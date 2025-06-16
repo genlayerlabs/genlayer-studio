@@ -200,8 +200,8 @@ def restore_stuck_transactions():
         )
         if tx1_finalized:
             previous_contact_state = tx1_finalized["consensus_data"]["leader_receipt"][
-                "contract_state"
-            ]
+                0
+            ]["contract_state"]
             contract_processor.update_contract_state(
                 contract_address=tx1_finalized["to_address"],
                 accepted_state=previous_contact_state,
@@ -214,7 +214,7 @@ def restore_stuck_transactions():
             if tx1_accepted:
                 previous_contact_state = tx1_accepted["consensus_data"][
                     "leader_receipt"
-                ]["contract_state"]
+                ][0]["contract_state"]
                 contract_processor.update_contract_state(
                     contract_address=tx1_accepted["to_address"],
                     accepted_state=previous_contact_state,
