@@ -30,7 +30,7 @@ class AccountsManager:
         self.create_new_account_with_address(account.address)
         return account
 
-    def create_new_account_with_address(self, address: str) -> Account:
+    def create_new_account_with_address(self, address: str) -> CurrentState:
         # Check if account already exists
         if not is_address(address):
             raise ValueError(f"Invalid address: {address}")
@@ -80,3 +80,5 @@ class AccountsManager:
             self.create_new_account_with_address(account_address)
             to_account = self.get_account(account_address)
         to_account.balance = new_balance
+        self.session.commit()
+        
