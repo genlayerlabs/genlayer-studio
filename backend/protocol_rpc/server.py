@@ -4,8 +4,8 @@ import os
 from os import environ
 import threading
 import logging
-from flask import Flask
-from flask_jsonrpc import JSONRPC
+from flask import Flask, Response
+from flask_jsonrpc.app import JSONRPC
 from flask_socketio import SocketIO, join_room, leave_room
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
@@ -32,6 +32,7 @@ from backend.database_handler.models import Base, TransactionStatus
 from backend.rollup.consensus_service import ConsensusService
 from backend.protocol_rpc.aio import MAIN_SERVER_LOOP, MAIN_LOOP_EXITING, MAIN_LOOP_DONE
 from backend.domain.types import TransactionType
+from backend.protocol_rpc.docs.auto_endpoint import generate_documentation
 
 
 def get_db_name(database: str) -> str:
@@ -152,6 +153,14 @@ register_all_rpc_endpoints(
     consensus_service,
     transactions_parser,
 )
+
+
+@app.route("/api/docs")
+def docs():
+    """Serve interactive HTML documentation"""
+    generator = generate_documentation(jsonrpc)
+    html_docs = generator.generate_html()
+    return Response(html_docs, mimetype="text/html")
 
 
 def restore_stuck_transactions():
