@@ -113,6 +113,9 @@ class LLMModule:
     async def provider_available(
         self, model: str, url: str, plugin: str, key_env: str
     ) -> bool:
+        if plugin == "custom":
+            return True
+
         exe_path = Path(os.environ["GENVM_BIN"]).joinpath("genvm-modules")
 
         proc = await asyncio.subprocess.create_subprocess_exec(
