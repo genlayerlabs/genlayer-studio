@@ -31,7 +31,7 @@ from .origin.host_fns import Errors
 @dataclass
 class ExecutionError:
     message: str
-    kind: typing.Literal[ResultCode.CONTRACT_ERROR, ResultCode.ROLLBACK]
+    kind: typing.Literal[ResultCode.USER_ERROR, ResultCode.VM_ERROR]
 
     def __repr__(self):
         return json.dumps({"kind": self.kind.name, "message": self.message})
@@ -275,9 +275,6 @@ class _Host(genvmhost.IHost):
     async def get_calldata(self, /) -> bytes:
         return self.calldata_bytes
 
-    async def get_code(self, addr: bytes, /) -> bytes:
-        return self._state_proxy.get_code(Address(addr))
-
     def has_result(self) -> bool:
         return self._result is not None
 
@@ -302,11 +299,11 @@ class _Host(genvmhost.IHost):
     ) -> None:
         if type == ResultCode.RETURN:
             self._result = ExecutionReturn(ret=bytes(data))
-        elif type == ResultCode.ROLLBACK:
+        elif type == ResultCode.USER_ERROR:
             self._result = ExecutionError(str(data, encoding="utf-8"), type)
-        elif type == ResultCode.CONTRACT_ERROR:
+        elif type == ResultCode.VM_ERROR:
             self._result = ExecutionError(str(data, encoding="utf-8"), type)
-        elif type == ResultCode.ERROR:
+        elif type == ResultCode.INTERNAL_ERROR:
             raise Exception("GenVM internal error", str(data, encoding="utf-8"))
         else:
             assert False, f"invalid result {type}"

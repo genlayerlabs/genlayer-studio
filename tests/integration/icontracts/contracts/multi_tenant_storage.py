@@ -1,3 +1,4 @@
+# v0.1.0
 # { "Depends": "py-genlayer:test" }
 
 from genlayer import *
@@ -29,7 +30,7 @@ class MultiTentantStorage(gl.Contract):
     @gl.public.view
     def get_all_storages(self) -> dict[str, str]:
         return {
-            storage_contract.as_hex: gl.ContractAt(storage_contract)
+            storage_contract.as_hex: gl.get_contract_at(storage_contract)
             .view()
             .get_storage()
             for storage_contract in self.all_storage_contracts
@@ -45,4 +46,4 @@ class MultiTentantStorage(gl.Contract):
             self.available_storage_contracts.pop()
 
         contract_to_use = self.mappings[gl.message.sender_address]
-        gl.ContractAt(contract_to_use).emit(gas=100000).update_storage(new_storage)
+        gl.get_contract_at(contract_to_use).emit().update_storage(new_storage)

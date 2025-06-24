@@ -1,4 +1,5 @@
-# { "Depends": "py-genlayer:test" }
+# v0.1.0
+# { "Depends": "py-genlayer:latest" }
 
 import json
 
@@ -47,7 +48,7 @@ The balance of the receiver should have increased by the amount sent.
 The total sum of all balances should remain the same before and after the transaction"""
 
         final_result = (
-            gl.eq_principle_prompt_non_comparative(
+            gl.eq_principle.prompt_non_comparative(
                 lambda: input,
                 task=task,
                 criteria=criteria,

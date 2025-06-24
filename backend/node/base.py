@@ -343,8 +343,8 @@ class Node:
                 stderr="",
                 genvm_log=[],
                 result=genvmbase.ExecutionError(
-                    message="Execution timed out",
-                    kind=genvmbase.ResultCode.CONTRACT_ERROR,
+                    message="timeout",
+                    kind=genvmbase.ResultCode.VM_ERROR,
                 ),
             )
 

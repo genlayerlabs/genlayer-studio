@@ -1,4 +1,5 @@
-from enum import IntEnum
+from enum import IntEnum, StrEnum
+import typing
 
 
 class Methods(IntEnum):

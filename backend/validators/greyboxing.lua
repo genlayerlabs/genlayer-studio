@@ -1,10 +1,11 @@
-local lib = require("lib-greyboxing")
-local inspect = require("inspect")
+local lib = require("lib-genvm")
+local llm = require("lib-llm")
 
+-- check https://github.com/genlayerlabs/genvm/blob/v0.1.2/executor/modules/implementation/scripting/llm-default.lua
 
 -- Used to look up mock responses for testing
 -- It returns the response that is linked to a substring of the message
-function get_mock_response_from_table(table, message)
+local function get_mock_response_from_table(table, message)
 	for key, value in pairs(table) do
 		if string.find(message, key) then
 			return value
@@ -13,79 +14,161 @@ function get_mock_response_from_table(table, message)
 	return "no match"
 end
 
-function just_in_backend(args, prompt, format)
-	local search_in = lib.select_backends_for(args, format)
+local function handle_custom_plugin(ctx, args, mapped_prompt)
+	local custom_plugin_data = ctx.host_data.custom_plugin_data
+	local content
+	if mapped_prompt.prompt.system_message then
+		content = mapped_prompt.prompt.system_message .. mapped_prompt.prompt.user_message
+	else
+		content = mapped_prompt.prompt.user_message
+	end
+	local payload = {
+		model = custom_plugin_data.model,
+		messages = {
+			{role = "user", content = content}
+		}
+	}
 
-	lib.log{ args = args, prompt = prompt, format = format, search_in = search_in }
+	-- Convert config values to appropriate types because we could only send strings to genvm
+	for k, v in pairs(custom_plugin_data.config) do
+		local num = tonumber(v)
+		if num then
+			payload[k] = num
+		elseif v == "true" then
+			payload[k] = true
+		elseif v == "false" then
+			payload[k] = false
+		else
+			payload[k] = v
+		end
+	end
 
-	local handler = args.handler
+	local api_request = lib.rs.request(ctx, {
+		method = 'POST',
+		url = custom_plugin_data.plugin_config.api_url,
+		headers = {
+			["Content-Type"] = "application/json",
+			["Authorization"] = "Bearer " .. custom_plugin_data.plugin_config.api_key_env_var
+		},
+		body = lib.rs.json_stringify(payload),
+		json = true
+	})
+
+	local response_data = api_request.body
+	local response_status = api_request.status
+
+	if response_status ~= 200 then
+		return false, lib.rs.json_stringify(response_data.error)
+	end
+
+	local result
+	if args.template == "EqComparative" or args.template == "EqNonComparativeValidator" then
+		-- These equivalence principles ask also for a reasoning but we only want the result
+		local json_response = lib.rs.json_parse(response_data.choices[1].message.content)
+		result = json_response.result
+	else
+		result = response_data.choices[1].message.content
+	end
+
+	return true, result
+end
+
+local function just_in_backend(ctx, args, mapped_prompt)
+	---@cast mapped_prompt MappedPrompt
+	---@cast args LLMExecPromptPayload | LLMExecPromptTemplatePayload
 
 	-- Return mock response if it exists
-	if args.host_data and args.host_data.mock_response then
-		if args.payload then
-			if args.payload.principle then
-				-- Return the matching response to gl.eq_principle_prompt_comparative request which contains a principle key in the payload
-				result = get_mock_response_from_table(args.host_data.mock_response.eq_principle_prompt_comparative, prompt.user_message)
-			elseif args.payload.output then
-				-- Return the matching response to gl.eq_principle_prompt_non_comparative request which contains an output key in the payload
-				result = get_mock_response_from_table(args.host_data.mock_response.eq_principle_prompt_non_comparative, prompt.user_message)
-			else
-				-- Return the matching response to gl.exec_prompt request which does not contain any specific key in the payload
-				result = get_mock_response_from_table(args.host_data.mock_response.response, prompt.user_message)
-			end
+	if ctx.host_data.mock_response then
+		local result
+
+		if args.template == "EqComparative" then
+			-- Return the matching response to gl.eq_principle_prompt_comparative request which contains a principle key in the payload
+			result = get_mock_response_from_table(ctx.host_data.mock_response.eq_principle_prompt_comparative, mapped_prompt.prompt.user_message)
+		elseif args.template == "EqNonComparativeValidator" then
+			-- Return the matching response to gl.eq_principle_prompt_non_comparative request which contains an output key in the payload
+			result = get_mock_response_from_table(ctx.host_data.mock_response.eq_principle_prompt_non_comparative, mapped_prompt.prompt.user_message)
+		else
+			-- Return the matching response to gl.exec_prompt request which does not contain any specific key in the payload
+			-- EqNonComparativeLeader is essentially just exec_prompt
+			result = get_mock_response_from_table(ctx.host_data.mock_response.response, mapped_prompt.prompt.user_message)
 		end
 		lib.log{level = "debug", message = "executed with", type = type(result), res = result}
 		return result
 	end
 
-	local provider_id = args.host_data.studio_llm_id
-	local model = lib.get_first_from_table(greyboxing.available_backends[provider_id].models).key
+	local provider_id = ctx.host_data.studio_llm_id
+	local model = lib.get_first_from_table(llm.providers[provider_id].models).key
 
-	prompt.use_max_completion_tokens = false
+	mapped_prompt.prompt.use_max_completion_tokens = false
 
 	for i = 1,3 do
-		local success, result = pcall(function ()
-			return lib.exec_in_backend(
-				args.handler,
-				{
-					provider = provider_id,
-					model = model,
-					prompt = prompt,
-					format = format,
-				}
-			)
-		end)
+		local success, result
+		if ctx.host_data.custom_plugin_data then
+			success, result = handle_custom_plugin(ctx, args, mapped_prompt)
+		else
+			local request = {
+				provider = provider_id,
+				model = model,
+				prompt = mapped_prompt.prompt,
+				format = mapped_prompt.format,
+			}
 
-		lib.log{level = "debug", message = "executed with", type = type(result), res = result}
+			success, result = pcall(function ()
+				return llm.rs.exec_prompt_in_provider(
+					ctx,
+					request
+				)
+			end)
+		end
+
+		lib.log{message = "executed with", success = success, type = type(result), res = result}
 		if success then
 			return result
-		elseif result.kind == "Overloaded" then
-			-- nothing/continue
-			lib.log{level = "warning", message = "service is overloaded", result = result}
-		else
-			lib.log{level = "error", message = "provider failed", result = result}
+		end
 
+		local as_user_error = lib.rs.as_user_error(result)
+		if as_user_error == nil then
 			error(result)
 		end
 
-		lib.log{level = "error", message = "sleeping before retry"}
+		if llm.overloaded_statuses[as_user_error.ctx.status] then
+			lib.log{level = "warning", message = "service is overloaded", error = as_user_error, request = request}
+		else
+			lib.log{level = "error", message = "provider failed", error = as_user_error, request = request}
+			as_user_error.fatal = true
 
-		lib.sleep_seconds(1.5)
+			lib.rs.user_error(as_user_error)
+		end
+
+		lib.log{level = "warning", message = "sleeping before retry"}
+
+		lib.rs.sleep_seconds(1.5)
 	end
+
+	lib.rs.user_error({
+		causes = {"NO_PROVIDER_FOR_PROMPT"},
+		fatal = true,
+		ctx = {
+			prompt = mapped_prompt,
+			host_data = ctx.host_data,
+		}
+	})
 end
 
-function exec_prompt(args)
-	local handler = args.handler
+function ExecPrompt(ctx, args)
+	---@cast args LLMExecPromptPayload
 
-	local mapped = lib.exec_prompt_transform(args)
+	local mapped = llm.exec_prompt_transform(args)
 
-	return just_in_backend(args, mapped.prompt, mapped.format)
+	return just_in_backend(ctx, args, mapped)
 end
 
-function exec_prompt_template(args)
-	local handler = args.handler
+function ExecPromptTemplate(ctx, args)
+	---@cast args LLMExecPromptTemplatePayload
 
-	local mapped = lib.exec_prompt_template_transform(args)
+	local template = args.template -- workaround by kp2pml30 (Kira) GVM-86
+	local mapped = llm.exec_prompt_template_transform(args)
+	args.template = template
 
-	return just_in_backend(args, mapped.prompt, mapped.format)
+	return just_in_backend(ctx, args, mapped)
 end
