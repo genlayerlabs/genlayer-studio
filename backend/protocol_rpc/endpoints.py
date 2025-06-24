@@ -54,6 +54,13 @@ from backend.protocol_rpc.message_handler.types import LogEvent, EventType, Even
 from backend.protocol_rpc.types import DecodedsubmitAppealDataArgs
 from backend.database_handler.snapshot_manager import SnapshotManager
 import asyncio
+from backend.protocol_rpc.docs import (
+    simulator_endpoint,
+    genlayer_endpoint,
+    ethereum_endpoint,
+    rpc_endpoint,
+    EndpointCategory,
+)
 
 
 ####### WRAPPER TO BLOCK ENDPOINTS FOR HOSTED ENVIRONMENT #######
@@ -72,11 +79,23 @@ def check_forbidden_method_in_hosted_studio(func):
 
 
 ####### HELPER ENDPOINTS #######
+@rpc_endpoint(
+    name="ping",
+    category=EndpointCategory.UTILITY,
+    description="Health check endpoint that returns 'OK' if the server is running",
+)
 def ping() -> str:
     return "OK"
 
 
 ####### SIMULATOR ENDPOINTS #######
+@simulator_endpoint(
+    name="sim_clearDbTables",
+    description="Clear specified database tables (restricted in hosted environment)",
+    params={"tables": "List of table names to clear"},
+    dependencies=["request_session"],
+    restricted=True,
+)
 @check_forbidden_method_in_hosted_studio
 def clear_db_tables(session: Session, tables: list) -> None:
     for table_name in tables:
@@ -86,6 +105,15 @@ def clear_db_tables(session: Session, tables: list) -> None:
         session.execute(table.delete())
 
 
+@simulator_endpoint(
+    name="sim_fundAccount",
+    description="Fund an account with a specified amount of tokens",
+    params={
+        "account_address": "The account address (0x-prefixed hex string)",
+        "amount": "Amount in wei (integer)",
+    },
+    dependencies=["accounts_manager", "transactions_processor"],
+)
 def fund_account(
     accounts_manager: AccountsManager,
     transactions_processor: TransactionsProcessor,
@@ -102,6 +130,12 @@ def fund_account(
     return transaction_hash
 
 
+@simulator_endpoint(
+    name="sim_resetDefaultsLlmProviders",
+    description="Reset LLM providers to default configuration",
+    dependencies=["llm_provider_registry"],
+    restricted=True,
+)
 @check_forbidden_method_in_hosted_studio
 def reset_defaults_llm_providers(llm_provider_registry: LLMProviderRegistry) -> None:
     llm_provider_registry.reset_defaults()
@@ -126,6 +160,11 @@ async def check_provider_is_available(
     )
 
 
+@simulator_endpoint(
+    name="sim_getProvidersAndModels",
+    description="Get all available LLM providers and their models with availability status",
+    dependencies=["llm_provider_registry", "validators_manager"],
+)
 async def get_providers_and_models(
     llm_provider_registry: LLMProviderRegistry,
     validators_manager: validators.Manager,
@@ -143,6 +182,13 @@ async def get_providers_and_models(
     return providers
 
 
+@simulator_endpoint(
+    name="sim_addProvider",
+    description="Add a new LLM provider configuration",
+    params={"params": "LLM provider configuration parameters"},
+    dependencies=["llm_provider_registry"],
+    restricted=True,
+)
 @check_forbidden_method_in_hosted_studio
 def add_provider(llm_provider_registry: LLMProviderRegistry, params: dict) -> int:
     provider = LLMProvider(
@@ -158,6 +204,16 @@ def add_provider(llm_provider_registry: LLMProviderRegistry, params: dict) -> in
     return llm_provider_registry.add(provider)
 
 
+@simulator_endpoint(
+    name="sim_updateProvider",
+    description="Update an existing LLM provider configuration",
+    params={
+        "id": "Unique identifier for the provider",
+        "params": "Updated LLM provider configuration parameters",
+    },
+    dependencies=["llm_provider_registry"],
+    restricted=True,
+)
 @check_forbidden_method_in_hosted_studio
 def update_provider(
     llm_provider_registry: LLMProviderRegistry, id: int, params: dict
@@ -174,11 +230,32 @@ def update_provider(
     llm_provider_registry.update(id, provider)
 
 
+@simulator_endpoint(
+    name="sim_deleteProvider",
+    description="Delete an LLM provider configuration",
+    params={"id": "Unique identifier for the provider"},
+    dependencies=["llm_provider_registry"],
+    restricted=True,
+)
 @check_forbidden_method_in_hosted_studio
 def delete_provider(llm_provider_registry: LLMProviderRegistry, id: int) -> None:
     llm_provider_registry.delete(id)
 
 
+@simulator_endpoint(
+    name="sim_createValidator",
+    description="Create a new validator with specified configuration",
+    params={
+        "stake": "Validator stake amount",
+        "provider": "LLM provider name",
+        "model": "LLM model name",
+        "config": "Optional provider configuration",
+        "plugin": "Optional plugin name",
+        "plugin_config": "Optional plugin configuration",
+    },
+    dependencies=["validators_registry", "accounts_manager"],
+    restricted=True,
+)
 async def create_validator(
     validators_registry: ModifiableValidatorsRegistry,
     accounts_manager: AccountsManager,
@@ -216,6 +293,18 @@ async def create_validator(
     )
 
 
+@simulator_endpoint(
+    name="sim_createRandomValidator",
+    description="Create a validator with random configuration",
+    params={"stake": "Validator stake amount"},
+    dependencies=[
+        "validators_registry",
+        "accounts_manager",
+        "llm_provider_registry",
+        "validators_manager",
+    ],
+    restricted=True,
+)
 @check_forbidden_method_in_hosted_studio
 async def create_random_validator(
     validators_registry: ModifiableValidatorsRegistry,
@@ -237,6 +326,24 @@ async def create_random_validator(
     )[0]
 
 
+@simulator_endpoint(
+    name="sim_createRandomValidators",
+    description="Create multiple validators with random configurations",
+    params={
+        "count": "Number of validators to create",
+        "min_stake": "Minimum stake amount",
+        "max_stake": "Maximum stake amount",
+        "limit_providers": "Optional list of provider names to limit to",
+        "limit_models": "Optional list of model names to limit to",
+    },
+    dependencies=[
+        "validators_registry",
+        "accounts_manager",
+        "llm_provider_registry",
+        "validators_manager",
+    ],
+    restricted=True,
+)
 @check_forbidden_method_in_hosted_studio
 async def create_random_validators(
     validators_registry: ModifiableValidatorsRegistry,
@@ -278,6 +385,21 @@ async def create_random_validators(
     return response
 
 
+@simulator_endpoint(
+    name="sim_updateValidator",
+    description="Update an existing validator's configuration",
+    params={
+        "validator_address": "The validator's address",
+        "stake": "Validator stake amount",
+        "provider": "LLM provider name",
+        "model": "LLM model name",
+        "config": "Optional provider configuration",
+        "plugin": "Optional plugin name",
+        "plugin_config": "Optional plugin configuration",
+    },
+    dependencies=["validators_registry", "accounts_manager"],
+    restricted=True,
+)
 @check_forbidden_method_in_hosted_studio
 async def update_validator(
     validators_registry: ModifiableValidatorsRegistry,
@@ -319,6 +441,13 @@ async def update_validator(
     return await validators_registry.update_validator(validator)
 
 
+@simulator_endpoint(
+    name="sim_deleteValidator",
+    description="Delete a validator by address",
+    params={"validator_address": "The validator's address"},
+    dependencies=["validators_registry", "accounts_manager"],
+    restricted=True,
+)
 @check_forbidden_method_in_hosted_studio
 async def delete_validator(
     validators_registry: ModifiableValidatorsRegistry,
@@ -333,6 +462,12 @@ async def delete_validator(
     return validator_address
 
 
+@simulator_endpoint(
+    name="sim_deleteAllValidators",
+    description="Delete all validators from the system",
+    dependencies=["validators_registry"],
+    restricted=True,
+)
 @check_forbidden_method_in_hosted_studio
 async def delete_all_validators(
     validators_registry: ModifiableValidatorsRegistry,
@@ -341,10 +476,21 @@ async def delete_all_validators(
     return validators_registry.get_all_validators()
 
 
+@simulator_endpoint(
+    name="sim_getAllValidators",
+    description="Get a list of all validators",
+    dependencies=["validators_registry"],
+)
 def get_all_validators(validators_registry: ValidatorsRegistry) -> list:
     return validators_registry.get_all_validators(include_private_key=False)
 
 
+@simulator_endpoint(
+    name="sim_getValidator",
+    description="Get details of a specific validator by address",
+    params={"validator_address": "The validator's address"},
+    dependencies=["validators_registry"],
+)
 def get_validator(
     validators_registry: ValidatorsRegistry, validator_address: str
 ) -> dict:
@@ -353,11 +499,22 @@ def get_validator(
     )
 
 
+@simulator_endpoint(
+    name="sim_countValidators",
+    description="Get the total number of validators",
+    dependencies=["validators_registry"],
+)
 def count_validators(validators_registry: ValidatorsRegistry) -> int:
     return validators_registry.count_validators()
 
 
 ####### GEN ENDPOINTS #######
+@genlayer_endpoint(
+    name="gen_getContractSchema",
+    description="Get the ABI schema for a deployed contract",
+    params={"contract_address": "The contract address"},
+    dependencies=["accounts_manager", "msg_handler"],
+)
 async def get_contract_schema(
     accounts_manager: AccountsManager,
     msg_handler: MessageHandler,
@@ -400,6 +557,12 @@ async def get_contract_schema(
     return json.loads(schema)
 
 
+@genlayer_endpoint(
+    name="gen_getContractSchemaForCode",
+    description="Get the ABI schema for contract code without deployment",
+    params={"contract_code_hex": "Smart contract source code in hex format"},
+    dependencies=["msg_handler"],
+)
 async def get_contract_schema_for_code(
     msg_handler: MessageHandler, contract_code_hex: str
 ) -> dict:
@@ -427,6 +590,18 @@ async def get_contract_schema_for_code(
     return json.loads(schema)
 
 
+@genlayer_endpoint(
+    name="gen_call",
+    description="Execute a contract method (deploy, call, or send transaction)",
+    params={"params": "Transaction data for contract interaction"},
+    dependencies=[
+        "request_session",
+        "accounts_manager",
+        "msg_handler",
+        "transactions_parser",
+        "validators_manager",
+    ],
+)
 async def gen_call(
     session: Session,
     accounts_manager: AccountsManager,
@@ -532,6 +707,12 @@ async def _gen_call_with_validator(
 
 
 ####### ETH ENDPOINTS #######
+@ethereum_endpoint(
+    name="eth_getBalance",
+    description="Get the balance of an account",
+    params={"address": "The account address (0x-prefixed hex string)"},
+    dependencies=["accounts_manager"],
+)
 def get_balance(
     accounts_manager: AccountsManager, account_address: str, block_tag: str = "latest"
 ) -> int:
@@ -543,18 +724,45 @@ def get_balance(
     return account_balance
 
 
+@ethereum_endpoint(
+    name="eth_getTransactionCount",
+    description="Get the number of transactions sent from an address (nonce)",
+    params={"address": "The account address", "block": "Block tag (default: 'latest')"},
+    dependencies=["transactions_processor"],
+)
 def get_transaction_count(
     transactions_processor: TransactionsProcessor, address: str, block: str = "latest"
 ) -> int:
     return transactions_processor.get_transaction_count(address)
 
 
+@ethereum_endpoint(
+    name="eth_getTransactionByHash",
+    description="Get transaction details by hash",
+    params={"transaction_hash": "Transaction hash (0x-prefixed)"},
+    dependencies=["transactions_processor"],
+)
 def get_transaction_by_hash(
     transactions_processor: TransactionsProcessor, transaction_hash: str
 ) -> dict | None:
     return transactions_processor.get_transaction_by_hash(transaction_hash)
 
 
+@ethereum_endpoint(
+    name="eth_call",
+    description="Execute a contract call without creating a transaction",
+    params={
+        "params": "Transaction data for the call",
+        "block_tag": "Block tag (default: 'latest')",
+    },
+    dependencies=[
+        "request_session",
+        "accounts_manager",
+        "msg_handler",
+        "transactions_parser",
+        "validators_manager",
+    ],
+)
 async def eth_call(
     session: Session,
     accounts_manager: AccountsManager,
@@ -611,6 +819,18 @@ async def eth_call(
     return eth_utils.hexadecimal.encode_hex(receipt.result[1:])
 
 
+@ethereum_endpoint(
+    name="eth_sendRawTransaction",
+    description="Submit a signed transaction to the network",
+    params={"signed_rollup_transaction": "Signed transaction data"},
+    dependencies=[
+        "transactions_processor",
+        "msg_handler",
+        "accounts_manager",
+        "transactions_parser",
+        "consensus_service",
+    ],
+)
 def send_raw_transaction(
     transactions_processor: TransactionsProcessor,
     msg_handler: MessageHandler,
@@ -730,6 +950,15 @@ def send_raw_transaction(
         return transaction_hash
 
 
+@simulator_endpoint(
+    name="sim_getTransactionsForAddress",
+    description="Get all transactions for a specific address with optional filtering",
+    params={
+        "address": "The account address",
+        "filter": "Transaction filter type (ALL, FROM, TO)",
+    },
+    dependencies=["transactions_processor", "accounts_manager"],
+)
 def get_transactions_for_address(
     transactions_processor: TransactionsProcessor,
     accounts_manager: AccountsManager,
@@ -744,28 +973,60 @@ def get_transactions_for_address(
     )
 
 
+@simulator_endpoint(
+    name="sim_setFinalityWindowTime",
+    description="Set the finality window time for consensus",
+    params={"time": "Time in seconds"},
+    dependencies=["consensus"],
+    restricted=True,
+)
 @check_forbidden_method_in_hosted_studio
 def set_finality_window_time(consensus: ConsensusAlgorithm, time: int) -> None:
     consensus.set_finality_window_time(time)
 
 
+@simulator_endpoint(
+    name="sim_getFinalityWindowTime",
+    description="Get the current finality window time",
+    dependencies=["consensus"],
+)
 def get_finality_window_time(consensus: ConsensusAlgorithm) -> int:
     return consensus.finality_window_time
 
 
+@ethereum_endpoint(name="eth_chainId", description="Get the chain ID of the network")
 def get_chain_id() -> str:
     return hex(SIMULATOR_CHAIN_ID)
 
 
+@rpc_endpoint(
+    category=EndpointCategory.NETWORK,
+    name="net_version",
+    description="Get the network version",
+)
 def get_net_version() -> str:
     return str(SIMULATOR_CHAIN_ID)
 
 
+@ethereum_endpoint(
+    name="eth_blockNumber",
+    description="Get the current block number",
+    dependencies=["transactions_processor"],
+)
 def get_block_number(transactions_processor: TransactionsProcessor) -> str:
     transaction_count = transactions_processor.get_highest_timestamp()
     return hex(transaction_count)
 
 
+@ethereum_endpoint(
+    name="eth_getBlockByNumber",
+    description="Get block details by block number",
+    params={
+        "block_number": "Block number (hex string or 'latest')",
+        "full_tx": "Whether to include full transaction objects",
+    },
+    dependencies=["transactions_processor"],
+)
 def get_block_by_number(
     transactions_processor: TransactionsProcessor, block_number: str, full_tx: bool
 ) -> dict:
@@ -790,16 +1051,28 @@ def get_block_by_number(
     return block_details
 
 
+@ethereum_endpoint(name="eth_gasPrice", description="Get the current gas price")
 def get_gas_price() -> str:
     gas_price_in_wei = 0
     return hex(gas_price_in_wei)
 
 
+@ethereum_endpoint(
+    name="eth_estimateGas",
+    description="Estimate gas required for a transaction",
+    params={"data": "Transaction data for gas estimation"},
+)
 def get_gas_estimate(data: Any) -> str:
     gas_price_in_wei = 30 * 10**6
     return hex(gas_price_in_wei)
 
 
+@ethereum_endpoint(
+    name="eth_getTransactionReceipt",
+    description="Get the receipt of a transaction by hash",
+    params={"transaction_hash": "Transaction hash (0x-prefixed)"},
+    dependencies=["transactions_processor"],
+)
 def get_transaction_receipt(
     transactions_processor: TransactionsProcessor,
     transaction_hash: str,
@@ -853,6 +1126,15 @@ def get_transaction_receipt(
     return receipt
 
 
+@ethereum_endpoint(
+    name="eth_getBlockByHash",
+    description="Get block details by block hash",
+    params={
+        "transaction_hash": "Block hash (0x-prefixed)",
+        "full_tx": "Whether to include full transaction objects",
+    },
+    dependencies=["transactions_processor"],
+)
 def get_block_by_hash(
     transactions_processor: TransactionsProcessor,
     transaction_hash: str,
@@ -892,6 +1174,12 @@ def get_block_by_hash(
     return block_details
 
 
+@simulator_endpoint(
+    name="sim_getConsensusContract",
+    description="Get details of a contract from consensus service",
+    params={"contract_name": "Name of the contract to retrieve"},
+    dependencies=["consensus_service"],
+)
 def get_contract(consensus_service: ConsensusService, contract_name: str) -> dict:
     """
     Get contract instance by name
@@ -918,6 +1206,12 @@ def get_contract(consensus_service: ConsensusService, contract_name: str) -> dic
     }
 
 
+@simulator_endpoint(
+    name="sim_createSnapshot",
+    description="Create a snapshot of the current system state",
+    dependencies=["snapshot_manager"],
+    restricted=True,
+)
 @check_forbidden_method_in_hosted_studio
 def create_snapshot(
     snapshot_manager: SnapshotManager,
@@ -931,6 +1225,13 @@ def create_snapshot(
     return snapshot.snapshot_id
 
 
+@simulator_endpoint(
+    name="sim_restoreSnapshot",
+    description="Restore system state from a snapshot",
+    params={"snapshot_id": "Unique identifier for the snapshot"},
+    dependencies=["snapshot_manager"],
+    restricted=True,
+)
 @check_forbidden_method_in_hosted_studio
 def restore_snapshot(
     snapshot_manager: SnapshotManager,
@@ -948,6 +1249,12 @@ def restore_snapshot(
     return reverted
 
 
+@simulator_endpoint(
+    name="sim_deleteAllSnapshots",
+    description="Delete all stored snapshots",
+    dependencies=["snapshot_manager"],
+    restricted=True,
+)
 @check_forbidden_method_in_hosted_studio
 def delete_all_snapshots(
     snapshot_manager: SnapshotManager,
