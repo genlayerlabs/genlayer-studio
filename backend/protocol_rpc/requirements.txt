@@ -4,7 +4,7 @@ flask-socketio==5.5.1
 Flask-Cors==5.0.1
 psycopg2-binary>=2.9.9
 requests==2.32.4
-python-dotenv==1.1.0
+python-dotenv==1.1.1
 asgiref==3.8.1
 pydantic==2.11.7
 numpy==1.26.4
