@@ -795,9 +795,16 @@ def get_gas_price() -> str:
     return hex(gas_price_in_wei)
 
 
-def get_gas_estimate(data: Any) -> str:
-    gas_price_in_wei = 30 * 10**6
-    return hex(gas_price_in_wei)
+def get_gas_estimate(consensus_service: ConsensusService, tx_data: dict) -> str:
+    """
+    Estimate gas for a transaction using Hardhat
+    """
+    try:
+        gas_estimate = consensus_service.web3.eth.estimate_gas(tx_data)
+        return hex(gas_estimate)
+    except Exception:
+        gas_estimate = 50000000
+        return hex(gas_estimate)
 
 
 def get_transaction_receipt(
@@ -1138,7 +1145,9 @@ def register_all_rpc_endpoints(
         method_name="eth_getBlockByNumber",
     )
     register_rpc_endpoint(get_gas_price, method_name="eth_gasPrice")
-    register_rpc_endpoint(get_gas_estimate, method_name="eth_estimateGas")
+    register_rpc_endpoint(
+        partial(get_gas_estimate, consensus_service), method_name="eth_estimateGas"
+    )
     register_rpc_endpoint(
         partial(get_transaction_receipt, transactions_processor),
         method_name="eth_getTransactionReceipt",
