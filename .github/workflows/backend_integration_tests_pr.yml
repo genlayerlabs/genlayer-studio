@@ -173,5 +173,5 @@ jobs:
             ${{ runner.os }}-buildx-
 
       - name: Run Docker Compose
-        run: docker compose -f tests/hardhat/docker-compose.yml --project-directory . up tests --build --force-recreate --always-recreate-deps
+        run: docker compose -f tests/hardhat/docker-compose.yml --project-directory . up hardhat tests --build --force-recreate --always-recreate-deps
 
