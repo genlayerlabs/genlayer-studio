@@ -16,6 +16,7 @@ import backend.node.genvm.origin.calldata as calldata
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.node.types import Receipt, ExecutionMode, Vote, ExecutionResultStatus
 from backend.protocol_rpc.message_handler.base import MessageHandler
+from backend.node.genvm.origin.result_codes import ResultCode
 
 from .types import Address
 
@@ -144,6 +145,12 @@ class Node:
         return receipt
 
     def _set_vote(self, receipt: Receipt) -> Receipt:
+        if (receipt.result[0] == ResultCode.CONTRACT_ERROR) and (
+            receipt.result[1:] == b"timeout"
+        ):
+            receipt.vote = Vote.TIMEOUT
+            return receipt
+
         leader_receipt = self.leader_receipt
         if (
             leader_receipt.execution_result == receipt.execution_result
@@ -334,19 +341,6 @@ class Node:
             config_path=config_path,
             host_data=host_data,
         )
-
-        if res is None:
-            res = genvmbase.ExecutionResult(
-                eq_outputs={},
-                pending_transactions=[],
-                stdout="",
-                stderr="",
-                genvm_log=[],
-                result=genvmbase.ExecutionError(
-                    message="Execution timed out",
-                    kind=genvmbase.ResultCode.CONTRACT_ERROR,
-                ),
-            )
 
         await self._execution_finished(res, transaction_hash)
 

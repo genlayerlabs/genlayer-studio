@@ -70,8 +70,10 @@ class SnapshotManager:
                 "appeal_undetermined": tx.appeal_undetermined,
                 "triggered_by_hash": tx.triggered_by_hash,
                 "appealed": tx.appealed,
-                "appeal_undetermined": tx.appeal_undetermined,
                 "timestamp_awaiting_finalization": tx.timestamp_awaiting_finalization,
+                "appeal_leader_timeout": tx.appeal_leader_timeout,
+                "leader_timeout_validators": tx.leader_timeout_validators,
+                "appeal_validators_timeout": tx.appeal_validators_timeout,
             }
             for tx in transactions
         }
@@ -141,6 +143,9 @@ class SnapshotManager:
                 timestamp_awaiting_finalization=tx_info[
                     "timestamp_awaiting_finalization"
                 ],
+                appeal_leader_timeout=tx_info["appeal_leader_timeout"],
+                leader_timeout_validators=tx_info["leader_timeout_validators"],
+                appeal_validators_timeout=tx_info["appeal_validators_timeout"],
             )
             if tx_info["created_at"]:
                 new_tx.created_at = datetime.fromisoformat(tx_info["created_at"])

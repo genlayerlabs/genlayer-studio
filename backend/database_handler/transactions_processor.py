@@ -15,6 +15,7 @@ from web3 import Web3
 
 from backend.node.types import Receipt
 from .models import Transactions, TransactionStatus
+from backend.consensus.types import ConsensusRound
 
 
 class TransactionAddressFilter(Enum):
@@ -81,6 +82,9 @@ class TransactionsProcessor:
             "appeal_processing_time": transaction_data.appeal_processing_time,
             "contract_snapshot": transaction_data.contract_snapshot,
             "config_rotation_rounds": transaction_data.config_rotation_rounds,
+            "appeal_leader_timeout": transaction_data.appeal_leader_timeout,
+            "leader_timeout_validators": transaction_data.leader_timeout_validators,
+            "appeal_validators_timeout": transaction_data.appeal_validators_timeout,
         }
 
     @staticmethod
@@ -229,6 +233,9 @@ class TransactionsProcessor:
             appeal_processing_time=0,
             contract_snapshot=None,
             config_rotation_rounds=config_rotation_rounds,
+            appeal_leader_timeout=False,
+            leader_timeout_validators=None,
+            appeal_validators_timeout=False,
         )
 
         self.session.add(new_transaction)
@@ -331,6 +338,8 @@ class TransactionsProcessor:
         elif transaction.status in (
             TransactionStatus.ACCEPTED,
             TransactionStatus.UNDETERMINED,
+            TransactionStatus.LEADER_TIMEOUT,
+            TransactionStatus.VALIDATORS_TIMEOUT,
         ):
             transaction.appealed = appeal
             self.set_transaction_timestamp_appeal(transaction, int(time.time()))
@@ -435,7 +444,7 @@ class TransactionsProcessor:
     def update_consensus_history(
         self,
         transaction_hash: str,
-        consensus_round: str,
+        consensus_round: ConsensusRound,
         leader_result: list[Receipt] | None,
         validator_results: list[Receipt],
         extra_status_change: TransactionStatus | None = None,
@@ -453,7 +462,7 @@ class TransactionsProcessor:
             status_changes_to_use.append(extra_status_change.value)
 
         current_consensus_results = {
-            "consensus_round": consensus_round,
+            "consensus_round": consensus_round.value,
             "leader_result": (
                 [receipt.to_dict() for receipt in leader_result]
                 if leader_result
@@ -568,3 +577,30 @@ class TransactionsProcessor:
             if closest_transaction
             else None
         )
+
+    def set_transaction_appeal_leader_timeout(
+        self, transaction_hash: str, appeal_leader_timeout: bool
+    ) -> bool:
+        transaction = (
+            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        )
+        transaction.appeal_leader_timeout = appeal_leader_timeout
+        self.session.commit()
+        return appeal_leader_timeout
+
+    def set_leader_timeout_validators(self, transaction_hash: str, validators: list):
+        transaction = (
+            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        )
+        transaction.leader_timeout_validators = validators
+        self.session.commit()
+
+    def set_transaction_appeal_validators_timeout(
+        self, transaction_hash: str, appeal_validators_timeout: bool
+    ) -> bool:
+        transaction = (
+            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        )
+        transaction.appeal_validators_timeout = appeal_validators_timeout
+        self.session.commit()
+        return appeal_validators_timeout

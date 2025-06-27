@@ -32,6 +32,9 @@ def test_chain_snapshot(session: Session):
         appealed=False,
         appeal_undetermined=False,
         timestamp_awaiting_finalization=0,
+        appeal_leader_timeout=False,
+        leader_timeout_validators=None,
+        appeal_validators_timeout=False,
         # triggered_by_hash=None,
     )
 
@@ -60,6 +63,9 @@ def test_chain_snapshot(session: Session):
         appealed=False,
         appeal_undetermined=False,
         timestamp_awaiting_finalization=0,
+        appeal_leader_timeout=False,
+        leader_timeout_validators=None,
+        appeal_validators_timeout=False,
         # triggered_by_hash="0xdef",
     )
 
@@ -88,6 +94,9 @@ def test_chain_snapshot(session: Session):
         appealed=False,
         appeal_undetermined=False,
         timestamp_awaiting_finalization=0,
+        appeal_leader_timeout=False,
+        leader_timeout_validators=None,
+        appeal_validators_timeout=False,
         # triggered_by_hash=None,
     )
 
