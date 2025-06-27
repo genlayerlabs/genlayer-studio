@@ -6,7 +6,11 @@ import { useTimeAgo } from '@vueuse/core';
 import ModalSection from '@/components/Simulator/ModalSection.vue';
 import JsonViewer from '@/components/JsonViewer/json-viewer.vue';
 import { useUIStore, useNodeStore, useTransactionsStore } from '@/stores';
-import { CheckCircleIcon, XCircleIcon } from '@heroicons/vue/16/solid';
+import {
+  CheckCircleIcon,
+  XCircleIcon,
+  EllipsisHorizontalCircleIcon,
+} from '@heroicons/vue/16/solid';
 import CopyTextButton from '../global/CopyTextButton.vue';
 import { FilterIcon, GavelIcon, UserPen, UserSearch } from 'lucide-vue-next';
 import {
@@ -195,7 +199,8 @@ function prettifyTxData(x: any): any {
         v-if="
           transaction.statusName !== 'FINALIZED' &&
           transaction.statusName !== 'ACCEPTED' &&
-          transaction.statusName !== 'UNDETERMINED'
+          transaction.statusName !== 'UNDETERMINED' &&
+          transaction.statusName !== 'LEADER_TIMEOUT'
         "
       />
 
@@ -204,7 +209,8 @@ function prettifyTxData(x: any): any {
           v-if="
             transaction.data.leader_only == false &&
             (transaction.statusName == 'ACCEPTED' ||
-              transaction.statusName == 'UNDETERMINED') &&
+              transaction.statusName == 'UNDETERMINED' ||
+              transaction.statusName == 'LEADER_TIMEOUT') &&
             Date.now() / 1000 -
               transaction.data.timestamp_awaiting_finalization -
               transaction.data.appeal_processing_time <=
@@ -276,7 +282,8 @@ function prettifyTxData(x: any): any {
               v-if="
                 transaction.statusName !== 'FINALIZED' &&
                 transaction.statusName !== 'ACCEPTED' &&
-                transaction.statusName !== 'UNDETERMINED'
+                transaction.statusName !== 'UNDETERMINED' &&
+                transaction.statusName !== 'LEADER_TIMEOUT'
               "
             />
             <TransactionStatusBadge
@@ -418,17 +425,27 @@ function prettifyTxData(x: any): any {
                 <div class="flex items-center gap-1">
                   <UserPen class="h-4 w-4" />
                   <span class="font-mono text-xs">{{
-                    history.leader_result[1].node_config.address
+                    history.leader_result[0].node_config.address
                   }}</span>
                 </div>
                 <div class="flex flex-row items-center gap-1 capitalize">
-                  <template v-if="history.leader_result[1].vote === 'agree'">
-                    <CheckCircleIcon class="h-4 w-4 text-green-500" />
-                    Agree
+                  <template v-if="history.leader_result.length === 1">
+                    <EllipsisHorizontalCircleIcon
+                      class="h-4 w-4 text-yellow-500"
+                    />
+                    Timeout
                   </template>
-                  <template v-if="history.leader_result[1].vote === 'disagree'">
-                    <XCircleIcon class="h-4 w-4 text-red-500" />
-                    Disagree
+                  <template v-else>
+                    <template v-if="history.leader_result[1].vote === 'agree'">
+                      <CheckCircleIcon class="h-4 w-4 text-green-500" />
+                      Agree
+                    </template>
+                    <template
+                      v-if="history.leader_result[1].vote === 'disagree'"
+                    >
+                      <XCircleIcon class="h-4 w-4 text-red-500" />
+                      Disagree
+                    </template>
                   </template>
                 </div>
               </div>

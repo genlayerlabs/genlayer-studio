@@ -16,8 +16,8 @@ class ChainSnapshot:
     def __init__(self, session: Session):
         self.session = session
         self.pending_transactions = self._load_pending_transactions()
-        self.accepted_undetermined_transactions = (
-            self._load_accepted_undetermined_transactions()
+        self.awaiting_finalization_transactions = (
+            self._load_awaiting_finalization_transactions()
         )
 
         del self.session
@@ -40,15 +40,16 @@ class ChainSnapshot:
         """Return the list of pending transactions."""
         return self.pending_transactions
 
-    def _load_accepted_undetermined_transactions(self) -> dict[str, List[dict]]:
-        """Load and return the list of accepted and undetermined transactions from the database,
+    def _load_awaiting_finalization_transactions(self) -> dict[str, List[dict]]:
+        """Load and return the list of transactions that are awaiting finalization from the database,
         grouped by address."""
 
-        accepted_undetermined_transactions = (
+        awaiting_finalization_transactions = (
             self.session.query(Transactions)
             .filter(
                 (Transactions.status == TransactionStatus.ACCEPTED)
                 | (Transactions.status == TransactionStatus.UNDETERMINED)
+                | (Transactions.status == TransactionStatus.LEADER_TIMEOUT)
             )
             .order_by(Transactions.created_at)
             .all()
@@ -56,13 +57,13 @@ class ChainSnapshot:
 
         # Group transactions by address
         transactions_by_address = defaultdict(list)
-        for transaction in accepted_undetermined_transactions:
+        for transaction in awaiting_finalization_transactions:
             address = transaction.to_address
             transactions_by_address[address].append(
                 TransactionsProcessor._parse_transaction_data(transaction)
             )
         return transactions_by_address
 
-    def get_accepted_undetermined_transactions(self):
-        """Return the list of accepted and undetermined transactions."""
-        return self.accepted_undetermined_transactions
+    def get_awaiting_finalization_transactions(self):
+        """Return the list of transactions that are awaiting finalization."""
+        return self.awaiting_finalization_transactions
