@@ -58,16 +58,26 @@ class ContractProcessor:
             contract.data = new_contract_data
             self.session.commit()
 
-    def reset_contract(self, contract_address: str):
+    def reset_contract(self, contract_address: str) -> bool:
         """
         Reset a contract from the database.
 
         Args:
             contract_address: The address of the contract to reset
+
+        Returns:
+            True if the contract was reset, False if the contract did not exist
         """
         current_contract = (
-            self.session.query(CurrentState).filter_by(id=contract_address).one()
+            self.session.query(CurrentState)
+            .filter_by(id=contract_address)
+            .one_or_none()
         )
-        current_contract.data = {}
-        current_contract.balance = 0
-        self.session.commit()
+
+        if current_contract:
+            current_contract.data = {}
+            current_contract.balance = 0
+            self.session.commit()
+            return True
+        else:
+            return False

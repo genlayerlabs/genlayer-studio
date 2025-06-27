@@ -40,7 +40,9 @@ class TransactionsProcessor:
     def _parse_transaction_data(transaction_data: Transactions) -> dict:
         if transaction_data.consensus_data:
             leader_receipts = transaction_data.consensus_data.get("leader_receipt", [])
-            if len(leader_receipts) > 0:
+            if isinstance(leader_receipts, dict):
+                result = leader_receipts.get("result", {})
+            elif isinstance(leader_receipts, list) and len(leader_receipts) > 0:
                 result = leader_receipts[0].get("result", {})
             else:
                 result = {}
