@@ -594,10 +594,10 @@ class ConsensusAlgorithm:
 
         if (
             (previous_transaction is None)
-            or (previous_transaction["appealed"] == True)
-            or (previous_transaction["appeal_undetermined"] == True)
-            or (previous_transaction["appeal_leader_timeout"] == True)
-            or (previous_transaction["appeal_validators_timeout"] == True)
+            or (previous_transaction["appealed"])
+            or (previous_transaction["appeal_undetermined"])
+            or (previous_transaction["appeal_leader_timeout"])
+            or (previous_transaction["appeal_validators_timeout"])
             or (
                 previous_transaction["status"]
                 in [

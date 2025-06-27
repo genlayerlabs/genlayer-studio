@@ -1641,7 +1641,7 @@ async def test_validator_appeal_success_with_rollback_second_tx(
 
 
 @pytest.mark.asyncio
-async def test_leader_appeal_succes_with_rollback_second_tx(consensus_algorithm):
+async def test_leader_appeal_success_with_rollback_second_tx(consensus_algorithm):
     """
     Test that a leader appeal is successful and the second transaction (future transaction) is rolled back to pending state.
     Also check the contract state is correctly updated these changes.

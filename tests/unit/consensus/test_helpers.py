@@ -36,8 +36,8 @@ class AccountsManagerMock:
 
 
 class TransactionsProcessorMock:
-    def __init__(self, transactions={}):
-        self.transactions = transactions or {}
+    def __init__(self, transactions=None):
+        self.transactions = transactions if transactions is not None else {}
         self.updated_transaction_status_history = defaultdict(list)
         self.status_changed_event = threading.Event()
         self.status_update_lock = threading.Lock()
