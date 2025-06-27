@@ -397,7 +397,7 @@ async def _run_genvm_host(
     tmpdir = Path(tempfile.mkdtemp())
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock_listener:
-            timeout = 1  # seconds
+            timeout = 300  # seconds
 
             sock_listener.setblocking(False)
             sock_path = tmpdir.joinpath("sock")
@@ -421,8 +421,6 @@ async def _run_genvm_host(
             new_args.extend(args)
 
             host: _Host = host_supplier(sock_listener)  # _Host(sock_listener)
-            if host._leader_results is not None:
-                timeout = 1
             try:
                 return host.provide_result(
                     await genvmhost.run_host_and_program(
