@@ -13,7 +13,7 @@ import { ref, onMounted } from 'vue';
 import { notify } from '@kyvg/vue3-notification';
 
 const store = useContractsStore();
-const defaultContractName = 'New Contract.gpy';
+const defaultContractName = 'New Contract.py';
 
 const props = defineProps<{
   contract?: ContractFile;

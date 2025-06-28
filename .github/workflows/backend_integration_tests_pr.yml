@@ -12,8 +12,8 @@ on:
       - edited
 
 concurrency:
-  group: backend-e2e-${{ github.event.number || github.event.pull_request.number}}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: ${{ github.event.action == 'synchronize' }}
 
 jobs:
   triggers:
@@ -34,6 +34,7 @@ jobs:
 
     env:
       PYTHONPATH: ${{ github.workspace }}
+      COMPOSE_PROFILES: hardhat
 
     steps:
       - name: Checkout code
@@ -50,6 +51,12 @@ jobs:
         run: |
           sed -i "s/<add_your_openai_api_key_here>/${OPENAIKEY}/g" .env
           sed -i "s/FINALITY_WINDOW =.*/FINALITY_WINDOW = 10/" .env
+          echo >> .env
+          if [[ "${{ needs.triggers.outputs.is_pull_request_review_approved }}" == "true" ]]; then
+            echo "TEST_WITH_MOCK_LLMS=false" >> .env
+          else
+            echo "TEST_WITH_MOCK_LLMS=true" >> .env
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -92,7 +99,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: 3.12.4
+          python-version: 3.13.3
 
       - name: Install dependencies
         run: |
@@ -101,7 +108,7 @@ jobs:
           pip install -r requirements.test.txt
 
       - name: Run tests
-        run: pytest tests/integration/ -svv
+        run: gltest --contracts-dir . --default-wait-retries 40 tests/integration/ -svv
 
       - name: Dump Docker Compose logs
         run: docker compose logs
@@ -133,7 +140,8 @@ jobs:
             ${{ runner.os }}-buildx-
 
       - name: Run Docker Compose
-        run: docker compose -f tests/db-sqlalchemy/docker-compose.yml --project-directory . up tests --build --force-recreate --always-recreate-deps
+        run: docker compose -f tests/db-sqlalchemy/docker-compose.yml --project-directory . run --build --rm tests
+
 
   load-test:
     name: Load Tests

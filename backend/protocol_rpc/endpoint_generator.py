@@ -10,7 +10,10 @@ from flask_jsonrpc import JSONRPC
 import flask
 from flask_jsonrpc.exceptions import JSONRPCError
 from functools import partial, wraps
-
+import requests
+import os
+import traceback
+from backend.protocol_rpc.aio import run_in_main_server_loop
 from backend.protocol_rpc.message_handler.base import MessageHandler
 
 
@@ -61,6 +64,61 @@ def _decode_exception(x: Exception) -> typing.Any:
         return repr(x)
 
 
+def setup_eth_method_handler(jsonrpc: JSONRPC):
+    """Forwards eth_ methods to Hardhat if no own implementation is available"""
+    app = jsonrpc.app
+    port = os.environ.get("HARDHAT_PORT")
+    url = os.environ.get("HARDHAT_URL")
+    HARDHAT_URL = f"{url}:{port}"
+
+    @app.before_request
+    def handle_eth_methods():
+        if flask.request.is_json and flask.request.path == "/api":
+            try:
+                request_json = flask.request.get_json()
+                if not request_json:
+                    return None
+
+                method = request_json.get("method", "")
+                if method.startswith("eth_"):
+                    site = jsonrpc.get_jsonrpc_site()
+                    if method in site.view_funcs:
+                        return None  # Use local implementation
+                    else:
+                        # No local implementation, forward to Hardhat
+                        try:
+                            with requests.Session() as http:
+                                result = http.post(
+                                    HARDHAT_URL,
+                                    json=request_json,
+                                    headers={"Content-Type": "application/json"},
+                                ).json()
+
+                                if "error" in result:
+                                    raise JSONRPCError(
+                                        code=result["error"].get("code", -32000),
+                                        message=result["error"].get(
+                                            "message", "Hardhat node error"
+                                        ),
+                                        data=result["error"].get("data", {}),
+                                    )
+
+                                return result
+
+                        except requests.RequestException as e:
+                            print(f"Network error: {str(e)}")
+                            raise JSONRPCError(
+                                code=-32603,
+                                message=f"Error forwarding request to Hardhat: {str(e)}",
+                                data={"original_error": str(e)},
+                            )
+
+            except Exception as e:
+                print(f"Error in before_request handler: {str(e)}")
+                print(traceback.format_exc())
+        return None  # Continue normal processing for non-eth methods
+
+
 def generate_rpc_endpoint(
     jsonrpc: JSONRPC,
     msg_handler: MessageHandler,
@@ -76,9 +134,8 @@ def generate_rpc_endpoint(
         try:
             result = partial_function(*endpoint_args, **endpoint_kwargs)
             if hasattr(result, "__await__"):
-                result = await result
+                result = await run_in_main_server_loop(result)
             return _serialize(result)
-
         except JSONRPCError as e:
             raise e
         except Exception as e:

@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { useTransactionsStore } from '@/stores';
-import { useDb, useRpcClient, useGenlayer } from '@/hooks';
-import { type TransactionItem } from '@/types';
-import type { TransactionHash } from 'genlayer-js/types';
+import { useDb, useGenlayer } from '@/hooks';
+import type { TransactionItem } from '@/types';
+import type { Address, TransactionHash } from 'genlayer-js/types';
+import { TransactionStatus } from 'genlayer-js/types';
 
 vi.mock('@/hooks', () => ({
   useGenlayer: vi.fn(),
@@ -28,17 +29,17 @@ vi.mock('@/hooks', () => ({
 const testTransaction: TransactionItem = {
   hash: '0x1234567890123456789012345678901234567890',
   type: 'deploy',
-  status: 'PENDING',
-  contractAddress: '0xAf4ec2548dBBdc43ab6dCFbD4EdcEedde3FEAFB5',
+  statusName: TransactionStatus.PENDING,
+  contractAddress: '0xAf4ec2548dBBdc43ab6dCFbD4EdcEedde3FEAFB5' as Address,
   data: {
-    contract_address: '0xAf4ec2548dBBdc43ab6dCFbD4EdcEedde3FEAFB5',
+    contract_address: '0xAf4ec2548dBBdc43ab6dCFbD4EdcEedde3FEAFB5' as Address,
   },
   localContractId: '47490604-6ee9-4c0e-bf31-05d33197eedd',
 };
 
-const updatedTransactionPayload = {
+const updatedTransactionPayload: TransactionItem = {
   ...testTransaction,
-  status: 'FINALIZED',
+  statusName: TransactionStatus.FINALIZED,
 };
 
 describe('useTransactionsStore', () => {
@@ -82,13 +83,18 @@ describe('useTransactionsStore', () => {
   it('should update a transaction', () => {
     transactionsStore.addTransaction(testTransaction);
     transactionsStore.updateTransaction(updatedTransactionPayload);
-    expect(transactionsStore.transactions[0].status).toBe('FINALIZED');
+    expect(transactionsStore.transactions[0].statusName).toBe(
+      TransactionStatus.FINALIZED,
+    );
   });
 
   it('should get a transaction by hash using genlayer', async () => {
     const transactionHash =
       '0x1234567890123456789012345678901234567890' as TransactionHash;
-    const transactionData = { id: transactionHash, status: 'PENDING' };
+    const transactionData = {
+      id: transactionHash,
+      statusName: TransactionStatus.PENDING,
+    };
     mockGenlayerClient.getTransaction.mockResolvedValue(transactionData);
 
     const result = await transactionsStore.getTransaction(transactionHash);
@@ -102,12 +108,12 @@ describe('useTransactionsStore', () => {
   it('should clear transactions for a specific contract', () => {
     const tx1 = {
       ...testTransaction,
-      hash: '0x1234567890123456789012345678901234567891',
+      hash: '0x1234567890123456789012345678901234567891' as TransactionHash,
       localContractId: 'contract-1',
     };
     const tx2 = {
       ...testTransaction,
-      hash: '0x1234567890123456789012345678901234567892',
+      hash: '0x1234567890123456789012345678901234567892' as TransactionHash,
       localContractId: 'contract-2',
     };
 
@@ -126,11 +132,11 @@ describe('useTransactionsStore', () => {
   it('should refresh pending transactions', async () => {
     const pendingTransaction = {
       ...testTransaction,
-      status: 'PENDING',
+      statusName: TransactionStatus.PENDING,
     };
     const updatedTransaction = {
       ...pendingTransaction,
-      status: 'FINALIZED',
+      statusName: TransactionStatus.FINALIZED,
     };
 
     transactionsStore.addTransaction(pendingTransaction);
@@ -146,9 +152,11 @@ describe('useTransactionsStore', () => {
       pendingTransaction.hash,
     );
     expect(mockDb.transactions.modify).toHaveBeenCalledWith({
-      status: 'FINALIZED',
+      statusName: TransactionStatus.FINALIZED,
       data: updatedTransaction,
     });
-    expect(transactionsStore.transactions[0].status).toBe('FINALIZED');
+    expect(transactionsStore.transactions[0].statusName).toBe(
+      TransactionStatus.FINALIZED,
+    );
   });
 });

@@ -20,6 +20,11 @@ export default defineConfig(({ mode }) => {
     preview: {
       port: 8080,
       strictPort: true,
+      allowedHosts: [
+        'studio.genlayer.com',
+        'studio-stage.genlayer.com',
+        'studio-dev.genlayer.com',
+      ],
     },
     server: {
       port: 8080,

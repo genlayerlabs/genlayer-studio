@@ -23,7 +23,7 @@ def sign_transaction(
     transaction = {
         "nonce": nonce,
         "gasPrice": 0,
-        "gas": 0,
+        "gas": 20000000,
         "to": to,
         "value": value,
     }

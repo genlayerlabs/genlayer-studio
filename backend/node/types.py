@@ -178,10 +178,11 @@ class Receipt:
     execution_result: ExecutionResultStatus
     vote: Optional[Vote] = None
     pending_transactions: Iterable[PendingTransaction] = ()
+    genvm_result: dict[str, str] | None = None
 
     def to_dict(self):
         return {
-            "vote": self.vote.value,
+            "vote": self.vote.value if self.vote else None,
             "execution_result": self.execution_result.value,
             "result": base64.b64encode(self.result).decode("ascii"),
             "calldata": str(base64.b64encode(self.calldata), encoding="ascii"),
@@ -194,13 +195,14 @@ class Receipt:
                 pending_transaction.to_dict()
                 for pending_transaction in self.pending_transactions
             ],
+            "genvm_result": self.genvm_result,
         }
 
     @classmethod
     def from_dict(cls, input: dict) -> Optional["Receipt"]:
         if input:
             return cls(
-                vote=Vote.from_string(input.get("vote")),
+                vote=Vote.from_string(input.get("vote")) if input.get("vote") else None,
                 execution_result=ExecutionResultStatus.from_string(
                     input.get("execution_result")
                 ),
@@ -215,6 +217,7 @@ class Receipt:
                     PendingTransaction.from_dict(pending_transaction)
                     for pending_transaction in input.get("pending_transactions", [])
                 ],
+                genvm_result=input.get("genvm_result"),
             )
         else:
             return None

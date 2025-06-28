@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass
 from backend.database_handler.accounts_manager import AccountsManager
-from backend.database_handler.validators_registry import ValidatorsRegistry
+from backend.database_handler.validators_registry import ModifiableValidatorsRegistry
 
 
 @dataclass
@@ -15,9 +15,9 @@ class ValidatorConfig:
     amount: int = 1
 
 
-def initialize_validators(
+async def initialize_validators(
     validators_json: str,
-    validators_registry: ValidatorsRegistry,
+    validators_registry: ModifiableValidatorsRegistry,
     accounts_manager: AccountsManager,
     validator_creator=None,
 ):
@@ -50,7 +50,7 @@ def initialize_validators(
         raise ValueError("validators_json must contain a JSON array")
 
     # Delete all existing validators
-    validators_registry.delete_all_validators()
+    await validators_registry.delete_all_validators()
 
     # Create new validators
     for validator_data in validators_data:
@@ -58,7 +58,7 @@ def initialize_validators(
             validator = ValidatorConfig(**validator_data)
 
             for _ in range(validator.amount):
-                validator_creator(
+                await validator_creator(
                     validators_registry,
                     accounts_manager,
                     validator.stake,

@@ -1,8 +1,13 @@
 # base image mostly copied from Dockerfile.backend to reuse cache
-FROM python:3.12.6-slim AS base
+FROM python:3.13.3-slim AS base
 
 ARG path=/app
 WORKDIR $path
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends build-essential && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY backend/protocol_rpc/requirements.txt backend/protocol_rpc/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \

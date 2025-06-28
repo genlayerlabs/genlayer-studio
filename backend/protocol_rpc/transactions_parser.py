@@ -8,6 +8,7 @@ from eth_account._utils.legacy_transactions import Transaction
 import eth_utils
 from eth_utils import to_checksum_address
 from hexbytes import HexBytes
+import os
 from backend.rollup.consensus_service import ConsensusService
 from backend.domain.types import TransactionType
 
@@ -20,6 +21,7 @@ from backend.protocol_rpc.types import (
     DecodedRollupTransactionDataArgs,
     DecodedGenlayerTransaction,
     DecodedGenlayerTransactionData,
+    DecodedsubmitAppealDataArgs,
     ZERO_ADDRESS,
 )
 
@@ -143,7 +145,11 @@ class TransactionParser:
                                         data=params["_txData"],
                                     ),
                                 )
-                            break
+                            elif decoded_data["function"] == "submitAppeal":
+                                params = decoded_data["params"]
+                                decoded_data = DecodedsubmitAppealDataArgs(
+                                    tx_id=params["_txId"],
+                                )
 
             return DecodedRollupTransaction(
                 from_address=sender,
@@ -196,10 +202,12 @@ class TransactionParser:
                 from_address=rollup_transaction.from_address,
                 to_address=rollup_transaction.to_address,
                 data=None,
+                max_rotations=int(os.getenv("VITE_MAX_ROTATIONS", 3)),
             )
 
         sender = rollup_transaction.data.args.sender
         recipient = rollup_transaction.data.args.recipient
+        max_rotations = rollup_transaction.data.args.max_rotations
         type = self._get_genlayer_transaction_type(recipient)
         data = self._get_genlayer_transaction_data(type, rollup_transaction.data.args)
 
@@ -207,6 +215,7 @@ class TransactionParser:
             from_address=sender,
             to_address=recipient,
             type=type,
+            max_rotations=max_rotations,
             data=DecodedGenlayerTransactionData(
                 contract_code=(
                     data.contract_code if hasattr(data, "contract_code") else None
@@ -241,7 +250,22 @@ class TransactionParser:
         )
 
     def decode_method_call_data(self, data: str) -> DecodedMethodCallData:
-        return DecodedMethodCallData(eth_utils.hexadecimal.decode_hex(data))
+        raw_bytes = eth_utils.hexadecimal.decode_hex(data)
+
+        # Remove the null byte
+        if raw_bytes[-1] == 0:
+            raw_bytes = raw_bytes[:-1]
+
+            # Try to decode the outer list first
+            if raw_bytes[0] >= 0xF8:  # Long list
+                raw_bytes = raw_bytes[2:]  # Skip list prefix and length
+            elif raw_bytes[0] >= 0xC0:  # Short list
+                raw_bytes = raw_bytes[1:]  # Skip list prefix
+
+            # Now try to decode the inner string
+            raw_bytes = rlp.decode(raw_bytes)
+
+        return DecodedMethodCallData(raw_bytes)
 
     def decode_deployment_data(self, data: str) -> DecodedDeploymentData:
         data_bytes = HexBytes(data)

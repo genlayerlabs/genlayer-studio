@@ -1,0 +1,48 @@
+name: Update BSL License Dates
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+
+jobs:
+  update-license-dates:
+    # if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@master
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Update BSL license date
+        run: |
+          # Get current date in format "YYYY-MM-DD"
+          CURRENT_DATE=$(date +%Y-%m-%d)
+
+          # Find BSL license files and update the date
+          find . -name "LICENSE" -o -name "LICENSE.txt" | while read file; do
+            if grep -q "License" "$file"; then
+              echo "Updating license date in $file"
+
+              # Replace the date with current date
+              # This pattern assumes a date in YYYY-MM-DD format
+              # Adjust the regex pattern if your date format is different
+              sed -i -E "s/Change Date: [0-9]{4}-[0-9]{2}-[0-9]{2}/Change Date: $CURRENT_DATE/g" "$file"
+            fi
+          done
+
+      # - name: Display changes
+      #   run: |
+      #     git diff
+      #     cat LICENSE
+
+      - name: Commit & Push changes
+        uses: actions-js/push@master
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ github.event.pull_request.base.ref }}

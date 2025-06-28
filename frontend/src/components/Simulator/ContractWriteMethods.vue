@@ -7,6 +7,7 @@ import EmptyListPlaceholder from '@/components/Simulator/EmptyListPlaceholder.vu
 import type { ContractSchema } from 'genlayer-js/types';
 const props = defineProps<{
   leaderOnly: boolean;
+  consensusMaxRotations: number;
 }>();
 
 const { contractAbiQuery } = useContractQueries();
@@ -41,6 +42,7 @@ const writeMethods = computed(() => {
         :method="method[1]"
         methodType="write"
         :leaderOnly="props.leaderOnly"
+        :consensusMaxRotations="consensusMaxRotations"
       />
 
       <EmptyListPlaceholder v-if="writeMethods.length === 0">

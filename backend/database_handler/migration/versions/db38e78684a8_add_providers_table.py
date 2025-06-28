@@ -49,12 +49,6 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id", name="llm_provider_pkey"),
     )
     # ### end Alembic commands ###
-    # Get the connection from Alembic
-    bind = op.get_bind()
-
-    # Create a new SQLAlchemy session using the connection
-    with sessionmaker(bind=bind)() as session:
-        LLMProviderRegistry(session).reset_defaults()
 
 
 def downgrade() -> None:

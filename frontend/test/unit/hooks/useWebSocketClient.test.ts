@@ -31,8 +31,10 @@ describe('useWebSocketClient', () => {
 
     const connectCallback = mockOn.mock.calls.find(
       (call) => call[0] === 'connect',
-    )[1];
-    connectCallback();
+    )?.[1];
+    if (connectCallback) {
+      connectCallback();
+    }
     expect(consoleLogSpy).toHaveBeenCalledWith(
       'webSocketClient.connect',
       'mocked-socket-id',
@@ -40,8 +42,10 @@ describe('useWebSocketClient', () => {
 
     const disconnectCallback = mockOn.mock.calls.find(
       (call) => call[0] === 'disconnect',
-    )[1];
-    disconnectCallback();
+    )?.[1];
+    if (disconnectCallback) {
+      disconnectCallback();
+    }
     expect(consoleLogSpy).toHaveBeenCalledWith(
       'webSocketClient.disconnnect',
       'mocked-socket-id',

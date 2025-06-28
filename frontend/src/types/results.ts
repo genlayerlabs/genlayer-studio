@@ -10,4 +10,5 @@ export interface GetProvidersAndModelsData
     provider: string;
     is_available: boolean;
     is_model_available: boolean;
+    is_default: boolean;
   }> {}
