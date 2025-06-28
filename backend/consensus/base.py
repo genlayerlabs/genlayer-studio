@@ -2206,23 +2206,24 @@ class AcceptedState(TransactionState):
 
                 _emit_messages(context, insert_transactions_data, rollup_receipt)
 
-                # Update the balance of the sender account
-                from_balance = context.accounts_manager.get_account_balance(
-                    context.transaction.from_address
-                )
-                context.accounts_manager.update_account_balance(
-                    context.transaction.from_address,
-                    from_balance - context.transaction.value,
-                )
+                if context.transaction.value:
+                    # Update the balance of the sender account
+                    from_balance = context.accounts_manager.get_account_balance(
+                        context.transaction.from_address
+                    )
+                    context.accounts_manager.update_account_balance(
+                        context.transaction.from_address,
+                        from_balance - context.transaction.value,
+                    )
 
-                # Update the balance of the recipient account
-                to_balance = context.accounts_manager.get_account_balance(
-                    context.transaction.to_address
-                )
-                context.accounts_manager.update_account_balance(
-                    context.transaction.to_address,
-                    to_balance + context.transaction.value,
-                )
+                    # Update the balance of the recipient account
+                    to_balance = context.accounts_manager.get_account_balance(
+                        context.transaction.to_address
+                    )
+                    context.accounts_manager.update_account_balance(
+                        context.transaction.to_address,
+                        to_balance + context.transaction.value,
+                    )
 
         else:
             context.transaction.appealed = False
