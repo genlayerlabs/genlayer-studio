@@ -230,7 +230,7 @@ export function useContractQueries() {
         address: address.value as Address,
         functionName: method,
         args: args.args,
-        value: BigInt(value),
+        value: value,
         leaderOnly,
         consensusMaxRotations,
       });

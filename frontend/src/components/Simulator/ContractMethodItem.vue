@@ -31,7 +31,7 @@ const calldataArguments = ref<ArgData>({ args: [], kwargs: {} });
 const value = ref<bigint>(BigInt(0));
 
 const handleValueChange = (newValue: bigint) => {
-  value.value = newValue < 0 ? BigInt(0) : newValue;
+  value.value = newValue < BigInt(0) ? BigInt(0) : newValue;
 };
 
 const formatResponseIfNeeded = (response: string): string => {
