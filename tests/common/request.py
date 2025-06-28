@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from eth_account import Account
 from eth_abi import encode
 from web3 import Web3
-
+import base64
 from tests.common.transactions import sign_transaction, encode_transaction_data
 
 import backend.node.genvm.origin.calldata as calldata
@@ -58,6 +58,13 @@ def get_transaction_count(account_address: str):
     return parsed_raw_response["result"]
 
 
+def get_consensus_contract_address() -> str:
+    payload_data = payload("sim_getConsensusContract", "ConsensusMain")
+    raw_response = post_request_localhost(payload_data)
+    parsed_raw_response = raw_response.json()
+    return parsed_raw_response["result"]["address"]
+
+
 def call_contract_method(
     contract_address: str,
     from_account: Account,
@@ -90,11 +97,8 @@ def _prepare_transaction(
     value: int = 0,
 ) -> str:
     """Helper function to prepare a transaction for the consensus contract"""
-    # Get consensus contract address from environment
-    consensus_contract_address = os.environ.get("CONSENSUS_CONTRACT_ADDRESS")
-    if not consensus_contract_address:
-        raise ValueError("CONSENSUS_CONTRACT_ADDRESS not set in environment")
-
+    # Get consensus contract address from JSONRPC
+    consensus_contract_address = get_consensus_contract_address()
     # Default values from environment or constants
     num_initial_validators = int(os.environ.get("DEFAULT_NUM_INITIAL_VALIDATORS", 1))
     max_rotations = int(os.environ.get("DEFAULT_CONSENSUS_MAX_ROTATIONS", 100))
@@ -138,73 +142,6 @@ def _prepare_transaction(
         value=value,
         nonce=nonce,
     )
-
-
-def write_intelligent_contract(
-    account: Account,
-    contract_address: str | None,
-    method_name: str | None,
-    method_args: list | None,
-    value: int = 0,
-    assert_success: bool = True,
-):
-    # Encode the transaction data for the contract method
-    call_method_data = (
-        [calldata.encode({"method": method_name, "args": method_args})]
-        if method_name is not None and method_args is not None
-        else None
-    )
-
-    genlayer_transaction_data = (
-        encode_transaction_data(call_method_data)
-        if call_method_data is not None
-        else None
-    )
-    signed_transaction = _prepare_transaction(
-        account, contract_address, genlayer_transaction_data, value
-    )
-    result = send_raw_transaction(signed_transaction)
-    if assert_success and result["consensus_data"]:
-        assert (
-            result["consensus_data"]["leader_receipt"]["execution_result"] == "SUCCESS"
-        ), print(
-            "Send transaction: ",
-            json.dumps(decode_nested_data(result), indent=3),
-        )
-    return result
-
-
-def deploy_intelligent_contract(
-    account: Account,
-    contract_code: str | bytes,
-    method_args: list,
-    assert_success: bool = True,
-) -> tuple[str, dict]:
-    # Prepare deploy data
-    deploy_data = [
-        (
-            contract_code.encode("utf-8")
-            if isinstance(contract_code, str)
-            else contract_code
-        ),
-        calldata.encode({"args": method_args}),
-    ]
-
-    genlayer_transaction_data = encode_transaction_data(deploy_data)
-    signed_transaction = _prepare_transaction(
-        account, ZERO_ADDRESS, genlayer_transaction_data
-    )
-
-    result = send_raw_transaction(signed_transaction)
-    if assert_success:
-        assert (
-            result["consensus_data"]["leader_receipt"]["execution_result"] == "SUCCESS"
-        ), print(
-            "Deployed intelligent contract: ",
-            json.dumps(decode_nested_data(result), indent=3),
-        )
-    contract_address = result["data"]["contract_address"]
-    return contract_address, result
 
 
 def send_transaction(sender: Account, recipient: str, value: int):
@@ -252,9 +189,7 @@ def decode_base64(encoded_str):
 def decode_contract_state(contract_state):
     decoded_state = {}
     for key, value in contract_state.items():
-        decoded_state[decode_base64(key)] = {
-            decode_base64(k): decode_base64(v) for k, v in value.items()
-        }
+        decoded_state[decode_base64(key)] = decode_base64(value)
     return decoded_state
 
 

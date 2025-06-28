@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { ContractMethod } from 'genlayer-js/types';
 import { abi } from 'genlayer-js';
+import { TransactionHashVariant } from 'genlayer-js/types';
 import { ref } from 'vue';
 import { Collapse } from 'vue-collapsed';
 import { notify } from '@kyvg/vue3-notification';
@@ -18,11 +19,13 @@ const props = defineProps<{
   method: ContractMethod;
   methodType: 'read' | 'write';
   leaderOnly: boolean;
+  consensusMaxRotations?: number;
 }>();
 
 const isExpanded = ref(false);
 const isCalling = ref(false);
-const responseMessage = ref();
+const responseMessageAccepted = ref('');
+const responseMessageFinalized = ref('');
 
 const calldataArguments = ref<ArgData>({ args: [], kwargs: {} });
 const value = ref<bigint>(BigInt(0));
@@ -53,20 +56,34 @@ const formatResponseIfNeeded = (response: string): string => {
 };
 
 const handleCallReadMethod = async () => {
+  responseMessageAccepted.value = '';
+  responseMessageFinalized.value = '';
   isCalling.value = true;
 
   try {
-    const result = await callReadMethod(
-      props.name,
-      unfoldArgsData(calldataArguments.value),
-    );
+    const [acceptedMsg, finalizedMsg] = await Promise.allSettled([
+      callReadMethod(
+        props.name,
+        unfoldArgsData(calldataArguments.value),
+        TransactionHashVariant.LATEST_NONFINAL,
+      ),
+      callReadMethod(
+        props.name,
+        unfoldArgsData(calldataArguments.value),
+        TransactionHashVariant.LATEST_FINAL,
+      ),
+    ]);
 
-    if (result !== undefined) {
-      const resultString = abi.calldata.toString(result);
-      responseMessage.value = formatResponseIfNeeded(resultString);
-    } else {
-      responseMessage.value = '<genlayer.client is undefined>';
-    }
+    console.log('handleCallReadMethod', acceptedMsg, finalizedMsg);
+
+    responseMessageAccepted.value =
+      acceptedMsg.status === 'fulfilled' && acceptedMsg.value !== undefined
+        ? formatResponseIfNeeded(abi.calldata.toString(acceptedMsg.value))
+        : `failed: ${acceptedMsg}`;
+    responseMessageFinalized.value =
+      finalizedMsg.status === 'fulfilled' && finalizedMsg.value !== undefined
+        ? formatResponseIfNeeded(abi.calldata.toString(finalizedMsg.value))
+        : `failed: ${finalizedMsg}`;
 
     trackEvent('called_read_method', {
       contract_name: contract.value?.name || '',
@@ -90,6 +107,7 @@ const handleCallWriteMethod = async () => {
     await callWriteMethod({
       method: props.name,
       leaderOnly: props.leaderOnly,
+      consensusMaxRotations: props.consensusMaxRotations,
       args: unfoldArgsData({
         args: calldataArguments.value.args,
         kwargs: calldataArguments.value.kwargs,
@@ -181,13 +199,30 @@ const handleCallWriteMethod = async () => {
           >
         </div>
 
-        <div v-if="responseMessage" class="w-full break-all text-sm">
-          <div class="mb-1 text-xs font-medium">Response:</div>
+        <div
+          v-if="responseMessageAccepted || responseMessageFinalized"
+          class="w-full break-all text-sm"
+        >
+          <div v-if="responseMessageAccepted" class="mb-1 text-xs font-medium">
+            Response Accepted:
+          </div>
           <div
             :data-testid="`method-response-${name}`"
             class="w-full whitespace-pre-wrap rounded bg-white p-1 font-mono text-xs dark:bg-slate-600"
           >
-            {{ responseMessage }}
+            {{ responseMessageAccepted }}
+          </div>
+          <div
+            v-if="responseMessageFinalized"
+            class="mb-1 mt-4 text-xs font-medium"
+          >
+            Response Finalized:
+          </div>
+          <div
+            :data-testid="`method-response-${name}`"
+            class="w-full whitespace-pre-wrap rounded bg-white p-1 font-mono text-xs dark:bg-slate-600"
+          >
+            {{ responseMessageFinalized }}
           </div>
         </div>
       </div>

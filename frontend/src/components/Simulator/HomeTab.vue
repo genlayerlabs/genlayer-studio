@@ -11,19 +11,19 @@ const contractStore = useContractsStore();
 
 const storageContract = computed(() => {
   return contractStore.contracts.find(
-    (contract) => contract.name === 'storage.gpy',
+    (contract) => contract.name === 'storage.py',
   );
 });
 
 const wizardOfCoinContract = computed(() => {
   return contractStore.contracts.find(
-    (contract) => contract.name === 'wizard_of_coin.gpy',
+    (contract) => contract.name === 'wizard_of_coin.py',
   );
 });
 
 const llmERC20Contract = computed(() => {
   return contractStore.contracts.find(
-    (contract) => contract.name === 'llm_erc20.gpy',
+    (contract) => contract.name === 'llm_erc20.py',
   );
 });
 

@@ -53,6 +53,14 @@ async function handleDeleteProvider() {
         {{ provider.model }}
       </span>
 
+      <span
+        v-if="!provider.is_default"
+        class="ml-2 text-xs font-medium text-gray-500"
+        data-testid="provider-item-default"
+      >
+        (Custom)
+      </span>
+
       <ExclamationTriangleIcon
         v-if="!provider.is_available || !provider.is_model_available"
         v-tooltip="'Configuration error'"

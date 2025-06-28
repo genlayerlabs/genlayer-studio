@@ -14,8 +14,11 @@ contract BasicERC20 is ERC20, ERC20Burnable, ERC20Pausable, Ownable {
 	constructor(
 		string memory name,
 		string memory symbol,
-		address initialOwner
-	) ERC20(name, symbol) Ownable(initialOwner) {}
+		address initialOwner,
+		uint256 initialSupply
+	) ERC20(name, symbol) Ownable(initialOwner) {
+		_mint(initialOwner, initialSupply);
+	}
 
 	function pause() external onlyOwner {
 		_pause();

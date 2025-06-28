@@ -3,7 +3,7 @@ FROM node:22.12-alpine3.19
 WORKDIR /app
 
 # Install necessary packages and set up the environment
-RUN apk add --no-cache curl g++ make netcat-openbsd python3
+RUN apk add --no-cache curl g++ make netcat-openbsd python3 jq
 
 COPY ./hardhat/package*.json ./
 RUN npm install --ignore-scripts
@@ -14,29 +14,111 @@ COPY ./hardhat .
 RUN npx hardhat compile || true
 
 # Create directories and set permissions
-RUN mkdir -p /app/deployments/localhost && \
-    mkdir -p /app/deployments/hardhat && \
+RUN mkdir -p /app/deployments/hardhat && \
     mkdir -p /app/artifacts/build-info && \
     mkdir -p /app/artifacts/contracts && \
     mkdir -p /app/cache && \
-    mkdir -p /app/ignition/deployments && \
     mkdir -p /app/scripts && \
     mkdir -p /app/test && \
+    mkdir -p /app/snapshots && \
     chmod -R 777 /app
 
 ENV PATH="/app/node_modules/.bin:${PATH}"
+ENV HARDHAT_NETWORK=hardhat
 
-# Add the start script
+# Add setup script to handle symlinks for volume simplification
+RUN echo '#!/bin/sh' > /app/setup_symlinks.sh && \
+    echo 'if [ -d "/app/hardhat_src" ]; then' >> /app/setup_symlinks.sh && \
+    echo '  echo "Setting up symbolic links from /app/hardhat_src to /app directories"' >> /app/setup_symlinks.sh && \
+    echo '  # Ensure base directories exist' >> /app/setup_symlinks.sh && \
+    echo '  mkdir -p /app/contracts /app/scripts /app/test /app/deploy' >> /app/setup_symlinks.sh && \
+    echo '' >> /app/setup_symlinks.sh && \
+    echo '  # Create symbolic links for each directory/file' >> /app/setup_symlinks.sh && \
+    echo '  if [ -d "/app/hardhat_src/contracts" ]; then' >> /app/setup_symlinks.sh && \
+    echo '    rm -rf /app/contracts/*' >> /app/setup_symlinks.sh && \
+    echo '    cp -r /app/hardhat_src/contracts/* /app/contracts/' >> /app/setup_symlinks.sh && \
+    echo '  fi' >> /app/setup_symlinks.sh && \
+    echo '' >> /app/setup_symlinks.sh && \
+    echo '  if [ -d "/app/hardhat_src/scripts" ]; then' >> /app/setup_symlinks.sh && \
+    echo '    rm -rf /app/scripts/*' >> /app/setup_symlinks.sh && \
+    echo '    cp -r /app/hardhat_src/scripts/* /app/scripts/' >> /app/setup_symlinks.sh && \
+    echo '  fi' >> /app/setup_symlinks.sh && \
+    echo '' >> /app/setup_symlinks.sh && \
+    echo '  if [ -d "/app/hardhat_src/test" ]; then' >> /app/setup_symlinks.sh && \
+    echo '    rm -rf /app/test/*' >> /app/setup_symlinks.sh && \
+    echo '    cp -r /app/hardhat_src/test/* /app/test/' >> /app/setup_symlinks.sh && \
+    echo '  fi' >> /app/setup_symlinks.sh && \
+    echo '' >> /app/setup_symlinks.sh && \
+    echo '  if [ -d "/app/hardhat_src/deploy" ]; then' >> /app/setup_symlinks.sh && \
+    echo '    rm -rf /app/deploy/*' >> /app/setup_symlinks.sh && \
+    echo '    cp -r /app/hardhat_src/deploy/* /app/deploy/' >> /app/setup_symlinks.sh && \
+    echo '  fi' >> /app/setup_symlinks.sh && \
+    echo '' >> /app/setup_symlinks.sh && \
+    echo '  if [ -f "/app/hardhat_src/hardhat.config.js" ]; then' >> /app/setup_symlinks.sh && \
+    echo '    cp -f /app/hardhat_src/hardhat.config.js /app/hardhat.config.js' >> /app/setup_symlinks.sh && \
+    echo '  fi' >> /app/setup_symlinks.sh && \
+    echo '' >> /app/setup_symlinks.sh && \
+    echo '  # Set permissions' >> /app/setup_symlinks.sh && \
+    echo '  chmod -R 777 /app/contracts /app/scripts /app/test /app/deploy /app/hardhat.config.js' >> /app/setup_symlinks.sh && \
+    echo 'else' >> /app/setup_symlinks.sh && \
+    echo '  echo "Warning: /app/hardhat_src not found, skipping symlink setup"' >> /app/setup_symlinks.sh && \
+    echo 'fi' >> /app/setup_symlinks.sh && \
+    chmod +x /app/setup_symlinks.sh
+
+# Add the start script with snapshot functionality
 RUN echo '#!/bin/sh' > /app/start.sh && \
-    echo 'echo "Checking and compiling contracts if needed..."' >> /app/start.sh && \
-    echo 'npx hardhat compile' >> /app/start.sh && \
-    echo 'echo "Starting Hardhat node..."' >> /app/start.sh && \
-    echo 'npx hardhat node --hostname 0.0.0.0 & sleep 5' >> /app/start.sh && \
-    echo 'echo "Deploying contracts with Ignition..."' >> /app/start.sh && \
-    echo 'npx hardhat run scripts/deploy.js --network localhost' >> /app/start.sh && \
-    echo 'npx hardhat test' >> /app/start.sh && \
+    echo '/app/setup_symlinks.sh' >> /app/start.sh && \
+    echo 'echo "[$(date +"%Y-%m-%d %H:%M:%S")] Starting Hardhat node initialization..."' >> /app/start.sh && \
+    echo 'if [ -f "/app/snapshots/latest.json" ]; then' >> /app/start.sh && \
+    echo '  echo "[$(date +"%Y-%m-%d %H:%M:%S")] Found existing snapshot, restoring state..."' >> /app/start.sh && \
+    echo '  npx hardhat node --hostname 0.0.0.0 --config hardhat.config.js &' >> /app/start.sh && \
+    echo '  echo "[$(date +"%Y-%m-%d %H:%M:%S")] Waiting for node to start..."' >> /app/start.sh && \
+    echo '  sleep 10' >> /app/start.sh && \
+    echo '  echo "[$(date +"%Y-%m-%d %H:%M:%S")] Verifying node is ready..."' >> /app/start.sh && \
+    echo '  while ! curl -s -X POST -H "Content-Type: application/json" --data "{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}" http://localhost:8545 > /dev/null; do' >> /app/start.sh && \
+    echo '    echo "[$(date +"%Y-%m-%d %H:%M:%S")] Waiting for node to be ready..."' >> /app/start.sh && \
+    echo '    sleep 1' >> /app/start.sh && \
+    echo '  done' >> /app/start.sh && \
+    echo '  echo "[$(date +"%Y-%m-%d %H:%M:%S")] Node is ready, restoring snapshot..."' >> /app/start.sh && \
+    echo '  npx hardhat run scripts/restore.js --network genlayer_network' >> /app/start.sh && \
+    echo '  echo "[$(date +"%Y-%m-%d %H:%M:%S")] State restored successfully from snapshot"' >> /app/start.sh && \
+    echo '  echo "[$(date +"%Y-%m-%d %H:%M:%S")] Creating new snapshot after restore..."' >> /app/start.sh && \
+    echo '  npx hardhat run scripts/snapshot.js --network genlayer_network' >> /app/start.sh && \
+    echo 'else' >> /app/start.sh && \
+    echo '  echo "[$(date +"%Y-%m-%d %H:%M:%S")] No snapshot found, starting fresh node..."' >> /app/start.sh && \
+    echo '  npx hardhat node --hostname 0.0.0.0 --config hardhat.config.js &' >> /app/start.sh && \
+    echo '  echo "[$(date +"%Y-%m-%d %H:%M:%S")] Waiting for node to start..."' >> /app/start.sh && \
+    echo '  sleep 10' >> /app/start.sh && \
+    echo '  echo "[$(date +"%Y-%m-%d %H:%M:%S")] Verifying node is ready..."' >> /app/start.sh && \
+    echo '  while ! curl -s -X POST -H "Content-Type: application/json" --data "{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}" http://localhost:8545 > /dev/null; do' >> /app/start.sh && \
+    echo '    echo "[$(date +"%Y-%m-%d %H:%M:%S")] Waiting for node to be ready..."' >> /app/start.sh && \
+    echo '    sleep 1' >> /app/start.sh && \
+    echo '  done' >> /app/start.sh && \
+    echo '  echo "[$(date +"%Y-%m-%d %H:%M:%S")] Node is ready, compiling contracts..."' >> /app/start.sh && \
+    echo '  npx hardhat compile || true' >> /app/start.sh && \
+    echo '  echo "[$(date +"%Y-%m-%d %H:%M:%S")] Contracts compiled successfully"' >> /app/start.sh && \
+    echo '  echo "[$(date +"%Y-%m-%d %H:%M:%S")] Deploying contracts..."' >> /app/start.sh && \
+    echo '  npx hardhat deploy --network genlayer_network' >> /app/start.sh && \
+    echo '  echo "[$(date +"%Y-%m-%d %H:%M:%S")] Contracts deployed successfully"' >> /app/start.sh && \
+    echo '  echo "[$(date +"%Y-%m-%d %H:%M:%S")] Creating initial snapshot..."' >> /app/start.sh && \
+    echo '  npx hardhat run scripts/snapshot.js --network genlayer_network' >> /app/start.sh && \
+    echo 'fi' >> /app/start.sh && \
     echo 'wait' >> /app/start.sh && \
     chmod +x /app/start.sh
+
+# Add a healthcheck script
+RUN echo '#!/bin/sh' > /app/healthcheck.sh && \
+    echo 'curl -X POST -H "Content-Type: application/json" --fail http://localhost:8545 -d "{\"jsonrpc\":\"2.0\",\"method\":\"net_version\",\"params\":[],\"id\":1}" && \
+if [ -d "/app/deployments/genlayer_network" ]; then \
+    if [ -f "/app/deployments/genlayer_network/ConsensusMain.json" ]; then \
+        exit 0; \
+    fi; \
+fi; \
+exit 1;' >> /app/healthcheck.sh && \
+    chmod +x /app/healthcheck.sh
+
+# Add healthcheck
+HEALTHCHECK --interval=60s --timeout=30s --start-period=60s --retries=5 CMD ["/app/healthcheck.sh"]
 
 EXPOSE 8545
 

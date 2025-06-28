@@ -20,7 +20,9 @@ contract MockGenStaking {
 	uint256 public lastFinalizationTimestamp;
 
 	// a bit longer than the real one to make sure we don't get any edge cases
-	uint256 public FINALIZATION_INTERVAL = 1 hours + 10 minutes;
+	uint256 public constant FINALIZATION_INTERVAL = 1 hours + 10 minutes;
+
+	uint256 public constant EPOCH_DURATION = 1 days;
 
 	struct ValidatorBan {
 		bool isBanned;
@@ -185,6 +187,23 @@ contract MockGenStaking {
 		address[] memory consumedValidators
 	)
 		external
+		view
+		returns (address[] memory validators_, uint256 leaderIndex)
+	{
+		return
+			_getValidatorsForTx(
+				_randomSeed,
+				requestedValidatorsCount,
+				consumedValidators
+			);
+	}
+
+	function _getValidatorsForTx(
+		bytes32 _randomSeed,
+		uint256 requestedValidatorsCount,
+		address[] memory consumedValidators
+	)
+		internal
 		view
 		returns (address[] memory validators_, uint256 leaderIndex)
 	{
@@ -409,14 +428,82 @@ contract MockGenStaking {
 	function validatorSlash(
 		address _validator,
 		uint256 _epoch,
-		bool _deterministic
+		bool /*_deterministic*/
 	) external {
 		validatorBans[hotToColdWallet[_validator]].isBanned = true;
+		validatorBans[hotToColdWallet[_validator]].banEndTime =
+			block.timestamp +
+			_epoch *
+			EPOCH_DURATION;
 		validatorBansCount++;
 		// TODO: slash validator in some form, placeholder
 	}
 
 	function getValidatorBansCount() external view returns (uint256) {
 		return validatorBansCount;
+	}
+
+	function ban(address _validator, uint256 _epoch) external {
+		validatorBans[hotToColdWallet[_validator]].isBanned = true;
+		validatorBans[hotToColdWallet[_validator]].banEndTime =
+			block.timestamp +
+			_epoch *
+			EPOCH_DURATION;
+		validatorBansCount++;
+		// TODO: ban validator
+	}
+
+	function slash(
+		address _validator,
+		uint256 _slashingPercentage
+	) external pure {
+		(_validator, _slashingPercentage);
+		// TODO: slash validator
+	}
+
+	function getNextValidators(
+		bytes32 _randomSeed,
+		uint256 _numberOfValidators,
+		address[] memory _consumedValidators,
+		bool _isWeightedSelection
+	) external view returns (address[] memory nextValidators) {
+		nextValidators = new address[](_numberOfValidators);
+		if (_isWeightedSelection) {
+			(nextValidators, ) = _getValidatorsForTx(
+				_randomSeed,
+				_numberOfValidators,
+				_consumedValidators
+			);
+		} else {
+			bytes32 combinedSeed = _randomSeed;
+			for (uint256 i = 0; i < _numberOfValidators; i++) {
+				combinedSeed = keccak256(abi.encodePacked(_randomSeed, i));
+				nextValidators[i] = this.getActivatorForSeed(combinedSeed);
+			}
+		}
+		return nextValidators;
+	}
+
+	function _concatArraysAndDropIndex(
+		address[] memory _array1,
+		address[] memory _array2,
+		uint256 _indexToDrop
+	) internal pure returns (address[] memory result) {
+		uint256 reduceLength = _array1.length > 0 &&
+			_indexToDrop < _array1.length
+			? 1
+			: 0;
+		result = new address[](_array1.length + _array2.length - reduceLength);
+		uint256 resultIndex = 0;
+		for (uint256 i = 0; i < _array1.length; i++) {
+			if (i != _indexToDrop) {
+				result[resultIndex] = _array1[i];
+				resultIndex++;
+			}
+		}
+		for (uint256 i = 0; i < _array2.length; i++) {
+			result[resultIndex] = _array2[i];
+			resultIndex++;
+		}
 	}
 }

@@ -1,6 +1,6 @@
 # GenLayer Studio
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/license/mit/) [![Discord](https://dcbadge.vercel.app/api/server/8Jm4v89VAu?compact=true&style=flat)](https://discord.gg/VpfmXEMN66) [![Twitter](https://img.shields.io/twitter/url/https/twitter.com/yeagerai.svg?style=social&label=Follow%20%40GenLayer)](https://x.com/GenLayer) [![GitHub star chart](https://img.shields.io/github/stars/yeagerai/genlayer-simulator?style=social)](https://star-history.com/#yeagerai/genlayer-simulator)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/license/mit/) [![Discord](https://dcbadge.vercel.app/api/server/8Jm4v89VAu?compact=true&style=flat)](https://discord.gg/VpfmXEMN66) [![Telegram](https://img.shields.io/badge/Telegram-2CA5E0?style=flat&logo=telegram&logoColor=white)](https://t.me/genlayer) [![Twitter](https://img.shields.io/twitter/url/https/twitter.com/yeagerai.svg?style=social&label=Follow%20%40GenLayer)](https://x.com/GenLayer) [![GitHub star chart](https://img.shields.io/github/stars/yeagerai/genlayer-simulator?style=social)](https://star-history.com/#yeagerai/genlayer-simulator)
 
 ## 👀 About
 
@@ -25,6 +25,28 @@ To run genlayer again just run:
 $ genlayer up
 ```
 After executing those commands a new tab will open in your browser with the GenLayer Studio. Additional installation instructions can be found [here](https://docs.genlayer.com/simulator/installation)
+
+### Enabling Hardhat Node
+If you need to interact with a local Hardhat node for transaction processing, make sure to add the following to your `.env` file:
+
+```
+HARDHAT_URL=http://hardhat
+HARDHAT_PORT=8545
+COMPOSE_PROFILES=hardhat
+```
+
+This will enable the Hardhat service when running `genlayer up`.
+
+### Disabling Hardhat Node
+If you need to disable the Hardhat node, make sure to remove the following from your `.env` file:
+
+```
+HARDHAT_URL=
+HARDHAT_PORT=
+COMPOSE_PROFILES=
+```
+
+This will disable the Hardhat service when running `genlayer up`.
 
 ## 🚀 Key Features
 * 🖥️ **Test Locally:** Developers can test Intelligent Contracts in a local environment, replicating the GenLayer network without the need for deployment. This speeds up the development cycle and reduces the risk of errors in the live environment.

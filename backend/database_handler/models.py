@@ -13,7 +13,8 @@ from sqlalchemy import (
     func,
     text,
     ForeignKey,
-    Text,
+    LargeBinary,
+    Sequence,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import (
@@ -95,7 +96,6 @@ class Transactions(Base):
     r: Mapped[Optional[int]] = mapped_column(Integer)
     s: Mapped[Optional[int]] = mapped_column(Integer)
     v: Mapped[Optional[int]] = mapped_column(Integer)
-    ghost_contract_address: Mapped[Optional[str]] = mapped_column(String(255))
     appeal_failed: Mapped[Optional[int]] = mapped_column(Integer)
     consensus_history: Mapped[Optional[dict]] = mapped_column(JSONB)
     timestamp_appeal: Mapped[Optional[int]] = mapped_column(BigInteger)
@@ -146,6 +146,7 @@ class Validators(Base):
     created_at: Mapped[Optional[datetime.datetime]] = mapped_column(
         DateTime(True), server_default=func.current_timestamp(), init=False
     )
+    private_key: Mapped[Optional[str]] = mapped_column(String(255))
 
 
 class LLMProviderDBModel(Base):
@@ -163,6 +164,7 @@ class LLMProviderDBModel(Base):
     config: Mapped[dict | str] = mapped_column(JSONB)
     plugin: Mapped[str] = mapped_column(String(255), nullable=False)
     plugin_config: Mapped[dict] = mapped_column(JSONB)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(True), server_default=func.current_timestamp(), init=False
     )
@@ -171,4 +173,30 @@ class LLMProviderDBModel(Base):
         init=False,
         server_default=func.current_timestamp(),
         onupdate=func.current_timestamp(),
+    )
+
+
+class Snapshot(Base):
+    __tablename__ = "snapshots"
+    __table_args__ = (
+        PrimaryKeyConstraint("id", name="snapshots_pkey"),
+        UniqueConstraint("snapshot_id", name="snapshots_snapshot_id_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, init=False)
+    snapshot_id: Mapped[int] = mapped_column(
+        Integer,
+        Sequence("snapshot_id_seq", start=1, increment=1),
+        unique=True,
+        nullable=False,
+        init=False,
+    )  # Incremental identifier
+    state_data: Mapped[bytes] = mapped_column(
+        LargeBinary
+    )  # Stores compressed state data as bytes
+    transaction_data: Mapped[bytes] = mapped_column(
+        LargeBinary
+    )  # Stores compressed transaction data as bytes
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(True), server_default=func.current_timestamp(), init=False
     )

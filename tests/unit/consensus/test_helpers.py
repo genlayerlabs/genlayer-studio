@@ -1,6 +1,7 @@
 from collections import defaultdict
 from typing import Callable
 from unittest.mock import AsyncMock, Mock, MagicMock
+from pathlib import Path
 import time
 import threading
 import pytest
@@ -14,7 +15,11 @@ from backend.domain.types import Transaction, TransactionType
 from backend.node.base import Node
 from backend.node.types import ExecutionMode, ExecutionResultStatus, Receipt, Vote
 from backend.protocol_rpc.message_handler.base import MessageHandler
+import backend.validators as validators
 from typing import Optional
+from backend.rollup.consensus_service import ConsensusService
+from datetime import datetime
+from copy import deepcopy
 
 DEFAULT_FINALITY_WINDOW = 5
 DEFAULT_CONSENSUS_SLEEP_TIME = 2
@@ -46,22 +51,26 @@ class TransactionsProcessorMock:
         raise ValueError(f"Transaction with hash {transaction_hash} not found")
 
     def update_transaction_status(
-        self, transaction_hash: str, new_status: TransactionStatus
+        self,
+        transaction_hash: str,
+        new_status: TransactionStatus,
+        update_current_status_changes: bool = True,
     ):
         with self.status_update_lock:
             transaction = self.get_transaction_by_hash(transaction_hash)
             transaction["status"] = new_status.value
             self.updated_transaction_status_history[transaction_hash].append(new_status)
 
-            if "current_status_changes" in transaction["consensus_history"]:
-                transaction["consensus_history"]["current_status_changes"].append(
-                    new_status.value
-                )
-            else:
-                transaction["consensus_history"]["current_status_changes"] = [
-                    TransactionStatus.PENDING.value,
-                    new_status.value,
-                ]
+            if update_current_status_changes:
+                if "current_status_changes" in transaction["consensus_history"]:
+                    transaction["consensus_history"]["current_status_changes"].append(
+                        new_status.value
+                    )
+                else:
+                    transaction["consensus_history"]["current_status_changes"] = [
+                        TransactionStatus.PENDING.value,
+                        new_status.value,
+                    ]
 
             self.status_changed_event.set()
 
@@ -116,9 +125,6 @@ class TransactionsProcessorMock:
             transactions_by_address[address].append(transaction)
         return transactions_by_address
 
-    def create_rollup_transaction(self, transaction_hash: str):
-        pass
-
     def set_transaction_appeal_failed(self, transaction_hash: str, appeal_failed: int):
         if appeal_failed < 0:
             raise ValueError("appeal_failed must be a non-negative integer")
@@ -139,26 +145,43 @@ class TransactionsProcessorMock:
         return sorted(result, key=lambda x: x["created_at"])
 
     def get_newer_transactions(self, transaction_hash: str):
-        return []
+        current_transaction = self.get_transaction_by_hash(transaction_hash)
+
+        result = []
+        for transaction in self.transactions:
+            if (transaction["created_at"] > current_transaction["created_at"]) and (
+                transaction["to_address"] == current_transaction["to_address"]
+            ):
+                result.append(transaction)
+        return sorted(result, key=lambda x: x["created_at"])
 
     def update_consensus_history(
         self,
         transaction_hash: str,
         consensus_round: str,
-        leader_result: dict | None,
-        validator_results: list,
+        leader_result: list[Receipt] | None,
+        validator_results: list[Receipt],
+        extra_status_change: TransactionStatus | None = None,
     ):
         transaction = self.get_transaction_by_hash(transaction_hash)
 
+        status_changes_to_use = (
+            transaction["consensus_history"]["current_status_changes"]
+            if "current_status_changes" in transaction["consensus_history"]
+            else []
+        )
+        if extra_status_change:
+            status_changes_to_use.append(extra_status_change.value)
+
         current_consensus_results = {
             "consensus_round": consensus_round,
-            "leader_result": leader_result.to_dict() if leader_result else None,
-            "validator_results": [receipt.to_dict() for receipt in validator_results],
-            "status_changes": (
-                transaction["consensus_history"]["current_status_changes"]
-                if "current_status_changes" in transaction["consensus_history"]
-                else []
+            "leader_result": (
+                [receipt.to_dict() for receipt in leader_result]
+                if leader_result
+                else None
             ),
+            "validator_results": [receipt.to_dict() for receipt in validator_results],
+            "status_changes": status_changes_to_use,
         }
         if "consensus_results" in transaction["consensus_history"]:
             transaction["consensus_history"]["consensus_results"].append(
@@ -191,19 +214,18 @@ class TransactionsProcessorMock:
     def set_transaction_contract_snapshot(
         self, transaction_hash: str, contract_snapshot: dict
     ):
-        pass
+        transaction = self.get_transaction_by_hash(transaction_hash)
+        transaction["contract_snapshot"] = contract_snapshot
 
-    def get_transaction_contract_snapshot(self, transaction_hash: str):
+    def get_previous_transaction(
+        self, transaction_hash: str, status: TransactionStatus | None = None
+    ) -> None:
         return None
 
 
 class SnapshotMock:
-    def __init__(self, nodes: list, transactions_processor: TransactionsProcessorMock):
-        self.nodes = nodes
+    def __init__(self, transactions_processor: TransactionsProcessorMock):
         self.transactions_processor = transactions_processor
-
-    def get_all_validators(self):
-        return self.nodes
 
     def get_pending_transactions(self):
         return self.transactions_processor.get_pending_transactions()
@@ -212,33 +234,105 @@ class SnapshotMock:
         return self.transactions_processor.get_accepted_undetermined_transactions()
 
 
-class ContractSnapshotMock:
-    def __init__(self, address: str):
-        self.address = address
+class ContractDB:
+    def __init__(self, contracts: dict[str, dict] = None):
+        self.contracts = contracts or {}
+        self.status_changed_event = threading.Event()
+
+    def get_contract(self, address: str) -> dict:
+        return self.contracts[address]
 
     def register_contract(self, contract: dict):
-        pass
+        self.contracts[contract["id"]] = contract
 
-    def update_contract_state(
-        self,
-        accepted_state: dict[str, str] | None = None,
-        finalized_state: dict[str, str] | None = None,
-    ):
-        pass
+    def update_contract_data(self, address: str, contract_data: dict):
+        self.contracts[address]["data"] = contract_data
+        self.status_changed_event.set()
+
+    def wait_for_status_change(self, timeout: float = 0.1) -> bool:
+        result = self.status_changed_event.wait(timeout)
+        self.status_changed_event.clear()
+        return result
+
+
+class ContractSnapshotMock:
+    def __init__(self, contract_address: str, contract_db: ContractDB | None = None):
+        if contract_address:
+            contract_account = contract_db.get_contract(contract_address)
+            self.contract_address = contract_address
+            self.contract_data = contract_account["data"]
+            self.contract_code = self.contract_data["code"]
+            self.states = self.contract_data["state"]
+            self.contract_db = contract_db
+
+    def __deepcopy__(self, memo):
+        """Handle deep copying without copying contract_db."""
+        new_instance = ContractSnapshotMock.__new__(ContractSnapshotMock)
+        memo[id(self)] = new_instance
+        new_instance.contract_address = self.contract_address
+        new_instance.contract_data = deepcopy(self.contract_data, memo)
+        new_instance.contract_code = self.contract_code
+        new_instance.states = deepcopy(self.states, memo)
+        new_instance.contract_db = (
+            None  # threading event that cannot be copied but not used by nodes
+        )
+        return new_instance
 
     def to_dict(self):
         return {
-            "address": (self.address if self.address else None),
+            "contract_address": (
+                self.contract_address if self.contract_address else None
+            ),
+            "contract_code": self.contract_code if self.contract_code else None,
+            "states": self.states if self.states else {"accepted": {}, "finalized": {}},
         }
 
     @classmethod
     def from_dict(cls, input: dict | None) -> Optional["ContractSnapshotMock"]:
         if input:
             instance = cls.__new__(cls)
-            instance.address = input.get("address", None)
+            instance.contract_address = input.get("contract_address", None)
+            instance.contract_code = input.get("contract_code", None)
+            instance.states = input.get("states", {"accepted": {}, "finalized": {}})
+            instance.contract_db = None
             return instance
         else:
             return None
+
+
+class ContractProcessorMock:
+    def __init__(self, contract_db: ContractDB):
+        self.contract_db = contract_db
+
+    def register_contract(self, contract: dict):
+        self.contract_db.register_contract(contract)
+
+    def update_contract_state(
+        self,
+        contract_address: str,
+        accepted_state: dict[str, str] | None = None,
+        finalized_state: dict[str, str] | None = None,
+    ):
+        contract = self.contract_db.get_contract(contract_address)
+
+        new_state = {
+            "accepted": (
+                accepted_state
+                if accepted_state is not None
+                else contract["data"]["state"]["accepted"]
+            ),
+            "finalized": (
+                finalized_state
+                if finalized_state is not None
+                else contract["data"]["state"]["finalized"]
+            ),
+        }
+        new_contract_data = {
+            "code": contract["data"]["code"],
+            "state": new_state,
+        }
+
+        self.contract_db.update_contract_data(contract_address, new_contract_data)
 
 
 def transaction_to_dict(transaction: Transaction) -> dict:
@@ -261,7 +355,6 @@ def transaction_to_dict(transaction: Transaction) -> dict:
         "v": transaction.v,
         "leader_only": transaction.leader_only,
         "created_at": transaction.created_at,
-        "ghost_contract_address": transaction.ghost_contract_address,
         "appealed": transaction.appealed,
         "timestamp_awaiting_finalization": transaction.timestamp_awaiting_finalization,
         "appeal_failed": transaction.appeal_failed,
@@ -278,13 +371,14 @@ def transaction_to_dict(transaction: Transaction) -> dict:
     }
 
 
-def init_dummy_transaction():
+def init_dummy_transaction(hash: str | None = None):
     return Transaction(
-        hash="transaction_hash",
+        hash="transaction_hash" if hash is None else hash,
         from_address="from_address",
         to_address="to_address",
         status=TransactionStatus.PENDING,
         type=TransactionType.RUN_CONTRACT,
+        created_at=datetime.fromtimestamp(time.time()),
     )
 
 
@@ -296,6 +390,7 @@ def get_nodes_specs(number_of_nodes: int):
             "provider": f"provider{i}",
             "model": f"model{i}",
             "config": f"config{i}",
+            "private_key": f"private_key{i}",
         }
         for i in range(number_of_nodes)
     ]
@@ -308,6 +403,7 @@ def node_factory(
     receipt: Receipt | None,
     msg_handler: MessageHandler,
     contract_snapshot_factory: Callable[[str], ContractSnapshot],
+    snap: validators.Snapshot,
     vote: Vote,
 ):
     mock = Mock(Node)
@@ -315,20 +411,34 @@ def node_factory(
     mock.validator_mode = mode
     mock.address = node["address"]
     mock.leader_receipt = receipt
+    mock.private_key = node["private_key"]
+    mock.contract_snapshot = contract_snapshot
 
-    mock.exec_transaction = AsyncMock(
-        return_value=Receipt(
+    async def exec_with_dynamic_state(transaction: Transaction):
+        accepted_state = contract_snapshot.states["accepted"]
+        set_value = transaction.hash[-1]
+        if len(accepted_state) == 0:
+            contract_state = {"state_var": set_value}
+        else:
+            value = accepted_state["state_var"]
+            contract_state = {"state_var": value + set_value}
+
+        return Receipt(
             vote=vote,
             calldata=b"",
             mode=mode,
             gas_used=0,
-            contract_state={},
+            contract_state=contract_state,  # Dynamic contract state based on transaction
             result=DEFAULT_EXEC_RESULT,
-            node_config={"address": node["address"]},
+            node_config={
+                "address": node["address"],
+                "private_key": node["private_key"],
+            },
             eq_outputs={},
             execution_result=ExecutionResultStatus.SUCCESS,
         )
-    )
+
+    mock.exec_transaction = AsyncMock(side_effect=exec_with_dynamic_state)
 
     return mock
 
@@ -363,7 +473,7 @@ def get_leader_address(
     transaction: Transaction, transactions_processor: TransactionsProcessor
 ):
     transaction_dict = transactions_processor.get_transaction_by_hash(transaction.hash)
-    return transaction_dict["consensus_data"]["leader_receipt"]["node_config"][
+    return transaction_dict["consensus_data"]["leader_receipt"][0]["node_config"][
         "address"
     ]
 
@@ -387,9 +497,13 @@ def consensus_algorithm() -> ConsensusAlgorithm:
     # Mock the session and other dependencies
     mock_session = MagicMock()
     mock_msg_handler = MessageHandlerMock()
+    mock_validators_manager = AsyncMock()
 
     consensus_algorithm = ConsensusAlgorithm(
-        get_session=lambda: mock_session, msg_handler=mock_msg_handler
+        get_session=lambda: mock_session,
+        msg_handler=mock_msg_handler,
+        consensus_service=MagicMock(),
+        validators_manager=mock_validators_manager,
     )
     consensus_algorithm.finality_window_time = DEFAULT_FINALITY_WINDOW
     consensus_algorithm.consensus_sleep_time = DEFAULT_CONSENSUS_SLEEP_TIME
@@ -402,71 +516,119 @@ def setup_test_environment(
     nodes: list,
     created_nodes: list,
     get_vote: Callable[[], Vote],
+    contract_db: ContractDB | None = None,
 ):
-    chain_snapshot = SnapshotMock(nodes, transactions_processor)
+    import contextlib
+    from backend.domain.types import Validator, LLMProvider
+
+    @contextlib.asynccontextmanager
+    async def fake_snapshot():
+        snap_nodes: list[validators.SingleValidatorSnapshot] = []
+        for i in nodes:
+            snap_nodes.append(
+                validators.SingleValidatorSnapshot(
+                    Validator(
+                        i["address"],
+                        i["stake"],
+                        LLMProvider("heurist", "other", {}, "heurist", {}),
+                    ),
+                    "",
+                )
+            )
+        yield validators.Snapshot(snap_nodes, Path())
+
+    consensus_algorithm.validators_manager.snapshot = fake_snapshot
+
+    chain_snapshot = SnapshotMock(transactions_processor)
     accounts_manager = AccountsManagerMock()
 
     chain_snapshot_factory = lambda session: chain_snapshot
     transactions_processor_factory = lambda session: transactions_processor
     accounts_manager_factory = lambda session: accounts_manager
+    if contract_db is None:
+        contract_db = ContractDB(
+            {
+                "to_address": {
+                    "id": "to_address",
+                    "data": {
+                        "state": {"accepted": {}, "finalized": {}},
+                        "code": "contract_code",
+                    },
+                }
+            }
+        )
     contract_snapshot_factory = (
-        lambda address, session, transaction: ContractSnapshotMock(address)
+        lambda address, session, transaction: ContractSnapshotMock(address, contract_db)
     )
-    node_factory_supplier = (
-        lambda node, mode, contract_snapshot, receipt, msg_handler, contract_snapshot_factory: created_nodes.append(
+    contract_processor_factory = lambda session: ContractProcessorMock(contract_db)
+
+    def node_factory_supplier(*args):
+        created_nodes.append(
             node_factory(
-                node,
-                mode,
-                contract_snapshot,
-                receipt,
-                msg_handler,
-                contract_snapshot_factory,
-                get_vote(),
+                *args,
+                vote=get_vote(),
             )
         )
-        or created_nodes[-1]
-    )
+        return created_nodes[-1]
 
     # Create a stop event
     stop_event = threading.Event()
 
+    import asyncio
+
+    consensus_loop = asyncio.new_event_loop()
+
+    async def start_all():
+        futures = [
+            consensus_algorithm.run_crawl_snapshot_loop(
+                chain_snapshot_factory, transactions_processor_factory, stop_event
+            ),
+            consensus_algorithm.run_process_pending_transactions_loop(
+                chain_snapshot_factory,
+                transactions_processor_factory,
+                accounts_manager_factory,
+                contract_snapshot_factory,
+                contract_processor_factory,
+                node_factory_supplier,
+                stop_event,
+            ),
+            consensus_algorithm.run_appeal_window_loop(
+                chain_snapshot_factory,
+                transactions_processor_factory,
+                accounts_manager_factory,
+                contract_snapshot_factory,
+                contract_processor_factory,
+                node_factory_supplier,
+                stop_event,
+            ),
+        ]
+
+        await asyncio.wait(
+            [asyncio.tasks.create_task(f) for f in futures],
+            return_when="FIRST_EXCEPTION",
+        )
+
+    def start_thread():
+        try:
+            consensus_loop.run_until_complete(start_all())
+        except BaseException as e:
+            import traceback
+
+            traceback.print_exception(e)
+            import sys
+
+            sys.exit(1)
+
     # Start the crawl_snapshot, process_pending_transactions and appeal_window threads
-    thread_crawl_snapshot = threading.Thread(
-        target=consensus_algorithm.run_crawl_snapshot_loop,
-        args=(chain_snapshot_factory, transactions_processor_factory, stop_event),
-    )
-    thread_process_pending_transactions = threading.Thread(
-        target=consensus_algorithm.run_process_pending_transactions_loop,
-        args=(
-            chain_snapshot_factory,
-            transactions_processor_factory,
-            accounts_manager_factory,
-            contract_snapshot_factory,
-            node_factory_supplier,
-            stop_event,
-        ),
-    )
-    thread_appeal_window = threading.Thread(
-        target=consensus_algorithm.run_appeal_window_loop,
-        args=(
-            chain_snapshot_factory,
-            transactions_processor_factory,
-            accounts_manager_factory,
-            contract_snapshot_factory,
-            node_factory_supplier,
-            stop_event,
-        ),
+    thread_all = threading.Thread(
+        target=start_thread,
     )
 
-    thread_crawl_snapshot.start()
-    thread_process_pending_transactions.start()
-    thread_appeal_window.start()
+    thread_all.start()
 
     return (
         stop_event,
-        thread_crawl_snapshot,
-        thread_process_pending_transactions,
-        thread_appeal_window,
+        thread_all,
     )
 
 
@@ -520,3 +682,36 @@ def assert_transaction_status_change_and_match(
         timeout=timeout,
         interval=interval,
     )
+
+
+def check_contract_state(
+    contract_db: ContractDB,
+    to_address: str,
+    accepted: dict | None = None,
+    finalized: dict | None = None,
+):
+    if accepted is not None:
+        assert (
+            contract_db.contracts[to_address]["data"]["state"]["accepted"] == accepted
+        )
+    if finalized is not None:
+        assert (
+            contract_db.contracts[to_address]["data"]["state"]["finalized"] == finalized
+        )
+
+
+def check_contract_state_with_timeout(
+    contract_db: ContractDB,
+    to_address: str,
+    accepted: dict | None = None,
+    finalized: dict | None = None,
+    timeout: int = 30,
+    interval: float = 0.1,
+):
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        if contract_db.wait_for_status_change(interval):
+            check_contract_state(contract_db, to_address, accepted, finalized)
+            return
+
+    raise AssertionError(f"Contract state did not change within {timeout} seconds")

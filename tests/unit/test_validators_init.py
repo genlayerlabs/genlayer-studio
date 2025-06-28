@@ -1,47 +1,51 @@
 import pytest
-from unittest.mock import Mock
+from unittest.mock import Mock, AsyncMock
 from backend.protocol_rpc.validators_init import initialize_validators
 
 
-def test_initialize_validators_empty_json():
+@pytest.mark.asyncio
+async def test_initialize_validators_empty_json():
     """Test that empty JSON string returns without doing anything"""
-    mock_registry = Mock()
+    mock_registry = AsyncMock()
     mock_accounts = Mock()
-    mock_creator = Mock()
+    mock_creator = AsyncMock()
 
-    initialize_validators("", mock_registry, mock_accounts, mock_creator)
+    await initialize_validators("", mock_registry, mock_accounts, mock_creator)
 
     mock_registry.delete_all_validators.assert_not_called()
     mock_creator.assert_not_called()
 
 
-def test_initialize_validators_invalid_json():
+@pytest.mark.asyncio
+async def test_initialize_validators_invalid_json():
     """Test that invalid JSON raises ValueError"""
-    mock_registry = Mock()
+    mock_registry = AsyncMock()
     mock_accounts = Mock()
-    mock_creator = Mock()
+    mock_creator = AsyncMock()
 
     with pytest.raises(ValueError, match="Invalid JSON"):
-        initialize_validators(
+        await initialize_validators(
             "{invalid json", mock_registry, mock_accounts, mock_creator
         )
 
 
-def test_initialize_validators_non_array_json():
+@pytest.mark.asyncio
+async def test_initialize_validators_non_array_json():
     """Test that non-array JSON raises ValueError"""
-    mock_registry = Mock()
+    mock_registry = AsyncMock()
     mock_accounts = Mock()
-    mock_creator = Mock()
+    mock_creator = AsyncMock()
 
     with pytest.raises(ValueError, match="must contain a JSON array"):
-        initialize_validators("{}", mock_registry, mock_accounts, mock_creator)
+        await initialize_validators("{}", mock_registry, mock_accounts, mock_creator)
 
 
-def test_initialize_validators_success():
+@pytest.mark.asyncio
+async def test_initialize_validators_success():
     """Test successful initialization of validators"""
-    mock_registry = Mock()
+    mock_registry = AsyncMock()
     mock_accounts = Mock()
-    mock_creator = Mock()
+    mock_creator = AsyncMock()
 
     validators_json = """[
         {
@@ -60,7 +64,9 @@ def test_initialize_validators_success():
         }
     ]"""
 
-    initialize_validators(validators_json, mock_registry, mock_accounts, mock_creator)
+    await initialize_validators(
+        validators_json, mock_registry, mock_accounts, mock_creator
+    )
 
     # Verify that existing validators were deleted
     mock_registry.delete_all_validators.assert_called_once()
@@ -104,11 +110,12 @@ def test_initialize_validators_success():
     )
 
 
-def test_initialize_validators_invalid_config():
+@pytest.mark.asyncio
+async def test_initialize_validators_invalid_config():
     """Test that invalid validator configuration raises ValueError"""
-    mock_registry = Mock()
+    mock_registry = AsyncMock()
     mock_accounts = Mock()
-    mock_creator = Mock()
+    mock_creator = AsyncMock()
 
     # Missing required field 'model'
     validators_json = """[
@@ -119,16 +126,17 @@ def test_initialize_validators_invalid_config():
     ]"""
 
     with pytest.raises(ValueError, match="Failed to create validator"):
-        initialize_validators(
+        await initialize_validators(
             validators_json, mock_registry, mock_accounts, mock_creator
         )
 
 
-def test_initialize_validators_creator_error():
+@pytest.mark.asyncio
+async def test_initialize_validators_creator_error():
     """Test that creator function errors are properly handled"""
-    mock_registry = Mock()
+    mock_registry = AsyncMock()
     mock_accounts = Mock()
-    mock_creator = Mock(side_effect=Exception("Creator error"))
+    mock_creator = AsyncMock(side_effect=Exception("Creator error"))
 
     validators_json = """[
         {
@@ -139,6 +147,6 @@ def test_initialize_validators_creator_error():
     ]"""
 
     with pytest.raises(ValueError, match="Failed to create validator.*Creator error"):
-        initialize_validators(
+        await initialize_validators(
             validators_json, mock_registry, mock_accounts, mock_creator
         )

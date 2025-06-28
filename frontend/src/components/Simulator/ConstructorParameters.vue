@@ -8,6 +8,7 @@ import { type ArgData, unfoldArgsData } from './ContractParams';
 
 const props = defineProps<{
   leaderOnly: boolean;
+  consensusMaxRotations: number;
 }>();
 
 const { contract, contractSchemaQuery, deployContract, isDeploying } =
@@ -24,7 +25,7 @@ const emit = defineEmits(['deployed-contract']);
 const handleDeployContract = async () => {
   const args = calldataArguments.value;
   const newArgs = unfoldArgsData(args);
-  await deployContract(newArgs, props.leaderOnly);
+  await deployContract(newArgs, props.leaderOnly, props.consensusMaxRotations);
 
   emit('deployed-contract');
 };

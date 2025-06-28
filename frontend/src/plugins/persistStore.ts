@@ -147,7 +147,7 @@ export function persistStorePlugin(context: PiniaPluginContext): void {
             await db.transactions
               .where('hash')
               .equals((args[0] as any).hash)
-              .modify({ data: args[0], status: args[0].status });
+              .modify({ data: args[0], statusName: args[0].statusName });
             break;
           case 'clearTransactionsForContract':
             await db.transactions

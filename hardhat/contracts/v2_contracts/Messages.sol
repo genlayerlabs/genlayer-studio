@@ -4,7 +4,7 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
-import "./interfaces/ITransactions.sol";
+import "./transactions/interfaces/ITransactions.sol";
 import "./interfaces/IGenConsensus.sol";
 contract Messages is
 	Initializable,
@@ -103,6 +103,11 @@ contract Messages is
 		);
 		require(success, "handleOp call failed");
 		ghostNonce[message.recipient]++;
+		if (message.onAcceptance) {
+			emit MessagesOnAcceptance(msgId);
+		} else {
+			emit MessagesOnFinalization(msgId);
+		}
 	}
 
 	function _handleMessagePacked(

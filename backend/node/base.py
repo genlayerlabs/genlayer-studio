@@ -11,6 +11,7 @@ import os
 from backend.domain.types import Validator, Transaction, TransactionType
 from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope
 import backend.node.genvm.base as genvmbase
+import backend.validators as validators
 import backend.node.genvm.origin.calldata as calldata
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.node.types import Receipt, ExecutionMode, Vote, ExecutionResultStatus
@@ -18,7 +19,18 @@ from backend.protocol_rpc.message_handler.base import MessageHandler
 
 from .types import Address
 
-SIMULATOR_CHAIN_ID: typing.Final[int] = 61999
+
+def _parse_chain_id() -> int:
+    raw = os.getenv("HARDHAT_CHAIN_ID", "61999")
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"HARDHAT_CHAIN_ID must be decimal digits, got '{raw}'"
+        ) from exc
+
+
+SIMULATOR_CHAIN_ID: typing.Final[int] = _parse_chain_id()
 
 
 class _SnapshotView(genvmbase.StateProxy):
@@ -27,12 +39,14 @@ class _SnapshotView(genvmbase.StateProxy):
         snapshot: ContractSnapshot,
         snapshot_factory: typing.Callable[[str], ContractSnapshot],
         readonly: bool,
+        state_status: str | None = None,
     ):
         self.contract_address = Address(snapshot.contract_address)
         self.snapshot = snapshot
         self.snapshot_factory = snapshot_factory
         self.cached = {}
         self.readonly = readonly
+        self.state_status = state_status if state_status else "accepted"
 
     def _get_snapshot(self, addr: Address) -> ContractSnapshot:
         if addr == self.contract_address:
@@ -44,15 +58,12 @@ class _SnapshotView(genvmbase.StateProxy):
         self.cached[addr] = res
         return res
 
-    def get_code(self, addr: Address) -> bytes:
-        return base64.b64decode(self._get_snapshot(addr).contract_code)
-
     def storage_read(
         self, account: Address, slot: bytes, index: int, le: int, /
     ) -> bytes:
         snap = self._get_snapshot(account)
         slot_id = base64.b64encode(slot).decode("ascii")
-        for_slot = snap.encoded_state.setdefault(slot_id, "")
+        for_slot = snap.states[self.state_status].setdefault(slot_id, "")
         data = bytearray(base64.b64decode(for_slot))
         data.extend(b"\x00" * (index + le - len(data)))
         return data[index : index + le]
@@ -69,12 +80,12 @@ class _SnapshotView(genvmbase.StateProxy):
         assert not self.readonly
         snap = self._get_snapshot(account)
         slot_id = base64.b64encode(slot).decode("ascii")
-        for_slot = snap.encoded_state.setdefault(slot_id, "")
+        for_slot = snap.states[self.state_status].setdefault(slot_id, "")
         data = bytearray(base64.b64decode(for_slot))
         mem = memoryview(got)
         data.extend(b"\x00" * (index + len(mem) - len(data)))
         data[index : index + len(mem)] = mem
-        snap.encoded_state[slot_id] = base64.b64encode(data).decode("utf-8")
+        snap.states[self.state_status][slot_id] = base64.b64encode(data).decode("utf-8")
 
     def get_balance(self, addr: Address) -> int:
         snap = self._get_snapshot(addr)
@@ -92,6 +103,7 @@ class Node:
         contract_snapshot_factory: Callable[[str], ContractSnapshot] | None,
         leader_receipt: Optional[Receipt] = None,
         msg_handler: MessageHandler | None = None,
+        validators_snapshot: validators.Snapshot | None = None,
     ):
         self.contract_snapshot = contract_snapshot
         self.validator_mode = validator_mode
@@ -100,6 +112,7 @@ class Node:
         self.leader_receipt = leader_receipt
         self.msg_handler = msg_handler
         self.contract_snapshot_factory = contract_snapshot_factory
+        self.validators_snapshot = validators_snapshot
 
     def _create_genvm(self) -> genvmbase.IGenVM:
         return genvmbase.GenVMHost()
@@ -132,9 +145,7 @@ class Node:
 
     def _set_vote(self, receipt: Receipt) -> Receipt:
         leader_receipt = self.leader_receipt
-        if self.validator_mode == ExecutionMode.LEADER:
-            receipt.vote = Vote.AGREE
-        elif (
+        if (
             leader_receipt.execution_result == receipt.execution_result
             and leader_receipt.result == receipt.result
             and leader_receipt.contract_state == receipt.contract_state
@@ -159,13 +170,31 @@ class Node:
         from_address: str,
         code_to_deploy: bytes,
         calldata: bytes,
-        transaction_hash: str,
+        transaction_hash: str | None = None,
         transaction_created_at: str | None = None,
     ) -> Receipt:
         assert self.contract_snapshot is not None
-        self.contract_snapshot.contract_code = base64.b64encode(code_to_deploy).decode(
-            "ascii"
+
+        from .genvm.origin import base_host
+
+        def no_factory(*args, **kwargs):
+            raise Exception("factory is forbidden for code deployment")
+
+        snapshot_view_for_code = _SnapshotView(
+            self.contract_snapshot,
+            no_factory,
+            False,
+            None,
         )
+
+        base_host.save_code_callback(
+            Address(self.contract_snapshot.contract_address).as_bytes,
+            code_to_deploy,
+            lambda addr, *rest: snapshot_view_for_code.storage_write(
+                Address(addr), *rest
+            ),
+        )
+
         return await self._run_genvm(
             from_address,
             calldata,
@@ -179,7 +208,7 @@ class Node:
         self,
         from_address: str,
         calldata: bytes,
-        transaction_hash: str,
+        transaction_hash: str | None = None,
         transaction_created_at: str | None = None,
     ) -> Receipt:
         return await self._run_genvm(
@@ -195,6 +224,7 @@ class Node:
         self,
         from_address: str,
         calldata: bytes,
+        state_status: str | None = None,
     ) -> Receipt:
         return await self._run_genvm(
             from_address,
@@ -202,6 +232,7 @@ class Node:
             readonly=True,
             is_init=False,
             transaction_datetime=datetime.datetime.now().astimezone(datetime.UTC),
+            state_status=state_status,
         )
 
     async def _execution_finished(
@@ -262,6 +293,7 @@ class Node:
         is_init: bool,
         transaction_hash: str | None = None,
         transaction_datetime: datetime.datetime | None,
+        state_status: str | None = None,
     ) -> Receipt:
         genvm = self._create_genvm()
         leader_res: None | dict[int, bytes]
@@ -274,30 +306,20 @@ class Node:
             }
         assert self.contract_snapshot is not None
         assert self.contract_snapshot_factory is not None
-        config = {
-            "modules": [
-                {
-                    "path": "${genvmRoot}/lib/genvm-modules/",
-                    "id": "llm",
-                    "config": {
-                        "host": f"{os.environ['WEBREQUESTPROTOCOL']}://{os.environ['WEBREQUESTHOST']}:{os.environ['WEBREQUESTPORT']}",
-                        "provider": "simulator",
-                        "model": json.dumps(self.validator.llmprovider.__dict__),
-                    },
-                },
-                {
-                    "path": "${genvmRoot}/lib/genvm-modules/",
-                    "id": "web",
-                    "config": {
-                        "host": f"{os.environ['WEBREQUESTPROTOCOL']}://{os.environ['WEBREQUESTHOST']}:{os.environ['WEBREQUESTSELENIUMPORT']}"
-                    },
-                },
-            ]
-        }
         snapshot_view = _SnapshotView(
-            self.contract_snapshot, self.contract_snapshot_factory, readonly
+            self.contract_snapshot,
+            self.contract_snapshot_factory,
+            readonly,
+            state_status,
         )
 
+        config_path = None
+        host_data = None
+        if self.validators_snapshot is not None:
+            config_path = self.validators_snapshot.genvm_config_path
+            for n in self.validators_snapshot.nodes:
+                if n.validator.address == self.validator.address:
+                    host_data = n.genvm_host_arg
         result_exec_code: ExecutionResultStatus
         res = await genvm.run_contract(
             snapshot_view,
@@ -307,10 +329,25 @@ class Node:
             is_init=is_init,
             readonly=readonly,
             leader_results=leader_res,
-            config=json.dumps(config),
             date=transaction_datetime,
             chain_id=SIMULATOR_CHAIN_ID,
+            config_path=config_path,
+            host_data=host_data,
         )
+
+        if res is None:
+            res = genvmbase.ExecutionResult(
+                eq_outputs={},
+                pending_transactions=[],
+                stdout="",
+                stderr="",
+                genvm_log=[],
+                result=genvmbase.ExecutionError(
+                    message="Execution timed out",
+                    kind=genvmbase.ResultCode.CONTRACT_ERROR,
+                ),
+            )
+
         await self._execution_finished(res, transaction_hash)
 
         result_exec_code = (
@@ -319,20 +356,26 @@ class Node:
             else ExecutionResultStatus.ERROR
         )
 
-        return self._set_vote(
-            Receipt(
-                result=genvmbase.encode_result_to_bytes(res.result),
-                gas_used=0,
-                eq_outputs={
-                    k: base64.b64encode(v).decode("ascii")
-                    for k, v in res.eq_outputs.items()
-                },
-                pending_transactions=res.pending_transactions,
-                vote=None,
-                execution_result=result_exec_code,
-                contract_state=self.contract_snapshot.encoded_state,
-                calldata=calldata,
-                mode=self.validator_mode,
-                node_config=self.validator.to_dict(),
-            )
+        result = Receipt(
+            result=genvmbase.encode_result_to_bytes(res.result),
+            gas_used=0,
+            eq_outputs={
+                k: base64.b64encode(v).decode("ascii")
+                for k, v in res.eq_outputs.items()
+            },
+            pending_transactions=res.pending_transactions,
+            vote=None,
+            execution_result=result_exec_code,
+            contract_state=self.contract_snapshot.states["accepted"],
+            calldata=calldata,
+            mode=self.validator_mode,
+            node_config=self.validator.to_dict(),
+            genvm_result={
+                "stdout": res.stdout,
+                "stderr": res.stderr,
+            },
         )
+
+        if self.validator_mode == ExecutionMode.LEADER:
+            return result
+        return self._set_vote(result)

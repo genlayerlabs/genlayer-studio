@@ -14,7 +14,9 @@ import type {
   Address,
   TransactionHash,
   CalldataEncodable,
+  TransactionHashVariant,
 } from 'genlayer-js/types';
+import { TransactionStatus } from 'genlayer-js/types';
 
 const schema = ref<any>();
 
@@ -98,6 +100,7 @@ export function useContractQueries() {
       kwargs: { [key: string]: CalldataEncodable };
     },
     leaderOnly: boolean,
+    consensusMaxRotations: number,
   ) {
     isDeploying.value = true;
 
@@ -113,6 +116,7 @@ export function useContractQueries() {
         code: code_bytes as any as string, // FIXME: code should accept both bytes and string in genlayer-js
         args: args.args,
         leaderOnly,
+        consensusMaxRotations,
       });
 
       const tx: TransactionItem = {
@@ -120,7 +124,7 @@ export function useContractQueries() {
         localContractId: contract.value?.id ?? '',
         hash: result as TransactionHash,
         type: 'deploy',
-        status: 'PENDING',
+        statusName: TransactionStatus.PENDING,
         data: {},
       };
 
@@ -172,7 +176,7 @@ export function useContractQueries() {
     }
 
     const result = await genlayerClient.value?.getContractSchema(
-      deployedContract.value?.address ?? '',
+      deployedContract.value?.address ?? '0x0',
     );
 
     return result;
@@ -184,12 +188,14 @@ export function useContractQueries() {
       args: CalldataEncodable[];
       kwargs: { [key: string]: CalldataEncodable };
     },
+    transactionHashVariant: TransactionHashVariant,
   ) {
     try {
       const result = await genlayerClient.value?.readContract({
         address: address.value as Address,
         functionName: method,
         args: args.args,
+        transactionHashVariant,
       });
 
       return result;
@@ -203,6 +209,7 @@ export function useContractQueries() {
     method,
     args,
     leaderOnly,
+    consensusMaxRotations,
     value,
   }: {
     method: string;
@@ -211,6 +218,7 @@ export function useContractQueries() {
       kwargs: { [key: string]: CalldataEncodable };
     };
     leaderOnly: boolean;
+    consensusMaxRotations?: number;
     value: bigint;
   }) {
     try {
@@ -224,14 +232,15 @@ export function useContractQueries() {
         args: args.args,
         value: BigInt(value),
         leaderOnly,
+        consensusMaxRotations,
       });
 
       transactionsStore.addTransaction({
         contractAddress: address.value || '',
         localContractId: contract.value?.id || '',
-        hash: result,
+        hash: result as TransactionHash,
         type: 'method',
-        status: 'PENDING',
+        statusName: TransactionStatus.PENDING,
         data: {},
         decodedData: {
           functionName: method,

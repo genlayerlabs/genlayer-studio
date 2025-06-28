@@ -77,6 +77,32 @@ contract Queues is
 		return queues.txIdToFinalizedSlot[txId] == queues.finalizedCount;
 	}
 
+	function getAcceptedCount(
+		address recipient
+	) external view returns (uint256) {
+		return recipientQueues[recipient].accepted.tail;
+	}
+
+	function getAcceptedTxId(
+		address recipient,
+		uint256 slot
+	) external view returns (bytes32) {
+		return recipientQueues[recipient].accepted.slotToTxId[slot];
+	}
+
+	function getFinalizedCount(
+		address recipient
+	) external view returns (uint256) {
+		return recipientQueues[recipient].finalizedCount;
+	}
+
+	function getFinalizedTxId(
+		address recipient,
+		uint256 slot
+	) external view returns (bytes32) {
+		return recipientQueues[recipient].accepted.slotToTxId[slot];
+	}
+
 	function addTransactionToPendingQueue(
 		address recipient,
 		bytes32 txId

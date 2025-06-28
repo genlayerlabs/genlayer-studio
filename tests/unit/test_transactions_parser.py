@@ -103,17 +103,19 @@ def test_decode_deployment_data(transaction_parser, data, expected_result):
                 "hash": "test_hash",
                 "status": TransactionStatus.FINALIZED,
                 "consensus_data": {
-                    "leader_receipt": {
-                        "result": {
-                            "raw": "AKQYeyJyZWFzb25pbmciOiAiVGhlIGNvaW4gbXVzdCBub3QgYmUgZ2l2ZW4gdG8gYW55b25lLCByZ"
-                            "WdhcmRsZXNzIG9mIHRoZSBjaXJjdW1zdGFuY2VzIG9yIHByb21pc2VzIG9mIGEgZGlmZmVyZW50IG91d"
-                            "GNvbWUuIFRoZSBjb25zZXF1ZW5jZXMgb2YgZ2l2aW5nIHRoZSBjb2luIGF3YXkgY291bGQgYmUgY2F0Y"
-                            "XN0cm9waGljIGFuZCBpcnJldmVyc2libGUsIGV2ZW4gaWYgdGhlcmUgaXMgYSBwb3NzaWJpbGl0eSBvZ"
-                            "iBhIHRpbWUgbG9vcCByZXNldHRpbmcgdGhlIHNpdHVhdGlvbi4gVGhlIGludGVncml0eSBvZiB0aGUgd"
-                            "W5pdmVyc2UgYW5kIHRoZSBiYWxhbmNlIG9mIHBvd2VyIG11c3QgYmUgcHJlc2VydmVkIGJ5IGtlZXBpb"
-                            "mcgdGhlIGNvaW4uIiwgImdpdmVfY29pbiI6IGZhbHNlfQ=="
+                    "leader_receipt": [
+                        {
+                            "result": {
+                                "raw": "AKQYeyJyZWFzb25pbmciOiAiVGhlIGNvaW4gbXVzdCBub3QgYmUgZ2l2ZW4gdG8gYW55b25lLCByZ"
+                                "WdhcmRsZXNzIG9mIHRoZSBjaXJjdW1zdGFuY2VzIG9yIHByb21pc2VzIG9mIGEgZGlmZmVyZW50IG91d"
+                                "GNvbWUuIFRoZSBjb25zZXF1ZW5jZXMgb2YgZ2l2aW5nIHRoZSBjb2luIGF3YXkgY291bGQgYmUgY2F0Y"
+                                "XN0cm9waGljIGFuZCBpcnJldmVyc2libGUsIGV2ZW4gaWYgdGhlcmUgaXMgYSBwb3NzaWJpbGl0eSBvZ"
+                                "iBhIHRpbWUgbG9vcCByZXNldHRpbmcgdGhlIHNpdHVhdGlvbi4gVGhlIGludGVncml0eSBvZiB0aGUgd"
+                                "W5pdmVyc2UgYW5kIHRoZSBiYWxhbmNlIG9mIHBvd2VyIG11c3QgYmUgcHJlc2VydmVkIGJ5IGtlZXBpb"
+                                "mcgdGhlIGNvaW4uIiwgImdpdmVfY29pbiI6IGZhbHNlfQ=="
+                            }
                         }
-                    }
+                    ]
                 },
             },
             '{"reasoning": "The coin must not be given to anyone, regardless of the circumstances or promises of a '
@@ -125,7 +127,7 @@ def test_decode_deployment_data(transaction_parser, data, expected_result):
             {
                 "hash": "test_hash",
                 "status": TransactionStatus.FINALIZED,
-                "consensus_data": {"leader_receipt": {"result": {"raw": "AAA="}}},
+                "consensus_data": {"leader_receipt": [{"result": {"raw": "AAA="}}]},
             },
             "",
         ),
@@ -134,13 +136,15 @@ def test_decode_deployment_data(transaction_parser, data, expected_result):
                 "hash": "test_hash",
                 "status": TransactionStatus.FINALIZED,
                 "consensus_data": {
-                    "leader_receipt": {
-                        "result": {
-                            "raw": '```json\n{\n"transaction_success": true,\n"transaction_error": "",'
-                            '\n"updated_balances": {"0x3bD9Cc00Fd6F9cAa866170b006a1182b760fC4D0": 100}\n}'
-                            "\n```"
+                    "leader_receipt": [
+                        {
+                            "result": {
+                                "raw": '```json\n{\n"transaction_success": true,\n"transaction_error": "",'
+                                '\n"updated_balances": {"0x3bD9Cc00Fd6F9cAa866170b006a1182b760fC4D0": 100}\n}'
+                                "\n```"
+                            }
                         }
-                    }
+                    ]
                 },
             },
             '```json\n{\n"transaction_success": true,\n"transaction_error": "",'
@@ -151,7 +155,7 @@ def test_decode_deployment_data(transaction_parser, data, expected_result):
             {
                 "hash": "test_hash",
                 "status": TransactionStatus.FINALIZED,
-                "consensus_data": {"leader_receipt": {"result": "AAA="}},
+                "consensus_data": {"leader_receipt": [{"result": "AAA="}]},
             },
             "",
         ),
@@ -159,7 +163,7 @@ def test_decode_deployment_data(transaction_parser, data, expected_result):
             {
                 "hash": "test_hash",
                 "status": TransactionStatus.FINALIZED,
-                "consensus_data": {"leader_receipt": {"result": {}}},
+                "consensus_data": {"leader_receipt": [{"result": {}}]},
             },
             {},
         ),

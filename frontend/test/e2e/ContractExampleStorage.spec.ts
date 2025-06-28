@@ -28,7 +28,7 @@ describe('Contract Example Storage', () => {
   it('should open Storage example contract', async () => {
     await contractsPage.navigate();
     await contractsPage.waitUntilVisible();
-    await contractsPage.openContract('storage.gpy');
+    await contractsPage.openContract('storage.py');
     const tabs = await driver.findElements(
       By.xpath("//div[contains(@class, 'contract-item')]"),
     );
@@ -41,7 +41,7 @@ describe('Contract Example Storage', () => {
 
     const nameOfContract = await driver.findElement(
       By.xpath(
-        "//*[@data-testid='current-contract-name' and contains(text(), 'storage.gpy')]",
+        "//*[@data-testid='current-contract-name' and contains(text(), 'storage.py')]",
       ),
     );
 

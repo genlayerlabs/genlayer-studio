@@ -1,6 +1,6 @@
 {
   "provider": "heuristai",
-  "plugin": "openai",
+  "plugin": "openai-compatible",
   "model": "mistralai/mixtral-8x22b-instruct",
   "config": {
     "temperature": 0.75,

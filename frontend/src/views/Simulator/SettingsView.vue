@@ -2,6 +2,7 @@
 import { useConfig } from '@/hooks';
 import MainTitle from '@/components/Simulator/MainTitle.vue';
 import ProviderSection from '@/components/Simulator/settings/ProviderSection.vue';
+import ConsensusSection from '@/components/Simulator/settings/ConsensusSection.vue';
 import SimulatorSection from '@/components/Simulator/settings/SimulatorSection.vue';
 
 const { canUpdateProviders } = useConfig();
@@ -12,6 +13,7 @@ const { canUpdateProviders } = useConfig();
     <MainTitle data-testid="settings-page-title">Settings</MainTitle>
 
     <SimulatorSection />
+    <ConsensusSection />
     <ProviderSection v-if="canUpdateProviders" />
   </div>
 </template>

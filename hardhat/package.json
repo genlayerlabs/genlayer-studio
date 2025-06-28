@@ -8,7 +8,7 @@
   "dependencies": {
     "@nomicfoundation/hardhat-ethers": "^3.0.0",
     "@nomicfoundation/hardhat-network-helpers": "^1.0.0",
-    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
     "@nomicfoundation/hardhat-verify": "^2.0.0",
     "@openzeppelin/contracts": "^5.1.0",
     "@openzeppelin/contracts-upgradeable": "^5.1.0",
@@ -22,7 +22,6 @@
     "node": ">=18.0.0"
   },
   "devDependencies": {
-    "@nomicfoundation/hardhat-ignition": "^0.15.8",
-    "@nomicfoundation/hardhat-ignition-ethers": "^0.15.8"
+    "hardhat-deploy": "^1.0.1"
   }
 }

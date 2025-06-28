@@ -1,8 +1,10 @@
 import { type DeployedContract, type TransactionItem } from '@/types';
+import { TransactionStatus } from 'genlayer-js/types';
 
 export function useMockContractData() {
   const mockContractId = '1a621cad-1cfd-4dbd-892a-f6bbde7a2fab';
-  const mockContractAddress = '0x3F9Fb6C6aBaBD0Ae6cB27c513E7b0fE4C0B3E9C8';
+  const mockContractAddress =
+    '0x3F9Fb6C6aBaBD0Ae6cB27c513E7b0fE4C0B3E9C8' as const;
 
   const mockDeployedContract: DeployedContract = {
     address: mockContractAddress,
@@ -36,7 +38,7 @@ export function useMockContractData() {
     localContractId: mockContractId,
     hash: '0x123',
     type: 'deploy',
-    status: 'FINALIZED',
+    statusName: TransactionStatus.FINALIZED,
     data: {},
   };
 
