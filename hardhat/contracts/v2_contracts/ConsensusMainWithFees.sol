@@ -5,7 +5,7 @@ import "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "./interfaces/IGenManager.sol";
-import "./interfaces/ITransactions.sol";
+import "./transactions/interfaces/ITransactions.sol";
 import "./interfaces/IQueues.sol";
 import "./interfaces/IGhostFactory.sol";
 import "./interfaces/IGenStaking.sol";
@@ -153,6 +153,7 @@ contract ConsensusMainWithFees is
 	function proposeReceipt(
 		bytes32 _tx_id,
 		bytes calldata _txReceipt,
+		uint256 _processingBlock,
 		IMessages.SubmittedMessage[] calldata _messages,
 		bytes calldata _vrfProof
 	) external {
@@ -164,6 +165,7 @@ contract ConsensusMainWithFees is
 		) = genTransactions.proposeTransactionReceipt(
 				_tx_id,
 				msg.sender,
+				_processingBlock,
 				_txReceipt,
 				_messages
 			);
@@ -348,7 +350,7 @@ contract ConsensusMainWithFees is
 		bytes32 _tx_id,
 		IFeeManager.FeesDistribution memory _feesDistribution
 	) external payable {
-		(address[] memory appealValidators, uint round) = _submitAppeal(
+		(address[] memory appealValidators /*uint round*/, ) = _submitAppeal(
 			_tx_id,
 			msg.value
 		);
@@ -475,7 +477,6 @@ contract ConsensusMainWithFees is
 	 * @param _sender Transaction sender address
 	 * @param _recipient Recipient GenVM contract address
 	 * @param _numOfInitialValidators Number of validators to assign
-	 * @param _maxRotations Maximum number of leader rotations allowed
 	 * @param _randomSeed Random seed for the transaction
 	 * @param _txData Transaction data to be executed
 	 */
@@ -483,7 +484,7 @@ contract ConsensusMainWithFees is
 		address _sender,
 		address _recipient,
 		uint256 _numOfInitialValidators,
-		uint256 _maxRotations,
+		uint256 /*_maxRotations*/,
 		bytes32 _randomSeed,
 		bytes memory _txData
 	) internal returns (bytes32 tx_id, address activator) {
@@ -498,6 +499,7 @@ contract ConsensusMainWithFees is
 		genTransactions.addNewTransaction(
 			tx_id,
 			ITransactions.Transaction({
+				id: tx_id,
 				sender: _sender,
 				recipient: _recipient,
 				numOfInitialValidators: _numOfInitialValidators,
@@ -505,13 +507,22 @@ contract ConsensusMainWithFees is
 				activator: activator,
 				status: ITransactions.TransactionStatus.Pending,
 				previousStatus: ITransactions.TransactionStatus.Uninitialized,
-				timestamp: block.timestamp,
-				lastModification: block.timestamp,
-				lastVoteTimestamp: 0,
-				activationTimestamp: 0,
+				timestamps: ITransactions.Timestamps({
+					created: block.timestamp,
+					pending: block.timestamp,
+					activated: 0,
+					proposed: 0,
+					committed: 0,
+					lastVote: 0
+				}),
 				randomSeed: _randomSeed,
 				onAcceptanceMessages: false,
 				result: ITransactions.ResultType(0),
+				readStateBlockRange: ITransactions.ReadStateBlockRange({
+					activationBlock: 0,
+					processingBlock: 0,
+					proposalBlock: 0
+				}),
 				txData: _txData,
 				txReceipt: new bytes(0),
 				messages: new IMessages.SubmittedMessage[](0),

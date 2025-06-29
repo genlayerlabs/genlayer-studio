@@ -3,14 +3,14 @@
 from typing import List
 from sqlalchemy.orm import Session
 
-from backend.domain.types import LLMProvider, Validator
+from backend.domain.types import Validator
 
 from .models import Validators
 from backend.errors.errors import ValidatorNotFound
 
 
 # the to_dict function lives in this module and not in models.py because it's on this layer of abstraction where we convert database objects to our custom data structures
-def to_dict(validator: Validators) -> dict:
+def to_dict(validator: Validators, include_private_key: bool = True) -> dict:
     return {
         "id": validator.id,
         "address": validator.address,
@@ -21,6 +21,7 @@ def to_dict(validator: Validators) -> dict:
         "plugin": validator.plugin,
         "plugin_config": validator.plugin_config,
         "created_at": validator.created_at.isoformat(),
+        **({"private_key": validator.private_key} if include_private_key else {}),
     }
 
 
@@ -45,18 +46,26 @@ class ValidatorsRegistry:
     def count_validators(self) -> int:
         return self.session.query(Validators).count()
 
-    def get_all_validators(self) -> List[dict]:
+    def get_all_validators(self, include_private_key: bool = True) -> List[dict]:
         validators_data = self.session.query(Validators).all()
-        return [to_dict(validator) for validator in validators_data]
+        return [
+            to_dict(validator, include_private_key) for validator in validators_data
+        ]
 
-    def get_validator(self, validator_address: str) -> dict:
-        return to_dict(self._get_validator_or_fail(validator_address))
+    def get_validator(
+        self, validator_address: str, include_private_key: bool = True
+    ) -> dict:
+        return to_dict(
+            self._get_validator_or_fail(validator_address), include_private_key
+        )
 
-    def create_validator(self, validator: Validator) -> dict:
+
+class ModifiableValidatorsRegistry(ValidatorsRegistry):
+    async def create_validator(self, validator: Validator) -> dict:
         self.session.add(_to_db_model(validator))
-        return self.get_validator(validator.address)
+        return self.get_validator(validator.address, False)
 
-    def update_validator(
+    async def update_validator(
         self,
         new_validator: Validator,
     ) -> dict:
@@ -69,31 +78,15 @@ class ValidatorsRegistry:
         validator.plugin = new_validator.llmprovider.plugin
         validator.plugin_config = new_validator.llmprovider.plugin_config
 
-        return to_dict(validator)
+        return to_dict(validator, False)
 
-    def delete_validator(self, validator_address):
+    async def delete_validator(self, validator_address):
         validator = self._get_validator_or_fail(validator_address)
 
         self.session.delete(validator)
 
-    def delete_all_validators(self):
+    async def delete_all_validators(self):
         self.session.query(Validators).delete()
-
-
-# def _to_domain(validator: Validators) -> Validator:
-#     return Validator(
-#         address=validator.address,
-#         stake=validator.stake,
-#         llmprovider=LLMProvider(
-#             provider=validator.provider,
-#             model=validator.model,
-#             config=validator.config,
-#             plugin=validator.plugin,
-#             plugin_config=validator.plugin_config,
-#             id=None,
-#         ),
-#         id=validator.id,
-#     )
 
 
 def _to_db_model(validator: Validator) -> Validators:
@@ -105,4 +98,5 @@ def _to_db_model(validator: Validator) -> Validators:
         config=validator.llmprovider.config,
         plugin=validator.llmprovider.plugin,
         plugin_config=validator.llmprovider.plugin_config,
+        private_key=validator.private_key.to_0x_hex(),
     )

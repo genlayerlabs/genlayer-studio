@@ -1,7 +1,7 @@
 services:
   traefik:
     profiles: ["studio"]
-    image: traefik:v3.2
+    image: traefik:v3.3
     ports:
       - "80:80"
       - "443:443"
@@ -52,9 +52,8 @@ services:
       # TODO: remove this in production
       - PYTHONUNBUFFERED=1
       - RPCDEBUGPORT=${RPCDEBUGPORT}
-      - WEBREQUESTPORT=${WEBREQUESTPORT}
-      - WEBREQUESTHOST=${WEBREQUESTHOST}
-      - WEBREQUESTPROTOCOL=${WEBREQUESTPROTOCOL}
+      - WEBDRIVERHOST=${WEBDRIVERHOST}
+      - WEBDRIVERPORT=${WEBDRIVERPORT}
     ports:
       - "${RPCPORT}:${RPCPORT}"
       - "${RPCDEBUGPORT}:${RPCDEBUGPORT}"
@@ -64,19 +63,23 @@ services:
       - hardhat_artifacts:/app/hardhat/artifacts
       - hardhat_deployments:/app/hardhat/deployments
     depends_on:
-      hardhat:
-        condition: service_healthy
       database-migration:
         condition: service_completed_successfully
-      webrequest:
+      webdriver:
         condition: service_healthy
+      hardhat:
+        condition: service_healthy
+        required: false
+      ollama:
+        condition: service_started
+        required: false
     expose:
       - "${RPCPORT}"
     healthcheck:
       test: ["CMD", "python3", "backend/healthcheck.py", "--port", "${RPCPORT}"]
       interval: 30s
       timeout: 10s
-      retries: 3
+      retries: 10
       start_period: 30s
     restart: always
     security_opt:
@@ -94,25 +97,13 @@ services:
       traefik.http.routers.jsonrpc.entrypoints: websecure
       traefik.http.routers.jsonrpc.tls: true
 
-  webrequest:
-    build:
-      context: ./
-      dockerfile: ./docker/Dockerfile.webrequest
+  webdriver:
+    image: yeagerai/genlayer-genvm-webdriver:0.0.3
     shm_size: 2gb
-    volumes:
-      - ./.env:/app/webrequest/.env
-      - ./webrequest:/app/webrequest
     environment:
-      - FLASK_SERVER_PORT=${WEBREQUESTPORT}
-      - WEBREQUESTSELENIUMPORT=${WEBREQUESTSELENIUMPORT}
-      # TODO: remove this in production
-      - PYTHONUNBUFFERED=1
-    depends_on:
-      ollama:
-        condition: service_started
+      - PORT=${WEBDRIVERPORT:-4444}
     expose:
-      - "${WEBREQUESTPORT}:${WEBREQUESTPORT}"
-      - "${WEBREQUESTSELENIUMPORT}:${WEBREQUESTSELENIUMPORT}"
+      - "${WEBDRIVERPORT:-4444}"
     restart: always
     security_opt:
       - "no-new-privileges=true"
@@ -123,7 +114,8 @@ services:
         max-file: "3"
 
   ollama:
-    image: ollama/ollama:0.5.7
+    profiles: ["ollama"]
+    image: ollama/ollama:0.6.5
     ports:
       - 11434:11434
     volumes:
@@ -170,40 +162,26 @@ services:
       dockerfile: docker/Dockerfile.database-migration
     environment:
       - DB_URL=postgresql://${DBUSER}:${DBUSER}@postgres/${DBNAME}
-      - WEBREQUESTPORT=${WEBREQUESTPORT}
-      - WEBREQUESTHOST=${WEBREQUESTHOST}
-      - WEBREQUESTPROTOCOL=${WEBREQUESTPROTOCOL}
     depends_on:
       postgres:
         condition: service_healthy
-      webrequest:
-        condition: service_healthy
 
   hardhat:
+    profiles: ["hardhat"]
     build:
       context: .
       dockerfile: docker/Dockerfile.hardhat
     ports:
       - "${HARDHAT_PORT:-8545}:8545"
+    env_file:
+      - .env
     volumes:
-      - ./hardhat/contracts:/app/contracts
-      - ./hardhat/scripts:/app/scripts
-      - ./hardhat/test:/app/test
-      - ./hardhat/hardhat.config.js:/app/hardhat.config.js
-      - ./hardhat/deploy:/app/deploy
+      - ./hardhat:/app/hardhat_src
       - hardhat_artifacts:/app/artifacts
       - hardhat_cache:/app/cache
       - hardhat_deployments:/app/deployments
-      - ignition_deployments:/app/ignition/deployments
-    environment:
-      - HARDHAT_NETWORK=hardhat
+      - hardhat_snapshots:/app/snapshots
     restart: always
-    healthcheck:
-      test: ["CMD", "curl", "-X", "POST", "-H", "Content-Type: application/json", "--fail", "http://localhost:8545", "-d", '{"jsonrpc":"2.0","method":"net_version","params":[],"id":1}']
-      interval: 60s
-      timeout: 30s
-      retries: 5
-      start_period: 60s
     labels:
       traefik.enable: true
       traefik.http.routers.hardhat.rule: Host(`${SERVER_NAME}`) && PathPrefix(`/hardhat`)
@@ -215,3 +193,4 @@ volumes:
   hardhat_cache:
   hardhat_deployments:
   ignition_deployments:
+  hardhat_snapshots:

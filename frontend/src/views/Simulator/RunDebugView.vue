@@ -50,6 +50,8 @@ watch(
 function isFinalityWindowValid(value: number) {
   return Number.isInteger(value) && value >= 0;
 }
+
+const consensusMaxRotations = computed(() => consensusStore.maxRotations);
 </script>
 
 <template>
@@ -104,6 +106,7 @@ function isFinalityWindowValid(value: number) {
           v-if="isDeploymentOpen"
           @deployedContract="isDeploymentOpen = false"
           :leaderOnly="leaderOnly"
+          :consensusMaxRotations="consensusMaxRotations"
         />
 
         <ContractReadMethods
@@ -115,6 +118,7 @@ function isFinalityWindowValid(value: number) {
           v-if="isDeployed"
           id="tutorial-write-methods"
           :leaderOnly="leaderOnly"
+          :consensusMaxRotations="consensusMaxRotations"
         />
         <TransactionsList
           id="tutorial-tx-response"

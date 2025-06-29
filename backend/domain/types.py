@@ -5,12 +5,11 @@
 from dataclasses import dataclass, field
 import decimal
 from enum import Enum, IntEnum
+import os
 
 from backend.database_handler.models import TransactionStatus
 from backend.database_handler.types import ConsensusData
 from backend.database_handler.contract_snapshot import ContractSnapshot
-
-MAX_ROTATIONS = 3
 
 
 @dataclass()
@@ -40,6 +39,25 @@ class Validator:
     stake: int
     llmprovider: LLMProvider
     id: int | None = None
+    private_key: str | None = None
+
+    @staticmethod
+    def from_dict(d: dict) -> "Validator":
+        ret = Validator.__new__(Validator)
+
+        ret.address = d["address"]
+        ret.stake = d["stake"]
+        ret.llmprovider = LLMProvider(
+            provider=d["provider"],
+            config=d["config"],
+            model=d["model"],
+            plugin=d["plugin"],
+            plugin_config=d["plugin_config"],
+        )
+        ret.id = d.get("id", None)
+        ret.private_key = d.get("private_key", None)
+
+        return ret
 
     def to_dict(self):
         result = {
@@ -50,6 +68,7 @@ class Validator:
             "config": self.llmprovider.config,
             "plugin": self.llmprovider.plugin,
             "plugin_config": self.llmprovider.plugin_config,
+            "private_key": self.private_key,
         }
 
         if self.id:
@@ -84,7 +103,6 @@ class Transaction:
         False  # Flag to indicate if this transaction should be processed only by the leader. Used for fast and cheap execution of transactions.
     )
     created_at: str | None = None
-    ghost_contract_address: str | None = None
     appealed: bool = False
     timestamp_awaiting_finalization: int | None = None
     appeal_failed: int = 0
@@ -93,7 +111,7 @@ class Transaction:
     timestamp_appeal: int | None = None
     appeal_processing_time: int = 0
     contract_snapshot: ContractSnapshot | None = None
-    config_rotation_rounds: int | None = MAX_ROTATIONS
+    config_rotation_rounds: int | None = int(os.getenv("VITE_MAX_ROTATIONS", 3))
 
     def to_dict(self):
         return {
@@ -115,7 +133,6 @@ class Transaction:
             "v": self.v,
             "leader_only": self.leader_only,
             "created_at": self.created_at,
-            "ghost_contract_address": self.ghost_contract_address,
             "appealed": self.appealed,
             "timestamp_awaiting_finalization": self.timestamp_awaiting_finalization,
             "appeal_failed": self.appeal_failed,
@@ -148,14 +165,13 @@ class Transaction:
             v=input.get("v"),
             leader_only=input.get("leader_only", False),
             created_at=input.get("created_at"),
-            ghost_contract_address=input.get("ghost_contract_address"),
             appealed=input.get("appealed"),
             timestamp_awaiting_finalization=input.get(
                 "timestamp_awaiting_finalization"
             ),
             appeal_failed=input.get("appeal_failed", 0),
             appeal_undetermined=input.get("appeal_undetermined", False),
-            consensus_history=input.get("consensus_history"),
+            consensus_history=input.get("consensus_history", {}),
             timestamp_appeal=input.get("timestamp_appeal"),
             appeal_processing_time=input.get("appeal_processing_time", 0),
             contract_snapshot=ContractSnapshot.from_dict(

@@ -34,4 +34,23 @@ library RandomnessUtils {
 		// Generate and return new seed
 		return uint256(keccak256(vrfProof));
 	}
+
+	/**
+	 * @dev Selects a random index using a set of seeds
+	 * @param _seed1 The first seed
+	 * @param _seed2 The second seed
+	 * @param _seed3 The third seed
+	 * @param _length The length of the list
+	 * @return index The randomly selected index
+	 */
+	function randomlySelectIndex(
+		uint256 _seed1,
+		uint256 _seed2,
+		uint256 _seed3,
+		uint256 _length
+	) external pure returns (uint256 index) {
+		index =
+			uint256(keccak256(abi.encodePacked(_seed1, _seed2, _seed3))) %
+			_length;
+	}
 }

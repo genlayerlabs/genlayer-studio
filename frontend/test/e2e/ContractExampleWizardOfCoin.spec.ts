@@ -28,7 +28,7 @@ describe('Contract Example WizardOfCoin', () => {
   it('should open WizardOfCoin example contract', async () => {
     await contractsPage.navigate();
     await contractsPage.waitUntilVisible();
-    await contractsPage.openContract('wizard_of_coin.gpy');
+    await contractsPage.openContract('wizard_of_coin.py');
     const tabs = await driver.findElements(
       By.xpath("//div[contains(@class, 'contract-item')]"),
     );
@@ -41,7 +41,7 @@ describe('Contract Example WizardOfCoin', () => {
 
     const nameOfContract = await driver.wait(
       until.elementLocated(
-        By.xpath("//div[contains(text(), 'wizard_of_coin.gpy')]"),
+        By.xpath("//div[contains(text(), 'wizard_of_coin.py')]"),
       ),
       2000,
     );

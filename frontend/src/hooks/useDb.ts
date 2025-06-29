@@ -34,6 +34,25 @@ class GenLayerSimulatorDB extends Dexie {
             }
           });
       });
+
+    this.version(4)
+      .stores({
+        contractFiles: 'id',
+        deployedContracts: '[contractId+address]',
+        transactions:
+          '++id, type, statusName, contractAddress, localContractId, hash',
+      })
+      .upgrade((tx) => {
+        return tx
+          .table('transactions')
+          .toCollection()
+          .modify((transaction) => {
+            if (transaction.status && !transaction.statusName) {
+              transaction.statusName = transaction.status;
+              delete transaction.status;
+            }
+          });
+      });
   }
 }
 

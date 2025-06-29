@@ -1,13 +1,14 @@
 # {
 #   "Seq": [
-#     { "Depends": "py-lib-genlayermodelwrappers:test" },
+#     { "Depends": "py-lib-genlayer-embeddings:test" },
 #     { "Depends": "py-genlayer:test" }
 #   ]
 # }
 
 import numpy as np
 from genlayer import *
-import genlayermodelwrappers
+import genlayer_embeddings as gle
+
 from dataclasses import dataclass
 import typing
 
@@ -21,13 +22,13 @@ class StoreValue:
 
 # contract class
 class LogIndexer(gl.Contract):
-    vector_store: VecDB[np.float32, typing.Literal[384], StoreValue]
+    vector_store: gle.VecDB[np.float32, typing.Literal[384], StoreValue]
 
     def __init__(self):
         pass
 
     def get_embedding_generator(self):
-        return genlayermodelwrappers.SentenceTransformer("all-MiniLM-L6-v2")
+        return gle.SentenceTransformer("all-MiniLM-L6-v2")
 
     def get_embedding(
         self, txt: str

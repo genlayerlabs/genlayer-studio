@@ -17,7 +17,7 @@ def test_llm_providers():
             for provider in providers_and_models
             if provider["model"] == "gpt-4o"
             and provider["provider"] == "openai"
-            and provider["plugin"] == "openai"
+            and provider["plugin"] == "openai-compatible"
         ),
         None,
     )
@@ -33,7 +33,7 @@ def test_llm_providers():
         "provider": "openai",
         "model": "gpt-4o",
         "config": {},
-        "plugin": "openai",
+        "plugin": "openai-compatible",
         "plugin_config": {"api_key_env_var": "OPENAIKEY", "api_url": None},
     }
     response = post_request_localhost(payload("sim_addProvider", provider)).json()
@@ -45,7 +45,7 @@ def test_llm_providers():
         "provider": "openai",
         "model": "gpt-4o",
         "config": {},
-        "plugin": "openai",
+        "plugin": "openai-compatible",
         "plugin_config": {"api_key_env_var": "OPENAIKEY", "api_url": None},
     }
 

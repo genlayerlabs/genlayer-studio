@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import { ITransactions } from "./ITransactions.sol";
+import { ITransactions } from "../transactions/interfaces/ITransactions.sol";
 
 interface IFeeManager {
 	enum RoundTypes {

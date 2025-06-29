@@ -1,32 +1,25 @@
 import asyncio
-from typing import Callable, List, Optional
+from typing import Callable, Awaitable
 import pytest
 from backend.domain.types import LLMProvider
 from backend.node.create_nodes.create_nodes import random_validator_config
-from backend.llms import Plugin
 
 
-def plugin_mock(available: bool, available_models: List[str]) -> Plugin:
-    class PluginMock(Plugin):
-        def __init__(self, plugin_config: dict):
-            pass
+def plugins_mock(
+    plugs: list[tuple[str, bool, list[str]]],
+) -> Callable[[LLMProvider], Awaitable[bool]]:
+    async def impl(p: LLMProvider):
+        for name, available, models in plugs:
+            if not available:
+                continue
+            if name != p.provider:
+                continue
+            if p.model not in models:
+                continue
+            return True
+        return False
 
-        async def call(
-            self,
-            node_config: dict,
-            prompt: str,
-            regex: Optional[str],
-            return_streaming_channel: Optional[asyncio.Queue],
-        ) -> str:
-            return ""
-
-        async def is_available(self):
-            return available
-
-        async def is_model_available(self, model: str) -> bool:
-            return model in available_models and self.is_available()
-
-    return PluginMock({})
+    return impl
 
 
 @pytest.mark.parametrize(
@@ -42,7 +35,7 @@ def plugin_mock(available: bool, available_models: List[str]) -> Plugin:
                     plugin_config={},
                 )
             ],
-            {"ollama": plugin_mock(True, ["llama3"])},
+            plugins_mock([("ollama", True, ["llama3"])]),
             None,
             None,
             [
@@ -67,16 +60,16 @@ def plugin_mock(available: bool, available_models: List[str]) -> Plugin:
                 ),
                 LLMProvider(
                     provider="openai",
-                    model="gpt-4",
+                    model="gpt-4-1106-preview",
                     config={},
-                    plugin="openai",
+                    plugin="openai-compatible",
                     plugin_config={},
                 ),
                 LLMProvider(
                     provider="openai",
                     model="gpt-4o",
                     config={},
-                    plugin="openai",
+                    plugin="openai-compatible",
                     plugin_config={},
                 ),
                 LLMProvider(
@@ -87,11 +80,13 @@ def plugin_mock(available: bool, available_models: List[str]) -> Plugin:
                     plugin_config={},
                 ),
             ],
-            {
-                "ollama": plugin_mock(True, ["llama3", "llama3.1"]),
-                "openai": plugin_mock(False, []),
-                "heuristai": plugin_mock(True, ["other"]),
-            },
+            plugins_mock(
+                [
+                    ("ollama", True, ["llama3", "llama3.1"]),
+                    ("openai", False, []),
+                    ("heuristai", True, ["other"]),
+                ]
+            ),
             None,
             None,
             [
@@ -116,16 +111,16 @@ def plugin_mock(available: bool, available_models: List[str]) -> Plugin:
                 ),
                 LLMProvider(
                     provider="openai",
-                    model="gpt-4",
+                    model="gpt-4-1106-preview",
                     config={},
-                    plugin="openai",
+                    plugin="openai-compatible",
                     plugin_config={},
                 ),
                 LLMProvider(
                     provider="openai",
                     model="gpt-4o",
                     config={},
-                    plugin="openai",
+                    plugin="openai-compatible",
                     plugin_config={},
                 ),
                 LLMProvider(
@@ -150,26 +145,28 @@ def plugin_mock(available: bool, available_models: List[str]) -> Plugin:
                     plugin_config={},
                 ),
             ],
-            {
-                "ollama": plugin_mock(True, ["llama3", "llama3.1"]),
-                "openai": plugin_mock(True, ["gpt-4", "gpt-4o"]),
-                "heuristai": plugin_mock(True, ["other"]),
-            },
+            plugins_mock(
+                [
+                    ("ollama", True, ["llama3", "llama3.1"]),
+                    ("openai", True, ["gpt-4-1106-preview", "gpt-4o"]),
+                    ("heuristai", True, ["other"]),
+                ]
+            ),
             ["openai"],
             None,
             [
                 LLMProvider(
                     provider="openai",
-                    model="gpt-4",
+                    model="gpt-4-1106-preview",
                     config={},
-                    plugin="openai",
+                    plugin="openai-compatible",
                     plugin_config={},
                 ),
                 LLMProvider(
                     provider="openai",
                     model="gpt-4o",
                     config={},
-                    plugin="openai",
+                    plugin="openai-compatible",
                     plugin_config={},
                 ),
             ],
@@ -179,16 +176,16 @@ def plugin_mock(available: bool, available_models: List[str]) -> Plugin:
             [
                 LLMProvider(
                     provider="openai",
-                    model="gpt-4",
+                    model="gpt-4-1106-preview",
                     config={},
-                    plugin="openai",
+                    plugin="openai-compatible",
                     plugin_config={},
                 ),
                 LLMProvider(
                     provider="openai",
                     model="gpt-4o",
                     config={},
-                    plugin="openai",
+                    plugin="openai-compatible",
                     plugin_config={},
                 ),
                 LLMProvider(
@@ -206,11 +203,13 @@ def plugin_mock(available: bool, available_models: List[str]) -> Plugin:
                     plugin_config={},
                 ),
             ],
-            {
-                "ollama": plugin_mock(False, ["llama3", "llama3.1"]),
-                "openai": plugin_mock(False, ["gpt-4", "gpt-4o"]),
-                "heuristai": plugin_mock(True, ["a", "b"]),
-            },
+            plugins_mock(
+                [
+                    ("ollama", False, ["llama3", "llama3.1"]),
+                    ("openai", False, ["gpt-4-1106-preview", "gpt-4o"]),
+                    ("heuristai", True, ["a", "b"]),
+                ]
+            ),
             ["heuristai"],
             ["a"],
             [
@@ -235,16 +234,16 @@ def plugin_mock(available: bool, available_models: List[str]) -> Plugin:
                 ),
                 LLMProvider(
                     provider="openai",
-                    model="gpt-4",
+                    model="gpt-4-1106-preview",
                     config={},
-                    plugin="openai",
+                    plugin="openai-compatible",
                     plugin_config={},
                 ),
                 LLMProvider(
                     provider="openai",
                     model="gpt-4o",
                     config={},
-                    plugin="openai",
+                    plugin="openai-compatible",
                     plugin_config={},
                 ),
                 LLMProvider(
@@ -262,11 +261,13 @@ def plugin_mock(available: bool, available_models: List[str]) -> Plugin:
                     plugin_config={},
                 ),
             ],
-            {
-                "ollama": plugin_mock(True, ["llama3", "llama3.1"]),
-                "openai": plugin_mock(True, ["gpt-4", "gpt-4o"]),
-                "heuristai": plugin_mock(True, ["a", "b"]),
-            },
+            plugins_mock(
+                [
+                    ("ollama", True, ["llama3", "llama3.1"]),
+                    ("openai", True, ["gpt-4-1106-preview", "gpt-4o"]),
+                    ("heuristai", True, ["a", "b"]),
+                ]
+            ),
             None,
             None,
             [
@@ -279,16 +280,16 @@ def plugin_mock(available: bool, available_models: List[str]) -> Plugin:
                 ),
                 LLMProvider(
                     provider="openai",
-                    model="gpt-4",
+                    model="gpt-4-1106-preview",
                     config={},
-                    plugin="openai",
+                    plugin="openai-compatible",
                     plugin_config={},
                 ),
                 LLMProvider(
                     provider="openai",
                     model="gpt-4o",
                     config={},
-                    plugin="openai",
+                    plugin="openai-compatible",
                     plugin_config={},
                 ),
                 LLMProvider(
@@ -318,12 +319,9 @@ async def test_random_validator_config(
     limit_models,
     expected,
 ):
-    async def get_llm_plugin(plugin, config):
-        return plugins[plugin]
-
     result = await random_validator_config(
         lambda: stored_providers,
-        get_llm_plugin,
+        plugins,
         limit_providers,
         limit_models,
         10,
@@ -364,11 +362,13 @@ async def test_random_validator_config(
                     plugin_config={},
                 )
             ],
-            {
-                "ollama": plugin_mock(False, ["llama3", "llama3.1"]),
-                "openai": plugin_mock(True, ["gpt-4", "gpt-4o"]),
-                "heuristai": plugin_mock(True, ["a", "b"]),
-            },
+            plugins_mock(
+                [
+                    ("ollama", False, ["llama3", "llama3.1"]),
+                    ("openai", True, ["gpt-4-1106-preview", "gpt-4o"]),
+                    ("heuristai", True, ["a", "b"]),
+                ]
+            ),
             ["ollama"],
             None,
             Exception,
@@ -387,7 +387,7 @@ async def test_random_validator_config_fail(
     with pytest.raises(exception):
         await random_validator_config(
             lambda: stored_providers,
-            lambda plugin, config: plugins[plugin],
+            plugins,
             limit_providers,
             limit_models,
             10,

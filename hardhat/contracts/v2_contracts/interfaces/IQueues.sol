@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "./ITransactions.sol";
+import { ITransactions } from "../transactions/interfaces/ITransactions.sol";
 
 interface IQueues {
 	enum QueueType {
@@ -62,4 +62,20 @@ interface IQueues {
 		address recipient,
 		bytes32 txId
 	) external;
+
+	function getAcceptedCount(
+		address recipient
+	) external view returns (uint256);
+	function getAcceptedTxId(
+		address recipient,
+		uint256 slot
+	) external view returns (bytes32);
+
+	function getFinalizedCount(
+		address recipient
+	) external view returns (uint256);
+	function getFinalizedTxId(
+		address recipient,
+		uint256 slot
+	) external view returns (bytes32);
 }

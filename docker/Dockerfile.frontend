@@ -1,10 +1,11 @@
-FROM node:22.13.1-alpine3.20 AS base
+FROM node:22.14.0-alpine3.20 AS base
 
 WORKDIR /app
 COPY ./frontend/package*.json .
 RUN --mount=type=cache,target=/root/.npm npm ci
 COPY ./frontend .
 COPY ./examples src/assets/examples
+
 COPY ./.env ./.env
 COPY ../backend/node/create_nodes/providers_schema.json /app/src/assets/schemas/providers_schema.json
 

@@ -10,14 +10,8 @@ from dataclasses import dataclass
 
 from pathlib import Path
 
-if typing.TYPE_CHECKING:
-    from .host_fns import *
-    from .result_codes import *
-else:
-    from pathlib import Path
-
-    exec(Path(__file__).parent.joinpath("host_fns.py").read_text())
-    exec(Path(__file__).parent.joinpath("result_codes.py").read_text())
+from .host_fns import *
+from .result_codes import *
 
 ACCOUNT_ADDR_SIZE = 20
 GENERIC_ADDR_SIZE = 32
@@ -38,8 +32,6 @@ class DefaultTransactionData(typing.TypedDict):
 
 class DeployDefaultTransactionData(DefaultTransactionData):
     salt_nonce: typing.NotRequired[str]
-    value: str
-    on: str
 
 
 class IHost(metaclass=abc.ABCMeta):
@@ -48,8 +40,7 @@ class IHost(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     async def get_calldata(self, /) -> bytes: ...
-    @abc.abstractmethod
-    async def get_code(self, addr: bytes, /) -> bytes: ...
+
     @abc.abstractmethod
     async def storage_read(
         self, mode: StorageType, account: bytes, slot: bytes, index: int, le: int, /
@@ -74,7 +65,7 @@ class IHost(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     async def get_leader_nondet_result(
         self, call_no: int, /
-    ) -> tuple[ResultCode, collections.abc.Buffer] | ResultCode: ...
+    ) -> tuple[ResultCode, collections.abc.Buffer] | Errors: ...
     @abc.abstractmethod
     async def post_nondet_result(
         self, call_no: int, type: ResultCode, data: collections.abc.Buffer, /
@@ -97,6 +88,32 @@ class IHost(metaclass=abc.ABCMeta):
     async def eth_call(self, account: bytes, calldata: bytes, /) -> bytes: ...
     @abc.abstractmethod
     async def get_balance(self, account: bytes, /) -> int: ...
+
+
+def save_code_callback[
+    T
+](
+    address: bytes, code: bytes, cb: typing.Callable[[bytes, bytes, int, bytes], T]
+) -> tuple[T, T]:
+    import hashlib
+
+    code_digest = hashlib.sha3_256(b"\x00" * 32)
+    CODE_OFFSET = 1
+    code_digest.update(CODE_OFFSET.to_bytes(4, byteorder="little"))
+    code_slot = code_digest.digest()
+    r1 = cb(
+        address, code_slot, 0, len(code).to_bytes(4, byteorder="little", signed=False)
+    )
+
+    r2 = cb(address, code_slot, 4, code)
+
+    return (r1, r2)
+
+
+async def save_code_to_host(host: IHost, address: bytes, code: bytes):
+    r1, r2 = save_code_callback(address, code, host.storage_write)
+    await r1
+    await r2
 
 
 async def host_loop(handler: IHost):
@@ -134,13 +151,9 @@ async def host_loop(handler: IHost):
         match meth_id:
             case Methods.GET_CALLDATA:
                 cd = await handler.get_calldata()
+                await send_all(bytes([Errors.OK]))
                 await send_int(len(cd))
                 await send_all(cd)
-            case Methods.GET_CODE:
-                addr = await read_exact(ACCOUNT_ADDR_SIZE)
-                code = await handler.get_code(addr)
-                await send_int(len(code))
-                await send_all(code)
             case Methods.STORAGE_READ:
                 mode = await read_exact(1)
                 mode = StorageType(mode[0])
@@ -150,6 +163,7 @@ async def host_loop(handler: IHost):
                 le = await recv_int()
                 res = await handler.storage_read(mode, account, slot, index, le)
                 assert len(res) == le
+                await send_all(bytes([Errors.OK]))
                 await send_all(res)
             case Methods.STORAGE_WRITE:
                 account = await read_exact(ACCOUNT_ADDR_SIZE)
@@ -158,6 +172,7 @@ async def host_loop(handler: IHost):
                 le = await recv_int()
                 got = await read_exact(le)
                 await handler.storage_write(account, slot, index, got)
+                await send_all(bytes([Errors.OK]))
             case Methods.CONSUME_RESULT:
                 await handler.consume_result(*await read_result())
                 await send_all(b"\x00")
@@ -165,9 +180,10 @@ async def host_loop(handler: IHost):
             case Methods.GET_LEADER_NONDET_RESULT:
                 call_no = await recv_int()
                 data = await handler.get_leader_nondet_result(call_no)
-                if isinstance(data, (ResultCode, int)):
+                if isinstance(data, Errors):
                     await send_all(bytes([data]))
                 else:
+                    await send_all(bytes([Errors.OK]))
                     code, as_bytes = data
                     await send_all(bytes([code]))
                     as_bytes = memoryview(as_bytes)
@@ -219,11 +235,13 @@ async def host_loop(handler: IHost):
                 calldata = await read_exact(calldata_len)
 
                 res = await handler.eth_call(account, calldata)
+                await send_all(bytes([Errors.OK]))
                 await send_int(len(res))
                 await send_all(res)
             case Methods.GET_BALANCE:
                 account = await read_exact(ACCOUNT_ADDR_SIZE)
                 res = await handler.get_balance(account)
+                await send_all(bytes([Errors.OK]))
                 await send_all(res.to_bytes(32, byteorder="little", signed=False))
             case x:
                 raise Exception(f"unknown method {x}")
