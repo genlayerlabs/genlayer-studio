@@ -717,6 +717,11 @@ def send_raw_transaction(
         else:
             transaction_hash = None
 
+        # Get the balance of the sender
+        from_balance = accounts_manager.get_account_balance(
+            genlayer_transaction.from_address
+        )
+
         # Insert transaction into the database
         try:
             transaction_hash = transactions_processor.insert_transaction(
@@ -730,7 +735,7 @@ def send_raw_transaction(
                 genlayer_transaction.max_rotations,
                 None,
                 transaction_hash,
-                accounts_manager,
+                from_balance,
             )
         except ValueError as e:
             raise JSONRPCError(

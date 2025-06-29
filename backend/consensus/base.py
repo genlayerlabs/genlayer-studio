@@ -2474,6 +2474,10 @@ def _emit_messages(
     insert_transactions_data: list,
     receipt: dict,
 ):
+    from_balance = context.accounts_manager.get_account_balance(
+        context.transaction.to_address
+    )
+
     for i, insert_transaction_data in enumerate(insert_transactions_data):
         transaction_hash = (
             receipt["tx_ids_hex"][i] if receipt and "tx_ids_hex" in receipt else None
@@ -2491,7 +2495,7 @@ def _emit_messages(
                 triggered_by_hash=context.transaction.hash,
                 transaction_hash=transaction_hash,
                 config_rotation_rounds=context.transaction.config_rotation_rounds,
-                accounts_manager=context.accounts_manager,
+                from_balance=from_balance,
             )
         except ValueError as e:
             context.msg_handler.send_message(

@@ -184,14 +184,12 @@ class TransactionsProcessor:
             str | None
         ) = None,  # If filled, the transaction must be present in the database (committed)
         transaction_hash: str | None = None,
-        accounts_manager: AccountsManager | None = None,
+        from_balance: int | None = None,
     ) -> str:
-        if accounts_manager:
-            sender_balance = accounts_manager.get_account_balance(from_address)
-
-            if sender_balance < value:
+        if from_balance:
+            if from_balance < value:
                 raise ValueError(
-                    f"Sender has insufficient balance. Is {sender_balance}, needs {value}"
+                    f"Sender has insufficient balance. Is {from_balance}, needs {value}"
                 )
 
         current_nonce = self.get_transaction_count(from_address)
