@@ -1,17 +1,18 @@
 <script setup lang="ts">
-import type { ContractMethod } from 'genlayer-js/types';
+import type { ContractMethod } from '@/types/contract';
 import { abi } from 'genlayer-js';
 import { TransactionHashVariant } from 'genlayer-js/types';
 import { ref } from 'vue';
 import { Collapse } from 'vue-collapsed';
 import { notify } from '@kyvg/vue3-notification';
 import { ChevronDownIcon } from '@heroicons/vue/16/solid';
-import { useEventTracking, useContractQueries } from '@/hooks';
+import { useEventTracking, useContractQueries, useInputMap } from '@/hooks';
 import { unfoldArgsData, type ArgData } from './ContractParams';
 import ContractParams from './ContractParams.vue';
 
 const { callWriteMethod, callReadMethod, contract } = useContractQueries();
 const { trackEvent } = useEventTracking();
+const inputMap = useInputMap();
 
 const props = defineProps<{
   name: string;
@@ -27,6 +28,11 @@ const responseMessageAccepted = ref('');
 const responseMessageFinalized = ref('');
 
 const calldataArguments = ref<ArgData>({ args: [], kwargs: {} });
+const value = ref<bigint>(BigInt(0));
+
+const handleValueChange = (newValue: bigint) => {
+  value.value = newValue < BigInt(0) ? BigInt(0) : newValue;
+};
 
 const formatResponseIfNeeded = (response: string): string => {
   // Check if the string looks like a malformed JSON (starts with { and ends with })
@@ -106,6 +112,7 @@ const handleCallWriteMethod = async () => {
         args: calldataArguments.value.args,
         kwargs: calldataArguments.value.kwargs,
       }),
+      value: value.value,
     });
 
     notify({
@@ -158,6 +165,20 @@ const handleCallWriteMethod = async () => {
             }
           "
         />
+
+        <div
+          v-if="methodType === 'write' && props.method.payable"
+          class="flex flex-col justify-start"
+        >
+          <component
+            :is="inputMap.getComponent('int')"
+            :model-value="value"
+            @update:model-value="handleValueChange"
+            name="value"
+            placeholder="0"
+            label="Value (wei)"
+          />
+        </div>
 
         <div>
           <Btn

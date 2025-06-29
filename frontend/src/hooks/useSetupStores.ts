@@ -68,7 +68,7 @@ export const useSetupStores = () => {
     consensusStore.fetchFinalityWindowTime();
 
     if (accountsStore.accounts.length < 1) {
-      accountsStore.generateNewAccount();
+      await accountsStore.generateNewAccount();
     }
 
     genlayer.initClient();

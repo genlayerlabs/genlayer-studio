@@ -210,6 +210,7 @@ export function useContractQueries() {
     args,
     leaderOnly,
     consensusMaxRotations,
+    value,
   }: {
     method: string;
     args: {
@@ -218,6 +219,7 @@ export function useContractQueries() {
     };
     leaderOnly: boolean;
     consensusMaxRotations?: number;
+    value: bigint;
   }) {
     try {
       if (!accountsStore.selectedAccount) {
@@ -228,7 +230,7 @@ export function useContractQueries() {
         address: address.value as Address,
         functionName: method,
         args: args.args,
-        value: BigInt(0),
+        value: value,
         leaderOnly,
         consensusMaxRotations,
       });

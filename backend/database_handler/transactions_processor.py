@@ -12,6 +12,7 @@ from sqlalchemy import or_, desc, and_, cast, JSON, String, type_coerce, text
 from sqlalchemy.orm.attributes import flag_modified
 from eth_utils import to_bytes, keccak, is_address
 from web3 import Web3
+from backend.database_handler.accounts_manager import AccountsManager
 
 from backend.node.types import Receipt, ExecutionResultStatus
 from .models import Transactions, TransactionStatus
@@ -183,7 +184,14 @@ class TransactionsProcessor:
             str | None
         ) = None,  # If filled, the transaction must be present in the database (committed)
         transaction_hash: str | None = None,
+        from_balance: int | None = None,
     ) -> str:
+        if from_balance:
+            if from_balance < value:
+                raise ValueError(
+                    f"Sender has insufficient balance. Is {from_balance}, needs {value}"
+                )
+
         current_nonce = self.get_transaction_count(from_address)
 
         # Follow up: https://github.com/MetaMask/metamask-extension/issues/29787
