@@ -509,10 +509,14 @@ async def _gen_call_with_validator(
             state_status=state_status,
         )
     elif type == "write":
+        value = (
+            params["value"] if "value" in params else 0
+        )  # waiting for gen_call node spec update if this is correct
         decoded_data = transactions_parser.decode_method_send_data(data)
         receipt = await node.run_contract(
             from_address=from_address,
             calldata=decoded_data.calldata,
+            transaction_value=value,
         )
     elif type == "deploy":
         decoded_data = transactions_parser.decode_deployment_data(data)
@@ -718,19 +722,31 @@ def send_raw_transaction(
         else:
             transaction_hash = None
 
-        # Insert transaction into the database
-        transaction_hash = transactions_processor.insert_transaction(
-            genlayer_transaction.from_address,
-            to_address,
-            transaction_data,
-            value,
-            genlayer_transaction.type.value,
-            nonce,
-            leader_only,
-            genlayer_transaction.max_rotations,
-            None,
-            transaction_hash,
+        # Get the balance of the sender
+        from_balance = accounts_manager.get_account_balance(
+            genlayer_transaction.from_address
         )
+
+        # Insert transaction into the database
+        try:
+            transaction_hash = transactions_processor.insert_transaction(
+                genlayer_transaction.from_address,
+                to_address,
+                transaction_data,
+                value,
+                genlayer_transaction.type.value,
+                nonce,
+                leader_only,
+                genlayer_transaction.max_rotations,
+                None,
+                transaction_hash,
+                from_balance,
+            )
+        except ValueError as e:
+            raise JSONRPCError(
+                message=str(e),
+                data={"sender_address": genlayer_transaction.from_address},
+            )
 
         return transaction_hash
 

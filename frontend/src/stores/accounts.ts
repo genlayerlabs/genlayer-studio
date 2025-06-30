@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 import type { Address } from '@/types';
 import { createAccount, generatePrivateKey } from 'genlayer-js';
-import { useShortAddress } from '@/hooks';
+import { useShortAddress, useGenlayer } from '@/hooks';
 import { notify } from '@kyvg/vue3-notification';
 
 export interface AccountInfo {
@@ -17,6 +17,7 @@ export const useAccountsStore = defineStore('accountsStore', () => {
   // Store all accounts (both local and MetaMask)
   const accounts = ref<AccountInfo[]>([]);
   const selectedAccount = ref<AccountInfo | null>(null);
+  const genlayer = useGenlayer();
 
   // Migrate from old storage to new storage
   const storedKeys = localStorage.getItem('accountsStore.privateKeys');
@@ -33,20 +34,22 @@ export const useAccountsStore = defineStore('accountsStore', () => {
   const storedAccounts = JSON.parse(
     localStorage.getItem('accountsStore.accounts') || '[]',
   );
-  if (storedAccounts.length === 0) {
-    generateNewAccount();
-    _initAccountsLocalStorage();
-  } else {
-    accounts.value = storedAccounts;
-  }
+  (async () => {
+    if (storedAccounts.length === 0) {
+      await generateNewAccount();
+      _initAccountsLocalStorage();
+    } else {
+      accounts.value = storedAccounts;
+    }
 
-  // Initialize selected account from localStorage
-  const storedSelectedAccount = JSON.parse(
-    localStorage.getItem('accountsStore.currentAccount') || 'null',
-  );
-  setCurrentAccount(
-    storedSelectedAccount ? storedSelectedAccount : accounts.value[0],
-  );
+    // Initialize selected account
+    const storedSelectedAccount = JSON.parse(
+      localStorage.getItem('accountsStore.currentAccount') ?? 'null',
+    );
+    setCurrentAccount(
+      storedSelectedAccount ? storedSelectedAccount : accounts.value[0],
+    );
+  })();
 
   function _initAccountsLocalStorage() {
     localStorage.setItem(
@@ -125,7 +128,7 @@ export const useAccountsStore = defineStore('accountsStore', () => {
     });
   }
 
-  function generateNewAccount(): AccountInfo {
+  async function generateNewAccount(): Promise<AccountInfo> {
     const privateKey = generatePrivateKey();
     const newAccountAddress = createAccount(privateKey).address;
     const newAccount: AccountInfo = {
@@ -133,6 +136,11 @@ export const useAccountsStore = defineStore('accountsStore', () => {
       address: newAccountAddress,
       privateKey,
     };
+
+    await genlayer.client.value?.request({
+      method: 'sim_fundAccount',
+      params: [newAccount.address, 10000],
+    });
 
     accounts.value.push(newAccount);
     setCurrentAccount(newAccount);

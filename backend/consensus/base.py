@@ -1197,6 +1197,15 @@ class ConsensusAlgorithm:
                     break
                 elif next_state == "validator_appeal_success":
                     self.rollback_transactions(context)
+
+                    # Restore the balances
+                    _value_transfer(
+                        context.transaction.to_address,
+                        context.transaction.from_address,
+                        context.transaction.value,
+                        context.accounts_manager,
+                    )
+
                     ConsensusAlgorithm.dispatch_transaction_status_update(
                         context.transactions_processor,
                         context.transaction.hash,
@@ -1258,6 +1267,14 @@ class ConsensusAlgorithm:
             # Reset the contract snapshot for the transaction
             context.transactions_processor.set_transaction_contract_snapshot(
                 future_transaction["hash"], None
+            )
+
+            # Restore the balances
+            _value_transfer(
+                future_transaction["to_address"],
+                future_transaction["from_address"],
+                future_transaction["value"],
+                context.accounts_manager,
             )
 
         # Start the queue loop again
@@ -2206,6 +2223,14 @@ class AcceptedState(TransactionState):
 
                 _emit_messages(context, insert_transactions_data, rollup_receipt)
 
+                if context.transaction.value:
+                    _value_transfer(
+                        context.transaction.from_address,
+                        context.transaction.to_address,
+                        context.transaction.value,
+                        context.accounts_manager,
+                    )
+
         else:
             context.transaction.appealed = False
 
@@ -2455,19 +2480,62 @@ def _emit_messages(
     insert_transactions_data: list,
     receipt: dict,
 ):
+    from_balance = context.accounts_manager.get_account_balance(
+        context.transaction.to_address
+    )
+
     for i, insert_transaction_data in enumerate(insert_transactions_data):
         transaction_hash = (
             receipt["tx_ids_hex"][i] if receipt and "tx_ids_hex" in receipt else None
         )
-        context.transactions_processor.insert_transaction(
-            context.transaction.to_address,  # new calls are done by the contract
-            insert_transaction_data[0],
-            insert_transaction_data[1],
-            value=0,  # we only handle EOA transfers at the moment, so no value gets transferred
-            type=insert_transaction_data[2],
-            nonce=insert_transaction_data[3],
-            leader_only=context.transaction.leader_only,  # Cascade
-            triggered_by_hash=context.transaction.hash,
-            transaction_hash=transaction_hash,
-            config_rotation_rounds=context.transaction.config_rotation_rounds,
+
+        try:
+            context.transactions_processor.insert_transaction(
+                from_address=context.transaction.to_address,  # new calls are done by the contract
+                to_address=insert_transaction_data[0],
+                data=insert_transaction_data[1],
+                value=0,  # we only handle EOA transfers at the moment, so no value gets transferred
+                type=insert_transaction_data[2],
+                nonce=insert_transaction_data[3],
+                leader_only=context.transaction.leader_only,  # Cascade
+                triggered_by_hash=context.transaction.hash,
+                transaction_hash=transaction_hash,
+                config_rotation_rounds=context.transaction.config_rotation_rounds,
+                from_balance=from_balance,
+            )
+        except ValueError as e:
+            context.msg_handler.send_message(
+                LogEvent(
+                    "consensus_event",
+                    EventType.ERROR,
+                    EventScope.CONSENSUS,
+                    str(e),
+                    {
+                        "transaction_hash": context.transaction.hash,
+                        "sender_address": context.transaction.from_address,
+                    },
+                    transaction_hash=context.transaction.hash,
+                )
+            )
+
+
+def _value_transfer(
+    from_address: str,
+    to_address: str,
+    value: int | None,
+    accounts_manager: AccountsManager,
+):
+    if value:
+        # Update the balance of the sender account
+        from_balance = accounts_manager.get_account_balance(from_address)
+        accounts_manager.update_account_balance(
+            from_address,
+            from_balance - value,
+        )
+
+        # Update the balance of the recipient account
+        to_balance = accounts_manager.get_account_balance(to_address)
+        accounts_manager.update_account_balance(
+            to_address,
+            to_balance + value,
         )
