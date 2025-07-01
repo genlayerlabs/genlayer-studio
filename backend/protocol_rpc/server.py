@@ -180,6 +180,14 @@ def restore_stuck_transactions():
                 restore_transaction["hash"], []
             )
 
+    def get_previous_contract_state(transaction: dict) -> dict:
+        leader_receipt = transaction["consensus_data"]["leader_receipt"]
+        if isinstance(leader_receipt, list):
+            previous_contract_state = leader_receipt[0]["contract_state"]
+        else:
+            previous_contract_state = leader_receipt["contract_state"]
+        return previous_contract_state
+
     try:
         # Find oldest stuck transaction per contract
         stuck_transactions = (
@@ -193,42 +201,49 @@ def restore_stuck_transactions():
         # Restore the contract state
         try:
             contract_processor = contract_processor_factory(request_session)
-            tx1_finalized = transactions_processor.get_previous_transaction(
-                tx2["hash"], TransactionStatus.FINALIZED
-            )
-            if tx1_finalized:
-                previous_contact_state = tx1_finalized["consensus_data"][
-                    "leader_receipt"
-                ][0]["contract_state"]
-                contract_processor.update_contract_state(
-                    contract_address=tx1_finalized["to_address"],
-                    accepted_state=previous_contact_state,
-                    finalized_state=previous_contact_state,
-                )
-            else:
-                tx1_accepted = transactions_processor.get_previous_transaction(
-                    tx2["hash"], TransactionStatus.ACCEPTED
-                )
-                if tx1_accepted:
-                    previous_contact_state = tx1_accepted["consensus_data"][
-                        "leader_receipt"
-                    ][0]["contract_state"]
-                    contract_processor.update_contract_state(
-                        contract_address=tx1_accepted["to_address"],
-                        accepted_state=previous_contact_state,
-                        finalized_state={},
-                    )
-                else:
-                    # Deploy contract transaction
-                    if tx2["type"] == TransactionType.DEPLOY_CONTRACT.value:
-                        contract_reset = contract_processor.reset_contract(
-                            contract_address=tx2["to_address"]
-                        )
 
-                        if not contract_reset:
-                            accounts_manager.create_new_account_with_address(
-                                tx2["to_address"]
+            if tx2["type"] == TransactionType.DEPLOY_CONTRACT.value:
+                contract_reset = contract_processor.reset_contract(
+                    contract_address=tx2["to_address"]
+                )
+
+                if not contract_reset:
+                    accounts_manager.create_new_account_with_address(tx2["to_address"])
+            else:
+                tx1_finalized = transactions_processor.get_previous_transaction(
+                    tx2["hash"], TransactionStatus.FINALIZED, True
+                )
+                tx1_accepted = transactions_processor.get_previous_transaction(
+                    tx2["hash"], TransactionStatus.ACCEPTED, True
+                )
+
+                if tx1_finalized:
+                    previous_finalized_state = get_previous_contract_state(
+                        tx1_finalized
+                    )
+                    if tx1_accepted:
+                        if tx1_accepted["created_at"] > tx1_finalized["created_at"]:
+                            previous_accepted_state = get_previous_contract_state(
+                                tx1_accepted
                             )
+                        else:
+                            previous_accepted_state = previous_finalized_state
+                    else:
+                        previous_accepted_state = previous_finalized_state
+                else:
+                    previous_finalized_state = {}
+                    if tx1_accepted:
+                        previous_accepted_state = get_previous_contract_state(
+                            tx1_accepted
+                        )
+                    else:
+                        previous_accepted_state = {}
+
+                contract_processor.update_contract_state(
+                    contract_address=tx2["to_address"],
+                    accepted_state=previous_accepted_state,
+                    finalized_state=previous_finalized_state,
+                )
 
         except Exception as e:
             print(
@@ -254,36 +269,48 @@ def restore_stuck_transactions():
 
                 for restore_transaction in restore_transactions:
                     try:
-                        ConsensusAlgorithm.dispatch_transaction_status_update(
-                            transactions_processor,
-                            restore_transaction["hash"],
-                            TransactionStatus.PENDING,
-                            msg_handler,
-                        )
-                        transactions_processor.set_transaction_contract_snapshot(
-                            restore_transaction["hash"], None
-                        )
-                        transactions_processor.set_transaction_result(
-                            restore_transaction["hash"], None
-                        )
-                        transactions_processor.set_transaction_appeal(
-                            restore_transaction["hash"], False
-                        )
-                        transactions_processor.set_transaction_appeal_failed(
-                            restore_transaction["hash"], 0
-                        )
-                        transactions_processor.set_transaction_appeal_undetermined(
-                            restore_transaction["hash"], False
-                        )
-                        transactions_processor.reset_consensus_history(
-                            restore_transaction["hash"]
-                        )
-                        transactions_processor.set_transaction_timestamp_appeal(
-                            restore_transaction["hash"], None
-                        )
-                        transactions_processor.reset_transaction_appeal_processing_time(
-                            restore_transaction["hash"]
-                        )
+                        if (
+                            accounts_manager.get_account(
+                                restore_transaction["to_address"]
+                            )
+                            is None
+                        ):
+                            transaction_to_canceled(
+                                transactions_processor,
+                                msg_handler,
+                                restore_transaction["hash"],
+                            )
+                        else:
+                            ConsensusAlgorithm.dispatch_transaction_status_update(
+                                transactions_processor,
+                                restore_transaction["hash"],
+                                TransactionStatus.PENDING,
+                                msg_handler,
+                            )
+                            transactions_processor.set_transaction_contract_snapshot(
+                                restore_transaction["hash"], None
+                            )
+                            transactions_processor.set_transaction_result(
+                                restore_transaction["hash"], None
+                            )
+                            transactions_processor.set_transaction_appeal(
+                                restore_transaction["hash"], False
+                            )
+                            transactions_processor.set_transaction_appeal_failed(
+                                restore_transaction["hash"], 0
+                            )
+                            transactions_processor.set_transaction_appeal_undetermined(
+                                restore_transaction["hash"], False
+                            )
+                            transactions_processor.reset_consensus_history(
+                                restore_transaction["hash"]
+                            )
+                            transactions_processor.set_transaction_timestamp_appeal(
+                                restore_transaction["hash"], None
+                            )
+                            transactions_processor.reset_transaction_appeal_processing_time(
+                                restore_transaction["hash"]
+                            )
                     except Exception as e:
                         print(
                             f"ERROR: Failed to reset transaction {restore_transaction['hash']}: {str(e)}"

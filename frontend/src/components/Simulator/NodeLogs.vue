@@ -23,7 +23,7 @@ const colorMap: ComputedRef<ColorMapType> = computed(() => ({
   info: 'text-blue-400',
   error: 'text-red-400',
   warning: 'text-yellow-500',
-  success: 'text-green-400',
+  success: 'text-green-500',
 }));
 
 const wasAtBottom = ref(false);
