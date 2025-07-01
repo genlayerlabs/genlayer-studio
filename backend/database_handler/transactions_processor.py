@@ -8,12 +8,12 @@ import rlp
 import re
 
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, desc
+from sqlalchemy import or_, desc, and_, cast, JSON, String, type_coerce, text
 from sqlalchemy.orm.attributes import flag_modified
 from eth_utils import to_bytes, keccak, is_address
 from web3 import Web3
 
-from backend.node.types import Receipt
+from backend.node.types import Receipt, ExecutionResultStatus
 from .models import Transactions, TransactionStatus
 from backend.consensus.types import ConsensusRound
 
@@ -552,7 +552,10 @@ class TransactionsProcessor:
         ]
 
     def get_previous_transaction(
-        self, transaction_hash: str, status: TransactionStatus | None = None
+        self,
+        transaction_hash: str,
+        status: TransactionStatus | None = None,
+        filter_success: bool = False,
     ) -> dict | None:
         transaction = (
             self.session.query(Transactions).filter_by(hash=transaction_hash).one()
@@ -564,6 +567,28 @@ class TransactionsProcessor:
         ]
         if status is not None:
             filters.append(Transactions.status == status)
+
+        if filter_success:
+            consensus_data = type_coerce(Transactions.consensus_data, JSON)
+
+            # Handle both formats of leader_receipt (dict and array)
+            filters.append(
+                and_(
+                    consensus_data.isnot(None),
+                    consensus_data["leader_receipt"].isnot(None),
+                    text(
+                        """
+                        (
+                            (jsonb_typeof(consensus_data::jsonb->'leader_receipt') = 'object'
+                             AND consensus_data::jsonb->'leader_receipt'->>'execution_result' = :status)
+                            OR
+                            (jsonb_typeof(consensus_data::jsonb->'leader_receipt') = 'array'
+                             AND consensus_data::jsonb->'leader_receipt'->0->>'execution_result' = :status)
+                        )
+                    """
+                    ).bindparams(status=ExecutionResultStatus.SUCCESS.value),
+                )
+            )
 
         closest_transaction = (
             self.session.query(Transactions)
