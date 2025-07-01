@@ -31,7 +31,7 @@ jobs:
     secrets:
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
-  webrequest:
+  webdriver:
     uses: ./.github/workflows/docker-build-and-push-image.yml
     with:
       docker_build_context: .
