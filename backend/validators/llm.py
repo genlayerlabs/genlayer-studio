@@ -111,34 +111,44 @@ class LLMModule:
         await self.restart()
 
     async def provider_available(
-        self, model: str, url: str, plugin: str, key_env: str
+        self, model: str, url: str | None, plugin: str, key_env: str
     ) -> bool:
         if plugin == "custom":
             return True
 
+        if url is None:
+            return False
+
         exe_path = Path(os.environ["GENVM_BIN"]).joinpath("genvm-modules")
 
-        proc = await asyncio.subprocess.create_subprocess_exec(
-            exe_path,
-            "llm-check",
-            "--provider",
-            plugin,
-            "--host",
-            url,
-            "--model",
-            model,
-            "--key",
-            "${ENV[" + key_env + "]}",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
+        try:
+            proc = await asyncio.subprocess.create_subprocess_exec(
+                exe_path,
+                "llm-check",
+                "--provider",
+                plugin,
+                "--host",
+                url,
+                "--model",
+                model,
+                "--key",
+                "${ENV[" + key_env + "]}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
 
-        stdout, _ = await proc.communicate()
-        return_code = await proc.wait()
+            stdout, _ = await proc.communicate()
+            return_code = await proc.wait()
 
-        stdout = stdout.decode("utf-8")
+            stdout = stdout.decode("utf-8")
 
-        if return_code != 0:
-            print(f"provider not available model={model} stdout={stdout!r}")
+            if return_code != 0:
+                print(f"provider not available model={model} stdout={stdout!r}")
 
-        return return_code == 0
+            return return_code == 0
+
+        except Exception as e:
+            print(
+                f"ERROR: Wrong input provider_available {model=}, {url=}, {plugin=}, {key_env=}, {e=}"
+            )
+            return False
