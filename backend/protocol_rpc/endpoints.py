@@ -429,14 +429,15 @@ async def get_contract_schema_for_code(
     return json.loads(schema)
 
 
-async def gen_call(
+async def _execute_call_with_snapshot(
     session: Session,
     accounts_manager: AccountsManager,
     msg_handler: MessageHandler,
     transactions_parser: TransactionParser,
     validators_manager: validators.Manager,
     params: dict,
-) -> str:
+):
+    """Common logic for gen_call and sim_call"""
     sim_config = params.get("sim_config", {})
     provider = sim_config.get("provider")
     model = sim_config.get("model")
@@ -481,7 +482,7 @@ async def gen_call(
 
     async with snapshot_func(*args) as snapshot:
         if len(snapshot.nodes) == 0:
-            raise JSONRPCError("No validators exist to execute the gen_call")
+            raise JSONRPCError("No validators exist to execute the call")
 
         receipt = await _gen_call_with_validator(
             session,
@@ -491,7 +492,26 @@ async def gen_call(
             snapshot,
             params,
         )
-        return eth_utils.hexadecimal.encode_hex(receipt.result[1:])[2:]
+        return receipt
+
+
+async def gen_call(
+    session: Session,
+    accounts_manager: AccountsManager,
+    msg_handler: MessageHandler,
+    transactions_parser: TransactionParser,
+    validators_manager: validators.Manager,
+    params: dict,
+) -> str:
+    receipt = await _execute_call_with_snapshot(
+        session,
+        accounts_manager,
+        msg_handler,
+        transactions_parser,
+        validators_manager,
+        params,
+    )
+    return eth_utils.hexadecimal.encode_hex(receipt.result[1:])[2:]
 
 
 async def sim_call(
@@ -502,60 +522,15 @@ async def sim_call(
     validators_manager: validators.Manager,
     params: dict,
 ) -> dict:
-    sim_config = params.get("sim_config", {})
-    provider = sim_config.get("provider")
-    model = sim_config.get("model")
-
-    if provider is not None and model is not None:
-        config = sim_config.get("config")
-        plugin = sim_config.get("plugin")
-        plugin_config = sim_config.get("plugin_config")
-
-        try:
-            if config is None or plugin is None or plugin_config is None:
-                llm_provider = get_default_provider_for(provider, model)
-            else:
-                llm_provider = LLMProvider(
-                    provider=provider,
-                    model=model,
-                    config=config,
-                    plugin=plugin,
-                    plugin_config=plugin_config,
-                )
-                validate_provider(llm_provider)
-        except ValueError as e:
-            raise JSONRPCError(code=-32602, message=str(e), data={}) from e
-        account = accounts_manager.create_new_account()
-        validator = Validator(
-            address=account.address,
-            private_key=account.key,
-            stake=0,
-            llmprovider=llm_provider,
-        )
-        snapshot_func = validators_manager.temporal_snapshot
-        args = [[validator]]
-    elif provider is None and model is None:
-        snapshot_func = validators_manager.snapshot
-        args = []
-    else:
-        raise JSONRPCError(
-            code=-32602,
-            message="Both 'provider' and 'model' must be supplied together.",
-            data={},
-        )
-
-    async with snapshot_func(*args) as snapshot:
-        if len(snapshot.nodes) == 0:
-            raise JSONRPCError("No validators exist to execute the sim_call")
-        receipt = await _gen_call_with_validator(
-            session,
-            accounts_manager,
-            msg_handler,
-            transactions_parser,
-            snapshot,
-            params,
-        )
-        return receipt.to_dict()
+    receipt = await _execute_call_with_snapshot(
+        session,
+        accounts_manager,
+        msg_handler,
+        transactions_parser,
+        validators_manager,
+        params,
+    )
+    return receipt.to_dict()
 
 
 async def _gen_call_with_validator(
