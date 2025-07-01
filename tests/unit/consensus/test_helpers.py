@@ -218,7 +218,10 @@ class TransactionsProcessorMock:
         transaction["contract_snapshot"] = contract_snapshot
 
     def get_previous_transaction(
-        self, transaction_hash: str, status: TransactionStatus | None = None
+        self,
+        transaction_hash: str,
+        status: TransactionStatus | None = None,
+        filter_success: bool = False,
     ) -> None:
         return None
 
