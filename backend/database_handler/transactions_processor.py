@@ -8,12 +8,12 @@ import rlp
 import re
 
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, desc
+from sqlalchemy import or_, desc, and_, cast, JSON, String, type_coerce, text
 from sqlalchemy.orm.attributes import flag_modified
 from eth_utils import to_bytes, keccak, is_address
 from web3 import Web3
 
-from backend.node.types import Receipt
+from backend.node.types import Receipt, ExecutionResultStatus
 from .models import Transactions, TransactionStatus
 
 
@@ -81,6 +81,8 @@ class TransactionsProcessor:
             "appeal_processing_time": transaction_data.appeal_processing_time,
             "contract_snapshot": transaction_data.contract_snapshot,
             "config_rotation_rounds": transaction_data.config_rotation_rounds,
+            "appeal_leader_timeout": transaction_data.appeal_leader_timeout,
+            "leader_timeout_validators": transaction_data.leader_timeout_validators,
         }
 
     @staticmethod
@@ -229,6 +231,8 @@ class TransactionsProcessor:
             appeal_processing_time=0,
             contract_snapshot=None,
             config_rotation_rounds=config_rotation_rounds,
+            appeal_leader_timeout=False,
+            leader_timeout_validators=None,
         )
 
         self.session.add(new_transaction)
@@ -331,6 +335,7 @@ class TransactionsProcessor:
         elif transaction.status in (
             TransactionStatus.ACCEPTED,
             TransactionStatus.UNDETERMINED,
+            TransactionStatus.LEADER_TIMEOUT,
         ):
             transaction.appealed = appeal
             self.set_transaction_timestamp_appeal(transaction, int(time.time()))
@@ -543,7 +548,10 @@ class TransactionsProcessor:
         ]
 
     def get_previous_transaction(
-        self, transaction_hash: str, status: TransactionStatus | None = None
+        self,
+        transaction_hash: str,
+        status: TransactionStatus | None = None,
+        filter_success: bool = False,
     ) -> dict | None:
         transaction = (
             self.session.query(Transactions).filter_by(hash=transaction_hash).one()
@@ -555,6 +563,28 @@ class TransactionsProcessor:
         ]
         if status is not None:
             filters.append(Transactions.status == status)
+
+        if filter_success:
+            consensus_data = type_coerce(Transactions.consensus_data, JSON)
+
+            # Handle both formats of leader_receipt (dict and array)
+            filters.append(
+                and_(
+                    consensus_data.isnot(None),
+                    consensus_data["leader_receipt"].isnot(None),
+                    text(
+                        """
+                        (
+                            (jsonb_typeof(consensus_data::jsonb->'leader_receipt') = 'object'
+                             AND consensus_data::jsonb->'leader_receipt'->>'execution_result' = :status)
+                            OR
+                            (jsonb_typeof(consensus_data::jsonb->'leader_receipt') = 'array'
+                             AND consensus_data::jsonb->'leader_receipt'->0->>'execution_result' = :status)
+                        )
+                    """
+                    ).bindparams(status=ExecutionResultStatus.SUCCESS.value),
+                )
+            )
 
         closest_transaction = (
             self.session.query(Transactions)
@@ -568,3 +598,20 @@ class TransactionsProcessor:
             if closest_transaction
             else None
         )
+
+    def set_transaction_appeal_leader_timeout(
+        self, transaction_hash: str, appeal_leader_timeout: bool
+    ) -> bool:
+        transaction = (
+            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        )
+        transaction.appeal_leader_timeout = appeal_leader_timeout
+        self.session.commit()
+        return appeal_leader_timeout
+
+    def set_leader_timeout_validators(self, transaction_hash: str, validators: list):
+        transaction = (
+            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        )
+        transaction.leader_timeout_validators = validators
+        self.session.commit()
