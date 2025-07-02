@@ -428,6 +428,72 @@ async def get_contract_schema_for_code(
     return json.loads(schema)
 
 
+async def _execute_call_with_snapshot(
+    session: Session,
+    accounts_manager: AccountsManager,
+    msg_handler: MessageHandler,
+    transactions_parser: TransactionParser,
+    validators_manager: validators.Manager,
+    params: dict,
+):
+    """Common logic for gen_call and sim_call"""
+    sim_config = params.get("sim_config", {})
+    provider = sim_config.get("provider")
+    model = sim_config.get("model")
+
+    if provider is not None and model is not None:
+        config = sim_config.get("config")
+        plugin = sim_config.get("plugin")
+        plugin_config = sim_config.get("plugin_config")
+
+        try:
+            if config is None or plugin is None or plugin_config is None:
+                llm_provider = get_default_provider_for(provider, model)
+            else:
+                llm_provider = LLMProvider(
+                    provider=provider,
+                    model=model,
+                    config=config,
+                    plugin=plugin,
+                    plugin_config=plugin_config,
+                )
+                validate_provider(llm_provider)
+        except ValueError as e:
+            raise JSONRPCError(code=-32602, message=str(e), data={}) from e
+        account = accounts_manager.create_new_account()
+        validator = Validator(
+            address=account.address,
+            private_key=account.key,
+            stake=0,
+            llmprovider=llm_provider,
+        )
+        snapshot_func = validators_manager.temporal_snapshot
+        args = [[validator]]
+    elif provider is None and model is None:
+        snapshot_func = validators_manager.snapshot
+        args = []
+    else:
+        raise JSONRPCError(
+            code=-32602,
+            message="Both 'provider' and 'model' must be supplied together.",
+            data={},
+        )
+
+    async with snapshot_func(*args) as snapshot:
+        if len(snapshot.nodes) == 0:
+            raise JSONRPCError("No validators exist to execute the call")
+
+        receipt = await _gen_call_with_validator(
+            session,
+            accounts_manager,
+            msg_handler,
+            transactions_parser,
+            snapshot,
+            params,
+        )
+        return receipt
+
+
 async def gen_call(
     session: Session,
     accounts_manager: AccountsManager,
@@ -436,17 +502,34 @@ async def gen_call(
     validators_manager: validators.Manager,
     params: dict,
 ) -> str:
-    async with validators_manager.snapshot() as snapshot:
-        if len(snapshot.nodes) == 0:
-            raise JSONRPCError("No validators exist to execute the gen_call")
-        return await _gen_call_with_validator(
-            session,
-            accounts_manager,
-            msg_handler,
-            transactions_parser,
-            snapshot,
-            params,
-        )
+    receipt = await _execute_call_with_snapshot(
+        session,
+        accounts_manager,
+        msg_handler,
+        transactions_parser,
+        validators_manager,
+        params,
+    )
+    return eth_utils.hexadecimal.encode_hex(receipt.result[1:])[2:]
+
+
+async def sim_call(
+    session: Session,
+    accounts_manager: AccountsManager,
+    msg_handler: MessageHandler,
+    transactions_parser: TransactionParser,
+    validators_manager: validators.Manager,
+    params: dict,
+) -> dict:
+    receipt = await _execute_call_with_snapshot(
+        session,
+        accounts_manager,
+        msg_handler,
+        transactions_parser,
+        validators_manager,
+        params,
+    )
+    return receipt.to_dict()
 
 
 async def _gen_call_with_validator(
@@ -460,19 +543,14 @@ async def _gen_call_with_validator(
     type = params["type"]
     data = params["data"]
     to_address = params["to"]
-    from_address = params["from"] if "from" in params else None
+    from_address = params["from"]
     transaction_hash_variant = (
         params["transaction_hash_variant"]
         if "transaction_hash_variant" in params
         else None
     )
 
-    if from_address is None:
-        return base64.b64encode(b"\x00' * 31 + b'\x01").decode(
-            "ascii"
-        )  # Return '1' as a uint256
-
-    if from_address and not accounts_manager.is_valid_address(from_address):
+    if not accounts_manager.is_valid_address(from_address):
         raise InvalidAddressError(from_address)
 
     if not accounts_manager.is_valid_address(to_address):
@@ -503,7 +581,7 @@ async def _gen_call_with_validator(
     if type == "read":
         decoded_data = transactions_parser.decode_method_call_data(data)
         receipt = await node.get_contract_data(
-            from_address="0x" + "00" * 20,
+            from_address=from_address,
             calldata=decoded_data.calldata,
             state_status=state_status,
         )
@@ -529,7 +607,7 @@ async def _gen_call_with_validator(
             message="running contract failed", data={"receipt": receipt.to_dict()}
         )
 
-    return eth_utils.hexadecimal.encode_hex(receipt.result[1:])[2:]
+    return receipt
 
 
 ####### ETH ENDPOINTS #######
@@ -1081,6 +1159,17 @@ def register_all_rpc_endpoints(
             validators_manager,
         ),
         method_name="gen_call",
+    )
+    register_rpc_endpoint(
+        partial(
+            sim_call,
+            request_session,
+            accounts_manager,
+            msg_handler,
+            transactions_parser,
+            validators_manager,
+        ),
+        method_name="sim_call",
     )
     register_rpc_endpoint(
         partial(get_balance, accounts_manager),
