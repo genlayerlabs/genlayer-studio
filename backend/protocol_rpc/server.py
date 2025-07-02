@@ -173,6 +173,12 @@ def restore_stuck_transactions():
             print(
                 f"ERROR: Failed to put transaction to canceled status {transaction_hash}: {str(e)}"
             )
+            transactions_processor.set_transaction_appeal_leader_timeout(
+                restore_transaction["hash"], False
+            )
+            transactions_processor.set_leader_timeout_validators(
+                restore_transaction["hash"], []
+            )
 
     def get_previous_contract_state(transaction: dict) -> dict:
         leader_receipt = transaction["consensus_data"]["leader_receipt"]
