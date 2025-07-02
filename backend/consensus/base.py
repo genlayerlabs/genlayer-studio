@@ -1864,8 +1864,7 @@ class ProposingState(TransactionState):
 
         # Check if the leader timed out
         if (
-            context.consensus_data.leader_receipt[0].result[0]
-            == ResultCode.CONTRACT_ERROR
+            context.consensus_data.leader_receipt[0].result[0] == ResultCode.VM_ERROR
         ) and (context.consensus_data.leader_receipt[0].result[1:] == b"timeout"):
             return LeaderTimeoutState()
 
