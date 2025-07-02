@@ -154,6 +154,12 @@ contract ConsensusMain is
 		emit TransactionReceiptProposed(txId);
 	}
 
+	function emitTransactionLeaderTimeout(
+		bytes32 txId
+	) external {
+		emit TransactionLeaderTimeout(txId);
+	}
+
 	function emitVoteCommitted(
 		bytes32 txId,
 		address validator,
