@@ -133,11 +133,13 @@ async def get_providers_and_models(
     providers = await llm_provider_registry.get_all_dict()
     sem = asyncio.Semaphore(8)
 
-    async def check_with_semaphore(provider):
+    async def check_with_semaphore(validators_manager, provider):
         async with sem:
             return await check_provider_is_available(validators_manager, provider)
 
-    availability = await asyncio.gather(*(check_with_semaphore(p) for p in providers))
+    availability = await asyncio.gather(
+        *(check_with_semaphore(validators_manager, p) for p in providers)
+    )
     for provider, is_available in zip(providers, availability):
         provider["is_model_available"] = is_available
     return providers
@@ -703,12 +705,15 @@ def send_raw_transaction(
             to_address = new_contract_address
         elif genlayer_transaction.type == TransactionType.RUN_CONTRACT:
             # Contract Call
+            to_address = genlayer_transaction.to_address
             if not accounts_manager.is_valid_address(to_address):
                 raise InvalidAddressError(
                     to_address, f"Invalid address to_address: {to_address}"
                 )
 
-            to_address = genlayer_transaction.to_address
+            if accounts_manager.get_account(to_address) is None:
+                raise JSONRPCError(f"Contract address does not exist: {to_address}")
+
             transaction_data = {"calldata": genlayer_transaction.data.calldata}
 
         # Obtain transaction hash from new transaction event

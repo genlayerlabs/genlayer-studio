@@ -112,6 +112,8 @@ class Transaction:
     appeal_processing_time: int = 0
     contract_snapshot: ContractSnapshot | None = None
     config_rotation_rounds: int | None = int(os.getenv("VITE_MAX_ROTATIONS", 3))
+    appeal_leader_timeout: bool = False
+    leader_timeout_validators: list | None = None
 
     def to_dict(self):
         return {
@@ -144,6 +146,8 @@ class Transaction:
                 self.contract_snapshot.to_dict() if self.contract_snapshot else None
             ),
             "config_rotation_rounds": self.config_rotation_rounds,
+            "appeal_leader_timeout": self.appeal_leader_timeout,
+            "leader_timeout_validators": self.leader_timeout_validators,
         }
 
     @classmethod
@@ -178,4 +182,6 @@ class Transaction:
                 input.get("contract_snapshot")
             ),
             config_rotation_rounds=input.get("config_rotation_rounds"),
+            appeal_leader_timeout=input.get("appeal_leader_timeout", False),
+            leader_timeout_validators=input.get("leader_timeout_validators"),
         )

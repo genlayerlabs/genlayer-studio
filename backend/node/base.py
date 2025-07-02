@@ -340,19 +340,6 @@ class Node:
             host_data=host_data,
         )
 
-        if res is None:
-            res = genvmbase.ExecutionResult(
-                eq_outputs={},
-                pending_transactions=[],
-                stdout="",
-                stderr="",
-                genvm_log=[],
-                result=genvmbase.ExecutionError(
-                    message="Execution timed out",
-                    kind=genvmbase.ResultCode.CONTRACT_ERROR,
-                ),
-            )
-
         await self._execution_finished(res, transaction_hash)
 
         result_exec_code = (
