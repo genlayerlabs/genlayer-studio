@@ -178,9 +178,7 @@ class TransactionsProcessorMock:
         validator_results: list[Receipt],
         extra_status_change: TransactionStatus | None = None,
     ):
-        transaction_old = self.get_transaction_by_hash(transaction_hash)
-
-        transaction = deepcopy(transaction_old)
+        transaction = self.get_transaction_by_hash(transaction_hash)
 
         status_changes_to_use = (
             transaction["consensus_history"]["current_status_changes"]
