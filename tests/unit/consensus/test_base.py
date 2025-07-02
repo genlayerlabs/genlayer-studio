@@ -1,6 +1,7 @@
 import pytest
 from backend.database_handler.models import TransactionStatus
 from backend.node.types import Vote
+from backend.consensus.base import DEFAULT_VALIDATORS_COUNT
 from tests.unit.consensus.test_helpers import (
     TransactionsProcessorMock,
     ContractDB,
@@ -633,26 +634,25 @@ async def test_exec_accepted_appeal_successful_twice(consensus_algorithm):
         """
         if len(created_nodes) < transaction.num_of_initial_validators + 1:
             return Vote.AGREE
-        elif (len(created_nodes) >= transaction.num_of_initial_validators + 1) and (
+        if (len(created_nodes) >= transaction.num_of_initial_validators + 1) and (
             len(created_nodes) < 2 * transaction.num_of_initial_validators + 2 + 1
         ):
             return Vote.DISAGREE
-        elif (
+        if (
             len(created_nodes) >= 2 * transaction.num_of_initial_validators + 2 + 1
         ) and (
             len(created_nodes)
             < 2 * (2 * transaction.num_of_initial_validators + 2) - 1 + 2
         ):
             return Vote.AGREE
-        elif (
+        if (
             len(created_nodes)
             >= 2 * (2 * transaction.num_of_initial_validators + 2) - 1 + 2
         ) and (
             len(created_nodes) < 3 * (2 * transaction.num_of_initial_validators + 2) + 2
         ):
             return Vote.DISAGREE
-        else:
-            return Vote.AGREE
+        return Vote.AGREE
 
     event, *threads = setup_test_environment(
         consensus_algorithm, transactions_processor, nodes, created_nodes, get_vote

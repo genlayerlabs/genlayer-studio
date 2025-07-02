@@ -8,13 +8,12 @@ from flask_jsonrpc import JSONRPC
 from flask_jsonrpc.exceptions import JSONRPCError
 from sqlalchemy import Table
 from sqlalchemy.orm import Session
-import backend.node.genvm.origin.calldata as genvm_calldata
 import backend.validators as validators
 
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.database_handler.llm_providers import LLMProviderRegistry
 from backend.rollup.consensus_service import ConsensusService
-from backend.database_handler.models import Base, TransactionStatus
+from backend.database_handler.models import Base
 from backend.domain.types import LLMProvider, Validator, TransactionType
 from backend.node.create_nodes.providers import (
     get_default_provider_for,
@@ -44,7 +43,7 @@ from backend.database_handler.transactions_processor import (
     TransactionsProcessor,
 )
 from backend.node.base import Node, SIMULATOR_CHAIN_ID
-from backend.node.types import ExecutionMode, ExecutionResultStatus, Vote
+from backend.node.types import ExecutionMode, ExecutionResultStatus
 from backend.consensus.base import ConsensusAlgorithm
 
 from flask_jsonrpc.exceptions import JSONRPCError
@@ -54,8 +53,6 @@ from backend.protocol_rpc.message_handler.types import LogEvent, EventType, Even
 from backend.protocol_rpc.types import DecodedsubmitAppealDataArgs
 from backend.database_handler.snapshot_manager import SnapshotManager
 import asyncio
-
-import backend.node.genvm.origin.calldata as calldata
 
 
 ####### WRAPPER TO BLOCK ENDPOINTS FOR HOSTED ENVIRONMENT #######

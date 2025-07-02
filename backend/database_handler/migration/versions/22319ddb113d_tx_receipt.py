@@ -1,7 +1,7 @@
 """tx_receipt
 
 Revision ID: 22319ddb113d
-Revises: 99015c5b5b78
+Revises: c0244b1d49b0
 Create Date: 2025-05-28 19:06:34.835960
 
 """
@@ -14,7 +14,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = "22319ddb113d"
-down_revision: Union[str, None] = "99015c5b5b78"
+down_revision: Union[str, None] = "c0244b1d49b0"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
