@@ -81,6 +81,8 @@ class TransactionsProcessor:
             "appeal_processing_time": transaction_data.appeal_processing_time,
             "contract_snapshot": transaction_data.contract_snapshot,
             "config_rotation_rounds": transaction_data.config_rotation_rounds,
+            "appeal_leader_timeout": transaction_data.appeal_leader_timeout,
+            "leader_timeout_validators": transaction_data.leader_timeout_validators,
         }
 
     @staticmethod
@@ -229,6 +231,8 @@ class TransactionsProcessor:
             appeal_processing_time=0,
             contract_snapshot=None,
             config_rotation_rounds=config_rotation_rounds,
+            appeal_leader_timeout=False,
+            leader_timeout_validators=None,
         )
 
         self.session.add(new_transaction)
@@ -331,6 +335,7 @@ class TransactionsProcessor:
         elif transaction.status in (
             TransactionStatus.ACCEPTED,
             TransactionStatus.UNDETERMINED,
+            TransactionStatus.LEADER_TIMEOUT,
         ):
             transaction.appealed = appeal
             self.set_transaction_timestamp_appeal(transaction, int(time.time()))
@@ -593,3 +598,20 @@ class TransactionsProcessor:
             if closest_transaction
             else None
         )
+
+    def set_transaction_appeal_leader_timeout(
+        self, transaction_hash: str, appeal_leader_timeout: bool
+    ) -> bool:
+        transaction = (
+            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        )
+        transaction.appeal_leader_timeout = appeal_leader_timeout
+        self.session.commit()
+        return appeal_leader_timeout
+
+    def set_leader_timeout_validators(self, transaction_hash: str, validators: list):
+        transaction = (
+            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        )
+        transaction.leader_timeout_validators = validators
+        self.session.commit()
