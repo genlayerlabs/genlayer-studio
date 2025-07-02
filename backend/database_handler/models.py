@@ -38,6 +38,7 @@ class TransactionStatus(enum.Enum):
     ACCEPTED = "ACCEPTED"
     FINALIZED = "FINALIZED"
     UNDETERMINED = "UNDETERMINED"
+    LEADER_TIMEOUT = "LEADER_TIMEOUT"
 
 
 # We map them to `DataClass`es in order to have better type hints https://docs.sqlalchemy.org/en/20/orm/dataclasses.html#declarative-dataclass-mapping
@@ -105,6 +106,7 @@ class Transactions(Base):
     num_of_initial_validators: Mapped[Optional[int]] = mapped_column(Integer)
     last_vote_timestamp: Mapped[Optional[int]] = mapped_column(BigInteger)
     rotation_count: Mapped[Optional[int]] = mapped_column(Integer)
+    leader_timeout_validators: Mapped[Optional[list]] = mapped_column(JSONB)
 
     # Relationship for triggered transactions
     triggered_by_hash: Mapped[Optional[str]] = mapped_column(
@@ -126,6 +128,7 @@ class Transactions(Base):
     )
     appealed: Mapped[bool] = mapped_column(Boolean, default=False)
     appeal_undetermined: Mapped[bool] = mapped_column(Boolean, default=False)
+    appeal_leader_timeout: Mapped[bool] = mapped_column(Boolean, default=False)
     timestamp_awaiting_finalization: Mapped[Optional[int]] = mapped_column(
         BigInteger, default=None
     )
