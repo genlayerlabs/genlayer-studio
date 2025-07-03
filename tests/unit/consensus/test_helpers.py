@@ -416,7 +416,7 @@ class AccountsManagerMock:
         to_account["balance"] = new_balance
 
     def update_account_balance(self, address: str, value: int | None):
-        if value:
+        if value is not None and value != 0:
             balance = self.get_account_balance(address)
             if balance + value < 0:
                 raise ValueError(f"Insufficient balance: {balance} < {value}")
