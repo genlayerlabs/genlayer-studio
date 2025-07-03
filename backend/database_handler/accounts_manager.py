@@ -5,6 +5,7 @@ from eth_utils import is_address
 
 from .models import CurrentState
 from backend.database_handler.errors import AccountNotFoundError
+from backend.rollup.consensus_service import ConsensusService
 
 from sqlalchemy.orm import Session
 
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 class AccountsManager:
     def __init__(self, session: Session):
         self.session = session
+        self.consensus_service = ConsensusService()
 
     def _parse_account_data(self, account_data: CurrentState) -> dict:
         return {
@@ -30,7 +32,7 @@ class AccountsManager:
         self.create_new_account_with_address(account.address)
         return account
 
-    def create_new_account_with_address(self, address: str) -> Account:
+    def create_new_account_with_address(self, address: str) -> CurrentState:
         # Check if account already exists
         if not is_address(address):
             raise ValueError(f"Invalid address: {address}")
@@ -45,6 +47,11 @@ class AccountsManager:
         account = CurrentState(id=address, data="{}", balance=0)
         self.session.add(account)
         self.session.commit()
+
+        # Fund hardhat account when hardhat is used
+        if self.consensus_service.web3_connected:
+            self.consensus_service.fund_hardhat_account(address, 10000)
+
         return account
 
     def is_valid_address(self, address: str) -> bool:
@@ -74,9 +81,19 @@ class AccountsManager:
             return 0
         return account.balance
 
-    def update_account_balance(self, account_address: str, new_balance: int):
+    def set_account_balance(self, account_address: str, new_balance: int):
         to_account = self.get_account(account_address)
         if to_account is None:
             self.create_new_account_with_address(account_address)
             to_account = self.get_account(account_address)
         to_account.balance = new_balance
+
+    def update_account_balance(self, address: str, value: int | None):
+        if value:
+            balance = self.get_account_balance(address)
+            if balance + value < 0:
+                raise ValueError(f"Insufficient balance: {balance} < {value}")
+            self.set_account_balance(
+                address,
+                balance + value,
+            )

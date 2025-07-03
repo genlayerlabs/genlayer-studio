@@ -186,14 +186,7 @@ class TransactionsProcessor:
             str | None
         ) = None,  # If filled, the transaction must be present in the database (committed)
         transaction_hash: str | None = None,
-        from_balance: int | None = None,
     ) -> str:
-        if from_balance:
-            if from_balance < value:
-                raise ValueError(
-                    f"Sender has insufficient balance. Is {from_balance}, needs {value}"
-                )
-
         current_nonce = self.get_transaction_count(from_address)
 
         # Follow up: https://github.com/MetaMask/metamask-extension/issues/29787

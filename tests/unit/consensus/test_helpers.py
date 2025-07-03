@@ -20,22 +20,12 @@ from typing import Optional
 from backend.rollup.consensus_service import ConsensusService
 from datetime import datetime
 from copy import deepcopy
+from eth_account import Account
 
 DEFAULT_FINALITY_WINDOW = 5
 DEFAULT_CONSENSUS_SLEEP_TIME = 2
 DEFAULT_EXEC_RESULT = b"\x00\x00"  # success(null)
 TIMEOUT_EXEC_RESULT = b"\x02timeout"
-
-
-class AccountsManagerMock:
-    def __init__(self, accounts: dict[str, int] | None = None):
-        self.accounts = accounts or defaultdict(int)
-
-    def get_account_balance(self, address: str) -> int:
-        return self.accounts[address]
-
-    def update_account_balance(self, address: str, balance: int):
-        self.accounts[address] = balance
 
 
 class TransactionsProcessorMock:
@@ -44,6 +34,9 @@ class TransactionsProcessorMock:
         self.updated_transaction_status_history = defaultdict(list)
         self.status_changed_event = threading.Event()
         self.status_update_lock = threading.Lock()
+
+    def insert_transaction(self, transaction: Transaction):
+        self.transactions.append(transaction_to_dict(transaction))
 
     def get_transaction_by_hash(self, transaction_hash: str) -> dict:
         for transaction in self.transactions:
@@ -252,46 +245,79 @@ class SnapshotMock:
         return self.transactions_processor.get_awaiting_finalization_transactions()
 
 
-class ContractDB:
-    def __init__(self, contracts: dict[str, dict] = None):
-        self.contracts = contracts or {}
-        self.status_changed_event = threading.Event()
+class CurrentStateDB:
+    def __init__(self, current_state: dict[str, dict] | None = None):
+        """
+        current_state = {
+            address: {
+                id: str, this is the address
+                data: {
+                    code: str,
+                    state: {
+                        accepted: dict,
+                        finalized: dict
+                    },
+                },
+                balance: int,
+            }
+        }
+        Basically the value of the address key is a current_state postgres database row
+        """
+        self.current_state = current_state or {}
+        self.contract_status_changed_event = threading.Event()
+        self.account_status_changed_event = threading.Event()
 
-    def get_contract(self, address: str) -> dict:
-        return self.contracts[address]
+    def get_record(self, address: str) -> dict | None:
+        if address in self.current_state:
+            return self.current_state[address]
+        else:
+            return None
+
+    def add_record(self, record: dict):
+        self.current_state[record["id"]] = record
 
     def register_contract(self, contract: dict):
-        self.contracts[contract["id"]] = contract
+        address = contract["id"]
+        self.current_state[address]["data"] = contract["data"]
 
     def update_contract_data(self, address: str, contract_data: dict):
-        self.contracts[address]["data"] = contract_data
-        self.status_changed_event.set()
+        self.current_state[address]["data"] = contract_data
+        self.contract_status_changed_event.set()
 
-    def wait_for_status_change(self, timeout: float = 0.1) -> bool:
-        result = self.status_changed_event.wait(timeout)
-        self.status_changed_event.clear()
+    def wait_for_contract_status_change(self, timeout: float = 0.1) -> bool:
+        result = self.contract_status_changed_event.wait(timeout)
+        self.contract_status_changed_event.clear()
+        return result
+
+    def wait_for_account_status_change(self, timeout: float = 0.1) -> bool:
+        result = self.account_status_changed_event.wait(timeout)
+        self.account_status_changed_event.clear()
         return result
 
 
 class ContractSnapshotMock:
-    def __init__(self, contract_address: str, contract_db: ContractDB | None = None):
+    def __init__(
+        self, contract_address: str, current_state_db: CurrentStateDB | None = None
+    ):
         if contract_address:
-            contract_account = contract_db.get_contract(contract_address)
+            contract_account = current_state_db.get_record(contract_address)
             self.contract_address = contract_address
             self.contract_data = contract_account["data"]
             self.contract_code = self.contract_data["code"]
             self.states = self.contract_data["state"]
-            self.contract_db = contract_db
+            self.balance = contract_account["balance"]
+            self.current_state_db = current_state_db
 
     def __deepcopy__(self, memo):
-        """Handle deep copying without copying contract_db."""
+        """Handle deep copying without copying current_state_db."""
         new_instance = ContractSnapshotMock.__new__(ContractSnapshotMock)
         memo[id(self)] = new_instance
         new_instance.contract_address = self.contract_address
         new_instance.contract_data = deepcopy(self.contract_data, memo)
         new_instance.contract_code = self.contract_code
         new_instance.states = deepcopy(self.states, memo)
-        new_instance.contract_db = (
+        new_instance.balance = deepcopy(self.balance, memo)
+        new_instance.current_state_db = (
             None  # threading event that cannot be copied but not used by nodes
         )
         return new_instance
@@ -312,18 +338,18 @@ class ContractSnapshotMock:
             instance.contract_address = input.get("contract_address", None)
             instance.contract_code = input.get("contract_code", None)
             instance.states = input.get("states", {"accepted": {}, "finalized": {}})
-            instance.contract_db = None
+            instance.current_state_db = None
             return instance
         else:
             return None
 
 
 class ContractProcessorMock:
-    def __init__(self, contract_db: ContractDB):
-        self.contract_db = contract_db
+    def __init__(self, current_state_db: CurrentStateDB):
+        self.current_state_db = current_state_db
 
     def register_contract(self, contract: dict):
-        self.contract_db.register_contract(contract)
+        self.current_state_db.register_contract(contract)
 
     def update_contract_state(
         self,
@@ -331,7 +357,7 @@ class ContractProcessorMock:
         accepted_state: dict[str, str] | None = None,
         finalized_state: dict[str, str] | None = None,
     ):
-        contract = self.contract_db.get_contract(contract_address)
+        contract = self.current_state_db.get_record(contract_address)
 
         new_state = {
             "accepted": (
@@ -350,7 +376,55 @@ class ContractProcessorMock:
             "state": new_state,
         }
 
-        self.contract_db.update_contract_data(contract_address, new_contract_data)
+        self.current_state_db.update_contract_data(contract_address, new_contract_data)
+
+
+class AccountsManagerMock:
+    def __init__(self, current_state_db: CurrentStateDB):
+        self.current_state_db = current_state_db
+
+    def create_new_account(self) -> Account:
+        account = Account.create()
+        self.create_new_account_with_address(account.address)
+        return account
+
+    def create_new_account_with_address(self, address: str) -> dict:
+        existing_account = self.current_state_db.get_record(address)
+        if existing_account:
+            return existing_account
+
+        account = {"id": address, "data": {}, "balance": 0}
+        self.current_state_db.add_record(account)
+
+        return account
+
+    def get_account(self, account_address: str) -> dict | None:
+        return self.current_state_db.get_record(account_address)
+
+    def get_account_balance(self, account_address: str) -> int:
+        account = self.get_account(account_address)
+        if account is None:
+            return 0
+        else:
+            return account["balance"]
+
+    def set_account_balance(self, account_address: str, new_balance: int):
+        to_account = self.get_account(account_address)
+        if to_account is None:
+            self.create_new_account_with_address(account_address)
+            to_account = self.get_account(account_address)
+        to_account["balance"] = new_balance
+
+    def update_account_balance(self, address: str, value: int | None):
+        if value:
+            balance = self.get_account_balance(address)
+            if balance + value < 0:
+                raise ValueError(f"Insufficient balance: {balance} < {value}")
+            self.set_account_balance(
+                address,
+                balance + value,
+            )
+            self.current_state_db.account_status_changed_event.set()
 
 
 def transaction_to_dict(transaction: Transaction) -> dict:
@@ -558,7 +632,8 @@ def setup_test_environment(
     created_nodes: list,
     get_vote: Callable[[], Vote],
     get_timeout: Callable[[], bool] | None = None,
-    contract_db: ContractDB | None = None,
+    current_state_db: CurrentStateDB | None = None,
+    accounts_manager: AccountsManagerMock | None = None,
 ):
     import contextlib
     from backend.domain.types import Validator, LLMProvider
@@ -582,13 +657,8 @@ def setup_test_environment(
     consensus_algorithm.validators_manager.snapshot = fake_snapshot
 
     chain_snapshot = SnapshotMock(transactions_processor)
-    accounts_manager = AccountsManagerMock()
-
-    chain_snapshot_factory = lambda session: chain_snapshot
-    transactions_processor_factory = lambda session: transactions_processor
-    accounts_manager_factory = lambda session: accounts_manager
-    if contract_db is None:
-        contract_db = ContractDB(
+    if current_state_db is None:
+        current_state_db = CurrentStateDB(
             {
                 "to_address": {
                     "id": "to_address",
@@ -596,13 +666,22 @@ def setup_test_environment(
                         "state": {"accepted": {}, "finalized": {}},
                         "code": "contract_code",
                     },
+                    "balance": 0,
                 }
             }
         )
+    if accounts_manager is None:
+        accounts_manager = AccountsManagerMock(current_state_db)
+
+    chain_snapshot_factory = lambda session: chain_snapshot
+    transactions_processor_factory = lambda session: transactions_processor
+    accounts_manager_factory = lambda session: accounts_manager
     contract_snapshot_factory = (
-        lambda address, session, transaction: ContractSnapshotMock(address, contract_db)
+        lambda address, session, transaction: ContractSnapshotMock(
+            address, current_state_db
+        )
     )
-    contract_processor_factory = lambda session: ContractProcessorMock(contract_db)
+    contract_processor_factory = lambda session: ContractProcessorMock(current_state_db)
 
     def node_factory_supplier(*args):
         created_nodes.append(
@@ -728,23 +807,25 @@ def assert_transaction_status_change_and_match(
 
 
 def check_contract_state(
-    contract_db: ContractDB,
+    current_state_db: CurrentStateDB,
     to_address: str,
     accepted: dict | None = None,
     finalized: dict | None = None,
 ):
     if accepted is not None:
         assert (
-            contract_db.contracts[to_address]["data"]["state"]["accepted"] == accepted
+            current_state_db.get_record(to_address)["data"]["state"]["accepted"]
+            == accepted
         )
     if finalized is not None:
         assert (
-            contract_db.contracts[to_address]["data"]["state"]["finalized"] == finalized
+            current_state_db.get_record(to_address)["data"]["state"]["finalized"]
+            == finalized
         )
 
 
 def check_contract_state_with_timeout(
-    contract_db: ContractDB,
+    current_state_db: CurrentStateDB,
     to_address: str,
     accepted: dict | None = None,
     finalized: dict | None = None,
@@ -753,8 +834,49 @@ def check_contract_state_with_timeout(
 ):
     start_time = time.time()
     while time.time() - start_time < timeout:
-        if contract_db.wait_for_status_change(interval):
-            check_contract_state(contract_db, to_address, accepted, finalized)
+        if current_state_db.wait_for_contract_status_change(interval):
+            check_contract_state(current_state_db, to_address, accepted, finalized)
             return
 
     raise AssertionError(f"Contract state did not change within {timeout} seconds")
+
+
+def check_account_balance_event_change_with_timeout(
+    current_state_db: CurrentStateDB,
+    timeout: int = 30,
+    interval: float = 0.1,
+):
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        if current_state_db.wait_for_account_status_change(interval):
+            return
+
+    raise AssertionError(f"Balance did not change within {timeout} seconds")
+
+
+def submit_transaction(
+    accounts_manager: AccountsManagerMock,
+    transactions_processor: TransactionsProcessorMock,
+    transaction: Transaction,
+):
+    accounts_manager.update_account_balance(
+        address=transaction.from_address,
+        value=-transaction.value if transaction.value else None,
+    )
+    accounts_manager.current_state_db.account_status_changed_event.clear()
+    transactions_processor.insert_transaction(transaction)
+
+
+def submit_contract(
+    accounts_manager: AccountsManagerMock,
+    address: str,
+):
+    accounts_manager.create_new_account_with_address(address)
+    contract = {
+        "id": address,
+        "data": {
+            "state": {"accepted": {}, "finalized": {}},
+            "code": "contract_code",
+        },
+    }
+    accounts_manager.current_state_db.register_contract(contract)

@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any
 from pathlib import Path
 from hexbytes import HexBytes
 import re
+from web3.types import RPCEndpoint
 
 from backend.rollup.default_contracts.consensus_main import (
     get_default_consensus_main_contract,
@@ -120,6 +121,29 @@ class ConsensusService:
         tx_hash = self.web3.eth.send_raw_transaction(transaction)
         receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
         return receipt
+
+    def fund_hardhat_account(self, address: str, amount: int) -> None:
+        """
+        Fund a hardhat account using hardhat_setBalance.
+        Only works when connected to hardhat network.
+
+        Args:
+            address (str): The address to fund
+            amount (int): The amount to fund the account with in ETH
+        """
+        if not self.web3.is_connected():
+            print(
+                "[CONSENSUS_SERVICE]: Not connected to Hardhat node, skipping account funding"
+            )
+            return None
+
+        try:
+            balance_in_wei = amount * 10**18
+            self.web3.provider.make_request(
+                RPCEndpoint("hardhat_setBalance"), [address, hex(balance_in_wei)]
+            )
+        except Exception as e:
+            print(f"[CONSENSUS_SERVICE]: Error funding hardhat account: {str(e)}")
 
     def wait_new_transaction_event(self, receipt: dict) -> dict:
         """

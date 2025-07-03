@@ -722,31 +722,31 @@ def send_raw_transaction(
         else:
             transaction_hash = None
 
-        # Get the balance of the sender
-        from_balance = accounts_manager.get_account_balance(
-            genlayer_transaction.from_address
-        )
-
-        # Insert transaction into the database
+        # Send value at transaction submission
         try:
-            transaction_hash = transactions_processor.insert_transaction(
-                genlayer_transaction.from_address,
-                to_address,
-                transaction_data,
-                value,
-                genlayer_transaction.type.value,
-                nonce,
-                leader_only,
-                genlayer_transaction.max_rotations,
-                None,
-                transaction_hash,
-                from_balance,
+            accounts_manager.update_account_balance(
+                address=genlayer_transaction.from_address,
+                value=-value if value else None,
             )
         except ValueError as e:
             raise JSONRPCError(
                 message=str(e),
                 data={"sender_address": genlayer_transaction.from_address},
             )
+
+        # Insert transaction into the database
+        transaction_hash = transactions_processor.insert_transaction(
+            genlayer_transaction.from_address,
+            to_address,
+            transaction_data,
+            value,
+            genlayer_transaction.type.value,
+            nonce,
+            leader_only,
+            genlayer_transaction.max_rotations,
+            None,
+            transaction_hash,
+        )
 
         return transaction_hash
 

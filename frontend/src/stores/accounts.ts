@@ -4,6 +4,9 @@ import type { Address } from '@/types';
 import { createAccount, generatePrivateKey } from 'genlayer-js';
 import { useShortAddress, useGenlayer } from '@/hooks';
 import { notify } from '@kyvg/vue3-notification';
+import { useRpcClient } from '@/hooks';
+
+const DEFAULT_FUNDING_AMOUNT = 10000;
 
 export interface AccountInfo {
   type: 'local' | 'metamask';
@@ -13,6 +16,7 @@ export interface AccountInfo {
 
 export const useAccountsStore = defineStore('accountsStore', () => {
   const { shorten } = useShortAddress();
+  const rpcClient = useRpcClient();
 
   // Store all accounts (both local and MetaMask)
   const accounts = ref<AccountInfo[]>([]);
@@ -80,6 +84,21 @@ export const useAccountsStore = defineStore('accountsStore', () => {
       address: ethAccounts[0] as Address,
     };
 
+    // Check balance before funding
+    const balance = await rpcClient.getBalance(metamaskAccount.address);
+    if (balance === 0) {
+      await rpcClient.fundAccount(
+        metamaskAccount.address,
+        DEFAULT_FUNDING_AMOUNT,
+      );
+    }
+
+    // Force MetaMask to refresh the balance when sending a transaction in the future
+    await window.ethereum.request({
+      method: 'eth_getBalance',
+      params: [metamaskAccount.address, 'pending'],
+    });
+
     // Update or add MetaMask account
     const existingMetaMaskIndex = accounts.value.findIndex(
       (acc) => acc.type === 'metamask',
@@ -137,10 +156,10 @@ export const useAccountsStore = defineStore('accountsStore', () => {
       privateKey,
     };
 
-    await genlayer.client.value?.request({
-      method: 'sim_fundAccount',
-      params: [newAccount.address, 10000],
-    });
+    const balance = await rpcClient.getBalance(newAccount.address);
+    if (balance === 0) {
+      await rpcClient.fundAccount(newAccount.address, DEFAULT_FUNDING_AMOUNT);
+    }
 
     accounts.value.push(newAccount);
     setCurrentAccount(newAccount);
