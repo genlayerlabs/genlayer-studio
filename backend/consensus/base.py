@@ -2644,10 +2644,11 @@ class FinalizingState(TransactionState):
             )
 
             # Restore value transfer
-            context.accounts_manager.update_account_balance(
-                address=context.transaction.from_address,
-                value=context.transaction.value,
-            )
+            if context.transaction.type != TransactionType.SEND:
+                context.accounts_manager.update_account_balance(
+                    address=context.transaction.from_address,
+                    value=context.transaction.value,
+                )
 
 
 def _get_messages_data(

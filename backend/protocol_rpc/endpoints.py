@@ -801,16 +801,17 @@ def send_raw_transaction(
             transaction_hash = None
 
         # Send value at transaction submission
-        try:
-            accounts_manager.update_account_balance(
-                address=genlayer_transaction.from_address,
-                value=-value if value else None,
-            )
-        except ValueError as e:
-            raise JSONRPCError(
-                message=str(e),
-                data={"sender_address": genlayer_transaction.from_address},
-            )
+        if genlayer_transaction.type != TransactionType.SEND:
+            try:
+                accounts_manager.update_account_balance(
+                    address=genlayer_transaction.from_address,
+                    value=-value if value else None,
+                )
+            except ValueError as e:
+                raise JSONRPCError(
+                    message=str(e),
+                    data={"sender_address": genlayer_transaction.from_address},
+                )
 
         # Insert transaction into the database
         transaction_hash = transactions_processor.insert_transaction(
