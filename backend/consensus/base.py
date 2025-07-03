@@ -1325,6 +1325,16 @@ class ConsensusAlgorithm:
                         context.msg_handler,
                     )
 
+                    # Restore the balance of the recipient account
+                    context.accounts_manager.update_account_balance(
+                        address=context.transaction.to_address,
+                        value=(
+                            -context.transaction.value
+                            if context.transaction.value
+                            else None
+                        ),
+                    )
+
                     # Get the previous state of the contract
                     if context.transaction.contract_snapshot:
                         previous_contact_state = (
@@ -1369,6 +1379,17 @@ class ConsensusAlgorithm:
             context.transaction.hash
         )
         for future_transaction in future_transactions:
+            # Restore the balance of the recipient account
+            if future_transaction["status"] == TransactionStatus.ACCEPTED.value:
+                context.accounts_manager.update_account_balance(
+                    address=future_transaction["to_address"],
+                    value=(
+                        -future_transaction["value"]
+                        if future_transaction["value"]
+                        else None
+                    ),
+                )
+
             ConsensusAlgorithm.dispatch_transaction_status_update(
                 context.transactions_processor,
                 future_transaction["hash"],

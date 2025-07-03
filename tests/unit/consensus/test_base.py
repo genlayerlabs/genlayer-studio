@@ -241,17 +241,29 @@ async def test_exec_accepted_appeal_fail(consensus_algorithm):
         PROPOSING -> COMMITTING -> REVEALING -> ACCEPTED -appeal-> COMMITTING -> REVEALING -appeal-fail-> ACCEPTED -no-appeal-> FINALIZED
     """
     transaction = init_dummy_transaction()
+    transaction.value = 5
     nodes = get_nodes_specs(2 * DEFAULT_VALIDATORS_COUNT + 2)
     created_nodes = []
-    transactions_processor = TransactionsProcessorMock(
-        [transaction_to_dict(transaction)]
-    )
+    transactions_processor = TransactionsProcessorMock()
+    current_state_db = CurrentStateDB()
+    accounts_manager = AccountsManagerMock(current_state_db)
+    EOA_BALANCE = 100
+    accounts_manager.set_account_balance(transaction.from_address, EOA_BALANCE)
+    submit_contract(accounts_manager, transaction.to_address)
+    submit_transaction(accounts_manager, transactions_processor, transaction)
 
     def get_vote():
         return Vote.AGREE
 
     event, *threads = setup_test_environment(
-        consensus_algorithm, transactions_processor, nodes, created_nodes, get_vote
+        consensus_algorithm,
+        transactions_processor,
+        nodes,
+        created_nodes,
+        get_vote,
+        None,
+        current_state_db,
+        accounts_manager,
     )
 
     try:
@@ -266,10 +278,15 @@ async def test_exec_accepted_appeal_fail(consensus_algorithm):
             ]
         )
 
+        check_account_balance_event_change_with_timeout(current_state_db)
+        assert accounts_manager.get_account_balance(transaction.to_address) == 5
+
         appeal(transaction, transactions_processor)
         assert_transaction_status_match(
             transactions_processor, transaction, [TransactionStatus.FINALIZED.value]
         )
+
+        assert accounts_manager.get_account_balance(transaction.to_address) == 5
 
         check_validator_count(
             transaction, transactions_processor, 2 * DEFAULT_VALIDATORS_COUNT + 2
@@ -395,11 +412,14 @@ async def test_exec_accepted_appeal_successful(consensus_algorithm):
         PENDING -> PROPOSING -> COMMITTING -> REVEALING -> ACCEPTED -no-appeal-> FINALIZED
     """
     transaction = init_dummy_transaction("transaction_hash_1")
+    transaction.value = 5
     nodes = get_nodes_specs(2 * DEFAULT_VALIDATORS_COUNT + 2)
     created_nodes = []
     transactions_processor = TransactionsProcessorMock()
     current_state_db = CurrentStateDB()
     accounts_manager = AccountsManagerMock(current_state_db)
+    EOA_BALANCE = 100
+    accounts_manager.set_account_balance(transaction.from_address, EOA_BALANCE)
     submit_contract(accounts_manager, transaction.to_address)
     submit_transaction(accounts_manager, transactions_processor, transaction)
 
@@ -484,6 +504,9 @@ async def test_exec_accepted_appeal_successful(consensus_algorithm):
             current_state_db, transaction.to_address, {}, {}
         )
 
+        check_account_balance_event_change_with_timeout(current_state_db)
+        assert accounts_manager.get_account_balance(transaction.to_address) == 0
+
         assert_transaction_status_match(
             transactions_processor, transaction, [TransactionStatus.ACCEPTED.value]
         )
@@ -491,6 +514,9 @@ async def test_exec_accepted_appeal_successful(consensus_algorithm):
         check_contract_state_with_timeout(
             current_state_db, transaction.to_address, {"state_var": "1"}, {}
         )
+
+        check_account_balance_event_change_with_timeout(current_state_db)
+        assert accounts_manager.get_account_balance(transaction.to_address) == 5
 
         assert_transaction_status_match(
             transactions_processor, transaction, [TransactionStatus.FINALIZED.value]
@@ -1567,10 +1593,14 @@ async def test_exec_validator_appeal_success_with_rollback_second_tx(
     transaction_2 = init_dummy_transaction("transaction_hash_2")
     nodes = get_nodes_specs(2 * DEFAULT_VALIDATORS_COUNT + 2)
     created_nodes = []
+    transaction_1.value = 5
+    transaction_2.value = 10
 
     transactions_processor = TransactionsProcessorMock()
     current_state_db = CurrentStateDB()
     accounts_manager = AccountsManagerMock(current_state_db)
+    EOA_BALANCE = 100
+    accounts_manager.set_account_balance(transaction_1.from_address, EOA_BALANCE)
     submit_contract(accounts_manager, transaction_1.to_address)
     submit_transaction(accounts_manager, transactions_processor, transaction_1)
     submit_transaction(accounts_manager, transactions_processor, transaction_2)
@@ -1619,6 +1649,9 @@ async def test_exec_validator_appeal_success_with_rollback_second_tx(
             current_state_db, contract_address, {"state_var": "1"}, {}
         )
 
+        check_account_balance_event_change_with_timeout(current_state_db)
+        assert accounts_manager.get_account_balance(contract_address) == 5
+
         assert_transaction_status_match(
             transactions_processor, transaction_2, [TransactionStatus.ACCEPTED.value]
         )
@@ -1627,6 +1660,9 @@ async def test_exec_validator_appeal_success_with_rollback_second_tx(
         check_contract_state_with_timeout(
             current_state_db, contract_address, {"state_var": "12"}, {}
         )
+
+        check_account_balance_event_change_with_timeout(current_state_db)
+        assert accounts_manager.get_account_balance(contract_address) == 15
 
         appeal(transaction_1, transactions_processor)
 
@@ -1637,6 +1673,9 @@ async def test_exec_validator_appeal_success_with_rollback_second_tx(
         )
 
         check_contract_state_with_timeout(current_state_db, contract_address, {}, {})
+
+        check_account_balance_event_change_with_timeout(current_state_db)
+        assert accounts_manager.get_account_balance(contract_address) == 0
 
         assert_transaction_status_match(
             transactions_processor, transaction_1, [TransactionStatus.ACCEPTED.value]
@@ -1684,6 +1723,9 @@ async def test_exec_validator_appeal_success_with_rollback_second_tx(
                 TransactionStatus.ACCEPTED,
             ],
         }
+
+        check_account_balance_event_change_with_timeout(current_state_db)
+        assert accounts_manager.get_account_balance(contract_address) == 15
 
     finally:
         cleanup_threads(event, threads)
