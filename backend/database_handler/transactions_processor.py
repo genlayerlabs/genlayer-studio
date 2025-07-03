@@ -12,6 +12,7 @@ from sqlalchemy import or_, desc, and_, cast, JSON, String, type_coerce, text
 from sqlalchemy.orm.attributes import flag_modified
 from eth_utils import to_bytes, keccak, is_address
 from web3 import Web3
+from backend.database_handler.accounts_manager import AccountsManager
 
 from backend.node.types import Receipt, ExecutionResultStatus
 from .models import Transactions, TransactionStatus
