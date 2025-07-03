@@ -587,8 +587,8 @@ async def _gen_call_with_validator(
             state_status=state_status,
         )
     elif type == "write":
-        value = (
-            params["value"] if "value" in params else 0
+        value = params.get(
+            "value", 0
         )  # waiting for gen_call node spec update if this is correct
         decoded_data = transactions_parser.decode_method_send_data(data)
         receipt = await node.run_contract(

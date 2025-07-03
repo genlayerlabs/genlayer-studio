@@ -692,7 +692,7 @@ class ConsensusAlgorithm:
                 return
 
         # Check if the transaction is a burn call
-        if not transaction.to_address is None:
+        if transaction.to_address is not None:
             # Update the balance of the recipient account
             accounts_manager.update_account_balance(
                 address=transaction.to_address, value=transaction.value

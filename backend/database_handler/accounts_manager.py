@@ -9,6 +9,8 @@ from backend.rollup.consensus_service import ConsensusService
 
 from sqlalchemy.orm import Session
 
+HARDHAT_FUNDING_AMOUNT = 10000
+
 
 class AccountsManager:
     def __init__(self, session: Session):
@@ -49,8 +51,7 @@ class AccountsManager:
         self.session.commit()
 
         # Fund hardhat account when hardhat is used
-        if self.consensus_service.web3_connected:
-            self.consensus_service.fund_hardhat_account(address, 10000)
+        self.consensus_service.fund_hardhat_account(address, HARDHAT_FUNDING_AMOUNT)
 
         return account
 
