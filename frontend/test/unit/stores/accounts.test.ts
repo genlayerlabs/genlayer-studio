@@ -10,9 +10,15 @@ const testAddress1 = '0x0200E9994260fe8D40107E01101F807B2e7A29Da' as Address;
 const testKey2 =
   '0x483b7a9b979289a227095c22229028a5debe04d6d1c8434d8bd5b48f78544263' as Address; // ! NEVER USE THIS PRIVATE KEY
 
+const mockRpcClient = {
+  getBalance: vi.fn(),
+  fundAccount: vi.fn(),
+};
+
 vi.mock('@/hooks', () => ({
   useGenlayer: vi.fn(),
   useShortAddress: vi.fn(() => ({})),
+  useRpcClient: vi.fn(() => mockRpcClient),
 }));
 
 vi.mock('genlayer-js', () => ({
@@ -31,6 +37,12 @@ describe('useAccountsStore', () => {
     (useGenlayer as Mock).mockReturnValue({
       client: mockGenlayerClient,
     });
+
+    // Reset RPC client mocks
+    mockRpcClient.getBalance.mockReset();
+    mockRpcClient.fundAccount.mockReset();
+    mockRpcClient.getBalance.mockResolvedValue(0);
+    mockRpcClient.fundAccount.mockResolvedValue(undefined);
 
     // Mock localStorage
     vi.stubGlobal('localStorage', {
@@ -57,6 +69,8 @@ describe('useAccountsStore', () => {
     });
     expect(accountsStore.accounts).toContainEqual(newAccount);
     expect(accountsStore.selectedAccount).toEqual(newAccount);
+    expect(mockRpcClient.getBalance).toHaveBeenCalledWith(testAddress1);
+    expect(mockRpcClient.fundAccount).toHaveBeenCalledWith(testAddress1, 10000);
   });
 
   it('should remove an account and default to existing one', () => {
@@ -169,6 +183,8 @@ describe('fetchMetaMaskAccount', () => {
 
     expect(accountsStore.accounts).toContainEqual(expectedMetaMaskAccount);
     expect(accountsStore.selectedAccount).toEqual(expectedMetaMaskAccount);
+    expect(mockRpcClient.getBalance).toHaveBeenCalledWith(testAccount);
+    expect(mockRpcClient.fundAccount).toHaveBeenCalledWith(testAccount, 10000);
   });
 
   it('should not modify accounts if window.ethereum is undefined', async () => {
