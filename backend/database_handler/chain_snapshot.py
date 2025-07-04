@@ -50,6 +50,7 @@ class ChainSnapshot:
                 (Transactions.status == TransactionStatus.ACCEPTED)
                 | (Transactions.status == TransactionStatus.UNDETERMINED)
                 | (Transactions.status == TransactionStatus.LEADER_TIMEOUT)
+                | (Transactions.status == TransactionStatus.VALIDATORS_TIMEOUT)
             )
             .order_by(Transactions.created_at)
             .all()
