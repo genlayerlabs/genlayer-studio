@@ -2,7 +2,7 @@ FROM ubuntu:24.04 AS base
 
 ARG TARGETPLATFORM
 
-ARG GENVM_TAG=v0.1.1
+ARG GENVM_TAG=v0.1.3
 
 ARG path=/app
 WORKDIR $path
@@ -61,7 +61,8 @@ RUN cd /genvm \
     && unzip genvm-runners.zip \
     && rm *.zip \
     && ls -R . \
-    && su - backend-user -c 'python3 /genvm/scripts/runners-registry download --registry /genvm/share/lib/genvm/runners/all.json' \
+    && chown -R backend-user:backend-group /genvm \
+    && su - backend-user -c 'python3 /genvm/scripts/runners-registry download --registry /genvm/share/lib/genvm/runners/all.json --dest /genvm/share/lib/genvm/runners/' \
     && su - backend-user -c '/genvm/bin/genvm precompile' \
     && cd "$path" \
     && true
