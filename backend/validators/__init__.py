@@ -132,9 +132,14 @@ class Manager:
 
     async def _get_snap_from_registry(self) -> Snapshot:
         cur_validators_as_dict = self.registry.get_all_validators()
+        validators = [domain.Validator.from_dict(i) for i in cur_validators_as_dict]
+        return await self._get_snap_from_validators(validators)
+
+    async def _get_snap_from_validators(
+        self, validators: list[domain.Validator]
+    ) -> Snapshot:
         current_validators: list[SingleValidatorSnapshot] = []
-        for i in cur_validators_as_dict:
-            val = domain.Validator.from_dict(i)
+        for val in validators:
             host_data = {"studio_llm_id": f"node-{val.address}"}
             if "mock_response" in val.llmprovider.plugin_config:
                 host_data["mock_response"] = val.llmprovider.plugin_config[
@@ -158,6 +163,26 @@ class Manager:
             yield snap
         finally:
             self.lock.reader.release()
+
+    @contextlib.asynccontextmanager
+    async def temporal_snapshot(self, validators: list[domain.Validator]):
+        await self.lock.writer.acquire()
+        try:
+            await self.llm_module.verify_for_read()
+            await self.web_module.verify_for_read()
+
+            original_snapshot = deepcopy(self._cached_snapshot)
+
+            temp_snapshot = await self._get_snap_from_validators(validators)
+            await self._change_providers_from_snapshot(temp_snapshot)
+
+            try:
+                yield deepcopy(temp_snapshot)
+            finally:
+                if original_snapshot is not None:
+                    await self._change_providers_from_snapshot(original_snapshot)
+        finally:
+            self.lock.writer.release()
 
     async def _change_providers_from_snapshot(self, snap: Snapshot):
         self._cached_snapshot = None

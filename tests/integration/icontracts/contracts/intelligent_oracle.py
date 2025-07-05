@@ -1,3 +1,4 @@
+# v0.1.0
 # { "Depends": "py-genlayer:test" }
 
 import json
@@ -139,7 +140,7 @@ class IntelligentOracle(gl.Contract):
         for resource_url in resources_to_check:
 
             def evaluate_single_source() -> str:
-                resource_web_data = gl.get_webpage(resource_url, mode="text")
+                resource_web_data = gl.nondet.web.render(resource_url, mode="text")
                 print(resource_web_data)
 
                 task = f"""
@@ -223,11 +224,11 @@ Provide your response in **valid JSON** format with the following structure:
 - **Clarity:** Make sure your reasoning is easy to understand.
 - **Validity:** Ensure the JSON output is properly formatted and free of errors. Do not include trailing commas.
                 """
-                result = gl.exec_prompt(task)
+                result = gl.nondet.exec_prompt(task)
                 print(result)
                 return result
 
-            result = gl.eq_principle_prompt_comparative(
+            result = gl.eq_principle.prompt_comparative(
                 evaluate_single_source,
                 principle="`outcome` field must be exactly the same. All other fields must be similar",
             )
@@ -305,11 +306,11 @@ Provide your response in **valid JSON** format with the following structure:
 
             """
 
-            result = gl.exec_prompt(task)
+            result = gl.nondet.exec_prompt(task)
             print(result)
             return result
 
-        result = gl.eq_principle_prompt_comparative(
+        result = gl.eq_principle.prompt_comparative(
             evaluate_all_sources,
             principle="`outcome` field must be exactly the same. All other fields must be similar",
         )
@@ -331,7 +332,7 @@ Provide your response in **valid JSON** format with the following structure:
         self.status = Status.RESOLVED.value
 
     @gl.public.view
-    def get_dict(self) -> dict[str, str]:
+    def get_dict(self) -> dict[str, str | list[str]]:
         return {
             "title": self.title,
             "description": self.description,

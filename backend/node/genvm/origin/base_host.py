@@ -401,7 +401,7 @@ async def run_host_and_program(
         ):
             errors.append(Exception("no result provided"))
         else:
-            await handler.consume_result(ResultCode.CONTRACT_ERROR, b"timeout")
+            await handler.consume_result(ResultCode.VM_ERROR, b"timeout")
 
     result = RunHostAndProgramRes(
         b"".join(stdout).decode(),
