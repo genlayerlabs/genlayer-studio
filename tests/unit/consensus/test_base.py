@@ -434,6 +434,14 @@ async def test_validator_appeal_success(consensus_algorithm):
         check_contract_state_with_timeout(contract_db, transaction.to_address, {}, {})
 
         assert_transaction_status_match(
+            transactions_processor, transaction, [TransactionStatus.ACCEPTED.value]
+        )
+
+        check_contract_state_with_timeout(
+            contract_db, transaction.to_address, {"state_var": "1"}, {}
+        )
+
+        assert_transaction_status_match(
             transactions_processor, transaction, [TransactionStatus.FINALIZED.value]
         )
 
@@ -480,7 +488,7 @@ async def test_validator_appeal_success(consensus_algorithm):
             == 0
         )
 
-        check_contract_state(
+        check_contract_state_with_timeout(
             contract_db, transaction.to_address, {"state_var": "1"}, {"state_var": "1"}
         )
         assert created_nodes[0].contract_snapshot.states == {
