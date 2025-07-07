@@ -2582,7 +2582,7 @@ async def validators_timeout_appeal_success(
                 transaction_2,
                 [TransactionStatus.FINALIZED.value],
             )
-            check_contract_state(
+            check_contract_state_with_timeout(
                 contract_db, contract_address, {"state_var": "2"}, {"state_var": "2"}
             )
 
@@ -2916,7 +2916,7 @@ async def test_leader_appeal_success_validators_timeout_no_rollback(
         assert_transaction_status_match(
             transactions_processor, transaction_2, [TransactionStatus.FINALIZED.value]
         )
-        check_contract_state(
+        check_contract_state_with_timeout(
             contract_db, contract_address, {"state_var": "2"}, {"state_var": "2"}
         )
 
