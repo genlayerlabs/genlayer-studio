@@ -1,7 +1,7 @@
 """add_validators_timeout
 
 Revision ID: a221e802477c
-Revises: c0244b1d49b0
+Revises: 22319ddb113d
 Create Date: 2025-06-16 16:13:46.841359
 
 """
@@ -14,7 +14,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = "a221e802477c"
-down_revision: Union[str, None] = "c0244b1d49b0"
+down_revision: Union[str, None] = "22319ddb113d"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

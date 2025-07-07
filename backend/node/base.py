@@ -145,7 +145,7 @@ class Node:
         return receipt
 
     def _set_vote(self, receipt: Receipt) -> Receipt:
-        if (receipt.result[0] == ResultCode.CONTRACT_ERROR) and (
+        if (receipt.result[0] == ResultCode.VM_ERROR) and (
             receipt.result[1:] == b"timeout"
         ):
             receipt.vote = Vote.TIMEOUT

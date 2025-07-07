@@ -2,14 +2,14 @@ from enum import Enum
 
 
 class ConsensusResult(Enum):
-    IDLE = ("IDLE",)
-    AGREE = ("AGREE",)
-    DISAGREE = ("DISAGREE",)
-    TIMEOUT = ("TIMEOUT",)
-    DETERMINISTIC_VIOLATION = ("DETERMINISTIC_VIOLATION",)
-    NO_MAJORITY = ("NO_MAJORITY",)
-    MAJORITY_AGREE = ("MAJORITY_AGREE",)
-    MAJORITY_DISAGREE = ("MAJORITY_DISAGREE",)
+    IDLE = "IDLE"
+    AGREE = "AGREE"
+    DISAGREE = "DISAGREE"
+    TIMEOUT = "TIMEOUT"
+    DETERMINISTIC_VIOLATION = "DETERMINISTIC_VIOLATION"
+    NO_MAJORITY = "NO_MAJORITY"
+    MAJORITY_AGREE = "MAJORITY_AGREE"
+    MAJORITY_DISAGREE = "MAJORITY_DISAGREE"
 
     @classmethod
     def from_string(cls, value: str) -> "ConsensusResult":
