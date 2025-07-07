@@ -89,3 +89,4 @@ class DecodedGenlayerTransaction:
     data: DecodedGenlayerTransactionData
     type: TransactionType
     max_rotations: int
+    num_of_initial_validators: int

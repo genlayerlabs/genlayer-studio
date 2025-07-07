@@ -121,7 +121,7 @@ local function just_in_backend(ctx, args, mapped_prompt)
 			end)
 		end
 
-		lib.log{message = "executed with", success = success, type = type(result), res = result}
+		lib.log{level = "debug", message = "executed with", success = success, type = type(result), res = result}
 		if success then
 			return result
 		end
