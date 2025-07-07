@@ -8,7 +8,10 @@ class MultiFileContract(gl.Contract):
         with open("/contract/other.py", "rt") as f:
             text = f.read()
         self.other_addr = gl.deploy_contract(
-            code=text.encode("utf-8"), args=["123"], salt_nonce=1
+            code=text.encode("utf-8"),
+            args=["123"],
+            salt_nonce=u256(1),
+            value=u256(0),
         )
 
     @gl.public.write
@@ -17,4 +20,4 @@ class MultiFileContract(gl.Contract):
 
     @gl.public.view
     def test(self) -> str:
-        return gl.ContractAt(self.other_addr).view().test()
+        return gl.get_contract_at(self.other_addr).view().test()

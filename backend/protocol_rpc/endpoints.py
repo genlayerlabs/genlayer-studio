@@ -8,7 +8,6 @@ from flask_jsonrpc import JSONRPC
 from flask_jsonrpc.exceptions import JSONRPCError
 from sqlalchemy import Table
 from sqlalchemy.orm import Session
-import backend.node.genvm.origin.calldata as genvm_calldata
 import backend.validators as validators
 
 from backend.database_handler.contract_snapshot import ContractSnapshot
@@ -825,6 +824,7 @@ def send_raw_transaction(
             genlayer_transaction.max_rotations,
             None,
             transaction_hash,
+            genlayer_transaction.num_of_initial_validators,
         )
 
         return transaction_hash
