@@ -113,6 +113,9 @@ class LLMModule:
     async def provider_available(
         self, model: str, url: str | None, plugin: str, key_env: str
     ) -> bool:
+        if plugin == "custom":
+            return True
+
         if url is None:
             return False
 
