@@ -1,4 +1,5 @@
-# { "Depends": "py-genlayer:test" }
+# v0.1.0
+# { "Depends": "py-genlayer:latest" }
 from genlayer import *
 
 import json
@@ -39,12 +40,12 @@ This result should be perfectly parseable by a JSON parser without errors.
 """
 
         def get_wizard_answer():
-            result = gl.exec_prompt(prompt)
+            result = gl.nondet.exec_prompt(prompt)
             result = result.replace("```json", "").replace("```", "")
             print(result)
             return result
 
-        result = gl.eq_principle_prompt_comparative(
+        result = gl.eq_principle.prompt_comparative(
             get_wizard_answer, "The value of give_coin has to match"
         )
         parsed_result = json.loads(result)
