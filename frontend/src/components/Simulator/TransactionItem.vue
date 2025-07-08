@@ -200,7 +200,8 @@ function prettifyTxData(x: any): any {
           transaction.statusName !== 'FINALIZED' &&
           transaction.statusName !== 'ACCEPTED' &&
           transaction.statusName !== 'UNDETERMINED' &&
-          transaction.statusName !== 'LEADER_TIMEOUT'
+          transaction.statusName !== 'LEADER_TIMEOUT' &&
+          transaction.statusName !== 'VALIDATORS_TIMEOUT'
         "
       />
 
@@ -210,7 +211,8 @@ function prettifyTxData(x: any): any {
             transaction.data.leader_only == false &&
             (transaction.statusName == 'ACCEPTED' ||
               transaction.statusName == 'UNDETERMINED' ||
-              transaction.statusName == 'LEADER_TIMEOUT') &&
+              transaction.statusName == 'LEADER_TIMEOUT' ||
+              transaction.statusName == 'VALIDATORS_TIMEOUT') &&
             Date.now() / 1000 -
               transaction.data.timestamp_awaiting_finalization -
               transaction.data.appeal_processing_time <=
@@ -283,7 +285,8 @@ function prettifyTxData(x: any): any {
                 transaction.statusName !== 'FINALIZED' &&
                 transaction.statusName !== 'ACCEPTED' &&
                 transaction.statusName !== 'UNDETERMINED' &&
-                transaction.statusName !== 'LEADER_TIMEOUT'
+                transaction.statusName !== 'LEADER_TIMEOUT' &&
+                transaction.statusName !== 'VALIDATORS_TIMEOUT'
               "
             />
             <TransactionStatusBadge
@@ -446,6 +449,14 @@ function prettifyTxData(x: any): any {
                       <XCircleIcon class="h-4 w-4 text-red-500" />
                       Disagree
                     </template>
+                    <template
+                      v-if="history.leader_result[1].vote === 'timeout'"
+                    >
+                      <EllipsisHorizontalCircleIcon
+                        class="h-4 w-4 text-yellow-500"
+                      />
+                      Timeout
+                    </template>
                   </template>
                 </div>
               </div>
@@ -469,6 +480,12 @@ function prettifyTxData(x: any): any {
                   <template v-if="validator.vote === 'disagree'">
                     <XCircleIcon class="h-4 w-4 text-red-500" />
                     Disagree
+                  </template>
+                  <template v-if="validator.vote === 'timeout'">
+                    <EllipsisHorizontalCircleIcon
+                      class="h-4 w-4 text-yellow-500"
+                    />
+                    Timeout
                   </template>
                 </div>
               </div>

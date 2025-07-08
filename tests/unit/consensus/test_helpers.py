@@ -5,7 +5,11 @@ from pathlib import Path
 import time
 import threading
 import pytest
-from backend.consensus.base import ConsensusAlgorithm, DEFAULT_VALIDATORS_COUNT
+from backend.consensus.base import (
+    ConsensusAlgorithm,
+    DEFAULT_VALIDATORS_COUNT,
+    ConsensusRound,
+)
 from backend.database_handler.transactions_processor import TransactionsProcessor
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.database_handler.models import TransactionStatus
@@ -37,16 +41,22 @@ class AccountsManagerMock:
 
 class TransactionsProcessorMock:
     def __init__(self, transactions=None):
-        self.transactions = transactions or []
+        self.transactions = transactions if transactions is not None else {}
         self.updated_transaction_status_history = defaultdict(list)
         self.status_changed_event = threading.Event()
         self.status_update_lock = threading.Lock()
 
     def get_transaction_by_hash(self, transaction_hash: str) -> dict:
-        for transaction in self.transactions:
-            if transaction["hash"] == transaction_hash:
-                return transaction
-        raise ValueError(f"Transaction with hash {transaction_hash} not found")
+        if transaction_hash in self.transactions:
+            # Everytime we do a database request we get a new transaction object
+            # This tests how it is done in the real code and we do not get weird behaviour because of passing references
+            return deepcopy(self.transactions[transaction_hash])
+        else:
+            raise ValueError(f"Transaction with hash {transaction_hash} not found")
+
+    def commit(self, transaction: dict):
+        # We write the copied transaction back to the transactions dictionary
+        self.transactions[transaction["hash"]] = transaction
 
     def update_transaction_status(
         self,
@@ -71,6 +81,7 @@ class TransactionsProcessorMock:
                     ]
 
             self.status_changed_event.set()
+            self.commit(transaction)
 
     def wait_for_status_change(self, timeout: float = 0.1) -> bool:
         result = self.status_changed_event.wait(timeout)
@@ -80,6 +91,7 @@ class TransactionsProcessorMock:
     def set_transaction_result(self, transaction_hash: str, consensus_data: dict):
         transaction = self.get_transaction_by_hash(transaction_hash)
         transaction["consensus_data"] = consensus_data
+        self.commit(transaction)
 
     def set_transaction_appeal(self, transaction_hash: str, appeal: bool):
         transaction = self.get_transaction_by_hash(transaction_hash)
@@ -89,10 +101,12 @@ class TransactionsProcessorMock:
             TransactionStatus.ACCEPTED.value,
             TransactionStatus.UNDETERMINED.value,
             TransactionStatus.LEADER_TIMEOUT.value,
+            TransactionStatus.VALIDATORS_TIMEOUT.value,
         ):
             self.set_transaction_timestamp_appeal(transaction, int(time.time()))
             time.sleep(1)
             transaction["appealed"] = appeal
+        self.commit(transaction)
 
     def set_transaction_timestamp_awaiting_finalization(
         self, transaction_hash: str, timestamp_awaiting_finalization: int = None
@@ -104,14 +118,16 @@ class TransactionsProcessorMock:
             )
         else:
             transaction["timestamp_awaiting_finalization"] = int(time.time())
+        self.commit(transaction)
 
     def get_awaiting_finalization_transactions(self):
         awaiting_finalization_transactions = []
-        for transaction in self.transactions:
+        for transaction in self.transactions.values():
             if (
                 (transaction["status"] == TransactionStatus.ACCEPTED.value)
                 or (transaction["status"] == TransactionStatus.UNDETERMINED.value)
                 or (transaction["status"] == TransactionStatus.LEADER_TIMEOUT.value)
+                or (transaction["status"] == TransactionStatus.VALIDATORS_TIMEOUT.value)
             ):
                 awaiting_finalization_transactions.append(transaction)
 
@@ -131,16 +147,18 @@ class TransactionsProcessorMock:
             raise ValueError("appeal_failed must be a non-negative integer")
         transaction = self.get_transaction_by_hash(transaction_hash)
         transaction["appeal_failed"] = appeal_failed
+        self.commit(transaction)
 
     def set_transaction_appeal_undetermined(
         self, transaction_hash: str, appeal_undetermined: bool
     ):
         transaction = self.get_transaction_by_hash(transaction_hash)
         transaction["appeal_undetermined"] = appeal_undetermined
+        self.commit(transaction)
 
     def get_pending_transactions(self):
         result = []
-        for transaction in self.transactions:
+        for transaction in self.transactions.values():
             if transaction["status"] == TransactionStatus.PENDING.value:
                 result.append(transaction)
         return sorted(result, key=lambda x: x["created_at"])
@@ -149,7 +167,7 @@ class TransactionsProcessorMock:
         current_transaction = self.get_transaction_by_hash(transaction_hash)
 
         result = []
-        for transaction in self.transactions:
+        for transaction in self.transactions.values():
             if (transaction["created_at"] > current_transaction["created_at"]) and (
                 transaction["to_address"] == current_transaction["to_address"]
             ):
@@ -159,7 +177,7 @@ class TransactionsProcessorMock:
     def update_consensus_history(
         self,
         transaction_hash: str,
-        consensus_round: str,
+        consensus_round: ConsensusRound,
         leader_result: list[Receipt] | None,
         validator_results: list[Receipt],
         extra_status_change: TransactionStatus | None = None,
@@ -175,7 +193,7 @@ class TransactionsProcessorMock:
             status_changes_to_use.append(extra_status_change.value)
 
         current_consensus_results = {
-            "consensus_round": consensus_round,
+            "consensus_round": consensus_round.value,
             "leader_result": (
                 [receipt.to_dict() for receipt in leader_result]
                 if leader_result
@@ -194,6 +212,7 @@ class TransactionsProcessorMock:
             ]
 
         transaction["consensus_history"]["current_status_changes"] = []
+        self.commit(transaction)
 
     def set_transaction_timestamp_appeal(
         self, transaction: dict | str, timestamp_appeal: int
@@ -201,22 +220,26 @@ class TransactionsProcessorMock:
         if isinstance(transaction, str):  # hash
             transaction = self.get_transaction_by_hash(transaction)
         transaction["timestamp_appeal"] = timestamp_appeal
+        self.commit(transaction)
 
     def set_transaction_appeal_processing_time(self, transaction_hash: str):
         transaction = self.get_transaction_by_hash(transaction_hash)
         transaction["appeal_processing_time"] += (
             round(time.time()) - transaction["timestamp_appeal"]
         )
+        self.commit(transaction)
 
     def reset_transaction_appeal_processing_time(self, transaction_hash: str):
         transaction = self.get_transaction_by_hash(transaction_hash)
         transaction["appeal_processing_time"] = 0
+        self.commit(transaction)
 
     def set_transaction_contract_snapshot(
         self, transaction_hash: str, contract_snapshot: dict
     ):
         transaction = self.get_transaction_by_hash(transaction_hash)
         transaction["contract_snapshot"] = contract_snapshot
+        self.commit(transaction)
 
     def get_previous_transaction(
         self,
@@ -243,11 +266,21 @@ class TransactionsProcessorMock:
     ) -> bool:
         transaction = self.get_transaction_by_hash(transaction_hash)
         transaction["appeal_leader_timeout"] = appeal_leader_timeout
+        self.commit(transaction)
         return appeal_leader_timeout
 
     def set_leader_timeout_validators(self, transaction_hash: str, validators: list):
         transaction = self.get_transaction_by_hash(transaction_hash)
         transaction["leader_timeout_validators"] = validators
+        self.commit(transaction)
+
+    def set_transaction_appeal_validators_timeout(
+        self, transaction_hash: str, appeal_validators_timeout: bool
+    ) -> bool:
+        transaction = self.get_transaction_by_hash(transaction_hash)
+        transaction["appeal_validators_timeout"] = appeal_validators_timeout
+        self.commit(transaction)
+        return appeal_validators_timeout
 
 
 class SnapshotMock:
@@ -400,6 +433,7 @@ def transaction_to_dict(transaction: Transaction) -> dict:
         "rotation_count": transaction.rotation_count,
         "appeal_leader_timeout": transaction.appeal_leader_timeout,
         "leader_timeout_validators": transaction.leader_timeout_validators,
+        "appeal_validators_timeout": transaction.appeal_validators_timeout,
     }
 
 
