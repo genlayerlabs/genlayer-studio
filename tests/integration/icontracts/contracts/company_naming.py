@@ -56,18 +56,16 @@ This result should be perfectly parseable by a JSON parser without errors.
         def validator_fn(
             leaders_res: gl.vm.Result,
         ) -> bool:
-            leaders_res = gl.vm.unpack_result(leaders_res)
-            validators_res = gl.vm.spawn_sandbox(leader_fn)
-            validators_res = gl.vm.unpack_result(validators_res)
-            result = (
-                abs(validators_res["score"] - leaders_res["score"])
+            validators_res = leader_fn()
+            if not isinstance(leaders_res, gl.vm.Return):
+                return False
+            return (
+                abs(validators_res["score"] - leaders_res.calldata["score"])
                 <= MAX_SCORE_DIFFERENCE
             )
-            return result
 
         analysis = gl.vm.run_nondet(leader_fn, validator_fn)
 
-        # Store the result
         score = analysis["score"]
         self.scores[company_name] = score
 
