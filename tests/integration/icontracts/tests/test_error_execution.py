@@ -84,12 +84,15 @@ def _run_testcase(setup_validators, testcase: ErrorType):
         else:
             args = [int(testcase)]
 
-        factory.deploy(args=args)
+        if testcase == ErrorType.INFINITE_LOOP:
+            factory.deploy(args=args, wait_interval=20000, wait_retries=20)
+        else:
+            factory.deploy(args=args)
     except DeploymentError as e:
         tx_receipt = _deployment_error_to_tx_receipt(e)
 
         if testcase == ErrorType.INFINITE_LOOP:
-            _check_last_round(tx_receipt, "LeaderTimeout")
+            _check_last_round(tx_receipt, "Leader Timeout")
 
         else:
             _check_result(tx_receipt, testcase.value)
@@ -136,11 +139,6 @@ def test_infinite_loop(setup_validators):
     _run_testcase(setup_validators, ErrorType.INFINITE_LOOP)
 
 
-#     # tx goes to LEADER_TIMEOUT state. gltest deploy timeout kicks in so test fails before going to leader timeout state.
-#     # genvm_result: "stdout": "", "stderr": ""
-#     # TODO: fix this
-
-
 def test_invalid_bytecode(setup_validators):
     _run_testcase(setup_validators, ErrorType.SYNTAX_ERROR)
 
@@ -155,7 +153,3 @@ def test_contract_state_value_corruption(setup_validators):
 
 def test_cross_contract_call_errors(setup_validators):
     _run_testcase(setup_validators, ErrorType.ATTRIBUTE_ERROR_2)
-
-
-# TODO: add a testcase related to contract state not available when modifying it to test db connectivity
-# TODO: make testcase from hosted studio issue
