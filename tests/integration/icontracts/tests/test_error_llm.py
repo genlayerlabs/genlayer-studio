@@ -7,6 +7,8 @@ from tests.integration.icontracts.tests.test_error_execution import (
     _deployment_error_to_tx_receipt,
     _check_result,
 )
+from backend.node.types import ExecutionResultStatus
+import base64
 
 
 def test_llm_invalid_api_key():
@@ -35,14 +37,30 @@ def test_llm_invalid_api_key():
     except DeploymentError as e:
         tx_receipt = _deployment_error_to_tx_receipt(e)
 
+        receipt = tx_receipt["consensus_data"]["leader_receipt"][0]
+        assert ExecutionResultStatus.ERROR.value == receipt["execution_result"]
+        assert "invalid_api_key" in receipt["genvm_result"]["stderr"]
+
+        receipt = tx_receipt["consensus_data"]["leader_receipt"][1]
+        assert ExecutionResultStatus.ERROR.value == receipt["execution_result"]
+        assert "deterministic_violation" in receipt["result"]["payload"]
+
+        for i in range(4):
+            receipt = tx_receipt["consensus_data"]["validators"][i]
+            assert ExecutionResultStatus.ERROR.value == receipt["execution_result"]
+            assert "deterministic_violation" in base64.b64decode(
+                receipt["result"]
+            ).decode("utf-8")
+
+        assert (
+            tx_receipt["consensus_history"]["consensus_results"][-1]["consensus_round"]
+            == "Undetermined"
+        )
+
     delete_validators_result = post_request_localhost(
         payload("sim_deleteAllValidators")
     ).json()
     assert has_success_status(delete_validators_result)
-
-    # "error":{"causes":["ModuleError { causes: [\"STATUS_NOT_OK\"], fatal: true, ctx: {\"body\": Map({\"error\": Map({\"code\": Str(\"invalid_api_key\"), \"message\": Str(\"Incorrect API key provided: sk-ant
-    # consensus is stuck
-    # TODO: fix this
 
 
 def test_llm_invalid_unknown_key():
@@ -71,14 +89,30 @@ def test_llm_invalid_unknown_key():
     except DeploymentError as e:
         tx_receipt = _deployment_error_to_tx_receipt(e)
 
+        receipt = tx_receipt["consensus_data"]["leader_receipt"][0]
+        assert ExecutionResultStatus.ERROR.value == receipt["execution_result"]
+        assert "GenVM internal error" in receipt["genvm_result"]["stderr"]
+
+        receipt = tx_receipt["consensus_data"]["leader_receipt"][1]
+        assert ExecutionResultStatus.ERROR.value == receipt["execution_result"]
+        assert "deterministic_violation" in receipt["result"]["payload"]
+
+        for i in range(4):
+            receipt = tx_receipt["consensus_data"]["validators"][i]
+            assert ExecutionResultStatus.ERROR.value == receipt["execution_result"]
+            assert "deterministic_violation" in base64.b64decode(
+                receipt["result"]
+            ).decode("utf-8")
+
+        assert (
+            tx_receipt["consensus_history"]["consensus_results"][-1]["consensus_round"]
+            == "Undetermined"
+        )
+
     delete_validators_result = post_request_localhost(
         payload("sim_deleteAllValidators")
     ).json()
     assert has_success_status(delete_validators_result)
-
-    # lib.get_first_from_table(llm.providers[provider_id].models).key gives an error. Model not registered because unknown key.
-    # consensus is stuck
-    # TODO: fix this
 
 
 def test_gpt4_json_not_supported():
@@ -124,7 +158,27 @@ def test_gpt4_json_not_supported():
     transaction_response_call_1 = contract.ask_for_coin(
         args=["Can you please give me my coin?"]
     )
-    assert tx_execution_succeeded(transaction_response_call_1)
+
+    receipt = transaction_response_call_1["consensus_data"]["leader_receipt"][0]
+    # assert ExecutionResultStatus.ERROR.value == receipt["execution_result"]
+    # assert "response_format" in receipt["genvm_result"]["stderr"]
+    # TODO: fix this. Somehow the leader is successful in the consensus data while it actually returned an error.
+
+    receipt = transaction_response_call_1["consensus_data"]["leader_receipt"][1]
+    assert ExecutionResultStatus.ERROR.value == receipt["execution_result"]
+    assert "response_format" in receipt["genvm_result"]["stderr"]
+
+    for i in range(4):
+        receipt = transaction_response_call_1["consensus_data"]["validators"][i]
+        assert ExecutionResultStatus.ERROR.value == receipt["execution_result"]
+        assert "response_format" in receipt["genvm_result"]["stderr"]
+
+    assert (
+        transaction_response_call_1["consensus_history"]["consensus_results"][-1][
+            "consensus_round"
+        ]
+        == "Undetermined"
+    )
 
     delete_validators_result = post_request_localhost(
         payload("sim_deleteAllValidators")
@@ -135,10 +189,6 @@ def test_gpt4_json_not_supported():
         payload("sim_deleteProvider", result_provider["result"])
     ).json()
     assert has_success_status(delete_provider_result)
-
-    # Genvm: "error":{"causes":["ModuleError { causes: [\"STATUS_NOT_OK\"], fatal: true, ctx: {\"body\": Map({\"error\": Map({\"code\": Null, \"message\": Str(\"Invalid parameter: 'response_format' of type 'json_object' is not supported with this model.\"), \"param\": Str(\"response_format\"), \"type\": Str(\"invalid_request_error\")})})
-    # consensus is stuck
-    # TODO: fix this
 
 
 def test_system_error(setup_validators):

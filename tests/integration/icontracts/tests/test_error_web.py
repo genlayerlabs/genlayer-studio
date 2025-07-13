@@ -47,16 +47,15 @@ def test_web_timeout_error(setup_validators):
     factory = get_contract_factory("ErrorWebContract")
     try:
         factory.deploy(
-            args=[2, " https://flash.siwalik.in/delay/300000/url/https://example.com"]
+            args=[2, " https://flash.siwalik.in/delay/300000/url/https://example.com"],
+            wait_interval=20000,
+            wait_retries=20,
         )
     except DeploymentError as e:
         tx_receipt = _deployment_error_to_tx_receipt(e)
         _check_last_round(
             tx_receipt, "Undetermined"
         )  # validators have a different response than leader due to some timestamps
-
-    # gltest deploy timeout kicks in so test fails before going to undetermined state
-    # TODO: fix this
 
 
 def test_web_404_error(setup_validators):

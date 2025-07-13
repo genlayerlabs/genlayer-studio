@@ -321,19 +321,33 @@ class Node:
                 if n.validator.address == self.validator.address:
                     host_data = n.genvm_host_arg
         result_exec_code: ExecutionResultStatus
-        res = await genvm.run_contract(
-            snapshot_view,
-            contract_address=Address(self.contract_snapshot.contract_address),
-            from_address=Address(from_address),
-            calldata_raw=calldata,
-            is_init=is_init,
-            readonly=readonly,
-            leader_results=leader_res,
-            date=transaction_datetime,
-            chain_id=SIMULATOR_CHAIN_ID,
-            config_path=config_path,
-            host_data=host_data,
-        )
+        try:
+            res = await genvm.run_contract(
+                snapshot_view,
+                contract_address=Address(self.contract_snapshot.contract_address),
+                from_address=Address(from_address),
+                calldata_raw=calldata,
+                is_init=is_init,
+                readonly=readonly,
+                leader_results=leader_res,
+                date=transaction_datetime,
+                chain_id=SIMULATOR_CHAIN_ID,
+                config_path=config_path,
+                host_data=host_data,
+            )
+        except Exception as e:
+            # In case genvm fails, we generate an error receipt
+            res = genvmbase.ExecutionResult(
+                result=genvmbase.ExecutionError(
+                    message="exit_code 1",
+                    kind=genvmbase.ResultCode.VM_ERROR,
+                ),
+                eq_outputs={},
+                pending_transactions=[],
+                stdout="",
+                stderr=str(e),
+                genvm_log=[],
+            )
 
         await self._execution_finished(res, transaction_hash)
 
