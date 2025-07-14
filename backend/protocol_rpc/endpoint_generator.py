@@ -11,10 +11,10 @@ import flask
 from flask_jsonrpc.exceptions import JSONRPCError
 from functools import partial, wraps
 import requests
-import os
 import traceback
 from backend.protocol_rpc.aio import run_in_main_server_loop
 from backend.protocol_rpc.message_handler.base import MessageHandler
+from backend.config.hardhat_config import HardhatConfig
 
 
 def get_json_rpc_method_name(function: Callable, method_name: str | None = None):
@@ -67,9 +67,7 @@ def _decode_exception(x: Exception) -> typing.Any:
 def setup_eth_method_handler(jsonrpc: JSONRPC):
     """Forwards eth_ methods to Hardhat if no own implementation is available"""
     app = jsonrpc.app
-    port = os.environ.get("HARDHAT_PORT")
-    url = os.environ.get("HARDHAT_URL")
-    HARDHAT_URL = f"{url}:{port}"
+    hardhat_url = HardhatConfig.get_full_url()
 
     @app.before_request
     def handle_eth_methods():
@@ -89,7 +87,7 @@ def setup_eth_method_handler(jsonrpc: JSONRPC):
                         try:
                             with requests.Session() as http:
                                 result = http.post(
-                                    HARDHAT_URL,
+                                    hardhat_url,
                                     json=request_json,
                                     headers={"Content-Type": "application/json"},
                                 ).json()

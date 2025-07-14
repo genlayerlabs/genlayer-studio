@@ -1,9 +1,12 @@
 import os
 from typing import Iterable
+from unittest.mock import patch, MagicMock
 
 import pytest
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
+from web3 import Web3
+from web3.providers import BaseProvider
 
 from backend.database_handler.models import Base
 from backend.database_handler.transactions_processor import TransactionsProcessor
@@ -41,4 +44,15 @@ def session(engine: Engine) -> Iterable[Session]:
 
 @pytest.fixture
 def transactions_processor(session: Session) -> Iterable[TransactionsProcessor]:
-    yield TransactionsProcessor(session)
+    # Create a mock Web3 instance with proper provider
+    mock_provider = MagicMock(spec=BaseProvider)
+    web3_instance = Web3(mock_provider)
+    web3_instance.eth = MagicMock()
+    web3_instance.eth.accounts = ["0x0000000000000000000000000000000000000000"]
+
+    # Patch HardhatConfig.get_web3_instance to return our mock
+    with patch(
+        "backend.database_handler.transactions_processor.HardhatConfig.get_web3_instance",
+        return_value=web3_instance,
+    ):
+        yield TransactionsProcessor(session)

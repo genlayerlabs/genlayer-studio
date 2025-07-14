@@ -1,7 +1,6 @@
-from web3 import Web3
 import json
 from eth_account import Account
-import os
+from backend.config.hardhat_config import HardhatConfig
 
 
 def test_eth_account():
@@ -41,8 +40,7 @@ def connect_to_hardhat():
     Raises:
         Exception: If the connection to the Hardhat network fails.
     """
-    hardhat_url = os.environ.get("HARDHAT_URL")
-    web3 = Web3(Web3.HTTPProvider(hardhat_url))
+    web3 = HardhatConfig.get_web3_instance()
 
     # Check connection
     if not web3.is_connected():

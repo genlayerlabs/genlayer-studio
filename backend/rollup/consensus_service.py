@@ -1,6 +1,4 @@
 import json
-import os
-from web3 import Web3
 from typing import Optional, Dict, Any
 from pathlib import Path
 from hexbytes import HexBytes
@@ -9,6 +7,7 @@ import re
 from backend.rollup.default_contracts.consensus_main import (
     get_default_consensus_main_contract,
 )
+from backend.config.hardhat_config import HardhatConfig
 
 
 class ConsensusService:
@@ -17,10 +16,7 @@ class ConsensusService:
         Initialize the ConsensusService class
         """
         # Connect to Hardhat Network
-        port = os.environ.get("HARDHAT_PORT")
-        url = os.environ.get("HARDHAT_URL")
-        hardhat_url = f"{url}:{port}"
-        self.web3 = Web3(Web3.HTTPProvider(hardhat_url))
+        self.web3 = HardhatConfig.get_web3_instance()
 
         self.web3_connected = self.web3.is_connected()
 
