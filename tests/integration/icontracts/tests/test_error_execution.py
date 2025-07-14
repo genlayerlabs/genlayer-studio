@@ -93,7 +93,12 @@ def _run_testcase(setup_validators, testcase: ErrorType):
 
         if testcase == ErrorType.INFINITE_LOOP:
             _check_last_round(tx_receipt, "Leader Timeout")
-
+        elif testcase == ErrorType.MEMORY_ERROR:
+            receipt_leader = tx_receipt["consensus_data"]["leader_receipt"][0]
+            assert (
+                ExecutionResultStatus.ERROR.value == receipt_leader["execution_result"]
+            )
+            assert testcase.value in receipt_leader["genvm_result"]["stderr"]
         else:
             _check_result(tx_receipt, testcase.value)
 
@@ -124,11 +129,6 @@ def test_contract_error(setup_validators):
 
 def test_memory_allocation_error(setup_validators):
     _run_testcase(setup_validators, ErrorType.MEMORY_ERROR)
-
-
-#     # Issue: second validator does not execute it, tx get stuck in committed state.
-#     # Problem: is asyncio.Semaphore(8) in consensus. When put on 1 then it is not stuck. gltest deploy timeout kicks in so tx cannot finalize
-#     # TODO: fix this
 
 
 def test_stack_overflow(setup_validators):

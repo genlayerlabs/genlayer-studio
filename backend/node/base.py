@@ -340,7 +340,7 @@ class Node:
             res = genvmbase.ExecutionResult(
                 result=genvmbase.ExecutionError(
                     message="exit_code 1",
-                    kind=genvmbase.ResultCode.VM_ERROR,
+                    kind=genvmbase.ResultCode.INTERNAL_ERROR,
                 ),
                 eq_outputs={},
                 pending_transactions=[],

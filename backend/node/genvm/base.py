@@ -31,7 +31,9 @@ from .origin.host_fns import Errors
 @dataclass
 class ExecutionError:
     message: str
-    kind: typing.Literal[ResultCode.USER_ERROR, ResultCode.VM_ERROR]
+    kind: typing.Literal[
+        ResultCode.USER_ERROR, ResultCode.VM_ERROR, ResultCode.INTERNAL_ERROR
+    ]
 
     def __repr__(self):
         return json.dumps({"kind": self.kind.name, "message": self.message})
