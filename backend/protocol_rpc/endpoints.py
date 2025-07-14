@@ -9,6 +9,7 @@ from flask_jsonrpc.exceptions import JSONRPCError
 from sqlalchemy import Table
 from sqlalchemy.orm import Session
 import backend.validators as validators
+from backend.config.hardhat_config import HardhatConfig
 
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.database_handler.llm_providers import LLMProviderRegistry
@@ -879,8 +880,39 @@ def get_gas_price() -> str:
 
 
 def get_gas_estimate(data: Any) -> str:
-    gas_price_in_wei = 30 * 10**6
-    return hex(gas_price_in_wei)
+    """
+    Estimate gas for a transaction using Hardhat service.
+    Falls back to a default value if the estimation fails.
+    """
+    fallback_gas_estimate = 30 * 10**6
+
+    try:
+        web3 = HardhatConfig.get_web3_instance()
+        tx_params = {}
+        if isinstance(data, dict):
+            if "from" in data:
+                tx_params["from"] = data["from"]
+            if "to" in data:
+                tx_params["to"] = data["to"]
+            # Handle both 'data' and 'input' fields (some clients use 'input' instead of 'data')
+            if "data" in data:
+                tx_params["data"] = data["data"]
+            elif "input" in data:
+                tx_params["data"] = data["input"]
+            if "value" in data:
+                tx_params["value"] = (
+                    int(data["value"], 16)
+                    if isinstance(data["value"], str)
+                    else data["value"]
+                )
+        if tx_params:
+            gas_estimate = web3.eth.estimate_gas(tx_params)
+            return hex(gas_estimate)
+        else:
+            return hex(fallback_gas_estimate)
+
+    except Exception:
+        return hex(fallback_gas_estimate)
 
 
 def get_transaction_receipt(
