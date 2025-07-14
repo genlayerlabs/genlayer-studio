@@ -24,6 +24,7 @@ export default defineConfig(({ mode }) => {
         'studio.genlayer.com',
         'studio-stage.genlayer.com',
         'studio-dev.genlayer.com',
+        'collective-memory.genlayer.com',
       ],
     },
     server: {
