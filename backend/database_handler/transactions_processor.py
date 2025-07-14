@@ -15,7 +15,7 @@ import base64
 import time
 from backend.domain.types import TransactionType
 from web3 import Web3
-import os
+from backend.config.hardhat_config import HardhatConfig
 
 
 class TransactionAddressFilter(Enum):
@@ -105,10 +105,7 @@ class TransactionsProcessor:
         self.session = session
 
         # Connect to Hardhat Network
-        port = os.environ.get("HARDHAT_PORT")
-        url = os.environ.get("HARDHAT_URL")
-        hardhat_url = f"{url}:{port}"
-        self.web3 = Web3(Web3.HTTPProvider(hardhat_url))
+        self.web3 = HardhatConfig.get_web3_instance()
 
     @staticmethod
     def _parse_transaction_data(transaction_data: Transactions) -> dict:

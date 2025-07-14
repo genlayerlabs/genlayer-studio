@@ -1,20 +1,15 @@
-from sqlalchemy.orm import Session
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import os
 import math
 from datetime import datetime
-from web3 import Web3
-from web3.providers import BaseProvider
 
-from backend.database_handler.chain_snapshot import ChainSnapshot
-from backend.database_handler.models import Transactions
 from backend.database_handler.transactions_processor import TransactionStatus
 from backend.database_handler.transactions_processor import TransactionsProcessor
 
 
 @pytest.fixture(autouse=True)
-def mock_env_and_web3():
+def mock_env():
     with patch.dict(
         os.environ,
         {
@@ -22,15 +17,8 @@ def mock_env_and_web3():
             "HARDHAT_URL": "http://localhost",
             "HARDHAT_PRIVATE_KEY": "0x0123456789",
         },
-    ), patch("web3.Web3.HTTPProvider"):
-        web3_instance = Web3(MagicMock(spec=BaseProvider))
-        web3_instance.eth = MagicMock()
-        web3_instance.eth.accounts = ["0x0000000000000000000000000000000000000000"]
-        with patch(
-            "backend.database_handler.transactions_processor.Web3",
-            return_value=web3_instance,
-        ):
-            yield
+    ):
+        yield
 
 
 def test_transactions_processor(transactions_processor: TransactionsProcessor):

@@ -30,4 +30,5 @@ services:
       hardhat:
         condition: service_healthy
     environment:
-      - HARDHAT_URL=http://hardhat:8545
+      - HARDHAT_URL=http://hardhat
+      - HARDHAT_PORT=8545
