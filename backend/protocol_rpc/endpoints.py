@@ -510,7 +510,9 @@ async def gen_call(
         validators_manager,
         params,
     )
-    return eth_utils.hexadecimal.encode_hex(receipt.result[1:])[2:]
+    result = eth_utils.hexadecimal.encode_hex(receipt.result[1:])[2:]
+    print("bla", result, receipt.result)
+    return result
 
 
 async def sim_call(
@@ -602,7 +604,7 @@ async def _gen_call_with_validator(
         raise JSONRPCError(f"Invalid type: {type}")
 
     # Return the result of the write method
-    if receipt.execution_result != ExecutionResultStatus.SUCCESS:
+    if type != "read" and receipt.execution_result != ExecutionResultStatus.SUCCESS:
         raise JSONRPCError(
             message="running contract failed", data={"receipt": receipt.to_dict()}
         )

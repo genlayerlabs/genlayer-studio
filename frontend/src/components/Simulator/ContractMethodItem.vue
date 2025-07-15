@@ -73,11 +73,11 @@ const handleCallReadMethod = async () => {
     responseMessageAccepted.value =
       acceptedMsg.status === 'fulfilled' && acceptedMsg.value !== undefined
         ? formatResponseIfNeeded(abi.calldata.toString(acceptedMsg.value))
-        : `failed: ${acceptedMsg}`;
+        : '';
     responseMessageFinalized.value =
       finalizedMsg.status === 'fulfilled' && finalizedMsg.value !== undefined
         ? formatResponseIfNeeded(abi.calldata.toString(finalizedMsg.value))
-        : `failed: ${finalizedMsg}`;
+        : '';
 
     trackEvent('called_read_method', {
       contract_name: contract.value?.name || '',
@@ -185,26 +185,23 @@ const handleCallWriteMethod = async () => {
           v-if="responseMessageAccepted || responseMessageFinalized"
           class="w-full break-all text-sm"
         >
-          <div v-if="responseMessageAccepted" class="mb-1 text-xs font-medium">
-            Response Accepted:
+          <div v-if="responseMessageAccepted">
+            <div class="mb-1 text-xs font-medium">Response Accepted:</div>
+            <div
+              :data-testid="`method-response-${name}`"
+              class="w-full whitespace-pre-wrap rounded bg-white p-1 font-mono text-xs dark:bg-slate-600"
+            >
+              {{ responseMessageAccepted }}
+            </div>
           </div>
-          <div
-            :data-testid="`method-response-${name}`"
-            class="w-full whitespace-pre-wrap rounded bg-white p-1 font-mono text-xs dark:bg-slate-600"
-          >
-            {{ responseMessageAccepted }}
-          </div>
-          <div
-            v-if="responseMessageFinalized"
-            class="mb-1 mt-4 text-xs font-medium"
-          >
-            Response Finalized:
-          </div>
-          <div
-            :data-testid="`method-response-${name}`"
-            class="w-full whitespace-pre-wrap rounded bg-white p-1 font-mono text-xs dark:bg-slate-600"
-          >
-            {{ responseMessageFinalized }}
+          <div v-if="responseMessageFinalized">
+            <div class="mb-1 mt-4 text-xs font-medium">Response Finalized:</div>
+            <div
+              :data-testid="`method-response-${name}`"
+              class="w-full whitespace-pre-wrap rounded bg-white p-1 font-mono text-xs dark:bg-slate-600"
+            >
+              {{ responseMessageFinalized }}
+            </div>
           </div>
         </div>
       </div>
