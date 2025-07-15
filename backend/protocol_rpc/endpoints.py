@@ -510,9 +510,7 @@ async def gen_call(
         validators_manager,
         params,
     )
-    result = eth_utils.hexadecimal.encode_hex(receipt.result[1:])[2:]
-    print("bla", result, receipt.result)
-    return result
+    return eth_utils.hexadecimal.encode_hex(receipt.result[1:])[2:]
 
 
 async def sim_call(
