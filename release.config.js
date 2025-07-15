@@ -29,6 +29,12 @@ module.exports = {
                 },
             }
         ],
+        [
+            "@semantic-release/npm",
+            {
+                "pkgRoot": "frontend"
+            }
+        ],
         '@semantic-release/github',
     ]
 };
