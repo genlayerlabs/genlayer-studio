@@ -21,10 +21,8 @@ export default defineConfig(({ mode }) => {
       port: 8080,
       strictPort: true,
       allowedHosts: [
-        'studio.genlayer.com',
-        'studio-stage.genlayer.com',
-        'studio-dev.genlayer.com',
-        'collective-memory.genlayer.com',
+        '.genlayer.com', // match all genlayer.com sub-domains
+        '.genlayerlabs.com', // match all genlayerlabs.com sub-domains
       ],
     },
     server: {
