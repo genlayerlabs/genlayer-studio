@@ -68,8 +68,6 @@ const handleCallReadMethod = async () => {
       ),
     ]);
 
-    console.log('handleCallReadMethod', acceptedMsg, finalizedMsg);
-
     responseMessageAccepted.value =
       acceptedMsg.status === 'fulfilled' && acceptedMsg.value !== undefined
         ? formatResponseIfNeeded(abi.calldata.toString(acceptedMsg.value))
