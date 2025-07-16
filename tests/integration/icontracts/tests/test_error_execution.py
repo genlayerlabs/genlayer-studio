@@ -55,7 +55,7 @@ def _check_result(tx_receipt: dict, error_string: str):
     assert (
         tx_receipt["consensus_history"]["consensus_results"][-1]["consensus_round"]
         == "Accepted"
-    )  # TODO: tx is accepted. Shouldn't it be undetermined?
+    )
 
 
 def _check_last_round(tx_receipt: dict, expected_round: str):
