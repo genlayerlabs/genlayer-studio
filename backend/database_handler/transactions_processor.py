@@ -16,49 +16,14 @@ import time
 from backend.domain.types import TransactionType
 from web3 import Web3
 import os
+from backend.consensus.types import ConsensusRound
+from backend.consensus.utils import determine_consensus_from_votes
 
 
 class TransactionAddressFilter(Enum):
     ALL = "all"
     TO = "to"
     FROM = "from"
-
-
-def vote_name_to_number(vote_name: str | None) -> int:
-    """Convert vote name to numeric code.
-
-    Args:
-        vote_name: Vote name (AGREE, DISAGREE, etc.)
-
-    Returns:
-        int: Numeric vote code (1=AGREE, 2=DISAGREE, 0=other)
-    """
-    if vote_name is None:
-        return 0
-    if vote_name.lower() == Vote.AGREE.value:
-        return 1
-    if vote_name.lower() == Vote.DISAGREE.value:
-        return 2
-    return 0
-
-
-def votes_to_result(votes: list) -> str:
-    """Determine consensus result from vote list.
-
-    Args:
-        votes: List of vote strings
-
-    Returns:
-        tuple: (result_code, result_name)
-    """
-    if len(votes) == 0:
-        return "5", "NO_MAJORITY"
-    if (
-        len([vote for vote in votes if vote.lower() == Vote.AGREE.value])
-        > len(votes) // 2
-    ):
-        return "6", "MAJORITY_AGREE"
-    return "7", "MAJORITY_DISAGREE"
 
 
 def get_validator_vote_hash(validator_address: str, vote_type: int, nonce: int) -> str:
@@ -160,6 +125,7 @@ class TransactionsProcessor:
             "rotation_count": transaction_data.rotation_count,
             "appeal_leader_timeout": transaction_data.appeal_leader_timeout,
             "leader_timeout_validators": transaction_data.leader_timeout_validators,
+            "appeal_validators_timeout": transaction_data.appeal_validators_timeout,
         }
 
     @staticmethod
@@ -314,6 +280,7 @@ class TransactionsProcessor:
             rotation_count=0,
             appeal_leader_timeout=False,
             leader_timeout_validators=None,
+            appeal_validators_timeout=False,
         )
 
         self.session.add(new_transaction)
@@ -344,7 +311,7 @@ class TransactionsProcessor:
             if "leader_result" in last_round and last_round["leader_result"]:
                 leader = last_round["leader_result"][1]
                 validator_votes_name.append(leader["vote"].upper())
-                vote_number = vote_name_to_number(leader["vote"])
+                vote_number = int(Vote.from_string(leader["vote"]))
                 validator_votes.append(vote_number)
                 leader_address = leader["node_config"]["address"]
                 validator_votes_hash.append(
@@ -356,7 +323,7 @@ class TransactionsProcessor:
 
             for validator in last_round["validator_results"]:
                 validator_votes_name.append(validator["vote"].upper())
-                vote_number = vote_name_to_number(validator["vote"])
+                vote_number = int(Vote.from_string(validator["vote"]))
                 validator_votes.append(vote_number)
                 validator_address = validator["node_config"]["address"]
                 validator_votes_hash.append(
@@ -367,7 +334,11 @@ class TransactionsProcessor:
                 round_validators.append(validator_address)
         else:
             round_number = "0"
-        last_round_result, _ = votes_to_result(validator_votes_name)
+        last_round_result = int(
+            determine_consensus_from_votes(
+                [vote.lower() for vote in validator_votes_name]
+            )
+        )
 
         transaction_data["last_round"] = {
             "round": round_number,
@@ -448,14 +419,17 @@ class TransactionsProcessor:
         if (
             transaction_data["consensus_data"] is not None
             and "leader_receipt" in transaction_data["consensus_data"]
-            and "node_config" in transaction_data["consensus_data"]["leader_receipt"][0]
+            and len(transaction_data["consensus_data"]["leader_receipt"]) > 1
+            and "node_config" in transaction_data["consensus_data"]["leader_receipt"][1]
         ):
             transaction_data["tx_execution_hash"] = get_tx_execution_hash(
-                transaction_data["consensus_data"]["leader_receipt"][0]["node_config"][
+                transaction_data["consensus_data"]["leader_receipt"][1]["node_config"][
                     "address"
                 ],
-                vote_name_to_number(
-                    transaction_data["consensus_data"]["leader_receipt"][0]["vote"]
+                int(
+                    Vote.from_string(
+                        transaction_data["consensus_data"]["leader_receipt"][1]["vote"]
+                    )
                 ),
             )
         else:
@@ -565,12 +539,12 @@ class TransactionsProcessor:
         if (transaction_data["consensus_data"] is not None) and (
             "votes" in transaction_data["consensus_data"]
         ):
-            votes_temp = transaction_data["consensus_data"]["votes"].values()
+            votes_temp = list(transaction_data["consensus_data"]["votes"].values())
         else:
             votes_temp = []
-        transaction_data["result"], transaction_data["result_name"] = votes_to_result(
-            votes_temp
-        )
+        consensus_result = determine_consensus_from_votes(votes_temp)
+        transaction_data["result"] = int(consensus_result)
+        transaction_data["result_name"] = consensus_result.value
         return transaction_data
 
     def get_transaction_by_hash(self, transaction_hash: str) -> dict | None:
@@ -678,6 +652,7 @@ class TransactionsProcessor:
             TransactionStatus.ACCEPTED,
             TransactionStatus.UNDETERMINED,
             TransactionStatus.LEADER_TIMEOUT,
+            TransactionStatus.VALIDATORS_TIMEOUT,
         ):
             transaction.appealed = appeal
             self.set_transaction_timestamp_appeal(transaction, int(time.time()))
@@ -782,7 +757,7 @@ class TransactionsProcessor:
     def update_consensus_history(
         self,
         transaction_hash: str,
-        consensus_round: str,
+        consensus_round: ConsensusRound,
         leader_result: list[Receipt] | None,
         validator_results: list[Receipt],
         extra_status_change: TransactionStatus | None = None,
@@ -800,7 +775,7 @@ class TransactionsProcessor:
             status_changes_to_use.append(extra_status_change.value)
 
         current_consensus_results = {
-            "consensus_round": consensus_round,
+            "consensus_round": consensus_round.value,
             "leader_result": (
                 [receipt.to_dict() for receipt in leader_result]
                 if leader_result
@@ -1018,3 +993,13 @@ class TransactionsProcessor:
         )
         transaction.leader_timeout_validators = validators
         self.session.commit()
+
+    def set_transaction_appeal_validators_timeout(
+        self, transaction_hash: str, appeal_validators_timeout: bool
+    ) -> bool:
+        transaction = (
+            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        )
+        transaction.appeal_validators_timeout = appeal_validators_timeout
+        self.session.commit()
+        return appeal_validators_timeout
