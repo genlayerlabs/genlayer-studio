@@ -22,7 +22,7 @@
     },
     "plugin": {
       "$comment": "Plugin to be loaded by the Studio to interact with the provider",
-      "enum": ["openai-compatible", "ollama", "anthropic", "google"]
+      "enum": ["openai-compatible", "ollama", "anthropic", "google", "custom"]
     },
     "plugin_config": {
       "type": "object"
@@ -450,6 +450,53 @@
               }
             },
             "required": ["max_tokens"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "plugin": { "const": "custom" }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin_config": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "api_key_env_var": {
+                "type": "string",
+                "$comment": "Environment variable that contains the API key",
+                "minLength": 1
+              },
+              "api_url": {
+                "type": ["string", "null"],
+                "$comment": "URL of the API endpoint"
+              }
+            },
+            "required": ["api_key_env_var", "api_url"]
+          },
+          "config": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "temperature": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "multipleOf": 0.05,
+                "default": 0.75
+              },
+              "max_tokens": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 2000,
+                "multipleOf": 10,
+                "default": 500
+              }
+            }
           }
         }
       }
