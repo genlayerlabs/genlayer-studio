@@ -8,6 +8,7 @@ export const useConsensusStore = defineStore('consensusStore', () => {
   const finalityWindow = ref(Number(import.meta.env.VITE_FINALITY_WINDOW));
   const isLoading = ref<boolean>(true); // Needed for the delay between creating the variable and fetching the initial value
   const maxRotations = ref(Number(import.meta.env.VITE_MAX_ROTATIONS));
+  const maxAppealRound = ref(Number(import.meta.env.VITE_MAX_APPEALS));
 
   if (!webSocketClient.connected) webSocketClient.connect();
 
@@ -39,6 +40,11 @@ export const useConsensusStore = defineStore('consensusStore', () => {
     maxRotations.value = rotations;
   }
 
+  function setMaxAppealRound(appealRound: number) {
+    maxAppealRound.value = appealRound;
+    console.log('maxAppealRound', maxAppealRound.value);
+  }
+
   return {
     finalityWindow,
     setFinalityWindowTime,
@@ -46,5 +52,7 @@ export const useConsensusStore = defineStore('consensusStore', () => {
     isLoading,
     maxRotations,
     setMaxRotations,
+    maxAppealRound,
+    setMaxAppealRound,
   };
 });
