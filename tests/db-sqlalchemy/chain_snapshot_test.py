@@ -32,6 +32,11 @@ def test_chain_snapshot(session: Session):
         appealed=False,
         appeal_undetermined=False,
         timestamp_awaiting_finalization=0,
+        num_of_initial_validators=5,
+        last_vote_timestamp=0,
+        rotation_count=0,
+        appeal_leader_timeout=False,
+        leader_timeout_validators=None,
         # triggered_by_hash=None,
     )
 
@@ -60,6 +65,11 @@ def test_chain_snapshot(session: Session):
         appealed=False,
         appeal_undetermined=False,
         timestamp_awaiting_finalization=0,
+        num_of_initial_validators=5,
+        last_vote_timestamp=0,
+        rotation_count=0,
+        appeal_leader_timeout=False,
+        leader_timeout_validators=None,
         # triggered_by_hash="0xdef",
     )
 
@@ -88,6 +98,11 @@ def test_chain_snapshot(session: Session):
         appealed=False,
         appeal_undetermined=False,
         timestamp_awaiting_finalization=0,
+        num_of_initial_validators=5,
+        last_vote_timestamp=0,
+        rotation_count=0,
+        appeal_leader_timeout=False,
+        leader_timeout_validators=None,
         # triggered_by_hash=None,
     )
 

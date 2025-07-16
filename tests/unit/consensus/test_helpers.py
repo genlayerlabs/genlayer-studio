@@ -5,9 +5,7 @@ from pathlib import Path
 import time
 import threading
 import pytest
-from backend.consensus.base import (
-    ConsensusAlgorithm,
-)
+from backend.consensus.base import ConsensusAlgorithm, DEFAULT_VALIDATORS_COUNT
 from backend.database_handler.transactions_processor import TransactionsProcessor
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.database_handler.models import TransactionStatus
@@ -17,13 +15,13 @@ from backend.node.types import ExecutionMode, ExecutionResultStatus, Receipt, Vo
 from backend.protocol_rpc.message_handler.base import MessageHandler
 import backend.validators as validators
 from typing import Optional
-from backend.rollup.consensus_service import ConsensusService
 from datetime import datetime
 from copy import deepcopy
 
 DEFAULT_FINALITY_WINDOW = 5
 DEFAULT_CONSENSUS_SLEEP_TIME = 2
 DEFAULT_EXEC_RESULT = b"\x00\x00"  # success(null)
+TIMEOUT_EXEC_RESULT = b"\x02timeout"
 
 
 class AccountsManagerMock:
@@ -90,6 +88,7 @@ class TransactionsProcessorMock:
         elif transaction["status"] in (
             TransactionStatus.ACCEPTED.value,
             TransactionStatus.UNDETERMINED.value,
+            TransactionStatus.LEADER_TIMEOUT.value,
         ):
             self.set_transaction_timestamp_appeal(transaction, int(time.time()))
             time.sleep(1)
@@ -106,21 +105,23 @@ class TransactionsProcessorMock:
         else:
             transaction["timestamp_awaiting_finalization"] = int(time.time())
 
-    def get_accepted_undetermined_transactions(self):
-        accepted_undetermined_transactions = []
+    def get_awaiting_finalization_transactions(self):
+        awaiting_finalization_transactions = []
         for transaction in self.transactions:
-            if (transaction["status"] == TransactionStatus.ACCEPTED.value) or (
-                transaction["status"] == TransactionStatus.UNDETERMINED.value
+            if (
+                (transaction["status"] == TransactionStatus.ACCEPTED.value)
+                or (transaction["status"] == TransactionStatus.UNDETERMINED.value)
+                or (transaction["status"] == TransactionStatus.LEADER_TIMEOUT.value)
             ):
-                accepted_undetermined_transactions.append(transaction)
+                awaiting_finalization_transactions.append(transaction)
 
-        accepted_undetermined_transactions = sorted(
-            accepted_undetermined_transactions, key=lambda x: x["created_at"]
+        awaiting_finalization_transactions = sorted(
+            awaiting_finalization_transactions, key=lambda x: x["created_at"]
         )
 
         # Group transactions by address
         transactions_by_address = defaultdict(list)
-        for transaction in accepted_undetermined_transactions:
+        for transaction in awaiting_finalization_transactions:
             address = transaction["to_address"]
             transactions_by_address[address].append(transaction)
         return transactions_by_address
@@ -218,9 +219,35 @@ class TransactionsProcessorMock:
         transaction["contract_snapshot"] = contract_snapshot
 
     def get_previous_transaction(
-        self, transaction_hash: str, status: TransactionStatus | None = None
+        self,
+        transaction_hash: str,
+        status: TransactionStatus | None = None,
+        filter_success: bool = False,
     ) -> None:
         return None
+
+    def set_transaction_timestamp_last_vote(self, transaction_hash: str):
+        transaction = self.get_transaction_by_hash(transaction_hash)
+        transaction["last_vote_timestamp"] = int(time.time())
+
+    def increase_transaction_rotation_count(self, transaction_hash: str):
+        transaction = self.get_transaction_by_hash(transaction_hash)
+        transaction["rotation_count"] += 1
+
+    def reset_transaction_rotation_count(self, transaction_hash: str):
+        transaction = self.get_transaction_by_hash(transaction_hash)
+        transaction["rotation_count"] = 0
+
+    def set_transaction_appeal_leader_timeout(
+        self, transaction_hash: str, appeal_leader_timeout: bool
+    ) -> bool:
+        transaction = self.get_transaction_by_hash(transaction_hash)
+        transaction["appeal_leader_timeout"] = appeal_leader_timeout
+        return appeal_leader_timeout
+
+    def set_leader_timeout_validators(self, transaction_hash: str, validators: list):
+        transaction = self.get_transaction_by_hash(transaction_hash)
+        transaction["leader_timeout_validators"] = validators
 
 
 class SnapshotMock:
@@ -230,8 +257,8 @@ class SnapshotMock:
     def get_pending_transactions(self):
         return self.transactions_processor.get_pending_transactions()
 
-    def get_accepted_undetermined_transactions(self):
-        return self.transactions_processor.get_accepted_undetermined_transactions()
+    def get_awaiting_finalization_transactions(self):
+        return self.transactions_processor.get_awaiting_finalization_transactions()
 
 
 class ContractDB:
@@ -368,6 +395,11 @@ def transaction_to_dict(transaction: Transaction) -> dict:
             else None
         ),
         "config_rotation_rounds": transaction.config_rotation_rounds,
+        "num_of_initial_validators": transaction.num_of_initial_validators,
+        "last_vote_timestamp": transaction.last_vote_timestamp,
+        "rotation_count": transaction.rotation_count,
+        "appeal_leader_timeout": transaction.appeal_leader_timeout,
+        "leader_timeout_validators": transaction.leader_timeout_validators,
     }
 
 
@@ -379,6 +411,7 @@ def init_dummy_transaction(hash: str | None = None):
         status=TransactionStatus.PENDING,
         type=TransactionType.RUN_CONTRACT,
         created_at=datetime.fromtimestamp(time.time()),
+        num_of_initial_validators=DEFAULT_VALIDATORS_COUNT,
     )
 
 
@@ -405,6 +438,7 @@ def node_factory(
     contract_snapshot_factory: Callable[[str], ContractSnapshot],
     snap: validators.Snapshot,
     vote: Vote,
+    timeout: bool,
 ):
     mock = Mock(Node)
 
@@ -429,7 +463,7 @@ def node_factory(
             mode=mode,
             gas_used=0,
             contract_state=contract_state,  # Dynamic contract state based on transaction
-            result=DEFAULT_EXEC_RESULT,
+            result=TIMEOUT_EXEC_RESULT if timeout else DEFAULT_EXEC_RESULT,
             node_config={
                 "address": node["address"],
                 "private_key": node["private_key"],
@@ -488,6 +522,26 @@ def get_validator_addresses(
     }
 
 
+def get_leader_timeout_validators_addresses(
+    transaction: Transaction, transactions_processor: TransactionsProcessor
+):
+    transaction_dict = transactions_processor.get_transaction_by_hash(transaction.hash)
+    return {
+        validator["address"]
+        for validator in transaction_dict["leader_timeout_validators"]
+    }
+
+
+def get_consensus_rounds_names(
+    transaction: Transaction, transactions_processor: TransactionsProcessor
+):
+    transaction_dict = transactions_processor.get_transaction_by_hash(transaction.hash)
+    return [
+        round["consensus_round"]
+        for round in transaction_dict["consensus_history"]["consensus_results"]
+    ]
+
+
 @pytest.fixture
 def consensus_algorithm() -> ConsensusAlgorithm:
     class MessageHandlerMock:
@@ -516,6 +570,7 @@ def setup_test_environment(
     nodes: list,
     created_nodes: list,
     get_vote: Callable[[], Vote],
+    get_timeout: Callable[[], bool] | None = None,
     contract_db: ContractDB | None = None,
 ):
     import contextlib
@@ -567,6 +622,7 @@ def setup_test_environment(
             node_factory(
                 *args,
                 vote=get_vote(),
+                timeout=get_timeout() if get_timeout else False,
             )
         )
         return created_nodes[-1]
