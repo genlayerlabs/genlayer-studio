@@ -1,10 +1,10 @@
 import pytest
 from backend.database_handler.models import TransactionStatus
 from backend.node.types import Vote
-from backend.consensus.base import DEFAULT_VALIDATORS_COUNT
 from tests.unit.consensus.test_helpers import (
     TransactionsProcessorMock,
-    ContractDB,
+    AccountsManagerMock,
+    CurrentStateDB,
     transaction_to_dict,
     init_dummy_transaction,
     get_nodes_specs,
@@ -21,6 +21,9 @@ from tests.unit.consensus.test_helpers import (
     assert_transaction_status_change_and_match,
     check_contract_state,
     check_contract_state_with_timeout,
+    check_account_balance_event_change_with_timeout,
+    submit_transaction,
+    submit_contract,
 )
 
 
@@ -29,27 +32,53 @@ async def test_exec_transaction(consensus_algorithm):
     """
     Minor smoke checks for the happy path of a transaction execution
     """
-    # Initialize transaction, nodes, and get_vote function
     transaction = init_dummy_transaction()
+    transaction.value = 5
     nodes = get_nodes_specs(3)
     created_nodes = []
-    transactions_processor = TransactionsProcessorMock(
-        [transaction_to_dict(transaction)]
-    )
+    transactions_processor = TransactionsProcessorMock()
+    current_state_db = CurrentStateDB()
+    accounts_manager = AccountsManagerMock(current_state_db)
+    EOA_BALANCE = 100
+    accounts_manager.set_account_balance(transaction.from_address, EOA_BALANCE)
+    submit_contract(accounts_manager, transaction.to_address)
 
     def get_vote():
         return Vote.AGREE
 
     # Use the helper function to set up the test environment
     event, *threads = setup_test_environment(
-        consensus_algorithm, transactions_processor, nodes, created_nodes, get_vote
+        consensus_algorithm,
+        transactions_processor,
+        nodes,
+        created_nodes,
+        get_vote,
+        None,
+        current_state_db,
+        accounts_manager,
     )
 
     try:
+        assert (
+            accounts_manager.get_account_balance(transaction.from_address)
+            == EOA_BALANCE
+        )
+        assert accounts_manager.get_account_balance(transaction.to_address) == 0
+        submit_transaction(accounts_manager, transactions_processor, transaction)
+        assert (
+            accounts_manager.get_account_balance(transaction.from_address)
+            == EOA_BALANCE - transaction.value
+        )
         assert_transaction_status_match(
             transactions_processor, transaction, [TransactionStatus.ACCEPTED.value]
         )
         assert len(created_nodes) == len(nodes) + 1
+
+        check_account_balance_event_change_with_timeout(current_state_db)
+        assert (
+            accounts_manager.get_account_balance(transaction.to_address)
+            == transaction.value
+        )
 
         assert_transaction_status_match(
             transactions_processor, transaction, [TransactionStatus.FINALIZED.value]
@@ -75,22 +104,44 @@ async def test_exec_transaction_no_consensus(consensus_algorithm):
     Tests that consensus algorithm correctly rotates the leader when majority of nodes disagree
     """
     transaction = init_dummy_transaction()
+    transaction.value = 5
     rotation_rounds = 2
     transaction.config_rotation_rounds = rotation_rounds
     nodes = get_nodes_specs(transaction.num_of_initial_validators + rotation_rounds)
     created_nodes = []
-    transactions_processor = TransactionsProcessorMock(
-        [transaction_to_dict(transaction)]
-    )
+    transactions_processor = TransactionsProcessorMock()
+    current_state_db = CurrentStateDB()
+    accounts_manager = AccountsManagerMock(current_state_db)
+    EOA_BALANCE = 100
+    accounts_manager.set_account_balance(transaction.from_address, EOA_BALANCE)
+    submit_contract(accounts_manager, transaction.to_address)
 
     def get_vote():
         return Vote.DISAGREE
 
     event, *threads = setup_test_environment(
-        consensus_algorithm, transactions_processor, nodes, created_nodes, get_vote
+        consensus_algorithm,
+        transactions_processor,
+        nodes,
+        created_nodes,
+        get_vote,
+        None,
+        current_state_db,
+        accounts_manager,
     )
 
     try:
+        assert (
+            accounts_manager.get_account_balance(transaction.from_address)
+            == EOA_BALANCE
+        )
+        assert accounts_manager.get_account_balance(transaction.to_address) == 0
+        submit_transaction(accounts_manager, transactions_processor, transaction)
+        assert (
+            accounts_manager.get_account_balance(transaction.from_address)
+            == EOA_BALANCE - transaction.value
+        )
+
         assert_transaction_status_match(
             transactions_processor, transaction, [TransactionStatus.UNDETERMINED.value]
         )
@@ -118,6 +169,13 @@ async def test_exec_transaction_no_consensus(consensus_algorithm):
                 TransactionStatus.FINALIZED,
             ]
         }
+
+        check_account_balance_event_change_with_timeout(current_state_db)
+        assert (
+            accounts_manager.get_account_balance(transaction.from_address)
+            == EOA_BALANCE
+        )
+        assert accounts_manager.get_account_balance(transaction.to_address) == 0
     finally:
         cleanup_threads(event, threads)
 
@@ -182,17 +240,29 @@ async def test_exec_accepted_appeal_fail(consensus_algorithm):
         PROPOSING -> COMMITTING -> REVEALING -> ACCEPTED -appeal-> COMMITTING -> REVEALING -appeal-fail-> ACCEPTED -no-appeal-> FINALIZED
     """
     transaction = init_dummy_transaction()
+    transaction.value = 5
     nodes = get_nodes_specs(2 * transaction.num_of_initial_validators + 2)
     created_nodes = []
-    transactions_processor = TransactionsProcessorMock(
-        [transaction_to_dict(transaction)]
-    )
+    transactions_processor = TransactionsProcessorMock()
+    current_state_db = CurrentStateDB()
+    accounts_manager = AccountsManagerMock(current_state_db)
+    EOA_BALANCE = 100
+    accounts_manager.set_account_balance(transaction.from_address, EOA_BALANCE)
+    submit_contract(accounts_manager, transaction.to_address)
+    submit_transaction(accounts_manager, transactions_processor, transaction)
 
     def get_vote():
         return Vote.AGREE
 
     event, *threads = setup_test_environment(
-        consensus_algorithm, transactions_processor, nodes, created_nodes, get_vote
+        consensus_algorithm,
+        transactions_processor,
+        nodes,
+        created_nodes,
+        get_vote,
+        None,
+        current_state_db,
+        accounts_manager,
     )
 
     try:
@@ -207,10 +277,15 @@ async def test_exec_accepted_appeal_fail(consensus_algorithm):
             ]
         )
 
+        check_account_balance_event_change_with_timeout(current_state_db)
+        assert accounts_manager.get_account_balance(transaction.to_address) == 5
+
         appeal(transaction, transactions_processor)
         assert_transaction_status_match(
             transactions_processor, transaction, [TransactionStatus.FINALIZED.value]
         )
+
+        assert accounts_manager.get_account_balance(transaction.to_address) == 5
 
         check_validator_count(
             transaction,
@@ -338,22 +413,16 @@ async def test_exec_accepted_appeal_successful(consensus_algorithm):
         PENDING -> PROPOSING -> COMMITTING -> REVEALING -> ACCEPTED -no-appeal-> FINALIZED
     """
     transaction = init_dummy_transaction("transaction_hash_1")
+    transaction.value = 5
     nodes = get_nodes_specs(2 * transaction.num_of_initial_validators + 2)
     created_nodes = []
-    transactions_processor = TransactionsProcessorMock(
-        [transaction_to_dict(transaction)]
-    )
-    contract_db = ContractDB(
-        {
-            "to_address": {
-                "id": "to_address",
-                "data": {
-                    "state": {"accepted": {}, "finalized": {}},
-                    "code": "contract_code",
-                },
-            }
-        }
-    )
+    transactions_processor = TransactionsProcessorMock()
+    current_state_db = CurrentStateDB()
+    accounts_manager = AccountsManagerMock(current_state_db)
+    EOA_BALANCE = 100
+    accounts_manager.set_account_balance(transaction.from_address, EOA_BALANCE)
+    submit_contract(accounts_manager, transaction.to_address)
+    submit_transaction(accounts_manager, transactions_processor, transaction)
 
     def get_vote():
         """
@@ -375,11 +444,12 @@ async def test_exec_accepted_appeal_successful(consensus_algorithm):
         created_nodes,
         get_vote,
         None,
-        contract_db,
+        current_state_db,
+        accounts_manager,
     )
 
     try:
-        check_contract_state(contract_db, transaction.to_address, {}, {})
+        check_contract_state(current_state_db, transaction.to_address, {}, {})
         assert_transaction_status_match(
             transactions_processor, transaction, [TransactionStatus.ACCEPTED.value]
         )
@@ -394,7 +464,7 @@ async def test_exec_accepted_appeal_successful(consensus_algorithm):
         )
 
         check_contract_state_with_timeout(
-            contract_db, transaction.to_address, {"state_var": "1"}, {}
+            current_state_db, transaction.to_address, {"state_var": "1"}, {}
         )
 
         appeal(transaction, transactions_processor)
@@ -430,7 +500,23 @@ async def test_exec_accepted_appeal_successful(consensus_algorithm):
         )
         old_leader_address = get_leader_address(transaction, transactions_processor)
 
-        check_contract_state_with_timeout(contract_db, transaction.to_address, {}, {})
+        check_contract_state_with_timeout(
+            current_state_db, transaction.to_address, {}, {}
+        )
+
+        check_account_balance_event_change_with_timeout(current_state_db)
+        assert accounts_manager.get_account_balance(transaction.to_address) == 0
+
+        assert_transaction_status_match(
+            transactions_processor, transaction, [TransactionStatus.ACCEPTED.value]
+        )
+
+        check_contract_state_with_timeout(
+            current_state_db, transaction.to_address, {"state_var": "1"}, {}
+        )
+
+        check_account_balance_event_change_with_timeout(current_state_db)
+        assert accounts_manager.get_account_balance(transaction.to_address) == 5
 
         assert_transaction_status_match(
             transactions_processor, transaction, [TransactionStatus.FINALIZED.value]
@@ -479,8 +565,11 @@ async def test_exec_accepted_appeal_successful(consensus_algorithm):
             == 0
         )
 
-        check_contract_state(
-            contract_db, transaction.to_address, {"state_var": "1"}, {"state_var": "1"}
+        check_contract_state_with_timeout(
+            current_state_db,
+            transaction.to_address,
+            {"state_var": "1"},
+            {"state_var": "1"},
         )
         assert created_nodes[0].contract_snapshot.states == {
             "accepted": {},
@@ -1263,20 +1352,11 @@ async def test_exec_undetermined_appeal(consensus_algorithm):
         + 2
     )
     created_nodes = []
-    transactions_processor = TransactionsProcessorMock(
-        [transaction_to_dict(transaction)]
-    )
-    contract_db = ContractDB(
-        {
-            "to_address": {
-                "id": "to_address",
-                "data": {
-                    "state": {"accepted": {}, "finalized": {}},
-                    "code": "contract_code",
-                },
-            }
-        }
-    )
+    transactions_processor = TransactionsProcessorMock()
+    current_state_db = CurrentStateDB()
+    accounts_manager = AccountsManagerMock(current_state_db)
+    submit_contract(accounts_manager, transaction.to_address)
+    submit_transaction(accounts_manager, transactions_processor, transaction)
 
     def get_vote():
         """
@@ -1311,11 +1391,12 @@ async def test_exec_undetermined_appeal(consensus_algorithm):
         created_nodes,
         get_vote,
         None,
-        contract_db,
+        current_state_db,
+        accounts_manager,
     )
 
     try:
-        check_contract_state(contract_db, transaction.to_address, {}, {})
+        check_contract_state(current_state_db, transaction.to_address, {}, {})
         assert_transaction_status_match(
             transactions_processor, transaction, [TransactionStatus.UNDETERMINED.value]
         )
@@ -1341,7 +1422,7 @@ async def test_exec_undetermined_appeal(consensus_algorithm):
         check_validator_count(transaction, transactions_processor, nb_validators)
         assert len(created_nodes) == nb_created_nodes
 
-        check_contract_state(contract_db, transaction.to_address, {}, {})
+        check_contract_state(current_state_db, transaction.to_address, {}, {})
 
         appeal(transaction, transactions_processor)
         assert_transaction_status_change_and_match(
@@ -1381,7 +1462,7 @@ async def test_exec_undetermined_appeal(consensus_algorithm):
             is not None
         )
 
-        check_contract_state(contract_db, transaction.to_address, {}, {})
+        check_contract_state(current_state_db, transaction.to_address, {}, {})
 
         appeal(transaction, transactions_processor)
         assert_transaction_status_match(
@@ -1402,7 +1483,7 @@ async def test_exec_undetermined_appeal(consensus_algorithm):
         }
 
         check_contract_state_with_timeout(
-            contract_db, transaction.to_address, {"state_var": "1"}, {}
+            current_state_db, transaction.to_address, {"state_var": "1"}, {}
         )
 
         nb_validators += nb_validators + 1
@@ -1473,7 +1554,9 @@ async def test_exec_undetermined_appeal(consensus_algorithm):
         check_validator_count(transaction, transactions_processor, nb_validators)
         assert len(created_nodes) == nb_created_nodes
 
-        check_contract_state_with_timeout(contract_db, transaction.to_address, {}, {})
+        check_contract_state_with_timeout(
+            current_state_db, transaction.to_address, {}, {}
+        )
 
         appeal(transaction, transactions_processor)
         assert_transaction_status_match(
@@ -1514,7 +1597,7 @@ async def test_exec_undetermined_appeal(consensus_algorithm):
             is not None
         )
 
-        check_contract_state(contract_db, transaction.to_address, {}, {})
+        check_contract_state(current_state_db, transaction.to_address, {}, {})
     finally:
         cleanup_threads(event, threads)
 
@@ -1531,20 +1614,17 @@ async def test_exec_validator_appeal_success_with_rollback_second_tx(
     transaction_2 = init_dummy_transaction("transaction_hash_2")
     nodes = get_nodes_specs(2 * transaction_1.num_of_initial_validators + 2)
     created_nodes = []
-    transactions_processor = TransactionsProcessorMock(
-        [transaction_to_dict(transaction_1), transaction_to_dict(transaction_2)]
-    )
-    contract_db = ContractDB(
-        {
-            "to_address": {
-                "id": "to_address",
-                "data": {
-                    "state": {"accepted": {}, "finalized": {}},
-                    "code": "contract_code",
-                },
-            }
-        }
-    )
+    transaction_1.value = 5
+    transaction_2.value = 10
+
+    transactions_processor = TransactionsProcessorMock()
+    current_state_db = CurrentStateDB()
+    accounts_manager = AccountsManagerMock(current_state_db)
+    EOA_BALANCE = 100
+    accounts_manager.set_account_balance(transaction_1.from_address, EOA_BALANCE)
+    submit_contract(accounts_manager, transaction_1.to_address)
+    submit_transaction(accounts_manager, transactions_processor, transaction_1)
+    submit_transaction(accounts_manager, transactions_processor, transaction_2)
 
     consensus_algorithm.finality_window_time = 60
 
@@ -1575,12 +1655,13 @@ async def test_exec_validator_appeal_success_with_rollback_second_tx(
         created_nodes,
         get_vote,
         None,
-        contract_db,
+        current_state_db,
+        accounts_manager,
     )
 
     try:
         contract_address = transaction_1.to_address
-        check_contract_state(contract_db, contract_address, {}, {})
+        check_contract_state(current_state_db, contract_address, {}, {})
 
         assert_transaction_status_match(
             transactions_processor, transaction_1, [TransactionStatus.ACCEPTED.value]
@@ -1588,8 +1669,11 @@ async def test_exec_validator_appeal_success_with_rollback_second_tx(
         assert len(created_nodes) == transaction_1.num_of_initial_validators + 1
 
         check_contract_state_with_timeout(
-            contract_db, contract_address, {"state_var": "1"}, {}
+            current_state_db, contract_address, {"state_var": "1"}, {}
         )
+
+        check_account_balance_event_change_with_timeout(current_state_db)
+        assert accounts_manager.get_account_balance(contract_address) == 5
 
         assert_transaction_status_match(
             transactions_processor, transaction_2, [TransactionStatus.ACCEPTED.value]
@@ -1603,8 +1687,11 @@ async def test_exec_validator_appeal_success_with_rollback_second_tx(
         )
 
         check_contract_state_with_timeout(
-            contract_db, contract_address, {"state_var": "12"}, {}
+            current_state_db, contract_address, {"state_var": "12"}, {}
         )
+
+        check_account_balance_event_change_with_timeout(current_state_db)
+        assert accounts_manager.get_account_balance(contract_address) == 15
 
         appeal(transaction_1, transactions_processor)
 
@@ -1614,14 +1701,17 @@ async def test_exec_validator_appeal_success_with_rollback_second_tx(
             [TransactionStatus.PENDING.value, TransactionStatus.ACTIVATED.value],
         )
 
-        check_contract_state_with_timeout(contract_db, contract_address, {}, {})
+        check_contract_state_with_timeout(current_state_db, contract_address, {}, {})
+
+        check_account_balance_event_change_with_timeout(current_state_db)
+        assert accounts_manager.get_account_balance(contract_address) == 0
 
         assert_transaction_status_match(
             transactions_processor, transaction_1, [TransactionStatus.ACCEPTED.value]
         )
 
         check_contract_state_with_timeout(
-            contract_db, contract_address, {"state_var": "1"}, {}
+            current_state_db, contract_address, {"state_var": "1"}, {}
         )
 
         assert_transaction_status_match(
@@ -1629,7 +1719,7 @@ async def test_exec_validator_appeal_success_with_rollback_second_tx(
         )
 
         check_contract_state_with_timeout(
-            contract_db, contract_address, {"state_var": "12"}, {}
+            current_state_db, contract_address, {"state_var": "12"}, {}
         )
 
         assert transactions_processor.updated_transaction_status_history == {
@@ -1663,6 +1753,9 @@ async def test_exec_validator_appeal_success_with_rollback_second_tx(
             ],
         }
 
+        check_account_balance_event_change_with_timeout(current_state_db)
+        assert accounts_manager.get_account_balance(contract_address) == 15
+
     finally:
         cleanup_threads(event, threads)
 
@@ -1678,20 +1771,12 @@ async def test_exec_leader_appeal_succes_with_rollback_second_tx(consensus_algor
     transaction_1.config_rotation_rounds = 3
     nodes = get_nodes_specs(5 * transaction_1.num_of_initial_validators + 1)
     created_nodes = []
-    transactions_processor = TransactionsProcessorMock(
-        [transaction_to_dict(transaction_1), transaction_to_dict(transaction_2)]
-    )
-    contract_db = ContractDB(
-        {
-            "to_address": {
-                "id": "to_address",
-                "data": {
-                    "state": {"accepted": {}, "finalized": {}},
-                    "code": "contract_code",
-                },
-            }
-        }
-    )
+    transactions_processor = TransactionsProcessorMock()
+    current_state_db = CurrentStateDB()
+    accounts_manager = AccountsManagerMock(current_state_db)
+    submit_contract(accounts_manager, transaction_1.to_address)
+    submit_transaction(accounts_manager, transactions_processor, transaction_1)
+    submit_transaction(accounts_manager, transactions_processor, transaction_2)
     consensus_algorithm.finality_window_time = 60
 
     def get_vote():
@@ -1717,25 +1802,26 @@ async def test_exec_leader_appeal_succes_with_rollback_second_tx(consensus_algor
         created_nodes,
         get_vote,
         None,
-        contract_db,
+        current_state_db,
+        accounts_manager,
     )
 
     try:
         contract_address = transaction_1.to_address
-        check_contract_state(contract_db, contract_address, {}, {})
+        check_contract_state(current_state_db, contract_address, {}, {})
 
         assert_transaction_status_match(
             transactions_processor,
             transaction_1,
             [TransactionStatus.UNDETERMINED.value],
         )
-        check_contract_state(contract_db, contract_address, {}, {})
+        check_contract_state(current_state_db, contract_address, {}, {})
 
         assert_transaction_status_match(
             transactions_processor, transaction_2, [TransactionStatus.ACCEPTED.value]
         )
         check_contract_state_with_timeout(
-            contract_db, contract_address, {"state_var": "2"}, {}
+            current_state_db, contract_address, {"state_var": "2"}, {}
         )
 
         appeal(transaction_1, transactions_processor)
@@ -1744,14 +1830,14 @@ async def test_exec_leader_appeal_succes_with_rollback_second_tx(consensus_algor
             transactions_processor, transaction_1, [TransactionStatus.ACCEPTED.value]
         )
         check_contract_state_with_timeout(
-            contract_db, contract_address, {"state_var": "1"}, {}
+            current_state_db, contract_address, {"state_var": "1"}, {}
         )
 
         assert_transaction_status_match(
             transactions_processor, transaction_2, [TransactionStatus.ACCEPTED.value]
         )
         check_contract_state_with_timeout(
-            contract_db, contract_address, {"state_var": "12"}, {}
+            current_state_db, contract_address, {"state_var": "12"}, {}
         )
 
         assert transactions_processor.updated_transaction_status_history == {
@@ -1795,7 +1881,7 @@ async def test_exec_leader_timeout_appeal_failed(consensus_algorithm):
     """
     # Initialize transaction, nodes, and get_vote function
     transaction = init_dummy_transaction()
-    nodes = get_nodes_specs(DEFAULT_VALIDATORS_COUNT + 1)
+    nodes = get_nodes_specs(transaction.num_of_initial_validators + 1)
     created_nodes = []
     transactions_processor = TransactionsProcessorMock(
         [transaction_to_dict(transaction)]
@@ -1887,22 +1973,14 @@ async def test_exec_leader_timeout_appeal_success(consensus_algorithm):
     """
     transaction_1 = init_dummy_transaction("transaction_hash_1")
     transaction_2 = init_dummy_transaction("transaction_hash_2")
-    nodes = get_nodes_specs(DEFAULT_VALIDATORS_COUNT + 1)
+    nodes = get_nodes_specs(transaction_1.num_of_initial_validators + 1)
     created_nodes = []
-    transactions_processor = TransactionsProcessorMock(
-        [transaction_to_dict(transaction_1), transaction_to_dict(transaction_2)]
-    )
-    contract_db = ContractDB(
-        {
-            "to_address": {
-                "id": "to_address",
-                "data": {
-                    "state": {"accepted": {}, "finalized": {}},
-                    "code": "contract_code",
-                },
-            }
-        }
-    )
+    transactions_processor = TransactionsProcessorMock()
+    current_state_db = CurrentStateDB()
+    accounts_manager = AccountsManagerMock(current_state_db)
+    submit_contract(accounts_manager, transaction_1.to_address)
+    submit_transaction(accounts_manager, transactions_processor, transaction_1)
+    submit_transaction(accounts_manager, transactions_processor, transaction_2)
     consensus_algorithm.finality_window_time = 60
 
     def get_vote():
@@ -1925,12 +2003,13 @@ async def test_exec_leader_timeout_appeal_success(consensus_algorithm):
         created_nodes,
         get_vote,
         get_timeout,
-        contract_db,
+        current_state_db,
+        accounts_manager,
     )
 
     try:
         contract_address = transaction_1.to_address
-        check_contract_state(contract_db, contract_address, {}, {})
+        check_contract_state(current_state_db, contract_address, {}, {})
 
         assert_transaction_status_match(
             transactions_processor,
@@ -1938,7 +2017,7 @@ async def test_exec_leader_timeout_appeal_success(consensus_algorithm):
             [TransactionStatus.LEADER_TIMEOUT.value],
         )
 
-        check_contract_state(contract_db, contract_address, {}, {})
+        check_contract_state(current_state_db, contract_address, {}, {})
 
         assert len(created_nodes) == 1
 
@@ -1956,10 +2035,10 @@ async def test_exec_leader_timeout_appeal_success(consensus_algorithm):
             transactions_processor, transaction_2, [TransactionStatus.ACCEPTED.value]
         )
         check_contract_state_with_timeout(
-            contract_db, contract_address, {"state_var": "2"}, {}
+            current_state_db, contract_address, {"state_var": "2"}, {}
         )
 
-        assert len(created_nodes) == 1 + DEFAULT_VALIDATORS_COUNT + 1
+        assert len(created_nodes) == 1 + transaction_1.num_of_initial_validators + 1
 
         appeal(transaction_1, transactions_processor)
 
@@ -1968,10 +2047,12 @@ async def test_exec_leader_timeout_appeal_success(consensus_algorithm):
         )
 
         check_contract_state_with_timeout(
-            contract_db, contract_address, {"state_var": "1"}, {}
+            current_state_db, contract_address, {"state_var": "1"}, {}
         )
 
-        assert len(created_nodes) == 1 + 2 * (DEFAULT_VALIDATORS_COUNT + 1)
+        assert len(created_nodes) == 1 + 2 * (
+            transaction_1.num_of_initial_validators + 1
+        )
 
         address_second_leader_timeout = get_leader_address(
             transaction_1, transactions_processor
@@ -2028,10 +2109,12 @@ async def test_exec_leader_timeout_appeal_success(consensus_algorithm):
         )
 
         check_contract_state_with_timeout(
-            contract_db, contract_address, {"state_var": "12"}, {}
+            current_state_db, contract_address, {"state_var": "12"}, {}
         )
 
-        assert len(created_nodes) == 1 + 3 * (DEFAULT_VALIDATORS_COUNT + 1)
+        assert len(created_nodes) == 1 + 3 * (
+            transaction_1.num_of_initial_validators + 1
+        )
 
     finally:
         cleanup_threads(event, threads)
@@ -2046,29 +2129,21 @@ async def test_exec_leader_timeout_during_leader_appeal(consensus_algorithm):
     transaction_1 = init_dummy_transaction("transaction_hash_1")
     transaction_2 = init_dummy_transaction("transaction_hash_2")
     transaction_1.config_rotation_rounds = 0
-    nodes = get_nodes_specs(3 * DEFAULT_VALIDATORS_COUNT + 2)
+    nodes = get_nodes_specs(3 * transaction_1.num_of_initial_validators + 2)
     created_nodes = []
-    transactions_processor = TransactionsProcessorMock(
-        [transaction_to_dict(transaction_1), transaction_to_dict(transaction_2)]
-    )
-    contract_db = ContractDB(
-        {
-            "to_address": {
-                "id": "to_address",
-                "data": {
-                    "state": {"accepted": {}, "finalized": {}},
-                    "code": "contract_code",
-                },
-            }
-        }
-    )
+    transactions_processor = TransactionsProcessorMock()
+    current_state_db = CurrentStateDB()
+    accounts_manager = AccountsManagerMock(current_state_db)
+    submit_contract(accounts_manager, transaction_1.to_address)
+    submit_transaction(accounts_manager, transactions_processor, transaction_1)
+    submit_transaction(accounts_manager, transactions_processor, transaction_2)
     consensus_algorithm.finality_window_time = 60
 
     def get_vote():
-        if len(created_nodes) < DEFAULT_VALIDATORS_COUNT + 1:
+        if len(created_nodes) < transaction_1.num_of_initial_validators + 1:
             return Vote.DISAGREE
-        elif (len(created_nodes) >= DEFAULT_VALIDATORS_COUNT + 1) and (
-            len(created_nodes) < 2 * (DEFAULT_VALIDATORS_COUNT + 1)
+        elif (len(created_nodes) >= transaction_1.num_of_initial_validators + 1) and (
+            len(created_nodes) < 2 * (transaction_1.num_of_initial_validators + 1)
         ):
             return Vote.AGREE
         else:
@@ -2078,7 +2153,7 @@ async def test_exec_leader_timeout_during_leader_appeal(consensus_algorithm):
         """
         First leader returns timeout
         """
-        if len(created_nodes) == 2 * (DEFAULT_VALIDATORS_COUNT + 1):
+        if len(created_nodes) == 2 * (transaction_1.num_of_initial_validators + 1):
             return True
         else:
             return False
@@ -2091,22 +2166,23 @@ async def test_exec_leader_timeout_during_leader_appeal(consensus_algorithm):
         created_nodes,
         get_vote,
         get_timeout,
-        contract_db,
+        current_state_db,
+        accounts_manager,
     )
 
     try:
         contract_address = transaction_1.to_address
-        check_contract_state(contract_db, contract_address, {}, {})
+        check_contract_state(current_state_db, contract_address, {}, {})
 
         assert_transaction_status_match(
             transactions_processor, transaction_2, [TransactionStatus.ACCEPTED.value]
         )
 
         check_contract_state_with_timeout(
-            contract_db, contract_address, {"state_var": "2"}, {}
+            current_state_db, contract_address, {"state_var": "2"}, {}
         )
 
-        nb_created_nodes = 2 * (DEFAULT_VALIDATORS_COUNT + 1)
+        nb_created_nodes = 2 * (transaction_1.num_of_initial_validators + 1)
         assert len(created_nodes) == nb_created_nodes
 
         appeal(transaction_1, transactions_processor)
@@ -2132,7 +2208,7 @@ async def test_exec_leader_timeout_during_leader_appeal(consensus_algorithm):
             [TransactionStatus.UNDETERMINED.value],
         )
 
-        nb_created_nodes += 2 * DEFAULT_VALIDATORS_COUNT + 1 + 1
+        nb_created_nodes += 2 * transaction_1.num_of_initial_validators + 1 + 1
         assert len(created_nodes) == nb_created_nodes
 
         address_leader_after_timeout = get_leader_address(
@@ -2179,7 +2255,7 @@ async def test_exec_leader_timeout_during_leader_appeal(consensus_algorithm):
             transaction_2, transactions_processor
         )
 
-        check_contract_state(contract_db, contract_address, {"state_var": "2"}, {})
+        check_contract_state(current_state_db, contract_address, {"state_var": "2"}, {})
 
     finally:
         cleanup_threads(event, threads)

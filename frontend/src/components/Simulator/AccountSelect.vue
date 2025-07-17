@@ -16,16 +16,14 @@ const hasMetaMaskAccount = computed(() =>
 );
 
 const handleCreateNewAccount = async () => {
-  const address = store.generateNewAccount();
-
-  if (address) {
+  try {
+    const account = await store.generateNewAccount();
     notify({
       title: 'New Account Created',
       type: 'success',
     });
-
     trackEvent('created_account');
-  } else {
+  } catch (error) {
     notify({
       title: 'Error creating a new account',
       type: 'error',
