@@ -33,4 +33,6 @@ export interface IJsonRpcService {
   getTransactionCount(address: GetTransactionCountRequest): Promise<number>;
   setFinalityWindowTime(time: number): Promise<any>;
   getFinalityWindowTime(): Promise<number>;
+  getStudioVersion(): Promise<string>;
+  getGenVMVersion(): Promise<string>;
 }
