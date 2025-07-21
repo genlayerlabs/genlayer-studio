@@ -19,19 +19,19 @@ class ErrorExecutionContract(gl.Contract):
             self.test_zero_division()
         elif testcase == 5:
             self.test_value_error()
-        elif testcase == 7:
+        elif testcase == 6:
             self.test_memory_allocation()
-        elif testcase == 8:
+        elif testcase == 7:
             self.test_stack_overflow()
-        elif testcase == 9:
+        elif testcase == 8:
             self.test_infinite_loop()
-        elif testcase == 10:
+        elif testcase == 9:
             self.test_invalid_bytecode()
-        elif testcase == 11:
+        elif testcase == 10:
             self.test_corrupt_state()
-        elif testcase == 12:
+        elif testcase == 11:
             self.test_corrupt_state_value()
-        elif testcase == 13:
+        elif testcase == 12:
             self.test_cross_contract_call(target_address)
 
     def test_type_error(self) -> None:

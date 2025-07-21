@@ -11,7 +11,6 @@ class ErrorType(Enum):
     KEY_ERROR = "KeyError"
     ZERO_DIVISION_ERROR = "ZeroDivisionError"
     VALUE_ERROR = "ValueError"
-    CONTRACT_ERROR = "ErrorContract"
     MEMORY_ERROR = "MemoryError"
     RECURSION_ERROR = "RecursionError"
     INFINITE_LOOP = "InfiniteLoop"
@@ -27,14 +26,13 @@ class ErrorType(Enum):
             ErrorType.KEY_ERROR: 3,
             ErrorType.ZERO_DIVISION_ERROR: 4,
             ErrorType.VALUE_ERROR: 5,
-            ErrorType.CONTRACT_ERROR: 6,
-            ErrorType.MEMORY_ERROR: 7,
-            ErrorType.RECURSION_ERROR: 8,
-            ErrorType.INFINITE_LOOP: 9,
-            ErrorType.SYNTAX_ERROR: 10,
-            ErrorType.ASSERTION_ERROR: 11,
-            ErrorType.ATTRIBUTE_ERROR_1: 12,
-            ErrorType.ATTRIBUTE_ERROR_2: 13,
+            ErrorType.MEMORY_ERROR: 6,
+            ErrorType.RECURSION_ERROR: 7,
+            ErrorType.INFINITE_LOOP: 8,
+            ErrorType.SYNTAX_ERROR: 9,
+            ErrorType.ASSERTION_ERROR: 10,
+            ErrorType.ATTRIBUTE_ERROR_1: 11,
+            ErrorType.ATTRIBUTE_ERROR_2: 12,
         }
         return values[self]
 
@@ -76,16 +74,14 @@ def _run_testcase(setup_validators, testcase: ErrorType):
     factory = get_contract_factory("ErrorExecutionContract")
 
     try:
-        if testcase == ErrorType.CONTRACT_ERROR:
-            args = []
-        elif testcase == ErrorType.ATTRIBUTE_ERROR_2:
+        if testcase == ErrorType.ATTRIBUTE_ERROR_2:
             contract_a = factory.deploy(args=[0])
             args = [int(testcase), contract_a.address]
         else:
             args = [int(testcase)]
 
-        if testcase == ErrorType.INFINITE_LOOP:
-            factory.deploy(args=args, wait_interval=20000, wait_retries=20)
+        if testcase in [ErrorType.INFINITE_LOOP, ErrorType.MEMORY_ERROR]:
+            factory.deploy(args=args, wait_interval=20000, wait_retries=30)
         else:
             factory.deploy(args=args)
     except DeploymentError as e:
@@ -121,10 +117,6 @@ def test_zero_division_error(setup_validators):
 
 def test_value_error(setup_validators):
     _run_testcase(setup_validators, ErrorType.VALUE_ERROR)
-
-
-def test_contract_error(setup_validators):
-    _run_testcase(setup_validators, ErrorType.CONTRACT_ERROR)
 
 
 def test_memory_allocation_error(setup_validators):

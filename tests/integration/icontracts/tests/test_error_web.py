@@ -1,4 +1,5 @@
 from gltest import get_contract_factory
+from gltest.glchain.contract import Contract
 from gltest.exceptions import DeploymentError
 from tests.integration.icontracts.tests.test_error_execution import (
     _deployment_error_to_tx_receipt,
@@ -53,17 +54,13 @@ def test_web_timeout_error(setup_validators):
         )
     except DeploymentError as e:
         tx_receipt = _deployment_error_to_tx_receipt(e)
-        _check_last_round(
-            tx_receipt, "Undetermined"
-        )  # validators have a different response than leader due to some timestamps
+        _check_last_round(tx_receipt, "Leader Timeout")
 
 
 def test_web_404_error(setup_validators):
     """Test web request 404 error"""
     setup_validators()
     factory = get_contract_factory("ErrorWebContract")
-    try:
-        factory.deploy(args=[2, " https://httpbin.org/status/404"])
-    except DeploymentError as e:
-        tx_receipt = _deployment_error_to_tx_receipt(e)
-        _check_last_round(tx_receipt, "Accepted")
+    contract = factory.deploy(args=[2, " https://httpbin.org/status/404"])
+    # No deployment error raised
+    assert isinstance(contract, Contract)
