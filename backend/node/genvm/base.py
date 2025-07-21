@@ -397,11 +397,13 @@ class _Host(genvmhost.IHost):
 async def _copy_state_proxy(state_proxy) -> StateProxy:
     # snapshot_factory cannot be pickled. Temporarily remove the factory to allow deepcopy
     factory = state_proxy.snapshot_factory
-    state_proxy.snapshot_factory = None
-    state_copy = copy.deepcopy(state_proxy)
-    state_proxy.snapshot_factory = factory
-    state_copy.snapshot_factory = factory
-    return state_copy
+    try:
+        state_proxy.snapshot_factory = None
+        state_copy = copy.deepcopy(state_proxy)
+        state_copy.snapshot_factory = factory
+        return state_copy
+    finally:
+        state_proxy.snapshot_factory = factory
 
 
 async def _run_genvm_host(
