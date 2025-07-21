@@ -141,7 +141,10 @@ class Manager:
         current_validators: list[SingleValidatorSnapshot] = []
         for val in validators:
             host_data = {"studio_llm_id": f"node-{val.address}"}
-            if "mock_response" in val.llmprovider.plugin_config:
+            if (
+                "mock_response" in val.llmprovider.plugin_config
+                and len(val.llmprovider.plugin_config["mock_response"]) > 0
+            ):
                 host_data["mock_response"] = val.llmprovider.plugin_config[
                     "mock_response"
                 ]
