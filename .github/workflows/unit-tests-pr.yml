@@ -34,6 +34,6 @@ jobs:
       - run: pip install pytest-cov
       - run: pytest tests/unit --cov=backend --cov-report=xml --cov-branch
       - name: SonarCloud Scan
-        uses: sonarsource/sonarqube-scan-action@v5.2.0
+        uses: sonarsource/sonarqube-scan-action@v5.3.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
