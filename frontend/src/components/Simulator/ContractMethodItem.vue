@@ -29,6 +29,9 @@ const responseMessageFinalized = ref('');
 const calldataArguments = ref<ArgData>({ args: [], kwargs: {} });
 
 const formatResponseIfNeeded = (response: string): string => {
+  if (!response) {
+    return '';
+  }
   // Check if the string looks like a malformed JSON (starts with { and ends with })
   if (response.startsWith('{') && response.endsWith('}')) {
     try {
@@ -45,6 +48,10 @@ const formatResponseIfNeeded = (response: string): string => {
         return response;
       }
     }
+  }
+  // Remove quotes if the response is just a quoted empty string
+  if (response === '""') {
+    return '';
   }
   return response;
 };
@@ -180,10 +187,13 @@ const handleCallWriteMethod = async () => {
         </div>
 
         <div
-          v-if="responseMessageAccepted || responseMessageFinalized"
+          v-if="
+            (responseMessageAccepted && responseMessageAccepted !== '') ||
+            (responseMessageFinalized && responseMessageFinalized !== '')
+          "
           class="w-full break-all text-sm"
         >
-          <div v-if="responseMessageAccepted">
+          <div v-if="responseMessageAccepted !== ''">
             <div class="mb-1 text-xs font-medium">Response Accepted:</div>
             <div
               :data-testid="`method-response-${name}`"
@@ -192,7 +202,7 @@ const handleCallWriteMethod = async () => {
               {{ responseMessageAccepted }}
             </div>
           </div>
-          <div v-if="responseMessageFinalized">
+          <div v-if="responseMessageFinalized !== ''">
             <div class="mb-1 mt-4 text-xs font-medium">Response Finalized:</div>
             <div
               :data-testid="`method-response-${name}`"
