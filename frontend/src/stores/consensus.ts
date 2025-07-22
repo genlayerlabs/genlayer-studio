@@ -2,13 +2,50 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { useRpcClient, useWebSocketClient } from '@/hooks';
 
+// Helper function to get stored value or default
+const getStoredValue = (key: string, defaultValue: number): number => {
+  const stored = localStorage.getItem(`consensusStore.${key}`);
+  return stored ? Number(stored) : defaultValue;
+};
+
 export const useConsensusStore = defineStore('consensusStore', () => {
   const rpcClient = useRpcClient();
   const webSocketClient = useWebSocketClient();
   const finalityWindow = ref(Number(import.meta.env.VITE_FINALITY_WINDOW));
   const isLoading = ref<boolean>(true); // Needed for the delay between creating the variable and fetching the initial value
-  const maxRotations = ref(Number(import.meta.env.VITE_MAX_ROTATIONS));
-  const maxAppealRound = ref(Number(import.meta.env.VITE_MAX_APPEALS));
+  const leaderTimeoutFee = ref(
+    getStoredValue(
+      'leaderTimeoutFee',
+      Number(import.meta.env.VITE_LEADER_TIMEOUT_FEE),
+    ),
+  );
+  const validatorsTimeoutFee = ref(
+    getStoredValue(
+      'validatorsTimeoutFee',
+      Number(import.meta.env.VITE_VALIDATORS_TIMEOUT_FEE),
+    ),
+  );
+  const appealRoundFee = ref(
+    getStoredValue(
+      'appealRoundFee',
+      Number(import.meta.env.VITE_APPEAL_ROUNDS_FEE),
+    ),
+  );
+  const defaultRotationFee = Number(import.meta.env.VITE_ROTATIONS_FEE);
+  const storedRotationsFee = localStorage.getItem(
+    'consensusStore.rotationsFee',
+  );
+  const rotationsFee = ref<number[]>(
+    storedRotationsFee ? JSON.parse(storedRotationsFee) : [],
+  );
+
+  if (!storedRotationsFee && appealRoundFee.value > 0) {
+    rotationsFee.value = Array(appealRoundFee.value).fill(defaultRotationFee);
+    localStorage.setItem(
+      'consensusStore.rotationsFee',
+      JSON.stringify(rotationsFee.value),
+    );
+  }
 
   if (!webSocketClient.connected) webSocketClient.connect();
 
@@ -36,13 +73,52 @@ export const useConsensusStore = defineStore('consensusStore', () => {
     finalityWindow.value = time;
   }
 
-  function setMaxRotations(rotations: number) {
-    maxRotations.value = rotations;
+  function setLeaderTimeoutFee(fee: number) {
+    leaderTimeoutFee.value = fee;
+    localStorage.setItem('consensusStore.leaderTimeoutFee', fee.toString());
   }
 
-  function setMaxAppealRound(appealRound: number) {
-    maxAppealRound.value = appealRound;
-    console.log('maxAppealRound', maxAppealRound.value);
+  function setValidatorsTimeoutFee(fee: number) {
+    validatorsTimeoutFee.value = fee;
+    localStorage.setItem('consensusStore.validatorsTimeoutFee', fee.toString());
+  }
+
+  function setAppealRoundFee(fee: number) {
+    appealRoundFee.value = fee;
+    localStorage.setItem('consensusStore.appealRoundFee', fee.toString());
+
+    // When appeal rounds change, adjust rotations fee array
+    if (fee > 0) {
+      const currentRotations = rotationsFee.value;
+      if (fee > currentRotations.length) {
+        // Add new rounds with default fee
+        rotationsFee.value = [
+          ...currentRotations,
+          ...Array(fee - currentRotations.length).fill(defaultRotationFee),
+        ];
+      } else if (fee < currentRotations.length) {
+        // Remove excess rounds
+        rotationsFee.value = currentRotations.slice(0, fee);
+      }
+    } else {
+      // If fee is 0, clear the array
+      rotationsFee.value = [];
+    }
+
+    localStorage.setItem(
+      'consensusStore.rotationsFee',
+      JSON.stringify(rotationsFee.value),
+    );
+  }
+
+  function setRotationsFee(roundIndex: number, fee: number) {
+    const newRotationsFee = [...rotationsFee.value];
+    newRotationsFee[roundIndex] = fee;
+    rotationsFee.value = newRotationsFee;
+    localStorage.setItem(
+      'consensusStore.rotationsFee',
+      JSON.stringify(rotationsFee.value),
+    );
   }
 
   return {
@@ -50,9 +126,13 @@ export const useConsensusStore = defineStore('consensusStore', () => {
     setFinalityWindowTime,
     fetchFinalityWindowTime,
     isLoading,
-    maxRotations,
-    setMaxRotations,
-    maxAppealRound,
-    setMaxAppealRound,
+    leaderTimeoutFee,
+    setLeaderTimeoutFee,
+    validatorsTimeoutFee,
+    setValidatorsTimeoutFee,
+    appealRoundFee,
+    setAppealRoundFee,
+    rotationsFee,
+    setRotationsFee,
   };
 });

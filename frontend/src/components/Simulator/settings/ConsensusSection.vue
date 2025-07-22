@@ -1,90 +1,89 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import PageSection from '@/components/Simulator/PageSection.vue';
-import FieldError from '@/components/global/fields/FieldError.vue';
-import NumberInput from '@/components/global/inputs/NumberInput.vue';
 import { useConsensusStore } from '@/stores';
+import MoreInfo from '@/components/global/MoreInfo.vue';
+import ConsensusInputSection from './ConsensusInputSection.vue';
+import type { ConsensusInput } from '@/types/store';
 
 const consensusStore = useConsensusStore();
-const maxRotations = computed({
-  get: () => consensusStore.maxRotations,
-  set: (newRotations) => {
-    consensusStore.setMaxRotations(Number(newRotations));
-  },
-});
 
-const isMaxRotationsValid = computed(() => {
-  return (
-    !isNaN(maxRotations.value) &&
-    Number.isInteger(maxRotations.value) &&
-    maxRotations.value >= 0
-  );
-});
+const createConsensusInput = (
+  storeValue: number,
+  label: string,
+  id: string,
+  setter: (value: number) => void,
+): ConsensusInput => {
+  return {
+    value: storeValue,
+    label,
+    id,
+    testId: `input-${id}`,
+    setter,
+  };
+};
 
-const maxAppealRound = computed({
-  get: () => consensusStore.maxAppealRound,
-  set: (newAppealRound) => {
-    consensusStore.setMaxAppealRound(Number(newAppealRound));
-  },
-});
+const timeUnitsInputs = computed(() => [
+  createConsensusInput(
+    consensusStore.leaderTimeoutFee,
+    'Leader',
+    'leaderTimeoutFee',
+    consensusStore.setLeaderTimeoutFee,
+  ),
+  createConsensusInput(
+    consensusStore.validatorsTimeoutFee,
+    'Validators',
+    'validatorsTimeoutFee',
+    consensusStore.setValidatorsTimeoutFee,
+  ),
+]);
 
-const isMaxAppealRoundValid = computed(() => {
-  return (
-    !isNaN(maxAppealRound.value) &&
-    Number.isInteger(maxAppealRound.value) &&
-    maxAppealRound.value >= 0
-  );
-});
+const appealInputs = computed(() => [
+  createConsensusInput(
+    consensusStore.appealRoundFee,
+    'Rounds',
+    'appealRoundFee',
+    consensusStore.setAppealRoundFee,
+  ),
+]);
+
+const rotationInputs = computed(() =>
+  consensusStore.rotationsFee.map((fee, index) =>
+    createConsensusInput(
+      fee,
+      `Round ${index + 1}`,
+      `rotationsFee_${index}`,
+      (value: number) => consensusStore.setRotationsFee(index, value),
+    ),
+  ),
+);
 </script>
 
 <template>
   <PageSection>
-    <template #title>Consensus</template>
+    <template #title>
+      Consensus
+      <MoreInfo
+        text="Configure consensus parameters for transaction processing and validation."
+      />
+    </template>
 
-    <div class="p-1">
-      <div class="flex flex-wrap items-center gap-2">
-        <label for="maxRotations" class="text-xs">Max Rotations</label>
-        <NumberInput
-          id="maxRotations"
-          name="maxRotations"
-          :min="0"
-          :step="1"
-          v-model.number="maxRotations"
-          required
-          testId="input-maxRotations"
-          :invalid="!isMaxRotationsValid"
-          :disabled="false"
-          class="h-6 w-12"
-          tiny
-        />
-      </div>
+    <div class="space-y-2">
+      <ConsensusInputSection
+        title="Time Units Allocation"
+        :inputs="timeUnitsInputs"
+      />
 
-      <FieldError v-if="!isMaxRotationsValid"
-        >Please enter a positive integer.</FieldError
-      >
-    </div>
+      <ConsensusInputSection
+        title="Appeal Configuration"
+        :inputs="appealInputs"
+      />
 
-    <div class="p-1">
-      <div class="flex flex-wrap items-center gap-2">
-        <label for="maxAppealRound" class="text-xs">Max Appeal Rounds</label>
-        <NumberInput
-          id="maxAppealRound"
-          name="maxAppealRound"
-          :min="0"
-          :step="1"
-          v-model.number="maxAppealRound"
-          required
-          testId="input-maxAppealRound"
-          :invalid="!isMaxAppealRoundValid"
-          :disabled="false"
-          class="h-6 w-12"
-          tiny
-        />
-      </div>
-
-      <FieldError v-if="!isMaxAppealRoundValid"
-        >Please enter a positive integer.</FieldError
-      >
+      <ConsensusInputSection
+        v-if="rotationInputs.length > 0"
+        title="Rotations Per Round"
+        :inputs="rotationInputs"
+      />
     </div>
   </PageSection>
 </template>
