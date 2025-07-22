@@ -602,7 +602,7 @@ async def _gen_call_with_validator(
         raise JSONRPCError(f"Invalid type: {type}")
 
     # Return the result of the write method
-    if type != "read" and receipt.execution_result != ExecutionResultStatus.SUCCESS:
+    if receipt.execution_result != ExecutionResultStatus.SUCCESS:
         raise JSONRPCError(
             message="running contract failed", data={"receipt": receipt.to_dict()}
         )

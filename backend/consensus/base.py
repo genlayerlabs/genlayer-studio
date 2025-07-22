@@ -51,6 +51,7 @@ from backend.rollup.consensus_service import ConsensusService
 import backend.validators as validators
 from backend.database_handler.validators_registry import ValidatorsRegistry
 from backend.node.genvm.origin.result_codes import ResultCode
+from backend.node.genvm.origin.base_host import get_code_slot
 
 type NodeFactory = Callable[
     [
@@ -2347,12 +2348,17 @@ class AcceptedState(TransactionState):
             if leader_receipt.execution_result == ExecutionResultStatus.SUCCESS:
                 # Register contract if it is a new contract
                 if context.transaction.type == TransactionType.DEPLOY_CONTRACT:
+                    code_slot_b64 = base64.b64encode(get_code_slot()).decode("ascii")
                     new_contract = {
                         "id": context.transaction.data["contract_address"],
                         "data": {
                             "state": {
                                 "accepted": leader_receipt.contract_state,
-                                "finalized": {},
+                                "finalized": {
+                                    code_slot_b64: leader_receipt.contract_state.get(
+                                        code_slot_b64, b""
+                                    )
+                                },
                             },
                             "code": context.transaction.data["contract_code"],
                         },
