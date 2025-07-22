@@ -135,6 +135,9 @@ def test_intelligent_oracle_factory_pattern(setup_validators):
         assert wait_for_contract_deployment(
             market_contract
         ), f"Market contract deployment timeout for {market_data['prediction_market_id']}"
+        time.sleep(
+            10
+        )  # sleep for the finality window. gltest should have a method to wait for the triggered transaction finality
 
     # Verify all markets were registered
     assert len(registered_addresses) == len(markets_data)
