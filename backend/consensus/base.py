@@ -53,6 +53,7 @@ from backend.database_handler.validators_registry import ValidatorsRegistry
 from backend.node.genvm.origin.result_codes import ResultCode
 from backend.consensus.types import ConsensusResult, ConsensusRound
 from backend.consensus.utils import determine_consensus_from_votes
+from backend.node.genvm.origin.base_host import get_code_slot
 
 type NodeFactory = Callable[
     [
@@ -2083,18 +2084,7 @@ class RevealingState(TransactionState):
 
         # Determine the consensus result
         votes_list = list(context.votes.values())
-        agree_count = votes_list.count(Vote.AGREE.value)
-        disagree_count = votes_list.count(Vote.DISAGREE.value)
-        timeout_count = votes_list.count(Vote.TIMEOUT.value)
-
-        if timeout_count > agree_count and timeout_count > disagree_count:
-            consensus_result = ConsensusResult.TIMEOUT
-        elif agree_count > disagree_count and agree_count > timeout_count:
-            consensus_result = ConsensusResult.MAJORITY_AGREE
-        elif disagree_count > agree_count and disagree_count > timeout_count:
-            consensus_result = ConsensusResult.MAJORITY_DISAGREE
-        else:
-            consensus_result = ConsensusResult.NO_MAJORITY
+        consensus_result = determine_consensus_from_votes(votes_list)
 
         # Send event in rollup to communicate the votes are revealed
         if len(context.consensus_data.leader_receipt) == 1:
@@ -2416,12 +2406,17 @@ class AcceptedState(TransactionState):
             if leader_receipt.execution_result == ExecutionResultStatus.SUCCESS:
                 # Register contract if it is a new contract
                 if context.transaction.type == TransactionType.DEPLOY_CONTRACT:
+                    code_slot_b64 = base64.b64encode(get_code_slot()).decode("ascii")
                     new_contract = {
                         "id": context.transaction.data["contract_address"],
                         "data": {
                             "state": {
                                 "accepted": leader_receipt.contract_state,
-                                "finalized": {},
+                                "finalized": {
+                                    code_slot_b64: leader_receipt.contract_state.get(
+                                        code_slot_b64, b""
+                                    )
+                                },
                             },
                             "code": context.transaction.data["contract_code"],
                         },
