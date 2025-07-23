@@ -45,6 +45,13 @@ export interface NewProviderDataModel {
   plugin_config: Record<string, any>;
 }
 
+export interface FeesDistribution {
+  leaderTimeoutFee: number;
+  validatorsTimeoutFee: number;
+  appealRounds: number;
+  rotations: number[];
+}
+
 export type Address = `0x${string}`;
 
 export interface SchemaProperty {
