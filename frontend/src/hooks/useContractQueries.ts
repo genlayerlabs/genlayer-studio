@@ -112,13 +112,11 @@ export function useContractQueries() {
       const code = contract.value?.content ?? '';
       const code_bytes = new TextEncoder().encode(code);
 
-      console.log('feesDistribution', feesDistribution);
-
       const result = await genlayerClient.value?.deployContract({
         code: code_bytes as any as string, // FIXME: code should accept both bytes and string in genlayer-js
         args: args.args,
         leaderOnly,
-        // feesDistribution: feesDistribution,
+        feesDistribution: feesDistribution,
       });
 
       const tx: TransactionItem = {
@@ -226,15 +224,13 @@ export function useContractQueries() {
         throw new Error('Error writing to contract');
       }
 
-      console.log('feesDistribution', feesDistribution);
-
       const result = await genlayerClient.value?.writeContract({
         address: address.value as Address,
         functionName: method,
         args: args.args,
         value: BigInt(0),
         leaderOnly,
-        // feesDistribution: feesDistribution,
+        feesDistribution: feesDistribution,
       });
 
       transactionsStore.addTransaction({
