@@ -63,7 +63,7 @@ def downgrade() -> None:
     # First remove the default
     op.execute("ALTER TABLE transactions ALTER COLUMN status DROP DEFAULT")
 
-    # Convert existing ACTIVATED values to PENDING
+    # Convert existing LEADER_TIMEOUT values to PENDING
     op.execute(
         "UPDATE transactions SET status = 'PENDING' WHERE status = 'LEADER_TIMEOUT'"
     )

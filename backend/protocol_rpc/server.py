@@ -179,6 +179,9 @@ def restore_stuck_transactions():
             transactions_processor.set_leader_timeout_validators(
                 restore_transaction["hash"], []
             )
+            transactions_processor.set_transaction_appeal_validators_timeout(
+                restore_transaction["hash"], False
+            )
 
     def get_previous_contract_state(transaction: dict) -> dict:
         leader_receipt = transaction["consensus_data"]["leader_receipt"]

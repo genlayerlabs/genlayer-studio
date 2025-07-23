@@ -117,6 +117,7 @@ class Transaction:
     rotation_count: int = 0
     appeal_leader_timeout: bool = False
     leader_timeout_validators: list | None = None
+    appeal_validators_timeout: bool = False
 
     def to_dict(self):
         return {
@@ -154,6 +155,7 @@ class Transaction:
             "rotation_count": self.rotation_count,
             "appeal_leader_timeout": self.appeal_leader_timeout,
             "leader_timeout_validators": self.leader_timeout_validators,
+            "appeal_validators_timeout": self.appeal_validators_timeout,
         }
 
     @classmethod
@@ -193,4 +195,5 @@ class Transaction:
             rotation_count=input.get("rotation_count", 0),
             appeal_leader_timeout=input.get("appeal_leader_timeout", False),
             leader_timeout_validators=input.get("leader_timeout_validators"),
+            appeal_validators_timeout=input.get("appeal_validators_timeout", False),
         )
