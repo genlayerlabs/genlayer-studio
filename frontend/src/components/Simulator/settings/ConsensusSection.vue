@@ -3,10 +3,16 @@ import { computed } from 'vue';
 import PageSection from '@/components/Simulator/PageSection.vue';
 import { useConsensusStore } from '@/stores';
 import MoreInfo from '@/components/global/MoreInfo.vue';
+import BooleanField from '@/components/global/fields/BooleanField.vue';
 import ConsensusInputSection from './ConsensusInputSection.vue';
 import type { ConsensusInput } from '@/types/store';
 
 const consensusStore = useConsensusStore();
+
+const feesEnabled = computed({
+  get: () => consensusStore.feesEnabled,
+  set: (value) => consensusStore.setFeesEnabled(value),
+});
 
 const createConsensusInput = (
   storeValue: number,
@@ -69,21 +75,30 @@ const rotationInputs = computed(() =>
     </template>
 
     <div class="space-y-2">
-      <ConsensusInputSection
-        title="Time Units Allocation"
-        :inputs="timeUnitsInputs"
+      <BooleanField
+        v-model="feesEnabled"
+        name="feesEnabled"
+        label="Enable Fees"
+        data-testid="toggle-fees"
       />
 
-      <ConsensusInputSection
-        title="Appeal Configuration"
-        :inputs="appealInputs"
-      />
+      <template v-if="feesEnabled">
+        <ConsensusInputSection
+          title="Time Units Allocation"
+          :inputs="timeUnitsInputs"
+        />
 
-      <ConsensusInputSection
-        v-if="rotationInputs.length > 0"
-        title="Rotations Per Round"
-        :inputs="rotationInputs"
-      />
+        <ConsensusInputSection
+          title="Appeal Configuration"
+          :inputs="appealInputs"
+        />
+
+        <ConsensusInputSection
+          v-if="rotationInputs.length > 0"
+          title="Rotations Per Round"
+          :inputs="rotationInputs"
+        />
+      </template>
     </div>
   </PageSection>
 </template>

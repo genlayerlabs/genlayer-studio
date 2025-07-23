@@ -19,7 +19,7 @@ const props = defineProps<{
   method: ContractMethod;
   methodType: 'read' | 'write';
   leaderOnly: boolean;
-  feesDistribution: FeesDistribution;
+  feesDistribution?: FeesDistribution;
 }>();
 
 const isExpanded = ref(false);

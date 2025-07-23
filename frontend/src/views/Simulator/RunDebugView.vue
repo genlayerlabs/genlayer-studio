@@ -52,12 +52,16 @@ function isFinalityWindowValid(value: number) {
   return Number.isInteger(value) && value >= 0;
 }
 
-const feesDistribution = computed<FeesDistribution>(() => ({
-  leaderTimeoutFee: consensusStore.leaderTimeoutFee,
-  validatorsTimeoutFee: consensusStore.validatorsTimeoutFee,
-  appealRounds: consensusStore.appealRoundFee,
-  rotations: consensusStore.rotationsFee,
-}));
+const feesDistribution = computed<FeesDistribution | undefined>(() => {
+  if (!consensusStore.feesEnabled) return undefined;
+
+  return {
+    leaderTimeoutFee: consensusStore.leaderTimeoutFee,
+    validatorsTimeoutFee: consensusStore.validatorsTimeoutFee,
+    appealRounds: consensusStore.appealRoundFee,
+    rotations: consensusStore.rotationsFee,
+  };
+});
 </script>
 
 <template>

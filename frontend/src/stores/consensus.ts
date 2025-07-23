@@ -8,11 +8,23 @@ const getStoredValue = (key: string, defaultValue: number): number => {
   return stored ? Number(stored) : defaultValue;
 };
 
+// Helper function to get stored boolean value or default
+const getStoredBooleanValue = (key: string, defaultValue: boolean): boolean => {
+  const stored = localStorage.getItem(`consensusStore.${key}`);
+  return stored ? stored === 'true' : defaultValue;
+};
+
 export const useConsensusStore = defineStore('consensusStore', () => {
   const rpcClient = useRpcClient();
   const webSocketClient = useWebSocketClient();
   const finalityWindow = ref(Number(import.meta.env.VITE_FINALITY_WINDOW));
   const isLoading = ref<boolean>(true); // Needed for the delay between creating the variable and fetching the initial value
+  const feesEnabled = ref(
+    getStoredBooleanValue(
+      'feesEnabled',
+      import.meta.env.VITE_FEES_ENABLED !== 'false',
+    ),
+  );
   const leaderTimeoutFee = ref(
     getStoredValue(
       'leaderTimeoutFee',
@@ -125,6 +137,11 @@ export const useConsensusStore = defineStore('consensusStore', () => {
     );
   }
 
+  function setFeesEnabled(enabled: boolean) {
+    feesEnabled.value = enabled;
+    localStorage.setItem('consensusStore.feesEnabled', enabled.toString());
+  }
+
   return {
     finalityWindow,
     setFinalityWindowTime,
@@ -138,5 +155,7 @@ export const useConsensusStore = defineStore('consensusStore', () => {
     setAppealRoundFee,
     rotationsFee,
     setRotationsFee,
+    feesEnabled,
+    setFeesEnabled,
   };
 });

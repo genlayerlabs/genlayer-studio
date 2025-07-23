@@ -9,7 +9,7 @@ import type { FeesDistribution } from '@/types';
 
 const props = defineProps<{
   leaderOnly: boolean;
-  feesDistribution: FeesDistribution;
+  feesDistribution?: FeesDistribution;
 }>();
 
 const { contract, contractSchemaQuery, deployContract, isDeploying } =
