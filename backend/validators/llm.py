@@ -174,34 +174,37 @@ class LLMModule:
                 print(f"ERROR: missing API key for {key_env}")
                 return False
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url, json=prompt, headers={"Authorization": f"Bearer {api_key}"}
-                ) as response:
-                    if response.status != 200:
-                        print(
-                            f"ERROR: Custom model check failed with status {response.status}"
-                        )
-                        return False
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as session, session.post(
+                url, json=prompt, headers={"Authorization": f"Bearer {api_key}"}
+            ) as response:
+                if response.status != 200:
+                    print(
+                        f"ERROR: Custom model check failed with status {response.status}"
+                    )
+                    return False
 
-                    response_data = await response.json()
-                    try:
-                        result = response_data["choices"][0]["message"]["content"]
-                        if isinstance(result, str):
-                            if result.strip().lower() == "ok":
-                                return True
-                        elif isinstance(result, dict) and "result" in result:
-                            if result["result"].strip().lower() == "ok":
-                                return True
+                response_data = await response.json()
+                try:
+                    result = response_data["choices"][0]["message"]["content"]
+                    if isinstance(result, str) and result.strip().lower() == "ok":
+                        return True
+                    elif (
+                        isinstance(result, dict)
+                        and "result" in result
+                        and result["result"].strip().lower() == "ok"
+                    ):
+                        return True
 
-                        print(
-                            f"ERROR: Custom model check failed: got '{result}' instead of 'ok'"
-                        )
-                        return False
+                    print(
+                        f"ERROR: Custom model check failed: got '{result}' instead of 'ok'"
+                    )
+                    return False
 
-                    except (KeyError, IndexError, json.JSONDecodeError) as e:
-                        print(f"ERROR: Invalid response format: {e}")
-                        return False
+                except (KeyError, IndexError, json.JSONDecodeError) as e:
+                    print(f"ERROR: Invalid response format: {e}")
+                    return False
 
         except Exception as e:
             print(f"ERROR: Custom model check failed with error: {e}")
