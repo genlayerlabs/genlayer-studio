@@ -32,20 +32,24 @@ export const useConsensusStore = defineStore('consensusStore', () => {
     ),
   );
   const defaultRotationFee = Number(import.meta.env.VITE_ROTATIONS_FEE);
-  const storedRotationsFee = localStorage.getItem(
-    'consensusStore.rotationsFee',
-  );
   const rotationsFee = ref<number[]>(
-    storedRotationsFee ? JSON.parse(storedRotationsFee) : [],
+    ((): number[] => {
+      try {
+        const stored = localStorage.getItem('consensusStore.rotationsFee');
+        if (stored) {
+          return JSON.parse(stored);
+        }
+      } catch (error) {
+        console.warn(
+          'Failed to parse stored rotationsFee, using default:',
+          error,
+        );
+      }
+      // Initialize based on current appealRoundFee
+      const rounds = appealRoundFee.value;
+      return rounds > 0 ? Array(rounds).fill(defaultRotationFee) : [];
+    })(),
   );
-
-  if (!storedRotationsFee && appealRoundFee.value > 0) {
-    rotationsFee.value = Array(appealRoundFee.value).fill(defaultRotationFee);
-    localStorage.setItem(
-      'consensusStore.rotationsFee',
-      JSON.stringify(rotationsFee.value),
-    );
-  }
 
   if (!webSocketClient.connected) webSocketClient.connect();
 
