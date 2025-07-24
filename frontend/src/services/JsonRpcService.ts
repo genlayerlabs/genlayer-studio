@@ -202,4 +202,22 @@ export class JsonRpcService implements IJsonRpcService {
       'Error getting finality window time',
     );
   }
+
+  async getStudioVersion(): Promise<string> {
+    const result = await this.callRpcMethod<string>(
+      'gen_protocolVersion',
+      [],
+      'Error getting studio version',
+    );
+    return result as string;
+  }
+
+  async getGenVMVersion(): Promise<string> {
+    const result = await this.callRpcMethod<string>(
+      'sim_genvmVersion',
+      [],
+      'Error getting GenVM version',
+    );
+    return result as string;
+  }
 }
