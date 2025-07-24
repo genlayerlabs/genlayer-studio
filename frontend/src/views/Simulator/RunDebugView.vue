@@ -12,6 +12,7 @@ import {
   useConsensusStore,
   useUIStore,
 } from '@/stores';
+import type { FeesDistribution } from '@/types';
 
 import ContractInfo from '@/components/Simulator/ContractInfo.vue';
 import BooleanField from '@/components/global/fields/BooleanField.vue';
@@ -51,7 +52,16 @@ function isFinalityWindowValid(value: number) {
   return Number.isInteger(value) && value >= 0;
 }
 
-const consensusMaxRotations = computed(() => consensusStore.maxRotations);
+const feesDistribution = computed<FeesDistribution | undefined>(() => {
+  if (!consensusStore.feesEnabled) return undefined;
+
+  return {
+    leaderTimeoutFee: consensusStore.leaderTimeoutFee,
+    validatorsTimeoutFee: consensusStore.validatorsTimeoutFee,
+    appealRounds: consensusStore.appealRoundFee,
+    rotations: consensusStore.rotationsFee,
+  };
+});
 </script>
 
 <template>
@@ -84,7 +94,7 @@ const consensusMaxRotations = computed(() => consensusStore.maxRotations);
               required
               testId="input-finalityWindow"
               :disabled="false"
-              class="w-20"
+              class="h-6 w-20"
               tiny
             />
           </div>
@@ -106,7 +116,7 @@ const consensusMaxRotations = computed(() => consensusStore.maxRotations);
           v-if="isDeploymentOpen"
           @deployedContract="isDeploymentOpen = false"
           :leaderOnly="leaderOnly"
-          :consensusMaxRotations="consensusMaxRotations"
+          :feesDistribution="feesDistribution"
         />
 
         <ContractReadMethods
@@ -118,7 +128,7 @@ const consensusMaxRotations = computed(() => consensusStore.maxRotations);
           v-if="isDeployed"
           id="tutorial-write-methods"
           :leaderOnly="leaderOnly"
-          :consensusMaxRotations="consensusMaxRotations"
+          :feesDistribution="feesDistribution"
         />
         <TransactionsList
           id="tutorial-tx-response"
