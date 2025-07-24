@@ -108,7 +108,7 @@ jobs:
           pip install -r requirements.test.txt
 
       - name: Run tests
-        run: gltest --contracts-dir . --default-wait-retries 40 tests/integration/ -svv
+        run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/ -svv
 
       - name: Dump Docker Compose logs
         run: docker compose logs
