@@ -58,7 +58,10 @@ export const useConsensusStore = defineStore('consensusStore', () => {
         );
       }
       // Initialize based on current appealRoundFee
-      const rounds = appealRoundFee.value;
+      const rounds = getStoredValue(
+        'appealRoundFee',
+        Number(import.meta.env.VITE_APPEAL_ROUNDS_FEE),
+      );
       return rounds > 0 ? Array(rounds).fill(defaultRotationFee) : [];
     })(),
   );
