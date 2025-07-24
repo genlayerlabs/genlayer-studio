@@ -90,17 +90,22 @@ class IHost(metaclass=abc.ABCMeta):
     async def get_balance(self, account: bytes, /) -> int: ...
 
 
-def save_code_callback[
-    T
-](
-    address: bytes, code: bytes, cb: typing.Callable[[bytes, bytes, int, bytes], T]
-) -> tuple[T, T]:
+def get_code_slot() -> bytes:
     import hashlib
 
     code_digest = hashlib.sha3_256(b"\x00" * 32)
     CODE_OFFSET = 1
     code_digest.update(CODE_OFFSET.to_bytes(4, byteorder="little"))
     code_slot = code_digest.digest()
+    return code_slot
+
+
+def save_code_callback[
+    T
+](
+    address: bytes, code: bytes, cb: typing.Callable[[bytes, bytes, int, bytes], T]
+) -> tuple[T, T]:
+    code_slot = get_code_slot()
     r1 = cb(
         address, code_slot, 0, len(code).to_bytes(4, byteorder="little", signed=False)
     )
