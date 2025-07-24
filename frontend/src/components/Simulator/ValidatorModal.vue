@@ -119,20 +119,20 @@ const providerOptions = computed(() => {
 });
 
 const modelOptions = computed(() => {
-  return uniqBy(nodeStore.nodeProviders, 'model')
-    .filter(
-      (provider: any) => provider.provider === newValidatorData.value.provider,
-    )
-    .map((provider: any) => {
-      const isDisabled = !provider?.is_model_available;
-      return {
-        value: provider.model,
-        label: isDisabled
-          ? `${provider.model} (missing configuration)`
-          : provider.model,
-        disabled: !provider?.is_model_available,
-      };
-    });
+  const providers = nodeStore.nodeProviders.filter(
+    (provider: any) => provider.provider === newValidatorData.value.provider,
+  );
+
+  return uniqBy(providers, 'model').map((provider: any) => {
+    const isDisabled = !provider?.is_model_available;
+    return {
+      value: provider.model,
+      label: isDisabled
+        ? `${provider.model} (missing configuration)`
+        : provider.model,
+      disabled: !provider?.is_model_available,
+    };
+  });
 });
 
 const handleChangeProvider = () => {
