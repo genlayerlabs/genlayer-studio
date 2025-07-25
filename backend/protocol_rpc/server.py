@@ -173,15 +173,6 @@ def restore_stuck_transactions():
             print(
                 f"ERROR: Failed to put transaction to canceled status {transaction_hash}: {str(e)}"
             )
-            transactions_processor.set_transaction_appeal_leader_timeout(
-                restore_transaction["hash"], False
-            )
-            transactions_processor.set_leader_timeout_validators(
-                restore_transaction["hash"], []
-            )
-            transactions_processor.set_transaction_appeal_validators_timeout(
-                restore_transaction["hash"], False
-            )
 
     def get_previous_contract_state(transaction: dict) -> dict:
         leader_receipt = transaction["consensus_data"]["leader_receipt"]
@@ -312,6 +303,21 @@ def restore_stuck_transactions():
                                 restore_transaction["hash"], None
                             )
                             transactions_processor.reset_transaction_appeal_processing_time(
+                                restore_transaction["hash"]
+                            )
+                            transactions_processor.set_transaction_appeal_leader_timeout(
+                                restore_transaction["hash"], False
+                            )
+                            transactions_processor.set_leader_timeout_validators(
+                                restore_transaction["hash"], []
+                            )
+                            transactions_processor.set_transaction_appeal_validators_timeout(
+                                restore_transaction["hash"], False
+                            )
+                            transactions_processor.set_transaction_appeal_count(
+                                restore_transaction["hash"], 0
+                            )
+                            transactions_processor.reset_transaction_rotation_count(
                                 restore_transaction["hash"]
                             )
                     except Exception as e:

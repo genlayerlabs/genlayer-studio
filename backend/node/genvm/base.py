@@ -100,6 +100,7 @@ class IGenVM(typing.Protocol):
         host_data: typing.Any,
         readonly: bool,
         config_path: Path | None,
+        timeout: int | None,
     ) -> ExecutionResult: ...
 
     async def get_contract_schema(self, contract_code: bytes) -> ExecutionResult: ...
@@ -155,6 +156,7 @@ class GenVMHost(IGenVM):
         chain_id: int,
         host_data: typing.Any,
         config_path: Path | None,
+        timeout: int | None,
     ) -> ExecutionResult:
         message = {
             "is_init": is_init,
@@ -189,6 +191,7 @@ class GenVMHost(IGenVM):
                 "--allow-latest",
             ],
             config_path,
+            timeout,
         )
 
     async def get_contract_schema(self, contract_code: bytes) -> ExecutionResult:
@@ -216,6 +219,7 @@ class GenVMHost(IGenVM):
                 leader_results=None,
             ),
             ["--message", json.dumps(message), "--permissions", "", "--allow-latest"],
+            None,
             None,
         )
 
@@ -390,12 +394,11 @@ async def _run_genvm_host(
     host_supplier: typing.Callable[[socket.socket], _Host],
     args: list[Path | str],
     config_path: Path | None,
+    timeout: int | None,
 ) -> ExecutionResult:
     tmpdir = Path(tempfile.mkdtemp())
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock_listener:
-            timeout = 300  # seconds
-
             sock_listener.setblocking(False)
             sock_path = tmpdir.joinpath("sock")
             sock_listener.bind(str(sock_path))

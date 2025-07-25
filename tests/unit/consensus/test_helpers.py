@@ -97,16 +97,27 @@ class TransactionsProcessorMock:
         transaction = self.get_transaction_by_hash(transaction_hash)
         if not appeal:
             transaction["appealed"] = appeal
-        elif transaction["status"] in (
-            TransactionStatus.ACCEPTED.value,
-            TransactionStatus.UNDETERMINED.value,
-            TransactionStatus.LEADER_TIMEOUT.value,
-            TransactionStatus.VALIDATORS_TIMEOUT.value,
+            self.commit(transaction)
+        elif (
+            transaction["status"]
+            in (
+                TransactionStatus.ACCEPTED.value,
+                TransactionStatus.UNDETERMINED.value,
+                TransactionStatus.LEADER_TIMEOUT.value,
+                TransactionStatus.VALIDATORS_TIMEOUT.value,
+            )
+            and (not transaction["appealed"])
+            and (
+                transaction["fees_distribution"] is None
+                or transaction["fees_distribution"]["appeal_rounds"]
+                > transaction["appeal_count"]
+            )
         ):
             self.set_transaction_timestamp_appeal(transaction, int(time.time()))
+            self.increase_transaction_appeal_count(transaction)
             time.sleep(1)
             transaction["appealed"] = appeal
-        self.commit(transaction)
+            self.commit(transaction)
 
     def set_transaction_timestamp_awaiting_finalization(
         self, transaction_hash: str, timestamp_awaiting_finalization: int = None
@@ -253,13 +264,21 @@ class TransactionsProcessorMock:
         transaction = self.get_transaction_by_hash(transaction_hash)
         transaction["last_vote_timestamp"] = int(time.time())
 
-    def increase_transaction_rotation_count(self, transaction_hash: str):
+    def increase_transaction_rotation_count(self, transaction_hash: str) -> int:
         transaction = self.get_transaction_by_hash(transaction_hash)
-        transaction["rotation_count"] += 1
+        if (
+            transaction["fees_distribution"] is None
+            or transaction["rotation_count"]
+            < transaction["fees_distribution"]["rotations"][transaction["appeal_count"]]
+        ):
+            transaction["rotation_count"] += 1
+            self.commit(transaction)
+        return transaction["rotation_count"]
 
     def reset_transaction_rotation_count(self, transaction_hash: str):
         transaction = self.get_transaction_by_hash(transaction_hash)
         transaction["rotation_count"] = 0
+        self.commit(transaction)
 
     def set_transaction_appeal_leader_timeout(
         self, transaction_hash: str, appeal_leader_timeout: bool
@@ -281,6 +300,15 @@ class TransactionsProcessorMock:
         transaction["appeal_validators_timeout"] = appeal_validators_timeout
         self.commit(transaction)
         return appeal_validators_timeout
+
+    def set_transaction_appeal_count(self, transaction_hash: str, appeal_count: int):
+        transaction = self.get_transaction_by_hash(transaction_hash)
+        transaction["appeal_count"] = appeal_count
+        self.commit(transaction)
+
+    def increase_transaction_appeal_count(self, transaction: dict):
+        transaction["appeal_count"] += 1
+        self.commit(transaction)
 
 
 class SnapshotMock:
@@ -427,13 +455,14 @@ def transaction_to_dict(transaction: Transaction) -> dict:
             if transaction.contract_snapshot
             else None
         ),
-        "config_rotation_rounds": transaction.config_rotation_rounds,
         "num_of_initial_validators": transaction.num_of_initial_validators,
         "last_vote_timestamp": transaction.last_vote_timestamp,
         "rotation_count": transaction.rotation_count,
         "appeal_leader_timeout": transaction.appeal_leader_timeout,
         "leader_timeout_validators": transaction.leader_timeout_validators,
         "appeal_validators_timeout": transaction.appeal_validators_timeout,
+        "fees_distribution": transaction.fees_distribution,
+        "appeal_count": transaction.appeal_count,
     }
 
 
@@ -471,8 +500,9 @@ def node_factory(
     msg_handler: MessageHandler,
     contract_snapshot_factory: Callable[[str], ContractSnapshot],
     snap: validators.Snapshot,
+    timeout: int | None,
     vote: Vote,
-    timeout: bool,
+    timeout_flag: bool,
 ):
     mock = Mock(Node)
 
@@ -497,7 +527,7 @@ def node_factory(
             mode=mode,
             gas_used=0,
             contract_state=contract_state,  # Dynamic contract state based on transaction
-            result=TIMEOUT_EXEC_RESULT if timeout else DEFAULT_EXEC_RESULT,
+            result=TIMEOUT_EXEC_RESULT if timeout_flag else DEFAULT_EXEC_RESULT,
             node_config={
                 "address": node["address"],
                 "private_key": node["private_key"],
@@ -656,7 +686,7 @@ def setup_test_environment(
             node_factory(
                 *args,
                 vote=get_vote(),
-                timeout=get_timeout() if get_timeout else False,
+                timeout_flag=get_timeout() if get_timeout else False,
             )
         )
         return created_nodes[-1]
@@ -805,3 +835,18 @@ def check_contract_state_with_timeout(
             return
 
     raise AssertionError(f"Contract state did not change within {timeout} seconds")
+
+
+def set_transaction_fees_distribution(
+    transaction: Transaction,
+    rotation_rounds: int,
+    appeal_rounds: int = 10,
+    leader_timeout_fee: int = 300,
+    validators_timeout_fee: int = 300,
+):
+    transaction.fees_distribution = {
+        "appeal_rounds": appeal_rounds,
+        "rotations": [rotation_rounds] * (appeal_rounds + 1),
+        "leader_timeout_fee": leader_timeout_fee,
+        "validators_timeout_fee": validators_timeout_fee,
+    }

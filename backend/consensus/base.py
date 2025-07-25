@@ -64,6 +64,7 @@ type NodeFactory = Callable[
         MessageHandler,
         Callable[[str], ContractSnapshot],
         validators.Snapshot,
+        int | None,
     ],
     Node,
 ]
@@ -77,6 +78,7 @@ def node_factory(
     msg_handler: MessageHandler,
     contract_snapshot_factory: Callable[[str], ContractSnapshot],
     validators_manager_snapshot: validators.Snapshot,
+    timeout: int | None,
 ) -> Node:
     """
     Factory function to create a Node instance.
@@ -112,6 +114,7 @@ def node_factory(
         ),
         contract_snapshot_factory=contract_snapshot_factory,
         validators_snapshot=validators_manager_snapshot,
+        timeout=timeout,
     )
 
 
@@ -262,7 +265,6 @@ class TransactionContext:
         self.votes: dict = {}
         self.validator_nodes: list = []
         self.validation_results: list = []
-        self.rotation_count: int = 0
         self.consensus_service = consensus_service
         self.leader: dict = {}
 
@@ -975,6 +977,7 @@ class ConsensusAlgorithm:
         Check if the transaction can be finalized based on the following criteria:
         - The transaction is a leader only transaction
         - The transaction has exceeded the finality window
+        - The appeal rounds fee is exhausted
         - The previous transaction has been finalized
 
         Args:
@@ -986,16 +989,24 @@ class ConsensusAlgorithm:
         Returns:
             bool: True if the transaction can be finalized, False otherwise.
         """
-        if (transaction.leader_only) or (
-            (
-                time.time()
-                - transaction.timestamp_awaiting_finalization
-                - transaction.appeal_processing_time
+        if (
+            (transaction.leader_only)
+            or (
+                (
+                    time.time()
+                    - transaction.timestamp_awaiting_finalization
+                    - transaction.appeal_processing_time
+                )
+                > self.finality_window_time
+                * (
+                    (1 - self.finality_window_appeal_failed_reduction)
+                    ** transaction.appeal_failed
+                )
             )
-            > self.finality_window_time
-            * (
-                (1 - self.finality_window_appeal_failed_reduction)
-                ** transaction.appeal_failed
+            or (
+                transaction.fees_distribution is not None
+                and transaction.fees_distribution["appeal_rounds"]
+                <= transaction.appeal_count
             )
         ):
             if index == 0:
@@ -1901,6 +1912,11 @@ class ProposingState(TransactionState):
             context.msg_handler,
             context.contract_snapshot_factory,
             context.validators_snapshot,
+            (
+                context.transaction.fees_distribution["leader_timeout_fee"]
+                if context.transaction.fees_distribution
+                else None
+            ),
         )
 
         # Execute the transaction and obtain the leader receipt
@@ -1982,6 +1998,11 @@ class CommittingState(TransactionState):
                 context.msg_handler,
                 context.contract_snapshot_factory,
                 context.validators_snapshot,
+                (
+                    context.transaction.fees_distribution["validators_timeout_fee"]
+                    if context.transaction.fees_distribution
+                    else None
+                ),
             )
 
         # Dispatch a transaction status update to COMMITTING
@@ -2084,7 +2105,9 @@ class RevealingState(TransactionState):
 
         # Determine the consensus result
         votes_list = list(context.votes.values())
-        consensus_result = determine_consensus_from_votes(votes_list)
+        consensus_result = (
+            ConsensusResult.NO_MAJORITY
+        )  # determine_consensus_from_votes(votes_list)
 
         # Send event in rollup to communicate the votes are revealed
         if len(context.consensus_data.leader_receipt) == 1:
@@ -2202,7 +2225,13 @@ class RevealingState(TransactionState):
                 ConsensusResult.NO_MAJORITY,
             ]:
                 # If all rotations are done and no consensus is reached, transition to UndeterminedState
-                if context.rotation_count >= context.transaction.config_rotation_rounds:
+                if (
+                    context.transaction.fees_distribution is not None
+                    and context.transaction.rotation_count
+                    >= context.transaction.fees_distribution["rotations"][
+                        context.transaction.appeal_count
+                    ]
+                ):
                     if context.transaction.appeal_leader_timeout:
                         context.transaction.appeal_leader_timeout = context.transactions_processor.set_transaction_appeal_leader_timeout(
                             context.transaction.hash, False
@@ -2251,8 +2280,7 @@ class RevealingState(TransactionState):
                         )
                         return UndeterminedState()
 
-                    context.rotation_count += 1
-                    context.transactions_processor.increase_transaction_rotation_count(
+                    context.transaction.rotation_count = context.transactions_processor.increase_transaction_rotation_count(
                         context.transaction.hash
                     )
 
@@ -2909,5 +2937,4 @@ def _emit_messages(
             num_of_initial_validators=context.transaction.num_of_initial_validators,
             triggered_by_hash=context.transaction.hash,
             transaction_hash=transaction_hash,
-            config_rotation_rounds=context.transaction.config_rotation_rounds,
         )

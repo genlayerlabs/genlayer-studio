@@ -795,6 +795,14 @@ def send_raw_transaction(
         else:
             transaction_hash = None
 
+        # TODO: Hardcoded fees parameters, they should be decoded from signed_rollup_transaction
+        fees_distribution = {
+            "leader_timeout_fee": 200,
+            "validators_timeout_fee": 100,
+            "appeal_rounds": 1,
+            "rotations": [1, 2],
+        }
+
         # Insert transaction into the database
         transaction_hash = transactions_processor.insert_transaction(
             genlayer_transaction.from_address,
@@ -804,10 +812,10 @@ def send_raw_transaction(
             genlayer_transaction.type.value,
             nonce,
             leader_only,
-            genlayer_transaction.max_rotations,
             None,
             transaction_hash,
             genlayer_transaction.num_of_initial_validators,
+            fees_distribution=fees_distribution,
         )
 
         return transaction_hash

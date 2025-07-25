@@ -39,6 +39,11 @@ export interface TransactionItem {
     args: any[];
     kwargs: { [key: string]: any };
   };
+  fees_distribution?: {
+    appeal_rounds: number;
+    [key: string]: any;
+  } | null;
+  appeal_count?: number;
 }
 
 export type UIMode = 'light' | 'dark';
