@@ -352,6 +352,18 @@ class TransactionsProcessor:
                 - transaction_data["rotation_count"]
             )
 
+        if transaction_data["fees_distribution"] is None:
+            rotations_left = None
+        else:
+            rotations = transaction_data["fees_distribution"]["rotations"]
+            appeal_count = transaction_data["appeal_count"]
+            if appeal_count < len(rotations):
+                rotations_left = (
+                    rotations[appeal_count] - transaction_data["rotation_count"]
+                )
+            else:
+                rotations_left = 0  # or handle this case appropriately
+
         transaction_data["last_round"] = {
             "round": round_number,
             "leader_index": "0",

@@ -2097,9 +2097,7 @@ class RevealingState(TransactionState):
 
         # Determine the consensus result
         votes_list = list(context.votes.values())
-        consensus_result = (
-            ConsensusResult.NO_MAJORITY
-        )  # determine_consensus_from_votes(votes_list)
+        consensus_result = determine_consensus_from_votes(votes_list)
 
         # Send event in rollup to communicate the votes are revealed
         if len(context.consensus_data.leader_receipt) == 1:
