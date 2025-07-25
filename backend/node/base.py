@@ -360,7 +360,9 @@ class Node:
             pending_transactions=res.pending_transactions,
             vote=None,
             execution_result=result_exec_code,
-            contract_state=self.contract_snapshot.states["accepted"],
+            contract_state=typing.cast(_SnapshotView, res.state).snapshot.states[
+                "accepted"
+            ],
             calldata=calldata,
             mode=self.validator_mode,
             node_config=self.validator.to_dict(),
