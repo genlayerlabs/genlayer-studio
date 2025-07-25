@@ -51,7 +51,6 @@ def test_transactions_processor(transactions_processor: TransactionsProcessor):
         transaction_type,
         nonce,
         True,
-        3,
         None,
     )
     transactions_processor.session.commit()
@@ -64,7 +63,6 @@ def test_transactions_processor(transactions_processor: TransactionsProcessor):
         transaction_type,
         nonce + 1,
         True,
-        3,
         first_transaction_hash,
     )
 
