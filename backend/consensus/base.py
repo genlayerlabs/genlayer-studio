@@ -989,24 +989,16 @@ class ConsensusAlgorithm:
         Returns:
             bool: True if the transaction can be finalized, False otherwise.
         """
-        if (
-            (transaction.leader_only)
-            or (
-                (
-                    time.time()
-                    - transaction.timestamp_awaiting_finalization
-                    - transaction.appeal_processing_time
-                )
-                > self.finality_window_time
-                * (
-                    (1 - self.finality_window_appeal_failed_reduction)
-                    ** transaction.appeal_failed
-                )
+        if (transaction.leader_only) or (
+            (
+                time.time()
+                - transaction.timestamp_awaiting_finalization
+                - transaction.appeal_processing_time
             )
-            or (
-                transaction.fees_distribution is not None
-                and transaction.fees_distribution["appeal_rounds"]
-                <= transaction.appeal_count
+            > self.finality_window_time
+            * (
+                (1 - self.finality_window_appeal_failed_reduction)
+                ** transaction.appeal_failed
             )
         ):
             if index == 0:
