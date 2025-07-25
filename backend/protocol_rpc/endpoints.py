@@ -725,7 +725,10 @@ def send_raw_transaction(
     if isinstance(decoded_rollup_transaction.data, DecodedsubmitAppealDataArgs):
         tx_id = decoded_rollup_transaction.data.tx_id
         tx_id_hex = "0x" + tx_id.hex() if isinstance(tx_id, bytes) else tx_id
-        transactions_processor.set_transaction_appeal(tx_id_hex, True)
+        try:
+            transactions_processor.set_transaction_appeal(tx_id_hex, True)
+        except ValueError as e:
+            raise JSONRPCError(str(e))
         msg_handler.send_message(
             log_event=LogEvent(
                 "transaction_appeal_updated",
@@ -795,6 +798,14 @@ def send_raw_transaction(
         else:
             transaction_hash = None
 
+        # TODO: Hardcoded fees parameters, they should be decoded from signed_rollup_transaction
+        fees_distribution = {
+            "leader_timeout_fee": 200,
+            "validators_timeout_fee": 100,
+            "appeal_rounds": 1,
+            "rotations": [1, 2],
+        }
+
         # Insert transaction into the database
         transaction_hash = transactions_processor.insert_transaction(
             genlayer_transaction.from_address,
@@ -804,10 +815,10 @@ def send_raw_transaction(
             genlayer_transaction.type.value,
             nonce,
             leader_only,
-            genlayer_transaction.max_rotations,
             None,
             transaction_hash,
             genlayer_transaction.num_of_initial_validators,
+            fees_distribution=fees_distribution,
         )
 
         return transaction_hash

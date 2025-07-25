@@ -119,13 +119,14 @@ class TransactionsProcessor:
             "timestamp_appeal": transaction_data.timestamp_appeal,
             "appeal_processing_time": transaction_data.appeal_processing_time,
             "contract_snapshot": transaction_data.contract_snapshot,
-            "config_rotation_rounds": transaction_data.config_rotation_rounds,
             "num_of_initial_validators": transaction_data.num_of_initial_validators,
             "last_vote_timestamp": transaction_data.last_vote_timestamp,
             "rotation_count": transaction_data.rotation_count,
             "appeal_leader_timeout": transaction_data.appeal_leader_timeout,
             "leader_timeout_validators": transaction_data.leader_timeout_validators,
             "appeal_validators_timeout": transaction_data.appeal_validators_timeout,
+            "fees_distribution": transaction_data.fees_distribution,
+            "appeal_count": transaction_data.appeal_count,
         }
 
     @staticmethod
@@ -223,12 +224,12 @@ class TransactionsProcessor:
         type: int,
         nonce: int,
         leader_only: bool,
-        config_rotation_rounds: int,
         triggered_by_hash: (
             str | None
         ) = None,  # If filled, the transaction must be present in the database (committed)
         transaction_hash: str | None = None,
         num_of_initial_validators: int | None = None,
+        fees_distribution: dict | None = None,
     ) -> str:
         current_nonce = self.get_transaction_count(from_address)
 
@@ -274,13 +275,14 @@ class TransactionsProcessor:
             timestamp_appeal=None,
             appeal_processing_time=0,
             contract_snapshot=None,
-            config_rotation_rounds=config_rotation_rounds,
             num_of_initial_validators=num_of_initial_validators,
             last_vote_timestamp=None,
             rotation_count=0,
             appeal_leader_timeout=False,
             leader_timeout_validators=None,
             appeal_validators_timeout=False,
+            fees_distribution=fees_distribution,
+            appeal_count=0,
         )
 
         self.session.add(new_transaction)
@@ -308,7 +310,11 @@ class TransactionsProcessor:
                 len(transaction_data["consensus_history"]["consensus_results"]) - 1
             )
             last_round = transaction_data["consensus_history"]["consensus_results"][-1]
-            if "leader_result" in last_round and last_round["leader_result"]:
+            if (
+                "leader_result" in last_round
+                and last_round["leader_result"] is not None
+                and len(last_round["leader_result"]) > 1
+            ):
                 leader = last_round["leader_result"][1]
                 validator_votes_name.append(leader["vote"].upper())
                 vote_number = int(Vote.from_string(leader["vote"]))
@@ -340,16 +346,35 @@ class TransactionsProcessor:
             )
         )
 
+        if transaction_data["fees_distribution"] is None:
+            rotations_left = None
+        else:
+            rotations_left = (
+                transaction_data["fees_distribution"]["rotations"][
+                    transaction_data["appeal_count"]
+                ]
+                - transaction_data["rotation_count"]
+            )
+
+        if transaction_data["fees_distribution"] is None:
+            rotations_left = None
+        else:
+            rotations = transaction_data["fees_distribution"]["rotations"]
+            appeal_count = transaction_data["appeal_count"]
+            if appeal_count < len(rotations):
+                rotations_left = (
+                    rotations[appeal_count] - transaction_data["rotation_count"]
+                )
+            else:
+                rotations_left = 0  # or handle this case appropriately
+
         transaction_data["last_round"] = {
             "round": round_number,
             "leader_index": "0",
             "votes_committed": str(len(validator_votes_name)),
             "votes_revealed": str(len(validator_votes_name)),
             "appeal_bond": "0",
-            "rotations_left": str(
-                transaction_data.get("config_rotation_rounds", 0)
-                - transaction_data.get("rotation_count", 0)
-            ),
+            "rotations_left": str(rotations_left),
             "result": last_round_result,
             "round_validators": round_validators,
             "validator_votes_hash": validator_votes_hash,
@@ -643,20 +668,35 @@ class TransactionsProcessor:
         transaction = (
             self.session.query(Transactions).filter_by(hash=transaction_hash).one()
         )
-        # You can only appeal the transaction if it is in accepted or undetermined state
+        # You can only appeal the transaction if:
+        # - it is in accepted, undetermined, leader timeout or validators timeout state
+        # - it is not already appealed
+        # - the appeal count is less than the appeal rounds fee
         # Setting it to false is always allowed
         if not appeal:
             transaction.appealed = appeal
             self.session.commit()
-        elif transaction.status in (
-            TransactionStatus.ACCEPTED,
-            TransactionStatus.UNDETERMINED,
-            TransactionStatus.LEADER_TIMEOUT,
-            TransactionStatus.VALIDATORS_TIMEOUT,
+        elif (
+            transaction.status
+            in (
+                TransactionStatus.ACCEPTED,
+                TransactionStatus.UNDETERMINED,
+                TransactionStatus.LEADER_TIMEOUT,
+                TransactionStatus.VALIDATORS_TIMEOUT,
+            )
+            and (not transaction.appealed)
+            and (
+                transaction.fees_distribution is None
+                or transaction.fees_distribution["appeal_rounds"]
+                > transaction.appeal_count
+            )
         ):
             transaction.appealed = appeal
             self.set_transaction_timestamp_appeal(transaction, int(time.time()))
+            self.increase_transaction_appeal_count(transaction)
             self.session.commit()
+        else:
+            raise ValueError("Transaction cannot be appealed")
 
     def set_transaction_timestamp_awaiting_finalization(
         self, transaction_hash: str, timestamp_awaiting_finalization: int = None
@@ -935,7 +975,7 @@ class TransactionsProcessor:
         transaction.last_vote_timestamp = int(time.time())
         self.session.commit()
 
-    def increase_transaction_rotation_count(self, transaction_hash: str):
+    def increase_transaction_rotation_count(self, transaction_hash: str) -> int:
         """
         Increment the rotation count for a transaction by 1.
 
@@ -951,13 +991,16 @@ class TransactionsProcessor:
             .with_for_update()  # lock row
             .one()
         )
-        max_rotations = transaction.config_rotation_rounds or 0
-        if max_rotations and transaction.rotation_count >= max_rotations:
-            self.session.commit()
-            return  # already at the ceiling
-        transaction.rotation_count += 1
-        flag_modified(transaction, "rotation_count")
+
+        if (
+            transaction.fees_distribution is None
+            or transaction.rotation_count
+            < transaction.fees_distribution["rotations"][transaction.appeal_count]
+        ):
+            transaction.rotation_count += 1
+            flag_modified(transaction, "rotation_count")
         self.session.commit()
+        return transaction.rotation_count
 
     def reset_transaction_rotation_count(self, transaction_hash: str):
         """
@@ -976,6 +1019,7 @@ class TransactionsProcessor:
             .one()
         )
         transaction.rotation_count = 0
+        self.session.commit()
 
     def set_transaction_appeal_leader_timeout(
         self, transaction_hash: str, appeal_leader_timeout: bool
@@ -1003,3 +1047,15 @@ class TransactionsProcessor:
         transaction.appeal_validators_timeout = appeal_validators_timeout
         self.session.commit()
         return appeal_validators_timeout
+
+    def set_transaction_appeal_count(self, transaction_hash: str, appeal_count: int):
+        transaction = (
+            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        )
+        transaction.appeal_count = appeal_count
+        self.session.commit()
+
+    def increase_transaction_appeal_count(self, transaction: Transactions):
+        transaction.appeal_count += 1
+        flag_modified(transaction, "appeal_count")
+        self.session.commit()

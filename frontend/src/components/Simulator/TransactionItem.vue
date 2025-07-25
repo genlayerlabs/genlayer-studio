@@ -218,7 +218,10 @@ function prettifyTxData(x: any): any {
               transaction.data.appeal_processing_time <=
               finalityWindow *
                 (1 - finalityWindowAppealFailedReduction) **
-                  transaction.data.appeal_failed
+                  transaction.data.appeal_failed &&
+            (transaction.data.fees_distribution === null ||
+              transaction.data.fees_distribution.appeal_rounds >
+                transaction.data.appeal_count)
           "
           @click="handleSetTransactionAppeal"
           tiny

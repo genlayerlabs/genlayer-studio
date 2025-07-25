@@ -65,7 +65,6 @@ class SnapshotManager:
                 "timestamp_appeal": tx.timestamp_appeal,
                 "appeal_processing_time": tx.appeal_processing_time,
                 "contract_snapshot": tx.contract_snapshot,
-                "config_rotation_rounds": tx.config_rotation_rounds,
                 "appealed": tx.appealed,
                 "appeal_undetermined": tx.appeal_undetermined,
                 "triggered_by_hash": tx.triggered_by_hash,
@@ -77,6 +76,8 @@ class SnapshotManager:
                 "appeal_leader_timeout": tx.appeal_leader_timeout,
                 "leader_timeout_validators": tx.leader_timeout_validators,
                 "appeal_validators_timeout": tx.appeal_validators_timeout,
+                "appeal_count": tx.appeal_count,
+                "fees_distribution": tx.fees_distribution,
             }
             for tx in transactions
         }
@@ -140,7 +141,6 @@ class SnapshotManager:
                 timestamp_appeal=tx_info["timestamp_appeal"],
                 appeal_processing_time=tx_info["appeal_processing_time"],
                 contract_snapshot=tx_info["contract_snapshot"],
-                config_rotation_rounds=tx_info["config_rotation_rounds"],
                 appealed=tx_info["appealed"],
                 appeal_undetermined=tx_info["appeal_undetermined"],
                 timestamp_awaiting_finalization=tx_info[
@@ -152,6 +152,8 @@ class SnapshotManager:
                 appeal_leader_timeout=tx_info["appeal_leader_timeout"],
                 leader_timeout_validators=tx_info["leader_timeout_validators"],
                 appeal_validators_timeout=tx_info["appeal_validators_timeout"],
+                appeal_count=tx_info["appeal_count"],
+                fees_distribution=tx_info["fees_distribution"],
             )
             if tx_info["created_at"]:
                 new_tx.created_at = datetime.fromisoformat(tx_info["created_at"])

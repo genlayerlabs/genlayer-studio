@@ -105,6 +105,7 @@ class Node:
         leader_receipt: Optional[Receipt] = None,
         msg_handler: MessageHandler | None = None,
         validators_snapshot: validators.Snapshot | None = None,
+        timeout: int | None = None,
     ):
         self.contract_snapshot = contract_snapshot
         self.validator_mode = validator_mode
@@ -114,6 +115,7 @@ class Node:
         self.msg_handler = msg_handler
         self.contract_snapshot_factory = contract_snapshot_factory
         self.validators_snapshot = validators_snapshot
+        self.timeout = timeout
 
     def _create_genvm(self) -> genvmbase.IGenVM:
         return genvmbase.GenVMHost()
@@ -340,6 +342,7 @@ class Node:
             chain_id=SIMULATOR_CHAIN_ID,
             config_path=config_path,
             host_data=host_data,
+            timeout=self.timeout,
         )
 
         await self._execution_finished(res, transaction_hash)

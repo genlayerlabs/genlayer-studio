@@ -28,7 +28,6 @@ def test_chain_snapshot(session: Session):
         timestamp_appeal=0,
         appeal_processing_time=0,
         contract_snapshot={},
-        config_rotation_rounds=0,
         appealed=False,
         appeal_undetermined=False,
         timestamp_awaiting_finalization=0,
@@ -38,6 +37,8 @@ def test_chain_snapshot(session: Session):
         appeal_leader_timeout=False,
         leader_timeout_validators=None,
         appeal_validators_timeout=False,
+        fees_distribution={},
+        appeal_count=0,
         # triggered_by_hash=None,
     )
 
@@ -62,7 +63,6 @@ def test_chain_snapshot(session: Session):
         timestamp_appeal=0,
         appeal_processing_time=0,
         contract_snapshot={},
-        config_rotation_rounds=0,
         appealed=False,
         appeal_undetermined=False,
         timestamp_awaiting_finalization=0,
@@ -72,6 +72,8 @@ def test_chain_snapshot(session: Session):
         appeal_leader_timeout=False,
         leader_timeout_validators=None,
         appeal_validators_timeout=False,
+        fees_distribution={},
+        appeal_count=0,
         # triggered_by_hash="0xdef",
     )
 
@@ -96,7 +98,6 @@ def test_chain_snapshot(session: Session):
         timestamp_appeal=0,
         appeal_processing_time=0,
         contract_snapshot={},
-        config_rotation_rounds=0,
         appealed=False,
         appeal_undetermined=False,
         timestamp_awaiting_finalization=0,
@@ -106,6 +107,8 @@ def test_chain_snapshot(session: Session):
         appeal_leader_timeout=False,
         leader_timeout_validators=None,
         appeal_validators_timeout=False,
+        fees_distribution={},
+        appeal_count=0,
         # triggered_by_hash=None,
     )
 
