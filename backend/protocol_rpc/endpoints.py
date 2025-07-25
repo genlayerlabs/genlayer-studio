@@ -725,7 +725,10 @@ def send_raw_transaction(
     if isinstance(decoded_rollup_transaction.data, DecodedsubmitAppealDataArgs):
         tx_id = decoded_rollup_transaction.data.tx_id
         tx_id_hex = "0x" + tx_id.hex() if isinstance(tx_id, bytes) else tx_id
-        transactions_processor.set_transaction_appeal(tx_id_hex, True)
+        try:
+            transactions_processor.set_transaction_appeal(tx_id_hex, True)
+        except ValueError as e:
+            raise JSONRPCError(str(e))
         msg_handler.send_message(
             log_event=LogEvent(
                 "transaction_appeal_updated",
