@@ -46,7 +46,7 @@ export const useConsensusStore = defineStore('consensusStore', () => {
         );
       }
       // Initialize based on current appealRoundFee
-      const rounds = appealRoundFee.value;
+      const rounds = appealRoundFee.value + 1;
       return rounds > 0 ? Array(rounds).fill(defaultRotationFee) : [];
     })(),
   );
@@ -91,22 +91,22 @@ export const useConsensusStore = defineStore('consensusStore', () => {
     appealRoundFee.value = fee;
     localStorage.setItem('consensusStore.appealRoundFee', fee.toString());
 
-    // When appeal rounds change, adjust rotations fee array
-    if (fee > 0) {
-      const currentRotations = rotationsFee.value;
-      if (fee > currentRotations.length) {
-        // Add new rounds with default fee
-        rotationsFee.value = [
-          ...currentRotations,
-          ...Array(fee - currentRotations.length).fill(defaultRotationFee),
-        ];
-      } else if (fee < currentRotations.length) {
-        // Remove excess rounds
-        rotationsFee.value = currentRotations.slice(0, fee);
-      }
-    } else {
-      // If fee is 0, clear the array
-      rotationsFee.value = [];
+    // Increment fee for rotation calculations
+    const rotationCount = fee + 1;
+    const currentRotations = rotationsFee.value;
+
+    // Adjust rotations fee array based on new count
+    if (rotationCount > currentRotations.length) {
+      // Add new rounds with default fee
+      rotationsFee.value = [
+        ...currentRotations,
+        ...Array(rotationCount - currentRotations.length).fill(
+          defaultRotationFee,
+        ),
+      ];
+    } else if (rotationCount < currentRotations.length) {
+      // Remove excess rounds
+      rotationsFee.value = currentRotations.slice(0, rotationCount);
     }
 
     localStorage.setItem(
