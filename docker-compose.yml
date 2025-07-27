@@ -132,6 +132,7 @@ services:
         max-file: "3"
 
   postgres:
+    profiles: ["local"]
     image: postgres:16-alpine
     ports:
       - "${DBPORT}:5432"
@@ -152,9 +153,9 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    # If you want your db to persist in dev
+    # Database data - use 'docker compose down -v' to wipe
     volumes:
-     - "./data/postgres:/var/lib/postgresql/data"
+      - postgres_data:/var/lib/postgresql/data
 
   database-migration:
     build:
@@ -194,3 +195,4 @@ volumes:
   hardhat_deployments:
   ignition_deployments:
   hardhat_snapshots:
+  postgres_data:
