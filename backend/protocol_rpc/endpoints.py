@@ -928,8 +928,8 @@ def get_transaction_receipt(
         "transactionIndex": hex(0),
         "blockHash": transaction_hash,
         "blockNumber": hex(transaction.get("block_number", 0)),
-        "from": from_addr if from_addr else None,
-        "to": to_addr if to_addr else None,
+        "from": from_addr,
+        "to": to_addr,
         "cumulativeGasUsed": hex(transaction.get("gas_used", 21000)),
         "gasUsed": hex(transaction.get("gas_used", 21000)),
         "contractAddress": (
