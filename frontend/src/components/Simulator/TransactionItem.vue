@@ -238,8 +238,14 @@ function prettifyTxData(x: any): any {
         :class="[
           'px-[4px] py-[1px] text-[9px]',
           transaction.statusName === 'FINALIZED' &&
-          transaction.data?.last_round?.result === 6
+          transaction.data?.last_round?.result === 6 &&
+          leaderReceipt.execution_result !== 'ERROR'
             ? '!bg-green-500'
+            : '',
+          transaction.statusName === 'FINALIZED' &&
+          transaction.data?.last_round?.result === 6 &&
+          leaderReceipt.execution_result === 'ERROR'
+            ? '!bg-red-500'
             : '',
           transaction.statusName === 'FINALIZED' &&
           transaction.data?.last_round?.result !== 6
@@ -300,8 +306,14 @@ function prettifyTxData(x: any): any {
               :class="[
                 'px-[4px] py-[1px] text-[9px]',
                 transaction.statusName === 'FINALIZED' &&
-                transaction.data?.last_round?.result === 6
+                transaction.data?.last_round?.result === 6 &&
+                leaderReceipt.execution_result !== 'ERROR'
                   ? '!bg-green-500'
+                  : '',
+                transaction.statusName === 'FINALIZED' &&
+                transaction.data?.last_round?.result === 6 &&
+                leaderReceipt.execution_result === 'ERROR'
+                  ? '!bg-red-500'
                   : '',
                 transaction.statusName === 'FINALIZED' &&
                 transaction.data?.last_round?.result !== 6
