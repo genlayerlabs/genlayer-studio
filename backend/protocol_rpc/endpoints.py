@@ -893,16 +893,17 @@ def get_transaction_receipt(
     event_signature = "NewTransaction(bytes32,address,address)"
     event_signature_hash = eth_utils.keccak(text=event_signature).hex()
 
+    to_addr = transaction.get("to_address", "0x0")
+    from_addr = transaction.get("from_address", "0x0")
+
     logs = [
         {
-            "address": transaction.get("to_address"),
+            "address": to_addr,
             "topics": [
                 f"0x{event_signature_hash}",
                 transaction_hash,
-                "0x000000000000000000000000"
-                + transaction.get("to_address").replace("0x", ""),
-                "0x000000000000000000000000"
-                + transaction.get("from_address").replace("0x", ""),
+                "0x000000000000000000000000" + (to_addr or "0x0").replace("0x", ""),
+                "0x000000000000000000000000" + (from_addr or "0x0").replace("0x", ""),
             ],
             "data": "0x",
             "blockNumber": 0,
