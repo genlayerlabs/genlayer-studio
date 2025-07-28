@@ -51,6 +51,9 @@ from backend.rollup.consensus_service import ConsensusService
 import backend.validators as validators
 from backend.database_handler.validators_registry import ValidatorsRegistry
 from backend.node.genvm.origin.result_codes import ResultCode
+from backend.consensus.types import ConsensusResult, ConsensusRound
+from backend.consensus.utils import determine_consensus_from_votes
+from backend.node.genvm.origin.base_host import get_code_slot
 
 type NodeFactory = Callable[
     [
@@ -593,9 +596,10 @@ class ConsensusAlgorithm:
 
         if (
             (previous_transaction is None)
-            or (previous_transaction["appealed"] == True)
-            or (previous_transaction["appeal_undetermined"] == True)
-            or (previous_transaction["appeal_leader_timeout"] == True)
+            or (previous_transaction["appealed"])
+            or (previous_transaction["appeal_undetermined"])
+            or (previous_transaction["appeal_leader_timeout"])
+            or (previous_transaction["appeal_validators_timeout"])
             or (
                 previous_transaction["status"]
                 in [
@@ -603,6 +607,7 @@ class ConsensusAlgorithm:
                     TransactionStatus.UNDETERMINED.value,
                     TransactionStatus.FINALIZED.value,
                     TransactionStatus.LEADER_TIMEOUT.value,
+                    TransactionStatus.VALIDATORS_TIMEOUT.value,
                 ]
             )
         ):
@@ -611,6 +616,28 @@ class ConsensusAlgorithm:
             while True:
                 next_state = await state.handle(context)
                 if next_state is None:
+                    break
+                elif next_state == ConsensusRound.ACCEPTED:
+                    if (
+                        ("consensus_results" in context.transaction.consensus_history)
+                        and (
+                            len(
+                                context.transaction.consensus_history[
+                                    "consensus_results"
+                                ]
+                            )
+                            >= 1
+                        )
+                        and (
+                            context.transaction.consensus_history["consensus_results"][
+                                -1
+                            ]["consensus_round"]
+                            == ConsensusRound.VALIDATOR_TIMEOUT_APPEAL_SUCCESSFUL.value
+                        )
+                    ):
+                        self.rollback_transactions(
+                            context, False
+                        )  # Put on False because this happens in the pending queue, so we don't need to stop it
                     break
                 state = next_state
 
@@ -1106,8 +1133,8 @@ class ConsensusAlgorithm:
                 next_state = await state.handle(context)
                 if next_state is None:
                     break
-                elif next_state == "leader_appeal_success":
-                    self.rollback_transactions(context)
+                elif next_state == ConsensusRound.LEADER_APPEAL_SUCCESSFUL:
+                    self.rollback_transactions(context, True)
                     break
                 state = next_state
 
@@ -1209,8 +1236,8 @@ class ConsensusAlgorithm:
                 next_state = await state.handle(context)
                 if next_state is None:
                     break
-                elif next_state == "leader_timeout_appeal_success":
-                    self.rollback_transactions(context)
+                elif next_state == ConsensusRound.LEADER_TIMEOUT_APPEAL_SUCCESSFUL:
+                    self.rollback_transactions(context, True)
                     break
                 state = next_state
 
@@ -1296,6 +1323,19 @@ class ConsensusAlgorithm:
                 context.transaction.hash
             )
         else:
+            # Appeal data member is used in the frontend for all types of appeals
+            # Here the type is refined based on the status
+            if transaction.status == TransactionStatus.VALIDATORS_TIMEOUT:
+                context.transactions_processor.set_transaction_appeal(
+                    context.transaction.hash, False
+                )
+                context.transaction.appealed = False
+                transaction.appeal_validators_timeout = (
+                    transactions_processor.set_transaction_appeal_validators_timeout(
+                        transaction.hash, True
+                    )
+                )
+
             # Set up the context for the committing state
             context.num_validators = len(context.remaining_validators)
             context.votes = {}
@@ -1316,8 +1356,29 @@ class ConsensusAlgorithm:
                 next_state = await state.handle(context)
                 if next_state is None:
                     break
-                elif next_state == "validator_appeal_success":
-                    self.rollback_transactions(context)
+                elif next_state == ConsensusRound.VALIDATOR_APPEAL_SUCCESSFUL:
+                    if context.transaction.appealed:
+                        self.rollback_transactions(context, True)
+
+                        # Get the previous state of the contract
+                        if context.transaction.contract_snapshot:
+                            previous_contact_state = (
+                                context.transaction.contract_snapshot.states["accepted"]
+                            )
+                        else:
+                            previous_contact_state = {}
+
+                        # Restore the contract state
+                        context.contract_processor.update_contract_state(
+                            context.transaction.to_address,
+                            accepted_state=previous_contact_state,
+                        )
+
+                        # Reset the contract snapshot for the transaction
+                        context.transactions_processor.set_transaction_contract_snapshot(
+                            context.transaction.hash, None
+                        )
+
                     ConsensusAlgorithm.dispatch_transaction_status_update(
                         context.transactions_processor,
                         context.transaction.hash,
@@ -1325,41 +1386,24 @@ class ConsensusAlgorithm:
                         context.msg_handler,
                     )
 
-                    # Get the previous state of the contract
-                    if context.transaction.contract_snapshot:
-                        previous_contact_state = (
-                            context.transaction.contract_snapshot.states["accepted"]
-                        )
-                    else:
-                        previous_contact_state = {}
-
-                    # Restore the contract state
-                    context.contract_processor.update_contract_state(
-                        context.transaction.to_address,
-                        accepted_state=previous_contact_state,
-                    )
-
-                    # Reset the contract snapshot for the transaction
-                    context.transactions_processor.set_transaction_contract_snapshot(
-                        context.transaction.hash, None
-                    )
-
                     # Transaction will be picked up by _crawl_snapshot
                     break
                 state = next_state
 
-    def rollback_transactions(self, context: TransactionContext):
+    def rollback_transactions(self, context: TransactionContext, stop_pending_queue):
         """
         Rollback newer transactions.
         """
         # Rollback all future transactions for the current contract
-        # Stop the _crawl_snapshot and the _run_consensus for the current contract
         address = context.transaction.to_address
-        self.stop_pending_queue_task(address)
 
-        # Wait until task is finished
-        while self.is_pending_queue_task_running(address):
-            time.sleep(1)
+        # Stop the _crawl_snapshot and the _run_consensus for the current contract
+        if stop_pending_queue:
+            self.stop_pending_queue_task(address)
+
+            # Wait until task is finished
+            while self.is_pending_queue_task_running(address):
+                time.sleep(1)
 
         # Empty the pending queue
         self.pending_queues[address] = asyncio.Queue()
@@ -1382,7 +1426,8 @@ class ConsensusAlgorithm:
             )
 
         # Start the queue loop again
-        self.start_pending_queue_task(address)
+        if stop_pending_queue:
+            self.start_pending_queue_task(address)
 
     @staticmethod
     def get_extra_validators(
@@ -1612,7 +1657,7 @@ class TransactionState(ABC):
     @abstractmethod
     async def handle(
         self, context: TransactionContext
-    ) -> 'TransactionState | None | Literal["leader_appeal_success", "validator_appeal_success", "leader_timeout_appeal_success"]':
+    ) -> "TransactionState | ConsensusRound | None":
         """
         Handle the state transition.
 
@@ -1702,7 +1747,10 @@ class PendingState(TransactionState):
             return None
 
         # Determine the involved validators based on whether the transaction is appealed
-        if context.transaction.appealed:
+        if (
+            context.transaction.appealed
+            or context.transaction.appeal_validators_timeout
+        ):
             # If the transaction is appealed, remove the old leader
             context.involved_validators, _ = (
                 ConsensusAlgorithm.get_validators_from_consensus_data(
@@ -1715,6 +1763,10 @@ class PendingState(TransactionState):
                 context.transaction.hash, False
             )
             context.transaction.appealed = False
+
+            context.transaction.appeal_validators_timeout = context.transactions_processor.set_transaction_appeal_validators_timeout(
+                context.transaction.hash, False
+            )
 
         elif context.transaction.appeal_undetermined:
             # Add n+2 validators, remove the old leader
@@ -2021,11 +2073,9 @@ class RevealingState(TransactionState):
                 validation_result.vote.value
             )
 
-        # Determine if the majority of validators agree
-        majority_agrees = (
-            len([vote for vote in context.votes.values() if vote == Vote.AGREE.value])
-            > context.num_validators // 2
-        )
+        # Determine the consensus result
+        votes_list = list(context.votes.values())
+        consensus_result = determine_consensus_from_votes(votes_list)
 
         # Send event in rollup to communicate the votes are revealed
         if len(context.consensus_data.leader_receipt) == 1:
@@ -2034,42 +2084,29 @@ class RevealingState(TransactionState):
                 context.consensus_data.leader_receipt[0].node_config,
                 context.transaction.hash,
                 context.consensus_data.leader_receipt[0].node_config["address"],
-                1,
+                int(context.consensus_data.leader_receipt[0].vote),
                 False,
-                0,
+                int(ConsensusResult.IDLE),
             )
         for i, validation_result in enumerate(context.validation_results):
-            if validation_result.vote == Vote.AGREE:
-                type_vote = 1
-            elif validation_result.vote == Vote.DISAGREE:
-                type_vote = 2
-            else:
-                type_vote = 0
-
-            if i == len(context.validation_results) - 1:
-                last_vote = True
-                if majority_agrees:
-                    result_vote = 6
-                else:
-                    result_vote = 7
-            else:
-                last_vote = False
-                result_vote = 0
-
+            last_vote = i == len(context.validation_results) - 1
             context.consensus_service.emit_transaction_event(
                 "emitVoteRevealed",
                 validation_result.node_config,
                 context.transaction.hash,
                 validation_result.node_config["address"],
-                type_vote,
+                int(validation_result.vote),
                 last_vote,
-                result_vote,
+                int(consensus_result) if last_vote else int(ConsensusResult.IDLE),
             )
         context.transactions_processor.set_transaction_timestamp_last_vote(
             context.transaction.hash
         )
 
-        if context.transaction.appealed:
+        if (
+            context.transaction.appealed
+            or context.transaction.appeal_validators_timeout
+        ):
 
             # Update the consensus results with all new votes and validators
             context.consensus_data.votes = (
@@ -2099,8 +2136,15 @@ class RevealingState(TransactionState):
                     + context.validation_results
                 )
 
-            if majority_agrees:
+            if (context.transaction.appealed) and (
+                consensus_result == ConsensusResult.MAJORITY_AGREE
+            ):
                 return AcceptedState()
+
+            elif (context.transaction.appeal_validators_timeout) and (
+                consensus_result == ConsensusResult.TIMEOUT
+            ):
+                return ValidatorsTimeoutState()
 
             else:
                 # Appeal succeeded, set the status to PENDING and reset the appeal_failed counter
@@ -2114,7 +2158,11 @@ class RevealingState(TransactionState):
                 )
                 context.transactions_processor.update_consensus_history(
                     context.transaction.hash,
-                    "Validator Appeal Successful",
+                    (
+                        ConsensusRound.VALIDATOR_APPEAL_SUCCESSFUL
+                        if context.transaction.appealed
+                        else ConsensusRound.VALIDATOR_TIMEOUT_APPEAL_SUCCESSFUL
+                    ),
                     None,
                     context.validation_results,
                 )
@@ -2127,104 +2175,115 @@ class RevealingState(TransactionState):
                     context.transaction.hash, None
                 )
 
-                return "validator_appeal_success"
+                return ConsensusRound.VALIDATOR_APPEAL_SUCCESSFUL
 
         else:
             # Not appealed, update consensus data with current votes and validators
             context.consensus_data.votes = context.votes
             context.consensus_data.validators = context.validation_results
 
-            if majority_agrees:
+            if consensus_result == ConsensusResult.MAJORITY_AGREE:
                 return AcceptedState()
 
-            # If all rotations are done and no consensus is reached, transition to UndeterminedState
-            elif context.rotation_count >= context.transaction.config_rotation_rounds:
-                if context.transaction.appeal_leader_timeout:
-                    context.transaction.appeal_leader_timeout = context.transactions_processor.set_transaction_appeal_leader_timeout(
-                        context.transaction.hash, False
-                    )
-                return UndeterminedState()
+            elif consensus_result == ConsensusResult.TIMEOUT:
+                return ValidatorsTimeoutState()
 
-            else:
-                if context.transaction.appeal_leader_timeout:
-                    context.transaction.appeal_leader_timeout = context.transactions_processor.set_transaction_appeal_leader_timeout(
-                        context.transaction.hash, False
-                    )
-                used_leader_addresses = (
-                    ConsensusAlgorithm.get_used_leader_addresses_from_consensus_history(
+            elif consensus_result in [
+                ConsensusResult.MAJORITY_DISAGREE,
+                ConsensusResult.NO_MAJORITY,
+            ]:
+                # If all rotations are done and no consensus is reached, transition to UndeterminedState
+                if context.rotation_count >= context.transaction.config_rotation_rounds:
+                    if context.transaction.appeal_leader_timeout:
+                        context.transaction.appeal_leader_timeout = context.transactions_processor.set_transaction_appeal_leader_timeout(
+                            context.transaction.hash, False
+                        )
+                    return UndeterminedState()
+
+                else:
+                    if context.transaction.appeal_leader_timeout:
+                        context.transaction.appeal_leader_timeout = context.transactions_processor.set_transaction_appeal_leader_timeout(
+                            context.transaction.hash, False
+                        )
+                    used_leader_addresses = ConsensusAlgorithm.get_used_leader_addresses_from_consensus_history(
                         context.transactions_processor.get_transaction_by_hash(
                             context.transaction.hash
                         )["consensus_history"],
                         context.consensus_data.leader_receipt[0],
                     )
-                )
-                # Add a new validator to the list of current validators when a rotation happens
-                try:
-                    assert context.validators_snapshot is not None
-                    old_validators = [
-                        x.validator.to_dict() for x in context.validators_snapshot.nodes
-                    ]
+                    # Add a new validator to the list of current validators when a rotation happens
+                    try:
+                        assert context.validators_snapshot is not None
+                        old_validators = [
+                            x.validator.to_dict()
+                            for x in context.validators_snapshot.nodes
+                        ]
 
-                    context.involved_validators = ConsensusAlgorithm.add_new_validator(
-                        old_validators,
-                        context.remaining_validators,
-                        used_leader_addresses,
+                        context.involved_validators = (
+                            ConsensusAlgorithm.add_new_validator(
+                                old_validators,
+                                context.remaining_validators,
+                                used_leader_addresses,
+                            )
+                        )
+                    except ValueError as e:
+                        # No more validators
+                        context.msg_handler.send_message(
+                            LogEvent(
+                                "consensus_event",
+                                EventType.ERROR,
+                                EventScope.CONSENSUS,
+                                str(e),
+                                {
+                                    "transaction_hash": context.transaction.hash,
+                                },
+                                transaction_hash=context.transaction.hash,
+                            )
+                        )
+                        return UndeterminedState()
+
+                    context.rotation_count += 1
+                    context.transactions_processor.increase_transaction_rotation_count(
+                        context.transaction.hash
                     )
-                except ValueError as e:
-                    # No more validators
+
+                    # Log the failure to reach consensus and transition to ProposingState
                     context.msg_handler.send_message(
                         LogEvent(
                             "consensus_event",
-                            EventType.ERROR,
+                            EventType.INFO,
                             EventScope.CONSENSUS,
-                            str(e),
+                            "Majority disagreement, rotating the leader",
                             {
                                 "transaction_hash": context.transaction.hash,
                             },
                             transaction_hash=context.transaction.hash,
                         )
                     )
-                    return UndeterminedState()
 
-                context.rotation_count += 1
-                context.transactions_processor.increase_transaction_rotation_count(
-                    context.transaction.hash
-                )
-
-                # Log the failure to reach consensus and transition to ProposingState
-                context.msg_handler.send_message(
-                    LogEvent(
-                        "consensus_event",
-                        EventType.INFO,
-                        EventScope.CONSENSUS,
-                        "Majority disagreement, rotating the leader",
-                        {
-                            "transaction_hash": context.transaction.hash,
-                        },
-                        transaction_hash=context.transaction.hash,
+                    # Send events in rollup to communicate the leader rotation
+                    context.consensus_service.emit_transaction_event(
+                        "emitTransactionLeaderRotated",
+                        context.consensus_data.leader_receipt[0].node_config,
+                        context.transaction.hash,
+                        context.involved_validators[0]["address"],
                     )
-                )
 
-                # Send events in rollup to communicate the leader rotation
-                context.consensus_service.emit_transaction_event(
-                    "emitTransactionLeaderRotated",
-                    context.consensus_data.leader_receipt[0].node_config,
-                    context.transaction.hash,
-                    context.involved_validators[0]["address"],
-                )
+                    # Update the consensus history
+                    if context.transaction.appeal_undetermined:
+                        consensus_round = ConsensusRound.LEADER_ROTATION_APPEAL
+                    else:
+                        consensus_round = ConsensusRound.LEADER_ROTATION
+                    context.transactions_processor.update_consensus_history(
+                        context.transaction.hash,
+                        consensus_round,
+                        context.consensus_data.leader_receipt,
+                        context.validation_results,
+                    )
+                    return ProposingState()
 
-                # Update the consensus history
-                if context.transaction.appeal_undetermined:
-                    consensus_round = "Leader Rotation Appeal"
-                else:
-                    consensus_round = "Leader Rotation"
-                context.transactions_processor.update_consensus_history(
-                    context.transaction.hash,
-                    consensus_round,
-                    context.consensus_data.leader_receipt,
-                    context.validation_results,
-                )
-                return ProposingState()
+            else:
+                raise ValueError("Invalid consensus result")
 
 
 class AcceptedState(TransactionState):
@@ -2244,7 +2303,7 @@ class AcceptedState(TransactionState):
         """
         # When appeal fails, the appeal window is not reset
         if context.transaction.appeal_undetermined:
-            consensus_round = "Leader Appeal Successful"
+            consensus_round = ConsensusRound.LEADER_APPEAL_SUCCESSFUL
             context.transactions_processor.set_transaction_timestamp_awaiting_finalization(
                 context.transaction.hash
             )
@@ -2260,12 +2319,12 @@ class AcceptedState(TransactionState):
                 0,
             )
         elif not context.transaction.appealed:
-            consensus_round = "Accepted"
+            consensus_round = ConsensusRound.ACCEPTED
             context.transactions_processor.set_transaction_timestamp_awaiting_finalization(
                 context.transaction.hash
             )
         else:
-            consensus_round = "Validator Appeal Failed"
+            consensus_round = ConsensusRound.VALIDATOR_APPEAL_FAILED
             # Set the transaction appeal status to False
             context.transactions_processor.set_transaction_appeal(
                 context.transaction.hash, False
@@ -2292,7 +2351,7 @@ class AcceptedState(TransactionState):
             consensus_round,
             (
                 None
-                if consensus_round == "Validator Appeal Failed"
+                if consensus_round == ConsensusRound.VALIDATOR_APPEAL_FAILED
                 else context.consensus_data.leader_receipt
             ),
             context.validation_results,
@@ -2338,12 +2397,17 @@ class AcceptedState(TransactionState):
             if leader_receipt.execution_result == ExecutionResultStatus.SUCCESS:
                 # Register contract if it is a new contract
                 if context.transaction.type == TransactionType.DEPLOY_CONTRACT:
+                    code_slot_b64 = base64.b64encode(get_code_slot()).decode("ascii")
                     new_contract = {
                         "id": context.transaction.data["contract_address"],
                         "data": {
                             "state": {
                                 "accepted": leader_receipt.contract_state,
-                                "finalized": {},
+                                "finalized": {
+                                    code_slot_b64: leader_receipt.contract_state.get(
+                                        code_slot_b64, b""
+                                    )
+                                },
                             },
                             "code": context.transaction.data["contract_code"],
                         },
@@ -2420,14 +2484,16 @@ class AcceptedState(TransactionState):
                 context.transaction.hash, False
             )
             context.transaction.appeal_undetermined = False
-            return "leader_appeal_success"
+            return consensus_round
         elif context.transaction.appeal_leader_timeout:
             context.transaction.appeal_leader_timeout = (
                 context.transactions_processor.set_transaction_appeal_leader_timeout(
                     context.transaction.hash, False
                 )
             )
-            return "leader_timeout_appeal_success"
+            return ConsensusRound.LEADER_TIMEOUT_APPEAL_SUCCESSFUL
+        elif consensus_round == ConsensusRound.ACCEPTED:
+            return consensus_round
         else:
             return None
 
@@ -2474,13 +2540,13 @@ class UndeterminedState(TransactionState):
                 context.transaction.hash, False
             )
             context.transaction.appeal_undetermined = False
-            consensus_round = "Leader Appeal Failed"
+            consensus_round = ConsensusRound.LEADER_APPEAL_FAILED
             context.transactions_processor.set_transaction_appeal_failed(
                 context.transaction.hash,
                 context.transaction.appeal_failed + 1,
             )
         else:
-            consensus_round = "Undetermined"
+            consensus_round = ConsensusRound.UNDETERMINED
 
         # Save the contract snapshot for potential future appeals
         if not context.transaction.contract_snapshot:
@@ -2542,7 +2608,7 @@ class LeaderTimeoutState(TransactionState):
             )
 
         if context.transaction.appeal_undetermined:
-            consensus_round = "Leader Appeal Successful"
+            consensus_round = ConsensusRound.LEADER_APPEAL_SUCCESSFUL
             context.transactions_processor.set_transaction_timestamp_awaiting_finalization(
                 context.transaction.hash
             )
@@ -2553,12 +2619,12 @@ class LeaderTimeoutState(TransactionState):
                 context.transaction.hash, None
             )
         elif context.transaction.appeal_leader_timeout:
-            consensus_round = "Leader Timeout Appeal Failed"
+            consensus_round = ConsensusRound.LEADER_TIMEOUT_APPEAL_FAILED
             context.transactions_processor.set_transaction_appeal_processing_time(
                 context.transaction.hash
             )
         else:
-            consensus_round = "Leader Timeout"
+            consensus_round = ConsensusRound.LEADER_TIMEOUT
             context.transactions_processor.set_transaction_timestamp_awaiting_finalization(
                 context.transaction.hash
             )
@@ -2592,6 +2658,96 @@ class LeaderTimeoutState(TransactionState):
             context.leader,
             context.transaction.hash,
         )
+
+        return None
+
+
+class ValidatorsTimeoutState(TransactionState):
+    """
+    Class representing the validators timeout state of a transaction.
+    """
+
+    async def handle(self, context):
+        """
+        Handle the validators timeout state transition.
+
+        Args:
+            context (TransactionContext): The context of the transaction.
+
+        Returns:
+            None: The transaction is in a validators timeout state.
+        """
+        if context.transaction.appeal_undetermined:
+            consensus_round = ConsensusRound.LEADER_APPEAL_SUCCESSFUL
+            context.transactions_processor.set_transaction_timestamp_awaiting_finalization(
+                context.transaction.hash
+            )
+            context.transactions_processor.reset_transaction_appeal_processing_time(
+                context.transaction.hash
+            )
+            context.transactions_processor.set_transaction_timestamp_appeal(
+                context.transaction.hash, None
+            )
+            context.transactions_processor.set_transaction_appeal_undetermined(
+                context.transaction.hash, False
+            )
+
+        elif context.transaction.appeal_validators_timeout:
+            consensus_round = ConsensusRound.VALIDATORS_TIMEOUT_APPEAL_FAILED
+            # Increment the appeal processing time when the transaction was appealed
+            context.transactions_processor.set_transaction_appeal_processing_time(
+                context.transaction.hash
+            )
+
+            # Appeal failed, increment the appeal_failed counter
+            context.transactions_processor.set_transaction_appeal_failed(
+                context.transaction.hash,
+                context.transaction.appeal_failed + 1,
+            )
+
+        else:
+            consensus_round = ConsensusRound.VALIDATORS_TIMEOUT
+            context.transactions_processor.set_transaction_timestamp_awaiting_finalization(
+                context.transaction.hash
+            )
+
+        if context.transaction.appeal_leader_timeout:
+            context.transaction.appeal_leader_timeout = (
+                context.transactions_processor.set_transaction_appeal_leader_timeout(
+                    context.transaction.hash, False
+                )
+            )
+
+        # Set the transaction result
+        context.transactions_processor.set_transaction_result(
+            context.transaction.hash, context.consensus_data.to_dict()
+        )
+
+        context.transactions_processor.update_consensus_history(
+            context.transaction.hash,
+            consensus_round,
+            (
+                None
+                if consensus_round == ConsensusRound.VALIDATORS_TIMEOUT_APPEAL_FAILED
+                else context.consensus_data.leader_receipt
+            ),
+            context.validation_results,
+            TransactionStatus.VALIDATORS_TIMEOUT,
+        )
+
+        # Update the transaction status to VALIDATORS_TIMEOUT
+        ConsensusAlgorithm.dispatch_transaction_status_update(
+            context.transactions_processor,
+            context.transaction.hash,
+            TransactionStatus.VALIDATORS_TIMEOUT,
+            context.msg_handler,
+            False,
+        )
+
+        if not context.transaction.contract_snapshot:
+            context.transactions_processor.set_transaction_contract_snapshot(
+                context.transaction.hash, context.contract_snapshot.to_dict()
+            )
 
         return None
 

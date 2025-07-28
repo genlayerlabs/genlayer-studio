@@ -46,11 +46,11 @@ def test_multi_read_erc20(setup_validators):
             from_account_doge.address,
             [doge_contract.address, shiba_contract.address],
         ]
-    )
+    ).transact()
     assert tx_execution_succeeded(transaction_response_call)
 
     # check balances
-    call_method_response_get_balances = multi_read_contract.get_balances(args=[])
+    call_method_response_get_balances = multi_read_contract.get_balances(args=[]).call()
     assert call_method_response_get_balances == {
         from_account_doge.address: {
             doge_contract.address: TOKEN_TOTAL_SUPPLY,
@@ -59,20 +59,22 @@ def test_multi_read_erc20(setup_validators):
     }
 
     # update balances for shiba account
-    transaction_response_call = multi_read_contract.connect(
-        from_account_shiba
-    ).update_token_balances(
-        args=[
-            from_account_shiba.address,
-            [doge_contract.address, shiba_contract.address],
-        ]
+    transaction_response_call = (
+        multi_read_contract.connect(from_account_shiba)
+        .update_token_balances(
+            args=[
+                from_account_shiba.address,
+                [doge_contract.address, shiba_contract.address],
+            ]
+        )
+        .transact()
     )
     assert tx_execution_succeeded(transaction_response_call)
 
     # check balances
-    call_method_response_get_balances = multi_read_contract.connect(
-        from_account_shiba
-    ).get_balances(args=[])
+    call_method_response_get_balances = (
+        multi_read_contract.connect(from_account_shiba).get_balances(args=[]).call()
+    )
 
     assert call_method_response_get_balances == {
         from_account_doge.address: {
