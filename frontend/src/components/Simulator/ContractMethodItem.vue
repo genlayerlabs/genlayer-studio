@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { ContractMethod } from '@/types/contract';
+import type { ContractMethod } from 'genlayer-js/types';
 import { abi } from 'genlayer-js';
 import { TransactionHashVariant } from 'genlayer-js/types';
 import { ref } from 'vue';
