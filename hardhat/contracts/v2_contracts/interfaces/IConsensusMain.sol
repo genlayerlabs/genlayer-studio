@@ -65,7 +65,13 @@ interface IConsensusMain {
 		address _validator
 	) external view returns (bool);
 
-	function addTransaction(bytes memory _transaction) external;
+	function addTransaction(
+		address _sender,
+		address _recipient,
+		uint256 _numOfInitialValidators,
+		uint256 _maxRotations,
+		bytes memory _txData
+	) external payable;
 
 	function isCurrentActivator(
 		uint256 proposingTimestamp,
