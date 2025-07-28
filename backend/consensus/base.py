@@ -702,13 +702,13 @@ class ConsensusAlgorithm:
 
         # Check if the transaction is a fund_account call
         if not transaction.from_address is None:
-            # Get the balance of the sender account
-            from_balance = accounts_manager.get_account_balance(
-                transaction.from_address
-            )
-
-            # Check if the sender has enough balance
-            if from_balance < transaction.value:
+            try:
+                # Update the balance of the sender account
+                accounts_manager.update_account_balance(
+                    address=transaction.from_address,
+                    value=-transaction.value if transaction.value else None,
+                )
+            except ValueError:
                 # Set the transaction status to UNDETERMINED if balance is insufficient
                 ConsensusAlgorithm.dispatch_transaction_status_update(
                     transactions_processor,
@@ -716,22 +716,13 @@ class ConsensusAlgorithm:
                     TransactionStatus.UNDETERMINED,
                     msg_handler,
                 )
-
                 return
 
-            # Update the balance of the sender account
-            accounts_manager.update_account_balance(
-                transaction.from_address, from_balance - transaction.value
-            )
-
         # Check if the transaction is a burn call
-        if not transaction.to_address is None:
-            # Get the balance of the recipient account
-            to_balance = accounts_manager.get_account_balance(transaction.to_address)
-
+        if transaction.to_address is not None:
             # Update the balance of the recipient account
             accounts_manager.update_account_balance(
-                transaction.to_address, to_balance + transaction.value
+                address=transaction.to_address, value=transaction.value
             )
 
         # Dispatch a transaction status update to FINALIZED
@@ -2471,6 +2462,12 @@ class AcceptedState(TransactionState):
 
                 _emit_messages(context, insert_transactions_data, rollup_receipt)
 
+                # Update the balance of the recipient account
+                context.accounts_manager.update_account_balance(
+                    address=context.transaction.to_address,
+                    value=context.transaction.value,
+                )
+
         else:
             context.transaction.appealed = False
 
@@ -2814,6 +2811,13 @@ class FinalizingState(TransactionState):
                 [],
             )
 
+            # Restore value transfer
+            if context.transaction.type != TransactionType.SEND:
+                context.accounts_manager.update_account_balance(
+                    address=context.transaction.from_address,
+                    value=context.transaction.value,
+                )
+
 
 def _get_messages_data(
     context: TransactionContext,
@@ -2898,10 +2902,11 @@ def _emit_messages(
         transaction_hash = (
             receipt["tx_ids_hex"][i] if receipt and "tx_ids_hex" in receipt else None
         )
+
         context.transactions_processor.insert_transaction(
-            context.transaction.to_address,  # new calls are done by the contract
-            insert_transaction_data[0],
-            insert_transaction_data[1],
+            from_address=context.transaction.to_address,  # new calls are done by the contract
+            to_address=insert_transaction_data[0],
+            data=insert_transaction_data[1],
             value=0,  # we only handle EOA transfers at the moment, so no value gets transferred
             type=insert_transaction_data[2],
             nonce=insert_transaction_data[3],

@@ -284,6 +284,14 @@ def restore_stuck_transactions():
                                 restore_transaction["hash"],
                             )
                         else:
+                            if (
+                                restore_transaction["status"]
+                                == TransactionStatus.ACCEPTED
+                            ):
+                                accounts_manager.update_account_balance(
+                                    address=restore_transaction["to_address"],
+                                    value=-restore_transaction["value"],
+                                )
                             ConsensusAlgorithm.dispatch_transaction_status_update(
                                 transactions_processor,
                                 restore_transaction["hash"],

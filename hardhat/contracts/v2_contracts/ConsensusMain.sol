@@ -244,7 +244,7 @@ contract ConsensusMain is
 		uint256 _numOfInitialValidators,
 		uint256 _maxRotations,
 		bytes memory _txData
-	) external {
+	) external payable {
 		if (_txData.length > 0) {
 			_addTransaction(
 				_sender,
