@@ -19,10 +19,10 @@ jobs:
           app_id: ${{ secrets.CI_BOT_APP_ID }}
           private_key: ${{ secrets.CI_BOT_SECRET }}
 
-      - name: Trigger Infra Deploy Studio to Staging Environment
+      - name: Trigger Infra Deploy Studio to Development Environment
         run: |
           curl -L -X POST \
             -H "Accept: application/vnd.github.v3+json" \
             -H "Authorization: token ${{ steps.ci_bot_token.outputs.token }}" \
-            https://api.github.com/repos/genlayerlabs/genlayer-infra/actions/workflows/deploy-stage.yml/dispatches \
+            https://api.github.com/repos/genlayerlabs/genlayer-infra/actions/workflows/deploy-dev.yml/dispatches \
             -d '{"ref":"main"}'
