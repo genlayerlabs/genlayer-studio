@@ -8,8 +8,9 @@ import signal
 import os
 import sys
 import dataclasses
-
+import aiohttp
 from pathlib import Path
+import json
 
 from dotenv import load_dotenv
 
@@ -116,6 +117,9 @@ class LLMModule:
         if url is None:
             return False
 
+        if plugin == "custom":
+            return await self.call_custom_model(model, url, key_env)
+
         exe_path = Path(os.environ["GENVM_BIN"]).joinpath("genvm-modules")
 
         try:
@@ -148,4 +152,60 @@ class LLMModule:
             print(
                 f"ERROR: Wrong input provider_available {model=}, {url=}, {plugin=}, {key_env=}, {e=}"
             )
+            return False
+
+    async def call_custom_model(self, model: str, url: str, key_env: str) -> bool:
+        """
+        Call a custom model to check if it is available.
+        """
+        try:
+            prompt = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": 'Respond with two letters "ok" (without quotes) and only this word, lowercase',
+                    }
+                ],
+            }
+
+            api_key = os.environ.get(key_env)
+            if not api_key:
+                print(f"ERROR: missing API key for {key_env}")
+                return False
+
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as session, session.post(
+                url, json=prompt, headers={"Authorization": f"Bearer {api_key}"}
+            ) as response:
+                if response.status != 200:
+                    print(
+                        f"ERROR: Custom model check failed with status {response.status}"
+                    )
+                    return False
+
+                response_data = await response.json()
+                try:
+                    result = response_data["choices"][0]["message"]["content"]
+                    if isinstance(result, str) and result.strip().lower() == "ok":
+                        return True
+                    elif (
+                        isinstance(result, dict)
+                        and "result" in result
+                        and result["result"].strip().lower() == "ok"
+                    ):
+                        return True
+
+                    print(
+                        f"ERROR: Custom model check failed: got '{result}' instead of 'ok'"
+                    )
+                    return False
+
+                except (KeyError, IndexError, json.JSONDecodeError) as e:
+                    print(f"ERROR: Invalid response format: {e}")
+                    return False
+
+        except Exception as e:
+            print(f"ERROR: Custom model check failed with error: {e}")
             return False

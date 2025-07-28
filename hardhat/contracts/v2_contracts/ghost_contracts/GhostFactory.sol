@@ -32,7 +32,7 @@ contract GhostFactory is
 		__AccessControl_init();
 	}
 
-	function createGhost() external onlyGenConsensus returns (address) {
+	function createGhost() external payable onlyGenConsensus returns (address) {
 		BeaconProxy beacon = new BeaconProxy(
 			ghostBeaconProxy,
 			abi.encodeWithSelector(
