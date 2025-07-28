@@ -155,6 +155,21 @@ function prettifyTxData(x: any): any {
     return x;
   }
 }
+
+const badgeColorClass = computed(() => {
+  if (props.transaction.statusName !== 'FINALIZED') {
+    return '';
+  } else {
+    if (
+      props.transaction.data?.last_round?.result === 6 &&
+      leaderReceipt.value?.execution_result !== 'ERROR'
+    ) {
+      return '!bg-green-500';
+    } else {
+      return '!bg-red-500';
+    }
+  }
+});
 </script>
 
 <template>
@@ -235,10 +250,7 @@ function prettifyTxData(x: any): any {
       </div>
 
       <TransactionStatusBadge
-        :class="[
-          'px-[4px] py-[1px] text-[9px]',
-          transaction.statusName === 'FINALIZED' ? '!bg-green-500' : '',
-        ]"
+        :class="['px-[4px] py-[1px] text-[9px]', badgeColorClass]"
       >
         {{ transaction.statusName }}
       </TransactionStatusBadge>
@@ -290,10 +302,7 @@ function prettifyTxData(x: any): any {
               "
             />
             <TransactionStatusBadge
-              :class="[
-                'px-[4px] py-[1px] text-[9px]',
-                transaction.statusName === 'FINALIZED' ? '!bg-green-500' : '',
-              ]"
+              :class="['px-[4px] py-[1px] text-[9px]', badgeColorClass]"
             >
               {{ transaction.statusName }}
             </TransactionStatusBadge>
