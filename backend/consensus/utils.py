@@ -2,16 +2,22 @@ from backend.consensus.types import ConsensusResult
 from backend.node.types import Vote
 
 
-def determine_consensus_from_votes(votes_list: list[str]) -> ConsensusResult:
+def determine_consensus_from_votes(
+    votes_list: list[str], leader_only: bool
+) -> ConsensusResult:
     """
     Determine consensus from a list of votes.
 
     Args:
         votes_list: List of vote strings
+        leader_only: Whether the transaction is leader-only
 
     Returns:
         ConsensusResult: The consensus result
     """
+    if leader_only:
+        return ConsensusResult.MAJORITY_AGREE
+
     agree_count = votes_list.count(Vote.AGREE.value)
     disagree_count = votes_list.count(Vote.DISAGREE.value)
     timeout_count = votes_list.count(Vote.TIMEOUT.value)

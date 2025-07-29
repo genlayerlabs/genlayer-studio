@@ -419,44 +419,39 @@ function prettifyTxData(x: any): any {
             </div>
 
             <div
+              v-if="
+                (history?.leader_result && history.leader_result.length > 1) ||
+                (history?.validator_results &&
+                  history.validator_results.length > 0)
+              "
               class="divide-y overflow-hidden rounded border dark:border-gray-600"
             >
               <div
-                v-if="history?.leader_result"
+                v-if="
+                  history?.leader_result && history.leader_result.length > 1
+                "
                 class="flex flex-row items-center justify-between p-2 text-xs dark:border-gray-600"
               >
                 <div class="flex items-center gap-1">
                   <UserPen class="h-4 w-4" />
                   <span class="font-mono text-xs">{{
-                    history.leader_result[0].node_config.address
+                    history.leader_result[1].node_config.address
                   }}</span>
                 </div>
                 <div class="flex flex-row items-center gap-1 capitalize">
-                  <template v-if="history.leader_result.length === 1">
+                  <template v-if="history.leader_result[1].vote === 'agree'">
+                    <CheckCircleIcon class="h-4 w-4 text-green-500" />
+                    Agree
+                  </template>
+                  <template v-if="history.leader_result[1].vote === 'disagree'">
+                    <XCircleIcon class="h-4 w-4 text-red-500" />
+                    Disagree
+                  </template>
+                  <template v-if="history.leader_result[1].vote === 'timeout'">
                     <EllipsisHorizontalCircleIcon
                       class="h-4 w-4 text-yellow-500"
                     />
                     Timeout
-                  </template>
-                  <template v-else>
-                    <template v-if="history.leader_result[1].vote === 'agree'">
-                      <CheckCircleIcon class="h-4 w-4 text-green-500" />
-                      Agree
-                    </template>
-                    <template
-                      v-if="history.leader_result[1].vote === 'disagree'"
-                    >
-                      <XCircleIcon class="h-4 w-4 text-red-500" />
-                      Disagree
-                    </template>
-                    <template
-                      v-if="history.leader_result[1].vote === 'timeout'"
-                    >
-                      <EllipsisHorizontalCircleIcon
-                        class="h-4 w-4 text-yellow-500"
-                      />
-                      Timeout
-                    </template>
                   </template>
                 </div>
               </div>
