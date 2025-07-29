@@ -185,7 +185,7 @@ class Receipt:
     calldata: bytes
     gas_used: int
     mode: ExecutionMode
-    contract_state: dict[str, dict[str, str]]
+    contract_state: dict[str, str]
     node_config: dict
     eq_outputs: dict[int, str]
     execution_result: ExecutionResultStatus
