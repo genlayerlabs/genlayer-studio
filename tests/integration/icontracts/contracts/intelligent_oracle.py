@@ -239,7 +239,7 @@ Provide your response in **valid JSON** format with the following structure:
         def evaluate_all_sources() -> str:
             task = f"""
     You are an AI Validator tasked with resolving a prediction market Oracle. Your goal is to determine
-    the correct outcome based on processed data from all of the individial data sources. Here are your inputs
+    the correct outcome based on processed data from all of the individual data sources. Here are your inputs
 
     ### Inputs
     <title>
