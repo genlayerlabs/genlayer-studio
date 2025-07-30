@@ -6,10 +6,10 @@ import fs from 'node:fs';
 
 ncp.limit = 16;
 const source = path.resolve('../examples');
-const destionation =  path.resolve('./src/assets/examples');
-if (existsSync(destionation)) {
+const destination =  path.resolve('./src/assets/examples');
+if (existsSync(destination)) {
     console.log('Contract Examples already exists');
-    fs.rmSync(destionation, { recursive: true, force: true });
+    fs.rmSync(destination, { recursive: true, force: true });
 }
 
 ncp(source, destionation,
