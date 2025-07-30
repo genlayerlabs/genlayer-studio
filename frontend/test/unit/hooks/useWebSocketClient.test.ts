@@ -47,7 +47,7 @@ describe('useWebSocketClient', () => {
       disconnectCallback();
     }
     expect(consoleLogSpy).toHaveBeenCalledWith(
-      'webSocketClient.disconnnect',
+      'webSocketClient.disconnect',
       'mocked-socket-id',
     );
 
