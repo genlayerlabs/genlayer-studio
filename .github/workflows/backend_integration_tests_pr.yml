@@ -34,7 +34,7 @@ jobs:
 
     env:
       PYTHONPATH: ${{ github.workspace }}
-      COMPOSE_PROFILES: local,hardhat
+      COMPOSE_PROFILES: hardhat
 
     steps:
       - name: Checkout code
