@@ -132,16 +132,17 @@ services:
         max-file: "3"
 
   postgres:
-    profiles: ["local"]
     image: postgres:16-alpine
+    command: sh -c "if [ \"$VITE_IS_HOSTED\" = \"true\" ]; then echo 'Postgres disabled in hosted environment' && exec tail -f /dev/null; else exec docker-entrypoint.sh postgres; fi"
     ports:
       - "${DBPORT}:5432"
     environment:
       - POSTGRES_USER=${DBUSER}
       - POSTGRES_PASSWORD=${DBPASSWORD}
       - POSTGRES_DB=${DBNAME}
+      - VITE_IS_HOSTED=${VITE_IS_HOSTED}
     healthcheck:
-      test: pg_isready -U ${DBUSER} -d ${DBNAME}
+      test: if [ "$VITE_IS_HOSTED" = "true" ]; then exit 0; else pg_isready -U ${DBUSER} -d ${DBNAME}; fi
       interval: 10s
       timeout: 3s
       retries: 3
@@ -162,10 +163,11 @@ services:
       context: .
       dockerfile: docker/Dockerfile.database-migration
     environment:
-      - DB_URL=postgresql://${DBUSER}:${DBUSER}@postgres/${DBNAME}
+      - DB_URL=postgresql://${DBUSER}:${DBPASSWORD}@${DBHOST}:${DBPORT}/${DBNAME}
     depends_on:
       postgres:
         condition: service_healthy
+        required: false
 
   hardhat:
     profiles: ["hardhat"]
