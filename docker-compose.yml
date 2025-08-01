@@ -133,16 +133,16 @@ services:
 
   postgres:
     image: postgres:16-alpine
-    command: sh -c "if [ \"$VITE_IS_HOSTED\" = \"true\" ]; then echo 'Postgres disabled in hosted environment' && exec tail -f /dev/null; else exec docker-entrypoint.sh postgres; fi"
+    command: sh -c "if [ \"$REMOTE_DATABASE\" = \"true\" ]; then echo 'Postgres disabled in hosted environment' && exec tail -f /dev/null; else exec docker-entrypoint.sh postgres; fi"
     ports:
       - "${DBPORT}:5432"
     environment:
       - POSTGRES_USER=${DBUSER}
       - POSTGRES_PASSWORD=${DBPASSWORD}
       - POSTGRES_DB=${DBNAME}
-      - VITE_IS_HOSTED=${VITE_IS_HOSTED}
+      - REMOTE_DATABASE=${REMOTE_DATABASE}
     healthcheck:
-      test: if [ "$VITE_IS_HOSTED" = "true" ]; then exit 0; else pg_isready -U ${DBUSER} -d ${DBNAME}; fi
+      test: if [ "$REMOTE_DATABASE" = "true" ]; then exit 0; else pg_isready -U ${DBUSER} -d ${DBNAME}; fi
       interval: 10s
       timeout: 3s
       retries: 3
