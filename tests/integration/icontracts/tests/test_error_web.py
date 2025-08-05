@@ -1,11 +1,14 @@
 from gltest import get_contract_factory
-from gltest.glchain.contract import Contract
+from gltest.contracts.contract import Contract
 from gltest.exceptions import DeploymentError
 from tests.integration.icontracts.tests.test_error_execution import (
     _deployment_error_to_tx_receipt,
     _check_result,
     _check_last_round,
 )
+import pytest
+
+pytestmark = pytest.mark.error_handling
 
 
 def test_web_system_error(setup_validators):

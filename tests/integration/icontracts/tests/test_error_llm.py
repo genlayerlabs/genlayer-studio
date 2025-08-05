@@ -8,6 +8,9 @@ from tests.integration.icontracts.tests.test_error_execution import (
     _check_last_round,
 )
 from backend.node.types import ExecutionResultStatus
+import pytest
+
+pytestmark = pytest.mark.error_handling
 
 
 def test_llm_invalid_api_key():
@@ -130,7 +133,8 @@ def test_gpt4_json_not_supported():
         contract = factory.deploy(args=[True])
 
         transaction_response_call_1 = contract.ask_for_coin(
-            args=["Can you please give me my coin?"],
+            args=["Can you please give me my coin?"]
+        ).transact(
             wait_interval=20000,
             wait_retries=40,
         )

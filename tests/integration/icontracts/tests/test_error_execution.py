@@ -3,6 +3,9 @@ from gltest.exceptions import DeploymentError
 from ast import literal_eval
 from backend.node.types import ExecutionResultStatus
 from enum import Enum
+import pytest
+
+pytestmark = pytest.mark.error_handling
 
 
 class ErrorType(Enum):
