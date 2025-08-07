@@ -89,7 +89,6 @@ const parseStdoutLogs = (log: any) => {
       type: 'info' as const,
       message: line,
       data: null,
-      isStdoutLog: true,
     });
   });
 
@@ -223,23 +222,19 @@ const resetFilters = () => {
         ref="scrollContainer"
       >
         <div
-          v-for="({ scope, type, message, data, isStdoutLog }, index) in filteredLogs"
+          v-for="({ scope, type, message, data }, index) in filteredLogs"
           :key="index"
           class="flex flex-row border-b border-gray-200 px-1 py-1 font-mono text-[10px] first-line:items-center hover:bg-white dark:border-zinc-800 dark:hover:bg-zinc-800"
-          :class="{ 'bg-blue-50 dark:bg-blue-950/30': isStdoutLog }"
         >
           <div class="flex flex-row items-start gap-1">
             <button
               class="rounded border bg-white px-[3px] py-[1px] dark:border-zinc-700 dark:bg-zinc-800"
-              :class="{ 'bg-blue-100 dark:bg-blue-900': isStdoutLog }"
               @click="isolateCategory(scope)"
             >
               {{ scope }}
             </button>
 
-            <pre 
-              :class="[colorMap[type], { 'text-blue-600 dark:text-blue-400': isStdoutLog }]"
-            >{{ message }}</pre>
+            <pre :class="colorMap[type]">{{ message }}</pre>
 
             <JsonViewer
               class="ml-2"
