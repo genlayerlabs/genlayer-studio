@@ -105,6 +105,14 @@ onMounted(() => {
         :name="paramName"
         :placeholder="`${paramType}`"
         :label="paramName"
+        :unionTypes="inputMap.getUnionTypes(paramType)"
+        @update:modelValue="
+          (newValue) => {
+            if (args.args[i]) {
+              args.args[i].val = newValue;
+            }
+          }
+        "
       />
     </div>
     <div
@@ -119,6 +127,14 @@ onMounted(() => {
         :name="paramName"
         :placeholder="`${paramType}`"
         :label="paramName"
+        :unionTypes="inputMap.getUnionTypes(paramType)"
+        @update:modelValue="
+          (newValue) => {
+            if (args.kwargs[paramName]) {
+              args.kwargs[paramName].val = newValue;
+            }
+          }
+        "
       />
     </div>
   </div>
