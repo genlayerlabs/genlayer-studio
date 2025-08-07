@@ -1,4 +1,9 @@
 <script setup lang="ts">
+/**
+ * NodeLogs component displays logs from the node store.
+ * Automatically parses stdout content from GenVM logs and displays
+ * each stdout line as a separate log entry for better readability.
+ */
 import { nextTick, ref, watch, computed, type ComputedRef } from 'vue';
 import { useNodeStore, useUIStore } from '@/stores';
 import JsonViewer from '@/components/JsonViewer/json-viewer.vue';
@@ -69,8 +74,39 @@ const toggleStatus = (status: string) => {
   }
 };
 
+// Helper function to parse stdout logs into individual log entries
+const parseStdoutLogs = (log: any) => {
+  if (!log.data?.stdout || typeof log.data.stdout !== 'string' || !log.data.stdout.trim()) {
+    return [log];
+  }
+
+  const logs = [log]; // Always include the original log
+  const stdoutLines = log.data.stdout
+    .split('\n')
+    .map((line: string) => line.trim())
+    .filter((line: string) => line.length > 0);
+  
+  // Parse each stdout line as a separate log entry
+  stdoutLines.forEach((line: string) => {
+    logs.push({
+      scope: 'GenVM',
+      name: 'stdout',
+      type: 'info' as const,
+      message: `📝 ${line}`, // Add emoji to visually distinguish stdout logs
+      data: null,
+      isStdoutLog: true, // Flag to identify parsed stdout logs
+    });
+  });
+
+  return logs;
+};
+
+const expandedLogs = computed(() => {
+  return nodeStore.logs.flatMap(parseStdoutLogs);
+});
+
 const filteredLogs = computed(() => {
-  return nodeStore.logs.filter((log) => {
+  return expandedLogs.value.filter((log) => {
     const categoryMatch =
       selectedScopes.value.length === 0 ||
       selectedScopes.value.includes(log.scope);
@@ -84,7 +120,7 @@ const filteredLogs = computed(() => {
       log.message.toLowerCase().includes(searchLower) ||
       log.scope.toLowerCase().includes(searchLower) ||
       log.name.toLowerCase().includes(searchLower) ||
-      JSON.stringify(log.data).toLowerCase().includes(searchLower);
+      (log.data && JSON.stringify(log.data).toLowerCase().includes(searchLower));
 
     return categoryMatch && statusMatch && searchMatch;
   });
@@ -196,24 +232,28 @@ const resetFilters = () => {
         ref="scrollContainer"
       >
         <div
-          v-for="({ scope, type, message, data }, index) in filteredLogs"
+          v-for="(log, index) in filteredLogs"
           :key="index"
           class="flex flex-row border-b border-gray-200 px-1 py-1 font-mono text-[10px] first-line:items-center hover:bg-white dark:border-zinc-800 dark:hover:bg-zinc-800"
+          :class="{ 'bg-blue-50 dark:bg-blue-950/30': log.isStdoutLog }"
         >
           <div class="flex flex-row items-start gap-1">
             <button
               class="rounded border bg-white px-[3px] py-[1px] dark:border-zinc-700 dark:bg-zinc-800"
-              @click="isolateCategory(scope)"
+              :class="{ 'bg-blue-100 dark:bg-blue-900': log.isStdoutLog }"
+              @click="isolateCategory(log.scope)"
             >
-              {{ scope }}
+              {{ log.scope }}
             </button>
 
-            <pre :class="colorMap[type]">{{ message }}</pre>
+            <pre 
+              :class="[colorMap[log.type], { 'text-blue-600 dark:text-blue-400': log.isStdoutLog }]"
+            >{{ log.message }}</pre>
 
             <JsonViewer
               class="ml-2"
-              v-if="data"
-              :value="data"
+              v-if="log.data"
+              :value="log.data"
               :theme="uiStore.mode === 'light' ? 'light' : 'dark'"
               :expand="false"
               sort
