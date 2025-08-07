@@ -1,9 +1,4 @@
 <script setup lang="ts">
-/**
- * NodeLogs component displays logs from the node store.
- * Automatically parses stdout content from GenVM logs and displays
- * each stdout line as a separate log entry for better readability.
- */
 import { nextTick, ref, watch, computed, type ComputedRef } from 'vue';
 import { useNodeStore, useUIStore } from '@/stores';
 import JsonViewer from '@/components/JsonViewer/json-viewer.vue';
@@ -92,21 +87,17 @@ const parseStdoutLogs = (log: any) => {
       scope: 'Contract',
       name: 'print',
       type: 'info' as const,
-      message: line, // Contract print message without emoji
+      message: line,
       data: null,
-      isStdoutLog: true, // Flag to identify parsed stdout logs
+      isStdoutLog: true,
     });
   });
 
   return logs;
 };
 
-const expandedLogs = computed(() => {
-  return nodeStore.logs.flatMap(parseStdoutLogs);
-});
-
 const filteredLogs = computed(() => {
-  return expandedLogs.value.filter((log) => {
+  return nodeStore.logs.flatMap(parseStdoutLogs).filter((log) => {
     const categoryMatch =
       selectedScopes.value.length === 0 ||
       selectedScopes.value.includes(log.scope);
@@ -232,28 +223,28 @@ const resetFilters = () => {
         ref="scrollContainer"
       >
         <div
-          v-for="(log, index) in filteredLogs"
+          v-for="({ scope, type, message, data, isStdoutLog }, index) in filteredLogs"
           :key="index"
           class="flex flex-row border-b border-gray-200 px-1 py-1 font-mono text-[10px] first-line:items-center hover:bg-white dark:border-zinc-800 dark:hover:bg-zinc-800"
-          :class="{ 'bg-blue-50 dark:bg-blue-950/30': log.isStdoutLog }"
+          :class="{ 'bg-blue-50 dark:bg-blue-950/30': isStdoutLog }"
         >
           <div class="flex flex-row items-start gap-1">
             <button
               class="rounded border bg-white px-[3px] py-[1px] dark:border-zinc-700 dark:bg-zinc-800"
-              :class="{ 'bg-blue-100 dark:bg-blue-900': log.isStdoutLog }"
-              @click="isolateCategory(log.scope)"
+              :class="{ 'bg-blue-100 dark:bg-blue-900': isStdoutLog }"
+              @click="isolateCategory(scope)"
             >
-              {{ log.scope }}
+              {{ scope }}
             </button>
 
             <pre 
-              :class="[colorMap[log.type], { 'text-blue-600 dark:text-blue-400': log.isStdoutLog }]"
-            >{{ log.message }}</pre>
+              :class="[colorMap[type], { 'text-blue-600 dark:text-blue-400': isStdoutLog }]"
+            >{{ message }}</pre>
 
             <JsonViewer
               class="ml-2"
-              v-if="log.data"
-              :value="log.data"
+              v-if="data"
+              :value="data"
               :theme="uiStore.mode === 'light' ? 'light' : 'dark'"
               :expand="false"
               sort
