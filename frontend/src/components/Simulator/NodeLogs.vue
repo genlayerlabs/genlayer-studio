@@ -9,6 +9,7 @@ import LogFilterBtn from '@/components/Simulator/LogFilterBtn.vue';
 import TextInput from '../global/inputs/TextInput.vue';
 import { useScroll } from '@vueuse/core';
 import { useTemplateRef } from 'vue';
+import { NodeLog } from '@/types';
 
 const nodeStore = useNodeStore();
 const uiStore = useUIStore();
@@ -70,10 +71,10 @@ const toggleStatus = (status: string) => {
 };
 
 // Helper function to parse stdout logs into individual contract print entries
-const parseStdoutLogs = (log: any) => {
+const parseStdoutLogs = (log: NodeLog): NodeLog[] => {
   if (
-    !log.data?.stdout || 
-    typeof log.data.stdout !== 'string' || 
+    !log.data?.stdout ||
+    typeof log.data.stdout !== 'string' ||
     !log.data.stdout.trim()
   ) {
     return [log];
@@ -84,7 +85,7 @@ const parseStdoutLogs = (log: any) => {
     .split('\n')
     .map((line: string) => line.trim())
     .filter((line: string) => line.length > 0);
-  
+
   // Parse each stdout line as a separate log entry
   stdoutLines.forEach((line: string) => {
     logs.push({
@@ -114,7 +115,7 @@ const filteredLogs = computed(() => {
       log.message.toLowerCase().includes(searchLower) ||
       log.scope.toLowerCase().includes(searchLower) ||
       log.name.toLowerCase().includes(searchLower) ||
-      (log.data && 
+      (log.data &&
         JSON.stringify(log.data).toLowerCase().includes(searchLower));
 
     return categoryMatch && statusMatch && searchMatch;
