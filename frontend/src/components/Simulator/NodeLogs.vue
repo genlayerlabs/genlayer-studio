@@ -86,7 +86,7 @@ const parseStdoutLogs = (log: any) => {
     logs.push({
       scope: 'Contract',
       name: 'print',
-      type: 'info' as const,
+      type: 'info',
       message: line,
       data: null,
     });
