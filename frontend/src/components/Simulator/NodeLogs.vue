@@ -71,7 +71,11 @@ const toggleStatus = (status: string) => {
 
 // Helper function to parse stdout logs into individual contract print entries
 const parseStdoutLogs = (log: any) => {
-  if (!log.data?.stdout || typeof log.data.stdout !== 'string' || !log.data.stdout.trim()) {
+  if (
+    !log.data?.stdout || 
+    typeof log.data.stdout !== 'string' || 
+    !log.data.stdout.trim()
+  ) {
     return [log];
   }
 
@@ -110,7 +114,8 @@ const filteredLogs = computed(() => {
       log.message.toLowerCase().includes(searchLower) ||
       log.scope.toLowerCase().includes(searchLower) ||
       log.name.toLowerCase().includes(searchLower) ||
-      (log.data && JSON.stringify(log.data).toLowerCase().includes(searchLower));
+      (log.data && 
+        JSON.stringify(log.data).toLowerCase().includes(searchLower));
 
     return categoryMatch && statusMatch && searchMatch;
   });
