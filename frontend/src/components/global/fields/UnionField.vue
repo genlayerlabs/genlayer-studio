@@ -21,6 +21,7 @@ const fieldId = useUniqueId('union');
 const selectedType = ref<string>('');
 const selectedGroup = ref<string>('');
 const values = ref<{ [key: string]: any }>({});
+const isInternalUpdate = ref<boolean>(false);
 
 const getInputComponent = (type: string) => {
   switch (type) {
@@ -83,6 +84,9 @@ const displayGroups = computed(() => {
 });
 
 const initializeValues = () => {
+  if (!props.unionTypes || props.unionTypes.length === 0) {
+    return;
+  }
   const typeMap: { [key: string]: any } = {
     string: '',
     int: 0,
@@ -98,13 +102,19 @@ const initializeValues = () => {
 
   props.unionTypes.forEach((type) => {
     const trimmedType = type.trim();
-    values.value[trimmedType] = typeMap[trimmedType] ?? '';
+    if (!trimmedType) return;
+    // Only initialize if the value doesn't already exist (preserve user input)
+    if (!(trimmedType in values.value)) {
+      values.value[trimmedType] = typeMap[trimmedType] ?? '';
+    }
   });
 
   const groups = displayGroups.value;
   if (groups.length > 0) {
     selectedGroup.value = groups[0].id;
     selectedType.value = groups[0].types[0];
+  } else {
+    console.warn('No valid union type groups found');
   }
 };
 
@@ -112,10 +122,29 @@ const initializeValues = () => {
 watch(
   () => props.modelValue,
   (newValue) => {
+    // Skip if this update is from our own emitValue
+    if (isInternalUpdate.value) {
+      isInternalUpdate.value = false;
+      return;
+    }
+
+    // Skip if the new value matches what we already have for the current type
+    // This prevents overwriting user input when switching radio buttons
+    if (newValue !== undefined && newValue instanceof AnyFieldValue) {
+      const currentValue = values.value[selectedType.value];
+      if (typeof currentValue === 'string' && currentValue === newValue.value) {
+        return;
+      }
+    }
+
     if (newValue !== undefined && newValue instanceof AnyFieldValue) {
       // For strings, unwrap the JSON to get the original value
       if (typeof newValue.value === 'string') {
-        values.value[selectedType.value] = JSON.parse(newValue.value);
+        try {
+          values.value[selectedType.value] = JSON.parse(newValue.value);
+        } catch {
+          values.value[selectedType.value] = newValue.value;
+        }
       } else {
         values.value[selectedType.value] = newValue.value;
       }
@@ -150,6 +179,7 @@ const getCurrentValue = () => {
 
 const emitValue = () => {
   const currentValue = getCurrentValue();
+  isInternalUpdate.value = true;
   emit('update:modelValue', currentValue);
 };
 
