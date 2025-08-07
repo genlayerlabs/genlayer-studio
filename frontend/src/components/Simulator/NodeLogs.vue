@@ -52,7 +52,7 @@ watch(y, () => {
   }
 });
 
-const scopes = ref(['RPC', 'GenVM', 'Consensus']);
+const scopes = ref(['RPC', 'GenVM', 'Consensus', 'Contract']);
 const statuses = ref(['info', 'success', 'error']);
 
 const selectedScopes = ref(scopes.value);
@@ -74,7 +74,7 @@ const toggleStatus = (status: string) => {
   }
 };
 
-// Helper function to parse stdout logs into individual log entries
+// Helper function to parse stdout logs into individual contract print entries
 const parseStdoutLogs = (log: any) => {
   if (!log.data?.stdout || typeof log.data.stdout !== 'string' || !log.data.stdout.trim()) {
     return [log];
@@ -89,10 +89,10 @@ const parseStdoutLogs = (log: any) => {
   // Parse each stdout line as a separate log entry
   stdoutLines.forEach((line: string) => {
     logs.push({
-      scope: 'GenVM',
-      name: 'stdout',
+      scope: 'Contract',
+      name: 'print',
       type: 'info' as const,
-      message: `📝 ${line}`, // Add emoji to visually distinguish stdout logs
+      message: line, // Contract print message without emoji
       data: null,
       isStdoutLog: true, // Flag to identify parsed stdout logs
     });
