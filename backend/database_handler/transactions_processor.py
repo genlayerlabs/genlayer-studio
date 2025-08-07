@@ -308,7 +308,11 @@ class TransactionsProcessor:
                 len(transaction_data["consensus_history"]["consensus_results"]) - 1
             )
             last_round = transaction_data["consensus_history"]["consensus_results"][-1]
-            if "leader_result" in last_round and last_round["leader_result"]:
+            if (
+                "leader_result" in last_round
+                and last_round["leader_result"] is not None
+                and len(last_round["leader_result"]) > 1
+            ):
                 leader = last_round["leader_result"][1]
                 validator_votes_name.append(leader["vote"].upper())
                 vote_number = int(Vote.from_string(leader["vote"]))
@@ -336,7 +340,8 @@ class TransactionsProcessor:
             round_number = "0"
         last_round_result = int(
             determine_consensus_from_votes(
-                [vote.lower() for vote in validator_votes_name]
+                [vote.lower() for vote in validator_votes_name],
+                transaction_data["leader_only"],
             )
         )
 
@@ -542,7 +547,9 @@ class TransactionsProcessor:
             votes_temp = list(transaction_data["consensus_data"]["votes"].values())
         else:
             votes_temp = []
-        consensus_result = determine_consensus_from_votes(votes_temp)
+        consensus_result = determine_consensus_from_votes(
+            votes_temp, transaction_data["leader_only"]
+        )
         transaction_data["result"] = int(consensus_result)
         transaction_data["result_name"] = consensus_result.value
         return transaction_data

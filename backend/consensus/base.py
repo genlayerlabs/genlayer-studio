@@ -1828,9 +1828,15 @@ class PendingState(TransactionState):
                 )
 
             else:
+                # Do not use validators in leader-only transactions
+                if context.transaction.leader_only:
+                    num_validators = 1
+                else:
+                    num_validators = context.transaction.num_of_initial_validators
+
                 # Transaction was never executed, get the default number of validators for the transaction
                 context.involved_validators = get_validators_for_transaction(
-                    all_validators, context.transaction.num_of_initial_validators
+                    all_validators, num_validators
                 )
 
         # Transition to the ProposingState
@@ -1875,10 +1881,6 @@ class ProposingState(TransactionState):
 
         # Unpack the leader and validators
         [context.leader, *context.remaining_validators] = context.involved_validators
-
-        # If the transaction is leader-only, clear the validators
-        if context.transaction.leader_only:
-            context.remaining_validators = []
 
         # Send event in rollup to communicate the transaction is activated
         if self.activate:
@@ -1996,6 +1998,7 @@ class CommittingState(TransactionState):
         if (
             context.consensus_data.leader_receipt
             and len(context.consensus_data.leader_receipt) == 1
+            and not context.transaction.leader_only
         ):
             leader_node = create_validator_node(context, context.leader)
             leader_receipt = await leader_node.exec_transaction(context.transaction)
@@ -2028,6 +2031,7 @@ class CommittingState(TransactionState):
         if (
             context.consensus_data.leader_receipt
             and len(context.consensus_data.leader_receipt) == 1
+            and not context.transaction.leader_only
         ):
             context.consensus_service.emit_transaction_event(
                 "emitVoteCommitted",
@@ -2084,10 +2088,16 @@ class RevealingState(TransactionState):
 
         # Determine the consensus result
         votes_list = list(context.votes.values())
-        consensus_result = determine_consensus_from_votes(votes_list)
+        consensus_result = determine_consensus_from_votes(
+            votes_list, context.transaction.leader_only
+        )
 
         # Send event in rollup to communicate the votes are revealed
-        if len(context.consensus_data.leader_receipt) == 1:
+        if (
+            context.consensus_data.leader_receipt
+            and len(context.consensus_data.leader_receipt) == 1
+            and not context.transaction.leader_only
+        ):
             context.consensus_service.emit_transaction_event(
                 "emitVoteRevealed",
                 context.consensus_data.leader_receipt[0].node_config,
