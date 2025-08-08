@@ -20,11 +20,14 @@ class WebModule:
 
         self._config = ChangedConfigFile("genvm-module-web.yaml")
 
+        web_script_path = Path(__file__).parent.joinpath("web.lua")
+
         with self._config.change_default() as conf:
             conf["webdriver_host"] = (
                 f"{os.getenv('WEBDRIVERPROTOCOL', 'http')}://{os.environ['WEBDRIVERHOST']}:{os.environ['WEBDRIVERPORT']}"
             )
             conf["bind_address"] = self.address
+            conf["lua_script_path"] = str(web_script_path)
 
         self._config.write_default()
 

@@ -15,6 +15,8 @@ import collections.abc
 import functools
 import datetime
 import abc
+import time
+import copy
 
 from backend.node.types import (
     PendingTransaction,
@@ -47,16 +49,6 @@ class ExecutionReturn:
         )
 
 
-@dataclass
-class ExecutionResult:
-    result: ExecutionReturn | ExecutionError
-    eq_outputs: dict[int, bytes]
-    pending_transactions: list[PendingTransaction]
-    stdout: str
-    stderr: str
-    genvm_log: list
-
-
 def encode_result_to_bytes(result: ExecutionReturn | ExecutionError) -> bytes:
     if isinstance(result, ExecutionReturn):
         return bytes([ResultCode.RETURN]) + result.ret
@@ -82,6 +74,17 @@ class StateProxy(metaclass=abc.ABCMeta):
     ) -> None: ...
     @abc.abstractmethod
     def get_balance(self, addr: Address) -> int: ...
+
+
+@dataclass
+class ExecutionResult:
+    result: ExecutionReturn | ExecutionError
+    eq_outputs: dict[int, bytes]
+    pending_transactions: list[PendingTransaction]
+    stdout: str
+    stderr: str
+    genvm_log: list
+    state: StateProxy
 
 
 # GenVM protocol just in case it is needed for mocks or bringing back the old one
@@ -254,7 +257,9 @@ class _Host(genvmhost.IHost):
         self.calldata_bytes = calldata_bytes
         self._leader_results = leader_results
 
-    def provide_result(self, res: genvmhost.RunHostAndProgramRes) -> ExecutionResult:
+    def provide_result(
+        self, res: genvmhost.RunHostAndProgramRes, state: StateProxy
+    ) -> ExecutionResult:
         assert self._result is not None
         return ExecutionResult(
             eq_outputs=self._eq_outputs,
@@ -263,6 +268,7 @@ class _Host(genvmhost.IHost):
             stderr=res.stderr,
             genvm_log=_decode_genvm_log(res.genvm_log),
             result=self._result,
+            state=state,
         )
 
     async def loop_enter(self) -> socket.socket:
@@ -386,6 +392,18 @@ class _Host(genvmhost.IHost):
         return self._state_proxy.get_balance(Address(account))
 
 
+async def _copy_state_proxy(state_proxy) -> StateProxy:
+    # snapshot_factory cannot be pickled. Temporarily remove the factory to allow deepcopy
+    factory = state_proxy.snapshot_factory
+    try:
+        state_proxy.snapshot_factory = None
+        state_copy = copy.deepcopy(state_proxy)
+        state_copy.snapshot_factory = factory
+        return state_copy
+    finally:
+        state_proxy.snapshot_factory = factory
+
+
 async def _run_genvm_host(
     host_supplier: typing.Callable[[socket.socket], _Host],
     args: list[Path | str],
@@ -393,39 +411,98 @@ async def _run_genvm_host(
 ) -> ExecutionResult:
     tmpdir = Path(tempfile.mkdtemp())
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock_listener:
-            timeout = 300  # seconds
+        timeout = 300  # seconds
+        base_delay = 5  # seconds
+        start_time = time.time()
+        retry_count = 0
+        last_error = ""
 
-            sock_listener.setblocking(False)
-            sock_path = tmpdir.joinpath("sock")
-            sock_listener.bind(str(sock_path))
-            sock_listener.listen(1)
+        # Extract the original arguments from the partial function
+        host_args = (
+            host_supplier.keywords
+            if isinstance(host_supplier, functools.partial)
+            else {}
+        )
+        fresh_args = {}
 
-            new_args: list[str | Path] = [
-                get_genvm_path(),
-            ]
-            if config_path is not None:
-                new_args.extend(["--config", config_path])
-            new_args.extend(
-                [
-                    "run",
-                    "--host",
-                    f"unix://{sock_path}",
-                    "--print=none",
-                ]
-            )
-
-            new_args.extend(args)
-
-            host: _Host = host_supplier(sock_listener)  # _Host(sock_listener)
-            try:
-                return host.provide_result(
-                    await genvmhost.run_host_and_program(
-                        host, new_args, deadline=timeout
-                    )
+        while True:
+            remaining_time = timeout - (time.time() - start_time)
+            if remaining_time <= 0:
+                # When the genvm keeps crashing we send a timeout error
+                return ExecutionResult(
+                    result=ExecutionError(message="timeout", kind=ResultCode.VM_ERROR),
+                    eq_outputs={},
+                    pending_transactions=[],
+                    stdout="",
+                    stderr=last_error,
+                    genvm_log=[],
+                    state=fresh_args.get("state_proxy", host_args.get("state_proxy")),
                 )
-            finally:
-                if host.sock is not None:
-                    host.sock.close()
+
+            # Create fresh copies of the arguments for each attempt
+            fresh_args = {}
+            for key, value in host_args.items():
+                if key == "state_proxy" and hasattr(value, "snapshot_factory"):
+                    fresh_args[key] = await _copy_state_proxy(value)
+                else:
+                    fresh_args[key] = copy.deepcopy(value)
+
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock_listener:
+                sock_listener.setblocking(False)
+                sock_path = tmpdir.joinpath(f"sock_{retry_count}")
+                sock_listener.bind(str(sock_path))
+                sock_listener.listen(1)
+
+                new_args: list[str | Path] = [
+                    get_genvm_path(),
+                ]
+                if config_path is not None:
+                    new_args.extend(["--config", config_path])
+                new_args.extend(
+                    [
+                        "run",
+                        "--host",
+                        f"unix://{sock_path}",
+                        "--print=none",
+                    ]
+                )
+
+                new_args.extend(args)
+
+                fresh_host_supplier = functools.partial(
+                    (
+                        host_supplier.func
+                        if isinstance(host_supplier, functools.partial)
+                        else host_supplier
+                    ),
+                    **fresh_args,
+                )
+                host: _Host = fresh_host_supplier(sock_listener)
+
+                try:
+                    result = host.provide_result(
+                        await genvmhost.run_host_and_program(
+                            host, new_args, deadline=remaining_time
+                        ),
+                        state=fresh_args.get(
+                            "state_proxy", host_args.get("state_proxy")
+                        ),
+                    )
+                    return result
+
+                except Exception as e:
+                    last_error = str(e)
+                    retry_count += 1
+                    # Sleep for a longer time than the previous attempt to avoid executing it too many times
+                    delay = min(base_delay * (2 ** (retry_count - 1)), remaining_time)
+                    await asyncio.sleep(delay)
+
+                finally:
+                    if host.sock is not None:
+                        host.sock.close()
+                    try:
+                        sock_path.unlink()
+                    except FileNotFoundError:
+                        pass
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

@@ -308,7 +308,7 @@ class TransactionsProcessor:
                 len(transaction_data["consensus_history"]["consensus_results"]) - 1
             )
             last_round = transaction_data["consensus_history"]["consensus_results"][-1]
-            if "leader_result" in last_round and last_round["leader_result"]:
+            if "leader_result" in last_round and len(last_round["leader_result"]) > 1:
                 leader = last_round["leader_result"][1]
                 validator_votes_name.append(leader["vote"].upper())
                 vote_number = int(Vote.from_string(leader["vote"]))
