@@ -1,0 +1,24 @@
+name: Trigger deployment on tag
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  trigger-deployment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger deployment workflow
+        run: |
+          curl -X POST \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{ secrets.DEPLOYMENT_PAT }}" \
+            -H "Content-Type: application/json" \
+            https://api.github.com/repos/yeagerai/genlayer-studio/dispatches \
+            -d '{
+              "event_type": "studio_tag_created",
+              "client_payload": {
+                "tag": "${{ github.ref_name }}"
+              }
+            }'
