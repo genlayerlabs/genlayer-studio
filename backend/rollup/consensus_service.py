@@ -175,33 +175,24 @@ class ConsensusService:
                 if "nonce too high" in error_str.lower()
                 else "nonce_too_low" if "nonce too low" in error_str.lower() else None
             )
+            # For nonce errors with pre-signed transactions, we can't fix them
+            # The transaction would need to be re-signed with the correct nonce
             if error_type:
-                # Extract expected and current nonce from error message
                 match = re.search(
                     r"Expected nonce to be (\d+) but got (\d+)", error_str
                 )
                 if match:
+                    expected_nonce = int(match.group(1))
                     current_nonce = int(match.group(2))
-
-                    # Set the nonce to the expected value
                     print(
-                        f"[CONSENSUS_SERVICE]: Setting nonce for {from_address} to {current_nonce}"
-                    )
-                    self.web3.provider.make_request(
-                        "hardhat_setNonce", [from_address, hex(current_nonce)]
-                    )
-
-                    if retry:
-                        return self.add_transaction(
-                            transaction, from_address, retry=False
-                        )
-                else:
-                    print(
-                        f"[CONSENSUS_SERVICE]: Could not parse nonce from error message: {error_str}"
+                        f"[CONSENSUS_SERVICE]: Nonce mismatch - expected {expected_nonce}, got {current_nonce}. "
+                        f"Transaction needs to be re-signed with correct nonce."
                     )
 
             print(f"[CONSENSUS_SERVICE]: Error forwarding transaction: {error_str}")
-            return None
+            # Raise the exception to be handled by the caller instead of returning None
+            # This will ensure the transaction fails explicitly rather than getting stuck in PENDING
+            raise Exception(f"Transaction failed: {error_str}")
 
     def emit_transaction_event(self, event_name: str, account: dict, *args):
         """
@@ -237,7 +228,7 @@ class ConsensusService:
             tx = event_function(*args).build_transaction(
                 {
                     "from": account_address,
-                    "gas": 50000000,
+                    "gas": 0xFFFFFFFF,  # 2^32 - 1 (4,294,967,295) - zkSync Era limit
                     "gasPrice": 0,
                     "nonce": self.web3.eth.get_transaction_count(account_address),
                 }

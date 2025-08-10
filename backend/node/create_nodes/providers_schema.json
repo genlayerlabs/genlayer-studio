@@ -55,7 +55,7 @@
             "const": "openai-compatible"
           },
           "model": {
-            "enum": ["grok-2-1212"]
+            "enum": ["grok-4-0709", "grok-3", "grok-3-mini"]
           }
         }
       }
@@ -72,7 +72,7 @@
             "const": "google"
           },
           "model": {
-            "enum": ["gemini-2.0-flash-lite-001"]
+            "enum": ["gemini-2.0-flash-lite-001", "gemini-2.5-flash-lite", "gemini-2.5-flash"]
           }
         }
       }
@@ -92,6 +92,7 @@
             "enum": [
               "deepseek/deepseek-v3",
               "mistralai/mixtral-8x22b-instruct",
+              "mistralai/mixtral-8x7b-instruct",
               "meta-llama/llama-3.3-70b-instruct"
             ]
           }
@@ -110,7 +111,7 @@
             "const": "openai-compatible"
           },
           "model": {
-            "enum": ["gpt-4-1106-preview", "gpt-4o"]
+            "enum": ["gpt-4-1106-preview", "gpt-4o", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-4.1"]
           }
         }
       }
@@ -127,7 +128,7 @@
             "const": "anthropic"
           },
           "model": {
-            "enum": ["claude-3-7-sonnet-20250219", "claude-3-5-haiku-20241022"]
+            "enum": ["claude-3-7-sonnet-20250219", "claude-3-5-haiku-20241022", "claude-sonnet-4-20250514", "claude-opus-4-20250514"]
           }
         }
       }

@@ -60,11 +60,28 @@ class WebModule:
 
     async def stop(self):
         if self._process is not None:
+            print(f"[WebModule] Stopping process (PID: {self._process.pid})")
             try:
                 self._process.send_signal(signal.SIGINT)
             except ProcessLookupError:
                 pass
-            await self._process.wait()
+            
+            try:
+                # Wait for process to terminate with a timeout
+                await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                print(f"[WebModule] Process terminated gracefully")
+            except asyncio.TimeoutError:
+                print(f"[WebModule] Process didn't terminate with SIGINT, trying SIGKILL")
+                # If SIGINT didn't work, try SIGKILL
+                try:
+                    self._process.send_signal(signal.SIGKILL)
+                    await asyncio.wait_for(self._process.wait(), timeout=2.0)
+                    print(f"[WebModule] Process terminated with SIGKILL")
+                except (asyncio.TimeoutError, ProcessLookupError):
+                    print(f"[WebModule] Process termination failed, continuing anyway")
+                    # If still hanging, just give up and set to None
+                    pass
+            
             self._process = None
 
     async def verify_for_read(self):

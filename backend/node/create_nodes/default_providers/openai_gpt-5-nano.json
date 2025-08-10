@@ -1,7 +1,7 @@
 {
   "provider": "openai",
   "plugin": "openai-compatible",
-  "model": "gpt-4-1106-preview",
+  "model": "gpt-5-nano",
   "config": {
     "temperature": 0.75,
     "max_tokens": 500

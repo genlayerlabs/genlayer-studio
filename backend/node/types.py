@@ -193,15 +193,37 @@ class Receipt:
     pending_transactions: Iterable[PendingTransaction] = ()
     genvm_result: dict[str, str] | None = None
 
-    def to_dict(self):
+    def to_dict(self, truncate_large_fields=False):
+        """Convert Receipt to dict.
+        
+        Args:
+            truncate_large_fields: If True, truncate large fields for logging
+        """
+        def truncate_if_needed(value, field_name):
+            if not truncate_large_fields:
+                return value
+            
+            # Fields to truncate when in summary mode
+            if field_name in ['calldata', 'result']:
+                if isinstance(value, str) and len(value) > 100:
+                    return f"{value[:100]}... ({len(value)} chars)"
+            elif field_name == 'contract_state':
+                if value and len(str(value)) > 100:
+                    return f"<{len(value)} entries, truncated>"
+            
+            return value
+        
+        result = base64.b64encode(self.result).decode("ascii")
+        calldata = str(base64.b64encode(self.calldata), encoding="ascii")
+        
         return {
             "vote": self.vote.value if self.vote else None,
             "execution_result": self.execution_result.value,
-            "result": base64.b64encode(self.result).decode("ascii"),
-            "calldata": str(base64.b64encode(self.calldata), encoding="ascii"),
+            "result": truncate_if_needed(result, 'result'),
+            "calldata": truncate_if_needed(calldata, 'calldata'),
             "gas_used": self.gas_used,
             "mode": self.mode.value,
-            "contract_state": self.contract_state,
+            "contract_state": truncate_if_needed(self.contract_state, 'contract_state'),
             "node_config": self.node_config,
             "eq_outputs": self.eq_outputs,
             "pending_transactions": [

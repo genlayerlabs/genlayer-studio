@@ -576,8 +576,14 @@ class TransactionsProcessor:
         update_current_status_changes: bool = True,
     ):
         transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
         )
+        
+        # If transaction doesn't exist (e.g., after snapshot restore), skip update
+        if not transaction:
+            print(f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping status update")
+            return
+            
         transaction.status = new_status
 
         if update_current_status_changes:
@@ -601,18 +607,30 @@ class TransactionsProcessor:
         self, transaction_hash: str, consensus_data: dict | None
     ):
         transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
         )
+        
+        # If transaction doesn't exist (e.g., after snapshot restore), skip update
+        if not transaction:
+            print(f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping result update")
+            return
+            
         transaction.consensus_data = consensus_data
         self.session.commit()
 
     def get_transaction_count(self, address: str) -> int:
-        count = (
-            self.session.query(Transactions)
-            .filter(Transactions.from_address == address)
-            .count()
-        )
-        return count
+        # Get the actual nonce from Hardhat instead of counting DB transactions
+        # This ensures we're always in sync with the blockchain's nonce tracking
+        if self.web3.is_connected():
+            return self.web3.eth.get_transaction_count(address)
+        else:
+            # Fallback to counting transactions if not connected
+            count = (
+                self.session.query(Transactions)
+                .filter(Transactions.from_address == address)
+                .count()
+            )
+            return count
 
     def get_transactions_for_address(
         self,
@@ -675,16 +693,22 @@ class TransactionsProcessor:
         if appeal_failed < 0:
             raise ValueError("appeal_failed must be a non-negative integer")
         transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
         )
+        if not transaction:
+            print(f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping appeal_failed update")
+            return
         transaction.appeal_failed = appeal_failed
 
     def set_transaction_appeal_undetermined(
         self, transaction_hash: str, appeal_undetermined: bool
     ):
         transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
         )
+        if not transaction:
+            print(f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping appeal_undetermined update")
+            return
         transaction.appeal_undetermined = appeal_undetermined
 
     def get_highest_timestamp(self) -> int:
@@ -817,8 +841,11 @@ class TransactionsProcessor:
 
     def set_transaction_appeal_processing_time(self, transaction_hash: str):
         transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
         )
+        if not transaction:
+            print(f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping appeal_processing_time update")
+            return
         transaction.appeal_processing_time += (
             round(time.time()) - transaction.timestamp_appeal
         )
@@ -981,8 +1008,11 @@ class TransactionsProcessor:
         self, transaction_hash: str, appeal_leader_timeout: bool
     ) -> bool:
         transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
         )
+        if not transaction:
+            print(f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping appeal_leader_timeout update")
+            return False
         transaction.appeal_leader_timeout = appeal_leader_timeout
         self.session.commit()
         return appeal_leader_timeout
@@ -998,8 +1028,11 @@ class TransactionsProcessor:
         self, transaction_hash: str, appeal_validators_timeout: bool
     ) -> bool:
         transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
         )
+        if not transaction:
+            print(f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping appeal_validators_timeout update")
+            return False
         transaction.appeal_validators_timeout = appeal_validators_timeout
         self.session.commit()
         return appeal_validators_timeout
