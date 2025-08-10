@@ -111,7 +111,7 @@
             "const": "openai-compatible"
           },
           "model": {
-            "enum": ["gpt-4-1106-preview", "gpt-4o", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-4.1"]
+            "enum": ["gpt-4-1106-preview", "gpt-4o", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-4.1", "gpt-5", "gpt-5-mini", "gpt-5-nano"]
           }
         }
       }

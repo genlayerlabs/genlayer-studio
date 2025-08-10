@@ -619,18 +619,36 @@ class TransactionsProcessor:
         self.session.commit()
 
     def get_transaction_count(self, address: str) -> int:
+        # Normalize address to checksum format
+        try:
+            checksum_address = self.web3.to_checksum_address(address)
+        except:
+            checksum_address = address
+        
         # Get the actual nonce from Hardhat instead of counting DB transactions
         # This ensures we're always in sync with the blockchain's nonce tracking
-        if self.web3.is_connected():
-            return self.web3.eth.get_transaction_count(address)
-        else:
-            # Fallback to counting transactions if not connected
-            count = (
-                self.session.query(Transactions)
-                .filter(Transactions.from_address == address)
-                .count()
-            )
-            return count
+        try:
+            # Check connection - handle both is_connected and isConnected
+            is_connected = False
+            if hasattr(self.web3, 'is_connected'):
+                is_connected = self.web3.is_connected()
+            elif hasattr(self.web3, 'isConnected'):
+                is_connected = self.web3.isConnected()
+            
+            if is_connected:
+                # Pass 'pending' to include pending transactions for accuracy
+                return self.web3.eth.get_transaction_count(checksum_address, 'pending')
+        except Exception as e:
+            # Log the error and fall back to database count
+            print(f"[TRANSACTIONS_PROCESSOR]: Error getting transaction count from RPC: {e}")
+        
+        # Fallback to counting transactions from database
+        count = (
+            self.session.query(Transactions)
+            .filter(Transactions.from_address == checksum_address)
+            .count()
+        )
+        return count
 
     def get_transactions_for_address(
         self,
@@ -846,11 +864,16 @@ class TransactionsProcessor:
         if not transaction:
             print(f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping appeal_processing_time update")
             return
-        transaction.appeal_processing_time += (
-            round(time.time()) - transaction.timestamp_appeal
-        )
-        flag_modified(transaction, "appeal_processing_time")
-        self.session.commit()
+        
+        # Check if timestamp_appeal is not None before performing arithmetic
+        if transaction.timestamp_appeal is not None:
+            transaction.appeal_processing_time += (
+                round(time.time()) - transaction.timestamp_appeal
+            )
+            flag_modified(transaction, "appeal_processing_time")
+            self.session.commit()
+        else:
+            print(f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} has no timestamp_appeal, skipping appeal_processing_time update")
 
     def reset_transaction_appeal_processing_time(self, transaction_hash: str):
         transaction = (

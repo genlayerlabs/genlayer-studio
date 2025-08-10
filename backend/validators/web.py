@@ -2,6 +2,7 @@ import asyncio
 import signal
 import os
 import sys
+import contextlib
 
 from pathlib import Path
 
@@ -59,29 +60,37 @@ class WebModule:
         )
 
     async def stop(self):
-        if self._process is not None:
-            print(f"[WebModule] Stopping process (PID: {self._process.pid})")
-            try:
+        if self._process is None:
+            return
+        
+        # Fast-path: check if process has already exited
+        if self._process.returncode is not None:
+            self._process = None
+            return
+        
+        print(f"[WebModule] Stopping process (PID: {self._process.pid})")
+        
+        try:
+            # Try graceful shutdown with SIGINT
+            with contextlib.suppress(ProcessLookupError):
                 self._process.send_signal(signal.SIGINT)
-            except ProcessLookupError:
-                pass
             
             try:
                 # Wait for process to terminate with a timeout
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
-                print(f"[WebModule] Process terminated gracefully")
+                print("[WebModule] Process terminated gracefully")
             except asyncio.TimeoutError:
-                print(f"[WebModule] Process didn't terminate with SIGINT, trying SIGKILL")
-                # If SIGINT didn't work, try SIGKILL
-                try:
-                    self._process.send_signal(signal.SIGKILL)
-                    await asyncio.wait_for(self._process.wait(), timeout=2.0)
-                    print(f"[WebModule] Process terminated with SIGKILL")
-                except (asyncio.TimeoutError, ProcessLookupError):
-                    print(f"[WebModule] Process termination failed, continuing anyway")
-                    # If still hanging, just give up and set to None
-                    pass
-            
+                print("[WebModule] Process didn't terminate with SIGINT, trying forceful termination")
+                # If SIGINT didn't work, use kill() for cross-platform compatibility
+                with contextlib.suppress(ProcessLookupError):
+                    self._process.kill()
+                    try:
+                        await asyncio.wait_for(self._process.wait(), timeout=2.0)
+                        print("[WebModule] Process terminated forcefully")
+                    except asyncio.TimeoutError:
+                        print("[WebModule] Process termination failed, continuing anyway")
+        finally:
+            # Ensure process handle is cleared even if exception occurs
             self._process = None
 
     async def verify_for_read(self):

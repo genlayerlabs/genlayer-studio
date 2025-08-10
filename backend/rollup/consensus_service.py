@@ -11,6 +11,30 @@ from backend.rollup.default_contracts.consensus_main import (
 )
 
 
+# Custom exception classes for nonce errors
+class NonceError(Exception):
+    """Base exception for nonce-related errors"""
+    pass
+
+
+class NonceTooLowError(NonceError):
+    """Exception raised when transaction nonce is too low"""
+    def __init__(self, expected_nonce: int, actual_nonce: int, *args, **kwargs):
+        self.expected_nonce = expected_nonce
+        self.actual_nonce = actual_nonce
+        message = f"Nonce too low: expected {expected_nonce}, got {actual_nonce}"
+        super().__init__(message, *args, **kwargs)
+
+
+class NonceTooHighError(NonceError):
+    """Exception raised when transaction nonce is too high"""
+    def __init__(self, expected_nonce: int, actual_nonce: int, *args, **kwargs):
+        self.expected_nonce = expected_nonce
+        self.actual_nonce = actual_nonce
+        message = f"Nonce too high: expected {expected_nonce}, got {actual_nonce}"
+        super().__init__(message, *args, **kwargs)
+
+
 class ConsensusService:
     def __init__(self):
         """
@@ -170,14 +194,9 @@ class ConsensusService:
 
         except Exception as e:
             error_str = str(e)
-            error_type = (
-                "nonce_too_high"
-                if "nonce too high" in error_str.lower()
-                else "nonce_too_low" if "nonce too low" in error_str.lower() else None
-            )
-            # For nonce errors with pre-signed transactions, we can't fix them
-            # The transaction would need to be re-signed with the correct nonce
-            if error_type:
+            
+            # Check for nonce errors and raise specific exceptions
+            if "nonce too high" in error_str.lower():
                 match = re.search(
                     r"Expected nonce to be (\d+) but got (\d+)", error_str
                 )
@@ -185,14 +204,33 @@ class ConsensusService:
                     expected_nonce = int(match.group(1))
                     current_nonce = int(match.group(2))
                     print(
-                        f"[CONSENSUS_SERVICE]: Nonce mismatch - expected {expected_nonce}, got {current_nonce}. "
+                        f"[CONSENSUS_SERVICE]: Nonce too high - expected {expected_nonce}, got {current_nonce}. "
                         f"Transaction needs to be re-signed with correct nonce."
                     )
+                    raise NonceTooHighError(expected_nonce, current_nonce) from e
+                else:
+                    # If we can't parse the nonces, still raise typed exception
+                    raise NonceTooHighError(0, 0) from e
+                    
+            elif "nonce too low" in error_str.lower():
+                match = re.search(
+                    r"Expected nonce to be (\d+) but got (\d+)", error_str
+                )
+                if match:
+                    expected_nonce = int(match.group(1))
+                    current_nonce = int(match.group(2))
+                    print(
+                        f"[CONSENSUS_SERVICE]: Nonce too low - expected {expected_nonce}, got {current_nonce}. "
+                        f"Transaction needs to be re-signed with correct nonce."
+                    )
+                    raise NonceTooLowError(expected_nonce, current_nonce) from e
+                else:
+                    # If we can't parse the nonces, still raise typed exception
+                    raise NonceTooLowError(0, 0) from e
 
             print(f"[CONSENSUS_SERVICE]: Error forwarding transaction: {error_str}")
-            # Raise the exception to be handled by the caller instead of returning None
-            # This will ensure the transaction fails explicitly rather than getting stuck in PENDING
-            raise Exception(f"Transaction failed: {error_str}")
+            # Re-raise with chaining to preserve the original traceback
+            raise Exception(f"Transaction failed: {error_str}") from e
 
     def emit_transaction_event(self, event_name: str, account: dict, *args):
         """
