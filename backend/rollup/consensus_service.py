@@ -14,11 +14,13 @@ from backend.rollup.default_contracts.consensus_main import (
 # Custom exception classes for nonce errors
 class NonceError(Exception):
     """Base exception for nonce-related errors"""
+
     pass
 
 
 class NonceTooLowError(NonceError):
     """Exception raised when transaction nonce is too low"""
+
     def __init__(self, expected_nonce: int, actual_nonce: int, *args, **kwargs):
         self.expected_nonce = expected_nonce
         self.actual_nonce = actual_nonce
@@ -28,6 +30,7 @@ class NonceTooLowError(NonceError):
 
 class NonceTooHighError(NonceError):
     """Exception raised when transaction nonce is too high"""
+
     def __init__(self, expected_nonce: int, actual_nonce: int, *args, **kwargs):
         self.expected_nonce = expected_nonce
         self.actual_nonce = actual_nonce
@@ -194,7 +197,7 @@ class ConsensusService:
 
         except Exception as e:
             error_str = str(e)
-            
+
             # Check for nonce errors and raise specific exceptions
             if "nonce too high" in error_str.lower():
                 match = re.search(
@@ -211,7 +214,7 @@ class ConsensusService:
                 else:
                     # If we can't parse the nonces, still raise typed exception
                     raise NonceTooHighError(0, 0) from e
-                    
+
             elif "nonce too low" in error_str.lower():
                 match = re.search(
                     r"Expected nonce to be (\d+) but got (\d+)", error_str

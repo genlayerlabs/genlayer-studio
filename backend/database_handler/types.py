@@ -15,11 +15,21 @@ class ConsensusData:
         return {
             "votes": self.votes,
             "leader_receipt": (
-                [receipt.to_dict(truncate_large_fields=truncate_large_fields) for receipt in self.leader_receipt]
+                [
+                    receipt.to_dict(truncate_large_fields=truncate_large_fields)
+                    for receipt in self.leader_receipt
+                ]
                 if self.leader_receipt
                 else None
             ),
-            "validators": [receipt.to_dict(truncate_large_fields=truncate_large_fields) for receipt in self.validators] if self.validators else [],
+            "validators": (
+                [
+                    receipt.to_dict(truncate_large_fields=truncate_large_fields)
+                    for receipt in self.validators
+                ]
+                if self.validators
+                else []
+            ),
         }
 
     @classmethod

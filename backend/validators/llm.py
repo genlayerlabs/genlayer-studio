@@ -64,25 +64,27 @@ class LLMModule:
     async def stop(self):
         if self._process is None:
             return
-        
+
         # Fast-path: check if process has already exited
         if self._process.returncode is not None:
             self._process = None
             return
-        
+
         print(f"[LLMModule] Stopping process (PID: {self._process.pid})")
-        
+
         try:
             # Try graceful shutdown with SIGINT
             with contextlib.suppress(ProcessLookupError):
                 self._process.send_signal(signal.SIGINT)
-            
+
             try:
                 # Wait for process to terminate with a timeout
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
                 print("[LLMModule] Process terminated gracefully")
             except asyncio.TimeoutError:
-                print("[LLMModule] Process didn't terminate with SIGINT, trying forceful termination")
+                print(
+                    "[LLMModule] Process didn't terminate with SIGINT, trying forceful termination"
+                )
                 # If SIGINT didn't work, use kill() for cross-platform compatibility
                 with contextlib.suppress(ProcessLookupError):
                     self._process.kill()
@@ -90,7 +92,9 @@ class LLMModule:
                         await asyncio.wait_for(self._process.wait(), timeout=2.0)
                         print("[LLMModule] Process terminated forcefully")
                     except asyncio.TimeoutError:
-                        print("[LLMModule] Process termination failed, continuing anyway")
+                        print(
+                            "[LLMModule] Process termination failed, continuing anyway"
+                        )
         finally:
             # Ensure process handle is cleared even if exception occurs
             self._process = None

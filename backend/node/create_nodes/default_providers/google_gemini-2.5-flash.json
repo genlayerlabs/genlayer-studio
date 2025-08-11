@@ -10,4 +10,4 @@
     "api_key_env_var": "GEMINI_API_KEY",
     "api_url": "https://generativelanguage.googleapis.com"
   }
-} 
+}
