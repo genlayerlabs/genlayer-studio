@@ -55,7 +55,7 @@
             "const": "openai-compatible"
           },
           "model": {
-            "enum": ["grok-4-0709", "grok-3", "grok-3-mini"]
+            "enum": ["grok-3"]
           }
         }
       }
@@ -91,7 +91,6 @@
           "model": {
             "enum": [
               "deepseek/deepseek-v3",
-              "mistralai/mixtral-8x22b-instruct",
               "mistralai/mixtral-8x7b-instruct",
               "meta-llama/llama-3.3-70b-instruct"
             ]
