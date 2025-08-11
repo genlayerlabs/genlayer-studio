@@ -742,10 +742,6 @@ def send_raw_transaction(
         )
         return tx_id_hex
     else:
-        rollup_transaction_details = consensus_service.add_transaction(
-            signed_rollup_transaction, from_address
-        )
-
         to_address = decoded_rollup_transaction.to_address
         nonce = decoded_rollup_transaction.nonce
         value = decoded_rollup_transaction.value
@@ -755,8 +751,12 @@ def send_raw_transaction(
 
         transaction_data = {}
         leader_only = False
+        rollup_transaction_details = None
         if genlayer_transaction.type != TransactionType.SEND:
             leader_only = genlayer_transaction.data.leader_only
+            rollup_transaction_details = consensus_service.add_transaction(
+                signed_rollup_transaction, from_address
+            )  # because hardhat accounts are not funded
 
         if genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT:
             if value > 0:
