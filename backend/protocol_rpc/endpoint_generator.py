@@ -79,6 +79,34 @@ def setup_eth_method_handler(jsonrpc: JSONRPC):
                 if not request_json:
                     return None
 
+                # Handle batch requests (list of requests)
+                if isinstance(request_json, list):
+                    # For batch requests, check if any contain eth_ methods
+                    has_eth_methods = any(
+                        isinstance(req, dict)
+                        and req.get("method", "").startswith("eth_")
+                        for req in request_json
+                    )
+                    if has_eth_methods:
+                        # Forward the entire batch to Hardhat
+                        try:
+                            with requests.Session() as http:
+                                result = http.post(
+                                    HARDHAT_URL,
+                                    json=request_json,
+                                    headers={"Content-Type": "application/json"},
+                                )
+                                return flask.Response(
+                                    result.content,
+                                    status=result.status_code,
+                                    headers=dict(result.headers),
+                                )
+                        except requests.RequestException as e:
+                            print(f"Error forwarding batch request to Hardhat: {e}")
+                            return flask.jsonify({"error": str(e)}), 500
+                    return None  # Let Flask-JSONRPC handle non-eth batch requests
+
+                # Handle single request
                 method = request_json.get("method", "")
                 if method.startswith("eth_"):
                     site = jsonrpc.get_jsonrpc_site()
