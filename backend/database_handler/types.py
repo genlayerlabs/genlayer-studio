@@ -11,22 +11,16 @@ class ConsensusData:
     )  # first item is leader function, second item is validator function
     validators: list[Receipt] | None = None
 
-    def to_dict(self, truncate_large_fields=False):
+    def to_dict(self):
         return {
             "votes": self.votes,
             "leader_receipt": (
-                [
-                    receipt.to_dict(truncate_large_fields=truncate_large_fields)
-                    for receipt in self.leader_receipt
-                ]
+                [receipt.to_dict() for receipt in self.leader_receipt]
                 if self.leader_receipt
                 else None
             ),
             "validators": (
-                [
-                    receipt.to_dict(truncate_large_fields=truncate_large_fields)
-                    for receipt in self.validators
-                ]
+                [receipt.to_dict() for receipt in self.validators]
                 if self.validators
                 else []
             ),

@@ -1706,37 +1706,6 @@ class PendingState(TransactionState):
             not context.transaction.appeal_leader_timeout
             and not context.transaction.appeal_undetermined
         ):
-            # Truncate large fields unless in DEBUG mode
-            truncate = os.environ.get("LOG_LEVEL", "INFO").upper() != "DEBUG"
-            transaction_data = context.transaction.to_dict()
-            if (
-                truncate
-                and transaction_data.get("data")
-                and isinstance(transaction_data["data"], dict)
-            ):
-                # Make a copy of the data dict to avoid modifying the original
-                import copy
-
-                transaction_data = copy.deepcopy(transaction_data)
-                # Truncate calldata if present
-                if "calldata" in transaction_data["data"]:
-                    if (
-                        isinstance(transaction_data["data"]["calldata"], str)
-                        and len(transaction_data["data"]["calldata"]) > 100
-                    ):
-                        transaction_data["data"][
-                            "calldata"
-                        ] = f"{transaction_data['data']['calldata'][:100]}... ({len(transaction_data['data']['calldata'])} chars)"
-                # Truncate contract_code if present
-                if "contract_code" in transaction_data["data"]:
-                    if (
-                        isinstance(transaction_data["data"]["contract_code"], str)
-                        and len(transaction_data["data"]["contract_code"]) > 100
-                    ):
-                        transaction_data["data"][
-                            "contract_code"
-                        ] = f"{transaction_data['data']['contract_code'][:100]}... ({len(transaction_data['data']['contract_code'])} chars)"
-
             context.msg_handler.send_message(
                 LogEvent(
                     "consensus_event",
@@ -1745,7 +1714,7 @@ class PendingState(TransactionState):
                     "Executing transaction",
                     {
                         "transaction_hash": context.transaction.hash,
-                        "transaction": transaction_data,
+                        "transaction": context.transaction.to_dict(),
                     },
                     transaction_hash=context.transaction.hash,
                 )
@@ -2408,8 +2377,6 @@ class AcceptedState(TransactionState):
         )
 
         # Send a message indicating consensus was reached
-        # Truncate large fields unless in DEBUG mode
-        truncate = os.environ.get("LOG_LEVEL", "INFO").upper() != "DEBUG"
         context.msg_handler.send_message(
             LogEvent(
                 "consensus_event",
@@ -2418,9 +2385,7 @@ class AcceptedState(TransactionState):
                 "Reached consensus",
                 {
                     "transaction_hash": context.transaction.hash,
-                    "consensus_data": context.consensus_data.to_dict(
-                        truncate_large_fields=truncate
-                    ),
+                    "consensus_data": context.consensus_data.to_dict(),
                 },
                 transaction_hash=context.transaction.hash,
             )
@@ -2460,36 +2425,13 @@ class AcceptedState(TransactionState):
                         context.contract_processor.register_contract(new_contract)
 
                         # Send a message indicating successful contract deployment
-                        # Truncate contract state for logging unless in DEBUG mode
-                        truncate = (
-                            os.environ.get("LOG_LEVEL", "INFO").upper() != "DEBUG"
-                        )
-                        log_data = (
-                            new_contract
-                            if not truncate
-                            else {
-                                "id": new_contract["id"],
-                                "data": {
-                                    "state": (
-                                        "<truncated>"
-                                        if new_contract.get("data", {}).get("state")
-                                        else None
-                                    ),
-                                    "code": (
-                                        f"<{len(new_contract.get('data', {}).get('code', ''))} chars>"
-                                        if new_contract.get("data", {}).get("code")
-                                        else None
-                                    ),
-                                },
-                            }
-                        )
                         context.msg_handler.send_message(
                             LogEvent(
                                 "deployed_contract",
                                 EventType.SUCCESS,
                                 EventScope.GENVM,
                                 "Contract deployed",
-                                log_data,
+                                new_contract,
                                 transaction_hash=context.transaction.hash,
                             )
                         )
@@ -2575,8 +2517,6 @@ class UndeterminedState(TransactionState):
             None: The transaction remains in an undetermined state.
         """
         # Send a message indicating consensus failure
-        # Truncate large fields unless in DEBUG mode
-        truncate = os.environ.get("LOG_LEVEL", "INFO").upper() != "DEBUG"
         context.msg_handler.send_message(
             LogEvent(
                 "consensus_event",
@@ -2585,9 +2525,7 @@ class UndeterminedState(TransactionState):
                 "Failed to reach consensus",
                 {
                     "transaction_hash": context.transaction.hash,
-                    "consensus_data": context.consensus_data.to_dict(
-                        truncate_large_fields=truncate
-                    ),
+                    "consensus_data": context.consensus_data.to_dict(),
                 },
                 transaction_hash=context.transaction.hash,
             )
