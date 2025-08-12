@@ -113,7 +113,7 @@ def setup_eth_method_handler(jsonrpc: JSONRPC):
                                     status=result.status_code,
                                     headers=dict(result.headers),
                                 )
-                        except requests.RequestException as e:
+                        except requests.RequestException:
                             # Log the exception with traceback
                             app.logger.exception(
                                 "Error forwarding batch request to Hardhat"
@@ -169,7 +169,7 @@ def setup_eth_method_handler(jsonrpc: JSONRPC):
 
                                 return result
 
-                        except requests.RequestException as e:
+                        except requests.RequestException:
                             # Log the exception with traceback
                             app.logger.exception(
                                 "Error forwarding single request to Hardhat"
@@ -180,7 +180,7 @@ def setup_eth_method_handler(jsonrpc: JSONRPC):
                                 data=f"An internal error occurred while forwarding the request to Hardhat.",
                             )
 
-            except Exception as e:
+            except Exception:
                 # Log the exception with traceback
                 app.logger.exception("Error in before_request handler")
         return None  # Continue normal processing for non-eth methods

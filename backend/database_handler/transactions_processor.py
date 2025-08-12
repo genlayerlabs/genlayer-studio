@@ -725,6 +725,7 @@ class TransactionsProcessor:
             )
             return
         transaction.appeal_failed = appeal_failed
+        self.session.commit()
 
     def set_transaction_appeal_undetermined(
         self, transaction_hash: str, appeal_undetermined: bool
@@ -738,6 +739,7 @@ class TransactionsProcessor:
             )
             return
         transaction.appeal_undetermined = appeal_undetermined
+        self.session.commit()
 
     def get_highest_timestamp(self) -> int:
         transaction = (

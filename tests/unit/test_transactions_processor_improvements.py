@@ -136,6 +136,9 @@ class TestGetTransactionCount:
         # Execute
         result = self.processor.get_transaction_count(test_address)
         self.mock_web3.isConnected.assert_called_once()
+        self.mock_web3.eth.get_transaction_count.assert_called_once_with(
+            test_address, "pending"
+        )
         assert result == 8
 
 

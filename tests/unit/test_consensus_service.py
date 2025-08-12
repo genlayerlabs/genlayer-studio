@@ -1,7 +1,7 @@
 """Unit tests for consensus_service.py"""
 
 import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 from backend.rollup.consensus_service import (
     ConsensusService,
     NonceError,
