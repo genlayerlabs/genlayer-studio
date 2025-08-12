@@ -130,7 +130,7 @@ def setup_eth_method_handler(jsonrpc: JSONRPC):
                                     "error": {
                                         "code": -32000,  # Server error
                                         "message": "Network error",
-                                        "data": f"Failed to forward request to Hardhat: {str(e)}",
+                                        "data": f"An internal error occurred while forwarding the request to Hardhat.",
                                     },
                                 }
                                 error_responses.append(error_response)
@@ -177,7 +177,7 @@ def setup_eth_method_handler(jsonrpc: JSONRPC):
                             raise JSONRPCError(
                                 code=-32000,  # Server error
                                 message="Network error",
-                                data=f"Failed to forward request to Hardhat: {str(e)}",
+                                data=f"An internal error occurred while forwarding the request to Hardhat.",
                             )
 
             except Exception as e:

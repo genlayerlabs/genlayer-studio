@@ -636,6 +636,8 @@ class TransactionsProcessor:
             is_connected = False
             if hasattr(self.web3, "is_connected"):
                 is_connected = self.web3.is_connected()
+            elif hasattr(self.web3, "isConnected"):  # older web3 version
+                is_connected = self.web3.isConnected()
 
             if is_connected:
                 # Pass 'pending' to include pending transactions for accuracy
