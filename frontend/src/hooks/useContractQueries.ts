@@ -84,9 +84,11 @@ export function useContractQueries() {
 
   const extractErrorMessage = (error: any) => {
     try {
-      const details = JSON.parse(error.details);
-      const message = details.data.error.args[1].stderr;
-      return message;
+      const stderrMatch = error.details.match(/'stderr':\s*'(.*?)',\s*'genvm_log'/);
+      if (stderrMatch) {
+        return stderrMatch[1].replace(/\\'/g, "'").replace(/\\n/g, '\n');
+      }
+      return error.details.replaceAll('\\n', '\n');
     } catch (err) {
       return error.details;
     }
