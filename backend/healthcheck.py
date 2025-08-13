@@ -3,9 +3,10 @@ File used to check the health of the backend API.
 We only check that the API is responding, and that the response is valid.
 """
 
-import json
-import requests
 import argparse
+import json
+
+import requests
 
 parser = argparse.ArgumentParser(description="Check the health of the backend API.")
 parser.add_argument(
