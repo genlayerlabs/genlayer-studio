@@ -212,9 +212,12 @@ const resetFilters = () => {
 
             <!-- Show stderr directly for GenVM errors -->
             <pre
-              class="ml-2 whitespace-pre-wrap text-red-400 bg-red-50 dark:bg-red-900/20 p-2 rounded text-[10px] font-mono"
-              v-if="data && scope === 'GenVM' && type === 'error' && data.stderr"
-            >{{ data.stderr }}</pre>
+              class="ml-2 whitespace-pre-wrap rounded bg-red-50 p-2 font-mono text-[10px] text-red-400 dark:bg-red-900/20"
+              v-if="
+                data && scope === 'GenVM' && type === 'error' && data.stderr
+              "
+              >{{ data.stderr }}</pre
+            >
             
             <!-- Show JSON viewer for other data -->
             <JsonViewer
