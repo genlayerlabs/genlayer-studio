@@ -218,7 +218,6 @@ const resetFilters = () => {
               "
               >{{ data.stderr }}</pre
             >
-            
             <!-- Show JSON viewer for other data -->
             <JsonViewer
               class="ml-2"
