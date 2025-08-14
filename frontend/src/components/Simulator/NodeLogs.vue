@@ -210,9 +210,16 @@ const resetFilters = () => {
 
             <pre :class="colorMap[type]">{{ message }}</pre>
 
+            <!-- Show stderr directly for GenVM errors -->
+            <pre
+              class="ml-2 whitespace-pre-wrap text-red-400 bg-red-50 dark:bg-red-900/20 p-2 rounded text-[10px] font-mono"
+              v-if="data && scope === 'GenVM' && type === 'error' && data.stderr"
+            >{{ data.stderr }}</pre>
+            
+            <!-- Show JSON viewer for other data -->
             <JsonViewer
               class="ml-2"
-              v-if="data"
+              v-else-if="data"
               :value="data"
               :theme="uiStore.mode === 'light' ? 'light' : 'dark'"
               :expand="false"
