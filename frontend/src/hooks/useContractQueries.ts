@@ -77,22 +77,9 @@ export function useContractQueries() {
       schema.value = result;
       return schema.value;
     } catch (error: any) {
-      const errorMessage = extractErrorMessage(error);
-      throw new Error(errorMessage);
+      throw new Error(error.details);
     }
   }
-
-  const extractErrorMessage = (error: any) => {
-    try {
-      const stderrMatch = error.details.match(/'stderr':\s*'(.*?)',\s*'genvm_log'/);
-      if (stderrMatch) {
-        return stderrMatch[1].replace(/\\'/g, "'").replace(/\\n/g, '\n');
-      }
-      return error.details.replaceAll('\\n', '\n');
-    } catch (err) {
-      return error.details;
-    }
-  };
 
   const isDeploying = ref(false);
 
