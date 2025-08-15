@@ -9,7 +9,7 @@ import LogFilterBtn from '@/components/Simulator/LogFilterBtn.vue';
 import TextInput from '../global/inputs/TextInput.vue';
 import { useScroll } from '@vueuse/core';
 import { useTemplateRef } from 'vue';
-import { NodeLog } from '@/types';
+import type { NodeLog } from '@/types';
 
 const nodeStore = useNodeStore();
 const uiStore = useUIStore();
