@@ -11,6 +11,7 @@ import dataclasses
 import aiohttp
 from pathlib import Path
 import json
+import contextlib
 
 from dotenv import load_dotenv
 
@@ -61,12 +62,41 @@ class LLMModule:
             raise Exception("service was not terminated")
 
     async def stop(self):
-        if self._process is not None:
-            try:
+        if self._process is None:
+            return
+
+        # Fast-path: check if process has already exited
+        if self._process.returncode is not None:
+            self._process = None
+            return
+
+        print(f"[LLMModule] Stopping process (PID: {self._process.pid})")
+
+        try:
+            # Try graceful shutdown with SIGINT
+            with contextlib.suppress(ProcessLookupError):
                 self._process.send_signal(signal.SIGINT)
-            except ProcessLookupError:
-                pass
-            await self._process.wait()
+
+            try:
+                # Wait for process to terminate with a timeout
+                await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                print("[LLMModule] Process terminated gracefully")
+            except asyncio.TimeoutError:
+                print(
+                    "[LLMModule] Process didn't terminate with SIGINT, trying forceful termination"
+                )
+                # If SIGINT didn't work, use kill() for cross-platform compatibility
+                with contextlib.suppress(ProcessLookupError):
+                    self._process.kill()
+                    try:
+                        await asyncio.wait_for(self._process.wait(), timeout=2.0)
+                        print("[LLMModule] Process terminated forcefully")
+                    except asyncio.TimeoutError:
+                        print(
+                            "[LLMModule] Process termination failed, continuing anyway"
+                        )
+        finally:
+            # Ensure process handle is cleared even if exception occurs
             self._process = None
 
     async def restart(self):

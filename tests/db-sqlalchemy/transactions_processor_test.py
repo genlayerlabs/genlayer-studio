@@ -13,8 +13,27 @@ from backend.database_handler.transactions_processor import TransactionStatus
 from backend.database_handler.transactions_processor import TransactionsProcessor
 
 
-@pytest.fixture(autouse=True)
-def mock_env_and_web3():
+def _create_mock_web3_instance(is_connected: bool):
+    """Helper function to create a mock Web3 instance with specified connection status."""
+    web3_instance = Web3(MagicMock(spec=BaseProvider))
+    web3_instance.eth = MagicMock()
+    web3_instance.eth.accounts = ["0x0000000000000000000000000000000000000000"]
+
+    call_count = {"count": 0}
+
+    def mock_get_transaction_count(address, block_identifier="latest"):
+        result = call_count["count"]
+        call_count["count"] += 1
+        return result
+
+    web3_instance.eth.get_transaction_count = mock_get_transaction_count
+    web3_instance.is_connected = MagicMock(return_value=is_connected)
+
+    return web3_instance
+
+
+@pytest.fixture
+def mock_env_and_web3_connected():
     with patch.dict(
         os.environ,
         {
@@ -23,17 +42,39 @@ def mock_env_and_web3():
             "HARDHAT_PRIVATE_KEY": "0x0123456789",
         },
     ), patch("web3.Web3.HTTPProvider"):
-        web3_instance = Web3(MagicMock(spec=BaseProvider))
-        web3_instance.eth = MagicMock()
-        web3_instance.eth.accounts = ["0x0000000000000000000000000000000000000000"]
+        web3_instance = _create_mock_web3_instance(is_connected=True)
+
         with patch(
             "backend.database_handler.transactions_processor.Web3",
             return_value=web3_instance,
         ):
-            yield
+            yield web3_instance
 
 
-def test_transactions_processor(transactions_processor: TransactionsProcessor):
+@pytest.fixture
+def mock_env_and_web3_disconnected():
+    with patch.dict(
+        os.environ,
+        {
+            "HARDHAT_PORT": "8545",
+            "HARDHAT_URL": "http://localhost",
+            "HARDHAT_PRIVATE_KEY": "0x0123456789",
+        },
+    ), patch("web3.Web3.HTTPProvider"):
+        web3_instance = _create_mock_web3_instance(is_connected=False)
+
+        with patch(
+            "backend.database_handler.transactions_processor.Web3",
+            return_value=web3_instance,
+        ):
+            yield web3_instance
+
+
+def test_transactions_processor(
+    transactions_processor: TransactionsProcessor, mock_env_and_web3_connected
+):
+    # Override the web3 instance in the transactions_processor with our mock
+    transactions_processor.web3 = mock_env_and_web3_connected
 
     from_address = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
     to_address = "0xAcec3A6d871C25F591aBd4fC24054e524BBbF794"
