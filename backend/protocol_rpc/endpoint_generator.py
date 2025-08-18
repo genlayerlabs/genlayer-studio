@@ -79,6 +79,70 @@ def setup_eth_method_handler(jsonrpc: JSONRPC):
                 if not request_json:
                     return None
 
+                # Handle batch requests (list of requests)
+                if isinstance(request_json, list):
+                    # Check if batch contains only eth_ methods without local implementation
+                    site = jsonrpc.get_jsonrpc_site()
+                    all_eth_forward = True
+
+                    for req in request_json:
+                        if isinstance(req, dict):
+                            method = req.get("method", "")
+                            # If it's not an eth_ method or we have a local implementation, can't forward all
+                            if (
+                                not method.startswith("eth_")
+                                or method in site.view_funcs
+                            ):
+                                all_eth_forward = False
+                                break
+                        else:
+                            all_eth_forward = False
+                            break
+
+                    # If all requests are eth_ methods without local implementation, forward entire batch
+                    if all_eth_forward:
+                        try:
+                            with requests.Session() as http:
+                                result = http.post(
+                                    HARDHAT_URL,
+                                    json=request_json,
+                                    headers={"Content-Type": "application/json"},
+                                )
+                                return flask.Response(
+                                    result.content,
+                                    status=result.status_code,
+                                    headers=dict(result.headers),
+                                )
+                        except requests.RequestException:
+                            # Log the exception with traceback
+                            app.logger.exception(
+                                "Error forwarding batch request to Hardhat"
+                            )
+
+                            # Build JSON-RPC compliant error responses
+                            error_responses = []
+                            for req in request_json:
+                                error_response = {
+                                    "jsonrpc": "2.0",
+                                    "id": (
+                                        req.get("id") if isinstance(req, dict) else None
+                                    ),
+                                    "error": {
+                                        "code": -32000,  # Server error
+                                        "message": "Network error",
+                                        "data": "An internal error occurred while forwarding the request to Hardhat.",
+                                    },
+                                }
+                                error_responses.append(error_response)
+
+                            # Return JSON-RPC error array with 200 status
+                            return flask.jsonify(error_responses), 200
+
+                    # Mixed batch or has local implementations - let Flask-JSONRPC handle it
+                    # Flask-JSONRPC will process each request and forward unknowns to Hardhat
+                    return None
+
+                # Handle single request
                 method = request_json.get("method", "")
                 if method.startswith("eth_"):
                     site = jsonrpc.get_jsonrpc_site()
@@ -105,17 +169,20 @@ def setup_eth_method_handler(jsonrpc: JSONRPC):
 
                                 return result
 
-                        except requests.RequestException as e:
-                            print(f"Network error: {str(e)}")
+                        except requests.RequestException:
+                            # Log the exception with traceback
+                            app.logger.exception(
+                                "Error forwarding single request to Hardhat"
+                            )
                             raise JSONRPCError(
-                                code=-32603,
-                                message=f"Error forwarding request to Hardhat: {str(e)}",
-                                data={"original_error": str(e)},
+                                code=-32000,  # Server error
+                                message="Network error",
+                                data="An internal error occurred while forwarding the request to Hardhat.",
                             )
 
-            except Exception as e:
-                print(f"Error in before_request handler: {str(e)}")
-                print(traceback.format_exc())
+            except Exception:
+                # Log the exception with traceback
+                app.logger.exception("Error in before_request handler")
         return None  # Continue normal processing for non-eth methods
 
 

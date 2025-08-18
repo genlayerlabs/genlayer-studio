@@ -8,8 +8,10 @@ import signal
 import os
 import sys
 import dataclasses
-
+import aiohttp
 from pathlib import Path
+import json
+import contextlib
 
 from dotenv import load_dotenv
 
@@ -60,12 +62,41 @@ class LLMModule:
             raise Exception("service was not terminated")
 
     async def stop(self):
-        if self._process is not None:
-            try:
+        if self._process is None:
+            return
+
+        # Fast-path: check if process has already exited
+        if self._process.returncode is not None:
+            self._process = None
+            return
+
+        print(f"[LLMModule] Stopping process (PID: {self._process.pid})")
+
+        try:
+            # Try graceful shutdown with SIGINT
+            with contextlib.suppress(ProcessLookupError):
                 self._process.send_signal(signal.SIGINT)
-            except ProcessLookupError:
-                pass
-            await self._process.wait()
+
+            try:
+                # Wait for process to terminate with a timeout
+                await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                print("[LLMModule] Process terminated gracefully")
+            except asyncio.TimeoutError:
+                print(
+                    "[LLMModule] Process didn't terminate with SIGINT, trying forceful termination"
+                )
+                # If SIGINT didn't work, use kill() for cross-platform compatibility
+                with contextlib.suppress(ProcessLookupError):
+                    self._process.kill()
+                    try:
+                        await asyncio.wait_for(self._process.wait(), timeout=2.0)
+                        print("[LLMModule] Process terminated forcefully")
+                    except asyncio.TimeoutError:
+                        print(
+                            "[LLMModule] Process termination failed, continuing anyway"
+                        )
+        finally:
+            # Ensure process handle is cleared even if exception occurs
             self._process = None
 
     async def restart(self):
@@ -116,6 +147,9 @@ class LLMModule:
         if url is None:
             return False
 
+        if plugin == "custom":
+            return await self.call_custom_model(model, url, key_env)
+
         exe_path = Path(os.environ["GENVM_BIN"]).joinpath("genvm-modules")
 
         try:
@@ -148,4 +182,60 @@ class LLMModule:
             print(
                 f"ERROR: Wrong input provider_available {model=}, {url=}, {plugin=}, {key_env=}, {e=}"
             )
+            return False
+
+    async def call_custom_model(self, model: str, url: str, key_env: str) -> bool:
+        """
+        Call a custom model to check if it is available.
+        """
+        try:
+            prompt = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": 'Respond with two letters "ok" (without quotes) and only this word, lowercase',
+                    }
+                ],
+            }
+
+            api_key = os.environ.get(key_env)
+            if not api_key:
+                print(f"ERROR: missing API key for {key_env}")
+                return False
+
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as session, session.post(
+                url, json=prompt, headers={"Authorization": f"Bearer {api_key}"}
+            ) as response:
+                if response.status != 200:
+                    print(
+                        f"ERROR: Custom model check failed with status {response.status}"
+                    )
+                    return False
+
+                response_data = await response.json()
+                try:
+                    result = response_data["choices"][0]["message"]["content"]
+                    if isinstance(result, str) and result.strip().lower() == "ok":
+                        return True
+                    elif (
+                        isinstance(result, dict)
+                        and "result" in result
+                        and result["result"].strip().lower() == "ok"
+                    ):
+                        return True
+
+                    print(
+                        f"ERROR: Custom model check failed: got '{result}' instead of 'ok'"
+                    )
+                    return False
+
+                except (KeyError, IndexError, json.JSONDecodeError) as e:
+                    print(f"ERROR: Invalid response format: {e}")
+                    return False
+
+        except Exception as e:
+            print(f"ERROR: Custom model check failed with error: {e}")
             return False

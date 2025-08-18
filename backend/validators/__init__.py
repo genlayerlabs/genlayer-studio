@@ -3,6 +3,7 @@ __all__ = ("Manager", "with_lock")
 import typing
 import contextlib
 import dataclasses
+import os
 
 from copy import deepcopy
 from pathlib import Path
@@ -141,10 +142,32 @@ class Manager:
         current_validators: list[SingleValidatorSnapshot] = []
         for val in validators:
             host_data = {"studio_llm_id": f"node-{val.address}"}
-            if "mock_response" in val.llmprovider.plugin_config:
+            if (
+                "mock_response" in val.llmprovider.plugin_config
+                and len(val.llmprovider.plugin_config["mock_response"]) > 0
+            ):
                 host_data["mock_response"] = val.llmprovider.plugin_config[
                     "mock_response"
                 ]
+            if val.llmprovider.plugin == "custom":
+                plugin_config = {
+                    str(k): str(v) for k, v in val.llmprovider.plugin_config.items()
+                }
+                plugin_config["api_key_env_var"] = str(
+                    os.getenv(val.llmprovider.plugin_config["api_key_env_var"])
+                )
+
+                host_data["custom_plugin_data"] = {
+                    "model": str(val.llmprovider.model),
+                    "config": {
+                        str(k): str(v) if isinstance(v, (int, float, bool)) else v
+                        for k, v in val.llmprovider.config.items()
+                    },
+                    "plugin_config": plugin_config,
+                }
+                val.llmprovider.plugin = (
+                    "openai-compatible"  # so genvm thinks it is an implemented plugin
+                )
             current_validators.append(SingleValidatorSnapshot(val, host_data))
         return Snapshot(
             nodes=current_validators, genvm_config_path=self._genvm_config.new_path

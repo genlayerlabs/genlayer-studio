@@ -922,7 +922,9 @@ def send_raw_transaction(
     decoded_rollup_transaction = transactions_parser.decode_signed_transaction(
         signed_rollup_transaction
     )
-    print("DECODED ROLLUP TRANSACTION", decoded_rollup_transaction)
+    # Debug logging - only in DEBUG mode
+    if os.environ.get("LOG_LEVEL", "INFO").upper() == "DEBUG":
+        print("DECODED ROLLUP TRANSACTION", decoded_rollup_transaction)
 
     # Validate transaction
     if decoded_rollup_transaction is None:
@@ -960,10 +962,6 @@ def send_raw_transaction(
         )
         return tx_id_hex
     else:
-        rollup_transaction_details = consensus_service.add_transaction(
-            signed_rollup_transaction, from_address
-        )
-
         to_address = decoded_rollup_transaction.to_address
         nonce = decoded_rollup_transaction.nonce
         value = decoded_rollup_transaction.value
@@ -973,8 +971,12 @@ def send_raw_transaction(
 
         transaction_data = {}
         leader_only = False
+        rollup_transaction_details = None
         if genlayer_transaction.type != TransactionType.SEND:
             leader_only = genlayer_transaction.data.leader_only
+            rollup_transaction_details = consensus_service.add_transaction(
+                signed_rollup_transaction, from_address
+            )  # because hardhat accounts are not funded
 
         if genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT:
             if value > 0:
@@ -1146,8 +1148,9 @@ def get_gas_price() -> str:
     params={"data": "Transaction data for gas estimation"},
 )
 def get_gas_estimate(data: Any) -> str:
-    gas_price_in_wei = 30 * 10**6
-    return hex(gas_price_in_wei)
+    # Use zkSync Era's gas limit: 2^32 - 1 (4,294,967,295)
+    gas_limit = 0xFFFFFFFF  # 4,294,967,295
+    return hex(gas_limit)
 
 
 @ethereum_endpoint(
