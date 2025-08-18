@@ -586,10 +586,14 @@ async def _gen_call_with_validator(
             state_status=state_status,
         )
     elif type == "write":
+        value = params.get(
+            "value", 0
+        )  # waiting for gen_call node spec update if this is correct
         decoded_data = transactions_parser.decode_method_send_data(data)
         receipt = await node.run_contract(
             from_address=from_address,
             calldata=decoded_data.calldata,
+            transaction_value=value,
         )
     elif type == "deploy":
         decoded_data = transactions_parser.decode_deployment_data(data)
@@ -796,6 +800,19 @@ def send_raw_transaction(
             transaction_hash = rollup_transaction_details["tx_id_hex"]
         else:
             transaction_hash = None
+
+        # Send value at transaction submission
+        if genlayer_transaction.type != TransactionType.SEND:
+            try:
+                accounts_manager.update_account_balance(
+                    address=genlayer_transaction.from_address,
+                    value=-value if value else None,
+                )
+            except ValueError as e:
+                raise JSONRPCError(
+                    message=str(e),
+                    data={"sender_address": genlayer_transaction.from_address},
+                )
 
         # Insert transaction into the database
         transaction_hash = transactions_processor.insert_transaction(

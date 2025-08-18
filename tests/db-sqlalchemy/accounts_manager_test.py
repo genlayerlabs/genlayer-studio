@@ -83,18 +83,18 @@ def test_get_account_balance(accounts_manager: AccountsManager):
     assert non_existent_balance == 0
 
 
-def test_update_account_balance(accounts_manager: AccountsManager):
+def test_set_account_balance(accounts_manager: AccountsManager):
     address = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
     accounts_manager.create_new_account_with_address(address)
 
     new_balance = 100
-    accounts_manager.update_account_balance(address, new_balance)
+    accounts_manager.set_account_balance(address, new_balance)
 
     updated_balance = accounts_manager.get_account_balance(address)
     assert updated_balance == new_balance
 
     non_existent_address = "0x0000000000000000000000000000000000000000"
-    accounts_manager.update_account_balance(non_existent_address, new_balance)
+    accounts_manager.set_account_balance(non_existent_address, new_balance)
 
     created_account_balance = accounts_manager.get_account_balance(non_existent_address)
     assert created_account_balance == new_balance
@@ -110,7 +110,7 @@ def test_accounts_manager_update_timestamp(accounts_manager: AccountsManager):
 
     time.sleep(0.1)
     # Perform an action that should update the timestamp
-    accounts_manager.update_account_balance(address, 100)
+    accounts_manager.set_account_balance(address, 100)
 
     account_data = accounts_manager.get_account_or_fail(address)
     second_updated_at = account_data["updated_at"]
