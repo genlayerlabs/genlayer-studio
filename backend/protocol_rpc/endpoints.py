@@ -1047,6 +1047,27 @@ def delete_all_snapshots(
     return {"deleted_count": deleted_count}
 
 
+def get_simulator_version() -> str:
+    """Get the current version of the simulator."""
+    try:
+        with open("/app/version.txt", "r") as f:
+            # Read first line which contains the studio version
+            return f.readline().strip()
+    except (FileNotFoundError, IOError):
+        return "0.0.0"
+
+
+def get_genvm_version() -> str:
+    """Get the current version of the GenVM."""
+    try:
+        with open("/app/version.txt", "r") as f:
+            # Skip first line (studio version) and read second line (genvm version)
+            f.readline()
+            return f.readline().strip()
+    except (FileNotFoundError, IOError):
+        return "0.0.0"
+
+
 def register_all_rpc_endpoints(
     jsonrpc: JSONRPC,
     msg_handler: MessageHandler,
@@ -1256,3 +1277,5 @@ def register_all_rpc_endpoints(
         partial(delete_all_snapshots, snapshot_manager),
         method_name="sim_deleteAllSnapshots",
     )
+    register_rpc_endpoint(get_simulator_version, method_name="gen_protocolVersion")
+    register_rpc_endpoint(get_genvm_version, method_name="sim_genvmVersion")

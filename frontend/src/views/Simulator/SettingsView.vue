@@ -4,6 +4,7 @@ import MainTitle from '@/components/Simulator/MainTitle.vue';
 import ProviderSection from '@/components/Simulator/settings/ProviderSection.vue';
 import ConsensusSection from '@/components/Simulator/settings/ConsensusSection.vue';
 import SimulatorSection from '@/components/Simulator/settings/SimulatorSection.vue';
+import VersionSection from '@/components/Simulator/settings/VersionSection.vue';
 
 const { canUpdateProviders } = useConfig();
 </script>
@@ -15,5 +16,7 @@ const { canUpdateProviders } = useConfig();
     <SimulatorSection />
     <ConsensusSection />
     <ProviderSection v-if="canUpdateProviders" />
+    <div class="flex-grow"></div>
+    <VersionSection />
   </div>
 </template>
