@@ -137,6 +137,7 @@ class Node:
             receipt = await self.run_contract(
                 transaction.from_address,
                 calldata,
+                transaction.value,
                 transaction.hash,
                 transaction.created_at,
             )
@@ -215,6 +216,7 @@ class Node:
         self,
         from_address: str,
         calldata: bytes,
+        transaction_value: int,
         transaction_hash: str | None = None,
         transaction_created_at: str | None = None,
     ) -> Receipt:
@@ -225,6 +227,7 @@ class Node:
             is_init=False,
             transaction_hash=transaction_hash,
             transaction_datetime=self._date_from_str(transaction_created_at),
+            transaction_value=transaction_value,
         )
 
     async def get_contract_data(
@@ -301,6 +304,7 @@ class Node:
         transaction_hash: str | None = None,
         transaction_datetime: datetime.datetime | None,
         state_status: str | None = None,
+        transaction_value: int | None = None,
     ) -> Receipt:
         genvm = self._create_genvm()
         leader_res: None | dict[int, bytes]
@@ -338,6 +342,7 @@ class Node:
             leader_results=leader_res,
             date=transaction_datetime,
             chain_id=SIMULATOR_CHAIN_ID,
+            value=transaction_value,
             config_path=config_path,
             host_data=host_data,
         )

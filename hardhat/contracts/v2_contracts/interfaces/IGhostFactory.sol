@@ -6,7 +6,7 @@ pragma solidity ^0.8.20;
 interface IGhostFactory {
 	/// @notice Creates a new ghost contract
 	/// @return The address where the contract will be deployed
-	function createGhost() external returns (address);
+	function createGhost() external payable returns (address);
 
 	/// @notice Checks if an address is a ghost contract
 	/// @param contractAddress The address to check

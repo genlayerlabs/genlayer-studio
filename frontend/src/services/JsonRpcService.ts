@@ -202,4 +202,20 @@ export class JsonRpcService implements IJsonRpcService {
       'Error getting finality window time',
     );
   }
+
+  async fundAccount(address: string, amount: number): Promise<string> {
+    return this.callRpcMethod<any>(
+      'sim_fundAccount',
+      [address, amount],
+      'Error funding account',
+    );
+  }
+
+  async getBalance(address: string): Promise<number> {
+    return this.callRpcMethod<any>(
+      'eth_getBalance',
+      [address],
+      'Error getting account balance',
+    );
+  }
 }
