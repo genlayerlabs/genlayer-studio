@@ -5,10 +5,11 @@ import PageSection from '@/components/Simulator/PageSection.vue';
 import { ArrowUpTrayIcon } from '@heroicons/vue/16/solid';
 import ContractParams from './ContractParams.vue';
 import { type ArgData, unfoldArgsData } from './ContractParams';
+import type { FeesDistribution } from '@/types';
 
 const props = defineProps<{
   leaderOnly: boolean;
-  consensusMaxRotations: number;
+  feesDistribution?: FeesDistribution;
 }>();
 
 const { contract, contractSchemaQuery, deployContract, isDeploying } =
@@ -25,7 +26,7 @@ const emit = defineEmits(['deployed-contract']);
 const handleDeployContract = async () => {
   const args = calldataArguments.value;
   const newArgs = unfoldArgsData(args);
-  await deployContract(newArgs, props.leaderOnly, props.consensusMaxRotations);
+  await deployContract(newArgs, props.leaderOnly, props.feesDistribution);
 
   emit('deployed-contract');
 };

@@ -9,6 +9,7 @@ import { ChevronDownIcon } from '@heroicons/vue/16/solid';
 import { useEventTracking, useContractQueries } from '@/hooks';
 import { unfoldArgsData, type ArgData } from './ContractParams';
 import ContractParams from './ContractParams.vue';
+import type { FeesDistribution } from '@/types';
 
 const { callWriteMethod, callReadMethod, contract } = useContractQueries();
 const { trackEvent } = useEventTracking();
@@ -18,7 +19,7 @@ const props = defineProps<{
   method: ContractMethod;
   methodType: 'read' | 'write';
   leaderOnly: boolean;
-  consensusMaxRotations?: number;
+  feesDistribution?: FeesDistribution;
 }>();
 
 const isExpanded = ref(false);
@@ -106,7 +107,7 @@ const handleCallWriteMethod = async () => {
     await callWriteMethod({
       method: props.name,
       leaderOnly: props.leaderOnly,
-      consensusMaxRotations: props.consensusMaxRotations,
+      feesDistribution: props.feesDistribution,
       args: unfoldArgsData({
         args: calldataArguments.value.args,
         kwargs: calldataArguments.value.kwargs,

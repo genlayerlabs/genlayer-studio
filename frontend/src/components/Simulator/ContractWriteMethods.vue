@@ -5,9 +5,11 @@ import PageSection from '@/components/Simulator/PageSection.vue';
 import ContractMethodItem from '@/components/Simulator/ContractMethodItem.vue';
 import EmptyListPlaceholder from '@/components/Simulator/EmptyListPlaceholder.vue';
 import type { ContractSchema } from 'genlayer-js/types';
+import type { FeesDistribution } from '@/types';
+
 const props = defineProps<{
   leaderOnly: boolean;
-  consensusMaxRotations: number;
+  feesDistribution?: FeesDistribution;
 }>();
 
 const { contractAbiQuery } = useContractQueries();
@@ -42,7 +44,7 @@ const writeMethods = computed(() => {
         :method="method[1]"
         methodType="write"
         :leaderOnly="props.leaderOnly"
-        :consensusMaxRotations="consensusMaxRotations"
+        :feesDistribution="props.feesDistribution"
       />
 
       <EmptyListPlaceholder v-if="writeMethods.length === 0">
