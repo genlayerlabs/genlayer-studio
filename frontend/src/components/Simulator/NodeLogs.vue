@@ -10,6 +10,7 @@ import TextInput from '../global/inputs/TextInput.vue';
 import { useScroll } from '@vueuse/core';
 import { useTemplateRef } from 'vue';
 import type { NodeLog } from '@/types';
+import { splitTopLevelLines } from './parsers/splitTopLevelLines';
 
 const nodeStore = useNodeStore();
 const uiStore = useUIStore();
@@ -80,23 +81,18 @@ const parseStdoutLogs = (log: NodeLog): NodeLog[] => {
     return [log];
   }
 
-  const logs = [log]; // Always include the original log
-  const stdoutLines = log.data.stdout
-    .split('\n')
-    .map((line: string) => line.trim())
-    .filter((line: string) => line.length > 0);
+  const logs: NodeLog[] = [log];
+  const normalizedStdout = log.data.stdout.replace(/\r\n?/g, '\n');
+  for (const chunk of splitTopLevelLines(normalizedStdout)) {
 
-  // Parse each stdout line as a separate log entry
-  stdoutLines.forEach((line: string) => {
     logs.push({
       scope: 'Contract',
       name: 'print',
       type: 'info',
-      message: line,
+      message: chunk,
       data: null,
     });
-  });
-
+  }
   return logs;
 };
 
