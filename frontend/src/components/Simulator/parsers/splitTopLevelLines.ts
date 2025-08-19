@@ -48,5 +48,3 @@ export function splitTopLevelLines(s: string): string[] {
   if (tail) out.push(tail);
   return out;
 }
-
-

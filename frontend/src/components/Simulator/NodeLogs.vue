@@ -84,7 +84,6 @@ const parseStdoutLogs = (log: NodeLog): NodeLog[] => {
   const logs: NodeLog[] = [log];
   const normalizedStdout = log.data.stdout.replace(/\r\n?/g, '\n');
   for (const chunk of splitTopLevelLines(normalizedStdout)) {
-
     logs.push({
       scope: 'Contract',
       name: 'print',
