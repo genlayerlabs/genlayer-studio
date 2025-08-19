@@ -9,18 +9,18 @@ export function splitTopLevelLines(s: string): string[] {
   let depthCurly = 0;
   let depthSquare = 0;
   let inString: '"' | "'" | null = null;
-  let escape = false;
+  let escaped = false;
 
   for (let i = 0; i < s.length; i++) {
     const ch = s[i];
     buf += ch;
 
-    if (escape) {
-      escape = false;
+    if (escaped) {
+      escaped = false;
       continue;
     }
-    if (ch === '\\') {
-      escape = true;
+    if (inString && ch === '\\') {
+      escaped = true;
       continue;
     }
 
