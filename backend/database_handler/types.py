@@ -19,7 +19,11 @@ class ConsensusData:
                 if self.leader_receipt
                 else None
             ),
-            "validators": [receipt.to_dict() for receipt in self.validators],
+            "validators": (
+                [receipt.to_dict() for receipt in self.validators]
+                if self.validators
+                else []
+            ),
         }
 
     @classmethod

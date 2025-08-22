@@ -185,7 +185,7 @@ class Receipt:
     calldata: bytes
     gas_used: int
     mode: ExecutionMode
-    contract_state: dict[str, dict[str, str]]
+    contract_state: dict[str, str]
     node_config: dict
     eq_outputs: dict[int, str]
     execution_result: ExecutionResultStatus
@@ -194,11 +194,15 @@ class Receipt:
     genvm_result: dict[str, str] | None = None
 
     def to_dict(self):
+        """Convert Receipt to dict."""
+        result = base64.b64encode(self.result).decode("ascii")
+        calldata = str(base64.b64encode(self.calldata), encoding="ascii")
+
         return {
             "vote": self.vote.value if self.vote else None,
             "execution_result": self.execution_result.value,
-            "result": base64.b64encode(self.result).decode("ascii"),
-            "calldata": str(base64.b64encode(self.calldata), encoding="ascii"),
+            "result": result,
+            "calldata": calldata,
             "gas_used": self.gas_used,
             "mode": self.mode.value,
             "contract_state": self.contract_state,

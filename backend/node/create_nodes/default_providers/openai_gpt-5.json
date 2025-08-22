@@ -1,13 +1,13 @@
 {
-  "provider": "xai",
+  "provider": "openai",
   "plugin": "openai-compatible",
-  "model": "grok-2-1212",
+  "model": "gpt-5",
   "config": {
     "temperature": 0.75,
     "max_tokens": 500
   },
   "plugin_config": {
-    "api_key_env_var": "XAI_API_KEY",
-    "api_url": "https://api.x.ai"
+    "api_key_env_var": "OPENAIKEY",
+    "api_url": "https://api.openai.com"
   }
 }

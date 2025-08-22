@@ -1,5 +1,6 @@
 import os
 import json
+import copy
 from functools import wraps
 from logging.config import dictConfig
 import traceback
@@ -81,7 +82,8 @@ class MessageHandler:
 
         if log_event.data:
             try:
-                data_str = json.dumps(log_event.data, default=lambda o: o.__dict__)
+                data_to_log = self._apply_log_level_truncation(log_event.data)
+                data_str = json.dumps(data_to_log, default=lambda o: o.__dict__)
                 log_message += f" {gray}{data_str}{reset}"
             except TypeError as e:
                 log_message += (
@@ -89,6 +91,63 @@ class MessageHandler:
                 )
 
         log_method(log_message)
+
+    def _apply_log_level_truncation(self, data, max_length=100):
+        """Apply LOG_LEVEL-based truncation to log data for better readability."""
+        # Only truncate if not in DEBUG mode
+        should_truncate = os.environ.get("LOG_LEVEL", "INFO").upper() != "DEBUG"
+
+        if not should_truncate or not isinstance(data, dict):
+            return data
+
+        truncated_data = copy.deepcopy(data)
+        self._truncate_dict(truncated_data, max_length)
+
+        return truncated_data
+
+    def _truncate_dict(self, data_dict, max_length):
+        """Recursively truncate dictionary values based on key patterns."""
+        if not isinstance(data_dict, dict):
+            return
+
+        # String fields that should be truncated with length info
+        for key in ["calldata", "contract_code", "result"]:
+            if (
+                key in data_dict
+                and isinstance(data_dict[key], str)
+                and len(data_dict[key]) > max_length
+            ):
+                data_dict[key] = (
+                    f"{data_dict[key][:max_length]}... ({len(data_dict[key])} chars)"
+                )
+
+        # Contract state - show entry count when truncated
+        if "contract_state" in data_dict and data_dict["contract_state"]:
+            value = data_dict["contract_state"]
+            if len(str(value)) > max_length:
+                if isinstance(value, dict):
+                    data_dict["contract_state"] = f"<{len(value)} entries, truncated>"
+                else:
+                    data_dict["contract_state"] = (
+                        f"<{len(str(value))} chars, truncated>"
+                    )
+
+        # Contract state field - simple truncation message
+        if "state" in data_dict:
+            data_dict["state"] = "<truncated>"
+
+        # Contract code field - show character count
+        if "code" in data_dict and isinstance(data_dict["code"], str):
+            data_dict["code"] = f"<{len(data_dict['code'])} chars>"
+
+        # Recursively process nested dictionaries and lists
+        for key, value in data_dict.items():
+            if isinstance(value, dict):
+                self._truncate_dict(value, max_length)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        self._truncate_dict(item, max_length)
 
     def send_message(self, log_event: LogEvent, log_to_terminal: bool = True):
         if log_to_terminal:
