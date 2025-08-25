@@ -9,6 +9,8 @@ import LogFilterBtn from '@/components/Simulator/LogFilterBtn.vue';
 import TextInput from '../global/inputs/TextInput.vue';
 import { useScroll } from '@vueuse/core';
 import { useTemplateRef } from 'vue';
+import type { NodeLog } from '@/types';
+import { splitTopLevelLines } from './parsers/splitTopLevelLines';
 
 const nodeStore = useNodeStore();
 const uiStore = useUIStore();
@@ -47,7 +49,7 @@ watch(y, () => {
   }
 });
 
-const scopes = ref(['RPC', 'GenVM', 'Consensus']);
+const scopes = ref(['RPC', 'GenVM', 'Consensus', 'Contract']);
 const statuses = ref(['info', 'success', 'error']);
 
 const selectedScopes = ref(scopes.value);
@@ -69,8 +71,32 @@ const toggleStatus = (status: string) => {
   }
 };
 
+// Helper function to parse stdout logs into individual contract print entries
+const parseStdoutLogs = (log: NodeLog): NodeLog[] => {
+  if (
+    !log.data?.stdout ||
+    typeof log.data.stdout !== 'string' ||
+    !log.data.stdout.trim()
+  ) {
+    return [log];
+  }
+
+  const logs: NodeLog[] = [log];
+  const normalizedStdout = log.data.stdout.replace(/\r\n?/g, '\n');
+  for (const chunk of splitTopLevelLines(normalizedStdout)) {
+    logs.push({
+      scope: 'Contract',
+      name: 'print',
+      type: 'info',
+      message: chunk,
+      data: null,
+    });
+  }
+  return logs;
+};
+
 const filteredLogs = computed(() => {
-  return nodeStore.logs.filter((log) => {
+  return nodeStore.logs.flatMap(parseStdoutLogs).filter((log) => {
     const categoryMatch =
       selectedScopes.value.length === 0 ||
       selectedScopes.value.includes(log.scope);
@@ -84,7 +110,8 @@ const filteredLogs = computed(() => {
       log.message.toLowerCase().includes(searchLower) ||
       log.scope.toLowerCase().includes(searchLower) ||
       log.name.toLowerCase().includes(searchLower) ||
-      JSON.stringify(log.data).toLowerCase().includes(searchLower);
+      (log.data &&
+        JSON.stringify(log.data).toLowerCase().includes(searchLower));
 
     return categoryMatch && statusMatch && searchMatch;
   });
@@ -210,9 +237,18 @@ const resetFilters = () => {
 
             <pre :class="colorMap[type]">{{ message }}</pre>
 
+            <!-- Show stderr directly for GenVM errors -->
+            <pre
+              class="ml-2 whitespace-pre-wrap rounded bg-red-50 p-2 font-mono text-[10px] text-red-400 dark:bg-red-900/20"
+              v-if="
+                data && scope === 'GenVM' && type === 'error' && data.stderr
+              "
+              >{{ data.stderr }}</pre
+            >
+            <!-- Show JSON viewer for other data -->
             <JsonViewer
               class="ml-2"
-              v-if="data"
+              v-else-if="data"
               :value="data"
               :theme="uiStore.mode === 'light' ? 'light' : 'dark'"
               :expand="false"

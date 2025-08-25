@@ -77,20 +77,9 @@ export function useContractQueries() {
       schema.value = result;
       return schema.value;
     } catch (error: any) {
-      const errorMessage = extractErrorMessage(error);
-      throw new Error(errorMessage);
+      throw new Error(error.details);
     }
   }
-
-  const extractErrorMessage = (error: any) => {
-    try {
-      const details = JSON.parse(error.details);
-      const message = details.data.error.args[1].stderr;
-      return message;
-    } catch (err) {
-      return error.details;
-    }
-  };
 
   const isDeploying = ref(false);
 
