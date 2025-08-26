@@ -1992,57 +1992,51 @@ class CommittingState(TransactionState):
             context.msg_handler,
         )
 
-        # Leader evaluates validation function
-        if (
-            context.consensus_data.leader_receipt
-            and len(context.consensus_data.leader_receipt) == 1
-        ):
-            leader_node = create_validator_node(context, context.leader)
-            leader_receipt = await leader_node.exec_transaction(context.transaction)
-            context.consensus_data.leader_receipt.append(leader_receipt)
-            context.votes = {context.leader["address"]: leader_receipt.vote.value}
-
-        # Create validator nodes for each validator
-
-        assert context.validators_snapshot is not None
-
-        # Create validator nodes for each validator
-        context.validator_nodes = [
-            create_validator_node(context, validator)
-            for validator in context.remaining_validators
-        ]
-
-        # Execute the transaction on each validator node and gather the results
+        # Execute the transaction with a semaphore to limit the number of concurrent validators
         sem = asyncio.Semaphore(8)
 
         async def run_single_validator(validator: Node) -> Receipt:
             async with sem:
                 return await validator.exec_transaction(context.transaction)
 
+        # Leader evaluates validation function
+        validation_by_leader = (
+            context.consensus_data.leader_receipt
+            and len(context.consensus_data.leader_receipt) == 1
+        )
+
+        # Create validator node for the leader
+        if validation_by_leader:
+            context.validator_nodes = [create_validator_node(context, context.leader)]
+        else:
+            context.validator_nodes = []
+
+        # Create validator nodes for each validator
+        context.validator_nodes.extend(
+            [
+                create_validator_node(context, validator)
+                for validator in context.remaining_validators
+            ]
+        )
+
+        # Execute the transaction on each validator node and gather the results
         validation_tasks = [
             run_single_validator(validator) for validator in context.validator_nodes
         ]
         context.validation_results = await asyncio.gather(*validation_tasks)
 
         # Send events in rollup to communicate the votes are committed
-        if (
-            context.consensus_data.leader_receipt
-            and len(context.consensus_data.leader_receipt) == 1
-        ):
-            context.consensus_service.emit_transaction_event(
-                "emitVoteCommitted",
-                context.consensus_data.leader_receipt[0].node_config,
-                context.transaction.hash,
-                context.consensus_data.leader_receipt[0].node_config["address"],
-                False,
-            )
-        for i, validator in enumerate(context.remaining_validators):
+        if validation_by_leader:
+            validators_to_emit = [context.leader] + context.remaining_validators
+        else:
+            validators_to_emit = context.remaining_validators
+        for i, validator in enumerate(validators_to_emit):
             context.consensus_service.emit_transaction_event(
                 "emitVoteCommitted",
                 validator,
                 context.transaction.hash,
                 validator["address"],
-                True if i == len(context.remaining_validators) - 1 else False,
+                True if i == len(validators_to_emit) - 1 else False,
             )
         context.transactions_processor.set_transaction_timestamp_last_vote(
             context.transaction.hash
@@ -2087,16 +2081,6 @@ class RevealingState(TransactionState):
         consensus_result = determine_consensus_from_votes(votes_list)
 
         # Send event in rollup to communicate the votes are revealed
-        if len(context.consensus_data.leader_receipt) == 1:
-            context.consensus_service.emit_transaction_event(
-                "emitVoteRevealed",
-                context.consensus_data.leader_receipt[0].node_config,
-                context.transaction.hash,
-                context.consensus_data.leader_receipt[0].node_config["address"],
-                int(context.consensus_data.leader_receipt[0].vote),
-                False,
-                int(ConsensusResult.IDLE),
-            )
         for i, validation_result in enumerate(context.validation_results):
             last_vote = i == len(context.validation_results) - 1
             context.consensus_service.emit_transaction_event(
@@ -2111,6 +2095,14 @@ class RevealingState(TransactionState):
         context.transactions_processor.set_transaction_timestamp_last_vote(
             context.transaction.hash
         )
+
+        # Set the leader's validation receipt
+        if (
+            context.consensus_data.leader_receipt
+            and len(context.consensus_data.leader_receipt) == 1
+        ):
+            context.consensus_data.leader_receipt.append(context.validation_results[0])
+            context.validation_results = context.validation_results[1:]
 
         if (
             context.transaction.appealed
