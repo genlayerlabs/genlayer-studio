@@ -896,16 +896,25 @@ def get_transaction_receipt(
     event_signature = "NewTransaction(bytes32,address,address)"
     event_signature_hash = eth_utils.keccak(text=event_signature).hex()
 
+    to_addr = transaction.get("to_address")
+    from_addr = transaction.get("from_address")
+
     logs = [
         {
-            "address": transaction.get("to_address"),
+            "address": to_addr,
             "topics": [
                 f"0x{event_signature_hash}",
                 transaction_hash,
-                "0x000000000000000000000000"
-                + transaction.get("to_address").replace("0x", ""),
-                "0x000000000000000000000000"
-                + transaction.get("from_address").replace("0x", ""),
+                (
+                    "0x000000000000000000000000" + to_addr.replace("0x", "")
+                    if to_addr
+                    else None
+                ),
+                (
+                    "0x000000000000000000000000" + from_addr.replace("0x", "")
+                    if from_addr
+                    else None
+                ),
             ],
             "data": "0x",
             "blockNumber": 0,
@@ -922,8 +931,8 @@ def get_transaction_receipt(
         "transactionIndex": hex(0),
         "blockHash": transaction_hash,
         "blockNumber": hex(transaction.get("block_number", 0)),
-        "from": transaction.get("from_address"),
-        "to": transaction.get("to_address") if transaction.get("to_address") else None,
+        "from": from_addr,
+        "to": to_addr,
         "cumulativeGasUsed": hex(transaction.get("gas_used", 21000)),
         "gasUsed": hex(transaction.get("gas_used", 21000)),
         "contractAddress": (
