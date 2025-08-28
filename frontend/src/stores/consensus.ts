@@ -11,9 +11,6 @@ export const useConsensusStore = defineStore('consensusStore', () => {
 
   if (!webSocketClient.connected) webSocketClient.connect();
 
-  // Get the value when the frontend or backend is reloaded
-  webSocketClient.on('connect', fetchFinalityWindowTime);
-
   async function fetchFinalityWindowTime() {
     try {
       finalityWindow.value = await rpcClient.getFinalityWindowTime(); // Assume this RPC method exists
@@ -24,10 +21,27 @@ export const useConsensusStore = defineStore('consensusStore', () => {
     }
   }
 
-  // Get the value when the backend updates its value from an RPC request
-  webSocketClient.on('finality_window_time_updated', (eventData: any) => {
+  function setupReconnectionListener() {
+    // Get the value when the backend is reloaded/reconnected
+    webSocketClient.off('connect', fetchFinalityWindowTime);
+    webSocketClient.on('connect', fetchFinalityWindowTime);
+  }
+
+  // Named handler for finality window time updates
+  const handleFinalityWindowTimeUpdate = (eventData: any) => {
     finalityWindow.value = eventData.data.time;
-  });
+  };
+
+  // Get the value when the backend updates its value from an RPC request
+  // Use off/on pattern to prevent duplicate listeners during HMR/re-inits
+  webSocketClient.off(
+    'finality_window_time_updated',
+    handleFinalityWindowTimeUpdate,
+  );
+  webSocketClient.on(
+    'finality_window_time_updated',
+    handleFinalityWindowTimeUpdate,
+  );
 
   // Set the value when the frontend updates its value
   async function setFinalityWindowTime(time: number) {
@@ -43,6 +57,7 @@ export const useConsensusStore = defineStore('consensusStore', () => {
     finalityWindow,
     setFinalityWindowTime,
     fetchFinalityWindowTime,
+    setupReconnectionListener,
     isLoading,
     maxRotations,
     setMaxRotations,

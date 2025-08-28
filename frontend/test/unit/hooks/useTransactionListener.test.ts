@@ -24,6 +24,7 @@ describe('useTransactionListener', () => {
     };
 
     webSocketClientMock = {
+      id: 'mocked-socket-id',
       on: vi.fn(),
     };
 
