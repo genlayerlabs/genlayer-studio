@@ -67,7 +67,12 @@ describe('useContractsStore', () => {
     (useFileName as Mock).mockReturnValue(mockFileName);
     (useSetupStores as Mock).mockReturnValue(mockSetupStores);
     (useRpcClient as Mock).mockReturnValue({});
-    (useWebSocketClient as Mock).mockReturnValue({});
+    (useWebSocketClient as Mock).mockReturnValue({
+      connected: true,
+      emit: vi.fn(),
+      on: vi.fn(),
+      off: vi.fn(),
+    });
     (useGenlayer as Mock).mockReturnValue({});
 
     contractsStore = useContractsStore();
