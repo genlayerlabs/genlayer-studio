@@ -21,15 +21,17 @@ export const useAccountsStore = defineStore('accountsStore', () => {
   const selectedAccount = ref<AccountInfo | null>(null);
 
   // Track current account subscription
-  let currentAccountSubscription: string | null = null;
+  let currentAccountSubscription: Address | null = null;
 
   // Handle WebSocket reconnection to restore account subscription
-  webSocketClient.on('connect', () => {
-    // Resubscribe on any connect (network reconnect OR backend restart)
+  const resubscribeOnConnect = () => {
     if (currentAccountSubscription) {
       webSocketClient.emit('subscribe', [currentAccountSubscription]);
     }
-  });
+  };
+  // ensure single listener across HMR/re-inits
+  webSocketClient.off('connect', resubscribeOnConnect);
+  webSocketClient.on('connect', resubscribeOnConnect);
 
   // Migrate from old storage to new storage
   const storedKeys = localStorage.getItem('accountsStore.privateKeys');
@@ -176,24 +178,22 @@ export const useAccountsStore = defineStore('accountsStore', () => {
   }
 
   // Account subscription management
-  function subscribeToAccount(accountAddress: string) {
-    currentAccountSubscription = accountAddress;
+  function subscribeToAccount(accountAddress: Address) {
+    // Avoid duplicate subscriptions
+    if (currentAccountSubscription === accountAddress) {
+      return;
+    }
 
+    currentAccountSubscription = accountAddress;
     if (webSocketClient.connected) {
       webSocketClient.emit('subscribe', [accountAddress]);
-    } else {
-      // Set up a one-time listener to subscribe when connection is established
-      const onConnect = () => {
-        if (currentAccountSubscription === accountAddress) {
-          webSocketClient.emit('subscribe', [accountAddress]);
-        }
-        webSocketClient.off('connect', onConnect);
-      };
-      webSocketClient.on('connect', onConnect);
     }
   }
 
-  function unsubscribeFromAccount(accountAddress: string) {
+  function unsubscribeFromAccount(accountAddress: Address) {
+    if (currentAccountSubscription === accountAddress) {
+      currentAccountSubscription = null;
+    }
     if (webSocketClient.connected) {
       webSocketClient.emit('unsubscribe', [accountAddress]);
     }
@@ -203,13 +203,17 @@ export const useAccountsStore = defineStore('accountsStore', () => {
     selectedAccount.value = account;
 
     // Manage WebSocket account subscription for logs
-    if (currentAccountSubscription) {
-      unsubscribeFromAccount(currentAccountSubscription);
-      currentAccountSubscription = null;
-    }
+    const newAddress = account?.address || null;
 
-    if (account?.address) {
-      subscribeToAccount(account.address);
+    // Only change subscription if the address is different
+    if (currentAccountSubscription !== newAddress) {
+      if (currentAccountSubscription) {
+        unsubscribeFromAccount(currentAccountSubscription);
+      }
+
+      if (newAddress) {
+        subscribeToAccount(newAddress);
+      }
     }
   }
 

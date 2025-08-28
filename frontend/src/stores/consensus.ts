@@ -23,13 +23,25 @@ export const useConsensusStore = defineStore('consensusStore', () => {
 
   function setupReconnectionListener() {
     // Get the value when the backend is reloaded/reconnected
+    webSocketClient.off('connect', fetchFinalityWindowTime);
     webSocketClient.on('connect', fetchFinalityWindowTime);
   }
 
-  // Get the value when the backend updates its value from an RPC request
-  webSocketClient.on('finality_window_time_updated', (eventData: any) => {
+  // Named handler for finality window time updates
+  const handleFinalityWindowTimeUpdate = (eventData: any) => {
     finalityWindow.value = eventData.data.time;
-  });
+  };
+
+  // Get the value when the backend updates its value from an RPC request
+  // Use off/on pattern to prevent duplicate listeners during HMR/re-inits
+  webSocketClient.off(
+    'finality_window_time_updated',
+    handleFinalityWindowTimeUpdate,
+  );
+  webSocketClient.on(
+    'finality_window_time_updated',
+    handleFinalityWindowTimeUpdate,
+  );
 
   // Set the value when the frontend updates its value
   async function setFinalityWindowTime(time: number) {

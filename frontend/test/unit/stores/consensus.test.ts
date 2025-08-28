@@ -78,8 +78,9 @@ describe('useConsensusStore', () => {
     mockWebSocketClient.connected = true;
     mockWebSocketClient.connect.mockClear();
 
-    // Re-initialize store
-    consensusStore = useConsensusStore();
+    // Re-initialize store (new instance triggers init path)
+    setActivePinia(createPinia());
+    const newConsensusStore = useConsensusStore();
 
     expect(mockWebSocketClient.connect).not.toHaveBeenCalled();
   });
@@ -156,7 +157,11 @@ describe('useConsensusStore', () => {
   });
 
   describe('WebSocket event handlers', () => {
-    it('should set up finality_window_time_updated event handler', () => {
+    it('should set up finality_window_time_updated event handler with off/on pattern', () => {
+      expect(mockWebSocketClient.off).toHaveBeenCalledWith(
+        'finality_window_time_updated',
+        expect.any(Function),
+      );
       expect(mockWebSocketClient.on).toHaveBeenCalledWith(
         'finality_window_time_updated',
         expect.any(Function),
@@ -187,11 +192,16 @@ describe('useConsensusStore', () => {
   });
 
   describe('setupReconnectionListener', () => {
-    it('should set up connect event handler when setupReconnectionListener is called', () => {
+    it('should set up connect event handler with off/on pattern when setupReconnectionListener is called', () => {
+      mockWebSocketClient.off.mockClear();
       mockWebSocketClient.on.mockClear();
 
       consensusStore.setupReconnectionListener();
 
+      expect(mockWebSocketClient.off).toHaveBeenCalledWith(
+        'connect',
+        expect.any(Function),
+      );
       expect(mockWebSocketClient.on).toHaveBeenCalledWith(
         'connect',
         expect.any(Function),
@@ -246,6 +256,39 @@ describe('useConsensusStore', () => {
       );
 
       consoleErrorSpy.mockRestore();
+    });
+
+    it('should prevent duplicate listeners when setupReconnectionListener is called multiple times', () => {
+      mockWebSocketClient.off.mockClear();
+      mockWebSocketClient.on.mockClear();
+
+      // Call setupReconnectionListener multiple times
+      consensusStore.setupReconnectionListener();
+      consensusStore.setupReconnectionListener();
+      consensusStore.setupReconnectionListener();
+
+      // Should call off and on the same number of times
+      expect(mockWebSocketClient.off).toHaveBeenCalledTimes(3);
+      expect(mockWebSocketClient.on).toHaveBeenCalledTimes(3);
+
+      // Each call should be for the 'connect' event
+      const offCalls = mockWebSocketClient.off.mock.calls.filter(
+        (call: any) => call[0] === 'connect',
+      );
+      const onCalls = mockWebSocketClient.on.mock.calls.filter(
+        (call: any) => call[0] === 'connect',
+      );
+
+      expect(offCalls).toHaveLength(3);
+      expect(onCalls).toHaveLength(3);
+
+      // Each call should have a function as the second parameter
+      offCalls.forEach((call: any) => {
+        expect(typeof call[1]).toBe('function');
+      });
+      onCalls.forEach((call: any) => {
+        expect(typeof call[1]).toBe('function');
+      });
     });
   });
 });

@@ -68,6 +68,7 @@ describe('useContractsStore', () => {
     (useSetupStores as Mock).mockReturnValue(mockSetupStores);
     (useRpcClient as Mock).mockReturnValue({});
     (useWebSocketClient as Mock).mockReturnValue({
+      id: 'mocked-socket-id',
       connected: true,
       emit: vi.fn(),
       on: vi.fn(),

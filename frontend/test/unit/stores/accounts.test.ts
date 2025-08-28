@@ -160,7 +160,11 @@ describe('useAccountsStore', () => {
   });
 
   describe('WebSocket reconnection', () => {
-    it('should set up connect event handler on store initialization', () => {
+    it('should set up connect event handler on store initialization with off/on pattern', () => {
+      expect(mockWebSocketClient.off).toHaveBeenCalledWith(
+        'connect',
+        expect.any(Function),
+      );
       expect(mockWebSocketClient.on).toHaveBeenCalledWith(
         'connect',
         expect.any(Function),
@@ -214,6 +218,9 @@ describe('useAccountsStore', () => {
 
     it('should subscribe to account when setting current account and WebSocket is connected', () => {
       mockWebSocketClient.connected = true;
+
+      // First set to null to clear any existing subscription
+      accountsStore.setCurrentAccount(null);
       mockWebSocketClient.emit.mockClear();
 
       const testAccount = {
@@ -229,10 +236,9 @@ describe('useAccountsStore', () => {
       ]);
     });
 
-    it('should set up one-time connect listener when setting account and WebSocket is not connected', () => {
+    it('should not immediately subscribe when setting account and WebSocket is not connected', () => {
       mockWebSocketClient.connected = false;
-      mockWebSocketClient.on.mockClear();
-      mockWebSocketClient.off.mockClear();
+      mockWebSocketClient.emit.mockClear();
 
       const testAccount = {
         type: 'local' as const,
@@ -242,9 +248,39 @@ describe('useAccountsStore', () => {
 
       accountsStore.setCurrentAccount(testAccount);
 
-      expect(mockWebSocketClient.on).toHaveBeenCalledWith(
-        'connect',
-        expect.any(Function),
+      expect(mockWebSocketClient.emit).not.toHaveBeenCalledWith(
+        'subscribe',
+        expect.anything(),
+      );
+    });
+
+    it('should avoid duplicate subscriptions when setting the same account twice', () => {
+      mockWebSocketClient.connected = true;
+
+      const testAccount = {
+        type: 'local' as const,
+        address: testAddress1,
+        privateKey: testKey1,
+      };
+
+      // Set account first time
+      accountsStore.setCurrentAccount(testAccount);
+      const firstCallCount = mockWebSocketClient.emit.mock.calls.filter(
+        (call: any) => call[0] === 'subscribe',
+      ).length;
+
+      mockWebSocketClient.emit.mockClear();
+
+      // Set same account again - should not trigger another subscription
+      accountsStore.setCurrentAccount(testAccount);
+
+      expect(mockWebSocketClient.emit).not.toHaveBeenCalledWith(
+        'subscribe',
+        expect.anything(),
+      );
+      expect(mockWebSocketClient.emit).not.toHaveBeenCalledWith(
+        'unsubscribe',
+        expect.anything(),
       );
     });
 
