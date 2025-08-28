@@ -46,3 +46,11 @@ export interface UIState {
   mode: UIMode;
   showTutorial: boolean;
 }
+
+export interface ConsensusInput {
+  value: number;
+  label: string;
+  id: string;
+  testId: string;
+  setter: (value: number) => void;
+}
