@@ -6,6 +6,8 @@ from logging.config import dictConfig
 import traceback
 
 from flask import request
+from eth_utils.address import to_checksum_address
+from eth_account import Account
 from flask_jsonrpc.exceptions import JSONRPCError
 from loguru import logger
 import sys
@@ -22,7 +24,7 @@ MAX_LOG_MESSAGE_LENGTH = 3000
 # TODO: this should probably live in another module
 def get_client_session_id() -> str:
     try:
-        return request.headers.get("x-session-id")
+        return request.headers.get("x-session-id", "")
     except RuntimeError:  # when this is called outside of a request
         return ""
 
@@ -47,7 +49,13 @@ class MessageHandler:
             self.socketio.emit(
                 log_event.name,
                 log_event.to_dict(),
-                room=log_event.transaction_hash,
+                to=log_event.transaction_hash,
+            )
+        elif log_event.account_address:
+            self.socketio.emit(
+                log_event.name,
+                log_event.to_dict(),
+                to=log_event.account_address,
             )
         else:
             client_session_id = (
@@ -55,11 +63,13 @@ class MessageHandler:
                 or self.client_session_id
                 or get_client_session_id()
             )
-            self.socketio.emit(
-                log_event.name,
-                log_event.to_dict(),
-                to=client_session_id,
-            )
+
+            if client_session_id:
+                self.socketio.emit(
+                    log_event.name,
+                    log_event.to_dict(),
+                    to=client_session_id,
+                )
 
     def _log_message(self, log_event: LogEvent):
         logging_status = log_event.type.value
@@ -155,12 +165,42 @@ class MessageHandler:
         self._socket_emit(log_event)
 
 
+def _extract_account_address_from_endpoint(func_name: str, args: tuple) -> str | None:
+    """Extract account address from endpoint function name and arguments."""
+    try:
+        if (
+            func_name in ["eth_getBalance", "eth_getTransactionCount"]
+            and len(args) >= 1
+        ):
+            return args[0]
+        elif (
+            func_name
+            in ["eth_sendTransaction", "eth_call", "gen_call", "eth_estimateGas"]
+            and len(args) >= 1
+        ):
+            if isinstance(args[0], dict) and "from" in args[0]:
+                return args[0]["from"]
+        elif func_name == "eth_sendRawTransaction" and len(args) >= 1:
+            try:
+                sender = Account.recover_transaction(args[0])
+                return to_checksum_address(sender)
+            except Exception:
+                return None
+        return None
+    except Exception:
+        return None
+
+
 def log_endpoint_info_wrapper(msg_handler: MessageHandler, config: GlobalConfiguration):
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
             shouldPrintInfoLogs = (
                 func.__name__ not in config.get_disabled_info_logs_endpoints()
+            )
+
+            account_address = _extract_account_address_from_endpoint(
+                func.__name__, args
             )
 
             if shouldPrintInfoLogs:
@@ -171,6 +211,7 @@ def log_endpoint_info_wrapper(msg_handler: MessageHandler, config: GlobalConfigu
                         EventScope.RPC,
                         "Endpoint called: " + func.__name__,
                         {"endpoint_name": func.__name__, "args": args},
+                        account_address=account_address,
                     )
                 )
             try:
@@ -188,6 +229,7 @@ def log_endpoint_info_wrapper(msg_handler: MessageHandler, config: GlobalConfigu
                                 "endpoint_name": func.__name__,
                                 "result": result,
                             },
+                            account_address=account_address,
                         )
                     )
                 return result
@@ -207,6 +249,7 @@ def log_endpoint_info_wrapper(msg_handler: MessageHandler, config: GlobalConfigu
                             "traceback": traceback.format_exc(),
                             "jsonrpc_error": as_jsonrpc,
                         },
+                        account_address=account_address,
                     )
                 )
                 raise e

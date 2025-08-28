@@ -15,6 +15,14 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
   const db = useDb();
   const rpcClient = useRpcClient();
 
+  // Handle WebSocket reconnection to restore transaction subscriptions
+  webSocketClient.on('connect', () => {
+    // Resubscribe to all transaction topics after reconnect/restart
+    if (subscriptions.size > 0) {
+      webSocketClient.emit('subscribe', Array.from(subscriptions));
+    }
+  });
+
   function addTransaction(tx: TransactionItem) {
     transactions.value.unshift(tx); // Push on top in case there's no date property yet
     subscribe([tx.hash]);
