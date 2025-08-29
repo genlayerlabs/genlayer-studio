@@ -411,7 +411,7 @@ async def _run_genvm_host(
 ) -> ExecutionResult:
     tmpdir = Path(tempfile.mkdtemp())
     try:
-        timeout = 300  # seconds
+        timeout = 600  # seconds
         base_delay = 5  # seconds
         start_time = time.time()
         retry_count = 0
