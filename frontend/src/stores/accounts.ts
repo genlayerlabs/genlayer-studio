@@ -6,7 +6,6 @@ import { useShortAddress } from '@/hooks';
 import { notify } from '@kyvg/vue3-notification';
 import { useGenlayer } from '@/hooks';
 
-
 export interface AccountInfo {
   type: 'local' | 'metamask';
   address: Address;
