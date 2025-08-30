@@ -4,6 +4,7 @@ import type { Address } from '@/types';
 import { createAccount, generatePrivateKey } from 'genlayer-js';
 import { useShortAddress } from '@/hooks';
 import { notify } from '@kyvg/vue3-notification';
+import { useGenlayer } from '@/hooks';
 
 export interface AccountInfo {
   type: 'local' | 'metamask';
@@ -160,6 +161,13 @@ export const useAccountsStore = defineStore('accountsStore', () => {
   }
 
   function setCurrentAccount(account: AccountInfo | null) {
+    // Calling connect method here instead of relying on the UI button (shown only when
+    // no MetaMask account was previously connected). If the user deletes the network,
+    // that button won’t reappear; connecting on selection covers this edge case.
+    if (account?.type === 'metamask') {
+      const genlayer = useGenlayer();
+      genlayer.client?.value?.connect(import.meta.env.VITE_NETWORK);
+    }
     selectedAccount.value = account;
   }
 
