@@ -11,33 +11,6 @@ from backend.rollup.default_contracts.consensus_main import (
 )
 
 
-# Custom exception classes for nonce errors
-class NonceError(Exception):
-    """Base exception for nonce-related errors"""
-
-    pass
-
-
-class NonceTooLowError(NonceError):
-    """Exception raised when transaction nonce is too low"""
-
-    def __init__(self, expected_nonce: int, actual_nonce: int, *args, **kwargs):
-        self.expected_nonce = expected_nonce
-        self.actual_nonce = actual_nonce
-        message = f"Nonce too low: expected {expected_nonce}, got {actual_nonce}"
-        super().__init__(message, *args, **kwargs)
-
-
-class NonceTooHighError(NonceError):
-    """Exception raised when transaction nonce is too high"""
-
-    def __init__(self, expected_nonce: int, actual_nonce: int, *args, **kwargs):
-        self.expected_nonce = expected_nonce
-        self.actual_nonce = actual_nonce
-        message = f"Nonce too high: expected {expected_nonce}, got {actual_nonce}"
-        super().__init__(message, *args, **kwargs)
-
-
 class ConsensusService:
     def __init__(self):
         """
@@ -197,43 +170,38 @@ class ConsensusService:
 
         except Exception as e:
             error_str = str(e)
-
-            # Check for nonce errors and raise specific exceptions
-            if "nonce too high" in error_str.lower():
+            error_type = (
+                "nonce_too_high"
+                if "nonce too high" in error_str.lower()
+                else "nonce_too_low" if "nonce too low" in error_str.lower() else None
+            )
+            if error_type:
+                # Extract expected and current nonce from error message
                 match = re.search(
                     r"Expected nonce to be (\d+) but got (\d+)", error_str
                 )
                 if match:
-                    expected_nonce = int(match.group(1))
                     current_nonce = int(match.group(2))
-                    print(
-                        f"[CONSENSUS_SERVICE]: Nonce too high - expected {expected_nonce}, got {current_nonce}. "
-                        f"Transaction needs to be re-signed with correct nonce."
-                    )
-                    raise NonceTooHighError(expected_nonce, current_nonce) from e
-                else:
-                    # If we can't parse the nonces, still raise typed exception
-                    raise NonceTooHighError(0, 0) from e
 
-            elif "nonce too low" in error_str.lower():
-                match = re.search(
-                    r"Expected nonce to be (\d+) but got (\d+)", error_str
-                )
-                if match:
-                    expected_nonce = int(match.group(1))
-                    current_nonce = int(match.group(2))
+                    # Set the nonce to the expected value
                     print(
-                        f"[CONSENSUS_SERVICE]: Nonce too low - expected {expected_nonce}, got {current_nonce}. "
-                        f"Transaction needs to be re-signed with correct nonce."
+                        f"[CONSENSUS_SERVICE]: Setting nonce for {from_address} to {current_nonce}"
                     )
-                    raise NonceTooLowError(expected_nonce, current_nonce) from e
+                    self.web3.provider.make_request(
+                        "hardhat_setNonce", [from_address, hex(current_nonce)]
+                    )
+
+                    if retry:
+                        return self.add_transaction(
+                            transaction, from_address, retry=False
+                        )
                 else:
-                    # If we can't parse the nonces, still raise typed exception
-                    raise NonceTooLowError(0, 0) from e
+                    print(
+                        f"[CONSENSUS_SERVICE]: Could not parse nonce from error message: {error_str}"
+                    )
 
             print(f"[CONSENSUS_SERVICE]: Error forwarding transaction: {error_str}")
-            # Re-raise with chaining to preserve the original traceback
-            raise Exception(f"Transaction failed: {error_str}") from e
+            return None
 
     def emit_transaction_event(self, event_name: str, account: dict, *args):
         """
@@ -269,7 +237,7 @@ class ConsensusService:
             tx = event_function(*args).build_transaction(
                 {
                     "from": account_address,
-                    "gas": 0xFFFFFFFF,  # 2^32 - 1 (4,294,967,295) - zkSync Era limit
+                    "gas": 50000000,
                     "gasPrice": 0,
                     "nonce": self.web3.eth.get_transaction_count(account_address),
                 }
