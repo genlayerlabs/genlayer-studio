@@ -3,8 +3,8 @@ import { computed, ref } from 'vue';
 import type { Address } from '@/types';
 import { createAccount, generatePrivateKey } from 'genlayer-js';
 import { useShortAddress } from '@/hooks';
-import { notify } from '@kyvg/vue3-notification'
-;import { useGenlayer } from '@/hooks';
+import { notify } from '@kyvg/vue3-notification';
+import { useGenlayer } from '@/hooks';
 
 
 export interface AccountInfo {
