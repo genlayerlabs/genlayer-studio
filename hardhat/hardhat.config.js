@@ -32,6 +32,9 @@ module.exports = {
           order: "fifo"
         }
       },
+      httpServer: {
+        maxConnections: 200
+      }, 
       chainId: parseInt(process.env.HARDHAT_CHAIN_ID || "61999"),
       gasPrice: 0,
       initialBaseFeePerGas: 0,
