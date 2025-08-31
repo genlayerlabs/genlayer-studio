@@ -27,6 +27,7 @@ from backend.database_handler.validators_registry import (
 )
 from backend.database_handler.accounts_manager import AccountsManager
 from backend.database_handler.snapshot_manager import SnapshotManager
+from backend.database_handler.session_manager import managed_session
 from backend.consensus.base import ConsensusAlgorithm, contract_processor_factory
 from backend.database_handler.models import Base, TransactionStatus
 from backend.rollup.consensus_service import ConsensusService
@@ -39,9 +40,6 @@ def get_db_name(database: str) -> str:
 
 
 async def create_app():
-    def create_session():
-        return Session(engine, expire_on_commit=False)
-
     # DataBase
     database_name_seed = "genlayer"
     db_uri = f"postgresql+psycopg2://{environ.get('DBUSER')}:{environ.get('DBPASSWORD')}@{environ.get('DBHOST')}/{get_db_name(database_name_seed)}"
@@ -52,13 +50,26 @@ async def create_app():
         },  # recommended in https://docs.sqlalchemy.org/en/20/orm/session_basics.html#when-do-i-construct-a-session-when-do-i-commit-it-and-when-do-i-close-it
     )
 
-    engine = create_engine(db_uri, echo=True, pool_size=50, max_overflow=50)
-
     # Flask
     app = Flask("jsonrpc_api")
     app.config["SQLALCHEMY_DATABASE_URI"] = db_uri
     app.config["SQLALCHEMY_ECHO"] = True
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+        "pool_size": 20,
+        "max_overflow": 30,
+        "pool_pre_ping": True,
+        "pool_recycle": 3600,
+        "pool_timeout": 30,
+        "echo_pool": True,  # temporary for verifying pool behavior
+    }
     sqlalchemy_db.init_app(app)
+
+    # Use the Flask-SQLAlchemy engine everywhere
+    with app.app_context():
+        engine = sqlalchemy_db.engine
+
+    def create_session():
+        return Session(engine, expire_on_commit=False)
 
     CORS(app, resources={r"/api/*": {"origins": "*"}}, intercept_exceptions=False)
     jsonrpc = JSONRPC(
@@ -78,13 +89,13 @@ async def create_app():
     consensus_service = ConsensusService()
     transactions_parser = TransactionParser(consensus_service)
 
-    initialize_validators_db_session = create_session()
-    await initialize_validators(
-        os.environ["VALIDATORS_CONFIG_JSON"],
-        ModifiableValidatorsRegistry(initialize_validators_db_session),
-        AccountsManager(initialize_validators_db_session),
-    )
-    initialize_validators_db_session.commit()
+    # Initialize validators with managed session
+    with managed_session(create_session) as session:
+        await initialize_validators(
+            os.environ["VALIDATORS_CONFIG_JSON"],
+            ModifiableValidatorsRegistry(session),
+            AccountsManager(session),
+        )
 
     validators_manager = validators.Manager(create_session())
     await validators_manager.restart()
@@ -151,10 +162,11 @@ register_all_rpc_endpoints(
     consensus,
     consensus_service,
     transactions_parser,
+    sqlalchemy_db,
 )
 
 
-def restore_stuck_transactions():
+def restore_stuck_transactions(session_factory):
     """Restore transactions that are stuck because of a program crash or shutdown. If they cannot be restored, they are deleted."""
 
     def transaction_to_canceled(
@@ -191,19 +203,25 @@ def restore_stuck_transactions():
             previous_contract_state = leader_receipt["contract_state"]
         return previous_contract_state
 
-    try:
-        # Find oldest stuck transaction per contract
-        stuck_transactions = (
-            transactions_processor.transactions_in_process_by_contract()
-        )
-    except Exception as e:
-        print(f"ERROR: Failed to find stuck transactions. Nothing restored: {str(e)}")
-        return
-
-    for tx2 in stuck_transactions:
-        # Restore the contract state
+    # Use managed session for the entire restore operation
+    with managed_session(session_factory) as session:
+        # Create processors with the managed session
+        local_transactions_processor = TransactionsProcessor(session)
+        local_accounts_manager = AccountsManager(session)
+        
         try:
-            contract_processor = contract_processor_factory(request_session)
+            # Find oldest stuck transaction per contract
+            stuck_transactions = (
+                local_transactions_processor.transactions_in_process_by_contract()
+            )
+        except Exception as e:
+            print(f"ERROR: Failed to find stuck transactions. Nothing restored: {str(e)}")
+            return
+
+        for tx2 in stuck_transactions:
+            # Restore the contract state
+            try:
+                contract_processor = contract_processor_factory(session)
 
             if tx2["type"] == TransactionType.DEPLOY_CONTRACT.value:
                 contract_reset = contract_processor.reset_contract(
@@ -211,12 +229,12 @@ def restore_stuck_transactions():
                 )
 
                 if not contract_reset:
-                    accounts_manager.create_new_account_with_address(tx2["to_address"])
+                    local_accounts_manager.create_new_account_with_address(tx2["to_address"])
             else:
-                tx1_finalized = transactions_processor.get_previous_transaction(
+                tx1_finalized = local_transactions_processor.get_previous_transaction(
                     tx2["hash"], TransactionStatus.FINALIZED, True
                 )
-                tx1_accepted = transactions_processor.get_previous_transaction(
+                tx1_accepted = local_transactions_processor.get_previous_transaction(
                     tx2["hash"], TransactionStatus.ACCEPTED, True
                 )
 
@@ -252,12 +270,12 @@ def restore_stuck_transactions():
             print(
                 f"ERROR: Failed to restore contract state {tx2['to_address']} for transaction {tx2['hash']}: {str(e)}"
             )
-            request_session.rollback()
+            # managed_session will handle rollback automatically
 
         else:
             # Restore the transactions
             try:
-                newer_transactions = transactions_processor.get_newer_transactions(
+                newer_transactions = local_transactions_processor.get_newer_transactions(
                     tx2["hash"]
                 )
             except Exception as e:
@@ -265,7 +283,7 @@ def restore_stuck_transactions():
                     f"ERROR: Failed to get newer transactions for {tx2['hash']}. Nothing restored: {str(e)}"
                 )
                 transaction_to_canceled(
-                    transactions_processor, msg_handler, tx2["hash"]
+                    local_transactions_processor, msg_handler, tx2["hash"]
                 )
             else:
                 restore_transactions = [tx2, *newer_transactions]
@@ -273,45 +291,45 @@ def restore_stuck_transactions():
                 for restore_transaction in restore_transactions:
                     try:
                         if (
-                            accounts_manager.get_account(
+                            local_accounts_manager.get_account(
                                 restore_transaction["to_address"]
                             )
                             is None
                         ):
                             transaction_to_canceled(
-                                transactions_processor,
+                                local_transactions_processor,
                                 msg_handler,
                                 restore_transaction["hash"],
                             )
                         else:
                             ConsensusAlgorithm.dispatch_transaction_status_update(
-                                transactions_processor,
+                                local_transactions_processor,
                                 restore_transaction["hash"],
                                 TransactionStatus.PENDING,
                                 msg_handler,
                             )
-                            transactions_processor.set_transaction_contract_snapshot(
+                            local_transactions_processor.set_transaction_contract_snapshot(
                                 restore_transaction["hash"], None
                             )
-                            transactions_processor.set_transaction_result(
+                            local_transactions_processor.set_transaction_result(
                                 restore_transaction["hash"], None
                             )
-                            transactions_processor.set_transaction_appeal(
+                            local_transactions_processor.set_transaction_appeal(
                                 restore_transaction["hash"], False
                             )
-                            transactions_processor.set_transaction_appeal_failed(
+                            local_transactions_processor.set_transaction_appeal_failed(
                                 restore_transaction["hash"], 0
                             )
-                            transactions_processor.set_transaction_appeal_undetermined(
+                            local_transactions_processor.set_transaction_appeal_undetermined(
                                 restore_transaction["hash"], False
                             )
-                            transactions_processor.reset_consensus_history(
+                            local_transactions_processor.reset_consensus_history(
                                 restore_transaction["hash"]
                             )
-                            transactions_processor.set_transaction_timestamp_appeal(
+                            local_transactions_processor.set_transaction_timestamp_appeal(
                                 restore_transaction["hash"], None
                             )
-                            transactions_processor.reset_transaction_appeal_processing_time(
+                            local_transactions_processor.reset_transaction_appeal_processing_time(
                                 restore_transaction["hash"]
                             )
                     except Exception as e:
@@ -319,7 +337,7 @@ def restore_stuck_transactions():
                             f"ERROR: Failed to reset transaction {restore_transaction['hash']}: {str(e)}"
                         )
                         transaction_to_canceled(
-                            transactions_processor,
+                            local_transactions_processor,
                             msg_handler,
                             restore_transaction["hash"],
                         )
@@ -327,7 +345,7 @@ def restore_stuck_transactions():
 
 # Restore stuck transactions
 with app.app_context():
-    restore_stuck_transactions()
+    restore_stuck_transactions(create_session)
 
 
 # This ensures that the transaction is committed or rolled back depending on the success of the request.

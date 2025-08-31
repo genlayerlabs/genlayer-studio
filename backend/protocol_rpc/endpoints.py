@@ -1056,6 +1056,36 @@ def delete_all_snapshots(
     return {"deleted_count": deleted_count}
 
 
+def dev_get_pool_status(sqlalchemy_db) -> dict:
+    """
+    Development endpoint to monitor database connection pool status.
+
+    Returns current pool metrics including size, checked out connections,
+    overflow, and maximum allowed connections.
+
+    Args:
+        sqlalchemy_db: The Flask-SQLAlchemy database instance
+
+    Returns:
+        dict: Pool status information including timestamp and metrics
+    """
+    from datetime import datetime
+
+    engine = sqlalchemy_db.engine
+    pool = engine.pool
+
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "pool": {
+            "size": pool.size(),
+            "checked_out": pool.checkedout(),
+            "overflow": pool.overflow(),
+            "max_allowed": pool.size() + pool._max_overflow,
+            "total": pool.size() + pool.overflow(),
+        },
+    }
+
+
 def register_all_rpc_endpoints(
     jsonrpc: JSONRPC,
     msg_handler: MessageHandler,
@@ -1069,6 +1099,7 @@ def register_all_rpc_endpoints(
     consensus: ConsensusAlgorithm,
     consensus_service: ConsensusService,
     transactions_parser: TransactionParser,
+    sqlalchemy_db=None,  # Optional for backward compatibility
 ):
     register_rpc_endpoint = partial(generate_rpc_endpoint, jsonrpc, msg_handler)
 
