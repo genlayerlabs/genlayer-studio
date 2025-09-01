@@ -167,23 +167,32 @@ class MessageHandler:
 
 def _extract_account_address_from_endpoint(func_name: str, args: tuple) -> str | None:
     """Extract account address from endpoint function name and arguments."""
+
+    def _normalize(addr):
+        if not isinstance(addr, str):
+            return None
+        try:
+            return to_checksum_address(addr)
+        except Exception:
+            return None
+
     try:
         if (
             func_name in ["eth_getBalance", "eth_getTransactionCount"]
             and len(args) >= 1
         ):
-            return args[0]
+            return _normalize(args[0])
         elif (
             func_name
             in ["eth_sendTransaction", "eth_call", "gen_call", "eth_estimateGas"]
             and len(args) >= 1
         ):
             if isinstance(args[0], dict) and "from" in args[0]:
-                return args[0]["from"]
+                return _normalize(args[0]["from"])
         elif func_name == "eth_sendRawTransaction" and len(args) >= 1:
             try:
                 sender = Account.recover_transaction(args[0])
-                return to_checksum_address(sender)
+                return _normalize(sender)
             except Exception:
                 return None
         return None
