@@ -197,3 +197,57 @@ class Transaction:
             leader_timeout_validators=input.get("leader_timeout_validators"),
             appeal_validators_timeout=input.get("appeal_validators_timeout", False),
         )
+
+
+@dataclass
+class SimValidatorConfig:
+    stake: int
+    provider: str
+    model: str
+    config: dict
+    plugin: str
+    plugin_config: dict
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "SimValidatorConfig":
+        return cls(
+            stake=d["stake"],
+            provider=d["provider"],
+            model=d["model"],
+            config=d["config"],
+            plugin=d["plugin"],
+            plugin_config=d["plugin_config"],
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "stake": self.stake,
+            "provider": self.provider,
+            "model": self.model,
+            "config": self.config,
+            "plugin": self.plugin,
+            "plugin_config": self.plugin_config,
+        }
+
+
+@dataclass
+class SimConfig:
+    validators: list[SimValidatorConfig]
+    timestamp: int | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "SimConfig":
+        validators = [
+            SimValidatorConfig.from_dict(v) if isinstance(v, dict) else v
+            for v in d["validators"]
+        ]
+        return cls(
+            validators=validators,
+            timestamp=d.get("timestamp"),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "validators": [v.to_dict() if hasattr(v, "to_dict") else v for v in self.validators],
+            "timestamp": self.timestamp,
+        }
