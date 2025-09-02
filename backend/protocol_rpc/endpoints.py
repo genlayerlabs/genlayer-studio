@@ -791,26 +791,72 @@ def send_raw_transaction(
 
             transaction_data = {"calldata": genlayer_transaction.data.calldata}
 
-        # Obtain transaction hash from new transaction event
+        # Obtain transaction hash from new transaction event or prepare for retry logic
         if rollup_transaction_details and "tx_id_hex" in rollup_transaction_details:
+            # Consensus service succeeded, use the hash from rollup transaction
             transaction_hash = rollup_transaction_details["tx_id_hex"]
+            
+            transaction_hash = transactions_processor.insert_transaction(
+                genlayer_transaction.from_address,
+                to_address,
+                transaction_data,
+                value,
+                genlayer_transaction.type.value,
+                nonce,
+                leader_only,
+                genlayer_transaction.max_rotations,
+                None,
+                transaction_hash,
+                genlayer_transaction.num_of_initial_validators,
+            )
         else:
-            transaction_hash = None
-
-        # Insert transaction into the database
-        transaction_hash = transactions_processor.insert_transaction(
-            genlayer_transaction.from_address,
-            to_address,
-            transaction_data,
-            value,
-            genlayer_transaction.type.value,
-            nonce,
-            leader_only,
-            genlayer_transaction.max_rotations,
-            None,
-            transaction_hash,
-            genlayer_transaction.num_of_initial_validators,
-        )
+            # Consensus service failed, use retry logic with hash generation
+            max_nonce_attempts = 5  # Prevent infinite loops
+            attempt_nonce = nonce
+            
+            for attempt in range(max_nonce_attempts):
+                try:
+                    # Try first with Metamask hash, then force regeneration on collision
+                    if attempt == 0:
+                        # First attempt: use Metamask hash
+                        transaction_hash = transactions_parser.get_transaction_hash(signed_rollup_transaction)
+                    else:
+                        # Subsequent attempts: force hash regeneration with incremented nonce
+                        transaction_hash = None
+                    
+                    transaction_hash = transactions_processor.insert_transaction(
+                        genlayer_transaction.from_address,
+                        to_address,
+                        transaction_data,
+                        value,
+                        genlayer_transaction.type.value,
+                        attempt_nonce,
+                        leader_only,
+                        genlayer_transaction.max_rotations,
+                        None,
+                        transaction_hash,
+                        genlayer_transaction.num_of_initial_validators,
+                    )
+                    break  # Success, exit retry loop
+                    
+                except Exception as e:
+                    error_str = str(e)
+                    if "duplicate key value violates unique constraint" in error_str and "uq_transactions_hash" in error_str:
+                        # Hash collision detected, rollback and retry with incremented nonce
+                        transactions_processor.session.rollback()
+                        attempt_nonce += 1
+                        print(f"[NONCE_INCREMENT] Hash collision detected, retrying with nonce {attempt_nonce}")
+                        if attempt == max_nonce_attempts - 1:
+                            raise Exception(f"Failed to insert transaction after {max_nonce_attempts} nonce attempts")
+                    elif "PendingRollbackError" in error_str:
+                        # Session needs rollback before retry
+                        transactions_processor.session.rollback()
+                        attempt_nonce += 1
+                        print(f"[SESSION_ROLLBACK] Session rolled back, retrying with nonce {attempt_nonce}")
+                        if attempt == max_nonce_attempts - 1:
+                            raise Exception(f"Failed to insert transaction after {max_nonce_attempts} nonce attempts")
+                    else:
+                        raise e
 
         return transaction_hash
 
@@ -846,19 +892,20 @@ def get_net_version() -> str:
     return str(SIMULATOR_CHAIN_ID)
 
 
-def get_block_number(transactions_processor: TransactionsProcessor) -> str:
+def get_block_number(transactions_processor: TransactionsProcessor, consensus_service: ConsensusService, msg_handler: MessageHandler) -> str:
+    consensus_block_number = consensus_service.get_highest_block_number()
     transaction_count = transactions_processor.get_highest_timestamp()
-    return hex(transaction_count)
+    return hex(int(consensus_block_number))
 
 
 def get_block_by_number(
-    transactions_processor: TransactionsProcessor, block_number: str, full_tx: bool
+    transactions_processor: TransactionsProcessor, consensus_service: ConsensusService, msg_handler: MessageHandler, block_number: str, full_tx: bool
 ) -> dict:
     block_number_int = 0
 
     if block_number == "latest":
-        # Get latest block number using existing method
-        block_number_int = int(get_block_number(transactions_processor), 16)
+        # For latest block, use the highest timestamp which is what get_transactions_for_block expects
+        block_number_int = transactions_processor.get_highest_timestamp()
     else:
         try:
             block_number_int = int(block_number, 16)
@@ -1236,11 +1283,11 @@ def register_all_rpc_endpoints(
     register_rpc_endpoint(get_chain_id, method_name="eth_chainId")
     register_rpc_endpoint(get_net_version, method_name="net_version")
     register_rpc_endpoint(
-        partial(get_block_number, transactions_processor),
+        partial(get_block_number, transactions_processor, consensus_service, msg_handler),
         method_name="eth_blockNumber",
     )
     register_rpc_endpoint(
-        partial(get_block_by_number, transactions_processor),
+        partial(get_block_by_number, transactions_processor, consensus_service, msg_handler),
         method_name="eth_getBlockByNumber",
     )
     register_rpc_endpoint(get_gas_price, method_name="eth_gasPrice")
