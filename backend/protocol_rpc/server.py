@@ -3,7 +3,6 @@
 import os
 from os import environ
 import threading
-import logging
 from flask import Flask
 from flask_jsonrpc import JSONRPC
 from flask_socketio import SocketIO, join_room, leave_room
@@ -39,6 +38,10 @@ def get_db_name(database: str) -> str:
 
 
 async def create_app():
+    # Set up unified logging BEFORE any other components
+    from backend.protocol_rpc.message_handler.base import setup_loguru_config
+    setup_loguru_config()
+    
     def create_session():
         return Session(engine, expire_on_commit=False)
 
@@ -52,12 +55,19 @@ async def create_app():
         },  # recommended in https://docs.sqlalchemy.org/en/20/orm/session_basics.html#when-do-i-construct-a-session-when-do-i-commit-it-and-when-do-i-close-it
     )
 
-    engine = create_engine(db_uri, echo=True, pool_size=50, max_overflow=50)
+    # Disable SQLAlchemy's built-in echo to prevent direct stdout logging
+    # We'll handle SQL logging through our intercept handler instead
+    engine = create_engine(db_uri, echo=False, pool_size=50, max_overflow=50)
+    
+    # Enable SQLAlchemy logging through the logging system (which we intercept)
+    import logging
+    sqlalchemy_logger = logging.getLogger('sqlalchemy.engine')
+    sqlalchemy_logger.setLevel(logging.INFO)
 
     # Flask
     app = Flask("jsonrpc_api")
     app.config["SQLALCHEMY_DATABASE_URI"] = db_uri
-    app.config["SQLALCHEMY_ECHO"] = True
+    app.config["SQLALCHEMY_ECHO"] = False  # We handle SQL logging through Loguru intercept
     sqlalchemy_db.init_app(app)
 
     CORS(app, resources={r"/api/*": {"origins": "*"}}, intercept_exceptions=False)
@@ -361,9 +371,8 @@ async def main():
             for topic in topics:
                 leave_room(topic)
 
-        logging.getLogger("werkzeug").setLevel(
-            os.environ.get("FLASK_LOG_LEVEL", logging.ERROR)
-        )
+        # Logging is now configured in MessageHandler setup_loguru_config()
+        pass
 
     # Thread for the Flask-SocketIO server
     threading.Thread(target=run_socketio, daemon=True).start()
