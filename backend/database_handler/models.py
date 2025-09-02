@@ -108,6 +108,7 @@ class Transactions(Base):
     last_vote_timestamp: Mapped[Optional[int]] = mapped_column(BigInteger)
     rotation_count: Mapped[Optional[int]] = mapped_column(Integer)
     leader_timeout_validators: Mapped[Optional[list]] = mapped_column(JSONB)
+    sim_config: Mapped[Optional[dict]] = mapped_column(JSONB)
 
     # Relationship for triggered transactions
     triggered_by_hash: Mapped[Optional[str]] = mapped_column(

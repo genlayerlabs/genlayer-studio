@@ -239,7 +239,7 @@ class SimConfig:
     def from_dict(cls, d: dict) -> "SimConfig":
         validators = [
             SimValidatorConfig.from_dict(v) if isinstance(v, dict) else v
-            for v in d["validators"]
+            for v in d.get("validators", [])
         ]
         return cls(
             validators=validators,

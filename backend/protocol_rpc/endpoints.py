@@ -738,6 +738,7 @@ def send_raw_transaction(
     transactions_parser: TransactionParser,
     consensus_service: ConsensusService,
     signed_rollup_transaction: str,
+    sim_config: dict | None = None,
 ) -> str:
     # Decode transaction
     decoded_rollup_transaction = transactions_parser.decode_signed_transaction(
@@ -851,6 +852,7 @@ def send_raw_transaction(
             None,
             transaction_hash,
             genlayer_transaction.num_of_initial_validators,
+            sim_config,
         )
 
         return transaction_hash

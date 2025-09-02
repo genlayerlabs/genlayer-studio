@@ -227,6 +227,7 @@ class TransactionsProcessor:
         ) = None,  # If filled, the transaction must be present in the database (committed)
         transaction_hash: str | None = None,
         num_of_initial_validators: int | None = None,
+        sim_config: dict | None = None,
     ) -> str:
         current_nonce = self.get_transaction_count(from_address)
 
@@ -279,6 +280,7 @@ class TransactionsProcessor:
             appeal_leader_timeout=False,
             leader_timeout_validators=None,
             appeal_validators_timeout=False,
+            sim_config=sim_config,
         )
 
         self.session.add(new_transaction)
