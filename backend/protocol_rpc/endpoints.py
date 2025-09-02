@@ -466,7 +466,10 @@ def get_contract_code(
             "Contract not deployed.",
         )
 
-    raw = base64.b64decode(stored)
+    try:
+        raw = base64.b64decode(stored, validate=True)
+    except Exception:
+        raise InvalidAddressError(contract_address, "Contract not deployed.")
     if len(raw) < 4:
         raise InvalidAddressError(
             contract_address,
@@ -474,6 +477,8 @@ def get_contract_code(
         )
 
     code_len = int.from_bytes(raw[0:4], byteorder="little", signed=False)
+    if len(raw) < 4 + code_len:
+        raise InvalidAddressError(contract_address, "Contract not deployed.")
     code_bytes = raw[4 : 4 + code_len]
     return base64.b64encode(code_bytes).decode("ascii")
 
