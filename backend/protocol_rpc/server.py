@@ -52,27 +52,7 @@ async def create_app():
         },  # recommended in https://docs.sqlalchemy.org/en/20/orm/session_basics.html#when-do-i-construct-a-session-when-do-i-commit-it-and-when-do-i-close-it
     )
 
-    # Database connection pool configuration
-    pool_config = {
-        'pool_size': int(os.getenv('DB_POOL_SIZE', 20)),
-        'max_overflow': int(os.getenv('DB_MAX_OVERFLOW', 30)),
-        'pool_recycle': int(os.getenv('DB_POOL_RECYCLE', 3600)),
-        'pool_timeout': int(os.getenv('DB_POOL_TIMEOUT', 30)),
-        'pool_pre_ping': os.getenv('DB_POOL_PRE_PING', 'true').lower() == 'true'
-    }
-    
-    connect_args = {
-        'connect_timeout': int(os.getenv('DB_CONNECT_TIMEOUT', 10)),
-        'application_name': 'genlayer_studio',
-        'options': f"-c statement_timeout={os.getenv('DB_STATEMENT_TIMEOUT', 300000)}"
-    }
-    
-    engine = create_engine(
-        db_uri,
-        echo=True,
-        connect_args=connect_args,
-        **pool_config
-    )
+    engine = create_engine(db_uri, echo=True, pool_size=50, max_overflow=50)
 
     # Flask
     app = Flask("jsonrpc_api")
