@@ -816,7 +816,7 @@ def send_raw_transaction(
             try:
                 # First attempt: try with Metamask hash
                 transaction_hash = transactions_parser.get_transaction_hash(signed_rollup_transaction)
-                print(f"[HASH_ATTEMPT] Using Metamask hash with nonce {db_nonce + 1}")
+                print(f"[HASH_ATTEMPT] Using Metamask hash with nonce {db_nonce}")
                 
                 transaction_hash = transactions_processor.insert_transaction(
                     genlayer_transaction.from_address,
@@ -824,7 +824,7 @@ def send_raw_transaction(
                     transaction_data,
                     value,
                     genlayer_transaction.type.value,
-                    db_nonce + 1,
+                    db_nonce,
                     leader_only,
                     genlayer_transaction.max_rotations,
                     None,
@@ -840,7 +840,7 @@ def send_raw_transaction(
                     
                     # Recalculate nonce after rollback to get current count
                     fresh_db_nonce = transactions_processor.get_transaction_count(genlayer_transaction.from_address)
-                    retry_nonce = fresh_db_nonce + 1
+                    retry_nonce = fresh_db_nonce
                     print(f"[HASH_COLLISION] Detected duplicate hash, recalculated nonce: {retry_nonce}")
                     
                     transaction_hash = transactions_processor.insert_transaction(
@@ -862,7 +862,7 @@ def send_raw_transaction(
                     
                     # Recalculate nonce after rollback to get current count
                     fresh_db_nonce = transactions_processor.get_transaction_count(genlayer_transaction.from_address)
-                    retry_nonce = fresh_db_nonce + 1
+                    retry_nonce = fresh_db_nonce
                     print(f"[SESSION_ROLLBACK] Session rolled back, recalculated nonce: {retry_nonce}")
                     
                     transaction_hash = transactions_processor.insert_transaction(
