@@ -236,10 +236,11 @@ class TransactionsProcessor:
         #     raise Exception(
         #         f"Unexpected nonce. Provided: {nonce}, expected: {current_nonce}"
         #     )
+        current_nonce = self.get_transaction_count(from_address)
 
         if transaction_hash is None:
             transaction_hash = self._generate_transaction_hash(
-                from_address, to_address, data, value, type, nonce
+                from_address, to_address, data, value, type, nonce, nonce
             )
 
         new_transaction = Transactions(
