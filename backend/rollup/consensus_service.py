@@ -281,8 +281,10 @@ class ConsensusService:
             return None
 
 
-    def get_highest_block_number(self) -> str:
+    def get_highest_block_number(self) -> int:
         """
         Get the highest block number
         """
+        if not self.web3.is_connected():
+            return 0
         return self.web3.eth.get_block_number()
