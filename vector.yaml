@@ -3,7 +3,7 @@ sources:
     type: docker_logs
     exclude_containers: 
       - vector
-  
+
 transforms:
   docker_logs_transform:
     type: remap
@@ -14,7 +14,7 @@ transforms:
       .labels = {"job": "docker", "instance": get_hostname!(), "container": .container_name}
       # Convert timestamp to RFC3339
       .timestamp = format_timestamp!(.timestamp, format: "%+")
-      
+
 sinks:
   gcp_logs:
     type: gcp_stackdriver_logs

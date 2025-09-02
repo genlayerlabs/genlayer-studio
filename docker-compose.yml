@@ -193,7 +193,7 @@ services:
 
   vector:
     profiles: ["studio"]
-    image: timberio/vector:latest-alpine
+    image: timberio/vector:0.42.0-alpine
     container_name: vector
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/etc/vector/gcp_credentials.json
@@ -204,7 +204,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./gcp_credentials.json:/etc/vector/gcp_credentials.json:ro
       - /var/log:/var/log:ro  # Mount the host's /var/log directory
-    network_mode: host
+    # network_mode: host
     restart: unless-stopped
     labels:
       org.label-schema.group: "monitoring"
