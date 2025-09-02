@@ -198,7 +198,7 @@ services:
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/etc/vector/gcp_credentials.json
       - VECTOR_LOG=info
-      - GCP_PROJECT_ID=simulator-440803
+      - GCP_PROJECT_ID=${GCP_PROJECT_ID}
     volumes:
       - ./vector.yaml:/etc/vector/vector.yaml:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
