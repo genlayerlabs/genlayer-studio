@@ -291,7 +291,7 @@ class TransactionParser:
             leader_only=leader_only,
         )
 
-    def get_transaction_hash(self, raw_transaction: str) -> str:
+    def get_transaction_hash(self, raw_transaction: str) -> str | None:
         """
         Extract the transaction hash from a signed transaction.
         This is the hash that Metamask calculated and signed.
@@ -300,14 +300,14 @@ class TransactionParser:
             raw_transaction: The hex-encoded signed transaction from Metamask
             
         Returns:
-            str: The transaction hash as hex string with 0x prefix
+            str | None: The transaction hash as hex string with 0x prefix, or None if extraction fails
         """
         try:
             transaction_bytes = HexBytes(raw_transaction)
             signed_transaction = Transaction.from_bytes(transaction_bytes)
             hash_bytes = self._hash_of_signed_transaction(signed_transaction)
             return "0x" + hash_bytes.hex()
-        except Exception as e:
+        except (ValueError, DeserializationError, rlp.exceptions.DecodingError):
             # If we can't extract the hash, return None so fallback generation is used
             return None
 
