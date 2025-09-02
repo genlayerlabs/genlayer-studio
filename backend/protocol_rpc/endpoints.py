@@ -793,7 +793,6 @@ def send_raw_transaction(
 
         # Obtain transaction hash from new transaction event or prepare for retry logic
         if rollup_transaction_details and "tx_id_hex" in rollup_transaction_details:
-            # Consensus service succeeded, use the hash from rollup transaction
             transaction_hash = rollup_transaction_details["tx_id_hex"]
             
             transaction_hash = transactions_processor.insert_transaction(
@@ -811,18 +810,38 @@ def send_raw_transaction(
             )
         else:
             # Consensus service failed, use retry logic with hash generation
-            max_nonce_attempts = 5  # Prevent infinite loops
-            attempt_nonce = nonce
+            # Get the correct nonce from database instead of using Metamask's potentially stale nonce
+            db_nonce = transactions_processor.get_transaction_count(genlayer_transaction.from_address)
             
-            for attempt in range(max_nonce_attempts):
-                try:
-                    # Try first with Metamask hash, then force regeneration on collision
-                    if attempt == 0:
-                        # First attempt: use Metamask hash
-                        transaction_hash = transactions_parser.get_transaction_hash(signed_rollup_transaction)
-                    else:
-                        # Subsequent attempts: force hash regeneration with incremented nonce
-                        transaction_hash = None
+            try:
+                # First attempt: try with Metamask hash
+                transaction_hash = transactions_parser.get_transaction_hash(signed_rollup_transaction)
+                print(f"[HASH_ATTEMPT] Using Metamask hash with nonce {db_nonce + 1}")
+                
+                transaction_hash = transactions_processor.insert_transaction(
+                    genlayer_transaction.from_address,
+                    to_address,
+                    transaction_data,
+                    value,
+                    genlayer_transaction.type.value,
+                    db_nonce + 1,
+                    leader_only,
+                    genlayer_transaction.max_rotations,
+                    None,
+                    transaction_hash,
+                    genlayer_transaction.num_of_initial_validators,
+                )
+                
+            except Exception as e:
+                error_str = str(e)
+                if "duplicate key value violates unique constraint" in error_str and "uq_transactions_hash" in error_str:
+                    # Hash collision detected, rollback and recalculate nonce
+                    transactions_processor.session.rollback()
+                    
+                    # Recalculate nonce after rollback to get current count
+                    fresh_db_nonce = transactions_processor.get_transaction_count(genlayer_transaction.from_address)
+                    retry_nonce = fresh_db_nonce + 1
+                    print(f"[HASH_COLLISION] Detected duplicate hash, recalculated nonce: {retry_nonce}")
                     
                     transaction_hash = transactions_processor.insert_transaction(
                         genlayer_transaction.from_address,
@@ -830,33 +849,37 @@ def send_raw_transaction(
                         transaction_data,
                         value,
                         genlayer_transaction.type.value,
-                        attempt_nonce,
+                        retry_nonce,  # Use fresh nonce calculation
                         leader_only,
                         genlayer_transaction.max_rotations,
                         None,
-                        transaction_hash,
+                        None,  # Force hash regeneration
                         genlayer_transaction.num_of_initial_validators,
                     )
-                    break  # Success, exit retry loop
+                elif "PendingRollbackError" in error_str:
+                    # Session needs rollback before retry
+                    transactions_processor.session.rollback()
                     
-                except Exception as e:
-                    error_str = str(e)
-                    if "duplicate key value violates unique constraint" in error_str and "uq_transactions_hash" in error_str:
-                        # Hash collision detected, rollback and retry with incremented nonce
-                        transactions_processor.session.rollback()
-                        attempt_nonce += 1
-                        print(f"[NONCE_INCREMENT] Hash collision detected, retrying with nonce {attempt_nonce}")
-                        if attempt == max_nonce_attempts - 1:
-                            raise Exception(f"Failed to insert transaction after {max_nonce_attempts} nonce attempts")
-                    elif "PendingRollbackError" in error_str:
-                        # Session needs rollback before retry
-                        transactions_processor.session.rollback()
-                        attempt_nonce += 1
-                        print(f"[SESSION_ROLLBACK] Session rolled back, retrying with nonce {attempt_nonce}")
-                        if attempt == max_nonce_attempts - 1:
-                            raise Exception(f"Failed to insert transaction after {max_nonce_attempts} nonce attempts")
-                    else:
-                        raise e
+                    # Recalculate nonce after rollback to get current count
+                    fresh_db_nonce = transactions_processor.get_transaction_count(genlayer_transaction.from_address)
+                    retry_nonce = fresh_db_nonce + 1
+                    print(f"[SESSION_ROLLBACK] Session rolled back, recalculated nonce: {retry_nonce}")
+                    
+                    transaction_hash = transactions_processor.insert_transaction(
+                        genlayer_transaction.from_address,
+                        to_address,
+                        transaction_data,
+                        value,
+                        genlayer_transaction.type.value,
+                        retry_nonce,  # Use fresh nonce calculation
+                        leader_only,
+                        genlayer_transaction.max_rotations,
+                        None,
+                        None,  # Force hash regeneration
+                        genlayer_transaction.num_of_initial_validators,
+                    )
+                else:
+                    raise e
 
         return transaction_hash
 
