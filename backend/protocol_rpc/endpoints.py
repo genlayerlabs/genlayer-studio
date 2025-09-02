@@ -438,15 +438,18 @@ def get_contract_code(
         )
     contract_account = accounts_manager.get_account_or_fail(contract_address)
 
-    if not contract_account["data"]:
-        raise InvalidAddressError(
-            contract_address,
-            "Contract not deployed.",
-        )
+    data = contract_account.get("data") or {}
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            raise InvalidAddressError(contract_address, "Contract not deployed.")
+    if not data:
+        raise InvalidAddressError(contract_address, "Contract not deployed.")
 
     from backend.node.genvm.origin.base_host import get_code_slot
 
-    state = contract_account["data"].get("state") or {}
+    state = (data.get("state") or {}) if isinstance(data, dict) else {}
     accepted = state.get("accepted") or {}
 
     code_slot_b64 = base64.b64encode(get_code_slot()).decode("ascii")
