@@ -240,7 +240,7 @@ class TransactionsProcessor:
 
         if transaction_hash is None:
             transaction_hash = self._generate_transaction_hash(
-                from_address, to_address, data, value, type, nonce, nonce
+                from_address, to_address, data, value, type, current_nonce
             )
 
         new_transaction = Transactions(

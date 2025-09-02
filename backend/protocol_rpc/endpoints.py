@@ -915,20 +915,19 @@ def get_net_version() -> str:
     return str(SIMULATOR_CHAIN_ID)
 
 
-def get_block_number(transactions_processor: TransactionsProcessor, consensus_service: ConsensusService, msg_handler: MessageHandler) -> str:
-    consensus_block_number = consensus_service.get_highest_block_number()
+def get_block_number(transactions_processor: TransactionsProcessor) -> str:
     transaction_count = transactions_processor.get_highest_timestamp()
-    return hex(int(consensus_block_number))
+    return hex(transaction_count)
 
 
 def get_block_by_number(
-    transactions_processor: TransactionsProcessor, consensus_service: ConsensusService, msg_handler: MessageHandler, block_number: str, full_tx: bool
+    transactions_processor: TransactionsProcessor, block_number: str, full_tx: bool
 ) -> dict:
     block_number_int = 0
 
     if block_number == "latest":
-        # For latest block, use the highest timestamp which is what get_transactions_for_block expects
-        block_number_int = transactions_processor.get_highest_timestamp()
+        # Get latest block number using existing method
+        block_number_int = int(get_block_number(transactions_processor), 16)
     else:
         try:
             block_number_int = int(block_number, 16)
@@ -1306,11 +1305,11 @@ def register_all_rpc_endpoints(
     register_rpc_endpoint(get_chain_id, method_name="eth_chainId")
     register_rpc_endpoint(get_net_version, method_name="net_version")
     register_rpc_endpoint(
-        partial(get_block_number, transactions_processor, consensus_service, msg_handler),
+        partial(get_block_number, transactions_processor),
         method_name="eth_blockNumber",
     )
     register_rpc_endpoint(
-        partial(get_block_by_number, transactions_processor, consensus_service, msg_handler),
+        partial(get_block_by_number, transactions_processor),
         method_name="eth_getBlockByNumber",
     )
     register_rpc_endpoint(get_gas_price, method_name="eth_gasPrice")
