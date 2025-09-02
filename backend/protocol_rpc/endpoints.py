@@ -451,34 +451,14 @@ def get_contract_code(accounts_manager: AccountsManager, contract_address: str) 
     if not data:
         raise InvalidAddressError(contract_address, "Contract not deployed.")
 
-    from backend.node.genvm.origin.base_host import get_code_slot
-
     state = (data.get("state") or {}) if isinstance(data, dict) else {}
-    accepted = state.get("accepted") or {}
-
-    code_slot_b64 = base64.b64encode(get_code_slot()).decode("ascii")
-    stored = accepted.get(code_slot_b64)
-    if not stored:
+    code_b64 = ContractSnapshot.extract_deployed_code_b64_from_state(state)
+    if not code_b64:
         raise InvalidAddressError(
             contract_address,
             "Contract not deployed.",
         )
-
-    try:
-        raw = base64.b64decode(stored, validate=True)
-    except Exception:
-        raise InvalidAddressError(contract_address, "Contract not deployed.")
-    if len(raw) < 4:
-        raise InvalidAddressError(
-            contract_address,
-            "Contract not deployed.",
-        )
-
-    code_len = int.from_bytes(raw[0:4], byteorder="little", signed=False)
-    if len(raw) < 4 + code_len:
-        raise InvalidAddressError(contract_address, "Contract not deployed.")
-    code_bytes = raw[4 : 4 + code_len]
-    return base64.b64encode(code_bytes).decode("ascii")
+    return code_b64
 
 
 async def _execute_call_with_snapshot(
