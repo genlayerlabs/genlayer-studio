@@ -1,6 +1,5 @@
 services:
   traefik:
-    profiles: ["studio"]
     image: traefik:v3.3
     ports:
       - "80:80"
@@ -42,6 +41,12 @@ services:
       traefik.http.routers.frontend.entrypoints: websecure
       traefik.http.routers.frontend.tls: true
 
+  # JSON-RPC Service - Auto-configures based on READER_WORKERS
+  # System auto-determines role:
+  # READER=0, WRITER=0  -> Simple RPC (no GenVM) for infrastructure
+  # READER>0, WRITER=0  -> Reader farm with GenVM for read operations
+  # READER=0, WRITER>0  -> Simple RPC (writers use separate service)
+  # READER>0, WRITER>0  -> Reader farm (development/hybrid mode)
   jsonrpc:
     build:
       context: ./
@@ -52,8 +57,21 @@ services:
       # TODO: remove this in production
       - PYTHONUNBUFFERED=1
       - RPCDEBUGPORT=${RPCDEBUGPORT}
-      - WEBDRIVERHOST=${WEBDRIVERHOST}
-      - WEBDRIVERPORT=${WEBDRIVERPORT}
+      - WEBDRIVERHOST=${WEBDRIVERHOST:-webdriver}
+      - WEBDRIVERPORT=${WEBDRIVERPORT:-4444}
+      - CONSENSUS_MODE=${CONSENSUS_MODE:-legacy}
+      - ZMQ_BROKER_HOST=${ZMQ_BROKER_HOST:-zmq-broker}
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      # Worker configuration
+      - READER_WORKERS=${READER_WORKERS:-0}
+      - WRITER_WORKERS=${WRITER_WORKERS:-0}
+      # Database configuration
+      - DBHOST=${DBHOST:-postgres}
+      - DBPORT=${DBPORT:-5432}
+      - DBUSER=${DBUSER:-genlayer}
+      - DBPASSWORD=${DBPASSWORD:-genlayer}
+      - DBNAME=${DBNAME:-genlayer}
     ports:
       - "${RPCPORT}:${RPCPORT}"
       - "${RPCDEBUGPORT}:${RPCDEBUGPORT}"
@@ -65,14 +83,24 @@ services:
     depends_on:
       database-migration:
         condition: service_completed_successfully
-      webdriver:
+      postgres:
         condition: service_healthy
+        required: false
+      webdriver:
+        condition: service_started
+        required: false
       hardhat:
         condition: service_healthy
         required: false
       ollama:
         condition: service_started
         required: false
+      zmq-broker:
+        condition: service_started
+        required: false  # Only required when WRITER_WORKERS > 0
+      redis:
+        condition: service_healthy
+        required: false  # Only required when WRITER_WORKERS > 0
     expose:
       - "${RPCPORT}"
     healthcheck:
@@ -90,20 +118,40 @@ services:
         max-size: "10m"
         max-file: "3"
     deploy:
+      # Calculate replicas: max(1, READER_WORKERS) to ensure at least 1 instance
       replicas: ${JSONRPC_REPLICAS:-1}
     labels:
       traefik.enable: true
       traefik.http.routers.jsonrpc.rule: Host(`${SERVER_NAME}`) && (PathPrefix(`/api`) || PathPrefix(`/socket.io`))
       traefik.http.routers.jsonrpc.entrypoints: websecure
       traefik.http.routers.jsonrpc.tls: true
+      # Traefik load balancing for reader replicas (when READER_WORKERS > 0)
+      # Write operations go directly through backend to ZMQ, not through Traefik
+      traefik.http.services.jsonrpc.loadbalancer.server.port: ${RPCPORT}
+      traefik.http.services.jsonrpc.loadbalancer.sticky.cookie: true
+      traefik.http.services.jsonrpc.loadbalancer.sticky.cookie.name: server_id
+      traefik.http.services.jsonrpc.loadbalancer.healthcheck.path: /api/health
+      traefik.http.services.jsonrpc.loadbalancer.healthcheck.interval: 10s
 
   webdriver:
     image: yeagerai/genlayer-genvm-webdriver:0.0.3
     shm_size: 2gb
     environment:
       - PORT=${WEBDRIVERPORT:-4444}
+      # Scale WebDriver sessions based on workers
+      - MAX_SESSIONS=${MAX_GENVM_TOTAL:-20}
+      - NODE_MAX_INSTANCES=${MAX_GENVM_PER_WORKER:-5}
+      - NODE_MAX_SESSION=${MAX_GENVM_PER_WORKER:-5}
+    ports:
+      - "${WEBDRIVERPORT:-4444}:4444"
     expose:
       - "${WEBDRIVERPORT:-4444}"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4444/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
     restart: always
     security_opt:
       - "no-new-privileges=true"
@@ -112,9 +160,13 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    # WebDriver is a single service that manages multiple browser sessions internally
+    # It scales sessions, not container replicas
+    deploy:
+      replicas: 1
 
   ollama:
-    profiles: ["ollama"]
+    profiles: ["ollama"]  # Keep ollama optional
     image: ollama/ollama:0.6.5
     ports:
       - 11434:11434
@@ -170,7 +222,7 @@ services:
         required: false
 
   hardhat:
-    profiles: ["hardhat"]
+    profiles: ["hardhat"]  # Keep hardhat optional
     build:
       context: .
       dockerfile: docker/Dockerfile.hardhat
@@ -191,6 +243,106 @@ services:
       traefik.http.routers.hardhat.entrypoints: websecure
       traefik.http.routers.hardhat.tls: true
 
+  # SCALABILITY SERVICES - Auto-start when WRITER_WORKERS > 0
+  zmq-broker:
+    build:
+      context: ./
+      dockerfile: ./docker/Dockerfile.backend
+      target: ${BACKEND_BUILD_TARGET:-prod}
+    command: python backend/services/zmq_broker.py
+    environment:
+      - FLASK_SERVER_PORT=5561
+      - DBHOST=${DBHOST}
+      - DBPORT=${DBPORT}
+      - DBUSER=${DBUSER}
+      - DBPASSWORD=${DBPASSWORD}
+      - DBNAME=${DBNAME}
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+    ports:
+      - "5557:5557"  # Frontend socket
+      - "5558:5558"  # Backend socket  
+      - "5559:5559"  # Status PUB socket
+      - "5560:5560"  # Control socket
+      - "5561:5561"  # Flask-SocketIO port
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+      redis:
+        condition: service_healthy
+        required: false
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import zmq; s=zmq.Context().socket(zmq.PUSH); s.connect('tcp://localhost:5557'); s.send_json({'ping': 'healthcheck'}); exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  consensus-worker:
+    build:
+      context: ./
+      dockerfile: ./docker/Dockerfile.backend
+      target: ${BACKEND_BUILD_TARGET:-prod}
+    command: python backend/workers/zmq_consensus_worker.py
+    deploy:
+      replicas: ${WRITER_WORKERS:-0}
+    environment:
+      - CONSENSUS_MODE=${CONSENSUS_MODE:-zmq}
+      - MAX_GENVM_PER_WORKER=${MAX_GENVM_PER_WORKER:-5}
+      - WEBDRIVERHOST=${WEBDRIVERHOST:-webdriver}
+      - WEBDRIVERPORT=${WEBDRIVERPORT:-4444}
+      - DBHOST=${DBHOST}
+      - DBPORT=${DBPORT}
+      - DBUSER=${DBUSER}
+      - DBPASSWORD=${DBPASSWORD}
+      - DBNAME=${DBNAME}
+      - ZMQ_BROKER_HOST=${ZMQ_BROKER_HOST:-zmq-broker}
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      zmq-broker:
+        condition: service_healthy
+        required: false
+      webdriver:
+        condition: service_healthy
+        required: false
+      postgres:
+        condition: service_healthy
+        required: false
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   hardhat_artifacts:
   hardhat_cache:
@@ -198,3 +350,4 @@ volumes:
   ignition_deployments:
   hardhat_snapshots:
   postgres_data:
+  redis_data:

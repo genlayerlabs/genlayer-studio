@@ -1,0 +1,57 @@
+# traefik-dynamic.yaml
+# Dynamic configuration for routing different endpoints to different worker types
+
+http:
+  routers:
+    # Router for GenVM read operations (call, staticcall)
+    genvm-reader:
+      rule: "Host(`{{ env "SERVER_NAME" }}`) && (PathPrefix(`/api/call`) || PathPrefix(`/api/staticcall`) || PathPrefix(`/api/eth_call`) || PathPrefix(`/api/eth_estimateGas`))"
+      service: reader-service
+      entryPoints:
+        - websecure
+      tls: true
+
+    # Router for simple RPC operations (non-GenVM)
+    simple-rpc:
+      rule: "Host(`{{ env "SERVER_NAME" }}`) && PathPrefix(`/api`) && !PathPrefix(`/api/call`) && !PathPrefix(`/api/staticcall`) && !PathPrefix(`/api/eth_call`) && !PathPrefix(`/api/eth_estimateGas`)"
+      service: simple-rpc-service
+      entryPoints:
+        - websecure
+      tls: true
+
+    # Router for WebSocket connections
+    websocket:
+      rule: "Host(`{{ env "SERVER_NAME" }}`) && PathPrefix(`/socket.io`)"
+      service: simple-rpc-service
+      entryPoints:
+        - websecure
+      tls: true
+
+  services:
+    # Service for GenVM reader workers
+    reader-service:
+      loadBalancer:
+        servers:
+          - url: "http://jsonrpc-reader:4000"
+        sticky:
+          cookie:
+            name: reader_id
+            httpOnly: true
+        healthCheck:
+          path: /api/health
+          interval: 10s
+          timeout: 3s
+
+    # Service for simple RPC workers
+    simple-rpc-service:
+      loadBalancer:
+        servers:
+          - url: "http://jsonrpc-simple:4000"
+        sticky:
+          cookie:
+            name: rpc_id
+            httpOnly: true
+        healthCheck:
+          path: /api/health
+          interval: 10s
+          timeout: 3s

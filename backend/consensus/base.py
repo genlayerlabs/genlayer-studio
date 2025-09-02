@@ -321,6 +321,32 @@ class ConsensusAlgorithm:
             {}
         )  # Track running state for each pending queue
         self.validators_manager = validators_manager
+        
+        # Scalability: Support for hybrid consensus mode
+        self.consensus_mode = os.getenv('CONSENSUS_MODE', 'legacy')  # legacy, hybrid, zmq
+        self.zmq_client = None
+        self.zmq_client_connected = False
+        if self.consensus_mode in ['hybrid', 'zmq']:
+            try:
+                from backend.services.zmq_client import AsyncZeroMQClient
+                self.zmq_client = AsyncZeroMQClient()
+                # Note: Connection will be established when first used
+                print(f"ConsensusAlgorithm initialized in {self.consensus_mode} mode with ZeroMQ")
+            except Exception as e:
+                print(f"Failed to initialize ZeroMQ client: {e}. Falling back to legacy mode.")
+                self.consensus_mode = 'legacy'
+                self.zmq_client = None
+    
+    async def _ensure_zmq_connected(self):
+        """Ensure ZeroMQ client is connected"""
+        if self.zmq_client and not self.zmq_client_connected:
+            try:
+                await self.zmq_client.connect()
+                self.zmq_client_connected = True
+            except Exception as e:
+                print(f"Failed to connect ZeroMQ client: {e}")
+                return False
+        return self.zmq_client_connected
 
     async def run_crawl_snapshot_loop(
         self,
@@ -380,16 +406,46 @@ class ConsensusAlgorithm:
                         print(f"_crawl_snapshot: address is None, tx {transaction}")
                         traceback.print_stack()
 
-                    # Initialize queue and stop event for the address if not present
-                    if address not in self.pending_queues:
-                        self.pending_queues[address] = asyncio.Queue()
+                    # Scalability: Route transactions based on consensus mode
+                    if self.consensus_mode == 'zmq':
+                        # ZeroMQ only mode - send directly to broker
+                        if self.zmq_client and await self._ensure_zmq_connected():
+                            success = await self.zmq_client.queue_transaction(transaction, 'leader')
+                            if not success:
+                                print(f"Failed to queue transaction {transaction.hash} via ZeroMQ")
+                                # Could implement retry logic here
+                    elif self.consensus_mode == 'hybrid':
+                        # Hybrid mode - try ZeroMQ first, fallback to legacy
+                        queued_via_zmq = False
+                        if self.zmq_client and await self._ensure_zmq_connected():
+                            queued_via_zmq = await self.zmq_client.queue_transaction(transaction, 'leader')
+                            if queued_via_zmq:
+                                print(f"Transaction {transaction.hash} queued via ZeroMQ")
+                        
+                        if not queued_via_zmq:
+                            # Fallback to legacy queue
+                            # Initialize queue and stop event for the address if not present
+                            if address not in self.pending_queues:
+                                self.pending_queues[address] = asyncio.Queue()
 
-                    if address not in self.pending_queue_stop_events:
-                        self.pending_queue_stop_events[address] = asyncio.Event()
+                            if address not in self.pending_queue_stop_events:
+                                self.pending_queue_stop_events[address] = asyncio.Event()
 
-                    # Only add to the queue if the stop event is not set
-                    if not self.pending_queue_stop_events[address].is_set():
-                        await self.pending_queues[address].put(transaction)
+                            # Only add to the queue if the stop event is not set
+                            if not self.pending_queue_stop_events[address].is_set():
+                                await self.pending_queues[address].put(transaction)
+                    else:
+                        # Legacy mode - use existing queue system
+                        # Initialize queue and stop event for the address if not present
+                        if address not in self.pending_queues:
+                            self.pending_queues[address] = asyncio.Queue()
+
+                        if address not in self.pending_queue_stop_events:
+                            self.pending_queue_stop_events[address] = asyncio.Event()
+
+                        # Only add to the queue if the stop event is not set
+                        if not self.pending_queue_stop_events[address].is_set():
+                            await self.pending_queues[address].put(transaction)
 
                         # Set the transaction as activated so it is not added to the queue again
                         ConsensusAlgorithm.dispatch_transaction_status_update(

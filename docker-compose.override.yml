@@ -1,0 +1,46 @@
+# Docker Compose Override for Scalability Configurations
+# This file is automatically applied and configures services based on READER_WORKERS and WRITER_WORKERS
+
+# Configuration Examples:
+# 1. Simple RPC (Infrastructure Node):
+#    READER_WORKERS=0 WRITER_WORKERS=0
+#    - No GenVM, handles simple RPC calls only
+#    - No WebDriver needed
+#    - No consensus processing
+#
+# 2. Reader Farm:
+#    READER_WORKERS=3 WRITER_WORKERS=0
+#    - 3 jsonrpc replicas with GenVM for read operations
+#    - Traefik load balances between readers
+#    - No write/consensus handling
+#
+# 3. Write Farm Coordinator:
+#    READER_WORKERS=0 WRITER_WORKERS=5
+#    - Simple RPC coordinator
+#    - 5 consensus workers processing via ZMQ
+#    - ZMQ broker and Redis enabled
+#
+# 4. Hybrid Mode (Development):
+#    READER_WORKERS=2 WRITER_WORKERS=3
+#    - 2 reader replicas with GenVM
+#    - 3 consensus workers
+#    - Full stack enabled
+
+services:
+  # Conditionally disable services based on configuration
+  webdriver:
+    # Needed when READER_WORKERS > 0 OR WRITER_WORKERS > 0 (both use GenVM)
+    # Not needed when both are 0 (simple-rpc mode)
+    profiles: ${WEBDRIVER_PROFILE:-default}
+  
+  zmq-broker:
+    # Only needed when WRITER_WORKERS > 0
+    profiles: ${ZMQ_PROFILE:-default}
+  
+  consensus-worker:
+    # Only needed when WRITER_WORKERS > 0
+    profiles: ${CONSENSUS_PROFILE:-default}
+  
+  redis:
+    # Only needed when WRITER_WORKERS > 0
+    profiles: ${REDIS_PROFILE:-default}

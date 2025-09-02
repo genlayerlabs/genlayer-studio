@@ -32,6 +32,8 @@ from backend.database_handler.models import Base, TransactionStatus
 from backend.rollup.consensus_service import ConsensusService
 from backend.protocol_rpc.aio import MAIN_SERVER_LOOP, MAIN_LOOP_EXITING, MAIN_LOOP_DONE
 from backend.domain.types import TransactionType
+from backend.protocol_rpc.scalability_endpoints import scalability_bp
+from backend.protocol_rpc.worker_mode import worker_config
 
 
 def get_db_name(database: str) -> str:
@@ -97,6 +99,14 @@ async def create_app():
         consensus_service,
         validators_manager,
     )
+    
+    # Register scalability monitoring endpoints
+    app.register_blueprint(scalability_bp, url_prefix='/api')
+    
+    # Log worker configuration
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"Worker configuration: {worker_config.get_status()}")
     return (
         app,
         jsonrpc,

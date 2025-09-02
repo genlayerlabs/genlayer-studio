@@ -1071,6 +1071,15 @@ def register_all_rpc_endpoints(
     transactions_parser: TransactionParser,
 ):
     register_rpc_endpoint = partial(generate_rpc_endpoint, jsonrpc, msg_handler)
+    
+    # Import worker configuration
+    from backend.protocol_rpc.worker_mode import worker_config
+    disabled_endpoints = worker_config.get_endpoints_to_disable()
+    
+    # Log worker mode configuration
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"Worker mode: {worker_config.mode}, Disabled endpoints: {disabled_endpoints}")
 
     register_rpc_endpoint(ping)
     register_rpc_endpoint(
@@ -1161,28 +1170,32 @@ def register_all_rpc_endpoints(
         partial(get_contract_schema_for_code, msg_handler),
         method_name="gen_getContractSchemaForCode",
     )
-    register_rpc_endpoint(
-        partial(
-            gen_call,
-            request_session,
-            accounts_manager,
-            msg_handler,
-            transactions_parser,
-            validators_manager,
-        ),
-        method_name="gen_call",
-    )
-    register_rpc_endpoint(
-        partial(
-            sim_call,
-            request_session,
-            accounts_manager,
-            msg_handler,
-            transactions_parser,
-            validators_manager,
-        ),
-        method_name="sim_call",
-    )
+    # GenVM read endpoints - skip if in simple-rpc mode
+    if 'call' not in disabled_endpoints and 'gen_call' not in disabled_endpoints:
+        register_rpc_endpoint(
+            partial(
+                gen_call,
+                request_session,
+                accounts_manager,
+                msg_handler,
+                transactions_parser,
+                validators_manager,
+            ),
+            method_name="gen_call",
+        )
+    
+    if 'call' not in disabled_endpoints and 'sim_call' not in disabled_endpoints:
+        register_rpc_endpoint(
+            partial(
+                sim_call,
+                request_session,
+                accounts_manager,
+                msg_handler,
+                transactions_parser,
+                validators_manager,
+            ),
+            method_name="sim_call",
+        )
     register_rpc_endpoint(
         partial(get_balance, accounts_manager),
         method_name="eth_getBalance",
@@ -1191,28 +1204,33 @@ def register_all_rpc_endpoints(
         partial(get_transaction_by_hash, transactions_processor),
         method_name="eth_getTransactionByHash",
     )
-    register_rpc_endpoint(
-        partial(
-            eth_call,
-            request_session,
-            accounts_manager,
-            msg_handler,
-            transactions_parser,
-            validators_manager,
-        ),
-        method_name="eth_call",
-    )
-    register_rpc_endpoint(
-        partial(
-            send_raw_transaction,
-            transactions_processor,
-            msg_handler,
-            accounts_manager,
-            transactions_parser,
-            consensus_service,
-        ),
-        method_name="eth_sendRawTransaction",
-    )
+    # eth_call - GenVM read endpoint
+    if 'eth_call' not in disabled_endpoints:
+        register_rpc_endpoint(
+            partial(
+                eth_call,
+                request_session,
+                accounts_manager,
+                msg_handler,
+                transactions_parser,
+                validators_manager,
+            ),
+            method_name="eth_call",
+        )
+    
+    # eth_sendRawTransaction - Write endpoint
+    if 'eth_sendRawTransaction' not in disabled_endpoints:
+        register_rpc_endpoint(
+            partial(
+                send_raw_transaction,
+                transactions_processor,
+                msg_handler,
+                accounts_manager,
+                transactions_parser,
+                consensus_service,
+            ),
+            method_name="eth_sendRawTransaction",
+        )
     register_rpc_endpoint(
         partial(get_transaction_count, transactions_processor),
         method_name="eth_getTransactionCount",
