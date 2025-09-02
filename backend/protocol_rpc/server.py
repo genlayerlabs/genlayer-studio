@@ -79,12 +79,15 @@ async def create_app():
     transactions_parser = TransactionParser(consensus_service)
 
     initialize_validators_db_session = create_session()
-    await initialize_validators(
-        os.environ["VALIDATORS_CONFIG_JSON"],
-        ModifiableValidatorsRegistry(initialize_validators_db_session),
-        AccountsManager(initialize_validators_db_session),
-    )
-    initialize_validators_db_session.commit()
+    try:
+        await initialize_validators(
+            os.environ["VALIDATORS_CONFIG_JSON"],
+            ModifiableValidatorsRegistry(initialize_validators_db_session),
+            AccountsManager(initialize_validators_db_session),
+        )
+        initialize_validators_db_session.commit()
+    finally:
+        initialize_validators_db_session.close()
 
     validators_manager = validators.Manager(create_session())
     await validators_manager.restart()
