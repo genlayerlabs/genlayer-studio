@@ -40,8 +40,9 @@ def get_db_name(database: str) -> str:
 async def create_app():
     # Set up unified logging BEFORE any other components
     from backend.protocol_rpc.message_handler.base import setup_loguru_config
+
     setup_loguru_config()
-    
+
     def create_session():
         return Session(engine, expire_on_commit=False)
 
@@ -58,16 +59,19 @@ async def create_app():
     # Disable SQLAlchemy's built-in echo to prevent direct stdout logging
     # We'll handle SQL logging through our intercept handler instead
     engine = create_engine(db_uri, echo=False, pool_size=50, max_overflow=50)
-    
+
     # Enable SQLAlchemy logging through the logging system (which we intercept)
     import logging
-    sqlalchemy_logger = logging.getLogger('sqlalchemy.engine')
+
+    sqlalchemy_logger = logging.getLogger("sqlalchemy.engine")
     sqlalchemy_logger.setLevel(logging.INFO)
 
     # Flask
     app = Flask("jsonrpc_api")
     app.config["SQLALCHEMY_DATABASE_URI"] = db_uri
-    app.config["SQLALCHEMY_ECHO"] = False  # We handle SQL logging through Loguru intercept
+    app.config["SQLALCHEMY_ECHO"] = (
+        False  # We handle SQL logging through Loguru intercept
+    )
     sqlalchemy_db.init_app(app)
 
     CORS(app, resources={r"/api/*": {"origins": "*"}}, intercept_exceptions=False)
