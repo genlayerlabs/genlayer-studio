@@ -230,29 +230,9 @@ def setup_loguru_config():
         sys.stdout,
         colorize=True,
         format="<level>{level: <8}</level> | {message}",
-        level=log_level
+        level=log_level,
     )
-    
-    # # Production file logging
-    # if logging_env == "prod":
-    #     # Rotating file handler for general logs
-    #     logger.add(
-    #         "system.log",
-    #         rotation="1 day",
-    #         retention="30 days",
-    #         level="ERROR",
-    #         format="[{time:YYYY-MM-DD HH:mm:ss}] {level} | {module} >>> {message}"
-    #     )
-        
-    #     # Size-based rotating handler for detailed logs
-    #     logger.add(
-    #         "flask.log", 
-    #         rotation="1 MB",
-    #         retention=5,
-    #         level=log_level,
-    #         format="[{time:YYYY-MM-DD HH:mm:ss}] {level} | {module} >>> {message}"
-    #     )
-    
+
     # Set up logging intercept for standard library loggers
     class InterceptHandler(logging.Handler):
         def emit(self, record):
@@ -270,9 +250,9 @@ def setup_loguru_config():
             
             # Format multi-line messages (like SQL) into single line
             message = record.getMessage()
-            if '\n' in message:
+            if "\n" in message:
                 # Replace newlines with spaces and compress multiple spaces
-                message = ' '.join(message.split())
+                message = " ".join(message.split())
                 # Add indicator that we processed multi-line content
                 message = f"[COMPRESSED] {message}"
             
