@@ -280,7 +280,6 @@ class ConsensusService:
             )
             return None
 
-
     def get_highest_block_number(self) -> int:
         """
         Get the highest block number

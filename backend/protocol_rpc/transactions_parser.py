@@ -295,10 +295,10 @@ class TransactionParser:
         """
         Extract the transaction hash from a signed transaction.
         This is the hash that Metamask calculated and signed.
-        
+
         Args:
             raw_transaction: The hex-encoded signed transaction from Metamask
-            
+
         Returns:
             str | None: The transaction hash as hex string with 0x prefix, or None if extraction fails
         """

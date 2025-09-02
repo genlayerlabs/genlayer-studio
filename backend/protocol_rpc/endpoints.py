@@ -795,7 +795,7 @@ def send_raw_transaction(
         # Obtain transaction hash from new transaction event or prepare for retry logic
         if rollup_transaction_details and "tx_id_hex" in rollup_transaction_details:
             transaction_hash = rollup_transaction_details["tx_id_hex"]
-            
+
             transaction_hash = transactions_processor.insert_transaction(
                 genlayer_transaction.from_address,
                 to_address,
@@ -812,13 +812,17 @@ def send_raw_transaction(
         else:
             # Consensus service failed, use retry logic with hash generation
             # Get the correct nonce from database instead of using Metamask's potentially stale nonce
-            db_nonce = transactions_processor.get_transaction_count(genlayer_transaction.from_address)
-            
+            db_nonce = transactions_processor.get_transaction_count(
+                genlayer_transaction.from_address
+            )
+
             try:
                 # First attempt: try with Metamask hash
-                transaction_hash = transactions_parser.get_transaction_hash(signed_rollup_transaction)
+                transaction_hash = transactions_parser.get_transaction_hash(
+                    signed_rollup_transaction
+                )
                 print(f"[HASH_ATTEMPT] Using Metamask hash with nonce {db_nonce}")
-                
+
                 transaction_hash = transactions_processor.insert_transaction(
                     genlayer_transaction.from_address,
                     to_address,
@@ -832,16 +836,20 @@ def send_raw_transaction(
                     transaction_hash,
                     genlayer_transaction.num_of_initial_validators,
                 )
-                
+
             except IntegrityError:
                 # Unique violation/hash collision ⇒ rollback and retry with fresh nonce
                 transactions_processor.session.rollback()
-                
+
                 # Recalculate nonce after rollback to get current count
-                fresh_db_nonce = transactions_processor.get_transaction_count(genlayer_transaction.from_address)
+                fresh_db_nonce = transactions_processor.get_transaction_count(
+                    genlayer_transaction.from_address
+                )
                 retry_nonce = fresh_db_nonce
-                print(f"[HASH_COLLISION] Detected duplicate hash, recalculated nonce: {retry_nonce}")
-                
+                print(
+                    f"[HASH_COLLISION] Detected duplicate hash, recalculated nonce: {retry_nonce}"
+                )
+
                 transaction_hash = transactions_processor.insert_transaction(
                     genlayer_transaction.from_address,
                     to_address,
@@ -858,12 +866,16 @@ def send_raw_transaction(
             except PendingRollbackError:
                 # Session needs rollback before retry
                 transactions_processor.session.rollback()
-                
+
                 # Recalculate nonce after rollback to get current count
-                fresh_db_nonce = transactions_processor.get_transaction_count(genlayer_transaction.from_address)
+                fresh_db_nonce = transactions_processor.get_transaction_count(
+                    genlayer_transaction.from_address
+                )
                 retry_nonce = fresh_db_nonce
-                print(f"[SESSION_ROLLBACK] Session rolled back, recalculated nonce: {retry_nonce}")
-                
+                print(
+                    f"[SESSION_ROLLBACK] Session rolled back, recalculated nonce: {retry_nonce}"
+                )
+
                 transaction_hash = transactions_processor.insert_transaction(
                     genlayer_transaction.from_address,
                     to_address,
