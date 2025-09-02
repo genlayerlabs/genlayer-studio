@@ -428,6 +428,47 @@ async def get_contract_schema_for_code(
     return json.loads(schema)
 
 
+def get_contract_code(
+    accounts_manager: AccountsManager, contract_address: str
+) -> str:
+    if not accounts_manager.is_valid_address(contract_address):
+        raise InvalidAddressError(
+            contract_address,
+            "Incorrect address format. Please provide a valid address.",
+        )
+    contract_account = accounts_manager.get_account_or_fail(contract_address)
+
+    if not contract_account["data"]:
+        raise InvalidAddressError(
+            contract_address,
+            "Contract not deployed.",
+        )
+
+    from backend.node.genvm.origin.base_host import get_code_slot
+
+    state = contract_account["data"].get("state") or {}
+    accepted = state.get("accepted") or {}
+
+    code_slot_b64 = base64.b64encode(get_code_slot()).decode("ascii")
+    stored = accepted.get(code_slot_b64)
+    if not stored:
+        raise InvalidAddressError(
+            contract_address,
+            "Contract not deployed.",
+        )
+
+    raw = base64.b64decode(stored)
+    if len(raw) < 4:
+        raise InvalidAddressError(
+            contract_address,
+            "Contract not deployed.",
+        )
+
+    code_len = int.from_bytes(raw[0:4], byteorder="little", signed=False)
+    code_bytes = raw[4 : 4 + code_len]
+    return base64.b64encode(code_bytes).decode("ascii")
+
+
 async def _execute_call_with_snapshot(
     session: Session,
     accounts_manager: AccountsManager,
@@ -1160,6 +1201,10 @@ def register_all_rpc_endpoints(
     register_rpc_endpoint(
         partial(get_contract_schema_for_code, msg_handler),
         method_name="gen_getContractSchemaForCode",
+    )
+    register_rpc_endpoint(
+        partial(get_contract_code, accounts_manager),
+        method_name="gen_getContractCode",
     )
     register_rpc_endpoint(
         partial(
