@@ -428,9 +428,7 @@ async def get_contract_schema_for_code(
     return json.loads(schema)
 
 
-def get_contract_code(
-    accounts_manager: AccountsManager, contract_address: str
-) -> str:
+def get_contract_code(accounts_manager: AccountsManager, contract_address: str) -> str:
     if not accounts_manager.is_valid_address(contract_address):
         raise InvalidAddressError(
             contract_address,
