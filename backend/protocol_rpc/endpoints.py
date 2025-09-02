@@ -438,6 +438,12 @@ def get_contract_code(
         )
     contract_account = accounts_manager.get_account_or_fail(contract_address)
 
+    # Legacy compatibility note:
+    # Historically, some rows in `current_state` were inserted with `data` as a
+    # JSON string (e.g., "{}") instead of a JSONB object. To avoid `.get` errors
+    # and keep backward compatibility, normalize string-valued `data` by parsing
+    # it into a dict. If parsing fails or the result is empty, treat it as an
+    # undeployed contract and return the standard error.
     data = contract_account.get("data") or {}
     if isinstance(data, str):
         try:
