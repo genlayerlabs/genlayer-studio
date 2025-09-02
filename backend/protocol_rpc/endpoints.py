@@ -8,6 +8,7 @@ from flask_jsonrpc import JSONRPC
 from flask_jsonrpc.exceptions import JSONRPCError
 from sqlalchemy import Table
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError, PendingRollbackError
 import backend.validators as validators
 
 from backend.database_handler.contract_snapshot import ContractSnapshot
@@ -832,54 +833,52 @@ def send_raw_transaction(
                     genlayer_transaction.num_of_initial_validators,
                 )
                 
-            except Exception as e:
-                error_str = str(e)
-                if "duplicate key value violates unique constraint" in error_str and "uq_transactions_hash" in error_str:
-                    # Hash collision detected, rollback and recalculate nonce
-                    transactions_processor.session.rollback()
-                    
-                    # Recalculate nonce after rollback to get current count
-                    fresh_db_nonce = transactions_processor.get_transaction_count(genlayer_transaction.from_address)
-                    retry_nonce = fresh_db_nonce
-                    print(f"[HASH_COLLISION] Detected duplicate hash, recalculated nonce: {retry_nonce}")
-                    
-                    transaction_hash = transactions_processor.insert_transaction(
-                        genlayer_transaction.from_address,
-                        to_address,
-                        transaction_data,
-                        value,
-                        genlayer_transaction.type.value,
-                        retry_nonce,  # Use fresh nonce calculation
-                        leader_only,
-                        genlayer_transaction.max_rotations,
-                        None,
-                        None,  # Force hash regeneration
-                        genlayer_transaction.num_of_initial_validators,
-                    )
-                elif "PendingRollbackError" in error_str:
-                    # Session needs rollback before retry
-                    transactions_processor.session.rollback()
-                    
-                    # Recalculate nonce after rollback to get current count
-                    fresh_db_nonce = transactions_processor.get_transaction_count(genlayer_transaction.from_address)
-                    retry_nonce = fresh_db_nonce
-                    print(f"[SESSION_ROLLBACK] Session rolled back, recalculated nonce: {retry_nonce}")
-                    
-                    transaction_hash = transactions_processor.insert_transaction(
-                        genlayer_transaction.from_address,
-                        to_address,
-                        transaction_data,
-                        value,
-                        genlayer_transaction.type.value,
-                        retry_nonce,  # Use fresh nonce calculation
-                        leader_only,
-                        genlayer_transaction.max_rotations,
-                        None,
-                        None,  # Force hash regeneration
-                        genlayer_transaction.num_of_initial_validators,
-                    )
-                else:
-                    raise e
+            except IntegrityError:
+                # Unique violation/hash collision ⇒ rollback and retry with fresh nonce
+                transactions_processor.session.rollback()
+                
+                # Recalculate nonce after rollback to get current count
+                fresh_db_nonce = transactions_processor.get_transaction_count(genlayer_transaction.from_address)
+                retry_nonce = fresh_db_nonce
+                print(f"[HASH_COLLISION] Detected duplicate hash, recalculated nonce: {retry_nonce}")
+                
+                transaction_hash = transactions_processor.insert_transaction(
+                    genlayer_transaction.from_address,
+                    to_address,
+                    transaction_data,
+                    value,
+                    genlayer_transaction.type.value,
+                    retry_nonce,  # Use fresh nonce calculation
+                    leader_only,
+                    genlayer_transaction.max_rotations,
+                    None,
+                    None,  # Force hash regeneration
+                    genlayer_transaction.num_of_initial_validators,
+                )
+            except PendingRollbackError:
+                # Session needs rollback before retry
+                transactions_processor.session.rollback()
+                
+                # Recalculate nonce after rollback to get current count
+                fresh_db_nonce = transactions_processor.get_transaction_count(genlayer_transaction.from_address)
+                retry_nonce = fresh_db_nonce
+                print(f"[SESSION_ROLLBACK] Session rolled back, recalculated nonce: {retry_nonce}")
+                
+                transaction_hash = transactions_processor.insert_transaction(
+                    genlayer_transaction.from_address,
+                    to_address,
+                    transaction_data,
+                    value,
+                    genlayer_transaction.type.value,
+                    retry_nonce,  # Use fresh nonce calculation
+                    leader_only,
+                    genlayer_transaction.max_rotations,
+                    None,
+                    None,  # Force hash regeneration
+                    genlayer_transaction.num_of_initial_validators,
+                )
+            except Exception:
+                raise
 
         return transaction_hash
 
