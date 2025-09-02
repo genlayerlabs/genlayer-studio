@@ -217,14 +217,14 @@ def log_endpoint_info_wrapper(msg_handler: MessageHandler, config: GlobalConfigu
 
 def setup_loguru_config():
     import logging
-    
+
     # Remove default loguru handler
     logger.remove()
-    
+
     # Get log level from environment
     log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
     logging_env = os.environ.get("LOGCONFIG", "dev")
-    
+
     # Console handler with colors
     logger.add(
         sys.stdout,
@@ -241,13 +241,13 @@ def setup_loguru_config():
                 level = logger.level(record.levelname).name
             except ValueError:
                 level = record.levelno
-            
+
             # Find caller from where originated the logged message
             frame, depth = logging.currentframe(), 2
             while frame and frame.f_code.co_filename == logging.__file__:
                 frame = frame.f_back
                 depth += 1
-            
+
             # Format multi-line messages (like SQL) into single line
             message = record.getMessage()
             if "\n" in message:
@@ -255,24 +255,24 @@ def setup_loguru_config():
                 message = " ".join(message.split())
                 # Add indicator that we processed multi-line content
                 message = f"[COMPRESSED] {message}"
-            
+
             logger.opt(depth=depth, exception=record.exc_info).log(level, message)
-    
+
     # Configure all standard library loggers to use loguru
     intercept_handler = InterceptHandler()
-    
+
     # Clear and configure root logger first
     logging.root.handlers.clear()
     logging.root.addHandler(intercept_handler)
     logging.root.setLevel("INFO")
-    
+
     # Be more aggressive - intercept all existing loggers
     for name in logging.Logger.manager.loggerDict:
         std_logger = logging.getLogger(name)
         std_logger.handlers.clear()
         std_logger.addHandler(intercept_handler)
         std_logger.propagate = False
-    
+
     # Ensure specific loggers are definitely intercepted
     for logger_name in ["sqlalchemy.engine", "werkzeug", "sqlalchemy"]:
         std_logger = logging.getLogger(logger_name)
