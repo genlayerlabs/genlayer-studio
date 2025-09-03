@@ -1333,7 +1333,7 @@ def register_all_rpc_endpoints(
         partial(delete_all_snapshots, snapshot_manager),
         method_name="sim_deleteAllSnapshots",
     )
-    
+
     register_rpc_endpoint(
         partial(dev_get_pool_status, sqlalchemy_db),
         method_name="dev_getPoolStatus",

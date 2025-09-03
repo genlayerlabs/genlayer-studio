@@ -1,9 +1,9 @@
 # Database Connection Pool Exhaustion Analysis
 
-**Date**: January 30, 2025  
-**Author**: Edgars Nemse with Claude  
-**Status**: Investigation Complete  
-**Severity**: High  
+**Date**: January 30, 2025
+**Author**: Edgars Nemse with Claude
+**Status**: Investigation Complete
+**Severity**: High
 
 ## Executive Summary
 
@@ -31,7 +31,7 @@ Each `TransactionsProcessor` instance creates its own Web3 HTTP connection:
 # backend/rollup/consensus_service.py:23
 self.web3 = Web3(Web3.HTTPProvider(hardhat_url))
 
-# backend/database_handler/transactions_processor.py:76  
+# backend/database_handler/transactions_processor.py:76
 self.web3 = Web3(Web3.HTTPProvider(hardhat_url))
 ```
 
@@ -78,14 +78,14 @@ Create `backend/rollup/web3_pool.py`:
 class Web3ConnectionPool:
     _instance = None
     _web3 = None
-    
+
     @classmethod
     def get_connection(cls):
         if cls._web3 is None:
             hardhat_url = f"{os.environ.get('HARDHAT_URL')}:{os.environ.get('HARDHAT_PORT')}"
             cls._web3 = Web3(Web3.HTTPProvider(hardhat_url))
         return cls._web3
-    
+
     @classmethod
     def close(cls):
         if cls._web3:
@@ -156,7 +156,7 @@ def transactions_processor_factory(session: Session, web3=None):
 
 # Update all calls to pass web3
 transactions_processor = transactions_processor_factory(
-    session, 
+    session,
     self.consensus_service.web3
 )
 ```
@@ -281,24 +281,24 @@ ab -n 1000 -c 100 http://localhost/api/eth_blockNumber
 
 ```sql
 -- Monitor PostgreSQL connections
-SELECT 
+SELECT
     state,
     count(*),
     max(age(now(), state_change)) as max_duration
-FROM pg_stat_activity 
+FROM pg_stat_activity
 WHERE datname = 'genlayer_state'
 GROUP BY state;
 
 -- Identify connection leaks
-SELECT 
+SELECT
     pid,
     usename,
     application_name,
     state,
     age(now(), state_change) as duration,
     query
-FROM pg_stat_activity 
-WHERE datname = 'genlayer_state' 
+FROM pg_stat_activity
+WHERE datname = 'genlayer_state'
   AND state != 'idle'
   AND state_change < now() - interval '5 minutes';
 ```
