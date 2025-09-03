@@ -1,4 +1,4 @@
-import type { ContractFile, DeployedContract, ImportedContract } from '@/types';
+import type { ContractFile, DeployedContract } from '@/types';
 import { type PiniaPluginContext } from 'pinia';
 import { useDb, useFileName } from '@/hooks';
 import { toRaw } from 'vue';
@@ -110,12 +110,6 @@ export function persistStorePlugin(context: PiniaPluginContext): void {
               .where('contractId')
               .equals(args[0] as string)
               .delete();
-            break;
-          case 'addImportedContract':
-            await db.importedContracts.add(args[0] as ImportedContract);
-            break;
-          case 'removeImportedContract':
-            await db.importedContracts.delete(args[0] as string);
             break;
           default:
             break;
