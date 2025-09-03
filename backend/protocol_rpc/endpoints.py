@@ -8,7 +8,6 @@ from flask_jsonrpc import JSONRPC
 from flask_jsonrpc.exceptions import JSONRPCError
 from sqlalchemy import Table
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError, PendingRollbackError
 import backend.validators as validators
 
 from backend.database_handler.contract_snapshot import ContractSnapshot
@@ -792,105 +791,26 @@ def send_raw_transaction(
 
             transaction_data = {"calldata": genlayer_transaction.data.calldata}
 
-        # Obtain transaction hash from new transaction event or prepare for retry logic
+        # Obtain transaction hash from new transaction event
         if rollup_transaction_details and "tx_id_hex" in rollup_transaction_details:
             transaction_hash = rollup_transaction_details["tx_id_hex"]
-
-            transaction_hash = transactions_processor.insert_transaction(
-                genlayer_transaction.from_address,
-                to_address,
-                transaction_data,
-                value,
-                genlayer_transaction.type.value,
-                nonce,
-                leader_only,
-                genlayer_transaction.max_rotations,
-                None,
-                transaction_hash,
-                genlayer_transaction.num_of_initial_validators,
-            )
         else:
-            # Consensus service failed, use retry logic with hash generation
-            # Get the correct nonce from database instead of using Metamask's potentially stale nonce
-            db_nonce = transactions_processor.get_transaction_count(
-                genlayer_transaction.from_address
-            )
+            transaction_hash = None
 
-            try:
-                # First attempt: try with Metamask hash
-                transaction_hash = transactions_parser.get_transaction_hash(
-                    signed_rollup_transaction
-                )
-                print(f"[HASH_ATTEMPT] Using Metamask hash with nonce {db_nonce}")
-
-                transaction_hash = transactions_processor.insert_transaction(
-                    genlayer_transaction.from_address,
-                    to_address,
-                    transaction_data,
-                    value,
-                    genlayer_transaction.type.value,
-                    db_nonce,
-                    leader_only,
-                    genlayer_transaction.max_rotations,
-                    None,
-                    transaction_hash,
-                    genlayer_transaction.num_of_initial_validators,
-                )
-
-            except IntegrityError:
-                # Unique violation/hash collision ⇒ rollback and retry with fresh nonce
-                transactions_processor.session.rollback()
-
-                # Recalculate nonce after rollback to get current count
-                fresh_db_nonce = transactions_processor.get_transaction_count(
-                    genlayer_transaction.from_address
-                )
-                retry_nonce = fresh_db_nonce
-                print(
-                    f"[HASH_COLLISION] Detected duplicate hash, recalculated nonce: {retry_nonce}"
-                )
-
-                transaction_hash = transactions_processor.insert_transaction(
-                    genlayer_transaction.from_address,
-                    to_address,
-                    transaction_data,
-                    value,
-                    genlayer_transaction.type.value,
-                    retry_nonce,  # Use fresh nonce calculation
-                    leader_only,
-                    genlayer_transaction.max_rotations,
-                    None,
-                    None,  # Force hash regeneration
-                    genlayer_transaction.num_of_initial_validators,
-                )
-            except PendingRollbackError:
-                # Session needs rollback before retry
-                transactions_processor.session.rollback()
-
-                # Recalculate nonce after rollback to get current count
-                fresh_db_nonce = transactions_processor.get_transaction_count(
-                    genlayer_transaction.from_address
-                )
-                retry_nonce = fresh_db_nonce
-                print(
-                    f"[SESSION_ROLLBACK] Session rolled back, recalculated nonce: {retry_nonce}"
-                )
-
-                transaction_hash = transactions_processor.insert_transaction(
-                    genlayer_transaction.from_address,
-                    to_address,
-                    transaction_data,
-                    value,
-                    genlayer_transaction.type.value,
-                    retry_nonce,  # Use fresh nonce calculation
-                    leader_only,
-                    genlayer_transaction.max_rotations,
-                    None,
-                    None,  # Force hash regeneration
-                    genlayer_transaction.num_of_initial_validators,
-                )
-            except Exception:
-                raise
+        # Insert transaction into the database
+        transaction_hash = transactions_processor.insert_transaction(
+            genlayer_transaction.from_address,
+            to_address,
+            transaction_data,
+            value,
+            genlayer_transaction.type.value,
+            nonce,
+            leader_only,
+            genlayer_transaction.max_rotations,
+            None,
+            transaction_hash,
+            genlayer_transaction.num_of_initial_validators,
+        )
 
         return transaction_hash
 
