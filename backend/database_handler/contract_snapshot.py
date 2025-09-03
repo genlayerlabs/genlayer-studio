@@ -66,7 +66,7 @@ class ContractSnapshot:
 
         if result is None:
             raise Exception(f"Contract {self.contract_address} not found")
-        
+
         # Handle legacy JSON string data and validate deployment
         if isinstance(result.data, str):
             result.data = json.loads(result.data)
