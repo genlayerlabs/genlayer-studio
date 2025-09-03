@@ -1,9 +1,10 @@
-import type { ContractFile, DeployedContract, TransactionItem } from '@/types';
+import type { ContractFile, DeployedContract, ImportedContract, TransactionItem } from '@/types';
 import Dexie, { type Table } from 'dexie';
 
 class GenLayerSimulatorDB extends Dexie {
   contractFiles!: Table<ContractFile>;
   deployedContracts!: Table<DeployedContract>;
+  importedContracts!: Table<ImportedContract>;
   transactions!: Table<TransactionItem>;
 
   constructor() {
@@ -53,6 +54,14 @@ class GenLayerSimulatorDB extends Dexie {
             }
           });
       });
+
+    this.version(5).stores({
+      contractFiles: 'id',
+      deployedContracts: '[contractId+address]',
+      importedContracts: 'id, address, name, importedAt',
+      transactions:
+        '++id, type, statusName, contractAddress, localContractId, hash',
+    });
   }
 }
 

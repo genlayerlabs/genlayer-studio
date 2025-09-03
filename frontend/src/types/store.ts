@@ -19,6 +19,14 @@ export interface DeployedContract {
   defaultState: string;
 }
 
+export interface ImportedContract {
+  id: string;
+  address: Address;
+  name: string;
+  importedAt: string;
+  abi?: string;
+}
+
 export interface NodeLog {
   scope: string;
   name: string;
