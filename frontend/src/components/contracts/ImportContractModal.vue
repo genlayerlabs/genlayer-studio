@@ -5,6 +5,7 @@ import { useContractsStore } from '@/stores';
 import { v4 as uuidv4 } from 'uuid';
 import { notify } from '@kyvg/vue3-notification';
 import { ContractService } from '@/services/ContractService';
+import { useContractQueries } from '@/hooks';
 
 const props = defineProps<{
   open: boolean;
@@ -15,6 +16,7 @@ const emit = defineEmits<{
 }>();
 
 const contractsStore = useContractsStore();
+const { fetchContractCode } = useContractQueries();
 
 const contractAddress = ref('');
 const contractName = ref('');
@@ -61,20 +63,35 @@ const handleImport = async () => {
     const contractId = uuidv4();
     const fileName = contractName.value || `imported_${contractAddress.value.slice(0, 10)}.py`;
     
-    // Create a placeholder contract file with a comment about the import
-    const placeholderCode = `# Imported contract from address: ${contractAddress.value}
-# Imported at: ${new Date().toISOString()}
-# This is a placeholder file for an imported contract.
-# The actual contract code is deployed at the address above.
-
-# Contract methods can be called through the Run & Debug interface.
-`;
+    let contractCode = '';
+    
+    try {
+      // Try to fetch the actual contract code
+      contractCode = await fetchContractCode(contractAddress.value);
+      
+      notify({
+        title: 'Contract code retrieved',
+        text: 'Successfully fetched the contract code',
+        type: 'success',
+      });
+    } catch (codeError) {
+      console.warn('Failed to fetch contract code:', codeError);
+      
+      // Fallback to empty file if we can't get the actual code
+      contractCode = '# ERROR: Could not retrieve contract code';
+      
+      notify({
+        title: 'Could not retrieve contract code',
+        text: 'The contract will be added without source code',
+        type: 'error',
+      });
+    }
 
     // Add the contract file
     contractsStore.addContractFile({
       id: contractId,
       name: fileName.endsWith('.py') ? fileName : `${fileName}.py`,
-      content: placeholderCode,
+      content: contractCode,
     });
 
     // Add the deployed contract entry
