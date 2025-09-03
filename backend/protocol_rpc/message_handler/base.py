@@ -236,27 +236,28 @@ def setup_loguru_config():
     # Set up logging intercept for standard library loggers
     class InterceptHandler(logging.Handler):
         def emit(self, record):
-            # Get corresponding Loguru level if it exists
             try:
                 level = logger.level(record.levelname).name
             except ValueError:
                 level = record.levelno
 
-            # Find caller from where originated the logged message
             frame, depth = logging.currentframe(), 2
             while frame and frame.f_code.co_filename == logging.__file__:
                 frame = frame.f_back
                 depth += 1
 
-            # Format multi-line messages (like SQL) into single line
             message = record.getMessage()
             if "\n" in message:
-                # Replace newlines with spaces and compress multiple spaces
                 message = " ".join(message.split())
-                # Add indicator that we processed multi-line content
                 message = f"[COMPRESSED] {message}"
 
-            logger.opt(depth=depth, exception=record.exc_info).log(level, message)
+            if record.exc_info: 
+                exc_type, exc, tb = record.exc_info 
+                exc_only = " ".join(traceback.format_exception_only(exc_type, exc)).strip() 
+                tb_str = " ".join(line.strip() for line in traceback.format_tb(tb)) 
+                message = f"{message} | exc={exc_only} | tb={tb_str}" 
+
+            logger.opt(depth=depth).log(level, message)
 
     # Configure all standard library loggers to use loguru
     intercept_handler = InterceptHandler()
