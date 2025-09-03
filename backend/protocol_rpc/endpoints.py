@@ -45,6 +45,7 @@ from backend.database_handler.transactions_processor import (
 from backend.node.base import Node, SIMULATOR_CHAIN_ID
 from backend.node.types import ExecutionMode, ExecutionResultStatus
 from backend.consensus.base import ConsensusAlgorithm
+from backend.protocol_rpc.call_interceptor import handle_consensus_data_call
 
 from flask_jsonrpc.exceptions import JSONRPCError
 import base64
@@ -673,6 +674,7 @@ async def eth_call(
     msg_handler: MessageHandler,
     transactions_parser: TransactionParser,
     validators_manager: validators.Manager,
+    transactions_processor: TransactionsProcessor,
     params: dict,
     block_tag: str = "latest",
 ) -> str:
@@ -690,6 +692,13 @@ async def eth_call(
 
     if not accounts_manager.is_valid_address(to_address):
         raise InvalidAddressError(to_address)
+
+    # Check if this is a ConsensusData contract call that we should handle locally
+    consensus_data_result = handle_consensus_data_call(
+        transactions_processor, to_address, data
+    )
+    if consensus_data_result is not None:
+        return consensus_data_result
 
     decoded_data = transactions_parser.decode_method_call_data(data)
 
@@ -1267,6 +1276,7 @@ def register_all_rpc_endpoints(
             msg_handler,
             transactions_parser,
             validators_manager,
+            transactions_processor,
         ),
         method_name="eth_call",
     )
@@ -1333,7 +1343,7 @@ def register_all_rpc_endpoints(
         partial(delete_all_snapshots, snapshot_manager),
         method_name="sim_deleteAllSnapshots",
     )
-    
+
     register_rpc_endpoint(
         partial(dev_get_pool_status, sqlalchemy_db),
         method_name="dev_getPoolStatus",
