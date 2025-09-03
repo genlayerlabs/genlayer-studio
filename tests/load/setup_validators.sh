@@ -7,7 +7,7 @@ set -e
 
 # Configuration
 NUM_VALIDATORS=${1:-5}  # Default to 5 validators
-API_URL=${API_URL:-"http://0.0.0.0:4000/api"}
+API_URL=${API_URL:-"http://localhost:4000/api"}
 
 echo "==================================================="
 echo "         VALIDATOR SETUP FOR LOAD TESTING"

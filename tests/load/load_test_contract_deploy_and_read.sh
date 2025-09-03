@@ -9,12 +9,14 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Configuration
-NUM_DEPLOYMENTS=${1:-10}  # Default to 10 deployments
-PARALLEL_JOBS=${2:-5}      # Default to 5 parallel jobs
+BASE_URL=${1:-"http://localhost:4000/api"}  # Default to localhost
+NUM_DEPLOYMENTS=${2:-10}  # Default to 10 deployments
+PARALLEL_JOBS=${3:-5}      # Default to 5 parallel jobs
 
 echo "==================================================="
 echo "WizardOfCoin Load Test"
 echo "==================================================="
+echo "Base URL: $BASE_URL"
 echo "Deployments: $NUM_DEPLOYMENTS"
 echo "Parallel jobs: $PARALLEL_JOBS"
 echo ""
@@ -31,7 +33,7 @@ deploy_contract() {
     local index=$1
 
     echo "[Deploy $index] Starting deployment..."
-    if result=$(python3 "$SCRIPT_DIR/deploy_contract/wizard_deploy.py" 2>&1); then
+    if result=$(python3 "$SCRIPT_DIR/deploy_contract/wizard_deploy.py" "$BASE_URL" 2>&1); then
         local addr=$(echo "$result" | grep -oE '0x[a-fA-F0-9]+' | tail -n 1)
         echo "[Deploy $index] ✅ Success - $addr"
         echo "$addr"
@@ -52,7 +54,7 @@ read_contract() {
     local temp_addr_file="/tmp/wizard_contract_$index.addr"
     echo "$addr" > "$temp_addr_file"
 
-    if result=$(python3 "$SCRIPT_DIR/deploy_contract/wizard_read.py" "$temp_addr_file" 2>&1); then
+    if result=$(python3 "$SCRIPT_DIR/deploy_contract/wizard_read.py" "$temp_addr_file" "$BASE_URL" 2>&1); then
         rm -f "$temp_addr_file"
         echo "[Read $index] ✅ Success"
         return 0
@@ -67,6 +69,7 @@ read_contract() {
 export -f deploy_contract
 export -f read_contract
 export SCRIPT_DIR
+export BASE_URL
 
 echo "=== Phase 1: Parallel Contract Deployments (Burst Mode) ==="
 echo "Launching $NUM_DEPLOYMENTS deployments with $PARALLEL_JOBS parallel workers..."
@@ -83,7 +86,7 @@ seq 1 "$NUM_DEPLOYMENTS" | xargs -P "$PARALLEL_JOBS" -I {} bash -c '
     script_dir=$3
 
     echo "[Deploy $index] Starting deployment..."
-    if result=$(python3 "$script_dir/deploy_contract/wizard_deploy.py" 2>&1); then
+    if result=$(python3 "$script_dir/deploy_contract/wizard_deploy.py" "$BASE_URL" 2>&1); then
         addr=$(echo "$result" | grep -oE "0x[a-fA-F0-9]+" | tail -n 1)
         if [ -n "$addr" ]; then
             echo "[Deploy $index] ✅ Success - $addr"
@@ -97,7 +100,7 @@ seq 1 "$NUM_DEPLOYMENTS" | xargs -P "$PARALLEL_JOBS" -I {} bash -c '
         echo "[Deploy $index] ❌ Failed"
         exit 1
     fi
-' _ {} "$TEMP_DIR" "$SCRIPT_DIR"
+' _ {} "$TEMP_DIR" "$SCRIPT_DIR" "$BASE_URL"
 
 echo ""
 echo "Collecting deployment results..."
@@ -107,9 +110,9 @@ for i in $(seq 1 "$NUM_DEPLOYMENTS"); do
     if [ -f "$TEMP_DIR/deploy_$i.addr" ]; then
         addr=$(cat "$TEMP_DIR/deploy_$i.addr")
         CONTRACT_ADDRESSES+=("$addr")
-        ((DEPLOY_SUCCESS++))
+        DEPLOY_SUCCESS=$((DEPLOY_SUCCESS + 1))
     else
-        ((DEPLOY_FAIL++))
+        DEPLOY_FAIL=$((DEPLOY_FAIL + 1))
     fi
 done
 
@@ -125,7 +128,7 @@ echo ""
 # Save addresses to files for parallel reading
 index=0
 for addr in "${CONTRACT_ADDRESSES[@]}"; do
-    ((index++))
+    index=$((index + 1))
     echo "$index" > "$TEMP_DIR/index_$index.txt"
     echo "$addr" > "$TEMP_DIR/addr_$index.txt"
 done
@@ -142,14 +145,14 @@ seq 1 "${#CONTRACT_ADDRESSES[@]}" | xargs -P "$PARALLEL_JOBS" -I {} bash -c '
     temp_addr_file="$temp_dir/read_$index.addr"
     echo "$addr" > "$temp_addr_file"
 
-    if python3 "$script_dir/deploy_contract/wizard_read.py" "$temp_addr_file" >/dev/null 2>&1; then
+    if python3 "$script_dir/deploy_contract/wizard_read.py" "$temp_addr_file" "$BASE_URL" >/dev/null 2>&1; then
         echo "[Read $index] ✅ Success"
         touch "$temp_dir/read_$index.success"
     else
         echo "[Read $index] ❌ Failed"
     fi
     rm -f "$temp_addr_file"
-' _ {} "$SCRIPT_DIR" "$TEMP_DIR"
+' _ {} "$SCRIPT_DIR" "$TEMP_DIR" "$BASE_URL"
 
 echo ""
 echo "Collecting read results..."
@@ -157,9 +160,9 @@ echo "Collecting read results..."
 # Count read successes
 for i in $(seq 1 "${#CONTRACT_ADDRESSES[@]}"); do
     if [ -f "$TEMP_DIR/read_$i.success" ]; then
-        ((READ_SUCCESS++))
+        READ_SUCCESS=$((READ_SUCCESS + 1))
     else
-        ((READ_FAIL++))
+        READ_FAIL=$((READ_FAIL + 1))
     fi
 done
 

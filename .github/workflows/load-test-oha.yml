@@ -275,7 +275,7 @@ jobs:
 
             # Run the deployment script in a subshell to capture both output and exit code
             set +e  # Disable exit on error temporarily
-            result=$(python3 deploy_contract/wizard_deploy.py 2>&1)
+            result=$(python3 deploy_contract/wizard_deploy.py "http://localhost:4000/api" 2>&1)
             exit_code=$?
             set -e  # Re-enable exit on error
 
@@ -289,7 +289,7 @@ jobs:
             if [ -n "$addr" ]; then
               echo "[Deploy $i/3] ✅ Success - Contract: $addr"
               CONTRACT_ADDRESSES+=("$addr")
-              ((DEPLOY_SUCCESS++))
+              DEPLOY_SUCCESS=$((DEPLOY_SUCCESS + 1))
 
               # Wait longer after successful deployment
               if [ $i -lt 3 ]; then
@@ -299,7 +299,7 @@ jobs:
             else
               echo "[Deploy $i/3] ❌ Failed - no address returned"
               echo "Output: $result"
-              ((DEPLOY_FAIL++))
+              DEPLOY_FAIL=$((DEPLOY_FAIL + 1))
 
               # Still wait between failed attempts
               if [ $i -lt 3 ]; then
@@ -338,7 +338,7 @@ jobs:
 
             # Run read script with proper error handling
             set +e  # Disable exit on error temporarily
-            read_output=$(python3 deploy_contract/wizard_read.py temp_contract.addr 2>&1)
+            read_output=$(python3 deploy_contract/wizard_read.py temp_contract.addr "http://localhost:4000/api" 2>&1)
             read_exit_code=$?
             set -e  # Re-enable exit on error
 
@@ -348,10 +348,10 @@ jobs:
             # Check if read was successful
             if [ $read_exit_code -eq 0 ]; then
               echo "✅ Successfully read contract state"
-              ((READ_SUCCESS++))
+              READ_SUCCESS=$((READ_SUCCESS + 1))
             else
               echo "❌ Failed to read contract state (exit code: $read_exit_code)"
-              ((READ_FAIL++))
+              READ_FAIL=$((READ_FAIL + 1))
             fi
 
             rm -f temp_contract.addr

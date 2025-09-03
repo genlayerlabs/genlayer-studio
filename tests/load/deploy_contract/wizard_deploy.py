@@ -12,14 +12,16 @@ import time
 
 
 def main():
-    # Accept optional output file argument
-    output_file = sys.argv[1] if len(sys.argv) > 1 else ".last_deployed_contract"
+    # Accept BASE_URL as first argument, optional output file as second
+    base_url = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:4000/api"
+    output_file = sys.argv[2] if len(sys.argv) > 2 else ".last_deployed_contract"
 
     print(f"=== Deploying WizardOfCoin Contract ===")
+    print(f"Base URL: {base_url}")
     print(f"Output file: {output_file}")
 
     # Setup
-    client = create_client(chain=localnet, endpoint="http://localhost:4000/api")
+    client = create_client(chain=localnet, endpoint=base_url)
     account = create_account()
     client.local_account = account
 
@@ -56,7 +58,7 @@ def main():
     # Get contract address from transaction details
     try:
         response = requests.post(
-            "http://localhost:4000/api",
+            base_url,
             json={
                 "jsonrpc": "2.0",
                 "method": "eth_getTransactionByHash",
