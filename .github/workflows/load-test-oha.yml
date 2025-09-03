@@ -8,6 +8,7 @@ on:
         required: false
         type: string
         default: 'v1.4.5'
+  pull_request:
 
 jobs:
   load-test:
@@ -65,6 +66,12 @@ jobs:
             exit 1
           fi
 
+      - name: Setup validators
+        run: |
+          cd tests/load
+          chmod +x setup_validators.sh
+          ./setup_validators.sh 5
+
       - name: Install oha
         run: |
           sudo apt-get update
@@ -73,8 +80,17 @@ jobs:
           chmod +x oha
           sudo mv oha /usr/local/bin
 
-      - name: Run Load Test
-        run: ./tests/load/test.sh
+      - name: Run Load Test - Contract Deploy and Read
+        run: |
+          cd tests/load
+          chmod +x load_test_contract_deploy_and_read.sh
+          ./load_test_contract_deploy_and_read.sh 5 1
+
+      - name: Run Load Test - All Read Setup Endpoints
+        run: |
+          cd tests/load
+          chmod +x load_test_all_read_setup_endpoints.sh
+          REQUESTS=500 CONCURRENCY=100 ./load_test_all_read_setup_endpoints.sh
 
       - name: Shutdown Docker Compose
         if: always()
