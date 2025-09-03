@@ -125,12 +125,23 @@ run_endpoint_test() {
 EOF
 )
 
-    # Run the load test using oha with timeout (suppress detailed output)
+    # Run the load test using oha with timeout
     TEST_OUTPUT=$(oha -n $REQUESTS -c $CONCURRENCY -m POST \
         -d "$REQUEST_JSON" \
         -H "Content-Type: application/json" \
         -t 60s \
         --no-tui "$BASE_URL" 2>&1)
+
+    # Print full oha output including histogram
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "Load Test Results for: $method"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    # Display the entire oha output (includes histogram, response time stats, etc.)
+    echo "$TEST_OUTPUT"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
 
     # Return success/failure based on test result
     if check_test_result "$TEST_OUTPUT"; then

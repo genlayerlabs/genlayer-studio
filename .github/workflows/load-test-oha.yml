@@ -120,8 +120,8 @@ jobs:
             echo "✅ All services are ready!"
           else
             # If frontend isn't ready but RPC is, wait a bit more
-            echo "Waiting additional 30 seconds for all services to stabilize..."
-            sleep 30
+            echo "Waiting additional 3 seconds for all services to stabilize..."
+            sleep 3
           fi
 
       - name: Verify Chain ID
@@ -293,8 +293,8 @@ jobs:
 
               # Wait longer after successful deployment
               if [ $i -lt 3 ]; then
-                echo "Waiting 30 seconds for contract to be fully processed..."
-                sleep 30
+                echo "Waiting 3 seconds for contract to be fully processed..."
+                sleep 3
               fi
             else
               echo "[Deploy $i/3] ❌ Failed - no address returned"
@@ -321,8 +321,8 @@ jobs:
 
           # Wait for contracts to be indexed
           echo ""
-          echo "Waiting 30 seconds for contracts to be indexed..."
-          sleep 30
+          echo "Waiting 3 seconds for contracts to be indexed..."
+          sleep 3
 
           # Read from deployed contracts
           echo ""
