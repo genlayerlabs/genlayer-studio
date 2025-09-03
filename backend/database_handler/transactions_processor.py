@@ -228,14 +228,13 @@ class TransactionsProcessor:
         transaction_hash: str | None = None,
         num_of_initial_validators: int | None = None,
     ) -> str:
-        current_nonce = self.get_transaction_count(from_address)
-
         # Follow up: https://github.com/MetaMask/metamask-extension/issues/29787
         # to uncomment this check
         # if nonce != current_nonce:
         #     raise Exception(
         #         f"Unexpected nonce. Provided: {nonce}, expected: {current_nonce}"
         #     )
+        current_nonce = self.get_transaction_count(from_address)
 
         if transaction_hash is None:
             transaction_hash = self._generate_transaction_hash(
@@ -627,26 +626,8 @@ class TransactionsProcessor:
         except:
             checksum_address = address
 
-        # Get the actual nonce from Hardhat instead of counting DB transactions
-        # This ensures we're always in sync with the blockchain's nonce tracking
-        try:
-            # Check connection - handle both is_connected and isConnected
-            is_connected = False
-            if hasattr(self.web3, "is_connected"):
-                is_connected = self.web3.is_connected()
-            elif hasattr(self.web3, "isConnected"):  # older web3 version
-                is_connected = self.web3.isConnected()
-
-            if is_connected:
-                # Pass 'pending' to include pending transactions for accuracy
-                return self.web3.eth.get_transaction_count(checksum_address, "pending")
-        except Exception as e:
-            # Log the error and fall back to database count
-            print(
-                f"[TRANSACTIONS_PROCESSOR]: Error getting transaction count from RPC: {e}"
-            )
-
-        # Fallback to counting transactions from database
+        # Always use database count as source of truth
+        # Our transactions are stored in PostgreSQL, not on Hardhat blockchain
         count = (
             self.session.query(Transactions)
             .filter(Transactions.from_address == checksum_address)

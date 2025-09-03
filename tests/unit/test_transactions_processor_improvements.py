@@ -24,17 +24,24 @@ class TestGetTransactionCount:
         checksum_address = "0xABcdEF1234567890aBcDef1234567890AbCdEf12"
 
         self.mock_web3.to_checksum_address.return_value = checksum_address
-        self.mock_web3.is_connected.return_value = True
-        self.mock_web3.eth.get_transaction_count.return_value = 5
+        
+        # Mock database query
+        mock_query = Mock()
+        mock_query.filter.return_value = mock_query
+        mock_query.count.return_value = 5
+        self.mock_session.query.return_value = mock_query
 
         # Execute
         result = self.processor.get_transaction_count(test_address)
 
         # Verify
         self.mock_web3.to_checksum_address.assert_called_once_with(test_address)
-        self.mock_web3.eth.get_transaction_count.assert_called_once_with(
-            checksum_address, "pending"
-        )
+        self.mock_session.query.assert_called_once_with(Transactions)
+        mock_query.filter.assert_called_once()
+        # Verify the filter checks from_address with checksum address
+        filter_call = mock_query.filter.call_args[0][0]
+        assert str(filter_call.left) == "transactions.from_address"
+        assert str(filter_call.right.value) == checksum_address
         assert result == 5
 
     def test_get_transaction_count_with_invalid_address(self):
@@ -43,102 +50,92 @@ class TestGetTransactionCount:
         test_address = "invalid_address"
 
         self.mock_web3.to_checksum_address.side_effect = Exception("Invalid address")
-        self.mock_web3.is_connected.return_value = True
-        self.mock_web3.eth.get_transaction_count.return_value = 3
+        
+        # Mock database query with original address
+        mock_query = Mock()
+        mock_query.filter.return_value = mock_query
+        mock_query.count.return_value = 3
+        self.mock_session.query.return_value = mock_query
 
         # Execute
         result = self.processor.get_transaction_count(test_address)
 
-        # Verify - should use original address
-        self.mock_web3.eth.get_transaction_count.assert_called_once_with(
-            test_address, "pending"
-        )
+        # Verify - should use original address after checksum fails
+        self.mock_web3.to_checksum_address.assert_called_once_with(test_address)
+        self.mock_session.query.assert_called_once_with(Transactions)
+        mock_query.filter.assert_called_once()
+        # Verify the filter uses the original address since checksum failed
+        filter_call = mock_query.filter.call_args[0][0]
+        assert str(filter_call.left) == "transactions.from_address"
+        assert str(filter_call.right.value) == test_address
         assert result == 3
 
-    def test_get_transaction_count_with_pending_parameter(self):
-        """Test that get_transaction_count uses 'pending' parameter"""
+    def test_get_transaction_count_returns_zero_when_no_transactions(self):
+        """Test get_transaction_count returns 0 when no transactions exist"""
         # Setup
         test_address = "0xABcdEF1234567890aBcDef1234567890AbCdEf12"
 
         self.mock_web3.to_checksum_address.return_value = test_address
-        self.mock_web3.is_connected.return_value = True
-        self.mock_web3.eth.get_transaction_count.return_value = 10
+        
+        # Mock database query returning 0
+        mock_query = Mock()
+        mock_query.filter.return_value = mock_query
+        mock_query.count.return_value = 0
+        self.mock_session.query.return_value = mock_query
 
         # Execute
         result = self.processor.get_transaction_count(test_address)
 
-        # Verify 'pending' is passed as second argument
-        self.mock_web3.eth.get_transaction_count.assert_called_once_with(
-            test_address, "pending"
-        )
-        assert result == 10
+        # Verify
+        assert result == 0
+        self.mock_session.query.assert_called_once_with(Transactions)
+        mock_query.filter.assert_called_once()
+        mock_query.count.assert_called_once()
 
-    def test_get_transaction_count_connection_error(self):
-        """Test get_transaction_count when RPC connection fails"""
+    def test_get_transaction_count_with_multiple_transactions(self):
+        """Test get_transaction_count correctly counts multiple transactions"""
         # Setup
         test_address = "0xABcdEF1234567890aBcDef1234567890AbCdEf12"
 
         self.mock_web3.to_checksum_address.return_value = test_address
-        self.mock_web3.is_connected.return_value = True
-        self.mock_web3.eth.get_transaction_count.side_effect = Exception(
-            "Connection error"
-        )
 
-        # Mock database fallback
+        # Mock database query returning count of 7
         mock_query = Mock()
         mock_query.filter.return_value = mock_query
         mock_query.count.return_value = 7
         self.mock_session.query.return_value = mock_query
 
         # Execute
-        with patch("builtins.print") as mock_print:
-            result = self.processor.get_transaction_count(test_address)
+        result = self.processor.get_transaction_count(test_address)
 
-        # Verify fallback to database
+        # Verify database is queried and correct count returned
         assert result == 7
-        mock_print.assert_called_once()
-        assert "Error getting transaction count from RPC" in str(mock_print.call_args)
+        self.mock_session.query.assert_called_once_with(Transactions)
+        mock_query.filter.assert_called_once()
+        mock_query.count.assert_called_once()
 
-    def test_get_transaction_count_not_connected(self):
-        """Test get_transaction_count when web3 is not connected"""
+
+    def test_get_transaction_count_database_query_structure(self):
+        """Test that get_transaction_count queries database with correct structure"""
         # Setup
         test_address = "0xABcdEF1234567890aBcDef1234567890AbCdEf12"
 
         self.mock_web3.to_checksum_address.return_value = test_address
-        self.mock_web3.is_connected.return_value = False
 
-        # Mock database fallback
+        # Mock database query
         mock_query = Mock()
-        mock_query.filter.return_value = mock_query
-        mock_query.count.return_value = 15
+        mock_filter = Mock()
+        mock_query.filter.return_value = mock_filter
+        mock_filter.count.return_value = 8
         self.mock_session.query.return_value = mock_query
 
         # Execute
         result = self.processor.get_transaction_count(test_address)
-
-        # Verify it falls back to database
-        assert result == 15
-        self.mock_web3.eth.get_transaction_count.assert_not_called()
-
-    def test_get_transaction_count_with_isConnected_method(self):
-        """Test handling of older web3 versions with isConnected method"""
-        # Setup
-        test_address = "0xABcdEF1234567890aBcDef1234567890AbCdEf12"
-
-        self.mock_web3.to_checksum_address.return_value = test_address
-
-        # Remove is_connected, add isConnected (older web3 version)
-        delattr(self.mock_web3, "is_connected")
-        self.mock_web3.isConnected = Mock(return_value=True)
-
-        self.mock_web3.eth.get_transaction_count.return_value = 8
-
-        # Execute
-        result = self.processor.get_transaction_count(test_address)
-        self.mock_web3.isConnected.assert_called_once()
-        self.mock_web3.eth.get_transaction_count.assert_called_once_with(
-            test_address, "pending"
-        )
+        
+        # Verify correct database query structure
+        self.mock_session.query.assert_called_once_with(Transactions)
+        mock_query.filter.assert_called_once()
+        mock_filter.count.assert_called_once()
         assert result == 8
 
 
