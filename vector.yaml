@@ -36,6 +36,6 @@ sinks:
       - docker_logs_transform
     credentials_path: /etc/vector/gcp_credentials.json
     project: "${GCP_PROJECT_ID}"
-    topic: "projects/simulator-440803/topics/observability_logs"
+    topic: "observability_logs"
     encoding:
       codec: json
