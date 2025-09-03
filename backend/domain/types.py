@@ -46,21 +46,13 @@ class SimValidatorConfig:
 @dataclass
 class SimConfig:
     validators: list[SimValidatorConfig]
-    timestamp: int | None = None
+    genvm_datetime: str | None = None
 
     @property
-    def timestamp_as_iso_format(self) -> str | None:
-        if self.timestamp is None:
+    def genvm_datetime_as_datetime(self) -> datetime.datetime | None:
+        if self.genvm_datetime is None:
             return None
-        timestamp_dt = datetime.datetime.fromtimestamp(self.timestamp, tz=datetime.UTC)
-        return timestamp_dt.isoformat()
-
-    @property
-    def timestamp_as_datetime(self) -> datetime.datetime | None:
-        if self.timestamp is None:
-            return None
-        timestamp_dt = datetime.datetime.fromtimestamp(self.timestamp, tz=datetime.UTC)
-        return timestamp_dt
+        return datetime.datetime.fromisoformat(self.genvm_datetime.replace('Z', '+00:00'))
 
     @classmethod
     def from_dict(cls, d: dict) -> "SimConfig":
@@ -70,13 +62,13 @@ class SimConfig:
         ]
         return cls(
             validators=validators,
-            timestamp=d.get("timestamp"),
+            genvm_datetime=d.get("genvm_datetime"),
         )
 
     def to_dict(self) -> dict:
         return {
             "validators": [v.to_dict() if hasattr(v, "to_dict") else v for v in self.validators],
-            "timestamp": self.timestamp,
+            "genvm_datetime": self.genvm_datetime,
         }
 
 
@@ -266,5 +258,5 @@ class Transaction:
             appeal_leader_timeout=input.get("appeal_leader_timeout", False),
             leader_timeout_validators=input.get("leader_timeout_validators"),
             appeal_validators_timeout=input.get("appeal_validators_timeout", False),
-            sim_config=input.get("sim_config"),
+            sim_config=SimConfig.from_dict(input["sim_config"]) if input.get("sim_config") else None,
         )

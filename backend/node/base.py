@@ -126,8 +126,8 @@ class Node:
         # Override transaction timestamp
         sim_config = transaction.sim_config
         transaction_created_at = transaction.created_at
-        if sim_config is not None and sim_config.timestamp is not None:
-            transaction_created_at = sim_config.timestamp_as_iso_format
+        if sim_config is not None and sim_config.genvm_datetime is not None:
+            transaction_created_at = sim_config.genvm_datetime
 
         if transaction.type == TransactionType.DEPLOY_CONTRACT:
             code = base64.b64decode(transaction_data["contract_code"])
