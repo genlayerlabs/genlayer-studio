@@ -24,7 +24,7 @@ const { isDeployed, address, contract } = useContractQueries();
 const nodeStore = useNodeStore();
 const consensusStore = useConsensusStore();
 const leaderOnly = ref(false);
-const selectedImportedContract = ref<string | null>(null);
+const selectedImportedContract = ref<string | null>(contractsStore.selectedImportedContractId);
 
 const isDeploymentOpen = ref(!isDeployed.value);
 const finalityWindow = computed({
@@ -46,6 +46,22 @@ const setConstructorVisibility = () => {
 watch(
   [() => contract.value?.id, () => isDeployed.value, () => address.value],
   setConstructorVisibility,
+);
+
+// Watch for changes in selected imported contract from store
+watch(
+  () => contractsStore.selectedImportedContractId,
+  (newValue) => {
+    selectedImportedContract.value = newValue;
+  }
+);
+
+// Watch for changes in local selectedImportedContract and update store
+watch(
+  selectedImportedContract,
+  (newValue) => {
+    contractsStore.setSelectedImportedContract(newValue);
+  }
 );
 
 function isFinalityWindowValid(value: number) {

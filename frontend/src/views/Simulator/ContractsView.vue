@@ -4,12 +4,14 @@ import { FilePlus2, Upload, FileInput } from 'lucide-vue-next';
 import { XMarkIcon } from '@heroicons/vue/16/solid';
 import { ref } from 'vue';
 import { v4 as uuidv4 } from 'uuid';
+import { useRouter } from 'vue-router';
 import ContractItem from '@/components/Simulator/ContractItem.vue';
 import MainTitle from '@/components/Simulator/MainTitle.vue';
 import ImportContractModal from '@/components/contracts/ImportContractModal.vue';
 import { useEventTracking } from '@/hooks';
 
 const store = useContractsStore();
+const router = useRouter();
 const showNewFileInput = ref(false);
 const showImportModal = ref(false);
 const { trackEvent } = useEventTracking();
@@ -61,6 +63,16 @@ const handleSaveNewFile = (name: string) => {
 
   showNewFileInput.value = false;
 };
+
+const handleImportedContractClick = (contractId: string) => {
+  console.log('Imported contract clicked:', contractId);
+  // Clear any selected file contract
+  store.setCurrentContractId('');
+  // Set the selected imported contract
+  store.setSelectedImportedContract(contractId);
+  // Navigate to Run & Debug
+  router.push({ name: 'run-debug' });
+};
 </script>
 
 <template>
@@ -103,9 +115,10 @@ const handleSaveNewFile = (name: string) => {
       <div
         v-for="contract in store.importedContracts"
         :key="contract.id"
-        class="flex items-center justify-between rounded-md px-3 py-2 hover:bg-gray-100 dark:hover:bg-zinc-700"
+        @click="handleImportedContractClick(contract.id)"
+        class="flex items-center justify-between rounded-md px-3 py-2 hover:bg-gray-100 dark:hover:bg-zinc-700 cursor-pointer"
       >
-        <div class="flex items-center gap-2">
+        <div class="flex items-center gap-2 flex-1 pointer-events-none">
           <FileInput :size="14" class="text-blue-500" />
           <div>
             <div class="text-sm font-medium">{{ contract.name }}</div>
@@ -115,8 +128,8 @@ const handleSaveNewFile = (name: string) => {
           </div>
         </div>
         <button
-          @click="store.removeImportedContract(contract.id)"
-          class="text-gray-400 hover:text-red-500"
+          @click.stop="store.removeImportedContract(contract.id)"
+          class="text-gray-400 hover:text-red-500 pointer-events-auto"
           v-tooltip="'Remove'"
         >
           <XMarkIcon class="h-4 w-4" />

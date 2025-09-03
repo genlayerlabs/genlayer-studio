@@ -15,6 +15,7 @@ export const useContractsStore = defineStore('contractsStore', () => {
   );
   const deployedContracts = ref<DeployedContract[]>([]);
   const importedContracts = ref<ImportedContract[]>([]);
+  const selectedImportedContractId = ref<string | null>(null);
 
   function getInitialOpenedFiles() {
     const storage = localStorage.getItem('contractsStore.openedFiles');
@@ -84,6 +85,8 @@ export const useContractsStore = defineStore('contractsStore', () => {
       openedFiles.value = [...openedFiles.value, id];
     }
     currentContractId.value = id;
+    // Clear selected imported contract when opening a file
+    selectedImportedContractId.value = null;
   }
 
   function closeFile(id: string) {
@@ -134,6 +137,10 @@ export const useContractsStore = defineStore('contractsStore', () => {
 
   function setCurrentContractId(id?: string) {
     currentContractId.value = id || '';
+  }
+
+  function setSelectedImportedContract(id: string | null) {
+    selectedImportedContractId.value = id;
   }
 
   function addImportedContract(contract: ImportedContract): void {
@@ -221,6 +228,7 @@ export const useContractsStore = defineStore('contractsStore', () => {
     currentContractId,
     deployedContracts,
     importedContracts,
+    selectedImportedContractId,
 
     //getters
     currentContract,
@@ -240,6 +248,7 @@ export const useContractsStore = defineStore('contractsStore', () => {
     removeImportedContract,
     getContractByAddress,
     setCurrentContractId,
+    setSelectedImportedContract,
     resetStorage,
     getInitialOpenedFiles,
     moveOpenedFile,
