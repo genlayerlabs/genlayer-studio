@@ -3,6 +3,7 @@
 import eth_utils
 from backend.database_handler.transactions_processor import TransactionsProcessor
 from flask_jsonrpc.exceptions import JSONRPCError
+from sqlalchemy.exc import SQLAlchemyError
 
 # ConsensusData contract configuration
 CONSENSUS_DATA_CONTRACT_ADDRESS = "0x88B0F18613Db92Bf970FfE264E02496e20a74D16"
@@ -97,12 +98,18 @@ def handle_get_latest_pending_tx_count(
         result_bytes = count.to_bytes(32, byteorder="big")
         return eth_utils.hexadecimal.encode_hex(result_bytes)
 
-    except Exception as e:
+    except SQLAlchemyError as e:
         raise JSONRPCError(
             code=-32000,
-            message="Error querying pending transaction count",
+            message="Database error querying pending transaction count",
             data={"error": str(e), "recipient": recipient_address},
-        )
+        ) from e
+    except (ValueError, OverflowError) as e:
+        raise JSONRPCError(
+            code=-32000,
+            message="Error formatting pending transaction count",
+            data={"error": str(e), "recipient": recipient_address},
+        ) from e
 
 
 def handle_consensus_data_call(

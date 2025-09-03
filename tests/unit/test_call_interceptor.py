@@ -463,17 +463,21 @@ class TestCallInterceptor:
         mock_transactions_processor,
     ):
         """
-        Test 14: eth_call handles missing 'from' address
+        Test 14: eth_call handles missing 'from' address with ConsensusData interception
 
         Why needed: Some eth_call requests don't specify sender
-        How it works: Tests that eth_call returns default value when 'from' is missing
-                     (this bypasses interceptor since eth_call has early return)
+        How it works: Tests that interceptor now works even when 'from' is missing
+                     (interceptor moved before early return check)
         """
         params = {
             # No 'from' address
             "to": CONSENSUS_DATA_CONTRACT_ADDRESS,
             "data": "0xfe4cfca7" + "0" * 64,
         }
+
+        mock_transactions_processor.get_pending_transaction_count_for_address.return_value = (
+            7
+        )
 
         result = await eth_call(
             mock_session,
@@ -485,14 +489,14 @@ class TestCallInterceptor:
             params,
         )
 
-        # Should return base64 encoded value (eth_call has malformed code with string literal)
-        import base64
-
-        expected = base64.b64encode(b"\x00' * 31 + b'\x01").decode("ascii")
+        # Should return hex-encoded count from ConsensusData interceptor (now works without 'from')
+        expected = "0x0000000000000000000000000000000000000000000000000000000000000007"
         assert result == expected
 
-        # Verify interceptor was not called (due to early return)
-        mock_transactions_processor.get_pending_transaction_count_for_address.assert_not_called()
+        # Verify interceptor was called correctly (extracts 20-byte address from 32-byte parameter)
+        mock_transactions_processor.get_pending_transaction_count_for_address.assert_called_once_with(
+            "0x0000000000000000000000000000000000000000"
+        )
 
     # ============================================================================
     # ERROR HANDLING TESTS
@@ -505,9 +509,11 @@ class TestCallInterceptor:
         Test 15: Handle database errors gracefully
 
         Why needed: Ensures system handles database failures properly
-        How it works: Simulates database exception
+        How it works: Simulates database exception using SQLAlchemyError
         """
-        mock_transactions_processor.get_pending_transaction_count_for_address.side_effect = Exception(
+        from sqlalchemy.exc import SQLAlchemyError
+
+        mock_transactions_processor.get_pending_transaction_count_for_address.side_effect = SQLAlchemyError(
             "Database connection error"
         )
 
@@ -519,7 +525,10 @@ class TestCallInterceptor:
             )
 
         assert exc_info.value.code == -32000  # Internal error
-        assert "Error querying pending transaction count" in exc_info.value.message
+        assert (
+            "Database error querying pending transaction count"
+            in exc_info.value.message
+        )
 
     # ============================================================================
     # ADDRESS NORMALIZATION TESTS
