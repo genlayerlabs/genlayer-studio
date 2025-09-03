@@ -171,9 +171,9 @@
         const testData = 
 {
   "test_suite": "GenLayer Studio API Comprehensive Test",
-  "timestamp": "2025-09-03 12:11:55",
-  "end_time": "2025-09-03 12:12:24",
-  "duration_seconds": 29,
+  "timestamp": "2025-09-03 12:48:39",
+  "end_time": "2025-09-03 12:49:06",
+  "duration_seconds": 27,
   "configuration": {
     "base_url": "http://localhost:4000/api",
     "requests_per_test": 10,
@@ -369,7 +369,7 @@
     {
   "category": "Setup",
   "method": "sim_createValidator",
-  "params": "{"stake":1,"provider":"openai","model":"gpt-4-1106-preview","config":{},"address":"0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"}",
+  "params": "{\"stake\":1,\"provider\":\"openai\",\"model\":\"gpt-4-1106-preview\",\"config\":{},\"address\":\"0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC\"}",
   "status": "pass",
   "requests": 10,
   "concurrency": 5
@@ -378,7 +378,7 @@
     {
   "category": "Setup",
   "method": "sim_updateValidator",
-  "params": "{"address":"0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC","stake":2,"provider":"openai","model":"gpt-4","config":{}}",
+  "params": "{\"address\":\"0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC\",\"stake\":2,\"provider\":\"openai\",\"model\":\"gpt-4\",\"config\":{}}",
   "status": "pass",
   "requests": 10,
   "concurrency": 5
@@ -396,7 +396,7 @@
     {
   "category": "Setup",
   "method": "sim_fundAccount",
-  "params": "{"account_address":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8","amount":1000000000000000000}",
+  "params": "{\"account_address\":\"0x70997970C51812dc3A010C7d01b50e0d17dc79C8\",\"amount\":1000000000000000000}",
   "status": "pass",
   "requests": 10,
   "concurrency": 5
@@ -441,7 +441,7 @@
     {
   "category": "Setup",
   "method": "sim_addProvider",
-  "params": "{"provider":"openai","model":"gpt-4","config":{"api_key_env_var":"OPENAI_API_KEY"}}",
+  "params": "{\"provider\":\"openai\",\"model\":\"gpt-4\",\"config\":{\"api_key_env_var\":\"OPENAI_API_KEY\"}}",
   "status": "pass",
   "requests": 10,
   "concurrency": 5
@@ -450,7 +450,7 @@
     {
   "category": "Setup",
   "method": "sim_updateProvider",
-  "params": "openai {"provider":"openai","model":"gpt-4-turbo","config":{"api_key_env_var":"OPENAI_API_KEY"}}",
+  "params": "openai {\"provider\":\"openai\",\"model\":\"gpt-4-turbo\",\"config\":{\"api_key_env_var\":\"OPENAI_API_KEY\"}}",
   "status": "pass",
   "requests": 10,
   "concurrency": 5

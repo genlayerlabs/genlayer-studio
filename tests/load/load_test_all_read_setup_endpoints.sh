@@ -18,8 +18,8 @@ BASE_URL=${BASE_URL:-"http://localhost:4000/api"}
 TEST_ENDPOINT_SCRIPT="$SCRIPT_DIR/test_endpoint.sh"
 
 # Test configuration
-REQUESTS=${REQUESTS:-50}
-CONCURRENCY=${CONCURRENCY:-10}
+REQUESTS=${REQUESTS:-10}
+CONCURRENCY=${CONCURRENCY:-5}
 
 # Report files (always overwritten)
 JSON_REPORT="$SCRIPT_DIR/api_test_report.json"
@@ -69,6 +69,9 @@ run_test() {
     printf "  Parameters: [%s]\n" "$params"
     printf "  Status: "
     
+    # Escape params for JSON
+    local escaped_params=$(echo "$params" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+    
     # Run the test using test_endpoint.sh
     if REQUESTS=$REQUESTS CONCURRENCY=$CONCURRENCY "$TEST_ENDPOINT_SCRIPT" "$method" $params >/dev/null 2>&1; then
         print_color "$GREEN" "✅ PASS"
@@ -77,7 +80,7 @@ run_test() {
 {
   "category": "$category",
   "method": "$method",
-  "params": "$params",
+  "params": "$escaped_params",
   "status": "pass",
   "requests": $REQUESTS,
   "concurrency": $CONCURRENCY
@@ -91,7 +94,7 @@ EOF
 {
   "category": "$category",
   "method": "$method",
-  "params": "$params",
+  "params": "$escaped_params",
   "status": "fail",
   "requests": $REQUESTS,
   "concurrency": $CONCURRENCY

@@ -2200,3 +2200,81 @@ ln -s load_test_all_read_setup_endpoints.sh comprehensive_api_test.sh
 ### Conclusion
 
 The rename improves clarity and consistency in the load testing suite while maintaining all functionality. The script continues to test 34 endpoints across read-only and setup categories with comprehensive reporting.
+
+## Iteration 16: Fixed HTML Report Display Issues
+
+### Overview
+Fixed the HTML report display issue where test results were properly embedded in the JavaScript but not rendering correctly in the browser. The issue was related to JSON escaping in the shell script when embedding data into the HTML.
+
+### Problem Identified
+The HTML report (`api_test_report.html`) contained the correct test data in the JavaScript section but parameters with special characters (particularly JSON objects) were not being properly escaped when transferred from the shell arrays to the JSON report.
+
+### Solution Implemented
+
+#### 1. Parameter Escaping
+Modified the `run_test()` function in `load_test_all_read_setup_endpoints.sh` to properly escape JSON parameters:
+
+```bash
+# Added escaping for JSON special characters
+local escaped_params=$(echo "$params" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+```
+
+This ensures that complex JSON parameters like:
+```json
+{"account_address":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8","amount":1000000000000000000}
+```
+are properly escaped when stored in the test results array.
+
+#### 2. Default Configuration Update
+Adjusted default test configuration to match actual usage:
+- **Previous**: `REQUESTS=50`, `CONCURRENCY=10`
+- **Updated**: `REQUESTS=10`, `CONCURRENCY=5`
+
+This change ensures the configuration in the script matches what was actually used in testing, providing accurate documentation.
+
+### Technical Details
+
+The issue occurred because shell arrays containing JSON data were being directly embedded into the JSON report without proper escaping. When parameters contained quotes or backslashes (common in JSON), they would break the JSON structure.
+
+**Before Fix:**
+```bash
+test_results[$test_index]=$(cat <<EOF
+{
+  "params": "$params",  # Could break with JSON parameters
+  ...
+}
+EOF
+)
+```
+
+**After Fix:**
+```bash
+local escaped_params=$(echo "$params" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+test_results[$test_index]=$(cat <<EOF
+{
+  "params": "$escaped_params",  # Properly escaped
+  ...
+}
+EOF
+)
+```
+
+### Results
+After the fix:
+- ✅ All test results display correctly in the HTML report
+- ✅ JSON parameters are properly formatted in the results table
+- ✅ Complex parameters (like those for `sim_createValidator`, `sim_fundAccount`) render correctly
+- ✅ The HTML report shows 34/34 tests passing with proper parameter display
+
+### Files Modified
+- `load_test_all_read_setup_endpoints.sh` - Added parameter escaping and updated defaults
+
+### Testing Verification
+The fix was verified by:
+1. Running the test suite with complex JSON parameters
+2. Checking the generated `api_test_report.json` for proper JSON structure
+3. Opening `api_test_report.html` in a browser and confirming all results display
+4. Verifying that parameters with special characters render correctly
+
+### Conclusion
+This iteration successfully resolved the HTML display issue by implementing proper JSON escaping in the shell script, ensuring that test results with complex parameters are correctly rendered in both JSON and HTML reports.
