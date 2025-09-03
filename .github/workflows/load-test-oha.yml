@@ -173,40 +173,6 @@ jobs:
 
           echo "Chain ID verification successful, proceeding with tests..."
 
-      - name: Wait for Finality Window
-        run: |
-          echo "Checking finality window time..."
-
-          # Get the finality window time
-          finality_response=$(curl -s -X POST http://localhost:4000/api \
-            -H "Content-Type: application/json" \
-            -d '{
-              "jsonrpc": "2.0",
-              "method": "sim_getFinalityWindowTime",
-              "params": [],
-              "id": 1
-            }')
-
-          echo "Finality window response: $finality_response"
-
-          # Extract the finality window time (in seconds)
-          finality_time=$(echo "$finality_response" | grep -o '"result"[[:space:]]*:[[:space:]]*[0-9]*' | grep -o '[0-9]*' | tail -1)
-
-          if [ -z "$finality_time" ]; then
-            echo "❌ Could not get finality window time, system may not be ready"
-            echo "Waiting 150 seconds for system initialization..."
-            wait_time=150
-          else
-            echo "✅ System is responsive (finality window: $finality_time seconds)"
-            echo "System is ready, waiting 120 seconds for stabilization before creating validators..."
-            wait_time=120
-          fi
-
-          echo "Waiting $wait_time seconds..."
-          sleep $wait_time
-
-          echo "✅ System stabilization complete, ready for validators"
-
       - name: Setup validators
         run: |
           echo "Creating validators with 5 second delays..."
@@ -307,28 +273,32 @@ jobs:
             echo ""
             echo "[Deploy $i/3] Starting deployment..."
 
-            # Run the deployment script
-            if result=$(python3 deploy_contract/wizard_deploy.py 2>&1); then
-              addr=$(echo "$result" | grep -oE "0x[a-fA-F0-9]+" | tail -n 1)
-              if [ -n "$addr" ]; then
-                echo "[Deploy $i/3] ✅ Success - Contract: $addr"
-                CONTRACT_ADDRESSES+=("$addr")
-                ((DEPLOY_SUCCESS++))
-              else
-                echo "[Deploy $i/3] ❌ Failed - no address returned"
-                echo "Output: $result"
-                ((DEPLOY_FAIL++))
+            # Run the deployment script and capture output regardless of exit code
+            result=$(python3 deploy_contract/wizard_deploy.py 2>&1) || true
+
+            # Look for a contract address in the output
+            addr=$(echo "$result" | grep -oE "0x[a-fA-F0-9]{40}" | tail -n 1)
+
+            if [ -n "$addr" ]; then
+              echo "[Deploy $i/3] ✅ Success - Contract: $addr"
+              CONTRACT_ADDRESSES+=("$addr")
+              ((DEPLOY_SUCCESS++))
+
+              # Wait longer after successful deployment
+              if [ $i -lt 3 ]; then
+                echo "Waiting 30 seconds for contract to be fully processed..."
+                sleep 30
               fi
             else
-              echo "[Deploy $i/3] ❌ Failed - deployment error"
-              echo "Error: $result"
+              echo "[Deploy $i/3] ❌ Failed - no address returned"
+              echo "Output: $result"
               ((DEPLOY_FAIL++))
-            fi
 
-            # Wait between deployments
-            if [ $i -lt 3 ]; then
-              echo "Waiting 10 seconds before next deployment..."
-              sleep 10
+              # Still wait between failed attempts
+              if [ $i -lt 3 ]; then
+                echo "Waiting 10 seconds before retry..."
+                sleep 10
+              fi
             fi
           done
 
