@@ -40,20 +40,8 @@ export function useContractQueries() {
     ),
   );
 
-  const importedContract = computed(() => {
-    if (!contractsStore.selectedImportedContractId) return null;
-    return contractsStore.importedContracts.find(
-      (c) => c.id === contractsStore.selectedImportedContractId,
-    );
-  });
-
-  const isDeployed = computed(() => !!deployedContract.value || !!importedContract.value);
-  const address = computed(() => {
-    if (importedContract.value) {
-      return importedContract.value.address;
-    }
-    return deployedContract.value?.address;
-  });
+  const isDeployed = computed(() => !!deployedContract.value);
+  const address = computed(() => deployedContract.value?.address);
 
   const fetchContractSchemaDebounced = useDebounceFn(() => {
     return fetchContractSchema();
@@ -156,14 +144,14 @@ export function useContractQueries() {
   }
 
   const abiQueryEnabled = computed(
-    () => (!!contract.value || !!importedContract.value) && !!isDeployed.value,
+    () => !!contract.value && !!isDeployed.value,
   );
 
   const contractAbiQuery = useQuery({
     queryKey: [
       'abi',
-      () => contract.value?.id || importedContract.value?.id,
-      () => address.value,
+      () => contract.value?.id,
+      () => deployedContract.value?.address,
     ],
     queryFn: fetchContractAbi,
     enabled: abiQueryEnabled,
@@ -176,13 +164,8 @@ export function useContractQueries() {
       return mockContractSchema;
     }
 
-    const contractAddress = address.value;
-    if (!contractAddress) {
-      throw new Error('No contract address available');
-    }
-
     const result = await genlayerClient.value?.getContractSchema(
-      contractAddress,
+      deployedContract.value?.address ?? '0x0',
     );
 
     return result;

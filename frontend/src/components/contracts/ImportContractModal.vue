@@ -4,7 +4,6 @@ import Modal from '@/components/global/Modal.vue';
 import { useContractsStore } from '@/stores';
 import { v4 as uuidv4 } from 'uuid';
 import { notify } from '@kyvg/vue3-notification';
-import type { ImportedContract } from '@/types';
 import { ContractService } from '@/services/ContractService';
 
 const props = defineProps<{
@@ -26,7 +25,7 @@ const isValidAddress = computed(() => {
 });
 
 const isDuplicate = computed(() => {
-  return contractsStore.importedContracts.some(
+  return contractsStore.deployedContracts.some(
     (c) => c.address.toLowerCase() === contractAddress.value.toLowerCase()
   );
 });
@@ -58,16 +57,44 @@ const handleImport = async () => {
       });
     }
 
-    const newContract: ImportedContract = {
-      id: uuidv4(),
-      address: contractAddress.value as `0x${string}`,
-      name: contractName.value || contractAddress.value.slice(0, 10) + '...',
-      importedAt: new Date().toISOString(),
-    };
+    // Create a unique ID for this contract
+    const contractId = uuidv4();
+    const fileName = contractName.value || `imported_${contractAddress.value.slice(0, 10)}.py`;
+    
+    // Create a placeholder contract file with a comment about the import
+    const placeholderCode = `# Imported contract from address: ${contractAddress.value}
+# Imported at: ${new Date().toISOString()}
+# This is a placeholder file for an imported contract.
+# The actual contract code is deployed at the address above.
 
-    contractsStore.addImportedContract(newContract);
+# Contract methods can be called through the Run & Debug interface.
+`;
+
+    // Add the contract file
+    contractsStore.addContractFile({
+      id: contractId,
+      name: fileName.endsWith('.py') ? fileName : `${fileName}.py`,
+      content: placeholderCode,
+    });
+
+    // Add the deployed contract entry
+    contractsStore.addDeployedContract({
+      contractId: contractId,
+      address: contractAddress.value as `0x${string}`,
+      defaultState: '{}',
+    });
+
+    // Open the file in the editor
+    contractsStore.openFile(contractId);
+
     resetForm();
     emit('close');
+    
+    notify({
+      title: 'Contract imported successfully',
+      text: `Contract imported as ${fileName}`,
+      type: 'success',
+    });
   } catch (error) {
     notify({
       title: 'Failed to import contract',

@@ -1,4 +1,4 @@
-import type { ContractFile, DeployedContract, ImportedContract } from '@/types';
+import type { ContractFile, DeployedContract } from '@/types';
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { notify } from '@kyvg/vue3-notification';
@@ -14,8 +14,6 @@ export const useContractsStore = defineStore('contractsStore', () => {
     localStorage.getItem('contractsStore.currentContractId') || '',
   );
   const deployedContracts = ref<DeployedContract[]>([]);
-  const importedContracts = ref<ImportedContract[]>([]);
-  const selectedImportedContractId = ref<string | null>(null);
 
   function getInitialOpenedFiles() {
     const storage = localStorage.getItem('contractsStore.openedFiles');
@@ -85,8 +83,6 @@ export const useContractsStore = defineStore('contractsStore', () => {
       openedFiles.value = [...openedFiles.value, id];
     }
     currentContractId.value = id;
-    // Clear selected imported contract when opening a file
-    selectedImportedContractId.value = null;
   }
 
   function closeFile(id: string) {
@@ -139,52 +135,13 @@ export const useContractsStore = defineStore('contractsStore', () => {
     currentContractId.value = id || '';
   }
 
-  function setSelectedImportedContract(id: string | null) {
-    selectedImportedContractId.value = id;
-  }
-
-  function addImportedContract(contract: ImportedContract): void {
-    const existingIndex = importedContracts.value.findIndex(
-      (c) => c.address === contract.address,
-    );
-
-    if (existingIndex === -1) {
-      importedContracts.value.push(contract);
-      notify({
-        title: 'Contract imported successfully',
-        type: 'success',
-      });
-    } else {
-      notify({
-        title: 'Contract already imported',
-        type: 'warning',
-      });
-    }
-  }
-
-  function removeImportedContract(id: string): void {
-    importedContracts.value = importedContracts.value.filter((c) => c.id !== id);
-  }
-
-  function getContractByAddress(
-    address: string,
-  ): ImportedContract | DeployedContract | undefined {
-    const imported = importedContracts.value.find((c) => c.address === address);
-    if (imported) return imported;
-
-    const deployed = deployedContracts.value.find((c) => c.address === address);
-    return deployed;
-  }
-
   async function resetStorage(): Promise<void> {
     contracts.value = [];
     openedFiles.value = [];
     currentContractId.value = '';
-    importedContracts.value = [];
 
     await db.deployedContracts.clear();
     await db.contractFiles.clear();
-    await db.importedContracts.clear();
   }
 
   const currentContract = computed(() => {
@@ -208,33 +165,17 @@ export const useContractsStore = defineStore('contractsStore', () => {
     });
   });
 
-  const allAvailableContracts = computed(() => {
-    const deployed = deployedContracts.value.map((c) => ({
-      ...c,
-      type: 'deployed' as const,
-      name: contracts.value.find((cf) => cf.id === c.contractId)?.name || 'Unknown',
-    }));
-    const imported = importedContracts.value.map((c) => ({
-      ...c,
-      type: 'imported' as const,
-    }));
-    return [...deployed, ...imported];
-  });
-
   return {
     // state
     contracts,
     openedFiles,
     currentContractId,
     deployedContracts,
-    importedContracts,
-    selectedImportedContractId,
 
     //getters
     currentContract,
     contractsOrderedByName,
     openedContracts,
-    allAvailableContracts,
 
     //actions
     addContractFile,
@@ -244,11 +185,7 @@ export const useContractsStore = defineStore('contractsStore', () => {
     closeFile,
     addDeployedContract,
     removeDeployedContract,
-    addImportedContract,
-    removeImportedContract,
-    getContractByAddress,
     setCurrentContractId,
-    setSelectedImportedContract,
     resetStorage,
     getInitialOpenedFiles,
     moveOpenedFile,
