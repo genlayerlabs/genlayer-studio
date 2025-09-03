@@ -83,8 +83,14 @@ build_params_json() {
         # Check if param starts with '{' (JSON object)
         if [[ "$param" =~ ^\{ ]]; then
             params+="$param"
-        # Check if param looks like a number
-        elif [[ "$param" =~ ^[0-9]+$ ]]; then
+        # Check if param starts with '0x' (Ethereum address or hex value) - always treat as string
+        elif [[ "$param" =~ ^0x ]]; then
+            params+="\"$param\""
+        # Check if param is a large number (more than 15 digits) - treat as string for precision
+        elif [[ "$param" =~ ^[0-9]{16,}$ ]]; then
+            params+="\"$param\""
+        # Check if param looks like a small number (less than 16 digits)
+        elif [[ "$param" =~ ^[0-9]+$ ]] && [ ${#param} -lt 16 ]; then
             params+="$param"
         # Check if param looks like a boolean
         elif [ "$param" = "true" ] || [ "$param" = "false" ]; then
@@ -119,10 +125,11 @@ run_endpoint_test() {
 EOF
 )
     
-    # Run the load test using oha (suppress detailed output)
+    # Run the load test using oha with timeout (suppress detailed output)
     TEST_OUTPUT=$(oha -n $REQUESTS -c $CONCURRENCY -m POST \
         -d "$REQUEST_JSON" \
         -H "Content-Type: application/json" \
+        -t 60s \
         --no-tui "$BASE_URL" 2>&1)
     
     # Return success/failure based on test result
