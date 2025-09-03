@@ -29,3 +29,13 @@ sinks:
       verify_certificate: true
     request:
       retry_attempts: 3
+
+  gcp_pubsub:
+    type: gcp_pubsub
+    inputs:
+      - docker_logs_transform
+    credentials_path: /etc/vector/gcp_credentials.json
+    project: "${GCP_PROJECT_ID}"
+    topic: "projects/simulator-440803/topics/observability_logs"
+    encoding:
+      codec: json
