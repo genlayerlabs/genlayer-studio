@@ -20,6 +20,54 @@ else
     exit 1
 fi
 
+echo ""
+echo "=== Verifying Chain ID ==="
+echo "Checking if blockchain is properly initialized..."
+max_retries=5
+retry_count=0
+chain_id=""
+
+while [[ "$retry_count" -lt "$max_retries" ]]; do
+    echo "Attempt $((retry_count + 1))/$max_retries to read chain ID..."
+
+    # Try to get the chain ID
+    response=$(curl -s -X POST http://0.0.0.0:4000/api \
+      -H "Content-Type: application/json" \
+      -d '{
+        "jsonrpc": "2.0",
+        "method": "eth_chainId",
+        "params": [],
+        "id": 1
+      }')
+
+    # Check if we got a valid chain ID response
+    if echo "$response" | grep -q '"result"'; then
+      # Handle both formatted and unformatted JSON
+      chain_id=$(echo "$response" | grep -o '"result"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"result"[[:space:]]*:[[:space:]]*"//;s/"$//')
+      if [ ! -z "$chain_id" ]; then
+        echo "✅ Successfully read chain ID: $chain_id"
+        break
+      fi
+    fi
+
+    retry_count=$((retry_count + 1))
+
+    if [[ "$retry_count" -lt "$max_retries" ]]; then
+      echo "Failed to read chain ID, waiting 10 seconds before retry..."
+      sleep 10
+    fi
+done
+
+# Check if we successfully got the chain ID
+if [ -z "$chain_id" ]; then
+    echo "❌ ERROR: Failed to read chain ID after $max_retries attempts"
+    echo "The blockchain service may not be properly initialized"
+    echo "Please check if GenLayer is running properly"
+    exit 1
+fi
+
+echo "Chain ID verification successful, proceeding with tests..."
+
 # Get script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

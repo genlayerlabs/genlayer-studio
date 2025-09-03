@@ -43,8 +43,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-buildx-
 
-      - name: Run Docker Compose
-        run: docker compose up -d
+      - name: Install GenLayer CLI
+        run: |
+          pip install genlayer
+
+      - name: Run GenLayer
+        run: genlayer up
 
       - name: Wait for services to be up
         run: |
@@ -66,11 +70,58 @@ jobs:
             exit 1
           fi
 
-      - name: Setup validators
+          # Wait additional 30 seconds for services to stabilize
+          echo "Waiting 30 seconds for services to stabilize..."
+          sleep 30
+
+      - name: Verify Chain ID
         run: |
-          cd tests/load
-          chmod +x setup_validators.sh
-          ./setup_validators.sh 5
+          echo "Verifying chain ID is readable..."
+          max_retries=5
+          retry_count=0
+          chain_id=""
+
+          while [[ "$retry_count" -lt "$max_retries" ]]; do
+            echo "Attempt $((retry_count + 1))/$max_retries to read chain ID..."
+
+            # Try to get the chain ID
+            response=$(curl -s -X POST http://0.0.0.0:4000/api \
+              -H "Content-Type: application/json" \
+              -d '{
+                "jsonrpc": "2.0",
+                "method": "eth_chainId",
+                "params": [],
+                "id": 1
+              }')
+
+            echo "Response: $response"
+
+            # Check if we got a valid chain ID response
+            if echo "$response" | grep -q '"result"'; then
+              # Handle both formatted and unformatted JSON
+              chain_id=$(echo "$response" | grep -o '"result"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"result"[[:space:]]*:[[:space:]]*"//;s/"$//')
+              if [ ! -z "$chain_id" ]; then
+                echo "✅ Successfully read chain ID: $chain_id"
+                break
+              fi
+            fi
+
+            retry_count=$((retry_count + 1))
+
+            if [[ "$retry_count" -lt "$max_retries" ]]; then
+              echo "Failed to read chain ID, waiting 10 seconds before retry..."
+              sleep 10
+            fi
+          done
+
+          # Check if we successfully got the chain ID
+          if [ -z "$chain_id" ]; then
+            echo "❌ ERROR: Failed to read chain ID after $max_retries attempts"
+            echo "The blockchain service may not be properly initialized"
+            exit 1
+          fi
+
+          echo "Chain ID verification successful, proceeding with tests..."
 
       - name: Install oha
         run: |
@@ -79,6 +130,12 @@ jobs:
           curl -sSfL https://github.com/hatoo/oha/releases/download/${{ inputs.oha-version }}/oha-linux-amd64 -o oha
           chmod +x oha
           sudo mv oha /usr/local/bin
+
+      - name: Setup validators
+        run: |
+          cd tests/load
+          chmod +x setup_validators.sh
+          ./setup_validators.sh 5
 
       - name: Run Load Test - Contract Deploy and Read
         run: |
@@ -92,6 +149,6 @@ jobs:
           chmod +x load_test_all_read_setup_endpoints.sh
           REQUESTS=500 CONCURRENCY=100 ./load_test_all_read_setup_endpoints.sh
 
-      - name: Shutdown Docker Compose
+      - name: Shutdown GenLayer
         if: always()
-        run: docker compose down
+        run: genlayer down -v
