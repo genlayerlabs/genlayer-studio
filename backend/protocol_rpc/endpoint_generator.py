@@ -146,39 +146,42 @@ def setup_eth_method_handler(jsonrpc: JSONRPC):
                 method = request_json.get("method", "")
                 if method.startswith("eth_"):
                     site = jsonrpc.get_jsonrpc_site()
-                    if method in site.view_funcs:
-                        return None  # Use local implementation
-                    else:
-                        # No local implementation, forward to Hardhat
-                        try:
-                            with requests.Session() as http:
-                                result = http.post(
-                                    HARDHAT_URL,
-                                    json=request_json,
-                                    headers={"Content-Type": "application/json"},
-                                ).json()
+                    print(site.view_funcs)
+                    print(method)
+                    print(method in site.view_funcs)
+                    return None  # Use local implementation
+                    # if method in site.view_funcs:
+                    # else:
+                    #     # No local implementation, forward to Hardhat
+                    #     try:
+                    #         with requests.Session() as http:
+                    #             result = http.post(
+                    #                 HARDHAT_URL,
+                    #                 json=request_json,
+                    #                 headers={"Content-Type": "application/json"},
+                    #             ).json()
 
-                                if "error" in result:
-                                    raise JSONRPCError(
-                                        code=result["error"].get("code", -32000),
-                                        message=result["error"].get(
-                                            "message", "Hardhat node error"
-                                        ),
-                                        data=result["error"].get("data", {}),
-                                    )
+                    #             if "error" in result:
+                    #                 raise JSONRPCError(
+                    #                     code=result["error"].get("code", -32000),
+                    #                     message=result["error"].get(
+                    #                         "message", "Hardhat node error"
+                    #                     ),
+                    #                     data=result["error"].get("data", {}),
+                    #                 )
 
-                                return result
+                    #             return result
 
-                        except requests.RequestException:
-                            # Log the exception with traceback
-                            app.logger.exception(
-                                "Error forwarding single request to Hardhat"
-                            )
-                            raise JSONRPCError(
-                                code=-32000,  # Server error
-                                message="Network error",
-                                data="An internal error occurred while forwarding the request to Hardhat.",
-                            )
+                    #     except requests.RequestException:
+                    #         # Log the exception with traceback
+                    #         app.logger.exception(
+                    #             "Error forwarding single request to Hardhat"
+                    #         )
+                    #         raise JSONRPCError(
+                    #             code=-32000,  # Server error
+                    #             message="Network error",
+                    #             data="An internal error occurred while forwarding the request to Hardhat.",
+                    #         )
 
             except Exception:
                 # Log the exception with traceback
