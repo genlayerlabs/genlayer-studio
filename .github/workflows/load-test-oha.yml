@@ -43,12 +43,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-buildx-
 
-      - name: Install GenLayer CLI
-        run: |
-          pip install genlayer
-
-      - name: Run GenLayer
-        run: genlayer up
+      - name: Run Docker Compose
+        run: docker compose up -d
 
       - name: Wait for services to be up
         run: |
@@ -149,6 +145,6 @@ jobs:
           chmod +x load_test_all_read_setup_endpoints.sh
           REQUESTS=500 CONCURRENCY=100 ./load_test_all_read_setup_endpoints.sh
 
-      - name: Shutdown GenLayer
+      - name: Shutdown Docker Compose
         if: always()
-        run: genlayer down -v
+        run: docker compose down -v
