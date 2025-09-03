@@ -42,12 +42,12 @@ print_color() {
 # Function to check if test passed
 check_test_result() {
     local TEST_OUTPUT="$1"
-    
+
     # Check for connection errors
     if echo "$TEST_OUTPUT" | grep -q "connection closed before message completed"; then
         return 1
     fi
-    
+
     # Check for other error patterns
     if echo "$TEST_OUTPUT" | grep -q "Error distribution:"; then
         # If there are errors listed, check if count is non-zero
@@ -56,12 +56,12 @@ check_test_result() {
             return 1
         fi
     fi
-    
+
     # Check if we got successful responses
     if echo "$TEST_OUTPUT" | grep -q "\[200\]"; then
         return 0
     fi
-    
+
     # Default to failure if no success indicators found
     return 1
 }
@@ -70,11 +70,11 @@ check_test_result() {
 run_load_test() {
     local requests=$1
     local concurrency=$2
-    
+
     echo ""
     echo "Running load test: $requests requests with $concurrency concurrent connections"
     echo "----------------------------------------"
-    
+
     # Build the JSON-RPC request
     REQUEST_JSON=$(cat <<EOF
 {
@@ -85,15 +85,15 @@ run_load_test() {
 }
 EOF
 )
-    
+
     # Run the load test using oha
     TEST_OUTPUT=$(oha -n $requests -c $concurrency -m POST \
         -d "$REQUEST_JSON" \
         -H "Content-Type: application/json" \
         --no-tui "$BASE_URL" 2>&1)
-    
+
     echo "$TEST_OUTPUT"
-    
+
     # Check if test passed
     if check_test_result "$TEST_OUTPUT"; then
         print_color "$GREEN" "✅ Test PASSED"
@@ -109,17 +109,17 @@ run_progressive_tests() {
     local configs=("10:1" "50:5" "100:10" "200:20" "500:50" "1000:100")
     local passed=0
     local failed=0
-    
+
     echo "Progressive Load Test Suite for eth_getBalance"
     echo "==============================================="
-    
+
     for config in "${configs[@]}"; do
         IFS=':' read -r req con <<< "$config"
-        
+
         echo ""
         echo "Test Configuration: $req requests / $con concurrent"
         echo "-----------------------------------------------------"
-        
+
         if run_load_test "$req" "$con"; then
             ((passed++))
         else
@@ -127,17 +127,17 @@ run_progressive_tests() {
             print_color "$YELLOW" "System limit potentially reached at $req requests / $con concurrent"
             break
         fi
-        
+
         # Small delay between tests
         sleep 2
     done
-    
+
     echo ""
     echo "Summary"
     echo "======="
     echo "Tests Passed: $passed"
     echo "Tests Failed: $failed"
-    
+
     if [ $failed -eq 0 ]; then
         print_color "$GREEN" "All tests completed successfully!"
     else
@@ -155,20 +155,20 @@ main() {
     echo "Base URL: $BASE_URL" | tee -a "$RESULTS_FILE"
     echo "Test Address: $TEST_ADDRESS" | tee -a "$RESULTS_FILE"
     echo "" | tee -a "$RESULTS_FILE"
-    
+
     # Check if oha is installed
     if ! command -v oha &> /dev/null; then
         print_color "$RED" "Error: oha is not installed. Please install it first."
         echo "Visit: https://github.com/hatoo/oha"
         exit 1
     fi
-    
+
     # Check if jq is installed
     if ! command -v jq &> /dev/null; then
         print_color "$RED" "Error: jq is not installed. Please install it first."
         exit 1
     fi
-    
+
     # Parse command line arguments
     case "${1:-}" in
         "progressive")
@@ -189,7 +189,7 @@ main() {
             run_load_test "$REQUESTS" "$CONCURRENCY" | tee -a "$RESULTS_FILE"
             ;;
     esac
-    
+
     echo "" | tee -a "$RESULTS_FILE"
     echo "Results saved to: $RESULTS_FILE" | tee -a "$RESULTS_FILE"
 }

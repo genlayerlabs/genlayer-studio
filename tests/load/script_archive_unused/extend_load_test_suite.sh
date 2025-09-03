@@ -66,7 +66,7 @@ fi
 # Function to create a validator
 create_validator() {
     local VALIDATOR_NUM=$1
-    
+
     local VALIDATOR_JSON=$(jq -n \
         --arg stake "$VALIDATOR_STAKE" \
         --arg provider "$VALIDATOR_PROVIDER" \
@@ -74,11 +74,11 @@ create_validator() {
         --arg plugin "$VALIDATOR_PLUGIN" \
         --arg api_key_env "$VALIDATOR_API_KEY_ENV" \
         '{jsonrpc: "2.0", method: "sim_createValidator", params: [($stake | tonumber), $provider, $model, {}, $plugin, {"api_key_env_var": $api_key_env, "api_url": null}], id: 1}')
-    
+
     local RESPONSE=$(curl -s -X POST "$BASE_URL" \
         -H "Content-Type: application/json" \
         -d "$VALIDATOR_JSON")
-    
+
     if echo "$RESPONSE" | jq -e '.result' > /dev/null 2>&1; then
         echo "✅ Validator $VALIDATOR_NUM created successfully"
         return 0
@@ -92,29 +92,29 @@ create_validator() {
 # Function to deploy a contract
 deploy_contract() {
     local CONTRACT_NUM=$1
-    
+
     # Send deployment transaction
     local DEPLOY_RESPONSE=$(curl -s -X POST "$BASE_URL" \
         -H "Content-Type: application/json" \
         -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_sendRawTransaction\",\"params\":[\"$RAW_DEPLOYMENT_TX\"],\"id\":1}")
-    
+
     # Extract transaction hash
     local TX_HASH=$(echo "$DEPLOY_RESPONSE" | jq -r '.result')
-    
+
     if [ "$TX_HASH" != "null" ] && [ -n "$TX_HASH" ]; then
         TX_HASHES+=("$TX_HASH")
         echo "✅ Contract $CONTRACT_NUM deployment initiated. TX Hash: $TX_HASH"
-        
+
         # Wait a bit for transaction to be processed
         sleep 1
-        
+
         # Get transaction receipt to extract contract address
         local RECEIPT_RESPONSE=$(curl -s -X POST "$BASE_URL" \
             -H "Content-Type: application/json" \
             -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getTransactionReceipt\",\"params\":[\"$TX_HASH\"],\"id\":1}")
-        
+
         local CONTRACT_ADDRESS=$(echo "$RECEIPT_RESPONSE" | jq -r '.result.logs[0].address // .result.contractAddress')
-        
+
         if [ "$CONTRACT_ADDRESS" != "null" ] && [ -n "$CONTRACT_ADDRESS" ]; then
             CONTRACT_ADDRESSES+=("$CONTRACT_ADDRESS")
             echo "   Contract Address: $CONTRACT_ADDRESS"
@@ -122,7 +122,7 @@ deploy_contract() {
             CONTRACT_ADDRESSES+=("UNKNOWN")
             echo "   ⚠️  Could not extract contract address"
         fi
-        
+
         return 0
     else
         echo "❌ Failed to deploy contract $CONTRACT_NUM"
@@ -137,22 +137,22 @@ deploy_contract() {
 check_transaction_status() {
     local TX_HASH=$1
     local CONTRACT_NUM=$2
-    
+
     if [ "$TX_HASH" == "FAILED" ]; then
         echo "   Contract $CONTRACT_NUM: ❌ Deployment failed"
         return 1
     fi
-    
+
     local TX_RESPONSE=$(curl -s -X POST "$BASE_URL" \
         -H "Content-Type: application/json" \
         -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getTransactionByHash\",\"params\":[\"$TX_HASH\"],\"id\":1}")
-    
+
     local TRANSACTION=$(echo "$TX_RESPONSE" | jq -r '.result')
-    
+
     if [ "$TRANSACTION" != "null" ] && [ -n "$TRANSACTION" ]; then
         # Check if transaction is in a block (finalized)
         local BLOCK_NUMBER=$(echo "$TX_RESPONSE" | jq -r '.result.blockNumber')
-        
+
         if [ "$BLOCK_NUMBER" != "null" ] && [ -n "$BLOCK_NUMBER" ]; then
             echo "   Contract $CONTRACT_NUM: ✅ Finalized in block $BLOCK_NUMBER"
             return 0
@@ -200,11 +200,11 @@ else
     if [ $VALIDATORS_TO_CREATE -gt $TARGET_VALIDATORS ]; then
         VALIDATORS_TO_CREATE=$TARGET_VALIDATORS
     fi
-    
+
     echo "" | tee -a "$RESULTS_FILE_TIMESTAMPED"
     echo "Need to create $VALIDATORS_TO_CREATE validators to reach target of $TARGET_VALIDATORS" | tee -a "$RESULTS_FILE_TIMESTAMPED"
     echo "" | tee -a "$RESULTS_FILE_TIMESTAMPED"
-    
+
     for i in $(seq 1 $VALIDATORS_TO_CREATE); do
         echo -n "Creating validator $i/$VALIDATORS_TO_CREATE... "
         if create_validator $i >> "$RESULTS_FILE_TIMESTAMPED" 2>&1; then
@@ -215,7 +215,7 @@ else
         # Small delay to avoid overwhelming the server
         sleep 0.1
     done
-    
+
     echo "" | tee -a "$RESULTS_FILE_TIMESTAMPED"
     echo "Validator Creation Summary:" | tee -a "$RESULTS_FILE_TIMESTAMPED"
     echo "  ✅ Successful: $VALIDATORS_CREATED" | tee -a "$RESULTS_FILE_TIMESTAMPED"
@@ -279,10 +279,10 @@ NOT_FOUND_COUNT=0
 for i in $(seq 0 $((${#TX_HASHES[@]} - 1))); do
     TX_HASH="${TX_HASHES[$i]}"
     CONTRACT_NUM=$((i + 1))
-    
+
     check_transaction_status "$TX_HASH" "$CONTRACT_NUM" | tee -a "$RESULTS_FILE_TIMESTAMPED"
     STATUS=$?
-    
+
     if [ $STATUS -eq 0 ]; then
         ((FINALIZED_COUNT++))
         DEPLOYMENT_STATUSES+=("FINALIZED")

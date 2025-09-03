@@ -65,12 +65,12 @@ declare -a FAILED_TESTS=()
 check_test_result() {
     local TEST_OUTPUT="$1"
     local TEST_NAME="$2"
-    
+
     # Check for connection errors
     if echo "$TEST_OUTPUT" | grep -q "connection closed before message completed"; then
         return 1
     fi
-    
+
     # Check for other error patterns
     if echo "$TEST_OUTPUT" | grep -q "Error distribution:"; then
         # If there are errors listed, the test failed
@@ -79,12 +79,12 @@ check_test_result() {
             return 1
         fi
     fi
-    
+
     # Check if we got successful responses
     if echo "$TEST_OUTPUT" | grep -q "\[200\]"; then
         return 0
     fi
-    
+
     # Default to failure if no success indicators found
     return 1
 }
@@ -95,17 +95,17 @@ run_test_scenario() {
     local CONCURRENCY=$2
     local TEST_NAME=$3
     local SCENARIO_PASSED=true
-    
+
     echo "" | tee -a "$RESULTS_FILE_TIMESTAMPED"
     echo "=====================================================" | tee -a "$RESULTS_FILE_TIMESTAMPED"
     echo "Test Scenario: $TEST_NAME" | tee -a "$RESULTS_FILE_TIMESTAMPED"
     echo "Requests: $REQUESTS, Concurrency: $CONCURRENCY" | tee -a "$RESULTS_FILE_TIMESTAMPED"
     echo "=====================================================" | tee -a "$RESULTS_FILE_TIMESTAMPED"
-    
+
     # # Test 1: Validator Creation
     # echo "" | tee -a "$RESULTS_FILE_TIMESTAMPED"
     # echo "--- Test 1: Validator Creation (sim_createValidator) ---" | tee -a "$RESULTS_FILE_TIMESTAMPED"
-    
+
     # if [ "$VALIDATOR_API_URL" = "null" ]; then
     #     VALIDATOR_JSON=$(jq -n \
     #         --arg stake "$VALIDATOR_STAKE" \
@@ -124,22 +124,22 @@ run_test_scenario() {
     #         --arg api_url "$VALIDATOR_API_URL" \
     #         '{jsonrpc: "2.0", method: "sim_createValidator", params: [($stake | tonumber), $provider, $model, {}, $plugin, {"api_key_env_var": $api_key_env, "api_url": $api_url}], id: 1}')
     # fi
-    
+
     # oha -n $REQUESTS -c $CONCURRENCY -m POST \
     #     -d "$VALIDATOR_JSON" \
     #     -H "Content-Type: application/json" --no-tui $BASE_URL 2>&1 | tee -a "$RESULTS_FILE_TIMESTAMPED"
-    
+
     # echo "" | tee -a "$RESULTS_FILE_TIMESTAMPED"
-    
+
     # Test 2: Get Account Balance
     echo "--- Test 2: Get Account Balance (eth_getBalance) ---" | tee -a "$RESULTS_FILE_TIMESTAMPED"
-    
+
     BALANCE_OUTPUT=$(oha -n $REQUESTS -c $CONCURRENCY -m POST \
         -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBalance\",\"params\":[\"$FROM_ADDRESS\",\"latest\"],\"id\":1}" \
         -H "Content-Type: application/json" --no-tui $BASE_URL 2>&1)
-    
+
     echo "$BALANCE_OUTPUT" | tee -a "$RESULTS_FILE_TIMESTAMPED"
-    
+
     # Check if this test passed
     if ! check_test_result "$BALANCE_OUTPUT" "Get Balance"; then
         SCENARIO_PASSED=false
@@ -147,18 +147,18 @@ run_test_scenario() {
     else
         echo "✅ Get Balance test PASSED" | tee -a "$RESULTS_FILE_TIMESTAMPED"
     fi
-    
+
     echo "" | tee -a "$RESULTS_FILE_TIMESTAMPED"
-    
+
     # Test 3: Contract Deployment
     echo "--- Test 3: Contract Deployment (eth_sendRawTransaction) ---" | tee -a "$RESULTS_FILE_TIMESTAMPED"
-    
+
     DEPLOY_OUTPUT=$(oha -n $REQUESTS -c $CONCURRENCY -m POST \
         -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_sendRawTransaction\",\"params\":[\"$RAW_DEPLOYMENT_TX\"],\"id\":1}" \
         -H "Content-Type: application/json" --no-tui $BASE_URL 2>&1)
-    
+
     echo "$DEPLOY_OUTPUT" | tee -a "$RESULTS_FILE_TIMESTAMPED"
-    
+
     # Check if this test passed (note: for deployment, first succeeds, rest fail is expected)
     # So we check if we got responses at all
     if echo "$DEPLOY_OUTPUT" | grep -q "Status code distribution:"; then
@@ -167,9 +167,9 @@ run_test_scenario() {
         SCENARIO_PASSED=false
         echo "❌ Contract Deployment test FAILED" | tee -a "$RESULTS_FILE_TIMESTAMPED"
     fi
-    
+
     echo "" | tee -a "$RESULTS_FILE_TIMESTAMPED"
-    
+
     # Record overall scenario result
     if [ "$SCENARIO_PASSED" = true ]; then
         TEST_RESULTS+=("$TEST_NAME: ✅ PASSED")
@@ -205,7 +205,7 @@ echo "" | tee -a "$RESULTS_FILE_TIMESTAMPED"
 for config in "${TEST_CONFIGS[@]}"; do
     IFS=':' read -r requests concurrency <<< "$config"
     run_test_scenario "$requests" "$concurrency" "${requests}req_${concurrency}con"
-    
+
     # Small delay between test scenarios
     echo "Waiting 2 seconds before next scenario..." | tee -a "$RESULTS_FILE_TIMESTAMPED"
     sleep 2
@@ -231,14 +231,14 @@ index=0
 for config in "${TEST_CONFIGS[@]}"; do
     IFS=':' read -r requests concurrency <<< "$config"
     TEST_NAME="${requests}req_${concurrency}con"
-    
+
     # Check if this test passed
     if [[ " ${FAILED_TESTS[@]} " =~ " ${TEST_NAME} " ]]; then
         STATUS="❌"
     else
         STATUS="✅"
     fi
-    
+
     echo "| $requests | $concurrency | 2:1 | $STATUS |" | tee -a "$RESULTS_FILE_TIMESTAMPED"
     ((index++))
 done

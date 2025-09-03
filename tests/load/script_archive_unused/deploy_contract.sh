@@ -47,41 +47,41 @@ echo "Transaction hash: $TX_HASH"
 if [ -z "$TX_HASH" ] || [ "$TX_HASH" = "empty" ]; then
     echo "❌ Error: Could not get transaction hash from deployment"
     echo "Response: $DEPLOY_RESPONSE"
-    
+
     # Check if it's an error response
     ERROR_MSG=$(echo "$DEPLOY_RESPONSE" | jq -r '.error.message // empty')
     if [ -n "$ERROR_MSG" ] && [ "$ERROR_MSG" != "empty" ]; then
         echo "Error message: $ERROR_MSG"
     fi
-    
+
     exit 1
 else
     echo "✅ Deployment transaction submitted successfully"
     echo ""
-    
+
     # Wait for transaction to be processed
     echo "Waiting for transaction to be processed..."
     sleep 3
-    
+
     # Get transaction receipt
     echo "Getting transaction receipt..."
     RECEIPT_RESPONSE=$(curl -s -X POST $BASE_URL \
         -H "Content-Type: application/json" \
         -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getTransactionReceipt\",\"params\":[\"$TX_HASH\"],\"id\":1}")
-    
+
     # Pretty print the receipt for debugging
     echo "Receipt response:"
     echo "$RECEIPT_RESPONSE" | jq '.'
     echo ""
-    
+
     # Extract contract address from logs[0].address in the receipt
     CONTRACT_ADDRESS=$(echo "$RECEIPT_RESPONSE" | jq -r '.result.logs[0].address // empty')
-    
+
     # If that doesn't work, try the contractAddress field
     if [ -z "$CONTRACT_ADDRESS" ] || [ "$CONTRACT_ADDRESS" = "null" ] || [ "$CONTRACT_ADDRESS" = "empty" ]; then
         CONTRACT_ADDRESS=$(echo "$RECEIPT_RESPONSE" | jq -r '.result.contractAddress // empty')
     fi
-    
+
     if [ -z "$CONTRACT_ADDRESS" ] || [ "$CONTRACT_ADDRESS" = "null" ] || [ "$CONTRACT_ADDRESS" = "empty" ]; then
         echo "❌ Error: Could not extract contract address from receipt"
         echo "Please check the receipt response above for the contract address"
@@ -94,15 +94,15 @@ else
         echo "Contract Address: $CONTRACT_ADDRESS"
         echo "Transaction Hash: $TX_HASH"
         echo ""
-        
+
         # Export for use in other scripts
         export DEPLOYED_CONTRACT_ADDRESS="$CONTRACT_ADDRESS"
         export DEPLOYMENT_TX_HASH="$TX_HASH"
-        
+
         # Save to file for later use
         echo "$CONTRACT_ADDRESS" > "$SCRIPT_DIR/.last_deployed_contract"
         echo "$TX_HASH" > "$SCRIPT_DIR/.last_deployment_tx"
-        
+
         echo "Contract address saved to: $SCRIPT_DIR/.last_deployed_contract"
         echo ""
         echo "You can now use this contract address in other scripts:"

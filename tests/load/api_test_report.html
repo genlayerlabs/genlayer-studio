@@ -137,7 +137,7 @@
             <h1>GenLayer Studio API Test Report</h1>
             <div class="timestamp">Generated: <span id="timestamp"></span></div>
         </div>
-        
+
         <div class="summary">
             <div class="stat-card">
                 <div class="stat-value total" id="total-tests">0</div>
@@ -156,19 +156,19 @@
                 <div class="stat-label">Success Rate</div>
             </div>
         </div>
-        
+
         <div class="results-section">
             <h2>Test Configuration</h2>
             <div class="config-info" id="config-info"></div>
-            
+
             <h2>Detailed Results</h2>
             <div id="results-container"></div>
         </div>
     </div>
-    
+
     <script>
         // Embedded test data
-        const testData = 
+        const testData =
 {
   "test_suite": "GenLayer Studio API Comprehensive Test",
   "timestamp": "2025-09-03 13:59:36",
@@ -486,14 +486,14 @@
   ]
 }
         ;
-        
+
         // Populate the report
         document.getElementById('timestamp').textContent = testData.timestamp;
         document.getElementById('total-tests').textContent = testData.summary.total_tests;
         document.getElementById('passed-tests').textContent = testData.summary.passed;
         document.getElementById('failed-tests').textContent = testData.summary.failed;
         document.getElementById('success-rate').textContent = testData.summary.success_rate + '%';
-        
+
         // Configuration info
         const configHtml = `
             <div class="config-item"><strong>Base URL:</strong> ${testData.configuration.base_url}</div>
@@ -502,7 +502,7 @@
             <div class="config-item"><strong>Duration:</strong> ${testData.duration_seconds}s</div>
         `;
         document.getElementById('config-info').innerHTML = configHtml;
-        
+
         // Group results by category
         const categories = {};
         testData.results.forEach(result => {
@@ -511,17 +511,17 @@
             }
             categories[result.category].push(result);
         });
-        
+
         // Generate results HTML
         const container = document.getElementById('results-container');
         Object.keys(categories).sort().forEach(category => {
             const section = document.createElement('div');
             section.className = 'category-section';
-            
+
             const title = document.createElement('h3');
             title.textContent = category;
             section.appendChild(title);
-            
+
             const table = document.createElement('table');
             const thead = `
                 <thead>
@@ -532,7 +532,7 @@
                     </tr>
                 </thead>
             `;
-            
+
             const tbody = categories[category].map(result => `
                 <tr>
                     <td><code>${result.method}</code></td>
@@ -540,7 +540,7 @@
                     <td class="status-${result.status}">${result.status.toUpperCase()}</td>
                 </tr>
             `).join('');
-            
+
             table.innerHTML = thead + '<tbody>' + tbody + '</tbody>';
             section.appendChild(table);
             container.appendChild(section);

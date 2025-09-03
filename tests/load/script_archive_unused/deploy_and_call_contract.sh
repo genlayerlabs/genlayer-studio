@@ -88,39 +88,39 @@ echo "Transaction hash: $TX_HASH"
 if [ -z "$TX_HASH" ] || [ "$TX_HASH" = "empty" ]; then
     echo "❌ Error: Could not get transaction hash from deployment"
     echo "Response: $DEPLOY_RESPONSE"
-    
+
     # Check if it's an error response
     ERROR_MSG=$(echo "$DEPLOY_RESPONSE" | jq -r '.error.message // empty')
     if [ -n "$ERROR_MSG" ] && [ "$ERROR_MSG" != "empty" ]; then
         echo "Error message: $ERROR_MSG"
     fi
-    
+
     exit 1
 else
     echo "✅ Deployment transaction submitted successfully"
     echo ""
-    
+
     # Wait for transaction to be processed
     echo "Waiting for transaction to be processed..."
     sleep 3
-    
+
     # Get transaction receipt
     echo "Getting transaction receipt..."
     RECEIPT_RESPONSE=$(curl -s -X POST $BASE_URL \
         -H "Content-Type: application/json" \
         -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getTransactionReceipt\",\"params\":[\"$TX_HASH\"],\"id\":1}")
-    
+
     # Pretty print the receipt for debugging
     echo "Receipt response:"
     echo "$RECEIPT_RESPONSE" | jq '.'
     echo ""
-    
+
     # Extract the actual deployed contract address from the NewTransaction event
     # The event signature is NewTransaction(bytes32,address,address)
     # Topics: [event_signature, txId, recipient, activator]
     # The recipient (topics[2]) is the deployed contract address
     CONTRACT_ADDRESS=$(echo "$RECEIPT_RESPONSE" | jq -r '.result.logs[0].topics[2] // empty')
-    
+
     # Remove leading zeros and format as proper address if found
     if [ -n "$CONTRACT_ADDRESS" ] && [ "$CONTRACT_ADDRESS" != "null" ] && [ "$CONTRACT_ADDRESS" != "empty" ]; then
         # Convert from 32-byte hex to address (remove 0x prefix, take last 40 chars, add 0x prefix back)
@@ -129,7 +129,7 @@ else
         # Fallback: try the contractAddress field
         CONTRACT_ADDRESS=$(echo "$RECEIPT_RESPONSE" | jq -r '.result.contractAddress // empty')
     fi
-    
+
     if [ -z "$CONTRACT_ADDRESS" ] || [ "$CONTRACT_ADDRESS" = "null" ] || [ "$CONTRACT_ADDRESS" = "empty" ]; then
         echo "❌ Error: Could not extract contract address from receipt"
         echo "Please check the receipt response above for the contract address"
@@ -142,15 +142,15 @@ else
         echo "Contract Address: $CONTRACT_ADDRESS"
         echo "Transaction Hash: $TX_HASH"
         echo ""
-        
+
         # Export for use in other scripts
         export DEPLOYED_CONTRACT_ADDRESS="$CONTRACT_ADDRESS"
         export DEPLOYMENT_TX_HASH="$TX_HASH"
-        
+
         # Save to file for later use
         echo "$CONTRACT_ADDRESS" > "$SCRIPT_DIR/.last_deployed_contract"
         echo "$TX_HASH" > "$SCRIPT_DIR/.last_deployment_tx"
-        
+
         echo "Contract address saved to: $SCRIPT_DIR/.last_deployed_contract"
         echo ""
     fi
@@ -183,9 +183,9 @@ echo ""
 make_gen_call() {
     local VARIANT=$1
     local VARIANT_DESC=$2
-    
+
     echo "Making gen_call with transaction_hash_variant: $VARIANT_DESC"
-    
+
     # Prepare the gen_call request
     # Note: params must be an array containing a single object
     GEN_CALL_REQUEST=$(cat <<EOF
@@ -205,23 +205,23 @@ make_gen_call() {
 }
 EOF
 )
-    
+
     echo "Request:"
     echo "$GEN_CALL_REQUEST" | jq '.'
     echo ""
-    
+
     # Send the gen_call request
     GEN_CALL_RESPONSE=$(curl -s -X POST $BASE_URL \
         -H "Content-Type: application/json" \
         -d "$GEN_CALL_REQUEST")
-    
+
     echo "Response:"
     echo "$GEN_CALL_RESPONSE" | jq '.'
     echo ""
-    
+
     # Extract and decode the result
     RESULT=$(echo "$GEN_CALL_RESPONSE" | jq -r '.result // empty')
-    
+
     if [ -z "$RESULT" ] || [ "$RESULT" = "empty" ]; then
         echo "❌ Error: Could not get result from gen_call"
         ERROR_MSG=$(echo "$GEN_CALL_RESPONSE" | jq -r '.error.message // empty')
@@ -231,7 +231,7 @@ EOF
     else
         echo "✅ gen_call successful!"
         echo "Result (hex): $RESULT"
-        
+
         # Try to decode the result (it appears to be hex-encoded)
         # The UI shows "08" which is likely a boolean value (true/false)
         if [ "$RESULT" = "08" ]; then
@@ -242,7 +242,7 @@ EOF
             echo "Result (decoded): Unknown value"
         fi
     fi
-    
+
     echo "-------------------------------------"
     echo ""
 }

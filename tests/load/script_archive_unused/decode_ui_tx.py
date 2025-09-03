@@ -21,7 +21,7 @@ print("=" * 50)
 # Format: [nonce, gasPrice, gasLimit, to, value, data, v, r, s]
 if len(decoded) == 9:
     nonce, gas_price, gas_limit, to, value, data, v, r, s = decoded
-    
+
     print(f"Transaction Type: Legacy (Type 0)")
     print(f"Nonce: {int.from_bytes(nonce, 'big') if nonce else 0}")
     print(f"Gas Price: {int.from_bytes(gas_price, 'big') if gas_price else 0}")
@@ -33,19 +33,19 @@ if len(decoded) == 9:
     print(f"V: {int.from_bytes(v, 'big') if v else 0}")
     print(f"R: 0x{r.hex()}")
     print(f"S: 0x{s.hex()}")
-    
+
     # Check if data starts with function selector
     if len(data) >= 4:
         function_selector = data[:4]
         print(f"\nFunction selector: 0x{function_selector.hex()}")
         # 27241a99 appears to be the function selector
-        
+
     # Try to extract the sender address from the first parameter
     if len(data) >= 36:
-        # Skip function selector (4 bytes) and padding (12 bytes) 
+        # Skip function selector (4 bytes) and padding (12 bytes)
         sender_param = data[16:36]
         print(f"First param (sender): 0x{sender_param.hex()}")
-        
+
 else:
     print(f"Unexpected transaction structure with {len(decoded)} elements")
     for i, element in enumerate(decoded):

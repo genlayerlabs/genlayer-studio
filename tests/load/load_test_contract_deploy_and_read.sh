@@ -29,7 +29,7 @@ declare -a CONTRACT_ADDRESSES
 # Function to deploy a contract
 deploy_contract() {
     local index=$1
-    
+
     echo "[Deploy $index] Starting deployment..."
     if result=$(python3 "$SCRIPT_DIR/deploy_contract/wizard_deploy.py" 2>&1); then
         local addr=$(echo "$result" | grep -oE '0x[a-fA-F0-9]+' | tail -n 1)
@@ -46,12 +46,12 @@ deploy_contract() {
 read_contract() {
     local addr=$1
     local index=$2
-    
+
     echo "[Read $index] Reading contract state..."
     # Create temporary file with contract address
     local temp_addr_file="/tmp/wizard_contract_$index.addr"
     echo "$addr" > "$temp_addr_file"
-    
+
     if result=$(python3 "$SCRIPT_DIR/deploy_contract/wizard_read.py" "$temp_addr_file" 2>&1); then
         rm -f "$temp_addr_file"
         echo "[Read $index] ✅ Success"
@@ -81,7 +81,7 @@ seq 1 "$NUM_DEPLOYMENTS" | xargs -P "$PARALLEL_JOBS" -I {} bash -c '
     index=$1
     temp_dir=$2
     script_dir=$3
-    
+
     echo "[Deploy $index] Starting deployment..."
     if result=$(python3 "$script_dir/deploy_contract/wizard_deploy.py" 2>&1); then
         addr=$(echo "$result" | grep -oE "0x[a-fA-F0-9]+" | tail -n 1)
@@ -135,13 +135,13 @@ seq 1 "${#CONTRACT_ADDRESSES[@]}" | xargs -P "$PARALLEL_JOBS" -I {} bash -c '
     index=$1
     script_dir=$2
     temp_dir=$3
-    
+
     addr=$(cat "$temp_dir/addr_$index.txt")
-    
+
     echo "[Read $index] Reading contract state..."
     temp_addr_file="$temp_dir/read_$index.addr"
     echo "$addr" > "$temp_addr_file"
-    
+
     if python3 "$script_dir/deploy_contract/wizard_read.py" "$temp_addr_file" >/dev/null 2>&1; then
         echo "[Read $index] ✅ Success"
         touch "$temp_dir/read_$index.success"

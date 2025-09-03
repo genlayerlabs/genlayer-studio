@@ -353,7 +353,7 @@ CONTRACT_ADDRESS=$(cat .last_deployed_contract)
 
 The final test flow is now:
 1. **Create Validators** - Using `sim_createValidator`
-2. **Fund Accounts** - Using `sim_fundAccount` 
+2. **Fund Accounts** - Using `sim_fundAccount`
 3. **Deploy Contract** (Load Test) - Using hardcoded `eth_sendRawTransaction`
 
 ### File Structure
@@ -619,7 +619,7 @@ Added a comprehensive load test suite script that runs multiple test scenarios w
 
 **Test Configurations**:
 - 2 requests / 1 concurrent
-- 10 requests / 5 concurrent  
+- 10 requests / 5 concurrent
 - 50 requests / 25 concurrent
 - 100 requests / 50 concurrent
 - 200 requests / 100 concurrent
@@ -886,7 +886,7 @@ Same as deployment script - checks `logs[0].address` first, then `contractAddres
 make_gen_call() {
     local VARIANT=$1
     local VARIANT_DESC=$2
-    
+
     # Prepare request with proper array format
     GEN_CALL_REQUEST=$(cat <<EOF
 {
@@ -905,7 +905,7 @@ make_gen_call() {
 }
 EOF
 )
-    
+
     # Send request and handle response
     # Decode result (hex to boolean for this method)
 }
@@ -988,7 +988,7 @@ CONTRACT_ADDRESS=$(cat .last_deployed_contract)
 1. **Hex Encoding**: GenLayer uses custom hex encoding for method names
 2. **Boolean Values**: Simple booleans return as `"08"` (true) or `"00"` (false)
 3. **Complex Types**: May return longer hex strings requiring custom decoding
-4. **Transaction Variants**: 
+4. **Transaction Variants**:
    - `latest-nonfinal`: Faster but may include uncommitted changes
    - `latest-final`: Slower but guaranteed to be finalized
 
@@ -1321,7 +1321,7 @@ def encode_calldata(constructor_args):
     The calldata should be encoded as an array of arguments.
     """
     have_coin = constructor_args.get("have_coin", True)
-    
+
     result = bytearray()
     # Array with 1 element: (1 << 3) | 5 = 13
     result.append(0x0D)
@@ -1330,7 +1330,7 @@ def encode_calldata(constructor_args):
         result.append(0x10)  # SPECIAL_TRUE
     else:
         result.append(0x08)  # SPECIAL_FALSE
-    
+
     return bytes(result)
 ```
 
@@ -1423,7 +1423,7 @@ Data tail: ...880e04617267730d10... (includes "args" wrapper)
 
 The UI wraps constructor arguments with a special "args" field:
 - `0x88` - Type/length marker
-- `0x0e` - Sub-type marker  
+- `0x0e` - Sub-type marker
 - `0x04` - Length of "args"
 - `0x61726773` - "args" in hex
 - `0x0d10` - The actual constructor arguments
@@ -1432,7 +1432,7 @@ The UI wraps constructor arguments with a special "args" field:
 
 Created `generate_ui_compatible_tx.py` that:
 
-1. **Uses Correct Account**: 
+1. **Uses Correct Account**:
    - Private key: `0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d`
    - Address: `0x70997970C51812dc3A010C7d01b50e0d17dc79C8`
 
@@ -1926,13 +1926,13 @@ deploy_contract() {
 **Operation Summary Table**:
 ```
 ===================================================
-              LOAD TEST RESULTS                    
+              LOAD TEST RESULTS
 ===================================================
 
-Operation            | Total      | Success    | Failed    
+Operation            | Total      | Success    | Failed
 --------------------+-----------+-----------+-----------
-Deployments          | 10         | 10         | 0         
-Contract Reads       | 10         | 10         | 0         
+Deployments          | 10         | 10         | 0
+Contract Reads       | 10         | 10         | 0
 ```
 
 **Success Rate Table**:
@@ -2072,7 +2072,7 @@ Fixed the `sim_fundAccount` parameter issue:
 # Old (failing)
 run_test "Setup" "sim_fundAccount" "$TEST_ADDRESS" "1000000000000000000"
 
-# New (working) 
+# New (working)
 FUND_PARAMS='{"account_address":"'$TEST_ADDRESS'","amount":1000000000000000000}'
 run_test "Setup" "sim_fundAccount" "$FUND_PARAMS"
 ```

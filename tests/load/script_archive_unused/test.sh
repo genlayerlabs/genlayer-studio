@@ -115,7 +115,7 @@ echo "Constructor args: have_coin=true"
 # - From: 0x701a6B9AbAF65a0E1d4B24fA875cAfA5EdB32205
 # IMPORTANT: This raw transaction might not work if:
 # - The WizardOfCoin contract code changes
-# - Constructor arguments are modified from have_coin=true 
+# - Constructor arguments are modified from have_coin=true
 # - Origin address differs from 0x701a6B9AbAF65a0E1d4B24fA875cAfA5EdB32205
 # To generate a new raw transaction:
 # 1. Use the UI to deploy a new instance of the contract

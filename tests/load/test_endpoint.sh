@@ -38,12 +38,12 @@ print_color() {
 # Function to check if test passed
 check_test_result() {
     local TEST_OUTPUT="$1"
-    
+
     # Check for connection errors
     if echo "$TEST_OUTPUT" | grep -q "connection closed before message completed"; then
         return 1
     fi
-    
+
     # Check for other error patterns
     if echo "$TEST_OUTPUT" | grep -q "Error distribution:"; then
         # If there are errors listed, check if count is non-zero
@@ -52,12 +52,12 @@ check_test_result() {
             return 1
         fi
     fi
-    
+
     # Check if we got successful responses
     if echo "$TEST_OUTPUT" | grep -q "\[200\]"; then
         return 0
     fi
-    
+
     # Default to failure if no success indicators found
     return 1
 }
@@ -69,17 +69,17 @@ build_params_json() {
         echo "$1"
         return
     fi
-    
+
     local params="["
     local first=true
-    
+
     for param in "$@"; do
         if [ "$first" = true ]; then
             first=false
         else
             params+=","
         fi
-        
+
         # Check if param starts with '{' (JSON object)
         if [[ "$param" =~ ^\{ ]]; then
             params+="$param"
@@ -103,7 +103,7 @@ build_params_json() {
             params+="\"$param\""
         fi
     done
-    
+
     params+="]"
     echo "$params"
 }
@@ -113,7 +113,7 @@ run_endpoint_test() {
     local method=$1
     shift
     local params=$(build_params_json "$@")
-    
+
     # Build the JSON-RPC request
     REQUEST_JSON=$(cat <<EOF
 {
@@ -124,14 +124,14 @@ run_endpoint_test() {
 }
 EOF
 )
-    
+
     # Run the load test using oha with timeout (suppress detailed output)
     TEST_OUTPUT=$(oha -n $REQUESTS -c $CONCURRENCY -m POST \
         -d "$REQUEST_JSON" \
         -H "Content-Type: application/json" \
         -t 60s \
         --no-tui "$BASE_URL" 2>&1)
-    
+
     # Return success/failure based on test result
     if check_test_result "$TEST_OUTPUT"; then
         return 0
@@ -145,25 +145,25 @@ run_progressive_tests() {
     local method=$1
     shift
     local configs=("10:1" "50:5" "100:10" "200:20" "500:50" "1000:100")
-    
+
     print_color "$BLUE" "\n════════════════════════════════════════════════════════════════════"
     print_color "$BLUE" "  Progressive Load Test: $method"
     print_color "$BLUE" "  Parameters: [$*]"
     print_color "$BLUE" "════════════════════════════════════════════════════════════════════\n"
-    
+
     # Table header
     printf "%-20s %-20s %-10s\n" "Requests" "Concurrency" "Result"
     printf "%-20s %-20s %-10s\n" "────────" "───────────" "──────"
-    
+
     for config in "${configs[@]}"; do
         IFS=':' read -r req con <<< "$config"
-        
+
         # Update global variables for this test
         REQUESTS=$req
         CONCURRENCY=$con
-        
+
         printf "%-20s %-20s " "$req" "$con"
-        
+
         if run_endpoint_test "$method" "$@"; then
             print_color "$GREEN" "✅ PASS"
         else
@@ -171,11 +171,11 @@ run_progressive_tests() {
             print_color "$YELLOW" "\nSystem limit reached at $req requests / $con concurrent"
             break
         fi
-        
+
         # Small delay between tests
         sleep 1
     done
-    
+
     echo ""
 }
 
@@ -183,25 +183,25 @@ run_progressive_tests() {
 run_single_test() {
     local method=$1
     shift
-    
+
     print_color "$BLUE" "\n════════════════════════════════════════════════════════════════════"
     print_color "$BLUE" "  Single Test: $method"
     print_color "$BLUE" "  Parameters: [$*]"
     print_color "$BLUE" "  Configuration: $REQUESTS requests / $CONCURRENCY concurrent"
     print_color "$BLUE" "════════════════════════════════════════════════════════════════════\n"
-    
+
     # Table header
     printf "%-20s %-20s %-10s\n" "Requests" "Concurrency" "Result"
     printf "%-20s %-20s %-10s\n" "────────" "───────────" "──────"
-    
+
     printf "%-20s %-20s " "$REQUESTS" "$CONCURRENCY"
-    
+
     if run_endpoint_test "$method" "$@"; then
         print_color "$GREEN" "✅ PASS"
     else
         print_color "$RED" "❌ FAIL"
     fi
-    
+
     echo ""
 }
 
@@ -213,7 +213,7 @@ main() {
         echo "Visit: https://github.com/hatoo/oha"
         exit 1
     fi
-    
+
     # Check for method argument
     if [ $# -lt 1 ]; then
         print_color "$RED" "Error: No method specified"
@@ -234,10 +234,10 @@ main() {
         echo "  BASE_URL=http://localhost:8545 $0 eth_getBalance 0x123... latest"
         exit 1
     fi
-    
+
     METHOD=$1
     shift
-    
+
     # Check for progressive mode
     if [ "${PROGRESSIVE:-0}" = "1" ]; then
         run_progressive_tests "$METHOD" "$@"

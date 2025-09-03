@@ -36,7 +36,7 @@ if [ $? -ne 0 ]; then
     echo "⚠️  Warning: genlayer_py not installed"
     echo "Installing genlayer_py..."
     pip3 install genlayer-py 2>/dev/null || pip install genlayer-py 2>/dev/null
-    
+
     # Check again
     python3 -c "import genlayer_py" 2>/dev/null
     if [ $? -ne 0 ]; then
@@ -66,7 +66,7 @@ fi
 echo ""
 if [ $EXIT_CODE -eq 0 ]; then
     echo "✅ Test completed successfully"
-    
+
     # Check if contract address was saved (could be in either location)
     if [ -f "$SCRIPT_DIR/.last_deployed_contract" ]; then
         CONTRACT_ADDRESS=$(cat "$SCRIPT_DIR/.last_deployed_contract")

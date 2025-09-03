@@ -62,16 +62,16 @@ run_test() {
     local method=$2
     shift 2
     local params="$*"
-    
+
     total_tests=$((total_tests + 1))
-    
+
     print_color "$CYAN" "Testing: $method"
     printf "  Parameters: [%s]\n" "$params"
     printf "  Status: "
-    
+
     # Escape params for JSON
     local escaped_params=$(echo "$params" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
-    
+
     # Run the test using test_endpoint.sh (now has built-in timeout)
     if REQUESTS=$REQUESTS CONCURRENCY=$CONCURRENCY "$TEST_ENDPOINT_SCRIPT" "$method" $params >/dev/null 2>&1; then
         print_color "$GREEN" "✅ PASS"
@@ -102,7 +102,7 @@ EOF
 EOF
 )
     fi
-    
+
     test_index=$((test_index + 1))
     sleep 0.5  # Small delay between tests
 }
@@ -113,7 +113,7 @@ generate_json_report() {
     local end_timestamp=$(date +%s)
     local duration=$((end_timestamp - start_timestamp))
     local success_rate=$(awk "BEGIN {printf \"%.2f\", ($passed_tests/$total_tests)*100}")
-    
+
     cat > "$JSON_REPORT" <<EOF
 {
   "test_suite": "GenLayer Studio API Comprehensive Test",
@@ -133,7 +133,7 @@ generate_json_report() {
   },
   "results": [
 EOF
-    
+
     # Add test results
     for ((i=0; i<${#test_results[@]}; i++)); do
         if [ $i -gt 0 ]; then
@@ -141,7 +141,7 @@ EOF
         fi
         echo "    ${test_results[$i]}" >> "$JSON_REPORT"
     done
-    
+
     cat >> "$JSON_REPORT" <<EOF
 
   ]
@@ -153,7 +153,7 @@ EOF
 generate_html_report() {
     local end_time=$(date '+%Y-%m-%d %H:%M:%S')
     local success_rate=$(awk "BEGIN {printf \"%.2f\", ($passed_tests/$total_tests)*100}")
-    
+
     cat > "$HTML_REPORT" <<'EOF'
 <!DOCTYPE html>
 <html lang="en">
@@ -294,7 +294,7 @@ generate_html_report() {
             <h1>GenLayer Studio API Test Report</h1>
             <div class="timestamp">Generated: <span id="timestamp"></span></div>
         </div>
-        
+
         <div class="summary">
             <div class="stat-card">
                 <div class="stat-value total" id="total-tests">0</div>
@@ -313,34 +313,34 @@ generate_html_report() {
                 <div class="stat-label">Success Rate</div>
             </div>
         </div>
-        
+
         <div class="results-section">
             <h2>Test Configuration</h2>
             <div class="config-info" id="config-info"></div>
-            
+
             <h2>Detailed Results</h2>
             <div id="results-container"></div>
         </div>
     </div>
-    
+
     <script>
         // Embedded test data
-        const testData = 
+        const testData =
 EOF
-    
+
     # Append JSON data
     cat "$JSON_REPORT" >> "$HTML_REPORT"
-    
+
     cat >> "$HTML_REPORT" <<'EOF'
         ;
-        
+
         // Populate the report
         document.getElementById('timestamp').textContent = testData.timestamp;
         document.getElementById('total-tests').textContent = testData.summary.total_tests;
         document.getElementById('passed-tests').textContent = testData.summary.passed;
         document.getElementById('failed-tests').textContent = testData.summary.failed;
         document.getElementById('success-rate').textContent = testData.summary.success_rate + '%';
-        
+
         // Configuration info
         const configHtml = `
             <div class="config-item"><strong>Base URL:</strong> ${testData.configuration.base_url}</div>
@@ -349,7 +349,7 @@ EOF
             <div class="config-item"><strong>Duration:</strong> ${testData.duration_seconds}s</div>
         `;
         document.getElementById('config-info').innerHTML = configHtml;
-        
+
         // Group results by category
         const categories = {};
         testData.results.forEach(result => {
@@ -358,17 +358,17 @@ EOF
             }
             categories[result.category].push(result);
         });
-        
+
         // Generate results HTML
         const container = document.getElementById('results-container');
         Object.keys(categories).sort().forEach(category => {
             const section = document.createElement('div');
             section.className = 'category-section';
-            
+
             const title = document.createElement('h3');
             title.textContent = category;
             section.appendChild(title);
-            
+
             const table = document.createElement('table');
             const thead = `
                 <thead>
@@ -379,7 +379,7 @@ EOF
                     </tr>
                 </thead>
             `;
-            
+
             const tbody = categories[category].map(result => `
                 <tr>
                     <td><code>${result.method}</code></td>
@@ -387,7 +387,7 @@ EOF
                     <td class="status-${result.status}">${result.status.toUpperCase()}</td>
                 </tr>
             `).join('');
-            
+
             table.innerHTML = thead + '<tbody>' + tbody + '</tbody>';
             section.appendChild(table);
             container.appendChild(section);
@@ -409,21 +409,21 @@ main() {
     echo "  Requests per test: $REQUESTS"
     echo "  Concurrency: $CONCURRENCY"
     echo ""
-    
+
     # Check if test_endpoint.sh exists
     if [ ! -f "$TEST_ENDPOINT_SCRIPT" ]; then
         print_color "$RED" "Error: test_endpoint.sh not found at $TEST_ENDPOINT_SCRIPT"
         exit 1
     fi
-    
+
     # Make sure test_endpoint.sh is executable
     chmod +x "$TEST_ENDPOINT_SCRIPT"
-    
+
     print_color "$BLUE" "╔════════════════════════════════════════════════════════════════╗"
     print_color "$BLUE" "║                    READ-ONLY ENDPOINTS                        ║"
     print_color "$BLUE" "╚════════════════════════════════════════════════════════════════╝"
     echo ""
-    
+
     # Test read-only endpoints without parameters
     print_color "$YELLOW" "Testing endpoints without parameters..."
     echo ""
@@ -436,7 +436,7 @@ main() {
     # run_test "Read-Only" "sim_getProvidersAndModels"
     run_test "Read-Only" "sim_countValidators"
     run_test "Read-Only" "sim_getAllValidators"
-    
+
     echo ""
     print_color "$YELLOW" "Testing endpoints with parameters..."
     echo ""
@@ -449,34 +449,34 @@ main() {
     run_test "Read-Only" "sim_getValidator" "$TEST_ADDRESS"
     run_test "Read-Only" "sim_getTransactionsForAddress" "$TEST_ADDRESS"
     run_test "Read-Only" "sim_getConsensusContract"
-    
+
     echo ""
     print_color "$BLUE" "╔════════════════════════════════════════════════════════════════╗"
     print_color "$BLUE" "║                     SETUP OPERATIONS                          ║"
     print_color "$BLUE" "╚════════════════════════════════════════════════════════════════╝"
     echo ""
-    
+
     print_color "$YELLOW" "Testing validator management..."
     echo ""
     run_test "Setup" "sim_createRandomValidator"
     run_test "Setup" "sim_createRandomValidators" "3"
-    
+
     # For sim_createValidator, we need to pass JSON
     VALIDATOR_CONFIG='{"stake":1,"provider":"openai","model":"gpt-4-1106-preview","config":{},"address":"'$TEST_ADDRESS_2'"}'
     run_test "Setup" "sim_createValidator" "$VALIDATOR_CONFIG"
-    
+
     # For sim_updateValidator
     UPDATE_CONFIG='{"address":"'$TEST_ADDRESS_2'","stake":2,"provider":"openai","model":"gpt-4","config":{}}'
     run_test "Setup" "sim_updateValidator" "$UPDATE_CONFIG"
-    
+
     run_test "Setup" "sim_deleteValidator" "$TEST_ADDRESS_2"
-    
+
     echo ""
     print_color "$YELLOW" "Testing account operations..."
     echo ""
     # sim_fundAccount expects array parameters: [address, amount]
     run_test "Setup" "sim_fundAccount" "$TEST_ADDRESS" "1000000000000000000"
-    
+
     echo ""
     print_color "$YELLOW" "Testing system management..."
     echo ""
@@ -484,35 +484,35 @@ main() {
     run_test "Setup" "sim_createSnapshot" "test_snapshot"
     run_test "Setup" "sim_restoreSnapshot" "test_snapshot"
     run_test "Setup" "sim_deleteAllSnapshots"
-    
+
     echo ""
     print_color "$YELLOW" "Testing provider management..."
     echo ""
     PROVIDER_CONFIG='{"provider":"openai","model":"gpt-4","config":{"api_key_env_var":"OPENAI_API_KEY"}}'
     run_test "Setup" "sim_addProvider" "$PROVIDER_CONFIG"
-    
+
     UPDATE_PROVIDER_CONFIG='{"provider":"openai","model":"gpt-4-turbo","config":{"api_key_env_var":"OPENAI_API_KEY"}}'
     run_test "Setup" "sim_updateProvider" "openai" "$UPDATE_PROVIDER_CONFIG"
-    
+
     run_test "Setup" "sim_deleteProvider" "openai"
     run_test "Setup" "sim_resetDefaultsLlmProviders"
-    
+
     echo ""
     print_color "$YELLOW" "Testing cleanup operations..."
     echo ""
     run_test "Setup" "sim_deleteAllValidators"
     run_test "Setup" "sim_clearDbTables"
-    
+
     echo ""
     print_color "$BLUE" "════════════════════════════════════════════════════════════════════"
     print_color "$BLUE" "                     GENERATING REPORTS"
     print_color "$BLUE" "════════════════════════════════════════════════════════════════════"
     echo ""
-    
+
     # Generate reports
     generate_json_report
     generate_html_report
-    
+
     # Print summary
     echo ""
     print_color "$GREEN" "╔════════════════════════════════════════════════════════════════╗"
@@ -529,7 +529,7 @@ main() {
     echo "  - JSON: $JSON_REPORT"
     echo "  - HTML: $HTML_REPORT"
     echo ""
-    
+
     if [ $failed_tests -eq 0 ]; then
         print_color "$GREEN" "  ✅ All tests passed successfully!"
     else

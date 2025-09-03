@@ -64,7 +64,7 @@ echo ""
 deploy_contract() {
     local index=$1
     local start_time=$(date +%s%N)
-    
+
     # Deploy the contract
     if command -v expect &> /dev/null && [ -n "$GENLAYER_PASSWORD" ]; then
         local output=$(expect -c "
@@ -82,14 +82,14 @@ deploy_contract() {
         local output=$(genlayer deploy --contract "$CONTRACT_PATH" --args true --rpc "$BASE_URL" 2>&1)
         local exit_code=$?
     fi
-    
+
     local end_time=$(date +%s%N)
     local duration_ns=$((end_time - start_time))
     local duration_ms=$((duration_ns / 1000000))
-    
+
     # Extract contract address if successful
     local contract_address=$(echo "$output" | grep -oE '0x[a-fA-F0-9]{40}' | head -1)
-    
+
     # Log result
     if [ $exit_code -eq 0 ] && [ -n "$contract_address" ]; then
         echo "[$(date +%H:%M:%S)] Deployment $index: SUCCESS - ${duration_ms}ms - $contract_address"
@@ -106,10 +106,10 @@ deploy_contract() {
 run_parallel_deployments() {
     local batch_start=$1
     local batch_size=$2
-    
+
     echo ""
     echo "Starting batch: deployments $batch_start to $((batch_start + batch_size - 1))"
-    
+
     # Start deployments in background
     for ((i=0; i<batch_size; i++)); do
         local index=$((batch_start + i))
@@ -117,7 +117,7 @@ run_parallel_deployments() {
             deploy_contract $index &
         fi
     done
-    
+
     # Wait for all background jobs to complete
     wait
 }
@@ -138,7 +138,7 @@ if [ $PARALLEL_DEPLOYMENTS -eq 1 ]; then
     echo ""
     echo "Running sequential deployments..."
     echo ""
-    
+
     for ((i=1; i<=NUM_DEPLOYMENTS; i++)); do
         deploy_contract $i
         if [ $? -eq 0 ]; then
@@ -151,12 +151,12 @@ else
     echo ""
     echo "Running parallel deployments (batch size: $PARALLEL_DEPLOYMENTS)..."
     echo ""
-    
+
     # Process in batches
     for ((batch_start=1; batch_start<=NUM_DEPLOYMENTS; batch_start+=PARALLEL_DEPLOYMENTS)); do
         run_parallel_deployments $batch_start $PARALLEL_DEPLOYMENTS
     done
-    
+
     # Count results
     SUCCESS_COUNT=$(grep -c "^SUCCESS" "$RESULTS_FILE")
     FAIL_COUNT=$(grep -c "^FAILED" "$RESULTS_FILE")
@@ -176,7 +176,7 @@ echo ""
 if [ -f "$RESULTS_FILE" ] && [ $SUCCESS_COUNT -gt 0 ]; then
     # Extract successful deployment times
     grep "^SUCCESS" "$RESULTS_FILE" | cut -d',' -f3 > "$RESULTS_DIR/temp_times.txt"
-    
+
     # Calculate average, min, max using awk
     STATS=$(awk '{
         sum += $1;
@@ -190,7 +190,7 @@ if [ -f "$RESULTS_FILE" ] && [ $SUCCESS_COUNT -gt 0 ]; then
             printf "%.2f,%.0f,%.0f", avg, min, max;
         }
     }' "$RESULTS_DIR/temp_times.txt")
-    
+
     IFS=',' read -r AVG_TIME MIN_TIME MAX_TIME <<< "$STATS"
     rm -f "$RESULTS_DIR/temp_times.txt"
 fi
@@ -232,7 +232,7 @@ if [ $SUCCESS_COUNT -gt 0 ]; then
     grep "^SUCCESS" "$RESULTS_FILE" | head -5 | while IFS=',' read -r status index duration address; do
         echo "  - $address (${duration}ms)"
     done
-    
+
     if [ $SUCCESS_COUNT -gt 5 ]; then
         echo "  ... and $((SUCCESS_COUNT - 5)) more"
     fi

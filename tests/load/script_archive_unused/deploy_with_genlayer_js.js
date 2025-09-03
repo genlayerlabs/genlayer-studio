@@ -45,7 +45,7 @@ async function deployContract() {
     });
 
     console.log('Deploying WizardOfCoin contract...');
-    
+
     // Deploy the contract
     const txHash = await client.deployContract({
       code: contractCode,
@@ -54,7 +54,7 @@ async function deployContract() {
     });
 
     console.log('Transaction submitted:', txHash);
-    
+
     // Wait for transaction receipt
     const publicClient = createPublicClient({
       chain: genlayerConfig,
@@ -68,22 +68,22 @@ async function deployContract() {
     });
 
     console.log('Transaction receipt:', receipt);
-    
+
     // Extract contract address from logs
     if (receipt.logs && receipt.logs.length > 0) {
       const log = receipt.logs[0];
       if (log.topics && log.topics[2]) {
         const contractAddress = '0x' + log.topics[2].slice(-40);
         console.log('Contract deployed at:', contractAddress);
-        
+
         // Save contract address for later use
         fs.writeFileSync(path.join(__dirname, '.last_deployed_contract'), contractAddress);
         fs.writeFileSync(path.join(__dirname, '.last_deployment_tx'), txHash);
-        
+
         return contractAddress;
       }
     }
-    
+
     console.log('Could not extract contract address from receipt');
     return null;
 

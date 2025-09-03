@@ -93,7 +93,7 @@ else
     echo "✅ Contract successfully deployed!"
     echo "Contract Address: $CONTRACT_ADDRESS"
     echo ""
-    
+
     # Save contract address for later use
     echo "$CONTRACT_ADDRESS" > "$SCRIPT_DIR/.last_deployed_contract"
     echo "Contract address saved to: $SCRIPT_DIR/.last_deployed_contract"
@@ -117,9 +117,9 @@ if [ -n "$CONTRACT_ADDRESS" ]; then
     echo "Calling get_have_coin() method..."
     CALL_OUTPUT=$(genlayer call "$CONTRACT_ADDRESS" get_have_coin --rpc "$BASE_URL" 2>&1)
     CALL_EXIT_CODE=$?
-    
+
     echo "$CALL_OUTPUT"
-    
+
     if [ $CALL_EXIT_CODE -eq 0 ]; then
         echo "✅ Successfully read contract state"
     else
