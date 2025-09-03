@@ -59,6 +59,7 @@ class ContractSnapshot:
         result = (
             session.query(CurrentState)
             .filter(CurrentState.id == self.contract_address)
+            .populate_existing()  # Force refresh from database even if cached
             .one_or_none()
         )
 
