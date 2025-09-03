@@ -84,7 +84,6 @@ async def create_app():
     with app.app_context():
         engine = sqlalchemy_db.engine
 
-
     CORS(app, resources={r"/api/*": {"origins": "*"}}, intercept_exceptions=False)
     jsonrpc = JSONRPC(
         app, "/api", enable_web_browsable_api=True
@@ -407,7 +406,6 @@ async def main():
         def handle_unsubscribe(topics):
             for topic in topics:
                 leave_room(topic)
-
 
     # Thread for the Flask-SocketIO server
     threading.Thread(target=run_socketio, daemon=True).start()
