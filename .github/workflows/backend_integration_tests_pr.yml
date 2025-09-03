@@ -61,16 +61,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Cache Docker layers
-        uses: actions/cache@v4
+      - uses: docker/bake-action@v6
         with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-buildx-
-
-      - name: Build Docker images
-        run: docker compose build
+          set: |
+            *.cache-from=type=gha
 
       - name: Run Docker Compose
         run: docker compose up -d
