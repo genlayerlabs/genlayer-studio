@@ -9,6 +9,7 @@ import re
 from backend.rollup.default_contracts.consensus_main import (
     get_default_consensus_main_contract,
 )
+from backend.rollup.web3_pool import Web3ConnectionPool
 
 
 class ConsensusService:
@@ -16,11 +17,8 @@ class ConsensusService:
         """
         Initialize the ConsensusService class
         """
-        # Connect to Hardhat Network
-        port = os.environ.get("HARDHAT_PORT")
-        url = os.environ.get("HARDHAT_URL")
-        hardhat_url = f"{url}:{port}"
-        self.web3 = Web3(Web3.HTTPProvider(hardhat_url))
+        # Use singleton Web3 connection pool
+        self.web3 = Web3ConnectionPool.get()
 
         self.web3_connected = self.web3.is_connected()
 
