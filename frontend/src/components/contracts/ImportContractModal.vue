@@ -67,14 +67,13 @@ const handleImport = async () => {
     } catch (codeError) {
       console.warn('Failed to fetch contract code:', codeError);
 
-      // Fallback to empty file if we can't get the actual code
-      contractCode = '# ERROR: Could not retrieve contract code';
-
       notify({
         title: 'Could not retrieve contract code',
-        text: 'The contract will be added without source code',
+        text: 'Review the contract address and try again',
         type: 'error',
       });
+
+      return;
     }
 
     // Add the contract file
