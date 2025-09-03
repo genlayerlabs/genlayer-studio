@@ -251,11 +251,13 @@ def setup_loguru_config():
                 message = " ".join(message.split())
                 message = f"[COMPRESSED] {message}"
 
-            if record.exc_info: 
-                exc_type, exc, tb = record.exc_info 
-                exc_only = " ".join(traceback.format_exception_only(exc_type, exc)).strip() 
-                tb_str = " ".join(line.strip() for line in traceback.format_tb(tb)) 
-                message = f"{message} | exc={exc_only} | tb={tb_str}" 
+            if record.exc_info:
+                exc_type, exc, tb = record.exc_info
+                exc_only = " ".join(
+                    traceback.format_exception_only(exc_type, exc)
+                ).strip()
+                tb_str = " ".join(line.strip() for line in traceback.format_tb(tb))
+                message = f"{message} | exc={exc_only} | tb={tb_str}"
 
             logger.opt(depth=depth).log(level, message)
 

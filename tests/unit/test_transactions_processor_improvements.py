@@ -24,7 +24,7 @@ class TestGetTransactionCount:
         checksum_address = "0xABcdEF1234567890aBcDef1234567890AbCdEf12"
 
         self.mock_web3.to_checksum_address.return_value = checksum_address
-        
+
         # Mock database query
         mock_query = Mock()
         mock_query.filter.return_value = mock_query
@@ -50,7 +50,7 @@ class TestGetTransactionCount:
         test_address = "invalid_address"
 
         self.mock_web3.to_checksum_address.side_effect = Exception("Invalid address")
-        
+
         # Mock database query with original address
         mock_query = Mock()
         mock_query.filter.return_value = mock_query
@@ -76,7 +76,7 @@ class TestGetTransactionCount:
         test_address = "0xABcdEF1234567890aBcDef1234567890AbCdEf12"
 
         self.mock_web3.to_checksum_address.return_value = test_address
-        
+
         # Mock database query returning 0
         mock_query = Mock()
         mock_query.filter.return_value = mock_query
@@ -114,7 +114,6 @@ class TestGetTransactionCount:
         mock_query.filter.assert_called_once()
         mock_query.count.assert_called_once()
 
-
     def test_get_transaction_count_database_query_structure(self):
         """Test that get_transaction_count queries database with correct structure"""
         # Setup
@@ -131,7 +130,7 @@ class TestGetTransactionCount:
 
         # Execute
         result = self.processor.get_transaction_count(test_address)
-        
+
         # Verify correct database query structure
         self.mock_session.query.assert_called_once_with(Transactions)
         mock_query.filter.assert_called_once()
