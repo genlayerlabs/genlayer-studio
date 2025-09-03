@@ -10,7 +10,8 @@ import { useEventTracking, useContractQueries } from '@/hooks';
 import { unfoldArgsData, type ArgData } from './ContractParams';
 import ContractParams from './ContractParams.vue';
 
-const { callWriteMethod, callReadMethod, contract } = useContractQueries();
+const { callWriteMethod, callReadMethod, simulateWriteMethod, contract } =
+  useContractQueries();
 const { trackEvent } = useEventTracking();
 
 const props = defineProps<{
@@ -19,6 +20,7 @@ const props = defineProps<{
   methodType: 'read' | 'write';
   leaderOnly: boolean;
   consensusMaxRotations?: number;
+  simulationMode?: boolean;
 }>();
 
 const isExpanded = ref(false);
@@ -103,25 +105,56 @@ const handleCallWriteMethod = async () => {
   isCalling.value = true;
 
   try {
-    await callWriteMethod({
-      method: props.name,
-      leaderOnly: props.leaderOnly,
-      consensusMaxRotations: props.consensusMaxRotations,
-      args: unfoldArgsData({
-        args: calldataArguments.value.args,
-        kwargs: calldataArguments.value.kwargs,
-      }),
-    });
+    if (props.simulationMode) {
+      // Simulation mode - call simulateWriteMethod
+      responseMessageAccepted.value = '';
+      responseMessageFinalized.value = '';
 
-    notify({
-      text: 'Write method called',
-      type: 'success',
-    });
+      const result = await simulateWriteMethod({
+        method: props.name,
+        leaderOnly: props.leaderOnly,
+        consensusMaxRotations: props.consensusMaxRotations,
+        args: unfoldArgsData({
+          args: calldataArguments.value.args,
+          kwargs: calldataArguments.value.kwargs,
+        }),
+      });
 
-    trackEvent('called_write_method', {
-      contract_name: contract.value?.name || '',
-      method_name: props.name,
-    });
+      responseMessageAccepted.value = formatResponseIfNeeded(
+        typeof result === 'string' ? result : JSON.stringify(result, null, 2),
+      );
+
+      notify({
+        text: 'Simulation completed',
+        type: 'success',
+      });
+
+      trackEvent('simulated_write_method', {
+        contract_name: contract.value?.name || '',
+        method_name: props.name,
+      });
+    } else {
+      // Real transaction mode
+      await callWriteMethod({
+        method: props.name,
+        leaderOnly: props.leaderOnly,
+        consensusMaxRotations: props.consensusMaxRotations,
+        args: unfoldArgsData({
+          args: calldataArguments.value.args,
+          kwargs: calldataArguments.value.kwargs,
+        }),
+      });
+
+      notify({
+        text: 'Write method called',
+        type: 'success',
+      });
+
+      trackEvent('called_write_method', {
+        contract_name: contract.value?.name || '',
+        method_name: props.name,
+      });
+    }
   } catch (error) {
     notify({
       title: 'Error',
@@ -182,7 +215,15 @@ const handleCallWriteMethod = async () => {
             :data-testid="`write-method-btn-${name}`"
             :loading="isCalling"
             :disabled="isCalling"
-            >{{ isCalling ? 'Sending...' : 'Send Transaction' }}</Btn
+            >{{
+              isCalling
+                ? simulationMode
+                  ? 'Simulating...'
+                  : 'Sending...'
+                : simulationMode
+                  ? 'Simulate'
+                  : 'Send Transaction'
+            }}</Btn
           >
         </div>
 
@@ -194,7 +235,13 @@ const handleCallWriteMethod = async () => {
           class="w-full break-all text-sm"
         >
           <div v-if="responseMessageAccepted !== ''">
-            <div class="mb-1 text-xs font-medium">Response Accepted:</div>
+            <div class="mb-1 text-xs font-medium">
+              {{
+                methodType === 'write' && simulationMode
+                  ? 'Simulation Result:'
+                  : 'Response Accepted:'
+              }}
+            </div>
             <div
               :data-testid="`method-response-${name}`"
               class="w-full whitespace-pre-wrap rounded bg-white p-1 font-mono text-xs dark:bg-slate-600"
