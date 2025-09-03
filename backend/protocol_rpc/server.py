@@ -58,10 +58,6 @@ async def create_app():
         },  # recommended in https://docs.sqlalchemy.org/en/20/orm/session_basics.html#when-do-i-construct-a-session-when-do-i-commit-it-and-when-do-i-close-it
     )
 
-    # Disable SQLAlchemy's built-in echo to prevent direct stdout logging
-    # We'll handle SQL logging through our intercept handler instead
-    engine = create_engine(db_uri, echo=False, pool_size=50, max_overflow=50)
-
     # Enable SQLAlchemy logging through the logging system (which we intercept)
     import logging
 
@@ -74,14 +70,20 @@ async def create_app():
     app.config["SQLALCHEMY_ECHO"] = (
         False  # We handle SQL logging through Loguru intercept
     )
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+        "pool_size": 100,
+        "max_overflow": 50,
+        "pool_pre_ping": True,
+        "pool_recycle": 3600,
+        "pool_timeout": 30,
+        "echo_pool": True,  # temporary for verifying pool behavior
+    }
     sqlalchemy_db.init_app(app)
 
     # Use the Flask-SQLAlchemy engine everywhere
     with app.app_context():
         engine = sqlalchemy_db.engine
 
-    def create_session():
-        return Session(engine, expire_on_commit=False)
 
     CORS(app, resources={r"/api/*": {"origins": "*"}}, intercept_exceptions=False)
     jsonrpc = JSONRPC(
@@ -406,8 +408,6 @@ async def main():
             for topic in topics:
                 leave_room(topic)
 
-        # Logging is now configured in MessageHandler setup_loguru_config()
-        pass
 
     # Thread for the Flask-SocketIO server
     threading.Thread(target=run_socketio, daemon=True).start()
