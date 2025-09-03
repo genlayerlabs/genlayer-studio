@@ -428,6 +428,39 @@ async def get_contract_schema_for_code(
     return json.loads(schema)
 
 
+def get_contract_code(accounts_manager: AccountsManager, contract_address: str) -> str:
+    if not accounts_manager.is_valid_address(contract_address):
+        raise InvalidAddressError(
+            contract_address,
+            "Incorrect address format. Please provide a valid address.",
+        )
+    contract_account = accounts_manager.get_account_or_fail(contract_address)
+
+    # Legacy compatibility note:
+    # Historically, some rows in `current_state` were inserted with `data` as a
+    # JSON string (e.g., "{}") instead of a JSONB object. To avoid `.get` errors
+    # and keep backward compatibility, normalize string-valued `data` by parsing
+    # it into a dict. If parsing fails or the result is empty, treat it as an
+    # undeployed contract and return the standard error.
+    data = contract_account.get("data") or {}
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            raise InvalidAddressError(contract_address, "Contract not deployed.")
+    if not data:
+        raise InvalidAddressError(contract_address, "Contract not deployed.")
+
+    state = (data.get("state") or {}) if isinstance(data, dict) else {}
+    code_b64 = ContractSnapshot.extract_deployed_code_b64_from_state(state)
+    if not code_b64:
+        raise InvalidAddressError(
+            contract_address,
+            "Contract not deployed.",
+        )
+    return code_b64
+
+
 async def _execute_call_with_snapshot(
     session: Session,
     accounts_manager: AccountsManager,
@@ -1191,6 +1224,10 @@ def register_all_rpc_endpoints(
     register_rpc_endpoint(
         partial(get_contract_schema_for_code, msg_handler),
         method_name="gen_getContractSchemaForCode",
+    )
+    register_rpc_endpoint(
+        partial(get_contract_code, accounts_manager),
+        method_name="gen_getContractCode",
     )
     register_rpc_endpoint(
         partial(
