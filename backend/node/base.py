@@ -239,14 +239,18 @@ class Node:
         from_address: str,
         calldata: bytes,
         state_status: str | None = None,
-        transaction_datetime: datetime.datetime | None = None
+        transaction_datetime: datetime.datetime | None = None,
     ) -> Receipt:
         return await self._run_genvm(
             from_address,
             calldata,
             readonly=True,
             is_init=False,
-            transaction_datetime=transaction_datetime if transaction_datetime is not None else datetime.datetime.now().astimezone(datetime.UTC),
+            transaction_datetime=(
+                transaction_datetime
+                if transaction_datetime is not None
+                else datetime.datetime.now().astimezone(datetime.UTC)
+            ),
             state_status=state_status,
         )
 

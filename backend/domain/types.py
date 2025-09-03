@@ -52,7 +52,9 @@ class SimConfig:
     def genvm_datetime_as_datetime(self) -> datetime.datetime | None:
         if self.genvm_datetime is None:
             return None
-        return datetime.datetime.fromisoformat(self.genvm_datetime.replace('Z', '+00:00'))
+        return datetime.datetime.fromisoformat(
+            self.genvm_datetime.replace("Z", "+00:00")
+        )
 
     @classmethod
     def from_dict(cls, d: dict) -> "SimConfig":
@@ -67,7 +69,9 @@ class SimConfig:
 
     def to_dict(self) -> dict:
         return {
-            "validators": [v.to_dict() if hasattr(v, "to_dict") else v for v in self.validators],
+            "validators": [
+                v.to_dict() if hasattr(v, "to_dict") else v for v in self.validators
+            ],
             "genvm_datetime": self.genvm_datetime,
         }
 
@@ -258,5 +262,9 @@ class Transaction:
             appeal_leader_timeout=input.get("appeal_leader_timeout", False),
             leader_timeout_validators=input.get("leader_timeout_validators"),
             appeal_validators_timeout=input.get("appeal_validators_timeout", False),
-            sim_config=SimConfig.from_dict(input["sim_config"]) if input.get("sim_config") else None,
+            sim_config=(
+                SimConfig.from_dict(input["sim_config"])
+                if input.get("sim_config")
+                else None
+            ),
         )
