@@ -7,7 +7,7 @@ on:
         description: 'Version of oha CLI to use for load testing'
         required: false
         type: string
-        default: 'v1.4.5'
+        default: 'v1.9.0'
   pull_request:
 
 jobs:
@@ -17,6 +17,27 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Install oha
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl jq
+          # Use the input version or default
+          OHA_VERSION="${{ inputs.oha-version || 'v1.9.0' }}"
+          echo "Installing oha version: $OHA_VERSION"
+
+          # Try to download oha
+          if ! curl -sSfL "https://github.com/hatoo/oha/releases/download/${OHA_VERSION}/oha-linux-amd64" -o oha; then
+            echo "Failed to download oha version $OHA_VERSION, trying latest..."
+            # Fallback to latest version
+            LATEST_VERSION=$(curl -s https://api.github.com/repos/hatoo/oha/releases/latest | jq -r '.tag_name')
+            echo "Using latest version: $LATEST_VERSION"
+            curl -sSfL "https://github.com/hatoo/oha/releases/download/${LATEST_VERSION}/oha-linux-amd64" -o oha
+          fi
+
+          chmod +x oha
+          sudo mv oha /usr/local/bin
+          oha --version
 
       - name: Copy .env file
         run: cp .env.example .env
@@ -118,14 +139,6 @@ jobs:
           fi
 
           echo "Chain ID verification successful, proceeding with tests..."
-
-      - name: Install oha
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y curl jq
-          curl -sSfL https://github.com/hatoo/oha/releases/download/${{ inputs.oha-version }}/oha-linux-amd64 -o oha
-          chmod +x oha
-          sudo mv oha /usr/local/bin
 
       - name: Setup validators
         run: |
