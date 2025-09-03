@@ -69,27 +69,60 @@ jobs:
 
       - name: Wait for services to be up
         run: |
-          timeout=60
+          echo "Waiting for frontend container to be ready..."
+          timeout=120
           counter=0
+          frontend_ready=false
+
+          # Wait for frontend to be ready
           while [[ "$counter" -lt "$timeout" ]]; do
-            if curl -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}' http://localhost:4000/api | grep -q "OK"; then
-              echo "RPC server is up!"
+            # Check if frontend container logs show it's ready
+            if docker compose logs frontend 2>/dev/null | tail -20 | grep -q "➜  Local:   http://localhost:8080/"; then
+              echo "✅ Frontend is ready!"
+              frontend_ready=true
               break
             else
-              echo "Waiting for RPC server... ($counter/$timeout)"
+              echo "Waiting for frontend... ($counter/$timeout)"
               sleep 5
               counter=$((counter+1))
             fi
           done
-          # Fail if the service didn't start within the timeout
-          if [[ "$counter" -ge "$timeout" ]]; then
+
+          if [ "$frontend_ready" = false ]; then
+            echo "⚠️ Frontend may not be fully ready after $timeout seconds"
+            echo "Checking if at least the RPC server is responding..."
+          fi
+
+          # Also verify RPC server is responding
+          echo "Checking RPC server..."
+          rpc_counter=0
+          rpc_timeout=60
+          while [[ "$rpc_counter" -lt "$rpc_timeout" ]]; do
+            if curl -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}' http://localhost:4000/api | grep -q "OK"; then
+              echo "✅ RPC server is up!"
+              break
+            else
+              echo "Waiting for RPC server... ($rpc_counter/$rpc_timeout)"
+              sleep 5
+              rpc_counter=$((rpc_counter+1))
+            fi
+          done
+
+          # Fail if the RPC service didn't start within the timeout
+          if [[ "$rpc_counter" -ge "$rpc_timeout" ]]; then
             echo "Error: Timeout while waiting for RPC server"
+            docker compose logs
             exit 1
           fi
 
-          # Wait additional 30 seconds for services to stabilize
-          echo "Waiting 30 seconds for services to stabilize..."
-          sleep 30
+          # If frontend is ready, we're good to go
+          if [ "$frontend_ready" = true ]; then
+            echo "✅ All services are ready!"
+          else
+            # If frontend isn't ready but RPC is, wait a bit more
+            echo "Waiting additional 30 seconds for all services to stabilize..."
+            sleep 30
+          fi
 
       - name: Verify Chain ID
         run: |
@@ -160,39 +193,19 @@ jobs:
           finality_time=$(echo "$finality_response" | grep -o '"result"[[:space:]]*:[[:space:]]*[0-9]*' | grep -o '[0-9]*' | tail -1)
 
           if [ -z "$finality_time" ]; then
-            echo "Could not determine finality window time, using default of 150 seconds"
-            finality_time=150
+            echo "❌ Could not get finality window time, system may not be ready"
+            echo "Waiting 150 seconds for system initialization..."
+            wait_time=150
           else
-            echo "Finality window time: $finality_time seconds"
-            # Add some buffer time
-            finality_time=$((finality_time + 30))
-            echo "Waiting $finality_time seconds (finality + 30s buffer) for system initialization..."
+            echo "✅ System is responsive (finality window: $finality_time seconds)"
+            echo "System is ready, waiting 120 seconds for stabilization before creating validators..."
+            wait_time=120
           fi
 
-          # Wait for at least 2 minutes (120 seconds) or the finality time, whichever is longer
-          if [ "$finality_time" -lt 120 ]; then
-            finality_time=120
-          fi
+          echo "Waiting $wait_time seconds..."
+          sleep $wait_time
 
-          echo "Waiting $finality_time seconds before setting up validators..."
-
-          # Wait in intervals with progress updates
-          elapsed=0
-          interval=30
-          while [ $elapsed -lt $finality_time ]; do
-            remaining=$((finality_time - elapsed))
-            echo "  Waiting... ($elapsed/$finality_time seconds elapsed, $remaining remaining)"
-
-            if [ $remaining -ge $interval ]; then
-              sleep $interval
-              elapsed=$((elapsed + interval))
-            else
-              sleep $remaining
-              elapsed=$finality_time
-            fi
-          done
-
-          echo "✅ Initial finality window period complete, system ready for validators"
+          echo "✅ System stabilization complete, ready for validators"
 
       - name: Setup validators
         run: |
