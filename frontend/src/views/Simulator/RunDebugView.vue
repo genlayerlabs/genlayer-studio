@@ -58,7 +58,9 @@ const consensusMaxRotations = computed(() => consensusStore.maxRotations);
   <div class="flex max-h-[93vh] w-full flex-col overflow-y-auto">
     <MainTitle data-testid="run-debug-page-title">Run and Debug</MainTitle>
 
-    <template v-if="contractsStore.currentContract && contractsStore.currentContractId">
+    <template
+      v-if="contractsStore.currentContract && contractsStore.currentContractId"
+    >
       <BooleanField
         v-model="leaderOnly"
         name="leaderOnly"

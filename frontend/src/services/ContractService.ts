@@ -11,7 +11,7 @@ export class ContractService {
     try {
       const genlayer = useGenlayer();
       const client = genlayer.client.value;
-      
+
       if (!client) {
         throw new Error('Genlayer client not initialized');
       }
@@ -38,13 +38,13 @@ export class ContractService {
     try {
       const genlayer = useGenlayer();
       const client = genlayer.client.value;
-      
+
       if (!client) {
         throw new Error('Genlayer client not initialized');
       }
 
       const schema = await client.getContractSchema(address as Address);
-      
+
       return {
         address: address as Address,
         exists: true,
