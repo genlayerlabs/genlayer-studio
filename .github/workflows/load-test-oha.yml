@@ -142,9 +142,80 @@ jobs:
 
       - name: Setup validators
         run: |
-          cd tests/load
-          chmod +x setup_validators.sh
-          API_URL="http://localhost:4000/api" ./setup_validators.sh 5
+          echo "Creating validators with 5 second delays..."
+          for i in {1..5}; do
+            echo "Creating validator $i/5..."
+            response=$(curl -s -X POST http://localhost:4000/api \
+              -H "Content-Type: application/json" \
+              -d '{
+                "jsonrpc": "2.0",
+                "method": "sim_createRandomValidator",
+                "params": [1],
+                "id": '"$i"'
+              }')
+
+            # Check if creation was successful
+            if echo "$response" | grep -q '"result"'; then
+              echo "✅ Validator $i created successfully"
+              echo "Response: $response"
+            else
+              echo "❌ Failed to create validator $i"
+              echo "Response: $response"
+            fi
+
+            # Wait 5 seconds between validator creation
+            if [ $i -lt 5 ]; then
+              echo "Waiting 5 seconds before next validator..."
+              sleep 5
+            fi
+          done
+
+          # Wait for validators to be fully registered
+          echo "Waiting 10 seconds for validators to be registered..."
+          sleep 10
+
+          # Verify validators were created
+          echo "Verifying validators..."
+          response=$(curl -s -X POST http://localhost:4000/api \
+            -H "Content-Type: application/json" \
+            -d '{
+              "jsonrpc": "2.0",
+              "method": "sim_countValidators",
+              "params": [],
+              "id": 100
+            }')
+
+          echo "Count response: $response"
+
+          # Try different parsing approaches
+          count=$(echo "$response" | grep -o '"result"[[:space:]]*:[[:space:]]*[0-9]*' | grep -o '[0-9]*' | tail -1)
+
+          # If count is empty, try without spaces
+          if [ -z "$count" ]; then
+            count=$(echo "$response" | grep -o '"result":[0-9]*' | grep -o '[0-9]*' | tail -1)
+          fi
+
+          # Default to 0 if still empty
+          if [ -z "$count" ]; then
+            count=0
+          fi
+
+          echo "Total validators: $count"
+
+          if [ "$count" -lt 5 ]; then
+            echo "❌ Error: Expected at least 5 validators, found $count"
+            echo "Trying to list all validators for debugging..."
+            curl -s -X POST http://localhost:4000/api \
+              -H "Content-Type: application/json" \
+              -d '{
+                "jsonrpc": "2.0",
+                "method": "sim_getAllValidators",
+                "params": [],
+                "id": 101
+              }'
+            exit 1
+          fi
+          echo "✅ Successfully created $count validators"
 
       - name: Run Load Test - Contract Deploy and Read
         run: |
