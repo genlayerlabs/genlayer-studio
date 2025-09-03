@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useContractQueries } from '@/hooks';
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import PageSection from '@/components/Simulator/PageSection.vue';
 import ContractMethodItem from '@/components/Simulator/ContractMethodItem.vue';
 import EmptyListPlaceholder from '@/components/Simulator/EmptyListPlaceholder.vue';
@@ -18,14 +18,29 @@ const writeMethods = computed(() => {
   const methods = (data.value as ContractSchema).methods;
   return Object.entries(methods).filter((x) => !x[1].readonly);
 });
+
+const simulationMode = ref(false);
 </script>
 
 <template>
   <PageSection>
-    <template #title
-      >Write Methods
-
-      <Loader v-if="isRefetching" :size="14" />
+    <template #title>
+      <div class="flex items-center justify-between w-full">
+        <span class="flex items-center gap-2">
+          Write Methods
+          <Loader v-if="isRefetching" :size="14" />
+        </span>
+        <div class="flex items-center gap-2 text-xs">
+          <label class="flex items-center gap-1 cursor-pointer">
+            <input
+              type="checkbox"
+              v-model="simulationMode"
+              class="rounded"
+            />
+            <span>Simulation Mode</span>
+          </label>
+        </div>
+      </div>
     </template>
 
     <ContentLoader v-if="isPending" />
@@ -43,6 +58,7 @@ const writeMethods = computed(() => {
         methodType="write"
         :leaderOnly="props.leaderOnly"
         :consensusMaxRotations="consensusMaxRotations"
+        :simulationMode="simulationMode"
       />
 
       <EmptyListPlaceholder v-if="writeMethods.length === 0">
