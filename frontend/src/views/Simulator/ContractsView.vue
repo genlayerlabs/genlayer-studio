@@ -65,7 +65,6 @@ const handleSaveNewFile = (name: string) => {
 };
 
 const handleImportedContractClick = (contractId: string) => {
-  console.log('Imported contract clicked:', contractId);
   // Clear any selected file contract
   store.setCurrentContractId('');
   // Set the selected imported contract
