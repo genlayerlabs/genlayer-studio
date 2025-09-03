@@ -140,6 +140,60 @@ jobs:
 
           echo "Chain ID verification successful, proceeding with tests..."
 
+      - name: Wait for Finality Window
+        run: |
+          echo "Checking finality window time..."
+
+          # Get the finality window time
+          finality_response=$(curl -s -X POST http://localhost:4000/api \
+            -H "Content-Type: application/json" \
+            -d '{
+              "jsonrpc": "2.0",
+              "method": "sim_getFinalityWindowTime",
+              "params": [],
+              "id": 1
+            }')
+
+          echo "Finality window response: $finality_response"
+
+          # Extract the finality window time (in seconds)
+          finality_time=$(echo "$finality_response" | grep -o '"result"[[:space:]]*:[[:space:]]*[0-9]*' | grep -o '[0-9]*' | tail -1)
+
+          if [ -z "$finality_time" ]; then
+            echo "Could not determine finality window time, using default of 150 seconds"
+            finality_time=150
+          else
+            echo "Finality window time: $finality_time seconds"
+            # Add some buffer time
+            finality_time=$((finality_time + 30))
+            echo "Waiting $finality_time seconds (finality + 30s buffer) for system initialization..."
+          fi
+
+          # Wait for at least 2 minutes (120 seconds) or the finality time, whichever is longer
+          if [ "$finality_time" -lt 120 ]; then
+            finality_time=120
+          fi
+
+          echo "Waiting $finality_time seconds before setting up validators..."
+
+          # Wait in intervals with progress updates
+          elapsed=0
+          interval=30
+          while [ $elapsed -lt $finality_time ]; do
+            remaining=$((finality_time - elapsed))
+            echo "  Waiting... ($elapsed/$finality_time seconds elapsed, $remaining remaining)"
+
+            if [ $remaining -ge $interval ]; then
+              sleep $interval
+              elapsed=$((elapsed + interval))
+            else
+              sleep $remaining
+              elapsed=$finality_time
+            fi
+          done
+
+          echo "✅ Initial finality window period complete, system ready for validators"
+
       - name: Setup validators
         run: |
           echo "Creating validators with 5 second delays..."
@@ -275,10 +329,10 @@ jobs:
             exit 1
           fi
 
-          # Wait before reading
+          # Wait for contracts to be indexed
           echo ""
-          echo "Waiting 20 seconds for contracts to be indexed..."
-          sleep 20
+          echo "Waiting 30 seconds for contracts to be indexed..."
+          sleep 30
 
           # Read from deployed contracts
           echo ""
