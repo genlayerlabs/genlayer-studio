@@ -48,19 +48,6 @@ const handleImport = async () => {
   isImporting.value = true;
 
   try {
-    // Optionally verify the contract exists on chain
-    const contractExists = await ContractService.verifyContractExists(
-      contractAddress.value,
-    );
-
-    if (!contractExists) {
-      notify({
-        title: 'Warning',
-        text: 'Contract may not exist at this address. Importing anyway...',
-        type: 'warning',
-      });
-    }
-
     // Create a unique ID for this contract
     const contractId = uuidv4();
     const fileName =
@@ -184,7 +171,7 @@ const handleClose = () => {
           class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm dark:border-zinc-600 dark:bg-zinc-800 dark:text-white"
         />
         <p class="mt-1 text-sm text-gray-500">
-          Leave empty to use the address as the name
+          Leave empty to auto-name as imported_&lt;address_prefix&gt;.py
         </p>
       </div>
 
