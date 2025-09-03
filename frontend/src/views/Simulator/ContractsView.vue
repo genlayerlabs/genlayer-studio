@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import { useContractsStore } from '@/stores';
-import { FilePlus2, Upload } from 'lucide-vue-next';
+import { FilePlus2, Upload, FileInput } from 'lucide-vue-next';
+import { XMarkIcon } from '@heroicons/vue/16/solid';
 import { ref } from 'vue';
 import { v4 as uuidv4 } from 'uuid';
 import ContractItem from '@/components/Simulator/ContractItem.vue';
 import MainTitle from '@/components/Simulator/MainTitle.vue';
+import ImportContractModal from '@/components/contracts/ImportContractModal.vue';
 import { useEventTracking } from '@/hooks';
 
 const store = useContractsStore();
 const showNewFileInput = ref(false);
+const showImportModal = ref(false);
 const { trackEvent } = useEventTracking();
 
 /**
@@ -76,6 +79,10 @@ const handleSaveNewFile = (name: string) => {
             <Upload :size="16" />
           </label>
         </GhostBtn>
+
+        <GhostBtn @click="showImportModal = true" v-tooltip="'Import Contract'">
+          <FileInput :size="16" />
+        </GhostBtn>
       </template>
     </MainTitle>
 
@@ -89,11 +96,44 @@ const handleSaveNewFile = (name: string) => {
       />
     </div>
 
+    <div v-if="store.importedContracts.length > 0" class="mt-6">
+      <div class="mb-2 text-sm font-semibold text-gray-600 dark:text-gray-400">
+        Imported Contracts
+      </div>
+      <div
+        v-for="contract in store.importedContracts"
+        :key="contract.id"
+        class="flex items-center justify-between rounded-md px-3 py-2 hover:bg-gray-100 dark:hover:bg-zinc-700"
+      >
+        <div class="flex items-center gap-2">
+          <FileInput :size="14" class="text-blue-500" />
+          <div>
+            <div class="text-sm font-medium">{{ contract.name }}</div>
+            <div class="text-xs text-gray-500 dark:text-gray-400">
+              {{ contract.address.slice(0, 10) }}...{{ contract.address.slice(-8) }}
+            </div>
+          </div>
+        </div>
+        <button
+          @click="store.removeImportedContract(contract.id)"
+          class="text-gray-400 hover:text-red-500"
+          v-tooltip="'Remove'"
+        >
+          <XMarkIcon class="h-4 w-4" />
+        </button>
+      </div>
+    </div>
+
     <ContractItem
       v-if="showNewFileInput"
       :isNewFile="true"
       @save="handleSaveNewFile"
       @cancel="showNewFileInput = false"
+    />
+
+    <ImportContractModal
+      :open="showImportModal"
+      @close="showImportModal = false"
     />
   </div>
 </template>

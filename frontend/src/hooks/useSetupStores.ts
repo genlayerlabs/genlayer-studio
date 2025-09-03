@@ -55,6 +55,7 @@ export const useSetupStores = () => {
     }
 
     contractsStore.deployedContracts = await db.deployedContracts.toArray();
+    contractsStore.importedContracts = await db.importedContracts.toArray();
     transactionsStore.transactions = await db.transactions.toArray();
 
     transactionsStore.initSubscriptions();

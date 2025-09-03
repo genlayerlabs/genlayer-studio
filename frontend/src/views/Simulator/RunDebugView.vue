@@ -24,6 +24,7 @@ const { isDeployed, address, contract } = useContractQueries();
 const nodeStore = useNodeStore();
 const consensusStore = useConsensusStore();
 const leaderOnly = ref(false);
+const selectedImportedContract = ref<string | null>(null);
 
 const isDeploymentOpen = ref(!isDeployed.value);
 const finalityWindow = computed({
@@ -52,15 +53,24 @@ function isFinalityWindowValid(value: number) {
 }
 
 const consensusMaxRotations = computed(() => consensusStore.maxRotations);
+
+const currentImportedContract = computed(() => {
+  if (!selectedImportedContract.value) return null;
+  return contractsStore.importedContracts.find(
+    (c) => c.id === selectedImportedContract.value
+  );
+});
+
+const hasContractSelected = computed(() => {
+  return (contractsStore.currentContract && contractsStore.currentContractId) || selectedImportedContract.value;
+});
 </script>
 
 <template>
   <div class="flex max-h-[93vh] w-full flex-col overflow-y-auto">
     <MainTitle data-testid="run-debug-page-title">Run and Debug</MainTitle>
 
-    <template
-      v-if="contractsStore.currentContract && contractsStore.currentContractId"
-    >
+    <template v-if="hasContractSelected">
       <BooleanField
         v-model="leaderOnly"
         name="leaderOnly"
@@ -96,26 +106,37 @@ const consensusMaxRotations = computed(() => consensusStore.maxRotations);
       </div>
 
       <ContractInfo
+        v-if="!selectedImportedContract"
         :showNewDeploymentButton="!isDeploymentOpen"
         @openDeployment="isDeploymentOpen = true"
       />
 
+      <div v-else class="bg-slate-100 px-2 py-2 dark:bg-zinc-700">
+        <div class="text-sm font-semibold mb-1">Imported Contract</div>
+        <div class="flex items-center gap-2 text-sm">
+          <span>{{ currentImportedContract?.name }}</span>
+          <span class="text-xs text-gray-500">
+            {{ currentImportedContract?.address }}
+          </span>
+        </div>
+      </div>
+
       <template v-if="nodeStore.hasAtLeastOneValidator || uiStore.showTutorial">
         <ConstructorParameters
           id="tutorial-how-to-deploy"
-          v-if="isDeploymentOpen"
+          v-if="isDeploymentOpen && !selectedImportedContract"
           @deployedContract="isDeploymentOpen = false"
           :leaderOnly="leaderOnly"
           :consensusMaxRotations="consensusMaxRotations"
         />
 
         <ContractReadMethods
-          v-if="isDeployed"
+          v-if="isDeployed || selectedImportedContract"
           id="tutorial-read-methods"
           :leaderOnly="leaderOnly"
         />
         <ContractWriteMethods
-          v-if="isDeployed"
+          v-if="isDeployed || selectedImportedContract"
           id="tutorial-write-methods"
           :leaderOnly="leaderOnly"
           :consensusMaxRotations="consensusMaxRotations"
@@ -131,6 +152,24 @@ const consensusMaxRotations = computed(() => consensusStore.maxRotations);
       v-else
       class="flex w-full flex-col bg-slate-100 px-2 py-2 dark:dark:bg-zinc-700"
     >
+      <div v-if="contractsStore.importedContracts.length > 0" class="mb-4">
+        <label class="block text-sm font-medium mb-2">
+          Select an imported contract to interact with:
+        </label>
+        <select
+          v-model="selectedImportedContract"
+          class="w-full rounded-md border-gray-300 dark:border-zinc-600 dark:bg-zinc-800 dark:text-white"
+        >
+          <option :value="null">-- Select a contract --</option>
+          <option
+            v-for="contract in contractsStore.importedContracts"
+            :key="contract.id"
+            :value="contract.id"
+          >
+            {{ contract.name }} ({{ contract.address.slice(0, 10) }}...)
+          </option>
+        </select>
+      </div>
       <div class="text-sm">
         Please first select an intelligent contract in the
         <RouterLink
