@@ -241,6 +241,20 @@ export function useContractQueries() {
     }
   }
 
+
+  async function fetchContractCode(contractAddress: string): Promise<string> {
+    try {
+      if (!genlayerClient.value) {
+        throw new Error('Genlayer client not initialized');
+      }
+
+      return await genlayerClient.value.getContractCode(contractAddress as Address);
+    } catch (error) {
+      console.error('Error fetching contract code:', error);
+      throw error;
+    }
+  }
+
   return {
     contractSchemaQuery,
     contractAbiQuery,
@@ -252,6 +266,7 @@ export function useContractQueries() {
     deployContract,
     callReadMethod,
     callWriteMethod,
+    fetchContractCode,
 
     mockContractSchema,
     isMock,
