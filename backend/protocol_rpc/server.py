@@ -3,7 +3,6 @@
 import os
 from os import environ
 import threading
-import logging
 from flask import Flask
 from flask_jsonrpc.app import JSONRPC
 from flask_socketio import SocketIO, join_room, leave_room
@@ -41,6 +40,14 @@ def get_db_name(database: str) -> str:
 
 
 async def create_app():
+    # Set up unified logging BEFORE any other components
+    from backend.protocol_rpc.message_handler.base import setup_loguru_config
+
+    setup_loguru_config()
+
+    def create_session():
+        return Session(engine, expire_on_commit=False)
+
     # DataBase
     database_name_seed = "genlayer"
     db_uri = f"postgresql+psycopg2://{environ.get('DBUSER')}:{environ.get('DBPASSWORD')}@{environ.get('DBHOST')}/{get_db_name(database_name_seed)}"
@@ -51,10 +58,18 @@ async def create_app():
         },  # recommended in https://docs.sqlalchemy.org/en/20/orm/session_basics.html#when-do-i-construct-a-session-when-do-i-commit-it-and-when-do-i-close-it
     )
 
+    # Enable SQLAlchemy logging through the logging system (which we intercept)
+    import logging
+
+    sqlalchemy_logger = logging.getLogger("sqlalchemy.engine")
+    sqlalchemy_logger.setLevel(logging.INFO)
+
     # Flask
     app = Flask("jsonrpc_api")
     app.config["SQLALCHEMY_DATABASE_URI"] = db_uri
-    app.config["SQLALCHEMY_ECHO"] = True
+    app.config["SQLALCHEMY_ECHO"] = (
+        False  # We handle SQL logging through Loguru intercept
+    )
     app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
         "pool_size": 100,
         "max_overflow": 50,
@@ -68,9 +83,6 @@ async def create_app():
     # Use the Flask-SQLAlchemy engine everywhere
     with app.app_context():
         engine = sqlalchemy_db.engine
-
-    def create_session():
-        return Session(engine, expire_on_commit=False)
 
     CORS(app, resources={r"/api/*": {"origins": "*"}}, intercept_exceptions=False)
     jsonrpc = JSONRPC(
@@ -394,10 +406,6 @@ async def main():
         def handle_unsubscribe(topics):
             for topic in topics:
                 leave_room(topic)
-
-        logging.getLogger("werkzeug").setLevel(
-            os.environ.get("FLASK_LOG_LEVEL", logging.ERROR)
-        )
 
     # Thread for the Flask-SocketIO server
     threading.Thread(target=run_socketio, daemon=True).start()
