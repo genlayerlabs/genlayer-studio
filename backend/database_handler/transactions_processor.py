@@ -18,6 +18,7 @@ from web3 import Web3
 import os
 from backend.consensus.types import ConsensusRound
 from backend.consensus.utils import determine_consensus_from_votes
+from backend.rollup.web3_pool import Web3ConnectionPool
 
 
 class TransactionAddressFilter(Enum):
@@ -69,11 +70,8 @@ class TransactionsProcessor:
     ):
         self.session = session
 
-        # Connect to Hardhat Network
-        port = os.environ.get("HARDHAT_PORT")
-        url = os.environ.get("HARDHAT_URL")
-        hardhat_url = f"{url}:{port}"
-        self.web3 = Web3(Web3.HTTPProvider(hardhat_url))
+        # Use singleton Web3 connection pool
+        self.web3 = Web3ConnectionPool.get()
 
     @staticmethod
     def _parse_transaction_data(transaction_data: Transactions) -> dict:
