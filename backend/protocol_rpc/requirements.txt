@@ -24,3 +24,5 @@ loguru==0.7.3
 web3==7.10.0
 aiorwlock==1.5.0
 PyYAML==6.0.2
+pyzmq==26.2.0
+redis==5.2.1

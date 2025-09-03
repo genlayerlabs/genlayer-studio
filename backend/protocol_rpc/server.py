@@ -27,7 +27,7 @@ from backend.database_handler.validators_registry import (
 )
 from backend.database_handler.accounts_manager import AccountsManager
 from backend.database_handler.snapshot_manager import SnapshotManager
-from backend.consensus.base import ConsensusAlgorithm, contract_processor_factory
+from backend.consensus.base import contract_processor_factory
 from backend.database_handler.models import Base, TransactionStatus
 from backend.rollup.consensus_service import ConsensusService
 from backend.protocol_rpc.aio import MAIN_SERVER_LOOP, MAIN_LOOP_EXITING, MAIN_LOOP_DONE
@@ -93,12 +93,8 @@ async def create_app():
 
     validators_registry = validators_manager.registry
 
-    consensus = ConsensusAlgorithm(
-        create_session,
-        msg_handler,
-        consensus_service,
-        validators_manager,
-    )
+    # ConsensusAlgorithm now runs in ZeroMQ broker, not here
+    consensus = None
     
     # Register scalability monitoring endpoints
     app.register_blueprint(scalability_bp, url_prefix='/api')
@@ -384,10 +380,8 @@ async def main():
         await MAIN_LOOP_EXITING
         stop_event.set()
 
+    # Consensus now runs in ZeroMQ broker, not here
     futures = [
-        consensus.run_crawl_snapshot_loop(stop_event=stop_event),
-        consensus.run_process_pending_transactions_loop(stop_event=stop_event),
-        consensus.run_appeal_window_loop(stop_event=stop_event),
         convert_future_to_event(),
     ]
 

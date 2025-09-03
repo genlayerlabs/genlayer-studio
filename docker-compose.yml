@@ -147,7 +147,7 @@ services:
     expose:
       - "${WEBDRIVERPORT:-4444}"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4444/status"]
+      test: ["CMD", "sh", "-c", "ps aux | grep -v grep | grep selenium-server || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -249,7 +249,7 @@ services:
       context: ./
       dockerfile: ./docker/Dockerfile.backend
       target: ${BACKEND_BUILD_TARGET:-prod}
-    command: python backend/services/zmq_broker.py
+    command: python3 backend/services/zmq_broker.py
     environment:
       - FLASK_SERVER_PORT=5561
       - DBHOST=${DBHOST}
@@ -274,7 +274,7 @@ services:
         required: false
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import zmq; s=zmq.Context().socket(zmq.PUSH); s.connect('tcp://localhost:5557'); s.send_json({'ping': 'healthcheck'}); exit(0)"]
+      test: ["CMD", "python3", "-c", "import zmq; s=zmq.Context().socket(zmq.PUSH); s.connect('tcp://localhost:5557'); s.send_json({'ping': 'healthcheck'}); exit(0)"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -290,7 +290,7 @@ services:
       context: ./
       dockerfile: ./docker/Dockerfile.backend
       target: ${BACKEND_BUILD_TARGET:-prod}
-    command: python backend/workers/zmq_consensus_worker.py
+    command: python3 backend/workers/zmq_consensus_worker.py
     deploy:
       replicas: ${WRITER_WORKERS:-0}
     environment:

@@ -1,4 +1,9 @@
 # backend/workers/zmq_consensus_worker.py
+"""
+Pure GenVM executor worker for distributed consensus.
+Receives execution tasks from ZeroMQ broker and returns results.
+"""
+
 import zmq.asyncio
 import asyncio
 import logging
@@ -7,10 +12,9 @@ import os
 import sys
 import json
 import time
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional
 from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
@@ -18,12 +22,11 @@ from sqlalchemy.pool import NullPool
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.database_handler.db_config import get_db_url
 from backend.services.state_manager import DistributedStateManager
+import backend.validators as validators
 from backend.node.base import Node
-from backend.node.types import ExecutionMode, Receipt, Vote, ExecutionResultStatus
-from backend.consensus.vrf import get_validators_for_transaction
-from backend.consensus.utils import determine_consensus_from_votes
-from backend.protocol_rpc.message_handler.base import MessageHandler
-from backend.domain.types import Transaction, TransactionType
+from pathlib import Path
+from backend.node.types import ExecutionMode, Receipt, Vote
+from backend.domain.types import Transaction, TransactionType, TransactionStatus, Validator, LLMProvider
 
 # Configuration
 WORKER_ID = sys.argv[1] if len(sys.argv) > 1 else f"worker-{os.getpid()}"
@@ -57,7 +60,7 @@ class WebDriverPool:
     def __init__(self, max_size: int):
         self.max_size = max_size
         self.available = asyncio.Queue(maxsize=max_size)
-        self.all_connections: List[WebDriverConnection] = []
+        self.all_connections = []
         self.lock = asyncio.Lock()
         
     async def initialize(self):
@@ -89,7 +92,7 @@ class WebDriverPool:
 
 
 class ZeroMQConsensusWorker:
-    """Worker that processes consensus tasks from ZeroMQ queue"""
+    """Worker that processes GenVM execution tasks from ZeroMQ broker"""
     
     def __init__(self, worker_id: str):
         self.worker_id = worker_id
@@ -113,9 +116,6 @@ class ZeroMQConsensusWorker:
         
         # State manager for distributed caching
         self.state_manager = DistributedStateManager(worker_id=worker_id)
-        
-        # Message handler for events
-        self.msg_handler = MessageHandler()
         
         logger.info(f"Worker {worker_id} initialized")
     
@@ -151,7 +151,7 @@ class ZeroMQConsensusWorker:
                 # Poll for new messages with timeout
                 if await self.receiver.poll(timeout=1000):
                     message = await self.receiver.recv_json()
-                    task = asyncio.create_task(self._process_transaction(message))
+                    task = asyncio.create_task(self._process_task(message))
                     self.active_tasks.add(task)
                     task.add_done_callback(self.active_tasks.discard)
             except zmq.error.Again:
@@ -159,70 +159,52 @@ class ZeroMQConsensusWorker:
             except Exception as e:
                 logger.error(f"Error in main loop: {e}", exc_info=True)
     
-    async def _process_transaction(self, message: dict):
-        """Process transaction with full consensus flow"""
-        tx_hash = message['tx_hash']
-        contract_address = message['contract_address']
-        consensus_mode = message.get('consensus_mode', 'leader')
+    async def _process_task(self, message: dict):
+        """Process execution task from broker"""
+        task_id = message.get('task_id', 'unknown')
+        task_type = message.get('type', 'unknown')
+        tx_hash = message.get('tx_hash')
+        contract_address = message.get('contract_address')
         
-        logger.info(f"Processing {consensus_mode} transaction {tx_hash}")
-        
-        # Inform broker we're processing
-        await self._send_feedback({
-            'status': 'PROCESSING',
-            'tx_hash': tx_hash,
-            'contract_address': contract_address,
-            'consensus_mode': consensus_mode
-        })
+        logger.info(f"Processing {task_type} task {task_id} for transaction {tx_hash}")
         
         try:
             # Get contract snapshot
             with self.SessionLocal() as session:
-                contract_snapshot = self._get_or_create_snapshot(session, contract_address)
+                contract_snapshot = await self._get_or_create_snapshot(session, contract_address)
             
             # Acquire WebDriver for GenVM execution
             driver_conn = await self.webdriver_pool.acquire()
             
             try:
-                if consensus_mode == 'leader':
+                if task_type == 'leader':
                     # Execute as leader
-                    result = await self._execute_leader_transaction(
-                        contract_snapshot, 
-                        message['transaction_data'],
-                        driver_conn
-                    )
-                    
-                elif consensus_mode == 'validator':
-                    # Execute as validator
-                    leader_receipt = message.get('leader_receipt')
-                    validator_info = message.get('validator_info')
-                    
-                    result = await self._execute_validator_transaction(
+                    result = await self._execute_as_leader(
                         contract_snapshot,
-                        message['transaction_data'],
-                        leader_receipt,
-                        validator_info,
+                        message.get('transaction'),
+                        message.get('validator_info'),
+                        message.get('genvm_config', {}),
                         driver_conn
                     )
                     
-                    # Send vote to broker
-                    await self._send_feedback({
-                        'status': 'CONSENSUS_VOTE',
-                        'tx_hash': tx_hash,
-                        'validator_id': validator_info.get('id', 'unknown'),
-                        'vote': result
-                    })
-                
+                elif task_type == 'validator':
+                    # Execute as validator
+                    result = await self._execute_as_validator(
+                        contract_snapshot,
+                        message.get('transaction'),
+                        message.get('validator_info'),
+                        message.get('genvm_config', {}),
+                        message.get('leader_receipt'),
+                        driver_conn
+                    )
+                    
                 else:
-                    result = {'error': f'Unknown consensus mode: {consensus_mode}'}
+                    result = {'error': f'Unknown task type: {task_type}'}
                 
-                # Store final result in database
-                await self._store_transaction_result(tx_hash, contract_address, result)
-                
+                # Send result back to broker
                 await self._send_feedback({
-                    'status': 'SUCCESS',
-                    'tx_hash': tx_hash,
-                    'contract_address': contract_address,
+                    'status': 'EXECUTION_RESULT',
+                    'task_id': task_id,
                     'result': result
                 })
                 
@@ -230,16 +212,11 @@ class ZeroMQConsensusWorker:
                 await self.webdriver_pool.release(driver_conn)
                 
         except Exception as e:
-            logger.error(f"Error processing {tx_hash}: {e}", exc_info=True)
+            logger.error(f"Error processing task {task_id}: {e}", exc_info=True)
             await self._send_feedback({
-                'status': 'FAILED',
-                'tx_hash': tx_hash,
-                'contract_address': contract_address,
-                'transaction_data': message.get('transaction_data'),
-                'error': str(e),
-                'retryable': self._is_retryable_error(e),
-                'retry_count': message.get('retry_count', 0),
-                'consensus_mode': consensus_mode
+                'status': 'EXECUTION_RESULT',
+                'task_id': task_id,
+                'result': {'error': str(e)}
             })
     
     async def _get_or_create_snapshot(self, session: Session, contract_address: str) -> ContractSnapshot:
@@ -258,27 +235,34 @@ class ZeroMQConsensusWorker:
             self.contract_snapshots[contract_address] = snapshot
             return snapshot
     
-    async def _execute_leader_transaction(self, 
-                                         contract_snapshot: ContractSnapshot,
-                                         tx_data: dict,
-                                         driver_conn: WebDriverConnection) -> dict:
-        """Execute transaction as leader"""
+    async def _execute_as_leader(self,
+                                 contract_snapshot: ContractSnapshot,
+                                 tx_data: dict,
+                                 validator_info: dict,
+                                 genvm_config: dict,
+                                 driver_conn: WebDriverConnection) -> dict:
+        """Execute transaction as leader - pure GenVM execution"""
         try:
             # Create transaction object
             transaction = self._create_transaction_from_data(tx_data)
+            
+            # Create minimal validators snapshot with just what GenVM needs
+            validators_snapshot = self._create_minimal_snapshot(validator_info, genvm_config)
+            
+            # Get the validator from the snapshot we just created
+            validator = validators_snapshot.nodes[0].validator
             
             # Create and execute node
             node = Node(
                 contract_snapshot=contract_snapshot,
                 validator_mode=ExecutionMode.LEADER,
                 leader_receipt=None,
-                msg_handler=self.msg_handler,
-                validator=None,
+                msg_handler=None,
+                validator=validator,
                 contract_snapshot_factory=lambda addr: self._get_or_create_snapshot(
                     self.SessionLocal(), addr
                 ),
-                validators_manager=None,
-                web_path=driver_conn.url
+                validators_snapshot=validators_snapshot
             )
             
             # Execute transaction
@@ -286,40 +270,55 @@ class ZeroMQConsensusWorker:
             
             return {
                 'receipt': receipt.to_dict() if hasattr(receipt, 'to_dict') else str(receipt),
-                'mode': 'leader',
                 'worker': self.worker_id
             }
             
         except Exception as e:
-            logger.error(f"Leader execution failed: {e}")
+            logger.error(f"Leader execution failed: {e}", exc_info=True)
             raise
     
-    async def _execute_validator_transaction(self,
-                                            contract_snapshot: ContractSnapshot,
-                                            tx_data: dict,
-                                            leader_receipt: dict,
-                                            validator_info: dict,
-                                            driver_conn: WebDriverConnection) -> dict:
-        """Execute transaction as validator"""
+    async def _execute_as_validator(self,
+                                    contract_snapshot: ContractSnapshot,
+                                    tx_data: dict,
+                                    validator_info: dict,
+                                    genvm_config: dict,
+                                    leader_receipt: dict,
+                                    driver_conn: WebDriverConnection) -> dict:
+        """Execute transaction as validator - pure GenVM execution"""
         try:
             # Create transaction object
             transaction = self._create_transaction_from_data(tx_data)
             
+            # Create minimal validators snapshot with just what GenVM needs
+            validators_snapshot = self._create_minimal_snapshot(validator_info, genvm_config)
+            
             # Convert leader receipt
             leader_receipt_obj = Receipt(**leader_receipt) if leader_receipt else None
+            
+            # Create validator object
+            validator = Validator(
+                address=validator_info['address'],
+                stake=validator_info['stake'],
+                llmprovider=LLMProvider(
+                    provider=validator_info['provider'],
+                    config=validator_info.get('config', {}),
+                    model=validator_info['model'],
+                    plugin=validator_info['plugin'],
+                    plugin_config=validator_info.get('plugin_config', {})
+                )
+            )
             
             # Create and execute node
             node = Node(
                 contract_snapshot=contract_snapshot,
                 validator_mode=ExecutionMode.VALIDATOR,
                 leader_receipt=leader_receipt_obj,
-                msg_handler=self.msg_handler,
-                validator=validator_info,
+                msg_handler=None,
+                validator=validator,
                 contract_snapshot_factory=lambda addr: self._get_or_create_snapshot(
                     self.SessionLocal(), addr
                 ),
-                validators_manager=None,
-                web_path=driver_conn.url
+                validators_snapshot=validators_snapshot
             )
             
             # Execute transaction
@@ -327,59 +326,75 @@ class ZeroMQConsensusWorker:
             
             return {
                 'vote': vote.to_dict() if hasattr(vote, 'to_dict') else str(vote),
-                'mode': 'validator',
-                'validator_id': validator_info.get('id'),
                 'worker': self.worker_id
             }
             
         except Exception as e:
-            logger.error(f"Validator execution failed: {e}")
+            logger.error(f"Validator execution failed: {e}", exc_info=True)
             raise
+    
+    def _create_minimal_snapshot(self, validator_info: dict, genvm_config: dict) -> validators.Snapshot:
+        """Create minimal validators.Snapshot with just what GenVM needs
+        
+        Args:
+            validator_info: Dictionary with validator information
+            genvm_config: Dictionary with genvm_config_path and host_arg
+        
+        Returns:
+            Minimal validators.Snapshot for GenVM execution
+        """
+        # Create a validator object
+        validator = Validator(
+            address=validator_info['address'],
+            stake=validator_info['stake'],
+            llmprovider=LLMProvider(
+                provider=validator_info['provider'],
+                config=validator_info.get('config', {}),
+                model=validator_info['model'],
+                plugin=validator_info['plugin'],
+                plugin_config=validator_info.get('plugin_config', {})
+            )
+        )
+        
+        # Create a single validator snapshot node
+        node = validators.SingleValidatorSnapshot(
+            validator=validator,
+            genvm_host_arg=genvm_config.get('host_arg')
+        )
+        
+        # Create the snapshot with config path and single node
+        config_path = genvm_config.get('config_path')
+        return validators.Snapshot(
+            nodes=[node],
+            genvm_config_path=Path(config_path) if config_path else Path('/genvm/genvm.yaml')
+        )
     
     def _create_transaction_from_data(self, tx_data: dict) -> Transaction:
         """Create Transaction object from dictionary data"""
+        # Handle status - could be string or int
+        status_value = tx_data.get('status', 'PENDING')
+        if isinstance(status_value, str):
+            status = TransactionStatus[status_value]
+        else:
+            status = TransactionStatus(status_value)
+        
+        # Handle type
+        type_value = tx_data.get('type', 0)
+        if isinstance(type_value, int):
+            tx_type = TransactionType(type_value)
+        else:
+            tx_type = TransactionType[type_value]
+        
         return Transaction(
+            hash=tx_data.get('hash'),
+            status=status,
             from_address=tx_data.get('from_address'),
             to_address=tx_data.get('to_address'),
             input_data=tx_data.get('input_data'),
             value=tx_data.get('value', 0),
-            type=TransactionType[tx_data.get('type', 'SEND')],
-            timestamp=tx_data.get('timestamp', time.time()),
+            type=tx_type,
             gaslimit=tx_data.get('gaslimit', 100000000)
         )
-    
-    async def _store_transaction_result(self, tx_hash: str, contract_address: str, result: dict):
-        """Store transaction result in database"""
-        try:
-            with self.SessionLocal() as session:
-                session.execute(
-                    text("""
-                        INSERT INTO transaction_results 
-                        (tx_hash, contract_address, result, processed_at)
-                        VALUES (:tx_hash, :contract_address, :result, NOW())
-                        ON CONFLICT (tx_hash) DO UPDATE
-                        SET result = :result, processed_at = NOW()
-                    """),
-                    {
-                        'tx_hash': tx_hash,
-                        'contract_address': contract_address,
-                        'result': json.dumps(result)
-                    }
-                )
-                session.commit()
-                logger.debug(f"Stored result for transaction {tx_hash}")
-        except Exception as e:
-            logger.error(f"Failed to store transaction result: {e}")
-    
-    def _is_retryable_error(self, error: Exception) -> bool:
-        """Determine if an error is retryable"""
-        # Network errors, timeout errors are retryable
-        retryable_errors = (
-            ConnectionError,
-            TimeoutError,
-            zmq.error.Again,
-        )
-        return isinstance(error, retryable_errors)
     
     async def _heartbeat_loop(self):
         """Send periodic heartbeats to broker"""

@@ -58,14 +58,15 @@ class ZeroMQClient:
         try:
             message = {
                 'tx_hash': transaction.hash,
-                'contract_address': transaction.contract_address,
+                'contract_address': getattr(transaction, 'contract_address', transaction.to_address),
                 'transaction_data': {
                     'from_address': transaction.from_address,
                     'to_address': transaction.to_address,
                     'input_data': transaction.input_data,
                     'value': transaction.value,
                     'type': transaction.type.value if hasattr(transaction.type, 'value') else str(transaction.type),
-                    'timestamp': transaction.timestamp,
+                    'status': transaction.status.value if hasattr(transaction.status, 'value') else str(transaction.status),
+                    'timestamp': getattr(transaction, 'timestamp', None),
                     'gaslimit': getattr(transaction, 'gaslimit', 100000000),
                 },
                 'consensus_mode': consensus_mode
@@ -104,14 +105,15 @@ class ZeroMQClient:
         try:
             message = {
                 'tx_hash': transaction.hash,
-                'contract_address': transaction.contract_address,
+                'contract_address': getattr(transaction, 'contract_address', transaction.to_address),
                 'transaction_data': {
                     'from_address': transaction.from_address,
                     'to_address': transaction.to_address,
                     'input_data': transaction.input_data,
                     'value': transaction.value,
                     'type': transaction.type.value if hasattr(transaction.type, 'value') else str(transaction.type),
-                    'timestamp': transaction.timestamp,
+                    'status': transaction.status.value if hasattr(transaction.status, 'value') else str(transaction.status),
+                    'timestamp': getattr(transaction, 'timestamp', None),
                     'gaslimit': getattr(transaction, 'gaslimit', 100000000),
                 },
                 'consensus_mode': 'validator',
@@ -192,14 +194,15 @@ class AsyncZeroMQClient:
         try:
             message = {
                 'tx_hash': transaction.hash,
-                'contract_address': transaction.contract_address,
+                'contract_address': getattr(transaction, 'contract_address', transaction.to_address),
                 'transaction_data': {
                     'from_address': transaction.from_address,
                     'to_address': transaction.to_address,
                     'input_data': transaction.input_data,
                     'value': transaction.value,
                     'type': transaction.type.value if hasattr(transaction.type, 'value') else str(transaction.type),
-                    'timestamp': transaction.timestamp,
+                    'status': transaction.status.value if hasattr(transaction.status, 'value') else str(transaction.status),
+                    'timestamp': getattr(transaction, 'timestamp', None),
                     'gaslimit': getattr(transaction, 'gaslimit', 100000000),
                 },
                 'consensus_mode': consensus_mode

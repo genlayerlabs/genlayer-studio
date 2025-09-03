@@ -6,7 +6,7 @@ DEFAULT_CONSENSUS_SLEEP_TIME = 5
 import os
 import asyncio
 import traceback
-from typing import Callable, List, Iterable, Literal
+from typing import Callable, List, Iterable, Literal, Any
 import time
 from abc import ABC, abstractmethod
 import threading
@@ -14,9 +14,11 @@ import random
 from copy import deepcopy
 import json
 import base64
+import logging
+
+logger = logging.getLogger(__name__)
 
 from sqlalchemy.orm import Session
-from backend.consensus.vrf import get_validators_for_transaction
 from backend.database_handler.chain_snapshot import ChainSnapshot
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.database_handler.contract_processor import ContractProcessor
@@ -265,6 +267,7 @@ class TransactionContext:
         self.rotation_count: int = 0
         self.consensus_service = consensus_service
         self.leader: dict = {}
+        self.consensus_algorithm = None  # Will be set by ConsensusAlgorithm when creating context
 
         if self.transaction.type != TransactionType.SEND:
             if self.transaction.contract_snapshot:
@@ -322,31 +325,74 @@ class ConsensusAlgorithm:
         )  # Track running state for each pending queue
         self.validators_manager = validators_manager
         
-        # Scalability: Support for hybrid consensus mode
-        self.consensus_mode = os.getenv('CONSENSUS_MODE', 'legacy')  # legacy, hybrid, zmq
-        self.zmq_client = None
-        self.zmq_client_connected = False
-        if self.consensus_mode in ['hybrid', 'zmq']:
-            try:
-                from backend.services.zmq_client import AsyncZeroMQClient
-                self.zmq_client = AsyncZeroMQClient()
-                # Note: Connection will be established when first used
-                print(f"ConsensusAlgorithm initialized in {self.consensus_mode} mode with ZeroMQ")
-            except Exception as e:
-                print(f"Failed to initialize ZeroMQ client: {e}. Falling back to legacy mode.")
-                self.consensus_mode = 'legacy'
-                self.zmq_client = None
+        # Reference to ZeroMQ broker for worker execution
+        self.zmq_broker = None  # Will be set by broker when initializing
     
-    async def _ensure_zmq_connected(self):
-        """Ensure ZeroMQ client is connected"""
-        if self.zmq_client and not self.zmq_client_connected:
-            try:
-                await self.zmq_client.connect()
-                self.zmq_client_connected = True
-            except Exception as e:
-                print(f"Failed to connect ZeroMQ client: {e}")
-                return False
-        return self.zmq_client_connected
+    async def _execute_on_worker(self, execution_type: str, context: 'TransactionContext', validator: dict = None) -> Any:
+        """Execute task on worker via ZeroMQ broker"""
+        
+        # Prepare task data
+        task_data = {
+            'tx_hash': context.transaction.hash,
+            'transaction': {
+                'hash': context.transaction.hash,
+                'from_address': context.transaction.from_address,
+                'to_address': context.transaction.to_address,
+                'input_data': context.transaction.input_data,
+                'value': context.transaction.value,
+                'type': context.transaction.type.value if hasattr(context.transaction.type, 'value') else str(context.transaction.type),
+                'status': context.transaction.status.value if hasattr(context.transaction.status, 'value') else str(context.transaction.status),
+                'gaslimit': getattr(context.transaction, 'gaslimit', 100000000),
+            },
+            'contract_address': context.transaction.to_address,
+        }
+        
+        # Extract GenVM config data from validators snapshot
+        genvm_config_path = None
+        genvm_host_arg = None
+        if context.validators_snapshot:
+            genvm_config_path = str(context.validators_snapshot.genvm_config_path)
+            
+            # Find the host arg for the specific validator
+            target_address = None
+            if execution_type == 'leader':
+                target_address = context.leader['address']
+            elif execution_type == 'validator' and validator:
+                target_address = validator['address']
+            
+            if target_address:
+                for node in context.validators_snapshot.nodes:
+                    if node.validator.address == target_address:
+                        genvm_host_arg = node.genvm_host_arg
+                        break
+        
+        task_data['genvm_config'] = {
+            'config_path': genvm_config_path,
+            'host_arg': genvm_host_arg
+        }
+        
+        if execution_type == 'leader':
+            task_data['validator_info'] = context.leader
+        elif execution_type == 'validator':
+            task_data['validator_info'] = validator
+            if context.consensus_data.leader_receipt:
+                task_data['leader_receipt'] = context.consensus_data.leader_receipt[0].to_dict()
+        
+        # Send to worker and wait for result
+        result = await self.zmq_broker.execute_on_worker(execution_type, task_data)
+        
+        # Convert result based on type
+        from backend.node.types import Receipt, Vote
+        if execution_type == 'leader':
+            if 'receipt' in result:
+                return Receipt(**result['receipt'])
+            else:
+                raise Exception(f"Invalid leader execution result: {result}")
+        elif execution_type == 'validator':
+            if 'vote' in result:
+                return Vote(**result['vote'])
+            else:
+                raise Exception(f"Invalid validator execution result: {result}")
 
     async def run_crawl_snapshot_loop(
         self,
@@ -393,10 +439,16 @@ class ConsensusAlgorithm:
             stop_event (threading.Event): Control signal to terminate the loop.
         """
         while not stop_event.is_set():
-            with self.get_session() as session:
-                chain_snapshot = chain_snapshot_factory(session)
-                transactions_processor = transactions_processor_factory(session)
-                pending_transactions = chain_snapshot.get_pending_transactions()
+            try:
+                # Get pending transactions with a read-only session
+                with self.get_session() as session:
+                    chain_snapshot = chain_snapshot_factory(session)
+                    pending_transactions = chain_snapshot.get_pending_transactions()
+                
+                # ADD: Log what we found
+                logger.info(f"[CRAWL] Found {len(pending_transactions)} PENDING transactions")
+                
+                # Process each transaction separately
                 for transaction in pending_transactions:
                     transaction = Transaction.from_dict(transaction)
                     address = transaction.to_address
@@ -405,55 +457,46 @@ class ConsensusAlgorithm:
                         # it happens in tests/integration/accounts/test_accounts.py::test_accounts_burn
                         print(f"_crawl_snapshot: address is None, tx {transaction}")
                         traceback.print_stack()
+                        continue
 
-                    # Scalability: Route transactions based on consensus mode
-                    if self.consensus_mode == 'zmq':
-                        # ZeroMQ only mode - send directly to broker
-                        if self.zmq_client and await self._ensure_zmq_connected():
-                            success = await self.zmq_client.queue_transaction(transaction, 'leader')
-                            if not success:
-                                print(f"Failed to queue transaction {transaction.hash} via ZeroMQ")
-                                # Could implement retry logic here
-                    elif self.consensus_mode == 'hybrid':
-                        # Hybrid mode - try ZeroMQ first, fallback to legacy
-                        queued_via_zmq = False
-                        if self.zmq_client and await self._ensure_zmq_connected():
-                            queued_via_zmq = await self.zmq_client.queue_transaction(transaction, 'leader')
-                            if queued_via_zmq:
-                                print(f"Transaction {transaction.hash} queued via ZeroMQ")
+                    # ADD: Log each transaction we process
+                    logger.info(f"[CRAWL] Processing tx {transaction.hash} for contract {address}")
+
+                    # Initialize queue and stop event for the address if not present
+                    if address not in self.pending_queues:
+                        self.pending_queues[address] = asyncio.Queue()
+                        logger.info(f"[CRAWL] Created new queue for contract {address}")
+
+                    if address not in self.pending_queue_stop_events:
+                        self.pending_queue_stop_events[address] = asyncio.Event()
+
+                    # Only add to the queue if the stop event is not set
+                    if not self.pending_queue_stop_events[address].is_set():
+                        # ADD: Log queue state before and after
+                        qsize_before = self.pending_queues[address].qsize()
+                        # Add to queue first
+                        await self.pending_queues[address].put(transaction)
+                        qsize_after = self.pending_queues[address].qsize()
+                        logger.info(f"[CRAWL] Queue for {address}: {qsize_before} → {qsize_after}")
                         
-                        if not queued_via_zmq:
-                            # Fallback to legacy queue
-                            # Initialize queue and stop event for the address if not present
-                            if address not in self.pending_queues:
-                                self.pending_queues[address] = asyncio.Queue()
-
-                            if address not in self.pending_queue_stop_events:
-                                self.pending_queue_stop_events[address] = asyncio.Event()
-
-                            # Only add to the queue if the stop event is not set
-                            if not self.pending_queue_stop_events[address].is_set():
-                                await self.pending_queues[address].put(transaction)
-                    else:
-                        # Legacy mode - use existing queue system
-                        # Initialize queue and stop event for the address if not present
-                        if address not in self.pending_queues:
-                            self.pending_queues[address] = asyncio.Queue()
-
-                        if address not in self.pending_queue_stop_events:
-                            self.pending_queue_stop_events[address] = asyncio.Event()
-
-                        # Only add to the queue if the stop event is not set
-                        if not self.pending_queue_stop_events[address].is_set():
-                            await self.pending_queues[address].put(transaction)
-
-                        # Set the transaction as activated so it is not added to the queue again
-                        ConsensusAlgorithm.dispatch_transaction_status_update(
-                            transactions_processor,
-                            transaction.hash,
-                            TransactionStatus.ACTIVATED,
-                            self.msg_handler,
-                        )
+                        # Update status in a separate session to ensure commit
+                        with self.get_session() as update_session:
+                            transactions_processor = transactions_processor_factory(update_session)
+                            # Set the transaction as activated so it is not added to the queue again
+                            ConsensusAlgorithm.dispatch_transaction_status_update(
+                                transactions_processor,
+                                transaction.hash,
+                                TransactionStatus.ACTIVATED,
+                                self.msg_handler,
+                            )
+                            update_session.commit()
+                        
+                        print(f"[CRAWL] Added transaction {transaction.hash} to queue for {address}, queue size: {self.pending_queues[address].qsize()}")
+                        
+            except Exception as e:
+                print(f"Error in _crawl_snapshot: {e}")
+                import traceback
+                traceback.print_exc()
 
             await asyncio.sleep(self.consensus_sleep_time)
 
@@ -532,6 +575,11 @@ class ConsensusAlgorithm:
         # TODO: Consider using async sessions to avoid blocking the current thread
         while not stop_event.is_set():
             try:
+                # ADD: Log queue states
+                queue_states = {addr: q.qsize() for addr, q in self.pending_queues.items()}
+                if queue_states:
+                    logger.info(f"[PROCESS] Queue states: {queue_states}")
+                
                 async with asyncio.TaskGroup() as tg:
                     for queue_address, queue in self.pending_queues.items():
                         if (
@@ -544,6 +592,8 @@ class ConsensusAlgorithm:
                             # Reference: https://docs.sqlalchemy.org/en/20/orm/session_basics.html#is-the-session-thread-safe-is-asyncsession-safe-to-share-in-concurrent-tasks
                             self.pending_queue_task_running[queue_address] = True
                             transaction: Transaction = await queue.get()
+                            # ADD: Log when we pick up a transaction
+                            logger.info(f"[PROCESS] Got tx {transaction.hash} from queue for {queue_address}")
                             with self.get_session() as session:
 
                                 async def exec_transaction_with_session_handling(
@@ -551,6 +601,7 @@ class ConsensusAlgorithm:
                                     transaction: Transaction,
                                     queue_address: str,
                                 ):
+                                    logger.info(f"[PROCESS] Starting exec_transaction for {transaction.hash}")
                                     transactions_processor = (
                                         transactions_processor_factory(session)
                                     )
@@ -570,6 +621,7 @@ class ConsensusAlgorithm:
                                             validators_snapshot,
                                         )
                                     session.commit()
+                                    logger.info(f"[PROCESS] Completed exec_transaction for {transaction.hash}")
                                     self.pending_queue_task_running[queue_address] = (
                                         False
                                     )
@@ -632,6 +684,8 @@ class ConsensusAlgorithm:
             contract_snapshot_factory (Callable[[str], ContractSnapshot]): Factory function to create contract snapshots.
             node_factory (Callable[[dict, ExecutionMode, ContractSnapshot, Receipt | None, MessageHandler, Callable[[str], ContractSnapshot]], Node]): Factory function to create nodes.
         """
+        logger.info(f"[EXEC] Starting exec_transaction for {transaction.hash}")
+        
         # Create initial state context for the transaction
         context = TransactionContext(
             transaction=transaction,
@@ -645,6 +699,11 @@ class ConsensusAlgorithm:
             consensus_service=self.consensus_service,
             validators_snapshot=validators_snapshot,
         )
+        # Set reference to ConsensusAlgorithm for worker execution
+        context.consensus_algorithm = self
+        
+        # ADD: Verify setup
+        logger.info(f"[EXEC] Context created, zmq_broker set: {self.zmq_broker is not None}")
 
         previous_transaction = transactions_processor.get_previous_transaction(
             transaction.hash,
@@ -670,32 +729,45 @@ class ConsensusAlgorithm:
             # Begin state transitions starting from PendingState
             state = PendingState()
             while True:
-                next_state = await state.handle(context)
-                if next_state is None:
-                    break
-                elif next_state == ConsensusRound.ACCEPTED:
-                    if (
-                        ("consensus_results" in context.transaction.consensus_history)
-                        and (
-                            len(
-                                context.transaction.consensus_history[
-                                    "consensus_results"
-                                ]
+                state_name = state.__class__.__name__
+                logger.info(f"[EXEC] Transaction {transaction.hash} entering state: {state_name}")
+                
+                try:
+                    next_state = await state.handle(context)
+                    
+                    if next_state is None:
+                        logger.info(f"[EXEC] Transaction {transaction.hash} completed with None")
+                        break
+                    elif next_state == ConsensusRound.ACCEPTED:
+                        logger.info(f"[EXEC] Transaction {transaction.hash} ACCEPTED")
+                        if (
+                            ("consensus_results" in context.transaction.consensus_history)
+                            and (
+                                len(
+                                    context.transaction.consensus_history[
+                                        "consensus_results"
+                                    ]
+                                )
+                                >= 1
                             )
-                            >= 1
-                        )
-                        and (
-                            context.transaction.consensus_history["consensus_results"][
-                                -1
-                            ]["consensus_round"]
-                            == ConsensusRound.VALIDATOR_TIMEOUT_APPEAL_SUCCESSFUL.value
-                        )
-                    ):
-                        self.rollback_transactions(
-                            context, False
-                        )  # Put on False because this happens in the pending queue, so we don't need to stop it
-                    break
-                state = next_state
+                            and (
+                                context.transaction.consensus_history["consensus_results"][
+                                    -1
+                                ]["consensus_round"]
+                                == ConsensusRound.VALIDATOR_TIMEOUT_APPEAL_SUCCESSFUL.value
+                            )
+                        ):
+                            self.rollback_transactions(
+                                context, False
+                            )  # Put on False because this happens in the pending queue, so we don't need to stop it
+                        break
+                    
+                    logger.info(f"[EXEC] Transaction {transaction.hash} transitioning to: {next_state.__class__.__name__}")
+                    state = next_state
+                    
+                except Exception as e:
+                    logger.error(f"[EXEC] State {state_name} failed for {transaction.hash}: {e}", exc_info=True)
+                    raise
 
     @staticmethod
     def dispatch_transaction_status_update(
@@ -1561,6 +1633,9 @@ class ConsensusAlgorithm:
         if len(not_used_validators) == 0:
             raise ValueError("No validators found")
 
+        # Import locally to avoid circular import
+        from backend.consensus.vrf import get_validators_for_transaction
+        
         nb_current_validators = len(current_validators) + 1  # including the leader
         if appeal_failed == 0:
             # Calculate extra validators when no appeal has failed
@@ -1656,6 +1731,9 @@ class ConsensusAlgorithm:
             if validator["address"] not in addresses
         ]
 
+        # Import locally to avoid circular import
+        from backend.consensus.vrf import get_validators_for_transaction
+        
         # Get new validator
         new_validator = get_validators_for_transaction(not_used_validators, 1)
 
@@ -1884,6 +1962,9 @@ class PendingState(TransactionState):
                 )
 
             else:
+                # Import locally to avoid circular import
+                from backend.consensus.vrf import get_validators_for_transaction
+                
                 # Transaction was never executed, get the default number of validators for the transaction
                 context.involved_validators = get_validators_for_transaction(
                     all_validators, context.transaction.num_of_initial_validators
@@ -1918,6 +1999,9 @@ class ProposingState(TransactionState):
         Returns:
             TransactionState: The CommittingState or UndeterminedState if all rotations are done.
         """
+        tx_hash = context.transaction.hash
+        logger.info(f"[PROPOSING] Starting for tx {tx_hash}")
+        
         # Dispatch a transaction status update to PROPOSING
         ConsensusAlgorithm.dispatch_transaction_status_update(
             context.transactions_processor,
@@ -1948,21 +2032,34 @@ class ProposingState(TransactionState):
             )
 
         assert context.validators_snapshot is not None
-        # Create a leader node for executing the transaction
-        leader_node = context.node_factory(
-            context.leader,
-            ExecutionMode.LEADER,
-            deepcopy(context.contract_snapshot),
-            None,
-            context.msg_handler,
-            context.contract_snapshot_factory,
-            context.validators_snapshot,
-        )
-
-        # Execute the transaction and obtain the leader receipt
-        context.consensus_data.leader_receipt = [
-            await leader_node.exec_transaction(context.transaction)
-        ]
+        
+        # Check setup
+        logger.info(f"[PROPOSING] consensus_algorithm set: {hasattr(context, 'consensus_algorithm')}")
+        logger.info(f"[PROPOSING] zmq_broker set: {context.consensus_algorithm.zmq_broker is not None if hasattr(context, 'consensus_algorithm') else False}")
+        
+        # Get ConsensusAlgorithm reference for worker execution
+        consensus_algo = getattr(context, 'consensus_algorithm', None)
+        if not consensus_algo:
+            logger.error(f"[PROPOSING] FAIL: No consensus_algorithm for tx {tx_hash}")
+            raise Exception("ConsensusAlgorithm not set in context - cannot execute without worker")
+        
+        if not consensus_algo.zmq_broker:
+            logger.error(f"[PROPOSING] FAIL: No zmq_broker for tx {tx_hash}")
+            raise Exception("ZeroMQ broker not set - cannot execute without broker")
+        
+        logger.info(f"[PROPOSING] Calling _execute_on_worker for tx {tx_hash}")
+        
+        try:
+            # Execute on worker via ZeroMQ (always)
+            receipt = await consensus_algo._execute_on_worker('leader', context)
+            logger.info(f"[PROPOSING] SUCCESS: Got receipt for tx {tx_hash}")
+            context.consensus_data.leader_receipt = [receipt]
+        except asyncio.TimeoutError:
+            logger.error(f"[PROPOSING] TIMEOUT: Worker execution timed out for tx {tx_hash}")
+            raise
+        except Exception as e:
+            logger.error(f"[PROPOSING] ERROR: Worker execution failed for tx {tx_hash}: {e}")
+            raise
 
         # Update the consensus data with the leader's vote and receipt
         context.consensus_data.votes = {}
@@ -2075,10 +2172,30 @@ class CommittingState(TransactionState):
             ]
         )
 
-        # Execute the transaction on each validator node and gather the results
-        validation_tasks = [
-            run_single_validator(validator) for validator in context.validator_nodes
-        ]
+        # Get ConsensusAlgorithm reference for worker execution
+        consensus_algo = getattr(context, 'consensus_algorithm', None)
+        if not consensus_algo:
+            raise Exception("ConsensusAlgorithm not set in context - cannot execute without worker")
+        
+        if not consensus_algo.zmq_broker:
+            raise Exception("ZeroMQ broker not set - cannot execute without broker")
+        
+        # Execute validators on workers via ZeroMQ (always)
+        logger.info(f"Executing validators on workers for {context.transaction.hash}")
+        
+        # Prepare validator list (leader + remaining validators if validation_by_leader)
+        validators_to_execute = []
+        if validation_by_leader:
+            validators_to_execute.append(context.leader)
+        validators_to_execute.extend(context.remaining_validators)
+        
+        # Execute all validators in parallel on workers
+        validation_tasks = []
+        for validator in validators_to_execute:
+            validation_tasks.append(
+                consensus_algo._execute_on_worker('validator', context, validator)
+            )
+        
         context.validation_results = await asyncio.gather(*validation_tasks)
 
         # Send events in rollup to communicate the votes are committed

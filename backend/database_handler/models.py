@@ -6,9 +6,11 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     Enum,
+    Index,
     Integer,
     PrimaryKeyConstraint,
     String,
+    Text,
     UniqueConstraint,
     func,
     text,
@@ -208,3 +210,24 @@ class Snapshot(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(True), server_default=func.current_timestamp(), init=False
     )
+
+
+class TransactionResults(Base):
+    """Stores results from distributed consensus workers via ZeroMQ"""
+    __tablename__ = "transaction_results"
+    __table_args__ = (
+        PrimaryKeyConstraint("tx_hash", name="transaction_results_pkey"),
+        Index("idx_transaction_results_contract", "contract_address"),
+        Index("idx_transaction_results_processed_at", "processed_at"),
+        Index("idx_transaction_results_contract_processed", "contract_address", "processed_at"),
+    )
+
+    tx_hash: Mapped[str] = mapped_column(String(66), primary_key=True)
+    contract_address: Mapped[str] = mapped_column(String(42))
+    result: Mapped[Optional[dict]] = mapped_column(JSONB)
+    error: Mapped[Optional[str]] = mapped_column(Text)
+    processed_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(True), server_default=func.current_timestamp(), init=False
+    )
+    worker_id: Mapped[Optional[str]] = mapped_column(String(100))
+    consensus_mode: Mapped[Optional[str]] = mapped_column(String(20))
