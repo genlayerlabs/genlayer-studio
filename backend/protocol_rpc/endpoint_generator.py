@@ -146,9 +146,6 @@ def setup_eth_method_handler(jsonrpc: JSONRPC):
                 method = request_json.get("method", "")
                 if method.startswith("eth_"):
                     site = jsonrpc.get_jsonrpc_site()
-                    print(site.view_funcs)
-                    print(method)
-                    print(method in site.view_funcs)
                     return None  # Use local implementation
                     # if method in site.view_funcs:
                     # else:
