@@ -124,6 +124,7 @@ class TransactionsProcessor:
             "appeal_leader_timeout": transaction_data.appeal_leader_timeout,
             "leader_timeout_validators": transaction_data.leader_timeout_validators,
             "appeal_validators_timeout": transaction_data.appeal_validators_timeout,
+            "sim_config": transaction_data.sim_config,
         }
 
     @staticmethod

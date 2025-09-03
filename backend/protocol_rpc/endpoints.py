@@ -619,18 +619,26 @@ async def _gen_call_with_validator(
         validators_snapshot=validators_snapshot,
     )
 
+    sim_config = None
+    if "sim_config" in params and params["sim_config"]:
+        sim_config = SimConfig.from_dict(params["sim_config"])
+
+    override_transaction_datetime: bool = sim_config is not None and sim_config.timestamp is not None    
+
     if type == "read":
         decoded_data = transactions_parser.decode_method_call_data(data)
         receipt = await node.get_contract_data(
             from_address=from_address,
             calldata=decoded_data.calldata,
             state_status=state_status,
+            transaction_datetime=sim_config.timestamp_as_datetime if override_transaction_datetime else None
         )
     elif type == "write":
         decoded_data = transactions_parser.decode_method_send_data(data)
         receipt = await node.run_contract(
             from_address=from_address,
             calldata=decoded_data.calldata,
+            transaction_created_at=sim_config.timestamp_as_iso_format if override_transaction_datetime else None
         )
     elif type == "deploy":
         decoded_data = transactions_parser.decode_deployment_data(data)
@@ -638,6 +646,7 @@ async def _gen_call_with_validator(
             from_address=from_address,
             code_to_deploy=decoded_data.contract_code,
             calldata=decoded_data.calldata,
+            transaction_created_at=sim_config.timestamp_as_iso_format if override_transaction_datetime else None
         )
     else:
         raise JSONRPCError(f"Invalid type: {type}")

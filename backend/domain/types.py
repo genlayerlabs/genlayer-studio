@@ -3,13 +3,81 @@
 # These types should not depend on any other layer.
 
 from dataclasses import dataclass, field
+import datetime
 import decimal
 from enum import Enum, IntEnum
 import os
-
 from backend.database_handler.models import TransactionStatus
 from backend.database_handler.types import ConsensusData
 from backend.database_handler.contract_snapshot import ContractSnapshot
+
+
+@dataclass
+class SimValidatorConfig:
+    stake: int
+    provider: str
+    model: str
+    config: dict
+    plugin: str
+    plugin_config: dict
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "SimValidatorConfig":
+        return cls(
+            stake=d["stake"],
+            provider=d["provider"],
+            model=d["model"],
+            config=d["config"],
+            plugin=d["plugin"],
+            plugin_config=d["plugin_config"],
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "stake": self.stake,
+            "provider": self.provider,
+            "model": self.model,
+            "config": self.config,
+            "plugin": self.plugin,
+            "plugin_config": self.plugin_config,
+        }
+
+
+@dataclass
+class SimConfig:
+    validators: list[SimValidatorConfig]
+    timestamp: int | None = None
+
+    @property
+    def timestamp_as_iso_format(self) -> str | None:
+        if self.timestamp is None:
+            return None
+        timestamp_dt = datetime.datetime.fromtimestamp(self.timestamp, tz=datetime.UTC)
+        return timestamp_dt.isoformat()
+
+    @property
+    def timestamp_as_datetime(self) -> datetime.datetime | None:
+        if self.timestamp is None:
+            return None
+        timestamp_dt = datetime.datetime.fromtimestamp(self.timestamp, tz=datetime.UTC)
+        return timestamp_dt
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "SimConfig":
+        validators = [
+            SimValidatorConfig.from_dict(v) if isinstance(v, dict) else v
+            for v in d.get("validators", [])
+        ]
+        return cls(
+            validators=validators,
+            timestamp=d.get("timestamp"),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "validators": [v.to_dict() if hasattr(v, "to_dict") else v for v in self.validators],
+            "timestamp": self.timestamp,
+        }
 
 
 @dataclass()
@@ -118,6 +186,7 @@ class Transaction:
     appeal_leader_timeout: bool = False
     leader_timeout_validators: list | None = None
     appeal_validators_timeout: bool = False
+    sim_config: SimConfig | None = None
 
     def to_dict(self):
         return {
@@ -156,6 +225,7 @@ class Transaction:
             "appeal_leader_timeout": self.appeal_leader_timeout,
             "leader_timeout_validators": self.leader_timeout_validators,
             "appeal_validators_timeout": self.appeal_validators_timeout,
+            "sim_config": self.sim_config.to_dict() if self.sim_config else None,
         }
 
     @classmethod
@@ -177,7 +247,7 @@ class Transaction:
             v=input.get("v"),
             leader_only=input.get("leader_only", False),
             created_at=input.get("created_at"),
-            appealed=input.get("appealed"),
+            appealed=input.get("appealed", False),
             timestamp_awaiting_finalization=input.get(
                 "timestamp_awaiting_finalization"
             ),
@@ -196,58 +266,5 @@ class Transaction:
             appeal_leader_timeout=input.get("appeal_leader_timeout", False),
             leader_timeout_validators=input.get("leader_timeout_validators"),
             appeal_validators_timeout=input.get("appeal_validators_timeout", False),
+            sim_config=input.get("sim_config"),
         )
-
-
-@dataclass
-class SimValidatorConfig:
-    stake: int
-    provider: str
-    model: str
-    config: dict
-    plugin: str
-    plugin_config: dict
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "SimValidatorConfig":
-        return cls(
-            stake=d["stake"],
-            provider=d["provider"],
-            model=d["model"],
-            config=d["config"],
-            plugin=d["plugin"],
-            plugin_config=d["plugin_config"],
-        )
-
-    def to_dict(self) -> dict:
-        return {
-            "stake": self.stake,
-            "provider": self.provider,
-            "model": self.model,
-            "config": self.config,
-            "plugin": self.plugin,
-            "plugin_config": self.plugin_config,
-        }
-
-
-@dataclass
-class SimConfig:
-    validators: list[SimValidatorConfig]
-    timestamp: int | None = None
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "SimConfig":
-        validators = [
-            SimValidatorConfig.from_dict(v) if isinstance(v, dict) else v
-            for v in d.get("validators", [])
-        ]
-        return cls(
-            validators=validators,
-            timestamp=d.get("timestamp"),
-        )
-
-    def to_dict(self) -> dict:
-        return {
-            "validators": [v.to_dict() if hasattr(v, "to_dict") else v for v in self.validators],
-            "timestamp": self.timestamp,
-        }
