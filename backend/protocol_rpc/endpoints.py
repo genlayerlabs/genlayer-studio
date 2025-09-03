@@ -434,7 +434,7 @@ def get_contract_code(session: Session, contract_address: str) -> str:
     if not code_b64:
         raise InvalidAddressError(
             contract_address,
-            "Contract not deployed.1",
+            "Contract not deployed",
         )
     return code_b64
 
