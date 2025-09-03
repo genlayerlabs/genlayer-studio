@@ -24,38 +24,4 @@ export class ContractService {
       return false;
     }
   }
-
-  /**
-   * Fetches contract information from the blockchain
-   * @param address The contract address
-   * @returns Promise with contract info or null if not found
-   */
-  static async fetchContractInfo(address: string): Promise<{
-    address: Address;
-    exists: boolean;
-    schema?: any;
-  } | null> {
-    try {
-      const genlayer = useGenlayer();
-      const client = genlayer.client.value;
-
-      if (!client) {
-        throw new Error('Genlayer client not initialized');
-      }
-
-      const schema = await client.getContractSchema(address as Address);
-
-      return {
-        address: address as Address,
-        exists: true,
-        schema,
-      };
-    } catch (error) {
-      console.error('Error fetching contract info:', error);
-      return {
-        address: address as Address,
-        exists: false,
-      };
-    }
-  }
 }
