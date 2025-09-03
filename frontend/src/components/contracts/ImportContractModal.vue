@@ -28,7 +28,7 @@ const isValidAddress = computed(() => {
 
 const isDuplicate = computed(() => {
   return contractsStore.deployedContracts.some(
-    (c) => c.address.toLowerCase() === contractAddress.value.toLowerCase()
+    (c) => c.address.toLowerCase() === contractAddress.value.toLowerCase(),
   );
 });
 
@@ -49,8 +49,10 @@ const handleImport = async () => {
 
   try {
     // Optionally verify the contract exists on chain
-    const contractExists = await ContractService.verifyContractExists(contractAddress.value);
-    
+    const contractExists = await ContractService.verifyContractExists(
+      contractAddress.value,
+    );
+
     if (!contractExists) {
       notify({
         title: 'Warning',
@@ -61,14 +63,15 @@ const handleImport = async () => {
 
     // Create a unique ID for this contract
     const contractId = uuidv4();
-    const fileName = contractName.value || `imported_${contractAddress.value.slice(0, 10)}.py`;
-    
+    const fileName =
+      contractName.value || `imported_${contractAddress.value.slice(0, 10)}.py`;
+
     let contractCode = '';
-    
+
     try {
       // Try to fetch the actual contract code
       contractCode = await fetchContractCode(contractAddress.value);
-      
+
       notify({
         title: 'Contract code retrieved',
         text: 'Successfully fetched the contract code',
@@ -76,10 +79,10 @@ const handleImport = async () => {
       });
     } catch (codeError) {
       console.warn('Failed to fetch contract code:', codeError);
-      
+
       // Fallback to empty file if we can't get the actual code
       contractCode = '# ERROR: Could not retrieve contract code';
-      
+
       notify({
         title: 'Could not retrieve contract code',
         text: 'The contract will be added without source code',
@@ -106,7 +109,7 @@ const handleImport = async () => {
 
     resetForm();
     emit('close');
-    
+
     notify({
       title: 'Contract imported successfully',
       text: `Contract imported as ${fileName}`,
@@ -149,13 +152,16 @@ const handleClose = () => {
           v-model="contractAddress"
           type="text"
           placeholder="0x..."
-          class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 dark:border-zinc-600 dark:bg-zinc-800 dark:text-white sm:text-sm"
+          class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm dark:border-zinc-600 dark:bg-zinc-800 dark:text-white"
           :class="{
             'border-red-500': contractAddress && !isValidAddress,
             'border-yellow-500': isDuplicate,
           }"
         />
-        <p v-if="contractAddress && !isValidAddress" class="mt-1 text-sm text-red-500">
+        <p
+          v-if="contractAddress && !isValidAddress"
+          class="mt-1 text-sm text-red-500"
+        >
           Invalid address format
         </p>
         <p v-if="isDuplicate" class="mt-1 text-sm text-yellow-500">
@@ -175,7 +181,7 @@ const handleClose = () => {
           v-model="contractName"
           type="text"
           placeholder="My Contract"
-          class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 dark:border-zinc-600 dark:bg-zinc-800 dark:text-white sm:text-sm"
+          class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm dark:border-zinc-600 dark:bg-zinc-800 dark:text-white"
         />
         <p class="mt-1 text-sm text-gray-500">
           Leave empty to use the address as the name

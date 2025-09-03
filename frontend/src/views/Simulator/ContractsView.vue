@@ -95,7 +95,6 @@ const handleSaveNewFile = (name: string) => {
       />
     </div>
 
-
     <ContractItem
       v-if="showNewFileInput"
       :isNewFile="true"

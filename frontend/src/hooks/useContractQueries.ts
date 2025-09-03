@@ -274,7 +274,9 @@ export function useContractQueries() {
         throw new Error('Genlayer client not initialized');
       }
 
-      return await genlayerClient.value.getContractCode(contractAddress as Address);
+      return await genlayerClient.value.getContractCode(
+        contractAddress as Address,
+      );
     } catch (error) {
       console.error('Error fetching contract code:', error);
       throw error;
