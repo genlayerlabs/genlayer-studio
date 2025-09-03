@@ -53,8 +53,6 @@ class GenLayerSimulatorDB extends Dexie {
             }
           });
       });
-
-    // Version 5 removed - was for importedContracts table that is no longer used
   }
 }
 
