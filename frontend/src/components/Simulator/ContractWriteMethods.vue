@@ -25,21 +25,21 @@ const simulationMode = ref(false);
 <template>
   <PageSection>
     <template #title>
-      <div class="flex items-center justify-between w-full">
-        <span class="flex items-center gap-2">
-          Write Methods
-          <Loader v-if="isRefetching" :size="14" />
-        </span>
-        <div class="flex items-center gap-2 text-xs">
-          <label class="flex items-center gap-1 cursor-pointer">
-            <input
-              type="checkbox"
-              v-model="simulationMode"
-              class="rounded"
-            />
-            <span>Simulation Mode</span>
-          </label>
-        </div>
+      <span class="flex items-center gap-2">
+        Write Methods
+        <Loader v-if="isRefetching" :size="14" />
+      </span>
+    </template>
+    <template #actions>
+      <div class="flex items-center gap-2 text-xs">
+        <label class="flex items-center gap-1 cursor-pointer">
+          <input
+            type="checkbox"
+            v-model="simulationMode"
+            class="rounded"
+          />
+          <span>Simulation Mode</span>
+        </label>
       </div>
     </template>
 
