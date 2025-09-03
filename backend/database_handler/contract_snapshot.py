@@ -1,7 +1,9 @@
 # database_handler/contract_snapshot.py
 from .models import CurrentState
 from sqlalchemy.orm import Session
-from typing import Optional
+from typing import Optional, Dict
+import base64
+import json
 
 
 class ContractSnapshot:
@@ -14,7 +16,7 @@ class ContractSnapshot:
     contract_address: str
     contract_code: str
     balance: int
-    states: dict[str, dict[str, str]]
+    states: Dict[str, Dict[str, str]]
 
     def __init__(self, contract_address: str | None, session: Session):
         if contract_address is not None:
@@ -58,10 +60,43 @@ class ContractSnapshot:
         result = (
             session.query(CurrentState)
             .filter(CurrentState.id == self.contract_address)
+            .populate_existing()  # Force refresh from database even if cached
             .one_or_none()
         )
 
         if result is None:
             raise Exception(f"Contract {self.contract_address} not found")
 
+        # Handle legacy JSON string data and validate deployment
+        if isinstance(result.data, str):
+            result.data = json.loads(result.data)
+
+        if not result.data:
+            raise Exception(f"Contract {self.contract_address} not deployed")
+
         return result
+
+    def extract_deployed_code_b64(self) -> Optional[str]:
+        """Extract the deployed contract code as base64 from this instance's state.
+
+        This reads the code slot key, fetches the stored blob, validates and
+        slices out the code payload, and returns it base64-encoded. Returns None
+        if missing/invalid.
+        """
+        # Import here to avoid circular dependencies at module import time
+        from backend.node.genvm.origin.base_host import get_code_slot
+
+        accepted = self.states.get("accepted") or {}
+
+        try:
+            code_slot_b64 = base64.b64encode(get_code_slot()).decode("ascii")
+            stored = accepted.get(code_slot_b64)
+            if not stored:
+                return None
+
+            raw = base64.b64decode(stored, validate=True)
+            code_len = int.from_bytes(raw[0:4], byteorder="little", signed=False)
+            code_bytes = raw[4 : 4 + code_len]
+            return base64.b64encode(code_bytes).decode("ascii")
+        except Exception:
+            return None

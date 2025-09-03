@@ -1,0 +1,41 @@
+sources:
+  docker_logs:
+    type: docker_logs
+    exclude_containers:
+      - vector
+
+transforms:
+  docker_logs_transform:
+    type: remap
+    inputs:
+      - docker_logs
+    source: |
+      # Add standard Loki labels
+      .labels = {"job": "docker", "instance": get_hostname!(), "container": .container_name}
+      # Convert timestamp to RFC3339
+      .timestamp = format_timestamp!(.timestamp, format: "%+")
+
+sinks:
+  gcp_logs:
+    type: gcp_stackdriver_logs
+    inputs:
+      - docker_logs_transform
+    credentials_path: /etc/vector/gcp_credentials.json
+    log_id: "genlayer-logs"
+    project_id: "${GCP_PROJECT_ID}"
+    resource:
+      type: "generic_node"
+    tls:
+      verify_certificate: true
+    request:
+      retry_attempts: 3
+
+  gcp_pubsub:
+    type: gcp_pubsub
+    inputs:
+      - docker_logs_transform
+    credentials_path: /etc/vector/gcp_credentials.json
+    project: "${GCP_PROJECT_ID}"
+    topic: "observability_logs"
+    encoding:
+      codec: json

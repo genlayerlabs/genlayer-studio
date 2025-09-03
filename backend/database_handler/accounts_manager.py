@@ -42,7 +42,7 @@ class AccountsManager:
             return existing_account
 
         # If account doesn't exist, create it
-        account = CurrentState(id=address, data="{}", balance=0)
+        account = CurrentState(id=address, data={}, balance=0)
         self.session.add(account)
         self.session.commit()
         return account

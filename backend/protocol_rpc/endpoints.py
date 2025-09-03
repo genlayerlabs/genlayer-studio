@@ -428,6 +428,17 @@ async def get_contract_schema_for_code(
     return json.loads(schema)
 
 
+def get_contract_code(session: Session, contract_address: str) -> str:
+    contract_snapshot = ContractSnapshot(contract_address, session)
+    code_b64 = contract_snapshot.extract_deployed_code_b64()
+    if not code_b64:
+        raise InvalidAddressError(
+            contract_address,
+            "Contract not deployed",
+        )
+    return code_b64
+
+
 async def _execute_call_with_snapshot(
     session: Session,
     accounts_manager: AccountsManager,
@@ -1056,6 +1067,36 @@ def delete_all_snapshots(
     return {"deleted_count": deleted_count}
 
 
+def dev_get_pool_status(sqlalchemy_db) -> dict:
+    """
+    Development endpoint to monitor database connection pool status.
+
+    Returns current pool metrics including size, checked out connections,
+    overflow, and maximum allowed connections.
+
+    Args:
+        sqlalchemy_db: The Flask-SQLAlchemy database instance
+
+    Returns:
+        dict: Pool status information including timestamp and metrics
+    """
+    from datetime import datetime
+
+    engine = sqlalchemy_db.engine
+    pool = engine.pool
+
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "pool": {
+            "size": pool.size(),
+            "checked_out": pool.checkedout(),
+            "overflow": pool.overflow(),
+            "max_allowed": pool.size() + pool._max_overflow,
+            "total": pool.size() + pool.overflow(),
+        },
+    }
+
+
 def register_all_rpc_endpoints(
     jsonrpc: JSONRPC,
     msg_handler: MessageHandler,
@@ -1069,6 +1110,7 @@ def register_all_rpc_endpoints(
     consensus: ConsensusAlgorithm,
     consensus_service: ConsensusService,
     transactions_parser: TransactionParser,
+    sqlalchemy_db=None,  # Optional for backward compatibility
 ):
     register_rpc_endpoint = partial(generate_rpc_endpoint, jsonrpc, msg_handler)
 
@@ -1160,6 +1202,10 @@ def register_all_rpc_endpoints(
     register_rpc_endpoint(
         partial(get_contract_schema_for_code, msg_handler),
         method_name="gen_getContractSchemaForCode",
+    )
+    register_rpc_endpoint(
+        partial(get_contract_code, request_session),
+        method_name="gen_getContractCode",
     )
     register_rpc_endpoint(
         partial(
@@ -1264,4 +1310,9 @@ def register_all_rpc_endpoints(
     register_rpc_endpoint(
         partial(delete_all_snapshots, snapshot_manager),
         method_name="sim_deleteAllSnapshots",
+    )
+
+    register_rpc_endpoint(
+        partial(dev_get_pool_status, sqlalchemy_db),
+        method_name="dev_getPoolStatus",
     )
