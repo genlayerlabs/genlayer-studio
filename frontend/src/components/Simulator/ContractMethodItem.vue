@@ -10,7 +10,8 @@ import { useEventTracking, useContractQueries } from '@/hooks';
 import { unfoldArgsData, type ArgData } from './ContractParams';
 import ContractParams from './ContractParams.vue';
 
-const { callWriteMethod, callReadMethod, simulateWriteMethod, contract } = useContractQueries();
+const { callWriteMethod, callReadMethod, simulateWriteMethod, contract } =
+  useContractQueries();
 const { trackEvent } = useEventTracking();
 
 const props = defineProps<{
@@ -108,7 +109,7 @@ const handleCallWriteMethod = async () => {
       // Simulation mode - call simulateWriteMethod
       responseMessageAccepted.value = '';
       responseMessageFinalized.value = '';
-      
+
       const result = await simulateWriteMethod({
         method: props.name,
         leaderOnly: props.leaderOnly,
@@ -120,7 +121,7 @@ const handleCallWriteMethod = async () => {
       });
 
       responseMessageAccepted.value = formatResponseIfNeeded(
-        typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+        typeof result === 'string' ? result : JSON.stringify(result, null, 2),
       );
 
       notify({
@@ -214,10 +215,14 @@ const handleCallWriteMethod = async () => {
             :data-testid="`write-method-btn-${name}`"
             :loading="isCalling"
             :disabled="isCalling"
-            >{{ 
-              isCalling 
-                ? (simulationMode ? 'Simulating...' : 'Sending...') 
-                : (simulationMode ? 'Simulate' : 'Send Transaction') 
+            >{{
+              isCalling
+                ? simulationMode
+                  ? 'Simulating...'
+                  : 'Sending...'
+                : simulationMode
+                  ? 'Simulate'
+                  : 'Send Transaction'
             }}</Btn
           >
         </div>
@@ -230,7 +235,13 @@ const handleCallWriteMethod = async () => {
           class="w-full break-all text-sm"
         >
           <div v-if="responseMessageAccepted !== ''">
-            <div class="mb-1 text-xs font-medium">{{ methodType === 'write' && simulationMode ? 'Simulation Result:' : 'Response Accepted:' }}</div>
+            <div class="mb-1 text-xs font-medium">
+              {{
+                methodType === 'write' && simulationMode
+                  ? 'Simulation Result:'
+                  : 'Response Accepted:'
+              }}
+            </div>
             <div
               :data-testid="`method-response-${name}`"
               class="w-full whitespace-pre-wrap rounded bg-white p-1 font-mono text-xs dark:bg-slate-600"

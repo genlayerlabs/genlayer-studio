@@ -32,12 +32,8 @@ const simulationMode = ref(false);
     </template>
     <template #actions>
       <div class="flex items-center gap-2 text-xs">
-        <label class="flex items-center gap-1 cursor-pointer">
-          <input
-            type="checkbox"
-            v-model="simulationMode"
-            class="rounded"
-          />
+        <label class="flex cursor-pointer items-center gap-1">
+          <input type="checkbox" v-model="simulationMode" class="rounded" />
           <span>Simulation Mode</span>
         </label>
       </div>
