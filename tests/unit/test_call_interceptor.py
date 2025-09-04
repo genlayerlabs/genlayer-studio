@@ -9,11 +9,11 @@ import eth_utils
 from backend.protocol_rpc.endpoints import eth_call
 from backend.protocol_rpc.call_interceptor import (
     handle_consensus_data_call,
-    extract_recipient_address_from_call_data,
     is_consensus_data_contract_call,
-    is_get_latest_pending_tx_count_call,
     CONSENSUS_DATA_CONTRACT_ADDRESS,
-    GET_LATEST_PENDING_TX_COUNT_SELECTOR,
+)
+from backend.protocol_rpc.calls_intercept.get_latest_pending_tx_count import (
+    GetLatestPendingTxCountHandler,
 )
 from backend.errors.errors import InvalidAddressError
 from flask_jsonrpc.exceptions import JSONRPCError
@@ -77,7 +77,12 @@ class TestCallInterceptor:
         """Generate sample call data for getLatestPendingTxCount"""
         recipient = "0x1234567890123456789012345678901234567890"
         # Method selector (fe4cfca7) + padded recipient address
-        return f"0x{GET_LATEST_PENDING_TX_COUNT_SELECTOR}{recipient[2:].zfill(64)}"
+        return f"0x{GetLatestPendingTxCountHandler.METHOD_SELECTOR}{recipient[2:].zfill(64)}"
+
+    @pytest.fixture
+    def handler(self):
+        """Get handler instance for testing"""
+        return GetLatestPendingTxCountHandler()
 
     # ============================================================================
     # CONTRACT DETECTION TESTS
@@ -102,7 +107,7 @@ class TestCallInterceptor:
             "0x1234567890123456789012345678901234567890"
         )
 
-    def test_method_signature_detection(self, sample_call_data):
+    def test_method_signature_detection(self, handler, sample_call_data):
         """
         Test 2: Verify getLatestPendingTxCount method signature detection
 
@@ -110,21 +115,21 @@ class TestCallInterceptor:
         How it works: Checks if call data starts with correct method selector
         """
         # Valid call data should be detected
-        assert is_get_latest_pending_tx_count_call(sample_call_data)
+        assert handler.can_handle(sample_call_data)
 
         # Different method selector should not match
-        assert not is_get_latest_pending_tx_count_call("0xabcdef12" + "0" * 64)
+        assert not handler.can_handle("0xabcdef12" + "0" * 64)
 
         # Invalid data formats should not match
-        assert not is_get_latest_pending_tx_count_call("0x")
-        assert not is_get_latest_pending_tx_count_call("")
-        assert not is_get_latest_pending_tx_count_call("0x123")  # Too short
+        assert not handler.can_handle("0x")
+        assert not handler.can_handle("")
+        assert not handler.can_handle("0x123")  # Too short
 
     # ============================================================================
     # PARAMETER EXTRACTION TESTS
     # ============================================================================
 
-    def test_extract_recipient_address_from_valid_data(self, sample_call_data):
+    def test_extract_recipient_address_from_valid_data(self, handler, sample_call_data):
         """
         Test 3: Extract recipient address from valid call data
 
@@ -132,10 +137,10 @@ class TestCallInterceptor:
         How it works: Extracts bytes 5-36 (after method selector) and formats as address
         """
         expected_recipient = "0x1234567890123456789012345678901234567890"
-        actual_recipient = extract_recipient_address_from_call_data(sample_call_data)
+        actual_recipient = handler._extract_recipient_address(sample_call_data)
         assert actual_recipient.lower() == expected_recipient.lower()
 
-    def test_extract_recipient_address_error_handling(self):
+    def test_extract_recipient_address_error_handling(self, handler):
         """
         Test 4: Error handling for invalid call data when extracting address
 
@@ -144,17 +149,15 @@ class TestCallInterceptor:
         """
         # Empty data
         with pytest.raises(ValueError, match="Call data is empty"):
-            extract_recipient_address_from_call_data("")
+            handler._extract_recipient_address("")
 
         # Too short data (missing address parameter)
         with pytest.raises(ValueError, match="Call data too short"):
-            extract_recipient_address_from_call_data("0xfe4cfca7")
+            handler._extract_recipient_address("0xfe4cfca7")
 
         # Only method selector, no parameters
         with pytest.raises(ValueError, match="Call data too short"):
-            extract_recipient_address_from_call_data(
-                "0x" + GET_LATEST_PENDING_TX_COUNT_SELECTOR
-            )
+            handler._extract_recipient_address("0x" + handler.METHOD_SELECTOR)
 
     # ============================================================================
     # HANDLER LOGIC TESTS
@@ -231,7 +234,7 @@ class TestCallInterceptor:
         How it works: Tests with invalid call data format
         """
         invalid_call = (
-            "0x" + GET_LATEST_PENDING_TX_COUNT_SELECTOR
+            "0x" + GetLatestPendingTxCountHandler.METHOD_SELECTOR
         )  # Missing address parameter
 
         with pytest.raises(JSONRPCError) as exc_info:
@@ -242,7 +245,7 @@ class TestCallInterceptor:
             )
 
         assert exc_info.value.code == -32602  # Invalid params error code
-        assert "Invalid parameters" in exc_info.value.message
+        assert exc_info.value.message and "Invalid parameters" in exc_info.value.message
 
     # ============================================================================
     # HEXADECIMAL FORMATTING TESTS
@@ -300,6 +303,7 @@ class TestCallInterceptor:
             )
 
             # Verify result format
+            assert result is not None
             assert result.startswith("0x")
             assert len(result) == 66  # 0x + 64 hex chars
 
@@ -526,7 +530,8 @@ class TestCallInterceptor:
 
         assert exc_info.value.code == -32000  # Internal error
         assert (
-            "Database error querying pending transaction count"
+            exc_info.value.message
+            and "Database error querying pending transaction count"
             in exc_info.value.message
         )
 
