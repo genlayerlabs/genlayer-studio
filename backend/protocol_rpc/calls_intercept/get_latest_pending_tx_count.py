@@ -12,7 +12,12 @@ class GetLatestPendingTxCountHandler(CallHandler):
 
     def can_handle(self, data: str) -> bool:
         """Check if this handler can process the given call data."""
-        if not data or len(data) < 10:
+        if not data:
+            return False
+
+        # Check minimum length based on whether data has "0x" prefix
+        min_length = 10 if data.startswith("0x") else 8
+        if len(data) < min_length:
             return False
 
         method_selector = data[2:10] if data.startswith("0x") else data[:8]
