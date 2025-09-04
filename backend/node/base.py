@@ -122,6 +122,13 @@ class Node:
         assert transaction.data is not None
         transaction_data = transaction.data
         assert transaction.from_address is not None
+
+        # Override transaction timestamp
+        sim_config = transaction.sim_config
+        transaction_created_at = transaction.created_at
+        if sim_config is not None and sim_config.genvm_datetime is not None:
+            transaction_created_at = sim_config.genvm_datetime
+
         if transaction.type == TransactionType.DEPLOY_CONTRACT:
             code = base64.b64decode(transaction_data["contract_code"])
             calldata = base64.b64decode(transaction_data["calldata"])
@@ -130,7 +137,7 @@ class Node:
                 code,
                 calldata,
                 transaction.hash,
-                transaction.created_at,
+                transaction_created_at,
             )
         elif transaction.type == TransactionType.RUN_CONTRACT:
             calldata = base64.b64decode(transaction_data["calldata"])
@@ -138,7 +145,7 @@ class Node:
                 transaction.from_address,
                 calldata,
                 transaction.hash,
-                transaction.created_at,
+                transaction_created_at,
             )
         else:
             raise Exception(f"unknown transaction type {transaction.type}")
@@ -167,7 +174,9 @@ class Node:
     def _date_from_str(self, date: str | None) -> datetime.datetime | None:
         if date is None:
             return None
-        res = datetime.datetime.fromisoformat(date)
+        # Accept ISO‐8601 strings with a trailing ‘Z’ by normalizing to +00:00
+        date_str = date.replace("Z", "+00:00")
+        res = datetime.datetime.fromisoformat(date_str)
         if res.tzinfo is None:
             res = res.replace(tzinfo=datetime.UTC)
         return res
@@ -232,13 +241,18 @@ class Node:
         from_address: str,
         calldata: bytes,
         state_status: str | None = None,
+        transaction_datetime: datetime.datetime | None = None,
     ) -> Receipt:
         return await self._run_genvm(
             from_address,
             calldata,
             readonly=True,
             is_init=False,
-            transaction_datetime=datetime.datetime.now().astimezone(datetime.UTC),
+            transaction_datetime=(
+                transaction_datetime
+                if transaction_datetime is not None
+                else datetime.datetime.now().astimezone(datetime.UTC)
+            ),
             state_status=state_status,
         )
 

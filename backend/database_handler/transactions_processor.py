@@ -124,6 +124,7 @@ class TransactionsProcessor:
             "appeal_leader_timeout": transaction_data.appeal_leader_timeout,
             "leader_timeout_validators": transaction_data.leader_timeout_validators,
             "appeal_validators_timeout": transaction_data.appeal_validators_timeout,
+            "sim_config": transaction_data.sim_config,
         }
 
     @staticmethod
@@ -227,6 +228,7 @@ class TransactionsProcessor:
         ) = None,  # If filled, the transaction must be present in the database (committed)
         transaction_hash: str | None = None,
         num_of_initial_validators: int | None = None,
+        sim_config: dict | None = None,
     ) -> str:
         # Follow up: https://github.com/MetaMask/metamask-extension/issues/29787
         # to uncomment this check
@@ -278,6 +280,7 @@ class TransactionsProcessor:
             appeal_leader_timeout=False,
             leader_timeout_validators=None,
             appeal_validators_timeout=False,
+            sim_config=sim_config,
         )
 
         self.session.add(new_transaction)
