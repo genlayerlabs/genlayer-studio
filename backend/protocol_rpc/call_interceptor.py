@@ -14,12 +14,6 @@ GET_LATEST_PENDING_TX_COUNT_SIGNATURE = "getLatestPendingTxCount(address)"
 def is_consensus_data_contract_call(to_address: str) -> bool:
     """
     Check if the eth_call is targeting the ConsensusData contract.
-
-    Args:
-        to_address: The contract address being called
-
-    Returns:
-        bool: True if calling ConsensusData contract
     """
     return to_address.lower() == CONSENSUS_DATA_CONTRACT_ADDRESS.lower()
 
@@ -27,12 +21,6 @@ def is_consensus_data_contract_call(to_address: str) -> bool:
 def is_get_latest_pending_tx_count_call(data: str) -> bool:
     """
     Check if the call data corresponds to getLatestPendingTxCount method.
-
-    Args:
-        data: The call data hex string
-
-    Returns:
-        bool: True if calling getLatestPendingTxCount method
     """
     if not data or len(data) < 10:  # Need at least method selector (0x + 8 chars)
         return False
@@ -45,15 +33,6 @@ def is_get_latest_pending_tx_count_call(data: str) -> bool:
 def extract_recipient_address_from_call_data(data: str) -> str:
     """
     Extract the recipient address parameter from getLatestPendingTxCount call data.
-
-    Args:
-        data: The call data hex string
-
-    Returns:
-        str: The recipient address
-
-    Raises:
-        ValueError: If call data format is invalid
     """
     if not data:
         raise ValueError("Call data is empty")
@@ -78,16 +57,6 @@ def handle_get_latest_pending_tx_count(
 ) -> str:
     """
     Handle getLatestPendingTxCount call by querying local database.
-
-    Args:
-        transactions_processor: TransactionsProcessor instance
-        recipient_address: The recipient address to count pending transactions for
-
-    Returns:
-        str: Hex-encoded uint256 result
-
-    Raises:
-        JSONRPCError: If database query fails
     """
     try:
         count = transactions_processor.get_pending_transaction_count_for_address(
@@ -117,17 +86,6 @@ def handle_consensus_data_call(
 ) -> str | None:
     """
     Handle ConsensusData contract calls by intercepting and processing locally.
-
-    Args:
-        transactions_processor: TransactionsProcessor instance
-        to_address: The contract address being called
-        data: The call data
-
-    Returns:
-        str: Hex-encoded result if handled, None if not a ConsensusData call
-
-    Raises:
-        JSONRPCError: If the call fails
     """
     # Check if this is a ConsensusData contract call
     if not is_consensus_data_contract_call(to_address):
