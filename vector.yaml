@@ -11,7 +11,7 @@ transforms:
       - docker_logs
     source: |
       # Add standard Loki labels
-      .labels = {"job": "docker", "instance": get_hostname!(), "container": .container_name}
+      .labels = {"job": "docker", "instance": "${SERVER_NAME}", "container": .container_name}
       # Convert timestamp to RFC3339
       .timestamp = format_timestamp!(.timestamp, format: "%+")
 
