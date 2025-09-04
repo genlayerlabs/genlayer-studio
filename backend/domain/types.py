@@ -52,9 +52,10 @@ class SimConfig:
     def genvm_datetime_as_datetime(self) -> datetime.datetime | None:
         if self.genvm_datetime is None:
             return None
-        return datetime.datetime.fromisoformat(
-            self.genvm_datetime.replace("Z", "+00:00")
-        )
+        dt = datetime.datetime.fromisoformat(self.genvm_datetime.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(datetime.timezone.utc)
 
     @classmethod
     def from_dict(cls, d: dict) -> "SimConfig":

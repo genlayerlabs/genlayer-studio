@@ -174,7 +174,9 @@ class Node:
     def _date_from_str(self, date: str | None) -> datetime.datetime | None:
         if date is None:
             return None
-        res = datetime.datetime.fromisoformat(date)
+        # Accept ISO‐8601 strings with a trailing ‘Z’ by normalizing to +00:00
+        date_str = date.replace("Z", "+00:00")
+        res = datetime.datetime.fromisoformat(date_str)
         if res.tzinfo is None:
             res = res.replace(tzinfo=datetime.UTC)
         return res

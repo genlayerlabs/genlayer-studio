@@ -152,7 +152,7 @@ class SnapshotManager:
                 appeal_leader_timeout=tx_info["appeal_leader_timeout"],
                 leader_timeout_validators=tx_info["leader_timeout_validators"],
                 appeal_validators_timeout=tx_info["appeal_validators_timeout"],
-                sim_config=tx_info["sim_config"],
+                sim_config=tx_info.get("sim_config"),
             )
             if tx_info["created_at"]:
                 new_tx.created_at = datetime.fromisoformat(tx_info["created_at"])
