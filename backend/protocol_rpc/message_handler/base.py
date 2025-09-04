@@ -2,7 +2,6 @@ import os
 import json
 import copy
 from functools import wraps
-from logging.config import dictConfig
 import traceback
 
 from flask import request
@@ -32,7 +31,7 @@ class MessageHandler:
         self.socketio = socketio
         self.config = config
         self.client_session_id = None
-        setup_logging_config()
+        # Logging is configured at app startup
 
     def with_client_session(self, client_session_id: str):
         new_msg_handler = MessageHandler(self.socketio, self.config)
@@ -216,18 +215,71 @@ def log_endpoint_info_wrapper(msg_handler: MessageHandler, config: GlobalConfigu
     return decorator
 
 
-def setup_logging_config():
-    logging_env = os.environ["LOGCONFIG"]
-    file_path = (
-        f"backend/protocol_rpc/message_handler/config/logging.{logging_env}.json"
-    )
-    with open(file_path, "r") as file:
-        logging_config = json.load(file)
-        dictConfig(logging_config)
+def setup_loguru_config():
+    import logging
 
+    # Remove default loguru handler
     logger.remove()
+
+    # Get log level from environment
+    log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    logging_env = os.environ.get("LOGCONFIG", "dev")
+
+    # Console handler with colors
     logger.add(
         sys.stdout,
         colorize=True,
         format="<level>{level: <8}</level> | {message}",
+        level=log_level,
     )
+
+    # Set up logging intercept for standard library loggers
+    class InterceptHandler(logging.Handler):
+        def emit(self, record):
+            try:
+                level = logger.level(record.levelname).name
+            except ValueError:
+                level = record.levelno
+
+            frame, depth = logging.currentframe(), 2
+            while frame and frame.f_code.co_filename == logging.__file__:
+                frame = frame.f_back
+                depth += 1
+
+            message = record.getMessage()
+            if "\n" in message:
+                message = " ".join(message.split())
+                message = f"[COMPRESSED] {message}"
+
+            if record.exc_info:
+                exc_type, exc, tb = record.exc_info
+                exc_only = " ".join(
+                    traceback.format_exception_only(exc_type, exc)
+                ).strip()
+                tb_str = " ".join(line.strip() for line in traceback.format_tb(tb))
+                message = f"{message} | exc={exc_only} | tb={tb_str}"
+
+            logger.opt(depth=depth).log(level, message)
+
+    # Configure all standard library loggers to use loguru
+    intercept_handler = InterceptHandler()
+
+    # Clear and configure root logger first
+    logging.root.handlers.clear()
+    logging.root.addHandler(intercept_handler)
+    logging.root.setLevel("INFO")
+
+    # Be more aggressive - intercept all existing loggers
+    for name in logging.Logger.manager.loggerDict:
+        std_logger = logging.getLogger(name)
+        std_logger.handlers.clear()
+        std_logger.addHandler(intercept_handler)
+        std_logger.propagate = False
+
+    # Ensure specific loggers are definitely intercepted
+    for logger_name in ["sqlalchemy.engine", "werkzeug", "sqlalchemy"]:
+        std_logger = logging.getLogger(logger_name)
+        std_logger.handlers.clear()
+        std_logger.addHandler(intercept_handler)
+        std_logger.propagate = False
+        std_logger.setLevel("INFO")

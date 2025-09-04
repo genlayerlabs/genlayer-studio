@@ -428,6 +428,17 @@ async def get_contract_schema_for_code(
     return json.loads(schema)
 
 
+def get_contract_code(session: Session, contract_address: str) -> str:
+    contract_snapshot = ContractSnapshot(contract_address, session)
+    code_b64 = contract_snapshot.extract_deployed_code_b64()
+    if not code_b64:
+        raise InvalidAddressError(
+            contract_address,
+            "Contract not deployed",
+        )
+    return code_b64
+
+
 async def _execute_call_with_snapshot(
     session: Session,
     accounts_manager: AccountsManager,
@@ -1261,6 +1272,10 @@ def register_all_rpc_endpoints(
     register_rpc_endpoint(
         partial(get_contract_schema_for_code, msg_handler),
         method_name="gen_getContractSchemaForCode",
+    )
+    register_rpc_endpoint(
+        partial(get_contract_code, request_session),
+        method_name="gen_getContractCode",
     )
     register_rpc_endpoint(
         partial(

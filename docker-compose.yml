@@ -191,6 +191,24 @@ services:
       traefik.http.routers.hardhat.entrypoints: websecure
       traefik.http.routers.hardhat.tls: true
 
+  vector:
+    profiles: ["studio"]
+    image: timberio/vector:0.42.0-alpine
+    container_name: vector
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/etc/vector/gcp_credentials.json
+      - VECTOR_LOG=info
+      - GCP_PROJECT_ID=${GCP_PROJECT_ID}
+    volumes:
+      - ./vector.yaml:/etc/vector/vector.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./gcp_credentials.json:/etc/vector/gcp_credentials.json:ro
+      - /var/log:/var/log:ro  # Mount the host's /var/log directory
+    # network_mode: host
+    restart: unless-stopped
+    labels:
+      org.label-schema.group: "monitoring"
+
 volumes:
   hardhat_artifacts:
   hardhat_cache:
