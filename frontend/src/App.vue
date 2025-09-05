@@ -55,7 +55,9 @@ onMounted(async () => {
   await nextTick();
 
   const param = route.query['import-contract'];
-  const initialAddress = Array.isArray(param) ? param[0] : (param as string | undefined);
+  const initialAddress = Array.isArray(param)
+    ? param[0]
+    : (param as string | undefined);
   if (initialAddress) {
     await applyContractImport(initialAddress);
   }
@@ -65,7 +67,9 @@ onMounted(async () => {
 watch(
   () => route.query['import-contract'],
   async (newValue) => {
-    const address = Array.isArray(newValue) ? newValue[0] : (newValue as string | undefined);
+    const address = Array.isArray(newValue)
+      ? newValue[0]
+      : (newValue as string | undefined);
     if (address) {
       await applyContractImport(address);
     }

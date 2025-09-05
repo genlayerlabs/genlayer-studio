@@ -3,7 +3,7 @@ import { ref, computed } from 'vue';
 import Modal from '@/components/global/Modal.vue';
 import { useContractImport } from '@/composables/useContractImport';
 
-const props = defineProps<{
+defineProps<{
   open: boolean;
 }>();
 
@@ -11,12 +11,8 @@ const emit = defineEmits<{
   close: [];
 }>();
 
-const {
-  importContract,
-  isImporting,
-  isValidAddress,
-  isDuplicateContract,
-} = useContractImport();
+const { importContract, isImporting, isValidAddress, isDuplicateContract } =
+  useContractImport();
 
 const contractAddress = ref('');
 const contractName = ref('');
@@ -30,7 +26,9 @@ const isDuplicate = computed(() => {
 });
 
 const canImport = computed(() => {
-  return isValidAddressComputed.value && !isDuplicate.value && !isImporting.value;
+  return (
+    isValidAddressComputed.value && !isDuplicate.value && !isImporting.value
+  );
 });
 
 const resetForm = () => {
@@ -41,8 +39,11 @@ const resetForm = () => {
 const handleImport = async () => {
   if (!canImport.value) return;
 
-  const result = await importContract(contractAddress.value, contractName.value);
-  
+  const result = await importContract(
+    contractAddress.value,
+    contractName.value,
+  );
+
   if (result.success) {
     resetForm();
     emit('close');
@@ -75,7 +76,7 @@ const handleClose = () => {
           v-model="contractAddress"
           type="text"
           placeholder="0x..."
-          class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm dark:border-zinc-600 dark:bg-zinc-800 dark:text-white"
+          class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-accent focus:ring-accent sm:text-sm dark:border-zinc-600 dark:bg-zinc-800 dark:text-white"
           :class="{
             'border-red-500': contractAddress && !isValidAddressComputed,
             'border-yellow-500': isDuplicate,
@@ -104,7 +105,7 @@ const handleClose = () => {
           v-model="contractName"
           type="text"
           placeholder="My Contract"
-          class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm dark:border-zinc-600 dark:bg-zinc-800 dark:text-white"
+          class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-accent focus:ring-accent sm:text-sm dark:border-zinc-600 dark:bg-zinc-800 dark:text-white"
         />
         <p class="mt-1 text-sm text-gray-500">
           Leave empty to auto-name as imported_&lt;address_prefix&gt;.py
@@ -115,7 +116,7 @@ const handleClose = () => {
         <button
           @click="handleClose"
           type="button"
-          class="inline-flex justify-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 dark:border-zinc-600 dark:bg-zinc-800 dark:text-white dark:hover:bg-zinc-700"
+          class="inline-flex justify-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 dark:border-zinc-600 dark:bg-zinc-800 dark:text-white dark:hover:bg-zinc-700"
         >
           Cancel
         </button>
@@ -123,7 +124,7 @@ const handleClose = () => {
           @click="handleImport"
           type="button"
           :disabled="!canImport"
-          class="inline-flex justify-center rounded-md border border-transparent bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+          class="flex flex-row items-center justify-center gap-2 rounded-md bg-primary px-3 py-2 font-semibold text-white transition-all hover:bg-opacity-90 hover:text-white active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 disabled:active:scale-100 dark:bg-accent"
         >
           {{ isImporting ? 'Importing...' : 'Import' }}
         </button>
