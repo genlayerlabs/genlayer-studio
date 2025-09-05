@@ -4,10 +4,9 @@ import Modal from '@/components/global/Modal.vue';
 import { useContractsStore } from '@/stores';
 import { v4 as uuidv4 } from 'uuid';
 import { notify } from '@kyvg/vue3-notification';
-import { ContractService } from '@/services/ContractService';
 import { useContractQueries } from '@/hooks';
 
-const props = defineProps<{
+defineProps<{
   open: boolean;
 }>();
 
