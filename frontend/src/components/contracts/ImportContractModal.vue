@@ -138,7 +138,7 @@ const handleClose = () => {
           v-model="contractAddress"
           type="text"
           placeholder="0x..."
-          class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm dark:border-zinc-600 dark:bg-zinc-800 dark:text-white"
+          class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-accent focus:ring-accent sm:text-sm dark:border-zinc-600 dark:bg-zinc-800 dark:text-white"
           :class="{
             'border-red-500': contractAddress && !isValidAddress,
             'border-yellow-500': isDuplicate,
@@ -167,7 +167,7 @@ const handleClose = () => {
           v-model="contractName"
           type="text"
           placeholder="My Contract"
-          class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm dark:border-zinc-600 dark:bg-zinc-800 dark:text-white"
+          class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-accent focus:ring-accent sm:text-sm dark:border-zinc-600 dark:bg-zinc-800 dark:text-white"
         />
         <p class="mt-1 text-sm text-gray-500">
           Leave empty to auto-name as imported_&lt;address_prefix&gt;.py
@@ -178,7 +178,7 @@ const handleClose = () => {
         <button
           @click="handleClose"
           type="button"
-          class="inline-flex justify-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 dark:border-zinc-600 dark:bg-zinc-800 dark:text-white dark:hover:bg-zinc-700"
+          class="inline-flex justify-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 dark:border-zinc-600 dark:bg-zinc-800 dark:text-white dark:hover:bg-zinc-700"
         >
           Cancel
         </button>
@@ -186,7 +186,7 @@ const handleClose = () => {
           @click="handleImport"
           type="button"
           :disabled="!canImport"
-          class="inline-flex justify-center rounded-md border border-transparent bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+          class="inline-flex justify-center rounded-md border border-transparent bg-primary px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-opacity-90 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-accent"
         >
           {{ isImporting ? 'Importing...' : 'Import' }}
         </button>
