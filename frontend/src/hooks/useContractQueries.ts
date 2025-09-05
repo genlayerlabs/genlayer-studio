@@ -241,6 +241,33 @@ export function useContractQueries() {
     }
   }
 
+  async function simulateWriteMethod({
+    method,
+    args,
+    consensusMaxRotations,
+  }: {
+    method: string;
+    args: {
+      args: CalldataEncodable[];
+      kwargs: { [key: string]: CalldataEncodable };
+    };
+    leaderOnly: boolean;
+    consensusMaxRotations?: number;
+  }) {
+    try {
+      const result = await genlayerClient.value?.simulateWriteContract({
+        address: address.value as Address,
+        functionName: method,
+        args: args.args,
+      });
+
+      return result;
+    } catch (error) {
+      console.error(error);
+      throw new Error('Error simulating write method');
+    }
+  }
+
   async function fetchContractCode(contractAddress: string): Promise<string> {
     try {
       if (!genlayerClient.value) {
@@ -273,6 +300,7 @@ export function useContractQueries() {
     deployContract,
     callReadMethod,
     callWriteMethod,
+    simulateWriteMethod,
     fetchContractCode,
 
     mockContractSchema,

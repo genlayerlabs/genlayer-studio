@@ -19,6 +19,10 @@ export interface EventProperties {
     contract_name: string;
     method_name: string;
   };
+  simulated_write_method: {
+    contract_name: string;
+    method_name: string;
+  };
 }
 
 export type EventName = keyof EventProperties;
