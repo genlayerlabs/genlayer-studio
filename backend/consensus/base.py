@@ -1910,6 +1910,7 @@ class ProposingState(TransactionState):
 
         # Update the consensus data with the leader's vote and receipt
         context.consensus_data.votes = {}
+        context.votes = {}
         context.consensus_data.validators = []
         context.transactions_processor.set_transaction_result(
             context.transaction.hash, context.consensus_data.to_dict()
