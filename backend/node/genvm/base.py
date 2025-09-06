@@ -85,6 +85,7 @@ class ExecutionResult:
     stderr: str
     genvm_log: list
     state: StateProxy
+    execution_time: int = 0
 
 
 # GenVM protocol just in case it is needed for mocks or bringing back the old one
@@ -480,14 +481,22 @@ async def _run_genvm_host(
                 host: _Host = fresh_host_supplier(sock_listener)
 
                 try:
+                    execution_start_time = time.time()
+                    genvm_result = await genvmhost.run_host_and_program(
+                        host, new_args, deadline=remaining_time
+                    )
+                    execution_end_time = time.time()
+                    execution_time_ms = int(
+                        (execution_end_time - execution_start_time) * 1000
+                    )
+
                     result = host.provide_result(
-                        await genvmhost.run_host_and_program(
-                            host, new_args, deadline=remaining_time
-                        ),
+                        genvm_result,
                         state=fresh_args.get(
                             "state_proxy", host_args.get("state_proxy")
                         ),
                     )
+                    result.execution_time = execution_time_ms
                     return result
 
                 except Exception as e:
