@@ -149,7 +149,7 @@ The current implementation uses implicit transactions:
 
 Based on the configuration and architecture:
 
-**Maximum Parallel Requests**: 
+**Maximum Parallel Requests**:
 - Theoretical: 150 (if pool configuration applies correctly)
 - Practical: 10-15 (if defaults are used)
 - Actual: 1-5 (limited by Werkzeug server threading)

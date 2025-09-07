@@ -507,7 +507,9 @@ class ConsensusAlgorithm:
                                                 chain_snapshot_factory(session),
                                                 accounts_manager_factory(session),
                                                 lambda contract_address: contract_snapshot_factory(
-                                                    contract_address, session, transaction
+                                                    contract_address,
+                                                    session,
+                                                    transaction,
                                                 ),
                                                 contract_processor_factory(session),
                                                 node_factory,
