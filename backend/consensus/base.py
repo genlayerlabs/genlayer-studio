@@ -488,39 +488,40 @@ class ConsensusAlgorithm:
                             # Reference: https://docs.sqlalchemy.org/en/20/orm/session_basics.html#is-the-session-thread-safe-is-asyncsession-safe-to-share-in-concurrent-tasks
                             self.pending_queue_task_running[queue_address] = True
                             transaction: Transaction = await queue.get()
-                            with self.get_session() as session:
 
-                                async def exec_transaction_with_session_handling(
-                                    session: Session,
-                                    transaction: Transaction,
-                                    queue_address: str,
-                                ):
-                                    transactions_processor = (
-                                        transactions_processor_factory(session)
-                                    )
-                                    async with (
-                                        self.validators_manager.snapshot() as validators_snapshot
-                                    ):
-                                        await self.exec_transaction(
-                                            transaction,
-                                            transactions_processor,
-                                            chain_snapshot_factory(session),
-                                            accounts_manager_factory(session),
-                                            lambda contract_address: contract_snapshot_factory(
-                                                contract_address, session, transaction
-                                            ),
-                                            contract_processor_factory(session),
-                                            node_factory,
-                                            validators_snapshot,
+                            async def exec_transaction_with_session_handling(
+                                transaction: Transaction,
+                                queue_address: str,
+                            ):
+                                try:
+                                    with self.get_session() as session:
+                                        transactions_processor = (
+                                            transactions_processor_factory(session)
                                         )
-                                    session.commit()
+                                        async with (
+                                            self.validators_manager.snapshot() as validators_snapshot
+                                        ):
+                                            await self.exec_transaction(
+                                                transaction,
+                                                transactions_processor,
+                                                chain_snapshot_factory(session),
+                                                accounts_manager_factory(session),
+                                                lambda contract_address: contract_snapshot_factory(
+                                                    contract_address, session, transaction
+                                                ),
+                                                contract_processor_factory(session),
+                                                node_factory,
+                                                validators_snapshot,
+                                            )
+                                        session.commit()
+                                finally:
                                     self.pending_queue_task_running[queue_address] = (
                                         False
                                     )
 
                             tg.create_task(
                                 exec_transaction_with_session_handling(
-                                    session, transaction, queue_address
+                                    transaction, queue_address
                                 )
                             )
 
@@ -828,13 +829,11 @@ class ConsensusAlgorithm:
                         ) in awaiting_finalization_transactions.values():
 
                             # Create a new session for each task so tasks can be run concurrently
-                            with self.get_session() as task_session:
-
-                                async def exec_appeal_window_with_session_handling(
-                                    task_session: Session,
-                                    awaiting_finalization_queue: list[dict],
-                                    captured_chain_snapshot: ChainSnapshot = chain_snapshot,
-                                ):
+                            async def exec_appeal_window_with_session_handling(
+                                awaiting_finalization_queue: list[dict],
+                                captured_chain_snapshot: ChainSnapshot = chain_snapshot,
+                            ):
+                                with self.get_session() as task_session:
                                     transactions_processor = (
                                         transactions_processor_factory(task_session)
                                     )
@@ -953,11 +952,11 @@ class ConsensusAlgorithm:
                                                     )
                                                     task_session.commit()
 
-                                tg.create_task(
-                                    exec_appeal_window_with_session_handling(
-                                        task_session, awaiting_finalization_queue
-                                    )
+                            tg.create_task(
+                                exec_appeal_window_with_session_handling(
+                                    awaiting_finalization_queue
                                 )
+                            )
 
             except Exception as e:
                 print("Error running consensus", e)
