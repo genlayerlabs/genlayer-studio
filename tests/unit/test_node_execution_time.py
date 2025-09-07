@@ -1,50 +1,39 @@
-import base64
 from datetime import datetime, timezone
 from unittest.mock import Mock, patch, AsyncMock
 import pytest
 from backend.node.types import (
-    Receipt,
     ExecutionMode,
-    Vote,
-    ExecutionResultStatus,
-    PendingTransaction,
     Address,
 )
 from backend.node.genvm.base import (
     ExecutionResult,
     ExecutionReturn,
-    ExecutionError,
     GenVMHost,
-    StateProxy,
-    ResultCode,
 )
 from backend.node.base import Node
 from backend.domain.types import Validator, LLMProvider
 from backend.database_handler.contract_snapshot import ContractSnapshot
 
 
-class MockStateProxy(StateProxy):
-    """Mock implementation of StateProxy for testing"""
+def create_mock_execution_result(processing_time=0, state=None):
+    """Helper function to create ExecutionResult with minimal test data."""
+    if state is None:
+        state = Mock()
+        state.snapshot = Mock()
+        state.snapshot.states = {
+            "accepted": {},
+        }
 
-    def __init__(self):
-        self.storage_data = {}
-        self.balances = {}
-        # Add mock snapshot attribute for Node tests
-        self.snapshot = Mock()
-        self.snapshot.states = {"accepted": {"test": "data"}}
-
-    def storage_read(self, account: Address, slot: bytes, index: int, le: int) -> bytes:
-        key = (account.as_hex, slot.hex(), index, le)
-        return self.storage_data.get(key, b"\x00" * le)
-
-    def storage_write(
-        self, account: Address, slot: bytes, index: int, got: bytes
-    ) -> None:
-        key = (account.as_hex, slot.hex(), index, len(got))
-        self.storage_data[key] = got
-
-    def get_balance(self, addr: Address) -> int:
-        return self.balances.get(addr.as_hex, 0)
+    return ExecutionResult(
+        result=ExecutionReturn(ret=b"test"),
+        eq_outputs={},
+        pending_transactions=[],
+        stdout="test",
+        stderr="",
+        genvm_log=[],
+        state=state,
+        processing_time=processing_time,
+    )
 
 
 class TestGenVMHostTimingMeasurement:
@@ -54,20 +43,11 @@ class TestGenVMHostTimingMeasurement:
     async def test_run_contract_measures_execution_time(self):
         """Test that GenVMHost.run_contract() measures execution time"""
         genvm_host = GenVMHost()
-        mock_state = MockStateProxy()
+        mock_state = Mock()
         mock_execution_time = 0.5  # 500ms
 
         with patch("backend.node.genvm.base._run_genvm_host") as mock_run:
-            mock_execution_result = ExecutionResult(
-                result=ExecutionReturn(ret=b"success"),
-                eq_outputs={1: b"output1"},
-                pending_transactions=[],
-                stdout="test output",
-                stderr="",
-                genvm_log=["log1"],
-                state=mock_state,
-                processing_time=0,  # Will be overridden by timing measurement
-            )
+            mock_execution_result = create_mock_execution_result()
 
             with patch("time.time", side_effect=[1000.0, 1000.0 + mock_execution_time]):
                 mock_run.return_value = mock_execution_result
@@ -97,17 +77,7 @@ class TestGenVMHostTimingMeasurement:
         mock_execution_time = 0.2  # 200ms
 
         with patch("backend.node.genvm.base._run_genvm_host") as mock_run:
-            mock_state = MockStateProxy()
-            mock_execution_result = ExecutionResult(
-                result=ExecutionReturn(ret=b"test schema"),
-                eq_outputs={},
-                pending_transactions=[],
-                stdout="schema output",
-                stderr="",
-                genvm_log=["schema log"],
-                state=mock_state,
-                processing_time=0,  # Will be overridden by timing measurement
-            )
+            mock_execution_result = create_mock_execution_result()
 
             with patch("time.time", side_effect=[2000.0, 2000.0 + mock_execution_time]):
                 mock_run.return_value = mock_execution_result
@@ -154,15 +124,8 @@ class TestNodeProcessingTimeExtraction:
         """Test that Node._run_genvm() extracts processing_time from ExecutionResult"""
         processing_time = 1800  # ms
 
-        mock_execution_result = ExecutionResult(
-            result=ExecutionReturn(ret=b"node_success"),
-            eq_outputs={1: b"node_output1"},
-            pending_transactions=[],
-            stdout="node output",
-            stderr="",
-            genvm_log=["node log"],
-            state=MockStateProxy(),
-            processing_time=processing_time,
+        mock_execution_result = create_mock_execution_result(
+            processing_time=processing_time
         )
 
         with patch.object(self.node, "_create_genvm") as mock_create_genvm:
@@ -183,16 +146,7 @@ class TestNodeProcessingTimeExtraction:
     @pytest.mark.asyncio
     async def test_node_run_genvm_without_processing_time(self):
         """Test that Node._run_genvm() handles ExecutionResult without processing_time"""
-        mock_execution_result = ExecutionResult(
-            result=ExecutionReturn(ret=b"node_success"),
-            eq_outputs={1: b"node_output1"},
-            pending_transactions=[],
-            stdout="node output",
-            stderr="",
-            genvm_log=["node log"],
-            state=MockStateProxy(),
-            processing_time=0,  # Default value since processing_time is required
-        )
+        mock_execution_result = create_mock_execution_result()
 
         with patch.object(self.node, "_create_genvm") as mock_create_genvm:
             mock_genvm = AsyncMock()
@@ -216,20 +170,11 @@ class TestExecutionTimeEdgeCases:
     async def test_zero_execution_time(self):
         """Test handling of zero execution time"""
         genvm_host = GenVMHost()
-        mock_state = MockStateProxy()
+        mock_state = Mock()
 
         with patch("time.time", side_effect=[5000.0, 5000.0]):
             with patch("backend.node.genvm.base._run_genvm_host") as mock_run:
-                mock_run.return_value = ExecutionResult(
-                    result=ExecutionReturn(ret=b"instant"),
-                    eq_outputs={},
-                    pending_transactions=[],
-                    stdout="",
-                    stderr="",
-                    genvm_log=[],
-                    state=mock_state,
-                    processing_time=0,  # Will be overridden by timing measurement
-                )
+                mock_run.return_value = create_mock_execution_result(state=mock_state)
 
                 result = await genvm_host.run_contract(
                     state=mock_state,
@@ -250,21 +195,11 @@ class TestExecutionTimeEdgeCases:
     async def test_very_long_execution_time(self):
         """Test handling of very long execution times"""
         genvm_host = GenVMHost()
-        mock_state = MockStateProxy()
 
         long_execution_time = 10.0  # seconds
         with patch("time.time", side_effect=[6000.0, 6000.0 + long_execution_time]):
             with patch("backend.node.genvm.base._run_genvm_host") as mock_run:
-                mock_run.return_value = ExecutionResult(
-                    result=ExecutionReturn(ret=b"long_running"),
-                    eq_outputs={},
-                    pending_transactions=[],
-                    stdout="long output",
-                    stderr="",
-                    genvm_log=["long log"],
-                    state=mock_state,
-                    processing_time=0,  # Will be overridden by timing measurement
-                )
+                mock_run.return_value = create_mock_execution_result()
 
                 result = await genvm_host.get_contract_schema(b"long_running_contract")
 
