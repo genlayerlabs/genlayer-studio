@@ -24,3 +24,12 @@ loguru==0.7.3
 web3==7.10.0
 aiorwlock==1.5.0
 PyYAML==6.0.2
+
+# Production dependencies for Uvicorn ASGI deployment
+uvicorn[standard]==0.30.6
+hypercorn==0.17.3
+asgiref==3.8.1
+setuptools==75.7.0
+redis==5.0.1
+prometheus-flask-exporter==0.23.0
+psutil==5.9.8

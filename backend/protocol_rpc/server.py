@@ -66,17 +66,29 @@ async def create_app():
 
     # Flask
     app = Flask("jsonrpc_api")
+    
+    # Register health check endpoint
+    from backend.protocol_rpc.health import health_bp
+    app.register_blueprint(health_bp)
+    
     app.config["SQLALCHEMY_DATABASE_URI"] = db_uri
     app.config["SQLALCHEMY_ECHO"] = (
         False  # We handle SQL logging through Loguru intercept
     )
+    # Fix Bug 3: Proper database pool configuration
+    workers = int(os.environ.get("WEB_CONCURRENCY", 1))
+    
+    # Pool size configuration for async workers
+    pool_size = int(os.environ.get("DATABASE_POOL_SIZE", 20 // workers if workers > 1 else 5))
+    max_overflow = int(os.environ.get("DATABASE_MAX_OVERFLOW", 10 // workers if workers > 1 else 5))
+    
     app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
-        "pool_size": 100,
-        "max_overflow": 50,
+        "pool_size": pool_size,
+        "max_overflow": max_overflow,
         "pool_pre_ping": True,
         "pool_recycle": 3600,
         "pool_timeout": 30,
-        "echo_pool": True,  # temporary for verifying pool behavior
+        "echo_pool": False,  # Disable pool logging in production
     }
     sqlalchemy_db.init_app(app)
 
@@ -90,6 +102,17 @@ async def create_app():
     )  # check it out at http://localhost:4000/api/browse/#/
     setup_eth_method_handler(jsonrpc)
     socketio = SocketIO(app, cors_allowed_origins="*")
+    
+    # Fix Bug 1: Register Socket.IO handlers at module level, before run
+    @socketio.on("subscribe")
+    def handle_subscribe(topics):
+        for topic in topics:
+            join_room(topic)
+    
+    @socketio.on("unsubscribe")
+    def handle_unsubscribe(topics):
+        for topic in topics:
+            leave_room(topic)
     # Handlers
     msg_handler = MessageHandler(socketio, config=GlobalConfiguration())
     session_for_type = cast(Session, sqlalchemy_db.session)
@@ -388,27 +411,24 @@ def shutdown_session(exception=None):
 
 
 async def main():
-    def run_socketio():
-        socketio.run(
-            app,
-            debug=os.getenv("VSCODEDEBUG", "false") == "false",
-            port=int(os.environ.get("RPCPORT", "4000")),
-            host="0.0.0.0",
-            allow_unsafe_werkzeug=True,
-        )
+    # Only start the built-in server if not running under uvicorn
+    if not os.getenv('UVICORN_WORKER'):
+        def run_socketio():
+            # Fix Bug 2: Correct debug mode logic
+            debug_mode = os.getenv("FLASK_DEBUG", "0") == "1" or os.getenv("VSCODEDEBUG", "false") == "true"
+            use_reloader = os.getenv("FLASK_ENV") == "development" and debug_mode
+            
+            socketio.run(
+                app,
+                debug=debug_mode,
+                use_reloader=use_reloader,
+                port=int(os.environ.get("RPCPORT", "4000")),
+                host="0.0.0.0",
+                allow_unsafe_werkzeug=os.getenv("ALLOW_UNSAFE_WERKZEUG", "false") == "true",
+            )
 
-        @socketio.on("subscribe")
-        def handle_subscribe(topics):
-            for topic in topics:
-                join_room(topic)
-
-        @socketio.on("unsubscribe")
-        def handle_unsubscribe(topics):
-            for topic in topics:
-                leave_room(topic)
-
-    # Thread for the Flask-SocketIO server
-    threading.Thread(target=run_socketio, daemon=True).start()
+        # Thread for the Flask-SocketIO server
+        threading.Thread(target=run_socketio, daemon=True).start()
 
     stop_event = threading.Event()
 
@@ -452,7 +472,9 @@ def app_target():
         MAIN_LOOP_DONE.set_result(True)
 
 
-threading.Thread(target=app_target, daemon=True).start()
+# Only start the background thread if not running under uvicorn
+if not os.getenv('UVICORN_WORKER'):
+    threading.Thread(target=app_target, daemon=True).start()
 
 
 def atexit_handler():
@@ -469,4 +491,6 @@ def atexit_handler():
 
 import atexit
 
-atexit.register(atexit_handler)
+# Only register atexit handler if not running under uvicorn
+if not os.getenv('UVICORN_WORKER'):
+    atexit.register(atexit_handler)

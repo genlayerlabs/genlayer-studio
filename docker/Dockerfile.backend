@@ -10,7 +10,7 @@ WORKDIR $path
 SHELL ["/bin/bash", "-x", "-c"]
 RUN apt-get update -y \
     && DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install -y --no-install-recommends \
-        curl unzip xz-utils ca-certificates python3.12 libssl3 \
+        curl unzip xz-utils ca-certificates python3.12 python3.12-dev libssl3 gcc \
     && mkdir -p "$HOME/.config/pip/" \
     && printf "[global]\nbreak-system-packages = true\n" >> "$HOME/.config/pip/pip.conf" \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2 \
@@ -69,6 +69,8 @@ RUN cd /genvm \
 
 COPY ../.env .
 COPY backend $path/backend
+COPY asgi.py $path/asgi.py
+COPY uvicorn_config.py $path/uvicorn_config.py
 
 HEALTHCHECK --interval=1s --timeout=1s --retries=30 --start-period=3s CMD python3 backend/healthcheck.py --port ${FLASK_SERVER_PORT}
 
@@ -81,5 +83,10 @@ CMD watchmedo auto-restart --no-restart-on-command-exit --recursive --pattern="*
 
 ###########START NEW IMAGE: PRODUCTION ###################
 FROM base AS prod
+# Install uvicorn and production dependencies as root
+USER root
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --cache-dir=/root/.cache/pip setuptools uvicorn[standard] hypercorn asgiref redis psutil prometheus-flask-exporter
+# Switch back to backend-user
 USER backend-user
-CMD flask run -h 0.0.0.0 -p ${FLASK_SERVER_PORT}
+CMD uvicorn asgi:application --host 0.0.0.0 --port ${RPCPORT:-4000} --workers ${WEB_CONCURRENCY:-1} --log-level ${LOG_LEVEL:-info}
