@@ -12,12 +12,12 @@ transforms:
     source: |
       # Ensure message is a string
       .message = to_string(.message) ?? ""
-      
+
       # Parse severity from Loguru format with ANSI codes: [1mLEVEL[0m | message
       # Also handle format: <level>LEVEL</level> | message
       ansi_parsed = parse_regex(.message, r'^\[1m(?P<level>\w+)\s*\[0m\s*\|\s*(?P<msg>.*)') ?? {}
       xml_parsed = parse_regex(.message, r'^<level>(?P<level>\w+)\s*</level>\s*\|\s*(?P<msg>.*)') ?? {}
-      
+
       if exists(ansi_parsed.level) {
         # ANSI format detected
         .severity = upcase(string!(ansi_parsed.level))
@@ -31,7 +31,7 @@ transforms:
         if starts_with(.message, "ERROR") {
           .severity = "ERROR"
         } else if starts_with(.message, "WARNING") {
-          .severity = "WARNING"  
+          .severity = "WARNING"
         } else if starts_with(.message, "CRITICAL") {
           .severity = "CRITICAL"
         } else {
@@ -40,10 +40,10 @@ transforms:
       } else {
         .severity = "INFO"
       }
-      
+
       # Map SUCCESS to INFO for GCP
       if .severity == "SUCCESS" { .severity = "INFO" }
-      
+
       # Add standard Loki labels
       .labels = {"job": "docker", "instance": "${SERVER_NAME}", "container": .container_name}
       # Convert timestamp to RFC3339
