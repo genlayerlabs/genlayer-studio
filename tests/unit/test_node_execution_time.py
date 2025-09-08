@@ -46,11 +46,13 @@ class TestGenVMHostTimingMeasurement:
         mock_state = Mock()
         mock_execution_time = 0.5  # 500ms
 
-        with patch("backend.node.genvm.base._run_genvm_host") as mock_run:
+        with patch(
+            "backend.node.genvm.base._run_genvm_host", new_callable=AsyncMock
+        ) as mock_run:
             mock_execution_result = create_mock_execution_result()
+            mock_run.return_value = mock_execution_result
 
             with patch("time.time", side_effect=[1000.0, 1000.0 + mock_execution_time]):
-                mock_run.return_value = mock_execution_result
 
                 result = await genvm_host.run_contract(
                     state=mock_state,
@@ -76,11 +78,13 @@ class TestGenVMHostTimingMeasurement:
         contract_code = b"def get_schema(): return 'test schema'"
         mock_execution_time = 0.2  # 200ms
 
-        with patch("backend.node.genvm.base._run_genvm_host") as mock_run:
+        with patch(
+            "backend.node.genvm.base._run_genvm_host", new_callable=AsyncMock
+        ) as mock_run:
             mock_execution_result = create_mock_execution_result()
+            mock_run.return_value = mock_execution_result
 
             with patch("time.time", side_effect=[2000.0, 2000.0 + mock_execution_time]):
-                mock_run.return_value = mock_execution_result
                 result = await genvm_host.get_contract_schema(contract_code)
                 assert result.processing_time == int(
                     mock_execution_time * 1000
@@ -173,7 +177,9 @@ class TestExecutionTimeEdgeCases:
         mock_state = Mock()
 
         with patch("time.time", side_effect=[5000.0, 5000.0]):
-            with patch("backend.node.genvm.base._run_genvm_host") as mock_run:
+            with patch(
+                "backend.node.genvm.base._run_genvm_host", new_callable=AsyncMock
+            ) as mock_run:
                 mock_run.return_value = create_mock_execution_result(state=mock_state)
 
                 result = await genvm_host.run_contract(
@@ -198,7 +204,9 @@ class TestExecutionTimeEdgeCases:
 
         long_execution_time = 10.0  # seconds
         with patch("time.time", side_effect=[6000.0, 6000.0 + long_execution_time]):
-            with patch("backend.node.genvm.base._run_genvm_host") as mock_run:
+            with patch(
+                "backend.node.genvm.base._run_genvm_host", new_callable=AsyncMock
+            ) as mock_run:
                 mock_run.return_value = create_mock_execution_result()
 
                 result = await genvm_host.get_contract_schema(b"long_running_contract")
