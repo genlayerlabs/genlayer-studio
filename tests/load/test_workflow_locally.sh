@@ -88,14 +88,14 @@ echo "Waiting 15 seconds for system to stabilize after validator setup..."
 sleep 15
 
 # Deploy contracts one by one with better error handling
-echo "Deploying 3 contracts with delays..."
+echo "Deploying 5 contracts with delays..."
 CONTRACT_ADDRESSES=()
 DEPLOY_SUCCESS=0
 DEPLOY_FAIL=0
 
-for i in {1..3}; do
+for i in {1..5}; do
     echo ""
-    echo "[Deploy $i/3] Starting deployment..."
+    echo "[Deploy $i/5] Starting deployment..."
 
     # Run the deployment script and capture output regardless of exit code
     if [ -f deploy_contract/wizard_deploy.py ]; then
@@ -105,23 +105,23 @@ for i in {1..3}; do
         addr=$(echo "$result" | grep -oE "0x[a-fA-F0-9]{40}" | tail -n 1)
 
         if [ -n "$addr" ]; then
-            echo "[Deploy $i/3] ✅ Success - Contract: $addr"
+            echo "[Deploy $i/5] ✅ Success - Contract: $addr"
             CONTRACT_ADDRESSES+=("$addr")
             ((DEPLOY_SUCCESS++))
 
             # Wait after successful deployment
-            if [ $i -lt 3 ]; then
-                echo "Waiting 30 seconds for contract to be fully processed..."
-                sleep 30
+            if [ $i -lt 5 ]; then
+                echo "Waiting 5 seconds for contract to be fully processed..."
+                sleep 5
             fi
         else
-            echo "[Deploy $i/3] ❌ Failed - no address returned"
+            echo "[Deploy $i/5] ❌ Failed - no address returned"
             echo "Output: $result"
             ((DEPLOY_FAIL++))
 
-            if [ $i -lt 3 ]; then
-                echo "Waiting 10 seconds before next attempt..."
-                sleep 10
+            if [ $i -lt 5 ]; then
+                echo "Waiting 5 seconds before next attempt..."
+                sleep 5
             fi
         fi
     else
