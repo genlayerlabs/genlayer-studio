@@ -101,7 +101,17 @@ async def create_app():
         app, "/api", enable_web_browsable_api=True
     )  # check it out at http://localhost:4000/api/browse/#/
     setup_eth_method_handler(jsonrpc)
-    socketio = SocketIO(app, cors_allowed_origins="*")
+    # Configure SocketIO - use appropriate async mode based on deployment
+    # For uvicorn/ASGI: use 'asgi' mode for native WebSocket support
+    # For standalone: use 'eventlet' for WebSocket support
+    if os.environ.get('UVICORN_WORKER'):
+        # Running under uvicorn - use ASGI mode for WebSocket support
+        async_mode = 'asgi'
+    else:
+        # Standalone mode - use eventlet
+        async_mode = 'eventlet'
+    
+    socketio = SocketIO(app, cors_allowed_origins="*", async_mode=async_mode, logger=False, engineio_logger=False)
     
     # Fix Bug 1: Register Socket.IO handlers at module level, before run
     @socketio.on("subscribe")
@@ -169,42 +179,155 @@ async def create_app():
 
 
 import asyncio
+import os
 
 load_dotenv()
 
-(
-    app,
-    jsonrpc,
-    socketio,
-    msg_handler,
-    request_session,
-    accounts_manager,
-    snapshot_manager,
-    transactions_processor,
-    validators_registry,
-    consensus,
-    llm_provider_registry,
-    sqlalchemy_db,
-    consensus_service,
-    transactions_parser,
-    validators_manager,
-) = MAIN_SERVER_LOOP.run_until_complete(create_app())
+# Global variables for app components
+app = None
+jsonrpc = None
+socketio = None
+msg_handler = None
+request_session = None
+accounts_manager = None
+snapshot_manager = None
+transactions_processor = None
+validators_registry = None
+consensus = None
+llm_provider_registry = None
+sqlalchemy_db = None
+consensus_service = None
+transactions_parser = None
+validators_manager = None
+_initialized = False
+_initializing = False
 
-register_all_rpc_endpoints(
-    jsonrpc,
-    msg_handler,
-    request_session,
-    accounts_manager,
-    snapshot_manager,
-    transactions_processor,
-    validators_registry,
-    validators_manager,
-    llm_provider_registry,
-    consensus,
-    consensus_service,
-    transactions_parser,
-    sqlalchemy_db,
-)
+async def init_app_async():
+    """Async initialization of the app - returns ASGI app for uvicorn"""
+    global app, jsonrpc, socketio, msg_handler, request_session
+    global accounts_manager, snapshot_manager, transactions_processor
+    global validators_registry, consensus, llm_provider_registry
+    global sqlalchemy_db, consensus_service, transactions_parser
+    global validators_manager, _initialized, _initializing
+    
+    if _initialized:
+        # Return ASGI app when running under uvicorn
+        if os.environ.get('UVICORN_WORKER') and socketio:
+            # Use ASGIApp wrapper for Flask-SocketIO in ASGI mode
+            import socketio as python_socketio
+            from asgiref.wsgi import WsgiToAsgi
+            
+            # Get the underlying python-socketio server from Flask-SocketIO
+            sio_server = socketio.server if hasattr(socketio, 'server') else socketio
+            
+            # Wrap Flask app with WSGI to ASGI adapter
+            wsgi_to_asgi = WsgiToAsgi(app)
+            
+            # Create ASGI app with Socket.IO
+            asgi_app = python_socketio.ASGIApp(sio_server, wsgi_to_asgi)
+            return asgi_app
+        return app
+    
+    if _initializing:
+        # Wait for initialization to complete
+        while not _initialized:
+            await asyncio.sleep(0.1)
+        # Return ASGI app when running under uvicorn
+        if os.environ.get('UVICORN_WORKER') and socketio:
+            # Use ASGIApp wrapper for Flask-SocketIO in ASGI mode
+            import socketio as python_socketio
+            from asgiref.wsgi import WsgiToAsgi
+            
+            # Get the underlying python-socketio server from Flask-SocketIO
+            sio_server = socketio.server if hasattr(socketio, 'server') else socketio
+            
+            # Wrap Flask app with WSGI to ASGI adapter
+            wsgi_to_asgi = WsgiToAsgi(app)
+            
+            # Create ASGI app with Socket.IO
+            asgi_app = python_socketio.ASGIApp(sio_server, wsgi_to_asgi)
+            return asgi_app
+        return app
+    
+    _initializing = True
+    
+    try:
+        (
+            app,
+            jsonrpc,
+            socketio,
+            msg_handler,
+            request_session,
+            accounts_manager,
+            snapshot_manager,
+            transactions_processor,
+            validators_registry,
+            consensus,
+            llm_provider_registry,
+            sqlalchemy_db,
+            consensus_service,
+            transactions_parser,
+            validators_manager,
+        ) = await create_app()
+        
+        register_all_rpc_endpoints(
+            jsonrpc,
+            msg_handler,
+            request_session,
+            accounts_manager,
+            snapshot_manager,
+            transactions_processor,
+            validators_registry,
+            validators_manager,
+            llm_provider_registry,
+            consensus,
+            consensus_service,
+            transactions_parser,
+            sqlalchemy_db,
+        )
+        
+        # Setup teardown handler after app is initialized
+        setup_teardown_handler()
+        
+        _initialized = True
+        
+        # Return ASGI app when running under uvicorn
+        if os.environ.get('UVICORN_WORKER') and socketio:
+            # Use ASGIApp wrapper for Flask-SocketIO in ASGI mode
+            import socketio as python_socketio
+            from asgiref.wsgi import WsgiToAsgi
+            
+            # Get the underlying python-socketio server from Flask-SocketIO
+            sio_server = socketio.server if hasattr(socketio, 'server') else socketio
+            
+            # Wrap Flask app with WSGI to ASGI adapter
+            wsgi_to_asgi = WsgiToAsgi(app)
+            
+            # Create ASGI app with Socket.IO
+            asgi_app = python_socketio.ASGIApp(sio_server, wsgi_to_asgi)
+            return asgi_app
+        return app
+    finally:
+        _initializing = False
+
+# Check if we're being run directly (not imported by uvicorn)
+if __name__ == "__main__" or not os.environ.get('UVICORN_WORKER'):
+    # Initialize synchronously for backward compatibility
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    if not _initialized and not _initializing:
+        try:
+            result = loop.run_until_complete(init_app_async())
+            if result:
+                app = result
+        except Exception as e:
+            # Log the error but don't crash during import
+            import sys
+            print(f"Warning: Failed to initialize app during import: {e}", file=sys.stderr)
 
 
 def restore_stuck_transactions(session_factory):
@@ -390,24 +513,28 @@ def restore_stuck_transactions(session_factory):
                             )
 
 
-# Restore stuck transactions
-with app.app_context():
-    # Provide a create_session factory at module scope using the returned sqlalchemy_db
-    def create_session():
-        return Session(sqlalchemy_db.engine, expire_on_commit=False)
-
-    restore_stuck_transactions(create_session)
-
-
-# This ensures that the transaction is committed or rolled back depending on the success of the request.
-# Opinions on whether this is a good practice are divided https://github.com/pallets-eco/flask-sqlalchemy/issues/216
-@app.teardown_appcontext
-def shutdown_session(exception=None):
-    if exception:
-        sqlalchemy_db.session.rollback()  # Rollback if there is an exception
-    else:
-        sqlalchemy_db.session.commit()  # Commit if everything is fine
-    sqlalchemy_db.session.remove()  # Remove the session after every request
+def setup_teardown_handler():
+    """Setup teardown handler after app is initialized"""
+    if app is None:
+        return
+    
+    # This ensures that the transaction is committed or rolled back depending on the success of the request.
+    # Opinions on whether this is a good practice are divided https://github.com/pallets-eco/flask-sqlalchemy/issues/216
+    @app.teardown_appcontext
+    def shutdown_session(exception=None):
+        if exception:
+            sqlalchemy_db.session.rollback()  # Rollback if there is an exception
+        else:
+            sqlalchemy_db.session.commit()  # Commit if everything is fine
+        sqlalchemy_db.session.remove()  # Remove the session after every request
+    
+    # Restore stuck transactions
+    with app.app_context():
+        # Provide a create_session factory at module scope using the returned sqlalchemy_db
+        def create_session():
+            return Session(sqlalchemy_db.engine, expire_on_commit=False)
+        
+        restore_stuck_transactions(create_session)
 
 
 async def main():

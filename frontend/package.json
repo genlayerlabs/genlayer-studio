@@ -43,7 +43,6 @@
     "monaco-editor": "^0.52.0",
     "path": "^0.12.7",
     "pinia": "^3.0.0",
-    "socket.io-client": "^4.7.5",
     "sortablejs": "^1.15.3",
     "splitpanes": "^4.0.0",
     "tippy.js": "^6.3.7",

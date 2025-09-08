@@ -842,10 +842,16 @@ def get_transactions_for_address(
 
 @check_forbidden_method_in_hosted_studio
 def set_finality_window_time(consensus: ConsensusAlgorithm, time: int) -> None:
+    if consensus is None:
+        # Silently ignore when consensus is not initialized
+        return
     consensus.set_finality_window_time(time)
 
 
 def get_finality_window_time(consensus: ConsensusAlgorithm) -> int:
+    if consensus is None:
+        # Return default finality window time when consensus is not initialized
+        return os.environ.get("VITE_FINALITY_WINDOW", 1800)  # Default to 60 seconds
     return consensus.finality_window_time
 
 

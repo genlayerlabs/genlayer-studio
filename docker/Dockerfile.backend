@@ -79,7 +79,7 @@ FROM base AS debug
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --cache-dir=/root/.cache/pip debugpy watchdog
 USER backend-user
-CMD watchmedo auto-restart --no-restart-on-command-exit --recursive --pattern="*.py" --ignore-patterns="*.pyc;*__pycache__*" -- python3 -m debugpy --listen 0.0.0.0:${RPCDEBUGPORT} -m flask run -h 0.0.0.0 -p ${FLASK_SERVER_PORT}
+CMD watchmedo auto-restart --no-restart-on-command-exit --recursive --pattern="*.py" --ignore-patterns="*.pyc;*__pycache__*" -- python3 -m debugpy --listen 0.0.0.0:${RPCDEBUGPORT} -m uvicorn asgi:application --host 0.0.0.0 --port ${FLASK_SERVER_PORT} --reload
 
 ###########START NEW IMAGE: PRODUCTION ###################
 FROM base AS prod

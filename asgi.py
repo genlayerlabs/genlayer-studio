@@ -1,32 +1,24 @@
 #!/usr/bin/env python
 """
-ASGI entry point for Uvicorn deployment.
-This properly handles async Flask app with Socket.IO support.
+ASGI entry point for FastAPI with native WebSocket support.
 """
 
 import os
 import sys
-import asyncio
 
 # Set production environment
 os.environ.setdefault('FLASK_ENV', 'production')
 os.environ.setdefault('UVICORN_WORKER', 'true')
 
-# Import asgiref for Flask-to-ASGI conversion
-from asgiref.wsgi import WsgiToAsgi
+# Import FastAPI app
+from backend.protocol_rpc.fastapi_server import app
 
-# Import the Flask app and socketio instance
-from backend.protocol_rpc.server import app, socketio
+# Export the ASGI application
+application = app
 
-# Create ASGI application from Flask WSGI app
-# This allows async handling of requests
-application = WsgiToAsgi(app)
-
-# For direct testing
 if __name__ == "__main__":
     import uvicorn
     
-    # Run with uvicorn
     uvicorn.run(
         "asgi:application",
         host="0.0.0.0",
