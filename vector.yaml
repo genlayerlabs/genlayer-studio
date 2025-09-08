@@ -13,36 +13,103 @@ transforms:
       # Ensure message is a string
       .message = to_string(.message) ?? ""
 
-      # Parse severity from Loguru format with ANSI codes: [1mLEVEL[0m | message
-      # Also handle format: <level>LEVEL</level> | message
-      ansi_parsed = parse_regex(.message, r'^\[1m(?P<level>\w+)\s*\[0m\s*\|\s*(?P<msg>.*)') ?? {}
-      xml_parsed = parse_regex(.message, r'^<level>(?P<level>\w+)\s*</level>\s*\|\s*(?P<msg>.*)') ?? {}
+      # Check if this is a JSON log
+      json_log = parse_json(.message) ?? null
 
-      if exists(ansi_parsed.level) {
-        # ANSI format detected
-        .severity = upcase(string!(ansi_parsed.level))
-        .message = ansi_parsed.msg ?? .message
-      } else if exists(xml_parsed.level) {
-        # XML format detected
-        .severity = upcase(string!(xml_parsed.level))
-        .message = xml_parsed.msg ?? .message
-      } else if contains(.message, "ERROR") || contains(.message, "WARNING") || contains(.message, "CRITICAL") {
-        # Handle plain ERROR/WARNING messages
-        if starts_with(.message, "ERROR") {
+      # Handle JSON logs first (from genvm)
+      if json_log != null && exists(json_log.level) {
+        # JSON format detected
+        json_level = upcase(to_string(json_log.level) ?? "info")
+
+        # Map JSON levels to GCP severity
+        if json_level == "ERROR" || json_level == "ERR" {
           .severity = "ERROR"
-        } else if starts_with(.message, "WARNING") {
+        } else if json_level == "WARN" || json_level == "WARNING" {
           .severity = "WARNING"
-        } else if starts_with(.message, "CRITICAL") {
+        } else if json_level == "INFO" {
+          .severity = "INFO"
+        } else if json_level == "DEBUG" || json_level == "TRACE" {
+          .severity = "DEBUG"
+        } else if json_level == "CRITICAL" || json_level == "FATAL" {
           .severity = "CRITICAL"
         } else {
           .severity = "INFO"
         }
+
+        # Extract message and other fields
+        .message = to_string(json_log.message) ?? .message
+
+        # Add additional context from JSON
+        if exists(json_log.target) {
+          target_str = to_string(json_log.target) ?? ""
+          .message = "[" + target_str + "] " + .message
+        }
+        if exists(json_log.file) {
+          .source_location = to_string(json_log.file) ?? ""
+        }
       } else {
-        .severity = "INFO"
+      # Parse severity from Loguru format with ANSI codes: [1mLEVEL[0m | message
+      # Also handle colored ANSI: [33m[1mWARNING[0m | message
+      # Also handle format: <level>LEVEL</level> | message
+      ansi_parsed = parse_regex(.message, r'^\[1m(?P<level>\w+)\s*\[0m\s*\|\s*(?P<msg>.*)') ?? {}
+      ansi_colored_parsed = parse_regex(.message, r'^\[\d+m\[1m(?P<level>\w+)\s*\[0m\s*\|\s*(?P<msg>.*)') ?? {}
+      ansi_esc_parsed = parse_regex(.message, r'^\x1b\[1m(?P<level>\w+)\s*\x1b\[0m\s*\|\s*(?P<msg>.*)') ?? {}
+      xml_parsed = parse_regex(.message, r'^<level>(?P<level>\w+)\s*</level>\s*\|\s*(?P<msg>.*)') ?? {}
+
+      if exists(ansi_colored_parsed.level) {
+        # Colored ANSI format detected ([33m[1m....[0m)
+        .severity = strip_whitespace(upcase!(ansi_colored_parsed.level))
+        if exists(ansi_colored_parsed.msg) {
+          .message = ansi_colored_parsed.msg
+        }
+      } else if exists(ansi_esc_parsed.level) {
+        # True ANSI escape format detected (ESC[1m...ESC[0m)
+        .severity = strip_whitespace(upcase!(ansi_esc_parsed.level))
+        if exists(ansi_esc_parsed.msg) {
+          .message = ansi_esc_parsed.msg
+        }
+      } else if exists(ansi_parsed.level) {
+        # ANSI format detected ([1m...[0m)
+        .severity = strip_whitespace(upcase!(ansi_parsed.level))
+        if exists(ansi_parsed.msg) {
+          .message = ansi_parsed.msg
+        }
+      } else if exists(xml_parsed.level) {
+        # XML format detected
+        .severity = strip_whitespace(upcase!(xml_parsed.level))
+        if exists(xml_parsed.msg) {
+          .message = xml_parsed.msg
+        }
+      } else {
+        # Handle plain level prefixes (ERROR:, WARNING:, etc.)
+        # Also extract message after "LEVEL | " or "LEVEL: "
+        plain_match = parse_regex(.message, r'^(?P<level>ERROR|CRITICAL|WARNING|WARN|DEBUG|INFO)\s*[:|]\s*(?P<msg>.*)') ?? null
+
+        if plain_match != null {
+          .severity = upcase!(plain_match.level)
+          if exists(plain_match.msg) {
+            .message = plain_match.msg
+          }
+        } else if starts_with(.message, "ERROR") {
+          .severity = "ERROR"
+        } else if starts_with(.message, "CRITICAL") {
+          .severity = "CRITICAL"
+        } else if starts_with(.message, "WARNING") || starts_with(.message, "WARN") {
+          .severity = "WARNING"
+        } else if starts_with(.message, "DEBUG") {
+          .severity = "DEBUG"
+        } else if starts_with(.message, "INFO") {
+          .severity = "INFO"
+        } else {
+          .severity = "INFO"
+        }
+      }
       }
 
-      # Map SUCCESS to INFO for GCP
+      # Map common aliases to GCP-compatible severities
       if .severity == "SUCCESS" { .severity = "INFO" }
+      if .severity == "FATAL" { .severity = "CRITICAL" }
+      if .severity == "WARN" { .severity = "WARNING" }
 
       # Add standard Loki labels
       .labels = {"job": "docker", "instance": "${SERVER_NAME}", "container": .container_name}
