@@ -123,9 +123,12 @@ sinks:
     credentials_path: /etc/vector/gcp_credentials.json
     log_id: "genlayer-logs"
     project_id: "${GCP_PROJECT_ID}"
-    severity_key: "severity"  # ADDED: Tell GCP to use our severity field
+    severity_key: "severity"  # Tell GCP to use our severity field
     resource:
       type: "generic_node"
+    encoding:
+      codec: "json"
+      except_fields: ["severity"]  # Exclude severity from jsonPayload after using it
     tls:
       verify_certificate: true
     request:
