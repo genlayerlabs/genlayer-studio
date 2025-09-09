@@ -384,6 +384,7 @@ class Node:
                 "stdout": res.stdout,
                 "stderr": res.stderr,
             },
+            processing_time=res.processing_time,
         )
 
         if self.validator_mode == ExecutionMode.LEADER:
