@@ -45,6 +45,15 @@ class RPCHandler:
         self.methods = {}
         self._register_methods()
 
+    def _is_async_function(self, func):
+        """Check if a function is async, accounting for decorators."""
+        if inspect.iscoroutinefunction(func):
+            return True
+        # Check if function is wrapped by a decorator
+        if hasattr(func, "__wrapped__"):
+            return inspect.iscoroutinefunction(func.__wrapped__)
+        return False
+
     def _register_methods(self):
         """Register all RPC methods from endpoints.py."""
 
@@ -201,7 +210,7 @@ class RPCHandler:
                             user_param_idx += 1
 
                 # Call with all arguments
-                if inspect.iscoroutinefunction(handler):
+                if self._is_async_function(handler):
                     result = await handler(*args)
                 else:
                     result = handler(*args)
@@ -216,7 +225,7 @@ class RPCHandler:
                     elif param_name in kwargs:
                         all_kwargs[param_name] = kwargs[param_name]
 
-                if inspect.iscoroutinefunction(handler):
+                if self._is_async_function(handler):
                     result = await handler(**all_kwargs)
                 else:
                     result = handler(**all_kwargs)
@@ -226,7 +235,7 @@ class RPCHandler:
                     k: v for k, v in kwargs.items() if k in sig.parameters
                 }
 
-                if inspect.iscoroutinefunction(handler):
+                if self._is_async_function(handler):
                     result = await handler(**filtered_kwargs)
                 else:
                     result = handler(**filtered_kwargs)

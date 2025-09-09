@@ -54,10 +54,10 @@ describe('useWebSocketClient', () => {
   it('should handle event listeners', () => {
     const client = useWebSocketClient();
     const mockHandler = vi.fn();
-    
+
     client.on('test-event', mockHandler);
     // Note: In a real test, you'd trigger the event and verify the handler is called
-    
+
     client.off('test-event', mockHandler);
     // Note: In a real test, you'd verify the handler is removed
   });

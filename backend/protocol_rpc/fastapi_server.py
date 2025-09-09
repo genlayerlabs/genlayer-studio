@@ -7,7 +7,14 @@ from os import environ
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Depends
+from fastapi import (
+    FastAPI,
+    WebSocket,
+    WebSocketDisconnect,
+    HTTPException,
+    Request,
+    Depends,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import create_engine
@@ -16,9 +23,17 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 
 from backend.database_handler.llm_providers import LLMProviderRegistry
 from backend.protocol_rpc.configuration import GlobalConfiguration
-from backend.protocol_rpc.message_handler.fastapi_handler import MessageHandler, setup_loguru_config
+from backend.protocol_rpc.message_handler.fastapi_handler import (
+    MessageHandler,
+    setup_loguru_config,
+)
+
 # from backend.protocol_rpc.endpoints import register_all_rpc_endpoints
-from backend.protocol_rpc.fastapi_rpc_handler import rpc_handler, JSONRPCRequest, JSONRPCResponse
+from backend.protocol_rpc.fastapi_rpc_handler import (
+    rpc_handler,
+    JSONRPCRequest,
+    JSONRPCResponse,
+)
 from backend.protocol_rpc.validators_init import initialize_validators
 from backend.protocol_rpc.transactions_parser import TransactionParser
 from backend.database_handler.transactions_processor import TransactionsProcessor
@@ -43,6 +58,7 @@ load_dotenv()
 # Set up logging
 setup_loguru_config()
 
+
 # WebSocket connection manager
 class ConnectionManager:
     def __init__(self):
@@ -66,17 +82,17 @@ class ConnectionManager:
     async def broadcast(self, message: str):
         for connection in self.active_connections:
             await connection.send_text(message)
-    
+
     async def join_room(self, room: str, websocket: WebSocket):
         if room not in self.room_connections:
             self.room_connections[room] = []
         if websocket not in self.room_connections[room]:
             self.room_connections[room].append(websocket)
-    
+
     async def leave_room(self, room: str, websocket: WebSocket):
         if room in self.room_connections and websocket in self.room_connections[room]:
             self.room_connections[room].remove(websocket)
-    
+
     async def emit_to_room(self, room: str, event: str, data: Any):
         """Emit an event to all connections in a room."""
         if room in self.room_connections:
@@ -88,12 +104,15 @@ class ConnectionManager:
                     # Connection might be closed
                     pass
 
+
 # Global instances
 manager = ConnectionManager()
 app_state = {}
 
+
 def get_db_name(database: str) -> str:
     return "genlayer_state" if database == "genlayer" else database
+
 
 # Database setup
 database_name_seed = "genlayer"
@@ -110,7 +129,10 @@ engine = create_engine(
 )
 
 # Create session factory
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, expire_on_commit=False)
+SessionLocal = sessionmaker(
+    autocommit=False, autoflush=False, bind=engine, expire_on_commit=False
+)
+
 
 def get_db():
     """Dependency to get database session."""
@@ -120,30 +142,33 @@ def get_db():
     finally:
         db.close()
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle."""
     print("Starting up FastAPI application...")
-    
+
     # Initialize database
     Base.metadata.create_all(bind=engine)
-    
+
     # Initialize components
     session = SessionLocal()
-    
+
     try:
         # Store components in app state
         # Use the ConnectionManager for WebSocket support
-        app_state['msg_handler'] = MessageHandler(manager, config=GlobalConfiguration())
-        app_state['transactions_processor'] = TransactionsProcessor(session)
-        app_state['accounts_manager'] = AccountsManager(session)
-        app_state['snapshot_manager'] = SnapshotManager(session)
-        app_state['validators_registry'] = ValidatorsRegistry(session)
-        app_state['llm_provider_registry'] = LLMProviderRegistry(session)
-        app_state['llm_provider_registry'].update_defaults()
-        app_state['consensus_service'] = ConsensusService()
-        app_state['transactions_parser'] = TransactionParser(app_state['consensus_service'])
-        
+        app_state["msg_handler"] = MessageHandler(manager, config=GlobalConfiguration())
+        app_state["transactions_processor"] = TransactionsProcessor(session)
+        app_state["accounts_manager"] = AccountsManager(session)
+        app_state["snapshot_manager"] = SnapshotManager(session)
+        app_state["validators_registry"] = ValidatorsRegistry(session)
+        app_state["llm_provider_registry"] = LLMProviderRegistry(session)
+        app_state["llm_provider_registry"].update_defaults()
+        app_state["consensus_service"] = ConsensusService()
+        app_state["transactions_parser"] = TransactionParser(
+            app_state["consensus_service"]
+        )
+
         # Initialize validators
         validators_config = os.environ.get("VALIDATORS_CONFIG_JSON")
         if validators_config:
@@ -152,51 +177,48 @@ async def lifespan(app: FastAPI):
                 ModifiableValidatorsRegistry(session),
                 AccountsManager(session),
             )
-        
+
         # Start validators manager
-        app_state['validators_manager'] = validators.Manager(session)
-        await app_state['validators_manager'].restart()
-        
-        app_state['validators_registry'] = app_state['validators_manager'].registry
-        
+        app_state["validators_manager"] = validators.Manager(session)
+        await app_state["validators_manager"].restart()
+
+        app_state["validators_registry"] = app_state["validators_manager"].registry
+
         # Initialize consensus
         def get_session():
             return SessionLocal()
-        
-        app_state['consensus'] = ConsensusAlgorithm(
+
+        app_state["consensus"] = ConsensusAlgorithm(
             get_session,
-            app_state['msg_handler'],
-            app_state['consensus_service'],
-            app_state['validators_manager'],
+            app_state["msg_handler"],
+            app_state["consensus_service"],
+            app_state["validators_manager"],
         )
-        
+
         # Store SQLAlchemy db for dev endpoints (if needed)
         # Since we're using SQLAlchemy directly, we can create a simple wrapper
         class SQLAlchemyDBWrapper:
             @property
             def engine(self):
                 return engine
-        
-        app_state['sqlalchemy_db'] = SQLAlchemyDBWrapper()
-        
+
+        app_state["sqlalchemy_db"] = SQLAlchemyDBWrapper()
+
         print("FastAPI application started successfully")
-        
+
         yield
-        
+
         # Cleanup on shutdown
         print("Shutting down FastAPI application...")
         MAIN_LOOP_EXITING.set()
         await MAIN_LOOP_DONE.wait()
-        
+
     finally:
         session.close()
 
+
 # Create FastAPI app
-app = FastAPI(
-    title="GenLayer RPC API",
-    version="1.0.0",
-    lifespan=lifespan
-)
+app = FastAPI(title="GenLayer RPC API", version="1.0.0", lifespan=lifespan)
 
 # Add CORS middleware
 app.add_middleware(
@@ -207,11 +229,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # Health check endpoint
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy"}
+
 
 # JSON-RPC endpoint
 @app.post("/api", response_model=JSONRPCResponse)
@@ -219,31 +243,26 @@ async def jsonrpc_endpoint(request: Request, db: Session = Depends(get_db)):
     """Main JSON-RPC endpoint."""
     try:
         body = await request.json()
-        
+
         # Parse request
         rpc_request = JSONRPCRequest(**body)
-        
+
         # Handle the RPC request
-        response = await rpc_handler.handle_request(
-            rpc_request,
-            db,
-            app_state
-        )
-        
+        response = await rpc_handler.handle_request(rpc_request, db, app_state)
+
         return response
-        
+
     except json.JSONDecodeError:
         return JSONRPCResponse(
-            jsonrpc="2.0",
-            error={"code": -32700, "message": "Parse error"},
-            id=None
+            jsonrpc="2.0", error={"code": -32700, "message": "Parse error"}, id=None
         )
     except Exception as e:
         return JSONRPCResponse(
             jsonrpc="2.0",
             error={"code": -32603, "message": str(e)},
-            id=body.get("id") if 'body' in locals() else None
+            id=body.get("id") if "body" in locals() else None,
         )
+
 
 # WebSocket endpoint with native WebSocket support
 # Use both /socket.io/ and /ws for compatibility
@@ -252,85 +271,84 @@ async def websocket_socketio_endpoint(websocket: WebSocket):
     """Socket.IO-compatible WebSocket endpoint."""
     return await websocket_handler(websocket)
 
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """Standard WebSocket endpoint."""
     return await websocket_handler(websocket)
 
+
 async def websocket_handler(websocket: WebSocket):
     """WebSocket handler for real-time communication."""
     await manager.connect(websocket)
     client_id = id(websocket)
-    print(f"WebSocket client {client_id} connected")
-    
+
     # Send initial connect confirmation
-    await websocket.send_text(json.dumps({
-        "event": "connect",
-        "data": {"id": str(client_id)}
-    }))
-    
+    await websocket.send_text(
+        json.dumps({"event": "connect", "data": {"id": str(client_id)}})
+    )
+
     try:
         while True:
             # Receive message from client
             data = await websocket.receive_text()
-            
+
             try:
                 message = json.loads(data)
                 event = message.get("event")
                 payload = message.get("data", {})
-                
+
                 if event == "subscribe":
                     # Handle room subscriptions
                     topics = payload if isinstance(payload, list) else [payload]
                     for topic in topics:
                         await manager.join_room(topic, websocket)
-                        await websocket.send_text(json.dumps({
-                            "event": "subscribed",
-                            "data": {"room": topic}
-                        }))
-                        print(f"Client {client_id} joined room: {topic}")
-                
+                        await websocket.send_text(
+                            json.dumps({"event": "subscribed", "data": {"room": topic}})
+                        )
+
                 elif event == "unsubscribe":
                     # Handle room unsubscriptions
                     topics = payload if isinstance(payload, list) else [payload]
                     for topic in topics:
                         await manager.leave_room(topic, websocket)
-                        await websocket.send_text(json.dumps({
-                            "event": "unsubscribed",
-                            "data": {"room": topic}
-                        }))
-                        print(f"Client {client_id} left room: {topic}")
-                
+                        await websocket.send_text(
+                            json.dumps(
+                                {"event": "unsubscribed", "data": {"room": topic}}
+                            )
+                        )
+
                 else:
                     # Handle other events
-                    await websocket.send_text(json.dumps({
-                        "event": "message",
-                        "data": f"Received event: {event}"
-                    }))
-                    
+                    await websocket.send_text(
+                        json.dumps(
+                            {"event": "message", "data": f"Received event: {event}"}
+                        )
+                    )
+
             except json.JSONDecodeError:
-                await websocket.send_text(json.dumps({
-                    "event": "error",
-                    "data": "Invalid JSON"
-                }))
-                
+                await websocket.send_text(
+                    json.dumps({"event": "error", "data": "Invalid JSON"})
+                )
+
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-        print(f"Client {client_id} disconnected")
     except Exception as e:
-        print(f"WebSocket error: {e}")
         manager.disconnect(websocket)
+
 
 # Method to emit events (to be used by other parts of the application)
 async def emit_event(room: str, event: str, data: Any):
     """Emit an event to all clients in a room."""
     await manager.emit_to_room(room, event, data)
 
+
 # Store emit function in app state for other components to use
-app_state['emit_event'] = emit_event
+app_state["emit_event"] = emit_event
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(
         app,
         host="0.0.0.0",

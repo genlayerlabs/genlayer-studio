@@ -31,6 +31,7 @@ export class RpcClient implements IRpcClient {
       params,
       id: requestId,
     };
+
     const response = await fetch(JSON_RPC_SERVER_URL, {
       method: 'POST',
       headers: {
@@ -39,6 +40,7 @@ export class RpcClient implements IRpcClient {
       },
       body: JSON.stringify(data),
     });
+
     return response.json() as Promise<JsonRPCResponse<T>>;
   }
 }
