@@ -69,8 +69,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-buildx-
 
-      - name: Build Docker images
-        run: docker compose build
+      - name: Debug
+        run: |
+          docker compose version
+
+      - name: Bake Docker images
+        run: docker buildx bake
 
       - name: Run Docker Compose
         run: docker compose up -d
