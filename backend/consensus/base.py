@@ -513,28 +513,25 @@ class ConsensusAlgorithm:
                                                 plugin = validator.plugin
                                                 plugin_config = validator.plugin_config
 
-                                                try:
-                                                    if (
-                                                        config is None
-                                                        or plugin is None
-                                                        or plugin_config is None
-                                                    ):
-                                                        llm_provider = (
-                                                            get_default_provider_for(
-                                                                provider, model
-                                                            )
+                                                if (
+                                                    config is None
+                                                    or plugin is None
+                                                    or plugin_config is None
+                                                ):
+                                                    llm_provider = (
+                                                        get_default_provider_for(
+                                                            provider, model
                                                         )
-                                                    else:
-                                                        llm_provider = LLMProvider(
-                                                            provider=provider,
-                                                            model=model,
-                                                            config=config,
-                                                            plugin=plugin,
-                                                            plugin_config=plugin_config,
-                                                        )
-                                                        validate_provider(llm_provider)
-                                                except ValueError as e:
-                                                    raise e
+                                                    )
+                                                else:
+                                                    llm_provider = LLMProvider(
+                                                        provider=provider,
+                                                        model=model,
+                                                        config=config,
+                                                        plugin=plugin,
+                                                        plugin_config=plugin_config,
+                                                    )
+                                                    validate_provider(llm_provider)
 
                                                 account = accounts_manager_factory(
                                                     session
