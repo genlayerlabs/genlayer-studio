@@ -50,7 +50,7 @@ transforms:
       } else {
       # Parse severity from various log formats
       # Plain format without ANSI: "INFO     | message" or "ERROR    | message"
-      plain_parsed = parse_regex(.message, r'^(?P<level>INFO|ERROR|WARNING|WARN|DEBUG|CRITICAL)\s+\|\s*(?P<msg>.*)') ?? {}
+      plain_parsed = parse_regex(.message, r'^(?P<level>INFO|ERROR|WARNING|WARN|DEBUG|CRITICAL|TRACE|NOTICE|SEVERE)\s+\|\s*(?P<msg>.*)') ?? {}
       # Loguru format with ANSI codes: [1mLEVEL[0m | message
       ansi_parsed = parse_regex(.message, r'^\[1m(?P<level>\w+)\s*\[0m\s*\|\s*(?P<msg>.*)') ?? {}
       # Colored ANSI: [33m[1mWARNING[0m | message
@@ -64,41 +64,41 @@ transforms:
         # Plain format detected (INFO     | message)
         .severity = strip_whitespace(upcase!(plain_parsed.level))
         if exists(plain_parsed.msg) {
-          .message = plain_parsed.msg
+          .message = strip_whitespace(plain_parsed.msg)
         }
       } else if exists(ansi_colored_parsed.level) {
         # Colored ANSI format detected ([33m[1m....[0m)
         .severity = strip_whitespace(upcase!(ansi_colored_parsed.level))
         if exists(ansi_colored_parsed.msg) {
-          .message = ansi_colored_parsed.msg
+          .message = strip_whitespace(ansi_colored_parsed.msg)
         }
       } else if exists(ansi_esc_parsed.level) {
         # True ANSI escape format detected (ESC[1m...ESC[0m)
         .severity = strip_whitespace(upcase!(ansi_esc_parsed.level))
         if exists(ansi_esc_parsed.msg) {
-          .message = ansi_esc_parsed.msg
+          .message = strip_whitespace(ansi_esc_parsed.msg)
         }
       } else if exists(ansi_parsed.level) {
         # ANSI format detected ([1m...[0m)
         .severity = strip_whitespace(upcase!(ansi_parsed.level))
         if exists(ansi_parsed.msg) {
-          .message = ansi_parsed.msg
+          .message = strip_whitespace(ansi_parsed.msg)
         }
       } else if exists(xml_parsed.level) {
         # XML format detected
         .severity = strip_whitespace(upcase!(xml_parsed.level))
         if exists(xml_parsed.msg) {
-          .message = xml_parsed.msg
+          .message = strip_whitespace(xml_parsed.msg)
         }
       } else {
         # Handle plain level prefixes (ERROR:, WARNING:, etc.)
         # Also extract message after "LEVEL | " or "LEVEL: "
-        plain_match = parse_regex(.message, r'^(?P<level>ERROR|CRITICAL|WARNING|WARN|DEBUG|INFO)\s*[:|]\s*(?P<msg>.*)') ?? null
+        plain_match = parse_regex(.message, r'^(?P<level>ERROR|CRITICAL|WARNING|WARN|DEBUG|INFO|TRACE|NOTICE|SEVERE)\s*[:|]\s*(?P<msg>.*)') ?? null
 
         if plain_match != null {
           .severity = upcase!(plain_match.level)
           if exists(plain_match.msg) {
-            .message = plain_match.msg
+            .message = strip_whitespace(plain_match.msg)
           }
         } else if starts_with(.message, "ERROR") {
           .severity = "ERROR"
@@ -120,10 +120,14 @@ transforms:
       if .severity == "SUCCESS" { .severity = "INFO" }
       if .severity == "FATAL" { .severity = "CRITICAL" }
       if .severity == "WARN" { .severity = "WARNING" }
+      if .severity == "TRACE" { .severity = "DEBUG" }
+      if .severity == "NOTICE" { .severity = "INFO" }
+      if .severity == "SEVERE" { .severity = "ERROR" }
 
       # Add standard Loki labels
       .labels = {"job": "docker", "instance": "${SERVER_NAME}", "container": .container_name}
-      # Convert timestamp to RFC3339
+      # Convert timestamp to RFC3339 with fallback to current time
+      .timestamp = to_timestamp!(.timestamp) ?? now()
       .timestamp = format_timestamp!(.timestamp, format: "%+")
 
 sinks:
