@@ -127,7 +127,6 @@ sinks:
     resource:
       type: "generic_node"
     encoding:
-      codec: "json"
       except_fields: ["severity"]  # Exclude severity from jsonPayload after using it
     tls:
       verify_certificate: true
