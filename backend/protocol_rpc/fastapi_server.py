@@ -139,6 +139,7 @@ async def lifespan(app: FastAPI):
         app_state['accounts_manager'] = AccountsManager(session)
         app_state['snapshot_manager'] = SnapshotManager(session)
         app_state['validators_registry'] = ValidatorsRegistry(session)
+        app_state['modifiable_validators_registry'] = ModifiableValidatorsRegistry(session)
         app_state['llm_provider_registry'] = LLMProviderRegistry(session)
         app_state['llm_provider_registry'].update_defaults()
         app_state['consensus_service'] = ConsensusService()

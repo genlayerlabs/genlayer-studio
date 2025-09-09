@@ -51,6 +51,7 @@ class RPCHandler:
             accounts_manager=self.app_state.get('accounts_manager'),
             transactions_processor=self.app_state.get('transactions_processor'),
             validators_registry=self.app_state.get('validators_registry'),
+            modifiable_validators_registry=self.app_state.get('modifiable_validators_registry'),
             validators_manager=self.app_state.get('validators_manager'),
             consensus=self.app_state.get('consensus'),
             consensus_service=self.app_state.get('consensus_service'),

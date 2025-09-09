@@ -166,6 +166,8 @@ class FastAPIEndpointRegistry:
                     kwargs[param_name] = app_state.get('transactions_processor')
                 elif param_name == 'validators_registry':
                     kwargs[param_name] = app_state.get('validators_registry')
+                elif param_name == 'modifiable_validators_registry':
+                    kwargs[param_name] = app_state.get('modifiable_validators_registry')
                 elif param_name == 'validators_manager':
                     kwargs[param_name] = app_state.get('validators_manager')
                 elif param_name == 'llm_provider_registry':
@@ -226,6 +228,7 @@ def register_endpoints_for_fastapi(
     accounts_manager,
     transactions_processor,
     validators_registry,
+    modifiable_validators_registry,
     validators_manager,
     consensus,
     consensus_service,
@@ -255,9 +258,9 @@ def register_endpoints_for_fastapi(
     register(partial(endpoints.add_provider, llm_provider_registry), "sim_addProvider")
     register(partial(endpoints.update_provider, llm_provider_registry), "sim_updateProvider")
     register(partial(endpoints.delete_provider, llm_provider_registry), "sim_deleteProvider")
-    register(partial(endpoints.create_validator, validators_manager), "sim_createValidator")
-    register(partial(endpoints.create_random_validator, validators_manager), "sim_createRandomValidator")
-    register(partial(endpoints.create_random_validators, validators_manager), "sim_createRandomValidators")
+    register(partial(endpoints.create_validator, modifiable_validators_registry, accounts_manager), "sim_createValidator")
+    register(partial(endpoints.create_random_validator, modifiable_validators_registry, accounts_manager, llm_provider_registry, validators_manager), "sim_createRandomValidator")
+    register(partial(endpoints.create_random_validators, modifiable_validators_registry, accounts_manager, llm_provider_registry, validators_manager), "sim_createRandomValidators")
     register(partial(endpoints.update_validator, validators_manager), "sim_updateValidator")
     register(partial(endpoints.delete_validator, validators_manager), "sim_deleteValidator")
     register(partial(endpoints.delete_all_validators, validators_manager), "sim_deleteAllValidators")

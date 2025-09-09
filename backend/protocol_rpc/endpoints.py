@@ -950,8 +950,8 @@ def get_transaction_receipt(
         "blockNumber": hex(transaction.get("block_number", 0)),
         "from": from_addr,
         "to": to_addr,
-        "cumulativeGasUsed": hex(transaction.get("gas_used", 21000)),
-        "gasUsed": hex(transaction.get("gas_used", 21000)),
+        "cumulativeGasUsed": hex(transaction.get("gas_used", 8000000)),
+        "gasUsed": hex(transaction.get("gas_used", 8000000)),
         "contractAddress": (
             transaction.get("contract_address")
             if transaction.get("contract_address")
@@ -991,7 +991,7 @@ def get_block_by_hash(
         "size": "0x0",
         "extraData": "0x",
         "gasLimit": hex(transaction.get("gas_limit", 8000000)),
-        "gasUsed": hex(transaction.get("gas_used", 21000)),
+        "gasUsed": hex(transaction.get("gas_used", 8000000)),
         "logsBloom": "0x" + "00" * 256,
         "transactions": [],
     }
