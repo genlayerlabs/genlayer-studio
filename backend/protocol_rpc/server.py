@@ -107,11 +107,15 @@ async def create_app():
     with managed_session(create_session) as session:
         validators_config = os.environ.get("VALIDATORS_CONFIG_JSON")
         if validators_config:
-            await initialize_validators(
-                validators_config,
-                ModifiableValidatorsRegistry(session),
-                AccountsManager(session),
-            )
+            try:
+                await initialize_validators(
+                    os.environ["VALIDATORS_CONFIG_JSON"],
+                    ModifiableValidatorsRegistry(session),
+                    AccountsManager(session),
+                )
+                session.commit()
+            finally:
+                session.close()
         else:
             print("VALIDATORS_CONFIG_JSON not set, skipping validator initialization")
 
