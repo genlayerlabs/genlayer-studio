@@ -129,6 +129,18 @@ class FastAPIEndpointRegistry:
         if method_name not in self.methods:
             raise ValueError(f"Method {method_name} not found")
         
+        # Log the RPC method call as endpoint_call event
+        from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope
+        self.msg_handler.send_message(
+            LogEvent(
+                name="endpoint_call",
+                type=EventType.INFO,
+                scope=EventScope.RPC,
+                message=f"RPC method called: {method_name}",
+                data={"method": method_name, "params": params}
+            )
+        )
+        
         handler = self.methods[method_name]
         metadata = self.method_metadata[method_name]
         
@@ -214,11 +226,30 @@ class FastAPIEndpointRegistry:
             elif hasattr(result, "__await__"):
                 result = await result
             
+            # Log successful endpoint call
+            self.msg_handler.send_message(
+                LogEvent(
+                    name="endpoint_success",
+                    type=EventType.INFO,
+                    scope=EventScope.RPC,
+                    message=f"RPC method completed: {method_name}",
+                    data={"method": method_name}
+                )
+            )
+            
             return _serialize(result)
             
         except Exception as e:
-            # Log the error with the message handler
-            self.msg_handler.error(f"Error in {method_name}: {str(e)}")
+            # Log the error as endpoint_error event
+            self.msg_handler.send_message(
+                LogEvent(
+                    name="endpoint_error",
+                    type=EventType.ERROR,
+                    scope=EventScope.RPC,
+                    message=f"Error in {method_name}: {str(e)}",
+                    data={"method": method_name, "error": str(e)}
+                )
+            )
             raise
 
 

@@ -99,6 +99,9 @@ class WebModule:
 
     async def verify_for_read(self):
         if self._process is None:
-            raise Exception("process is not started")
-        if self._process.returncode is not None:
-            raise Exception(f"process is dead {self._process.returncode}")
+            # Start the process if it hasn't been started
+            await self.restart()
+        elif self._process.returncode is not None:
+            # Restart the process if it's dead
+            print(f"Web module process died with code {self._process.returncode}, restarting...")
+            await self.restart()

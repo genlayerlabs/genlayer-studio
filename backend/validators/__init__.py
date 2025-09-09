@@ -135,8 +135,11 @@ class Manager:
 
     async def _get_snap_from_registry(self) -> Snapshot:
         cur_validators_as_dict = self.registry.get_all_validators()
+        print(f"[ValidatorManager] Retrieved {len(cur_validators_as_dict)} validators from registry")
         validators = [domain.Validator.from_dict(i) for i in cur_validators_as_dict]
-        return await self._get_snap_from_validators(validators)
+        snapshot = await self._get_snap_from_validators(validators)
+        print(f"[ValidatorManager] Created snapshot with {len(snapshot.nodes)} validator nodes")
+        return snapshot
 
     async def _get_snap_from_validators(
         self, validators: list[domain.Validator]
