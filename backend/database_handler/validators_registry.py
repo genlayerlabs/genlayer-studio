@@ -63,6 +63,7 @@ class ValidatorsRegistry:
 class ModifiableValidatorsRegistry(ValidatorsRegistry):
     async def create_validator(self, validator: Validator) -> dict:
         self.session.add(_to_db_model(validator))
+        self.session.commit()
         return self.get_validator(validator.address, False)
 
     async def update_validator(
