@@ -158,6 +158,18 @@ class FastAPIEndpointRegistry:
             
             param_list = list(sig.parameters.items())
             
+            # Check if we need to replace None session in filled_args
+            modified_args = list(metadata['filled_args'])
+            for i, arg in enumerate(modified_args):
+                if i < len(param_list):
+                    param_name = param_list[i][0]
+                    if (param_name == 'session' or param_name == 'request_session') and arg is None:
+                        modified_args[i] = db
+            
+            # Create a new partial with the modified args if needed
+            if modified_args != list(metadata['filled_args']):
+                handler = partial(metadata['underlying_func'], *modified_args, **metadata['filled_kwargs'])
+            
             # Skip filled positional arguments and add unfilled dependencies
             for i, (param_name, param) in enumerate(param_list):
                 # Skip if it's a positional arg that was filled
