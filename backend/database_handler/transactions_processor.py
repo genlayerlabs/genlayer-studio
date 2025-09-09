@@ -283,6 +283,7 @@ class TransactionsProcessor:
         self.session.add(new_transaction)
 
         self.session.flush()  # So that `created_at` gets set
+        self.session.commit()  # Persist the transaction to the database
 
         return new_transaction.hash
 
