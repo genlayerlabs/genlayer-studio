@@ -106,6 +106,8 @@ class Manager:
     async def restart(self):
         await self.lock.writer.acquire()
         try:
+            # Restart both LLM and web modules to ensure clean state
+            await self.llm_module.restart()
             await self.web_module.restart()
 
             new_validators = await self._get_snap_from_registry()

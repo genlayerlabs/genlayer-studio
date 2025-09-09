@@ -279,13 +279,13 @@ def register_endpoints_for_fastapi(
     register(partial(endpoints.get_contract_schema, accounts_manager, msg_handler), "gen_getContractSchema")
     register(partial(endpoints.get_contract_schema_for_code, msg_handler), "gen_getContractSchemaForCode")
     register(partial(endpoints.get_contract_code, request_session), "gen_getContractCode")
-    register(partial(endpoints.gen_call, consensus, msg_handler), "gen_call")
-    register(partial(endpoints.sim_call, consensus, msg_handler), "sim_call")
+    register(partial(endpoints.gen_call, request_session, accounts_manager, msg_handler, transactions_parser, validators_manager), "gen_call")
+    register(partial(endpoints.sim_call, request_session, accounts_manager, msg_handler, transactions_parser, validators_manager), "sim_call")
     
     # Ethereum-compatible endpoints
     register(partial(endpoints.get_balance, accounts_manager), "eth_getBalance")
     register(partial(endpoints.get_transaction_by_hash, transactions_processor), "eth_getTransactionByHash")
-    register(partial(endpoints.eth_call, consensus, msg_handler), "eth_call")
+    register(partial(endpoints.eth_call, request_session, accounts_manager, msg_handler, transactions_parser, validators_manager), "eth_call")
     register(partial(endpoints.send_raw_transaction, transactions_processor, msg_handler, accounts_manager, transactions_parser, consensus_service), "eth_sendRawTransaction")
     register(partial(endpoints.get_transaction_count, transactions_processor), "eth_getTransactionCount")
     register(endpoints.get_chain_id, "eth_chainId")
