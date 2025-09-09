@@ -59,7 +59,7 @@ class MessageHandler:
                             log_event.to_dict()
                         )
                     )
-            elif log_event.scope == EventScope.GLOBAL:
+            elif log_event.scope == EventScope.RPC:
                 # Broadcast to all connections
                 message = json.dumps({
                     "event": log_event.name,
@@ -91,7 +91,7 @@ class MessageHandler:
             name="log",
             type=EventType.INFO if level == "info" else EventType.ERROR,
             message=message,
-            scope=EventScope.GLOBAL,
+            scope=EventScope.RPC,
             **kwargs
         )
         self._log_event(log_event)
@@ -102,7 +102,7 @@ class MessageHandler:
             name="error",
             type=EventType.ERROR,
             message=message,
-            scope=EventScope.GLOBAL,
+            scope=EventScope.RPC,
             **kwargs
         )
         self._log_event(log_event)
@@ -113,7 +113,7 @@ class MessageHandler:
             name="warning",
             type=EventType.WARNING,
             message=message,
-            scope=EventScope.GLOBAL,
+            scope=EventScope.RPC,
             **kwargs
         )
         self._log_event(log_event)
@@ -124,10 +124,18 @@ class MessageHandler:
             name="info",
             type=EventType.INFO,
             message=message,
-            scope=EventScope.GLOBAL,
+            scope=EventScope.RPC,
             **kwargs
         )
         self._log_event(log_event)
+    
+    def send_message(self, log_event: LogEvent, log_to_terminal: bool = True):
+        """Send a message via WebSocket and optionally log to terminal."""
+        if log_to_terminal:
+            self._log_event(log_event)
+        else:
+            # Just emit via WebSocket without terminal logging
+            self._socket_emit(log_event)
     
     # Transaction-specific logging methods
     def send_transaction_status_update(

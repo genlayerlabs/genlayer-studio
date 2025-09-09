@@ -18,7 +18,7 @@ from backend.database_handler.llm_providers import LLMProviderRegistry
 from backend.protocol_rpc.configuration import GlobalConfiguration
 from backend.protocol_rpc.message_handler.fastapi_handler import MessageHandler, setup_loguru_config
 # from backend.protocol_rpc.endpoints import register_all_rpc_endpoints
-from backend.protocol_rpc.fastapi_rpc_handler import rpc_handler, JSONRPCRequest, JSONRPCResponse
+from backend.protocol_rpc.fastapi_rpc_handler import RPCHandler, JSONRPCRequest, JSONRPCResponse
 from backend.protocol_rpc.validators_init import initialize_validators
 from backend.protocol_rpc.transactions_parser import TransactionParser
 from backend.database_handler.transactions_processor import TransactionsProcessor
@@ -179,6 +179,9 @@ async def lifespan(app: FastAPI):
         
         app_state['sqlalchemy_db'] = SQLAlchemyDBWrapper()
         
+        # Initialize RPC handler with app_state
+        app_state['rpc_handler'] = RPCHandler(app_state)
+        
         print("FastAPI application started successfully")
         
         yield
@@ -222,6 +225,15 @@ async def jsonrpc_endpoint(request: Request, db: Session = Depends(get_db)):
         
         # Parse request
         rpc_request = JSONRPCRequest(**body)
+        
+        # Get RPC handler from app_state
+        rpc_handler = app_state.get('rpc_handler')
+        if not rpc_handler:
+            return JSONRPCResponse(
+                jsonrpc="2.0",
+                error={"code": -32603, "message": "RPC handler not initialized"},
+                id=body.get("id") if 'body' in locals() else None
+            )
         
         # Handle the RPC request
         response = await rpc_handler.handle_request(
