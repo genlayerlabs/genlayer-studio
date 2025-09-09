@@ -107,8 +107,10 @@ transforms:
       if .severity == "NOTICE" { .severity = "INFO" }
       if .severity == "SEVERE" { .severity = "ERROR" }
 
-      # Ensure severity is uppercase for GCP
-      .severity = upcase!(.severity ?? "INFO")
+      # Ensure severity is uppercase for GCP (already set above, just ensure fallback)
+      if !exists(.severity) {
+        .severity = "INFO"
+      }
 
       # Also set numeric severity for GCP (in case string doesn't work)
       if .severity == "CRITICAL" || .severity == "FATAL" || .severity == "EMERGENCY" {
