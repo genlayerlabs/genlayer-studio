@@ -106,10 +106,10 @@ transforms:
       if .severity == "TRACE" { .severity = "DEBUG" }
       if .severity == "NOTICE" { .severity = "INFO" }
       if .severity == "SEVERE" { .severity = "ERROR" }
-      
+
       # Ensure severity is uppercase for GCP
       .severity = upcase!(.severity ?? "INFO")
-      
+
       # Also set numeric severity for GCP (in case string doesn't work)
       if .severity == "CRITICAL" || .severity == "FATAL" || .severity == "EMERGENCY" {
         .severity_numeric = 600
