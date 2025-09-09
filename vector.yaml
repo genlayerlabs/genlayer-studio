@@ -49,8 +49,8 @@ transforms:
         }
       } else {
       # Parse severity from various log formats
-      # Plain format without ANSI: "INFO     | message" or "ERROR    | message"
-      plain_parsed = parse_regex(.message, r'^(?P<level>INFO|ERROR|WARNING|WARN|DEBUG|CRITICAL|TRACE|NOTICE|SEVERE)\s+\|\s*(?P<msg>.*)') ?? {}
+      # Plain format: "INFO | message" or "ERROR    | message" (with any amount of spacing)
+      plain_parsed = parse_regex(.message, r'^(?P<level>INFO|ERROR|WARNING|WARN|DEBUG|CRITICAL|TRACE|NOTICE|SEVERE)\s*\|') ?? {}
       # Loguru format with ANSI codes: [1mLEVEL[0m | message
       ansi_parsed = parse_regex(.message, r'^\[1m(?P<level>\w+)\s*\[0m\s*\|\s*(?P<msg>.*)') ?? {}
       # Colored ANSI: [33m[1mWARNING[0m | message
@@ -63,33 +63,19 @@ transforms:
       if exists(plain_parsed.level) {
         # Plain format detected (INFO     | message)
         .severity = strip_whitespace(upcase!(plain_parsed.level))
-        if exists(plain_parsed.msg) {
-          .message = plain_parsed.msg
-        }
+        # Don't change the message, just set severity
       } else if exists(ansi_colored_parsed.level) {
         # Colored ANSI format detected ([33m[1m....[0m)
         .severity = strip_whitespace(upcase!(ansi_colored_parsed.level))
-        if exists(ansi_colored_parsed.msg) {
-          .message = ansi_colored_parsed.msg
-        }
       } else if exists(ansi_esc_parsed.level) {
         # True ANSI escape format detected (ESC[1m...ESC[0m)
         .severity = strip_whitespace(upcase!(ansi_esc_parsed.level))
-        if exists(ansi_esc_parsed.msg) {
-          .message = ansi_esc_parsed.msg
-        }
       } else if exists(ansi_parsed.level) {
         # ANSI format detected ([1m...[0m)
         .severity = strip_whitespace(upcase!(ansi_parsed.level))
-        if exists(ansi_parsed.msg) {
-          .message = ansi_parsed.msg
-        }
       } else if exists(xml_parsed.level) {
         # XML format detected
         .severity = strip_whitespace(upcase!(xml_parsed.level))
-        if exists(xml_parsed.msg) {
-          .message = xml_parsed.msg
-        }
       } else {
         # Handle plain level prefixes (ERROR:, WARNING:, etc.)
         # Also extract message after "LEVEL | " or "LEVEL: "
@@ -97,9 +83,6 @@ transforms:
 
         if plain_match != null {
           .severity = upcase!(plain_match.level)
-          if exists(plain_match.msg) {
-            .message = plain_match.msg
-          }
         } else if starts_with(.message, "ERROR") {
           .severity = "ERROR"
         } else if starts_with(.message, "CRITICAL") {
