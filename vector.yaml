@@ -48,15 +48,25 @@ transforms:
           .source_location = to_string(json_log.file) ?? ""
         }
       } else {
-      # Parse severity from Loguru format with ANSI codes: [1mLEVEL[0m | message
-      # Also handle colored ANSI: [33m[1mWARNING[0m | message
-      # Also handle format: <level>LEVEL</level> | message
+      # Parse severity from various log formats
+      # Plain format without ANSI: "INFO     | message" or "ERROR    | message"
+      plain_parsed = parse_regex(.message, r'^(?P<level>INFO|ERROR|WARNING|WARN|DEBUG|CRITICAL)\s+\|\s*(?P<msg>.*)') ?? {}
+      # Loguru format with ANSI codes: [1mLEVEL[0m | message
       ansi_parsed = parse_regex(.message, r'^\[1m(?P<level>\w+)\s*\[0m\s*\|\s*(?P<msg>.*)') ?? {}
+      # Colored ANSI: [33m[1mWARNING[0m | message
       ansi_colored_parsed = parse_regex(.message, r'^\[\d+m\[1m(?P<level>\w+)\s*\[0m\s*\|\s*(?P<msg>.*)') ?? {}
+      # True ANSI escape: ESC[1mLEVEL ESC[0m | message
       ansi_esc_parsed = parse_regex(.message, r'^\x1b\[1m(?P<level>\w+)\s*\x1b\[0m\s*\|\s*(?P<msg>.*)') ?? {}
+      # XML format: <level>LEVEL</level> | message
       xml_parsed = parse_regex(.message, r'^<level>(?P<level>\w+)\s*</level>\s*\|\s*(?P<msg>.*)') ?? {}
 
-      if exists(ansi_colored_parsed.level) {
+      if exists(plain_parsed.level) {
+        # Plain format detected (INFO     | message)
+        .severity = strip_whitespace(upcase!(plain_parsed.level))
+        if exists(plain_parsed.msg) {
+          .message = plain_parsed.msg
+        }
+      } else if exists(ansi_colored_parsed.level) {
         # Colored ANSI format detected ([33m[1m....[0m)
         .severity = strip_whitespace(upcase!(ansi_colored_parsed.level))
         if exists(ansi_colored_parsed.msg) {
