@@ -50,26 +50,33 @@ transforms:
       } else {
       # Parse severity from various log formats
       # Plain format: "INFO | message" or "ERROR    | message" (with any amount of spacing)
-      plain_parsed = parse_regex(.message, r'^(?P<level>INFO|ERROR|WARNING|WARN|DEBUG|CRITICAL|TRACE|NOTICE|SEVERE)\s*\|') ?? {}
-      # Loguru format with ANSI codes: [1mLEVEL[0m | message
+      plain_parsed = parse_regex(.message, r'^(?P<level>INFO|ERROR|WARNING|WARN|DEBUG|CRITICAL|TRACE|NOTICE|SEVERE|SUCCESS)\s*\|') ?? {}
+      # True ANSI escape with bold: \u001b[1mLEVEL\u001b[0m | message (THIS IS WHAT YOUR LOGS USE!)
+      ansi_bold_parsed = parse_regex(.message, r'^\u001b\[1m(?P<level>INFO|ERROR|WARNING|WARN|DEBUG|CRITICAL|TRACE|NOTICE|SEVERE|SUCCESS)\s*\u001b\[0m\s*\|') ?? {}
+      # True ANSI escape with colors: \u001b[32mLEVEL\u001b[0m (green), \u001b[31mERROR\u001b[0m (red), etc
+      ansi_color_parsed = parse_regex(.message, r'^\u001b\[\d+m(?P<level>INFO|ERROR|WARNING|WARN|DEBUG|CRITICAL|TRACE|NOTICE|SEVERE|SUCCESS)\s*\u001b\[0m') ?? {}
+      # Combined ANSI color + bold: \u001b[31m\u001b[1mERROR\u001b[0m
+      ansi_combined_parsed = parse_regex(.message, r'^\u001b\[\d+m\u001b\[1m(?P<level>INFO|ERROR|WARNING|WARN|DEBUG|CRITICAL|TRACE|NOTICE|SEVERE|SUCCESS)\s*\u001b\[0m') ?? {}
+      # Fallback patterns for other formats
       ansi_parsed = parse_regex(.message, r'^\[1m(?P<level>\w+)\s*\[0m\s*\|\s*(?P<msg>.*)') ?? {}
-      # Colored ANSI: [33m[1mWARNING[0m | message
       ansi_colored_parsed = parse_regex(.message, r'^\[\d+m\[1m(?P<level>\w+)\s*\[0m\s*\|\s*(?P<msg>.*)') ?? {}
-      # True ANSI escape: ESC[1mLEVEL ESC[0m | message
-      ansi_esc_parsed = parse_regex(.message, r'^\x1b\[1m(?P<level>\w+)\s*\x1b\[0m\s*\|\s*(?P<msg>.*)') ?? {}
-      # XML format: <level>LEVEL</level> | message
       xml_parsed = parse_regex(.message, r'^<level>(?P<level>\w+)\s*</level>\s*\|\s*(?P<msg>.*)') ?? {}
 
-      if exists(plain_parsed.level) {
+      if exists(ansi_bold_parsed.level) {
+        # ANSI bold format detected (\u001b[1mLEVEL\u001b[0m | message) - YOUR PRODUCTION LOGS!
+        .severity = strip_whitespace(upcase!(ansi_bold_parsed.level))
+      } else if exists(ansi_color_parsed.level) {
+        # ANSI color format detected (\u001b[32mLEVEL\u001b[0m)
+        .severity = strip_whitespace(upcase!(ansi_color_parsed.level))
+      } else if exists(ansi_combined_parsed.level) {
+        # Combined ANSI color+bold format detected
+        .severity = strip_whitespace(upcase!(ansi_combined_parsed.level))
+      } else if exists(plain_parsed.level) {
         # Plain format detected (INFO     | message)
         .severity = strip_whitespace(upcase!(plain_parsed.level))
-        # Don't change the message, just set severity
       } else if exists(ansi_colored_parsed.level) {
         # Colored ANSI format detected ([33m[1m....[0m)
         .severity = strip_whitespace(upcase!(ansi_colored_parsed.level))
-      } else if exists(ansi_esc_parsed.level) {
-        # True ANSI escape format detected (ESC[1m...ESC[0m)
-        .severity = strip_whitespace(upcase!(ansi_esc_parsed.level))
       } else if exists(ansi_parsed.level) {
         # ANSI format detected ([1m...[0m)
         .severity = strip_whitespace(upcase!(ansi_parsed.level))
