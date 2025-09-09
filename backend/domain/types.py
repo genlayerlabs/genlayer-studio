@@ -24,12 +24,12 @@ class SimValidatorConfig:
     @classmethod
     def from_dict(cls, d: dict) -> "SimValidatorConfig":
         return cls(
-            stake=d["stake"],
-            provider=d["provider"],
-            model=d["model"],
-            config=d["config"],
-            plugin=d["plugin"],
-            plugin_config=d["plugin_config"],
+            stake=d.get("stake", 0),
+            provider=d.get("provider"),
+            model=d.get("model"),
+            config=d.get("config"),
+            plugin=d.get("plugin"),
+            plugin_config=d.get("plugin_config"),
         )
 
     def to_dict(self) -> dict:
