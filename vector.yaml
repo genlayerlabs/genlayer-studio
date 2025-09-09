@@ -106,6 +106,26 @@ transforms:
       if .severity == "TRACE" { .severity = "DEBUG" }
       if .severity == "NOTICE" { .severity = "INFO" }
       if .severity == "SEVERE" { .severity = "ERROR" }
+      
+      # Ensure severity is uppercase for GCP
+      .severity = upcase!(.severity ?? "INFO")
+      
+      # Also set numeric severity for GCP (in case string doesn't work)
+      if .severity == "CRITICAL" || .severity == "FATAL" || .severity == "EMERGENCY" {
+        .severity_numeric = 600
+      } else if .severity == "ERROR" || .severity == "ERR" {
+        .severity_numeric = 500
+      } else if .severity == "WARNING" || .severity == "WARN" {
+        .severity_numeric = 400
+      } else if .severity == "NOTICE" {
+        .severity_numeric = 300
+      } else if .severity == "INFO" {
+        .severity_numeric = 200
+      } else if .severity == "DEBUG" || .severity == "TRACE" {
+        .severity_numeric = 100
+      } else {
+        .severity_numeric = 0
+      }
 
       # Add standard Loki labels
       .labels = {"job": "docker", "instance": "${SERVER_NAME}", "container": .container_name}
@@ -126,8 +146,6 @@ sinks:
     severity_key: "severity"  # Tell GCP to use our severity field
     resource:
       type: "generic_node"
-    encoding:
-      except_fields: ["severity"]  # Exclude severity from jsonPayload after using it
     tls:
       verify_certificate: true
     request:
