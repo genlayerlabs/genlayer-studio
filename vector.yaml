@@ -48,48 +48,48 @@ transforms:
           .source_location = to_string(json_log.file) ?? ""
         }
       } else {
-      # Parse severity from Loguru format with ANSI codes: [1mLEVEL[0m | message
-      # Also handle colored ANSI: [33m[1mWARNING[0m | message
-      # Also handle format: <level>LEVEL</level> | message
+      # Parse severity from various log formats
+      # Plain format: "INFO | message" or "ERROR    | message" (with any amount of spacing)
+      plain_parsed = parse_regex(.message, r'^(?P<level>INFO|ERROR|WARNING|WARN|DEBUG|CRITICAL|TRACE|NOTICE|SEVERE|SUCCESS)\s*\|') ?? {}
+      # True ANSI escape with bold: \u001b[1mLEVEL\u001b[0m | message (THIS IS WHAT YOUR LOGS USE!)
+      ansi_bold_parsed = parse_regex(.message, r'^\u001b\[1m(?P<level>INFO|ERROR|WARNING|WARN|DEBUG|CRITICAL|TRACE|NOTICE|SEVERE|SUCCESS)\s*\u001b\[0m\s*\|') ?? {}
+      # True ANSI escape with colors: \u001b[32mLEVEL\u001b[0m (green), \u001b[31mERROR\u001b[0m (red), etc
+      ansi_color_parsed = parse_regex(.message, r'^\u001b\[\d+m(?P<level>INFO|ERROR|WARNING|WARN|DEBUG|CRITICAL|TRACE|NOTICE|SEVERE|SUCCESS)\s*\u001b\[0m') ?? {}
+      # Combined ANSI color + bold: \u001b[31m\u001b[1mERROR\u001b[0m
+      ansi_combined_parsed = parse_regex(.message, r'^\u001b\[\d+m\u001b\[1m(?P<level>INFO|ERROR|WARNING|WARN|DEBUG|CRITICAL|TRACE|NOTICE|SEVERE|SUCCESS)\s*\u001b\[0m') ?? {}
+      # Fallback patterns for other formats
       ansi_parsed = parse_regex(.message, r'^\[1m(?P<level>\w+)\s*\[0m\s*\|\s*(?P<msg>.*)') ?? {}
       ansi_colored_parsed = parse_regex(.message, r'^\[\d+m\[1m(?P<level>\w+)\s*\[0m\s*\|\s*(?P<msg>.*)') ?? {}
-      ansi_esc_parsed = parse_regex(.message, r'^\x1b\[1m(?P<level>\w+)\s*\x1b\[0m\s*\|\s*(?P<msg>.*)') ?? {}
       xml_parsed = parse_regex(.message, r'^<level>(?P<level>\w+)\s*</level>\s*\|\s*(?P<msg>.*)') ?? {}
 
-      if exists(ansi_colored_parsed.level) {
+      if exists(ansi_bold_parsed.level) {
+        # ANSI bold format detected (\u001b[1mLEVEL\u001b[0m | message) - YOUR PRODUCTION LOGS!
+        .severity = strip_whitespace(upcase!(ansi_bold_parsed.level))
+      } else if exists(ansi_color_parsed.level) {
+        # ANSI color format detected (\u001b[32mLEVEL\u001b[0m)
+        .severity = strip_whitespace(upcase!(ansi_color_parsed.level))
+      } else if exists(ansi_combined_parsed.level) {
+        # Combined ANSI color+bold format detected
+        .severity = strip_whitespace(upcase!(ansi_combined_parsed.level))
+      } else if exists(plain_parsed.level) {
+        # Plain format detected (INFO     | message)
+        .severity = strip_whitespace(upcase!(plain_parsed.level))
+      } else if exists(ansi_colored_parsed.level) {
         # Colored ANSI format detected ([33m[1m....[0m)
         .severity = strip_whitespace(upcase!(ansi_colored_parsed.level))
-        if exists(ansi_colored_parsed.msg) {
-          .message = ansi_colored_parsed.msg
-        }
-      } else if exists(ansi_esc_parsed.level) {
-        # True ANSI escape format detected (ESC[1m...ESC[0m)
-        .severity = strip_whitespace(upcase!(ansi_esc_parsed.level))
-        if exists(ansi_esc_parsed.msg) {
-          .message = ansi_esc_parsed.msg
-        }
       } else if exists(ansi_parsed.level) {
         # ANSI format detected ([1m...[0m)
         .severity = strip_whitespace(upcase!(ansi_parsed.level))
-        if exists(ansi_parsed.msg) {
-          .message = ansi_parsed.msg
-        }
       } else if exists(xml_parsed.level) {
         # XML format detected
         .severity = strip_whitespace(upcase!(xml_parsed.level))
-        if exists(xml_parsed.msg) {
-          .message = xml_parsed.msg
-        }
       } else {
         # Handle plain level prefixes (ERROR:, WARNING:, etc.)
         # Also extract message after "LEVEL | " or "LEVEL: "
-        plain_match = parse_regex(.message, r'^(?P<level>ERROR|CRITICAL|WARNING|WARN|DEBUG|INFO)\s*[:|]\s*(?P<msg>.*)') ?? null
+        plain_match = parse_regex(.message, r'^(?P<level>ERROR|CRITICAL|WARNING|WARN|DEBUG|INFO|TRACE|NOTICE|SEVERE)\s*[:|]\s*(?P<msg>.*)') ?? null
 
         if plain_match != null {
           .severity = upcase!(plain_match.level)
-          if exists(plain_match.msg) {
-            .message = plain_match.msg
-          }
         } else if starts_with(.message, "ERROR") {
           .severity = "ERROR"
         } else if starts_with(.message, "CRITICAL") {
@@ -110,10 +110,38 @@ transforms:
       if .severity == "SUCCESS" { .severity = "INFO" }
       if .severity == "FATAL" { .severity = "CRITICAL" }
       if .severity == "WARN" { .severity = "WARNING" }
+      if .severity == "TRACE" { .severity = "DEBUG" }
+      if .severity == "NOTICE" { .severity = "INFO" }
+      if .severity == "SEVERE" { .severity = "ERROR" }
+
+      # Ensure severity is uppercase for GCP (already set above, just ensure fallback)
+      if !exists(.severity) {
+        .severity = "INFO"
+      }
+
+      # Also set numeric severity for GCP (in case string doesn't work)
+      if .severity == "CRITICAL" || .severity == "FATAL" || .severity == "EMERGENCY" {
+        .severity_numeric = 600
+      } else if .severity == "ERROR" || .severity == "ERR" {
+        .severity_numeric = 500
+      } else if .severity == "WARNING" || .severity == "WARN" {
+        .severity_numeric = 400
+      } else if .severity == "NOTICE" {
+        .severity_numeric = 300
+      } else if .severity == "INFO" {
+        .severity_numeric = 200
+      } else if .severity == "DEBUG" || .severity == "TRACE" {
+        .severity_numeric = 100
+      } else {
+        .severity_numeric = 0
+      }
 
       # Add standard Loki labels
       .labels = {"job": "docker", "instance": get_hostname!(), "container": .container_name}
       # Convert timestamp to RFC3339
+      if !exists(.timestamp) {
+        .timestamp = now()
+      }
       .timestamp = format_timestamp!(.timestamp, format: "%+")
       # Add server name to the host label
       .host = "$SERVER_NAME"
@@ -126,7 +154,7 @@ sinks:
     credentials_path: /etc/vector/gcp_credentials.json
     log_id: "genlayer-logs"
     project_id: "${GCP_PROJECT_ID}"
-    severity_key: "severity"  # ADDED: Tell GCP to use our severity field
+    severity_key: "severity"  # Tell GCP to use our severity field
     resource:
       type: "generic_node"
     tls:

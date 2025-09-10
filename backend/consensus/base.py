@@ -33,6 +33,10 @@ from backend.domain.types import (
     Validator,
 )
 from backend.node.base import Node
+from backend.node.create_nodes.providers import (
+    get_default_provider_for,
+    validate_provider,
+)
 from backend.node.types import (
     ExecutionMode,
     Receipt,
@@ -495,12 +499,67 @@ class ConsensusAlgorithm:
                             ):
                                 try:
                                     with self.get_session() as session:
+                                        virtual_validators = []
+                                        if (
+                                            transaction.sim_config
+                                            and transaction.sim_config.validators
+                                        ):
+                                            for (
+                                                validator
+                                            ) in transaction.sim_config.validators:
+                                                provider = validator.provider
+                                                model = validator.model
+                                                config = validator.config
+                                                plugin = validator.plugin
+                                                plugin_config = validator.plugin_config
+
+                                                if (
+                                                    config is None
+                                                    or plugin is None
+                                                    or plugin_config is None
+                                                ):
+                                                    llm_provider = (
+                                                        get_default_provider_for(
+                                                            provider, model
+                                                        )
+                                                    )
+                                                else:
+                                                    llm_provider = LLMProvider(
+                                                        provider=provider,
+                                                        model=model,
+                                                        config=config,
+                                                        plugin=plugin,
+                                                        plugin_config=plugin_config,
+                                                    )
+                                                    validate_provider(llm_provider)
+
+                                                account = accounts_manager_factory(
+                                                    session
+                                                ).create_new_account()
+                                                virtual_validators.append(
+                                                    Validator(
+                                                        address=account.address,
+                                                        private_key=account.key.to_0x_hex(),
+                                                        stake=validator.stake,
+                                                        llmprovider=llm_provider,
+                                                    )
+                                                )
+                                        if len(virtual_validators) > 0:
+                                            snapshot_func = (
+                                                self.validators_manager.temporal_snapshot
+                                            )
+                                            args = [virtual_validators]
+                                        else:
+                                            snapshot_func = (
+                                                self.validators_manager.snapshot
+                                            )
+                                            args = []
                                         transactions_processor = (
                                             transactions_processor_factory(session)
                                         )
-                                        async with (
-                                            self.validators_manager.snapshot() as validators_snapshot
-                                        ):
+                                        async with snapshot_func(
+                                            *args
+                                        ) as validators_snapshot:
                                             await self.exec_transaction(
                                                 transaction,
                                                 transactions_processor,
@@ -1911,6 +1970,7 @@ class ProposingState(TransactionState):
 
         # Update the consensus data with the leader's vote and receipt
         context.consensus_data.votes = {}
+        context.votes = {}
         context.consensus_data.validators = []
         context.transactions_processor.set_transaction_result(
             context.transaction.hash, context.consensus_data.to_dict()
