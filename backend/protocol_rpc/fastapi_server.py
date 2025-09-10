@@ -14,7 +14,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
-from backend.database_handler.llm_providers import LLMProviderRegistry
 from backend.protocol_rpc.configuration import GlobalConfiguration
 from backend.protocol_rpc.message_handler.fastapi_handler import MessageHandler, setup_loguru_config
 # from backend.protocol_rpc.endpoints import register_all_rpc_endpoints
@@ -26,6 +25,7 @@ from backend.database_handler.validators_registry import (
     ValidatorsRegistry,
     ModifiableValidatorsRegistry,
 )
+from backend.database_handler.llm_providers import LLMProviderRegistry
 from backend.database_handler.accounts_manager import AccountsManager
 from backend.database_handler.snapshot_manager import SnapshotManager
 from backend.database_handler.session_manager import managed_session
@@ -117,6 +117,10 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
+        db.commit()  # Commit if no exception occurred
+    except Exception:
+        db.rollback()  # Rollback on any exception
+        raise
     finally:
         db.close()
 
@@ -138,28 +142,29 @@ async def lifespan(app: FastAPI):
         app_state['transactions_processor'] = TransactionsProcessor(session)
         app_state['accounts_manager'] = AccountsManager(session)
         app_state['snapshot_manager'] = SnapshotManager(session)
-        app_state['validators_registry'] = ValidatorsRegistry(session)
-        app_state['modifiable_validators_registry'] = ModifiableValidatorsRegistry(session)
         app_state['llm_provider_registry'] = LLMProviderRegistry(session)
         app_state['llm_provider_registry'].update_defaults()
         app_state['consensus_service'] = ConsensusService()
         app_state['transactions_parser'] = TransactionParser(app_state['consensus_service'])
         
-        # Initialize validators
+        # Start validators manager first - it will create its own registry
+        # Use SessionLocal() to create a new session for validators
+        app_state['validators_manager'] = validators.Manager(SessionLocal())
+        
+        # Initialize validators using the validators manager's registry
         validators_config = os.environ.get("VALIDATORS_CONFIG_JSON")
         if validators_config:
             await initialize_validators(
                 validators_config,
-                ModifiableValidatorsRegistry(session),
+                app_state['validators_manager'].registry,
                 AccountsManager(session),
             )
         
-        # Start validators manager
-        # Use SessionLocal() to create a new session for validators
-        app_state['validators_manager'] = validators.Manager(SessionLocal())
         await app_state['validators_manager'].restart()
         
+        # Use the validators manager's registry for all validator operations
         app_state['validators_registry'] = app_state['validators_manager'].registry
+        app_state['modifiable_validators_registry'] = app_state['validators_manager'].registry
         
         # Initialize consensus
         def get_session():

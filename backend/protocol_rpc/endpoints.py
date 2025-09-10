@@ -46,7 +46,6 @@ from backend.node.base import Node, SIMULATOR_CHAIN_ID
 from backend.node.types import ExecutionMode, ExecutionResultStatus
 from backend.consensus.base import ConsensusAlgorithm
 
-from flask_jsonrpc.exceptions import JSONRPCError
 import base64
 import os
 from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope

@@ -262,6 +262,14 @@ class FastAPIEndpointRegistry:
                     data={"method": method_name, "error": str(e)}
                 )
             )
+            
+            # Rollback the database session on any error
+            if db and hasattr(db, 'rollback'):
+                try:
+                    db.rollback()
+                except:
+                    pass  # Ignore rollback errors
+            
             raise
 
 
@@ -301,15 +309,17 @@ def register_endpoints_for_fastapi(
     register(partial(endpoints.add_provider, llm_provider_registry), "sim_addProvider")
     register(partial(endpoints.update_provider, llm_provider_registry), "sim_updateProvider")
     register(partial(endpoints.delete_provider, llm_provider_registry), "sim_deleteProvider")
-    register(partial(endpoints.create_validator, modifiable_validators_registry, accounts_manager), "sim_createValidator")
-    register(partial(endpoints.create_random_validator, modifiable_validators_registry, accounts_manager, llm_provider_registry, validators_manager), "sim_createRandomValidator")
-    register(partial(endpoints.create_random_validators, modifiable_validators_registry, accounts_manager, llm_provider_registry, validators_manager), "sim_createRandomValidators")
-    register(partial(endpoints.update_validator, modifiable_validators_registry, accounts_manager), "sim_updateValidator")
-    register(partial(endpoints.delete_validator, modifiable_validators_registry, accounts_manager), "sim_deleteValidator")
-    register(partial(endpoints.delete_all_validators, modifiable_validators_registry), "sim_deleteAllValidators")
-    register(partial(endpoints.get_all_validators, validators_registry), "sim_getAllValidators")
-    register(partial(endpoints.get_validator, validators_registry), "sim_getValidator")
-    register(partial(endpoints.count_validators, validators_registry), "sim_countValidators")
+    # Use validators_manager.registry instead of modifiable_validators_registry for proper session management
+    register(partial(endpoints.create_validator, validators_manager.registry if validators_manager else modifiable_validators_registry, accounts_manager), "sim_createValidator")
+    register(partial(endpoints.create_random_validator, validators_manager.registry if validators_manager else modifiable_validators_registry, accounts_manager, llm_provider_registry, validators_manager), "sim_createRandomValidator")
+    register(partial(endpoints.create_random_validators, validators_manager.registry if validators_manager else modifiable_validators_registry, accounts_manager, llm_provider_registry, validators_manager), "sim_createRandomValidators")
+    register(partial(endpoints.update_validator, validators_manager.registry if validators_manager else modifiable_validators_registry, accounts_manager), "sim_updateValidator")
+    register(partial(endpoints.delete_validator, validators_manager.registry if validators_manager else modifiable_validators_registry, accounts_manager), "sim_deleteValidator")
+    register(partial(endpoints.delete_all_validators, validators_manager.registry if validators_manager else modifiable_validators_registry), "sim_deleteAllValidators")
+    # Use validators_manager.registry for read operations too to ensure consistency
+    register(partial(endpoints.get_all_validators, validators_manager.registry if validators_manager else validators_registry), "sim_getAllValidators")
+    register(partial(endpoints.get_validator, validators_manager.registry if validators_manager else validators_registry), "sim_getValidator")
+    register(partial(endpoints.count_validators, validators_manager.registry if validators_manager else validators_registry), "sim_countValidators")
     register(partial(endpoints.get_transactions_for_address, transactions_processor, accounts_manager), "sim_getTransactionsForAddress")
     register(partial(endpoints.set_finality_window_time, consensus), "sim_setFinalityWindowTime")
     register(partial(endpoints.get_finality_window_time, consensus), "sim_getFinalityWindowTime")
