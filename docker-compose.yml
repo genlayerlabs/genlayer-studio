@@ -174,32 +174,76 @@ services:
         condition: service_healthy
         required: false
 
-  # hardhat:
-  #   profiles: ["hardhat"]
-  #   build:
-  #     context: .
-  #     dockerfile: docker/Dockerfile.hardhat
-  #   ports:
-  #     - "${HARDHAT_PORT:-8545}:8545"
-  #   env_file:
-  #     - .env
-  #   volumes:
-  #     - ./hardhat:/app/hardhat_src
-  #     - hardhat_artifacts:/app/artifacts
-  #     - hardhat_cache:/app/cache
-  #     - hardhat_deployments:/app/deployments
-  #     - hardhat_snapshots:/app/snapshots
-  #   restart: always
-  #   logging:
-  #     driver: "json-file"
-  #     options:
-  #       max-size: "50m"
-  #       max-file: "10"
-  #   labels:
-  #     traefik.enable: true
-  #     traefik.http.routers.hardhat.rule: Host(`${SERVER_NAME}`) && PathPrefix(`/hardhat`)
-  #     traefik.http.routers.hardhat.entrypoints: websecure
-  #     traefik.http.routers.hardhat.tls: true
+  consensus-worker:
+    build:
+      context: ./
+      dockerfile: ./docker/Dockerfile.consensus-worker
+      target: ${CONSENSUS_BUILD_TARGET:-base}
+    environment:
+      - DBUSER=${DBUSER}
+      - DBPASSWORD=${DBPASSWORD}
+      - DBHOST=${DBHOST}
+      - DBNAME=${DBNAME}
+      - WORKER_PORT=4001
+      - WORKER_POLL_INTERVAL=${WORKER_POLL_INTERVAL:-5}
+      - TRANSACTION_TIMEOUT_MINUTES=${TRANSACTION_TIMEOUT_MINUTES:-30}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - WEBDRIVERHOST=${WEBDRIVERHOST}
+      - WEBDRIVERPORT=${WEBDRIVERPORT}
+    volumes:
+      - ./.env:/app/.env
+      - ./backend:/app/backend
+    depends_on:
+      database-migration:
+        condition: service_completed_successfully
+      webdriver:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+        required: false
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      replicas: ${CONSENSUS_WORKERS:-3}
+    restart: always
+    security_opt:
+      - "no-new-privileges=true"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  hardhat:
+    profiles: ["hardhat"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.hardhat
+    ports:
+      - "${HARDHAT_PORT:-8545}:8545"
+    env_file:
+      - .env
+    volumes:
+      - ./hardhat:/app/hardhat_src
+      - hardhat_artifacts:/app/artifacts
+      - hardhat_cache:/app/cache
+      - hardhat_deployments:/app/deployments
+      - hardhat_snapshots:/app/snapshots
+    restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+    labels:
+      traefik.enable: true
+      traefik.http.routers.hardhat.rule: Host(`${SERVER_NAME}`) && PathPrefix(`/hardhat`)
+      traefik.http.routers.hardhat.entrypoints: websecure
+      traefik.http.routers.hardhat.tls: true
 
   vector:
     profiles: ["studio"]
