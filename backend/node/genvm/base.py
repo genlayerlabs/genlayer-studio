@@ -85,6 +85,7 @@ class ExecutionResult:
     stderr: str
     genvm_log: list
     state: StateProxy
+    processing_time: int
 
 
 # GenVM protocol just in case it is needed for mocks or bringing back the old one
@@ -175,7 +176,9 @@ class GenVMHost(IGenVM):
         perms = "rcn"  # read/call/spawn nondet
         if not readonly:
             perms += "ws"  # write/send
-        return await _run_genvm_host(
+
+        start_time = time.time()
+        result = await _run_genvm_host(
             functools.partial(
                 _Host,
                 calldata_bytes=calldata_raw,
@@ -193,6 +196,8 @@ class GenVMHost(IGenVM):
             ],
             config_path,
         )
+        result.processing_time = int((time.time() - start_time) * 1000)
+        return result
 
     async def get_contract_schema(self, contract_code: bytes) -> ExecutionResult:
         NO_ADDR = str(base64.b64encode(b"\x00" * 20), encoding="ascii")
@@ -211,7 +216,8 @@ class GenVMHost(IGenVM):
             lambda addr, *rest: state_proxy.storage_write(Address(addr), *rest),
         )
         # state_proxy.storage_write()
-        return await _run_genvm_host(
+        start_time = time.time()
+        result = await _run_genvm_host(
             functools.partial(
                 _Host,
                 calldata_bytes=calldata.encode({"method": "#get-schema"}),
@@ -221,6 +227,8 @@ class GenVMHost(IGenVM):
             ["--message", json.dumps(message), "--permissions", "", "--allow-latest"],
             None,
         )
+        result.processing_time = int((time.time() - start_time) * 1000)
+        return result
 
 
 def _decode_genvm_log(log: str) -> list:
@@ -269,6 +277,7 @@ class _Host(genvmhost.IHost):
             genvm_log=_decode_genvm_log(res.genvm_log),
             result=self._result,
             state=state,
+            processing_time=0,
         )
 
     async def loop_enter(self) -> socket.socket:
@@ -437,6 +446,7 @@ async def _run_genvm_host(
                     stderr=last_error,
                     genvm_log=[],
                     state=fresh_args.get("state_proxy", host_args.get("state_proxy")),
+                    processing_time=timeout * 1000,
                 )
 
             # Create fresh copies of the arguments for each attempt
