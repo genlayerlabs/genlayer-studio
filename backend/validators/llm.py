@@ -138,8 +138,8 @@ class LLMModule:
             "--allow-empty-backends",
             "--die-with-parent",
             stdin=None,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
         )
 
     async def verify_for_read(self):
