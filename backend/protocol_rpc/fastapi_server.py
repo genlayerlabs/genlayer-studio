@@ -7,7 +7,7 @@ from os import environ
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Depends
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import create_engine
@@ -96,8 +96,16 @@ def get_db_name(database: str) -> str:
     return "genlayer_state" if database == "genlayer" else database
 
 # Database setup
-database_name_seed = "genlayer"
-db_uri = f"postgresql+psycopg2://{environ.get('DBUSER')}:{environ.get('DBPASSWORD')}@{environ.get('DBHOST')}/{get_db_name(database_name_seed)}"
+# Prefer explicit environment variables for DB configuration to match migrations and compose
+db_user = os.environ.get("DBUSER", "postgres")
+db_password = os.environ.get("DBPASSWORD", "postgres")
+db_host = os.environ.get("DBHOST", "localhost")
+db_port = os.environ.get("DBPORT", "5432")
+db_name = os.environ.get("DBNAME") or get_db_name("genlayer")
+
+db_uri = (
+    f"postgresql+psycopg2://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+)
 
 # Create sync engine for existing code
 engine = create_engine(
@@ -243,43 +251,60 @@ async def health_check():
 
 # JSON-RPC endpoint
 @app.post("/api", response_model=JSONRPCResponse)
-async def jsonrpc_endpoint(request: Request, db: Session = Depends(get_db)):
+async def jsonrpc_endpoint(request: Request):
     """Main JSON-RPC endpoint."""
     try:
         body = await request.json()
-        
+
         # Parse request
         rpc_request = JSONRPCRequest(**body)
-        
-        # Get RPC handler from app_state
+
+        # Fast path: healthcheck ping without DB or full initialization
+        if rpc_request.method == "ping":
+            return JSONRPCResponse(jsonrpc="2.0", result="OK", id=rpc_request.id)
+
+        # For other methods, require handler and DB session
         rpc_handler = app_state.get('rpc_handler')
         if not rpc_handler:
             return JSONRPCResponse(
                 jsonrpc="2.0",
                 error={"code": -32603, "message": "RPC handler not initialized"},
-                id=body.get("id") if 'body' in locals() else None
+                id=rpc_request.id,
             )
-        
-        # Handle the RPC request
-        response = await rpc_handler.handle_request(
-            rpc_request,
-            db,
-            app_state
-        )
-        
-        return response
-        
+
+        db: Session | None = None
+        try:
+            db = SessionLocal()
+            response = await rpc_handler.handle_request(
+                rpc_request,
+                db,
+                app_state,
+            )
+            # Commit if handler did not raise
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            return response
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+
     except json.JSONDecodeError:
         return JSONRPCResponse(
             jsonrpc="2.0",
             error={"code": -32700, "message": "Parse error"},
-            id=None
+            id=None,
         )
     except Exception as e:
         return JSONRPCResponse(
             jsonrpc="2.0",
             error={"code": -32603, "message": str(e)},
-            id=body.get("id") if 'body' in locals() else None
+            id=body.get("id") if 'body' in locals() else None,
         )
 
 # WebSocket endpoint with native WebSocket support
