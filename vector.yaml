@@ -145,15 +145,6 @@ transforms:
       .timestamp = format_timestamp!(.timestamp, format: "%+")
 
 sinks:
-  # Debug sink to see what we're sending to GCP
-  debug_console:
-    type: console
-    inputs:
-      - docker_logs_transform
-    encoding:
-      codec: json
-    target: stdout
-
   gcp_logs:
     type: gcp_stackdriver_logs
     inputs:
