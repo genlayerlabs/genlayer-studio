@@ -137,6 +137,12 @@ class Transactions(Base):
     timestamp_awaiting_finalization: Mapped[Optional[int]] = mapped_column(
         BigInteger, default=None
     )
+    blocked_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), nullable=True, default=None
+    )
+    worker_id: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True, default=None
+    )
 
 
 class Validators(Base):

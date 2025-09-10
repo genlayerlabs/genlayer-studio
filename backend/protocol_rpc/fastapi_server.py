@@ -177,17 +177,6 @@ async def lifespan(app: FastAPI):
             app_state['validators_manager'],
         )
         
-        # Start consensus background tasks
-        import threading
-        stop_event = threading.Event()
-        app_state['consensus_stop_event'] = stop_event
-        
-        # Create async tasks for consensus loops
-        asyncio.create_task(app_state['consensus'].run_crawl_snapshot_loop(stop_event=stop_event))
-        asyncio.create_task(app_state['consensus'].run_process_pending_transactions_loop(stop_event=stop_event))
-        asyncio.create_task(app_state['consensus'].run_appeal_window_loop(stop_event=stop_event))
-        
-        print("Consensus background tasks started")
         
         # Store SQLAlchemy db for dev endpoints (if needed)
         # Since we're using SQLAlchemy directly, we can create a simple wrapper
@@ -207,11 +196,6 @@ async def lifespan(app: FastAPI):
         
         # Cleanup on shutdown
         print("Shutting down FastAPI application...")
-        
-        # Stop consensus tasks
-        if 'consensus_stop_event' in app_state:
-            app_state['consensus_stop_event'].set()
-            print("Stopping consensus background tasks...")
         
         MAIN_LOOP_EXITING.set()
         await MAIN_LOOP_DONE.wait()
