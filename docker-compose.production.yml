@@ -55,6 +55,21 @@ services:
         condition: service_started
         required: false
 
+  # Consensus worker with production settings
+  consensus-worker:
+    build:
+      target: base  # Use the production-ready base target
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - WORKER_POLL_INTERVAL=${WORKER_POLL_INTERVAL:-5}
+      - TRANSACTION_TIMEOUT_MINUTES=${TRANSACTION_TIMEOUT_MINUTES:-30}
+    deploy:
+      replicas: ${CONSENSUS_WORKERS:-3}
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
   # Redis service for production (message queue for Socket.IO)
   redis:
     image: redis:7-alpine

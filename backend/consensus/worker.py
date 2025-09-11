@@ -113,8 +113,7 @@ class ConsensusWorker:
                       transactions.leader_only, transactions.sim_config, transactions.contract_snapshot,
                       transactions.status, transactions.consensus_data, transactions.input_data,
                       transactions.created_at, transactions.timestamp_awaiting_finalization,
-                      transactions.appeal_failed
-            LIMIT 1;
+                      transactions.appeal_failed;
         """)
         
         result = session.execute(
@@ -197,8 +196,7 @@ class ConsensusWorker:
                       transactions.status, transactions.consensus_data, transactions.input_data,
                       transactions.created_at, transactions.appealed, transactions.appeal_failed,
                       transactions.timestamp_appeal, transactions.appeal_undetermined,
-                      transactions.appeal_leader_timeout, transactions.appeal_validators_timeout
-            LIMIT 1;
+                      transactions.appeal_leader_timeout, transactions.appeal_validators_timeout;
         """)
         
         result = session.execute(
@@ -282,8 +280,7 @@ class ConsensusWorker:
                       transactions.gaslimit, transactions.r, transactions.s, transactions.v,
                       transactions.leader_only, transactions.sim_config, transactions.contract_snapshot,
                       transactions.status, transactions.consensus_data, transactions.input_data,
-                      transactions.created_at
-            LIMIT 1;
+                      transactions.created_at;
         """)
         
         result = session.execute(
