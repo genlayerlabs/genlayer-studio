@@ -857,6 +857,16 @@ def send_raw_transaction(
                 signed_rollup_transaction, from_address
             )  # because hardhat accounts are not funded
 
+            if (
+                consensus_service.web3.is_connected()
+                and rollup_transaction_details is None
+            ):
+                raise JSONRPCError(
+                    code=-32000,
+                    message="Failed to add transaction to consensus layer",
+                    data={},
+                )
+
         if genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT:
             if value > 0:
                 raise InvalidTransactionError("Deploy Transaction can't send value")
