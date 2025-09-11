@@ -4,11 +4,13 @@ import typing
 import contextlib
 import dataclasses
 import os
+import hashlib
+import json
 
 from copy import deepcopy
 from pathlib import Path
 
-from .llm import LLMModule
+from .llm import LLMModule, SimulatorProvider
 from .web import WebModule
 from .base import ChangedConfigFile
 
@@ -87,7 +89,9 @@ class Manager:
 
         self.lock = RWLock()
 
-        self._cached_snapshot = None
+        # Track current LLM configuration to avoid unnecessary reconfigurations
+        self._current_llm_config_hash = None
+        self._web_module_available = False
 
         self.registry = ModifiableValidatorsRegistryInterceptor(
             self, validators_registry_session
@@ -106,12 +110,22 @@ class Manager:
     async def restart(self):
         await self.lock.writer.acquire()
         try:
-            # Restart both LLM and web modules to ensure clean state
+            # Restart LLM module (required)
             await self.llm_module.restart()
-            await self.web_module.restart()
+            
+            # Try to restart web module, but don't fail if it doesn't work
+            try:
+                await self.web_module.restart()
+                self._web_module_available = True
+                print("[ValidatorManager] Web module started successfully")
+            except Exception as e:
+                self._web_module_available = False
+                print(f"[ValidatorManager] Web module failed to start: {e}")
+                print("[ValidatorManager] Continuing without web module support")
 
-            new_validators = await self._get_snap_from_registry()
-            await self._change_providers_from_snapshot(new_validators)
+            # Initialize LLM configuration from database
+            snapshot = await self._get_snap_from_registry()
+            await self._update_llm_config_if_needed(snapshot)
         finally:
             self.lock.writer.release()
 
@@ -132,6 +146,20 @@ class Manager:
     def __del__(self):
         if not self._terminated:
             raise Exception("service was not terminated")
+
+    def _compute_llm_config_hash(self, validators: list[domain.Validator]) -> str:
+        """Compute a hash of the LLM configuration to detect changes."""
+        config_data = []
+        for val in validators:
+            config_data.append({
+                "address": val.address,
+                "model": val.llmprovider.model,
+                "plugin": val.llmprovider.plugin,
+                "url": val.llmprovider.plugin_config.get("api_url"),
+                "key_env": val.llmprovider.plugin_config.get("api_key_env_var"),
+            })
+        config_json = json.dumps(config_data, sort_keys=True)
+        return hashlib.sha256(config_json.encode()).hexdigest()
 
     async def _get_snap_from_registry(self) -> Snapshot:
         cur_validators_as_dict = self.registry.get_all_validators()
@@ -182,12 +210,23 @@ class Manager:
     async def snapshot(self):
         await self.lock.reader.acquire()
         try:
+            # Verify LLM module is ready
             await self.llm_module.verify_for_read()
-            await self.web_module.verify_for_read()
+            
+            # Only verify web module if it's available
+            if self._web_module_available:
+                try:
+                    await self.web_module.verify_for_read()
+                except Exception as e:
+                    print(f"[ValidatorManager] Web module verification failed: {e}")
+                    self._web_module_available = False
 
-            assert self._cached_snapshot is not None
-
-            snap = deepcopy(self._cached_snapshot)
+            # Always fetch fresh data from database
+            snap = await self._get_snap_from_registry()
+            
+            # Ensure LLM configuration is current
+            await self._update_llm_config_if_needed(snap)
+            
             yield snap
         finally:
             self.lock.reader.release()
@@ -196,49 +235,73 @@ class Manager:
     async def temporal_snapshot(self, validators: list[domain.Validator]):
         await self.lock.writer.acquire()
         try:
+            # Verify LLM module is ready
             await self.llm_module.verify_for_read()
-            await self.web_module.verify_for_read()
+            
+            # Only verify web module if it's available
+            if self._web_module_available:
+                try:
+                    await self.web_module.verify_for_read()
+                except Exception as e:
+                    print(f"[ValidatorManager] Web module verification failed: {e}")
+                    self._web_module_available = False
 
-            original_snapshot = deepcopy(self._cached_snapshot)
+            # Save current configuration hash
+            original_hash = self._current_llm_config_hash
 
+            # Create temporary snapshot and update LLM config
             temp_snapshot = await self._get_snap_from_validators(validators)
-            await self._change_providers_from_snapshot(temp_snapshot)
+            await self._update_llm_config_if_needed(temp_snapshot)
 
             try:
-                yield deepcopy(temp_snapshot)
+                yield temp_snapshot
             finally:
-                if original_snapshot is not None:
-                    await self._change_providers_from_snapshot(original_snapshot)
+                # Restore original configuration if it changed
+                if original_hash != self._current_llm_config_hash:
+                    original_snapshot = await self._get_snap_from_registry()
+                    await self._update_llm_config_if_needed(original_snapshot)
         finally:
             self.lock.writer.release()
 
-    async def _change_providers_from_snapshot(self, snap: Snapshot):
-        self._cached_snapshot = None
-
-        new_providers: list[llm.SimulatorProvider] = []
-
-        for i in snap.nodes:
-            new_providers.append(
-                llm.SimulatorProvider(
-                    model=i.validator.llmprovider.model,
-                    id=f"node-{i.validator.address}",
-                    url=i.validator.llmprovider.plugin_config["api_url"],
-                    plugin=i.validator.llmprovider.plugin,
-                    key_env=i.validator.llmprovider.plugin_config["api_key_env_var"],
+    async def _update_llm_config_if_needed(self, snap: Snapshot):
+        """Update LLM module configuration only if validators have changed."""
+        # Extract validator list from snapshot
+        validators = [node.validator for node in snap.nodes]
+        
+        # Compute hash of current configuration
+        new_hash = self._compute_llm_config_hash(validators)
+        
+        # Only update if configuration has changed
+        if new_hash != self._current_llm_config_hash:
+            print(f"[ValidatorManager] LLM configuration changed, updating...")
+            
+            new_providers: list[SimulatorProvider] = []
+            
+            for i in snap.nodes:
+                new_providers.append(
+                    SimulatorProvider(
+                        model=i.validator.llmprovider.model,
+                        id=f"node-{i.validator.address}",
+                        url=i.validator.llmprovider.plugin_config["api_url"],
+                        plugin=i.validator.llmprovider.plugin,
+                        key_env=i.validator.llmprovider.plugin_config["api_key_env_var"],
+                    )
                 )
-            )
-
-        await self.llm_module.change_config(new_providers)
-
-        self._cached_snapshot = snap
+            
+            await self.llm_module.change_config(new_providers)
+            self._current_llm_config_hash = new_hash
+            print(f"[ValidatorManager] LLM configuration updated with {len(new_providers)} providers")
+        else:
+            print(f"[ValidatorManager] LLM configuration unchanged, skipping update")
 
     @contextlib.asynccontextmanager
     async def do_write(self):
         await self.lock.writer.acquire()
         try:
             yield
-
-            new_validators = await self._get_snap_from_registry()
-            await self._change_providers_from_snapshot(new_validators)
+            
+            # After write operation, update LLM configuration if needed
+            snapshot = await self._get_snap_from_registry()
+            await self._update_llm_config_if_needed(snapshot)
         finally:
             self.lock.writer.release()

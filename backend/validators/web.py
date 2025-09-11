@@ -46,7 +46,23 @@ class WebModule:
     async def restart(self):
         await self.stop()
 
+        # Validate required environment variables
+        required_env_vars = ["GENVM_BIN", "WEBDRIVERHOST", "WEBDRIVERPORT"]
+        missing_vars = [var for var in required_env_vars if not os.environ.get(var)]
+        if missing_vars:
+            error_msg = f"[WebModule] Missing required environment variables: {', '.join(missing_vars)}"
+            print(error_msg)
+            raise RuntimeError(error_msg)
+
         exe_path = Path(os.environ["GENVM_BIN"]).joinpath("genvm-modules")
+        if not exe_path.exists():
+            error_msg = f"[WebModule] genvm-modules binary not found at: {exe_path}"
+            print(error_msg)
+            raise RuntimeError(error_msg)
+
+        print(f"[WebModule] Starting web module with binary: {exe_path}")
+        print(f"[WebModule] Config: {self._config.new_path}")
+        print(f"[WebModule] WebDriver: {os.getenv('WEBDRIVERPROTOCOL', 'http')}://{os.environ['WEBDRIVERHOST']}:{os.environ['WEBDRIVERPORT']}")
 
         self._process = await asyncio.subprocess.create_subprocess_exec(
             exe_path,
@@ -55,9 +71,46 @@ class WebModule:
             self._config.new_path,
             "--die-with-parent",
             stdin=None,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
+        
+        # Start background task to monitor process output
+        asyncio.create_task(self._monitor_process())
+
+    async def _monitor_process(self):
+        """Monitor process output for debugging."""
+        if self._process is None:
+            return
+            
+        try:
+            # Read stdout
+            if self._process.stdout:
+                asyncio.create_task(self._read_stream(self._process.stdout, "stdout"))
+            
+            # Read stderr
+            if self._process.stderr:
+                asyncio.create_task(self._read_stream(self._process.stderr, "stderr"))
+                
+            # Wait for process to exit
+            return_code = await self._process.wait()
+            if return_code != 0:
+                print(f"[WebModule] Process exited with code {return_code}")
+        except Exception as e:
+            print(f"[WebModule] Error monitoring process: {e}")
+    
+    async def _read_stream(self, stream, stream_name):
+        """Read and log output from a stream."""
+        try:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                decoded_line = line.decode('utf-8').strip()
+                if decoded_line:
+                    print(f"[WebModule] {stream_name}: {decoded_line}")
+        except Exception as e:
+            print(f"[WebModule] Error reading {stream_name}: {e}")
 
     async def stop(self):
         if self._process is None:

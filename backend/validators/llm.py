@@ -129,6 +129,13 @@ class LLMModule:
         await self.stop()
 
         exe_path = Path(os.environ["GENVM_BIN"]).joinpath("genvm-modules")
+        if not exe_path.exists():
+            error_msg = f"[LLMModule] genvm-modules binary not found at: {exe_path}"
+            print(error_msg)
+            raise RuntimeError(error_msg)
+
+        print(f"[LLMModule] Starting LLM module with binary: {exe_path}")
+        print(f"[LLMModule] Config: {self._config.new_path}")
 
         self._process = await asyncio.subprocess.create_subprocess_exec(
             exe_path,
@@ -138,9 +145,48 @@ class LLMModule:
             "--allow-empty-backends",
             "--die-with-parent",
             stdin=None,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
+        
+        # Start background task to monitor process output
+        asyncio.create_task(self._monitor_process())
+    
+    async def _monitor_process(self):
+        """Monitor process output for debugging."""
+        if self._process is None:
+            return
+            
+        try:
+            # Read stdout
+            if self._process.stdout:
+                asyncio.create_task(self._read_stream(self._process.stdout, "stdout"))
+            
+            # Read stderr
+            if self._process.stderr:
+                asyncio.create_task(self._read_stream(self._process.stderr, "stderr"))
+                
+            # Wait for process to exit
+            return_code = await self._process.wait()
+            if return_code != 0:
+                print(f"[LLMModule] Process exited with code {return_code}")
+        except Exception as e:
+            print(f"[LLMModule] Error monitoring process: {e}")
+    
+    async def _read_stream(self, stream, stream_name):
+        """Read and log output from a stream."""
+        try:
+            while True:
+                line = await stream.readline()
+                if not line:
+                    break
+                decoded_line = line.decode('utf-8').strip()
+                if decoded_line:
+                    # Only log errors and warnings to avoid flooding logs
+                    if "error" in decoded_line.lower() or "warn" in decoded_line.lower() or "fail" in decoded_line.lower():
+                        print(f"[LLMModule] {stream_name}: {decoded_line}")
+        except Exception as e:
+            print(f"[LLMModule] Error reading {stream_name}: {e}")
 
     async def verify_for_read(self):
         if self._process is None:
