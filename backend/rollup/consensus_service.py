@@ -20,8 +20,6 @@ class ConsensusService:
         # Use singleton Web3 connection pool
         self.web3 = Web3ConnectionPool.get()
 
-        self.web3_connected = self.web3.is_connected()
-
     def _get_contract(self, contract_name: str):
         """
         Get a contract instance
