@@ -14,7 +14,7 @@ from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.database_handler.llm_providers import LLMProviderRegistry
 from backend.rollup.consensus_service import ConsensusService
 from backend.database_handler.models import Base
-from backend.domain.types import LLMProvider, Validator, TransactionType
+from backend.domain.types import LLMProvider, Validator, TransactionType, SimConfig
 from backend.node.create_nodes.providers import (
     get_default_provider_for,
     validate_provider,
@@ -45,6 +45,7 @@ from backend.database_handler.transactions_processor import (
 from backend.node.base import Node, SIMULATOR_CHAIN_ID
 from backend.node.types import ExecutionMode, ExecutionResultStatus
 from backend.consensus.base import ConsensusAlgorithm
+from backend.protocol_rpc.call_interceptor import handle_consensus_data_call
 
 from flask_jsonrpc.exceptions import JSONRPCError
 import base64
@@ -448,47 +449,92 @@ async def _execute_call_with_snapshot(
     params: dict,
 ):
     """Common logic for gen_call and sim_call"""
-    sim_config = params.get("sim_config", {})
-    provider = sim_config.get("provider")
-    model = sim_config.get("model")
+    sim_config_obj = None
+    if "sim_config" in params and params["sim_config"]:
+        sim_config_obj = SimConfig.from_dict(params["sim_config"])
 
-    if provider is not None and model is not None:
-        config = sim_config.get("config")
-        plugin = sim_config.get("plugin")
-        plugin_config = sim_config.get("plugin_config")
+    virtual_validators = []
 
-        try:
-            if config is None or plugin is None or plugin_config is None:
-                llm_provider = get_default_provider_for(provider, model)
-            else:
-                llm_provider = LLMProvider(
-                    provider=provider,
-                    model=model,
-                    config=config,
-                    plugin=plugin,
-                    plugin_config=plugin_config,
+    # Use sim_config_obj if provided
+    if sim_config_obj and sim_config_obj.validators:
+        for validator in sim_config_obj.validators:
+            provider = validator.provider
+            model = validator.model
+            config = validator.config
+            plugin = validator.plugin
+            plugin_config = validator.plugin_config
+            try:
+                if config is None or plugin is None or plugin_config is None:
+                    llm_provider = get_default_provider_for(provider, model)
+                else:
+                    llm_provider = LLMProvider(
+                        provider=provider,
+                        model=model,
+                        config=config,
+                        plugin=plugin,
+                        plugin_config=plugin_config,
+                    )
+                    validate_provider(llm_provider)
+            except ValueError as e:
+                raise JSONRPCError(code=-32602, message=str(e), data={}) from e
+            account = accounts_manager.create_new_account()
+            virtual_validators.append(
+                Validator(
+                    address=account.address,
+                    private_key=account.key,
+                    stake=validator.stake,
+                    llmprovider=llm_provider,
                 )
-                validate_provider(llm_provider)
-        except ValueError as e:
-            raise JSONRPCError(code=-32602, message=str(e), data={}) from e
-        account = accounts_manager.create_new_account()
-        validator = Validator(
-            address=account.address,
-            private_key=account.key,
-            stake=0,
-            llmprovider=llm_provider,
-        )
+            )
+    else:
+        # Fallback to old behavior for backward compatibility
+        sim_config = params.get("sim_config", {})
+        provider = sim_config.get("provider")
+        model = sim_config.get("model")
+
+        if provider is not None and model is not None:
+            config = sim_config.get("config")
+            plugin = sim_config.get("plugin")
+            plugin_config = sim_config.get("plugin_config")
+
+            try:
+                if config is None or plugin is None or plugin_config is None:
+                    llm_provider = get_default_provider_for(provider, model)
+                else:
+                    llm_provider = LLMProvider(
+                        provider=provider,
+                        model=model,
+                        config=config,
+                        plugin=plugin,
+                        plugin_config=plugin_config,
+                    )
+                    validate_provider(llm_provider)
+            except ValueError as e:
+                raise JSONRPCError(code=-32602, message=str(e), data={}) from e
+            account = accounts_manager.create_new_account()
+            virtual_validators.append(
+                Validator(
+                    address=account.address,
+                    private_key=account.key,
+                    stake=0,
+                    llmprovider=llm_provider,
+                )
+            )
+        elif provider is None and model is None:
+            pass
+        else:
+            raise JSONRPCError(
+                code=-32602,
+                message="Both 'provider' and 'model' must be supplied together.",
+                data={},
+            )
+
+    if len(virtual_validators) > 0:
         snapshot_func = validators_manager.temporal_snapshot
-        args = [[validator]]
-    elif provider is None and model is None:
+        args = [virtual_validators]
+    else:
         snapshot_func = validators_manager.snapshot
         args = []
-    else:
-        raise JSONRPCError(
-            code=-32602,
-            message="Both 'provider' and 'model' must be supplied together.",
-            data={},
-        )
 
     async with snapshot_func(*args) as snapshot:
         if len(snapshot.nodes) == 0:
@@ -589,25 +635,67 @@ async def _gen_call_with_validator(
         validators_snapshot=validators_snapshot,
     )
 
+    sc_raw = params.get("sim_config")
+    sim_config = SimConfig.from_dict(sc_raw) if sc_raw else None
+    override_transaction_datetime: bool = (
+        sim_config is not None and sim_config.genvm_datetime is not None
+    )
+
     if type == "read":
+        # Pre-parse timestamp override and map errors
+        txn_dt = None
+        if sim_config and override_transaction_datetime:
+            try:
+                txn_dt = sim_config.genvm_datetime_as_datetime
+            except ValueError as e:
+                raise JSONRPCError(
+                    code=-32602,
+                    message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                    data={},
+                ) from e
         decoded_data = transactions_parser.decode_method_call_data(data)
         receipt = await node.get_contract_data(
             from_address=from_address,
             calldata=decoded_data.calldata,
             state_status=state_status,
+            transaction_datetime=txn_dt,
         )
     elif type == "write":
+        txn_created_at = None
+        if sim_config and override_transaction_datetime:
+            try:
+                _ = sim_config.genvm_datetime_as_datetime  # validation only
+                txn_created_at = sim_config.genvm_datetime
+            except ValueError as e:
+                raise JSONRPCError(
+                    code=-32602,
+                    message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                    data={},
+                ) from e
         decoded_data = transactions_parser.decode_method_send_data(data)
         receipt = await node.run_contract(
             from_address=from_address,
             calldata=decoded_data.calldata,
+            transaction_created_at=txn_created_at,
         )
     elif type == "deploy":
+        txn_created_at = None
+        if sim_config and override_transaction_datetime:
+            try:
+                _ = sim_config.genvm_datetime_as_datetime  # validation only
+                txn_created_at = sim_config.genvm_datetime
+            except ValueError as e:
+                raise JSONRPCError(
+                    code=-32602,
+                    message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                    data={},
+                ) from e
         decoded_data = transactions_parser.decode_deployment_data(data)
         receipt = await node.deploy_contract(
             from_address=from_address,
             code_to_deploy=decoded_data.contract_code,
             calldata=decoded_data.calldata,
+            transaction_created_at=txn_created_at,
         )
     else:
         raise JSONRPCError(f"Invalid type: {type}")
@@ -651,6 +739,7 @@ async def eth_call(
     msg_handler: MessageHandler,
     transactions_parser: TransactionParser,
     validators_manager: validators.Manager,
+    transactions_processor: TransactionsProcessor,
     params: dict,
     block_tag: str = "latest",
 ) -> str:
@@ -658,16 +747,26 @@ async def eth_call(
     from_address = params["from"] if "from" in params else None
     data = params["data"]
 
-    if from_address is None:
-        return base64.b64encode(b"\x00' * 31 + b'\x01").decode(
-            "ascii"
-        )  # Return '1' as a uint256
-
-    if from_address and not accounts_manager.is_valid_address(from_address):
-        raise InvalidAddressError(from_address)
-
+    # Validate to_address first
     if not accounts_manager.is_valid_address(to_address):
         raise InvalidAddressError(to_address)
+
+    # Check if this is a ConsensusData contract call that we should handle locally
+    # This should happen before early return to allow interception even without 'from'
+    consensus_data_result = handle_consensus_data_call(
+        transactions_processor, to_address, data
+    )
+    if consensus_data_result is not None:
+        return consensus_data_result
+
+    # Handle missing from_address after interceptor check
+    if from_address is None:
+        # Return '1' as a proper hex-encoded uint256
+        return "0x0000000000000000000000000000000000000000000000000000000000000001"
+
+    # Validate from_address if present
+    if not accounts_manager.is_valid_address(from_address):
+        raise InvalidAddressError(from_address)
 
     decoded_data = transactions_parser.decode_method_call_data(data)
 
@@ -708,6 +807,7 @@ def send_raw_transaction(
     transactions_parser: TransactionParser,
     consensus_service: ConsensusService,
     signed_rollup_transaction: str,
+    sim_config: dict | None = None,
 ) -> str:
     # Decode transaction
     decoded_rollup_transaction = transactions_parser.decode_signed_transaction(
@@ -769,6 +869,16 @@ def send_raw_transaction(
                 signed_rollup_transaction, from_address
             )  # because hardhat accounts are not funded
 
+            if (
+                consensus_service.web3.is_connected()
+                and rollup_transaction_details is None
+            ):
+                raise JSONRPCError(
+                    code=-32000,
+                    message="Failed to add transaction to consensus layer",
+                    data={},
+                )
+
         if genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT:
             if value > 0:
                 raise InvalidTransactionError("Deploy Transaction can't send value")
@@ -821,6 +931,7 @@ def send_raw_transaction(
             None,
             transaction_hash,
             genlayer_transaction.num_of_initial_validators,
+            sim_config,
         )
 
         return transaction_hash
@@ -1245,6 +1356,7 @@ def register_all_rpc_endpoints(
             msg_handler,
             transactions_parser,
             validators_manager,
+            transactions_processor,
         ),
         method_name="eth_call",
     )
@@ -1311,7 +1423,6 @@ def register_all_rpc_endpoints(
         partial(delete_all_snapshots, snapshot_manager),
         method_name="sim_deleteAllSnapshots",
     )
-
     register_rpc_endpoint(
         partial(dev_get_pool_status, sqlalchemy_db),
         method_name="dev_getPoolStatus",

@@ -124,6 +124,7 @@ class TransactionsProcessor:
             "appeal_leader_timeout": transaction_data.appeal_leader_timeout,
             "leader_timeout_validators": transaction_data.leader_timeout_validators,
             "appeal_validators_timeout": transaction_data.appeal_validators_timeout,
+            "sim_config": transaction_data.sim_config,
         }
 
     @staticmethod
@@ -227,6 +228,7 @@ class TransactionsProcessor:
         ) = None,  # If filled, the transaction must be present in the database (committed)
         transaction_hash: str | None = None,
         num_of_initial_validators: int | None = None,
+        sim_config: dict | None = None,
     ) -> str:
         # Follow up: https://github.com/MetaMask/metamask-extension/issues/29787
         # to uncomment this check
@@ -278,6 +280,7 @@ class TransactionsProcessor:
             appeal_leader_timeout=False,
             leader_timeout_validators=None,
             appeal_validators_timeout=False,
+            sim_config=sim_config,
         )
 
         self.session.add(new_transaction)
@@ -1058,3 +1061,30 @@ class TransactionsProcessor:
         transaction.appeal_validators_timeout = appeal_validators_timeout
         self.session.commit()
         return appeal_validators_timeout
+
+    def get_pending_transaction_count_for_address(self, address: str) -> int:
+        """
+        Get the count of pending transactions for a given recipient address.
+
+        Args:
+            address: The recipient address to count pending transactions for
+
+        Returns:
+            int: The number of pending transactions for the address
+        """
+        try:
+            # Normalize address to checksum format
+            checksum_address = self.web3.to_checksum_address(address)
+        except ValueError:
+            # If address normalization fails, use as-is
+            checksum_address = address
+
+        count = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.to_address == checksum_address,
+                Transactions.status == TransactionStatus.PENDING,
+            )
+            .count()
+        )
+        return count
