@@ -134,10 +134,7 @@ local function just_in_backend(ctx, args, mapped_prompt)
 		if llm.overloaded_statuses[as_user_error.ctx.status] then
 			lib.log{level = "warning", message = "service is overloaded", error = as_user_error, request = request}
 		else
-			lib.log{level = "error", message = "provider failed", error = as_user_error, request = request}
-			as_user_error.fatal = true
-
-			lib.rs.user_error(as_user_error)
+			lib.log{level = "warning", message = "provider failed", error = as_user_error, request = request}
 		end
 
 		lib.log{level = "warning", message = "sleeping before retry"}

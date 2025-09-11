@@ -45,6 +45,7 @@ from backend.database_handler.transactions_processor import (
 from backend.node.base import Node, SIMULATOR_CHAIN_ID
 from backend.node.types import ExecutionMode, ExecutionResultStatus
 from backend.consensus.base import ConsensusAlgorithm
+from backend.protocol_rpc.call_interceptor import handle_consensus_data_call
 
 import base64
 import os
@@ -737,6 +738,7 @@ async def eth_call(
     msg_handler: MessageHandler,
     transactions_parser: TransactionParser,
     validators_manager: validators.Manager,
+    transactions_processor: TransactionsProcessor,
     params: dict,
     block_tag: str = "latest",
 ) -> str:
@@ -744,16 +746,26 @@ async def eth_call(
     from_address = params["from"] if "from" in params else None
     data = params["data"]
 
-    if from_address is None:
-        return base64.b64encode(b"\x00' * 31 + b'\x01").decode(
-            "ascii"
-        )  # Return '1' as a uint256
-
-    if from_address and not accounts_manager.is_valid_address(from_address):
-        raise InvalidAddressError(from_address)
-
+    # Validate to_address first
     if not accounts_manager.is_valid_address(to_address):
         raise InvalidAddressError(to_address)
+
+    # Check if this is a ConsensusData contract call that we should handle locally
+    # This should happen before early return to allow interception even without 'from'
+    consensus_data_result = handle_consensus_data_call(
+        transactions_processor, to_address, data
+    )
+    if consensus_data_result is not None:
+        return consensus_data_result
+
+    # Handle missing from_address after interceptor check
+    if from_address is None:
+        # Return '1' as a proper hex-encoded uint256
+        return "0x0000000000000000000000000000000000000000000000000000000000000001"
+
+    # Validate from_address if present
+    if not accounts_manager.is_valid_address(from_address):
+        raise InvalidAddressError(from_address)
 
     decoded_data = transactions_parser.decode_method_call_data(data)
 
@@ -855,6 +867,16 @@ def send_raw_transaction(
             rollup_transaction_details = consensus_service.add_transaction(
                 signed_rollup_transaction, from_address
             )  # because hardhat accounts are not funded
+
+            if (
+                consensus_service.web3.is_connected()
+                and rollup_transaction_details is None
+            ):
+                raise JSONRPCError(
+                    code=-32000,
+                    message="Failed to add transaction to consensus layer",
+                    data={},
+                )
 
         if genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT:
             if value > 0:
@@ -1339,6 +1361,7 @@ def register_all_rpc_endpoints(
             msg_handler,
             transactions_parser,
             validators_manager,
+            transactions_processor,
         ),
         method_name="eth_call",
     )
