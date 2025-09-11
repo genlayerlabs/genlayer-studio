@@ -1061,3 +1061,30 @@ class TransactionsProcessor:
         transaction.appeal_validators_timeout = appeal_validators_timeout
         self.session.commit()
         return appeal_validators_timeout
+
+    def get_pending_transaction_count_for_address(self, address: str) -> int:
+        """
+        Get the count of pending transactions for a given recipient address.
+
+        Args:
+            address: The recipient address to count pending transactions for
+
+        Returns:
+            int: The number of pending transactions for the address
+        """
+        try:
+            # Normalize address to checksum format
+            checksum_address = self.web3.to_checksum_address(address)
+        except ValueError:
+            # If address normalization fails, use as-is
+            checksum_address = address
+
+        count = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.to_address == checksum_address,
+                Transactions.status == TransactionStatus.PENDING,
+            )
+            .count()
+        )
+        return count
