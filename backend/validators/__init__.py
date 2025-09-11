@@ -149,6 +149,13 @@ class Manager:
                 host_data["mock_response"] = val.llmprovider.plugin_config[
                     "mock_response"
                 ]
+            if (
+                "mock_web_request" in val.llmprovider.plugin_config
+                and len(val.llmprovider.plugin_config["mock_web_request"]) > 0
+            ):
+                host_data["mock_web_request"] = val.llmprovider.plugin_config[
+                    "mock_web_request"
+                ]
             if val.llmprovider.plugin == "custom":
                 plugin_config = {
                     str(k): str(v) for k, v in val.llmprovider.plugin_config.items()

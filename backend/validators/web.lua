@@ -120,6 +120,22 @@ function Request(ctx, payload)
     ---@cast payload WebRequestPayload
 
     web.check_url(payload.url)
+    if ctx.host_data.mock_web_request then
+        for url, response in pairs(ctx.host_data.mock_web_request.nondet_web_request) do
+            if url == payload.url and payload.method == response.method then
+                return {
+                    body = response.body,
+                    status = response.status,
+                    headers = {},
+                }
+            end
+        end
+        return {
+            body = "no mock response found",
+            status = 404,
+            headers = {},
+        }
+    end
 
     local function try_request()
         local success, result = pcall(lib.rs.request, ctx, {
