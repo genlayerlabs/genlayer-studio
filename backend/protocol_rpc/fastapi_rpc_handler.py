@@ -5,7 +5,7 @@ FastAPI RPC handler that uses the endpoint generator for proper registration.
 import asyncio
 import inspect
 from typing import Any, Dict, List, Optional, Union
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 # Import the FastAPI endpoint generator
@@ -19,6 +19,8 @@ class JSONRPCRequest(BaseModel):
     id: Optional[Union[str, int]] = None
 
 class JSONRPCResponse(BaseModel):
+    model_config = ConfigDict(exclude_none=True)
+    
     jsonrpc: str = "2.0"
     result: Optional[Any] = None
     error: Optional[Dict[str, Any]] = None

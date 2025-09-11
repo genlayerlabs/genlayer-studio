@@ -77,9 +77,11 @@ HEALTHCHECK --interval=1s --timeout=1s --retries=30 --start-period=3s CMD python
 ###########START NEW IMAGE : DEBUGGER ###################
 FROM base AS debug
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --cache-dir=/root/.cache/pip debugpy watchdog
+    pip install --cache-dir=/root/.cache/pip debugpy
 USER backend-user
-CMD watchmedo auto-restart --no-restart-on-command-exit --recursive --pattern="*.py" --ignore-patterns="*.pyc;*__pycache__*" -- python3 -m debugpy --listen 0.0.0.0:${RPCDEBUGPORT} -m uvicorn asgi:application --host 0.0.0.0 --port ${FLASK_SERVER_PORT} --reload
+# Use uvicorn's native --reload flag for hot reloading
+# This watches all Python files and automatically restarts on changes
+CMD python3 -m debugpy --listen 0.0.0.0:${RPCDEBUGPORT} -m uvicorn asgi:application --host 0.0.0.0 --port ${FLASK_SERVER_PORT} --reload --reload-dir /app/backend
 
 ###########START NEW IMAGE: PRODUCTION ###################
 FROM base AS prod

@@ -250,7 +250,7 @@ async def health_check():
     return {"status": "healthy"}
 
 # JSON-RPC endpoint
-@app.post("/api", response_model=JSONRPCResponse)
+@app.post("/api")
 async def jsonrpc_endpoint(request: Request):
     """Main JSON-RPC endpoint."""
     try:
@@ -261,16 +261,18 @@ async def jsonrpc_endpoint(request: Request):
 
         # Fast path: healthcheck ping without DB or full initialization
         if rpc_request.method == "ping":
-            return JSONRPCResponse(jsonrpc="2.0", result="OK", id=rpc_request.id)
+            response = JSONRPCResponse(jsonrpc="2.0", result="OK", id=rpc_request.id)
+            return JSONResponse(content=response.model_dump(exclude_none=True))
 
         # For other methods, require handler and DB session
         rpc_handler = app_state.get('rpc_handler')
         if not rpc_handler:
-            return JSONRPCResponse(
+            response = JSONRPCResponse(
                 jsonrpc="2.0",
                 error={"code": -32603, "message": "RPC handler not initialized"},
-                id=rpc_request.id,
+                id=rpc_request.id
             )
+            return JSONResponse(content=response.model_dump(exclude_none=True))
 
         db: Session | None = None
         try:
@@ -286,7 +288,7 @@ async def jsonrpc_endpoint(request: Request):
             except Exception:
                 db.rollback()
                 raise
-            return response
+            return JSONResponse(content=response.model_dump(exclude_none=True))
         finally:
             if db is not None:
                 try:
@@ -295,17 +297,19 @@ async def jsonrpc_endpoint(request: Request):
                     pass
 
     except json.JSONDecodeError:
-        return JSONRPCResponse(
+        response = JSONRPCResponse(
             jsonrpc="2.0",
             error={"code": -32700, "message": "Parse error"},
-            id=None,
+            id=None
         )
+        return JSONResponse(content=response.model_dump(exclude_none=True))
     except Exception as e:
-        return JSONRPCResponse(
+        response = JSONRPCResponse(
             jsonrpc="2.0",
             error={"code": -32603, "message": str(e)},
-            id=body.get("id") if 'body' in locals() else None,
+            id=body.get("id") if 'body' in locals() else None
         )
+        return JSONResponse(content=response.model_dump(exclude_none=True))
 
 # WebSocket endpoint with native WebSocket support
 # Use both /socket.io/ and /ws for compatibility

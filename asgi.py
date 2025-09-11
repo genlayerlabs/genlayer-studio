@@ -19,12 +19,16 @@ application = app
 if __name__ == "__main__":
     import uvicorn
     
+    # Enable reload in development mode
+    is_debug = os.getenv("BACKEND_BUILD_TARGET") == "debug"
+    
     uvicorn.run(
         "asgi:application",
         host="0.0.0.0",
         port=int(os.getenv("RPCPORT", "4000")),
-        workers=int(os.getenv("WEB_CONCURRENCY", "1")),
+        workers=1 if is_debug else int(os.getenv("WEB_CONCURRENCY", "1")),
         log_level=os.getenv("LOG_LEVEL", "info").lower(),
-        reload=False,
+        reload=is_debug,
+        reload_dirs=["backend"] if is_debug else None,
         access_log=True,
     )
