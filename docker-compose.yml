@@ -8,6 +8,11 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./traefik.yaml:/etc/traefik/traefik.yaml:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
 
   frontend:
     build:
@@ -185,6 +190,11 @@ services:
       - hardhat_deployments:/app/deployments
       - hardhat_snapshots:/app/snapshots
     restart: always
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
     labels:
       traefik.enable: true
       traefik.http.routers.hardhat.rule: Host(`${SERVER_NAME}`) && PathPrefix(`/hardhat`)
@@ -207,6 +217,11 @@ services:
       - /var/log:/var/log:ro  # Mount the host's /var/log directory
     # network_mode: host
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     labels:
       org.label-schema.group: "monitoring"
 

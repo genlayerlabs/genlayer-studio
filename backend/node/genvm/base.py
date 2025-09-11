@@ -85,6 +85,7 @@ class ExecutionResult:
     stderr: str
     genvm_log: list
     state: StateProxy
+    processing_time: int
 
 
 # GenVM protocol just in case it is needed for mocks or bringing back the old one
@@ -175,7 +176,9 @@ class GenVMHost(IGenVM):
         perms = "rcn"  # read/call/spawn nondet
         if not readonly:
             perms += "ws"  # write/send
-        return await _run_genvm_host(
+
+        start_time = time.time()
+        result = await _run_genvm_host(
             functools.partial(
                 _Host,
                 calldata_bytes=calldata_raw,
@@ -193,6 +196,8 @@ class GenVMHost(IGenVM):
             ],
             config_path,
         )
+        result.processing_time = int((time.time() - start_time) * 1000)
+        return result
 
     async def get_contract_schema(self, contract_code: bytes) -> ExecutionResult:
         NO_ADDR = str(base64.b64encode(b"\x00" * 20), encoding="ascii")
@@ -211,7 +216,8 @@ class GenVMHost(IGenVM):
             lambda addr, *rest: state_proxy.storage_write(Address(addr), *rest),
         )
         # state_proxy.storage_write()
-        return await _run_genvm_host(
+        start_time = time.time()
+        result = await _run_genvm_host(
             functools.partial(
                 _Host,
                 calldata_bytes=calldata.encode({"method": "#get-schema"}),
@@ -221,6 +227,8 @@ class GenVMHost(IGenVM):
             ["--message", json.dumps(message), "--permissions", "", "--allow-latest"],
             None,
         )
+        result.processing_time = int((time.time() - start_time) * 1000)
+        return result
 
 
 def _decode_genvm_log(log: str) -> list:
@@ -269,6 +277,7 @@ class _Host(genvmhost.IHost):
             genvm_log=_decode_genvm_log(res.genvm_log),
             result=self._result,
             state=state,
+            processing_time=0,
         )
 
     async def loop_enter(self) -> socket.socket:
@@ -404,6 +413,21 @@ async def _copy_state_proxy(state_proxy) -> StateProxy:
         state_proxy.snapshot_factory = factory
 
 
+def _create_timeout_result(
+    last_error: str, state_proxy: StateProxy, processing_time: int
+) -> ExecutionResult:
+    return ExecutionResult(
+        result=ExecutionError(message="timeout", kind=ResultCode.VM_ERROR),
+        eq_outputs={},
+        pending_transactions=[],
+        stdout="",
+        stderr=last_error,
+        genvm_log=[],
+        state=state_proxy,
+        processing_time=processing_time,
+    )
+
+
 async def _run_genvm_host(
     host_supplier: typing.Callable[[socket.socket], _Host],
     args: list[Path | str],
@@ -429,14 +453,10 @@ async def _run_genvm_host(
             remaining_time = timeout - (time.time() - start_time)
             if remaining_time <= 0:
                 # When the genvm keeps crashing we send a timeout error
-                return ExecutionResult(
-                    result=ExecutionError(message="timeout", kind=ResultCode.VM_ERROR),
-                    eq_outputs={},
-                    pending_transactions=[],
-                    stdout="",
-                    stderr=last_error,
-                    genvm_log=[],
-                    state=fresh_args.get("state_proxy", host_args.get("state_proxy")),
+                return _create_timeout_result(
+                    last_error,
+                    fresh_args.get("state_proxy", host_args.get("state_proxy")),
+                    timeout * 1000,
                 )
 
             # Create fresh copies of the arguments for each attempt
@@ -492,6 +512,15 @@ async def _run_genvm_host(
 
                 except Exception as e:
                     last_error = str(e)
+
+                    # Check if llm failed, immediately return timeout error
+                    if "fatal: true" in last_error:
+                        return _create_timeout_result(
+                            last_error,
+                            fresh_args.get("state_proxy", host_args.get("state_proxy")),
+                            int((time.time() - start_time) * 1000),
+                        )
+
                     retry_count += 1
                     # Sleep for a longer time than the previous attempt to avoid executing it too many times
                     delay = min(base_delay * (2 ** (retry_count - 1)), remaining_time)
