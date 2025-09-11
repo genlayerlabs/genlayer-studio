@@ -41,7 +41,7 @@ class LLMModule:
 
         greyboxing_path = Path(__file__).parent.joinpath("greyboxing.lua")
 
-        self._config = ChangedConfigFile("genvm-module-llm.yaml")
+        self._config = ChangedConfigFile(LLM_CONFIG_PATH)
 
         with self._config.change_default() as conf:
             conf["lua_script_path"] = str(greyboxing_path)
@@ -102,10 +102,8 @@ class LLMModule:
     async def restart(self):
         await self.stop()
 
-        exe_path = Path(os.environ["GENVM_BIN"]).joinpath("genvm-modules")
-
         self._process = await asyncio.subprocess.create_subprocess_exec(
-            exe_path,
+            MODULES_BINARY,
             "llm",
             "--config",
             self._config.new_path,
@@ -150,11 +148,9 @@ class LLMModule:
         if plugin == "custom":
             return await self.call_custom_model(model, url, key_env)
 
-        exe_path = Path(os.environ["GENVM_BIN"]).joinpath("genvm-modules")
-
         try:
             proc = await asyncio.subprocess.create_subprocess_exec(
-                exe_path,
+                MODULES_BINARY,
                 "llm-check",
                 "--provider",
                 plugin,

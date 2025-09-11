@@ -7,9 +7,18 @@ import tempfile
 from pathlib import Path
 from copy import deepcopy
 
-GENVM_BIN_DIR = Path(os.environ["GENVM_BIN"])
-GENVM_DEFAULT_CONFIG_DIR = Path(os.environ["GENVM_BIN"]).parent.joinpath("config")
-GENVM_SCRIPT_DIR = Path(os.environ["GENVM_BIN"]).parent.joinpath("scripts")
+import backend.node.genvm.config as genvm_config
+
+GENVM_BINARY = genvm_config._find_exe("genvm")
+MODULES_BINARY = genvm_config._find_exe("genvm-modules", env_name="GENVMROOT")
+
+GENVM_CONFIG_PATH = GENVM_BINARY.parent.parent.joinpath("config", "genvm.yaml")
+LLM_CONFIG_PATH = MODULES_BINARY.parent.parent.joinpath(
+    "config", "genvm-module-llm.yaml"
+)
+WEB_CONFIG_PATH = MODULES_BINARY.parent.parent.joinpath(
+    "config", "genvm-module-web.yaml"
+)
 
 
 class _Stream:
@@ -34,14 +43,12 @@ class ChangedConfigFile:
     _file: io.FileIO
     _default_conf: dict
 
-    def __init__(self, base: str):
+    def __init__(self, base: Path):
         import yaml
 
-        self._default_conf = typing.cast(
-            dict, yaml.safe_load(GENVM_DEFAULT_CONFIG_DIR.joinpath(base).read_text())
-        )
+        self._default_conf = typing.cast(dict, yaml.safe_load(base.read_text()))
 
-        fd, name = tempfile.mkstemp("-" + base, "studio-")
+        fd, name = tempfile.mkstemp("-" + base.name, "studio-")
         self.new_path = Path(name)
 
         self._file = io.FileIO(fd, "w")
