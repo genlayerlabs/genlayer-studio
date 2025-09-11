@@ -548,7 +548,7 @@ class TransactionsProcessor:
         transaction_data["result_name"] = consensus_result.value
         return transaction_data
 
-    def get_transaction_by_hash(self, transaction_hash: str) -> dict | None:
+    def get_transaction_by_hash(self, transaction_hash: str, sim_config: dict | None = None) -> dict | None:
         transaction = (
             self.session.query(Transactions)
             .filter_by(hash=transaction_hash)
@@ -559,6 +559,23 @@ class TransactionsProcessor:
             return None
 
         transaction_data = self._parse_transaction_data(transaction)
+
+        # Handle contract_state based on sim_config
+        include_contract_state = sim_config and sim_config.get("include_contract_state", False)
+        
+        # Remove contract_state from consensus_data by default (unless explicitly requested)
+        if transaction_data.get("consensus_data") and "leader_receipt" in transaction_data["consensus_data"]:
+            leader_receipt = transaction_data["consensus_data"]["leader_receipt"]
+            
+            if isinstance(leader_receipt, dict):
+                if not include_contract_state and "contract_state" in leader_receipt:
+                    del leader_receipt["contract_state"]
+                    
+            elif isinstance(leader_receipt, list):
+                for receipt in leader_receipt:
+                    if isinstance(receipt, dict):
+                        if not include_contract_state and "contract_state" in receipt:
+                            del receipt["contract_state"]
 
         # Process for testnet
         transaction_data = self._prepare_basic_transaction_data(transaction_data)
