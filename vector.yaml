@@ -137,12 +137,14 @@ transforms:
       }
 
       # Add standard Loki labels
-      .labels = {"job": "docker", "instance": "${SERVER_NAME}", "container": .container_name}
+      .labels = {"job": "docker", "instance": get_hostname!(), "container": .container_name}
       # Convert timestamp to RFC3339
       if !exists(.timestamp) {
         .timestamp = now()
       }
       .timestamp = format_timestamp!(.timestamp, format: "%+")
+      # Add server name to the host label
+      .host = "$SERVER_NAME"
 
 sinks:
   gcp_logs:
