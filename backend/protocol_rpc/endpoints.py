@@ -812,6 +812,7 @@ def send_raw_transaction(
     decoded_rollup_transaction = transactions_parser.decode_signed_transaction(
         signed_rollup_transaction
     )
+    print("DECODED ROLLUP TRANSACTION", decoded_rollup_transaction)
     # Debug logging - only in DEBUG mode
     if os.environ.get("LOG_LEVEL", "INFO").upper() == "DEBUG":
         print("DECODED ROLLUP TRANSACTION", decoded_rollup_transaction)
@@ -872,11 +873,12 @@ def send_raw_transaction(
                 consensus_service.web3.is_connected()
                 and rollup_transaction_details is None
             ):
-                raise JSONRPCError(
-                    code=-32000,
-                    message="Failed to add transaction to consensus layer",
-                    data={},
-                )
+                # raise JSONRPCError(
+                #     code=-32000,
+                #     message="Failed to add transaction to consensus layer",
+                #     data={},
+                # )
+                print("Failed to add transaction to consensus layer")
 
         if genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT:
             if value > 0:
