@@ -103,6 +103,7 @@ class Manager:
         self._genvm_config = ChangedConfigFile("genvm.yaml")
         with self._genvm_config.change_default() as config:
             config["modules"]["llm"]["address"] = "ws://" + self.llm_module.address
+            # Initially include web module address, will be updated if it fails
             config["modules"]["web"]["address"] = "ws://" + self.web_module.address
 
         self._genvm_config.write_default()

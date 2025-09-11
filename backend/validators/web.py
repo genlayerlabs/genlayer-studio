@@ -3,6 +3,8 @@ import signal
 import os
 import sys
 import contextlib
+import socket
+import random
 
 from pathlib import Path
 
@@ -13,7 +15,10 @@ class WebModule:
     _process: asyncio.subprocess.Process | None
 
     def __init__(self):
-        self.address = "127.0.0.1:3031"
+        # Try to find an available port
+        self.port = self._find_available_port(3031, 3040)
+        self.address = f"127.0.0.1:{self.port}"
+        print(f"[WebModule] Using port {self.port} for web module")
 
         self._terminated = False
 
@@ -31,6 +36,22 @@ class WebModule:
             conf["lua_script_path"] = str(web_script_path)
 
         self._config.write_default()
+    
+    def _find_available_port(self, start_port, end_port):
+        """Find an available port in the given range."""
+        for port in range(start_port, end_port + 1):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(('127.0.0.1', port))
+                    return port
+            except OSError:
+                continue
+        
+        # If no port in range is available, use a random high port
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('127.0.0.1', 0))
+            port = s.getsockname()[1]
+            return port
 
     async def terminate(self):
         if self._terminated:
@@ -60,8 +81,21 @@ class WebModule:
             print(error_msg)
             raise RuntimeError(error_msg)
 
+        # Check if port is still available, find a new one if not
+        if not self._is_port_available(self.port):
+            print(f"[WebModule] Port {self.port} is in use, finding new port...")
+            self.port = self._find_available_port(3031, 3040)
+            self.address = f"127.0.0.1:{self.port}"
+            print(f"[WebModule] Now using port {self.port}")
+            
+            # Update config with new address
+            with self._config.change_default() as conf:
+                conf["bind_address"] = self.address
+            self._config.write_default()
+
         print(f"[WebModule] Starting web module with binary: {exe_path}")
         print(f"[WebModule] Config: {self._config.new_path}")
+        print(f"[WebModule] Bind address: {self.address}")
         print(f"[WebModule] WebDriver: {os.getenv('WEBDRIVERPROTOCOL', 'http')}://{os.environ['WEBDRIVERHOST']}:{os.environ['WEBDRIVERPORT']}")
 
         self._process = await asyncio.subprocess.create_subprocess_exec(
@@ -77,6 +111,15 @@ class WebModule:
         
         # Start background task to monitor process output
         asyncio.create_task(self._monitor_process())
+    
+    def _is_port_available(self, port):
+        """Check if a port is available."""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('127.0.0.1', port))
+                return True
+        except OSError:
+            return False
 
     async def _monitor_process(self):
         """Monitor process output for debugging."""
