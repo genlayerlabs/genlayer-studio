@@ -98,6 +98,7 @@ class RPCHandler:
             )
             
         except JSONRPCError as e:
+            print(f"FastAPI RPC Handler JSONRPCError: {e}")
             return JSONRPCResponse(
                 jsonrpc="2.0",
                 error={
@@ -109,6 +110,8 @@ class RPCHandler:
             )
         except Exception as e:
             import traceback
+            print(f"FastAPI RPC Handler Exception: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
             return JSONRPCResponse(
                 jsonrpc="2.0",
                 error={
