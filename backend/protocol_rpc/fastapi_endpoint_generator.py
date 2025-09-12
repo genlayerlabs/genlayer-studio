@@ -256,7 +256,7 @@ class FastAPIEndpointRegistry:
                 self.msg_handler.send_message(
                     LogEvent(
                         name="endpoint_success",
-                        type=EventType.INFO,
+                        type=EventType.SUCCESS,
                         scope=EventScope.RPC,
                         message=f"RPC method completed: {method_name}",
                         data={"method": method_name},
