@@ -9,16 +9,25 @@ export const useConsensusStore = defineStore('consensusStore', () => {
   const isLoading = ref<boolean>(true); // Needed for the delay between creating the variable and fetching the initial value
   const maxRotations = ref(Number(import.meta.env.VITE_MAX_ROTATIONS));
 
+  // Track initialization state to prevent duplicate loading state changes
+  let hasInitialized = false;
+
   // Get the value when the frontend or backend is reloaded
   webSocketClient.on('connect', fetchFinalityWindowTime);
 
   async function fetchFinalityWindowTime() {
     try {
       finalityWindow.value = await rpcClient.getFinalityWindowTime(); // Assume this RPC method exists
+      if (!hasInitialized) {
+        isLoading.value = false;
+        hasInitialized = true;
+      }
     } catch (error) {
       console.error('Failed to fetch initial finality window time: ', error);
-    } finally {
-      isLoading.value = false;
+      if (!hasInitialized) {
+        isLoading.value = false;
+        hasInitialized = true;
+      }
     }
   }
 
