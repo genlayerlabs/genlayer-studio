@@ -11,6 +11,7 @@ import {
   useGenlayer,
   useTransactionListener,
   useContractListener,
+  useWebSocketClientAsync,
 } from '@/hooks';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -18,12 +19,16 @@ export const useSetupStores = () => {
   const setupStores = async () => {
     const contractsStore = useContractsStore();
     const accountsStore = useAccountsStore();
-    const transactionsStore = useTransactionsStore();
-    const nodeStore = useNodeStore();
-    const consensusStore = useConsensusStore();
     const tutorialStore = useTutorialStore();
     const db = useDb();
     const genlayer = useGenlayer();
+
+    await useWebSocketClientAsync();
+
+    const transactionsStore = useTransactionsStore();
+    const nodeStore = useNodeStore();
+    const consensusStore = useConsensusStore();
+
     const transactionListener = useTransactionListener();
     const contractListener = useContractListener();
     const contractFiles = await db.contractFiles.toArray();

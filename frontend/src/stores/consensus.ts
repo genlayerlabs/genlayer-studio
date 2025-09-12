@@ -9,8 +9,6 @@ export const useConsensusStore = defineStore('consensusStore', () => {
   const isLoading = ref<boolean>(true); // Needed for the delay between creating the variable and fetching the initial value
   const maxRotations = ref(Number(import.meta.env.VITE_MAX_ROTATIONS));
 
-  if (!webSocketClient.connected) webSocketClient.connect();
-
   // Get the value when the frontend or backend is reloaded
   webSocketClient.on('connect', fetchFinalityWindowTime);
 

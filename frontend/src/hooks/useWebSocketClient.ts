@@ -33,17 +33,17 @@ class NativeWebSocketClient {
   public connect() {
     try {
       this.ws = new WebSocket(this.url);
-      
+
       this.ws.onopen = () => {
         console.log('WebSocket connected');
         this.id = `ws-${Date.now()}`;
         this.connected = true;
         this.reconnectAttempts = 0;
         this.reconnectTimeout = 1000;
-        
+
         // Trigger connect event
         this.triggerEvent('connect', null);
-        
+
         // Re-subscribe to topics after reconnection
         if (this.subscribedTopics.size > 0) {
           this.emit('subscribe', Array.from(this.subscribedTopics));
@@ -68,7 +68,7 @@ class NativeWebSocketClient {
         this.id = null;
         this.connected = false;
         this.triggerEvent('disconnect', null);
-        
+
         if (this.shouldReconnect) {
           this.reconnect();
         }
@@ -83,11 +83,13 @@ class NativeWebSocketClient {
     this.reconnectAttempts++;
     const timeout = Math.min(
       this.reconnectTimeout * Math.pow(2, this.reconnectAttempts - 1),
-      this.maxReconnectTimeout
+      this.maxReconnectTimeout,
     );
-    
-    console.log(`Reconnecting in ${timeout}ms (attempt ${this.reconnectAttempts})`);
-    
+
+    console.log(
+      `Reconnecting in ${timeout}ms (attempt ${this.reconnectAttempts})`,
+    );
+
     setTimeout(() => {
       if (this.shouldReconnect) {
         this.connect();
@@ -97,7 +99,7 @@ class NativeWebSocketClient {
 
   private handleMessage(message: WebSocketMessage) {
     const { event, data } = message;
-    
+
     // Handle internal events
     if (event === 'subscribed') {
       if (data?.room) {
@@ -108,7 +110,7 @@ class NativeWebSocketClient {
         this.subscribedTopics.delete(data.room);
       }
     }
-    
+
     // Trigger event handlers
     this.triggerEvent(event, data);
   }
@@ -116,7 +118,7 @@ class NativeWebSocketClient {
   private triggerEvent(event: string, data: any) {
     const handlers = this.eventHandlers.get(event);
     if (handlers) {
-      handlers.forEach(handler => {
+      handlers.forEach((handler) => {
         try {
           handler(data);
         } catch (error) {
@@ -147,15 +149,19 @@ class NativeWebSocketClient {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       const message: WebSocketMessage = { event, data };
       this.ws.send(JSON.stringify(message));
-      
+
       // Track subscriptions locally
       if (event === 'subscribe' && Array.isArray(data)) {
-        data.forEach(topic => this.subscribedTopics.add(topic));
+        data.forEach((topic) => this.subscribedTopics.add(topic));
       } else if (event === 'unsubscribe' && Array.isArray(data)) {
-        data.forEach(topic => this.subscribedTopics.delete(topic));
+        data.forEach((topic) => this.subscribedTopics.delete(topic));
       }
     } else {
-      console.warn('WebSocket is not connected. Message not sent:', event, data);
+      console.warn(
+        'WebSocket is not connected. Message not sent:',
+        event,
+        data,
+      );
     }
   }
 
@@ -175,14 +181,48 @@ class NativeWebSocketClient {
   }
 }
 
-// Singleton instance
+// Singleton instance with initialization state tracking
 let webSocketClient: NativeWebSocketClient | null = null;
+let isInitializing: boolean = false;
 
-export function useWebSocketClient() {
-  if (!webSocketClient) {
-    const wsUrl = import.meta.env.VITE_WS_SERVER_URL || 'ws://localhost:4000';
-    webSocketClient = new NativeWebSocketClient(wsUrl);
+export function useWebSocketClient(): NativeWebSocketClient {
+  // Return existing client if already created or currently initializing
+  if (webSocketClient && (webSocketClient.connected || isInitializing)) {
+    return webSocketClient;
   }
 
-  return webSocketClient;
+  // Create new client if none exists
+  if (!webSocketClient && !isInitializing) {
+    isInitializing = true;
+    const wsUrl = import.meta.env.VITE_WS_SERVER_URL || 'ws://localhost:4000';
+    webSocketClient = new NativeWebSocketClient(wsUrl);
+
+    // Reset initialization flag when connection completes (success or failure)
+    webSocketClient.on('connect', () => {
+      isInitializing = false;
+    });
+
+    // Also handle connection failures
+    webSocketClient.on('disconnect', () => {
+      if (isInitializing) {
+        isInitializing = false;
+      }
+    });
+  }
+
+  return webSocketClient!;
+}
+
+export async function useWebSocketClientAsync(): Promise<NativeWebSocketClient> {
+  const client = useWebSocketClient();
+
+  if (client.connected) {
+    return client;
+  }
+
+  return new Promise<NativeWebSocketClient>((resolve) => {
+    client.on('connect', () => {
+      resolve(client);
+    });
+  });
 }
