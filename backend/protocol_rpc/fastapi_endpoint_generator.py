@@ -13,6 +13,7 @@ from functools import partial, wraps
 from typing import Callable, Dict, Any, Optional
 
 from backend.protocol_rpc.message_handler.fastapi_handler import MessageHandler
+from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope
 
 
 def get_json_rpc_method_name(function: Callable, method_name: str | None = None):
@@ -34,9 +35,7 @@ def _decode_exception(x: Exception) -> typing.Any:
             res = {
                 "message": str(x),
                 "type": type(x).__name__,
-                "traceback": traceback.format_exception(
-                    type(x), x, x.__traceback__
-                ),
+                "traceback": traceback.format_exception(type(x), x, x.__traceback__),
             }
             if x.__cause__ is not None:
                 res["cause"] = x.__cause__
@@ -77,12 +76,12 @@ def _serialize(obj):
 
 class FastAPIEndpointRegistry:
     """Registry for FastAPI RPC endpoints."""
-    
+
     def __init__(self, msg_handler: MessageHandler):
         self.msg_handler = msg_handler
         self.methods: Dict[str, Callable] = {}
         self.method_metadata: Dict[str, Dict[str, Any]] = {}
-    
+
     def generate_rpc_endpoint(
         self,
         partial_function: Callable,
@@ -93,83 +92,97 @@ class FastAPIEndpointRegistry:
         Returns the method name that was registered.
         """
         json_rpc_method_name = get_json_rpc_method_name(partial_function, method_name)
-        
+
         # Store the partial function and its metadata
         self.methods[json_rpc_method_name] = partial_function
-        
+
         # Store metadata about what parameters are already filled
         if isinstance(partial_function, partial):
             filled_args = partial_function.args if partial_function.args else ()
-            filled_kwargs = partial_function.keywords if partial_function.keywords else {}
+            filled_kwargs = (
+                partial_function.keywords if partial_function.keywords else {}
+            )
             underlying_func = partial_function.func
         else:
             filled_args = ()
             filled_kwargs = {}
             underlying_func = partial_function
-        
+
         self.method_metadata[json_rpc_method_name] = {
-            'filled_args': filled_args,
-            'filled_kwargs': filled_kwargs,
-            'underlying_func': underlying_func,
-            'is_partial': isinstance(partial_function, partial)
+            "filled_args": filled_args,
+            "filled_kwargs": filled_kwargs,
+            "underlying_func": underlying_func,
+            "is_partial": isinstance(partial_function, partial),
         }
-        
+
         return json_rpc_method_name
-    
+
     async def handle_method(
         self,
         method_name: str,
         params: Optional[Any],
         app_state: Dict[str, Any],
-        db: Any
+        db: Any,
     ) -> Any:
         """
         Handle execution of a registered RPC method.
         """
         if method_name not in self.methods:
             raise ValueError(f"Method {method_name} not found")
-        
-        # Log the RPC method call as endpoint_call event
-        from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope
-        self.msg_handler.send_message(
-            LogEvent(
-                name="endpoint_call",
-                type=EventType.INFO,
-                scope=EventScope.RPC,
-                message=f"RPC method called: {method_name}",
-                data={"method": method_name, "params": params}
+
+        # Check if this method should be logged
+        from backend.protocol_rpc.configuration import GlobalConfiguration
+
+        disabled_endpoints = GlobalConfiguration.get_disabled_info_logs_endpoints()
+        should_log = method_name not in disabled_endpoints
+
+        if should_log:
+            # Log the RPC method call as endpoint_call event
+            self.msg_handler.send_message(
+                LogEvent(
+                    name="endpoint_call",
+                    type=EventType.INFO,
+                    scope=EventScope.RPC,
+                    message=f"RPC method called: {method_name}",
+                    data={"method": method_name, "params": params},
+                )
             )
-        )
-        
+
         handler = self.methods[method_name]
         metadata = self.method_metadata[method_name]
-        
+
         # Get the signature of the underlying function
-        underlying_func = metadata['underlying_func']
+        underlying_func = metadata["underlying_func"]
         sig = inspect.signature(underlying_func)
-        
+
         # Build kwargs for dependencies that haven't been filled by partial
         kwargs = {}
-        
-        if metadata['is_partial']:
+
+        if metadata["is_partial"]:
             # For partial functions, skip parameters that are already filled
-            filled_args_count = len(metadata['filled_args'])
-            filled_kwargs = metadata['filled_kwargs']
-            
+            filled_args_count = len(metadata["filled_args"])
+            filled_kwargs = metadata["filled_kwargs"]
+
             param_list = list(sig.parameters.items())
-            
+
             # Check if we need to replace None session in filled_args
-            modified_args = list(metadata['filled_args'])
+            modified_args = list(metadata["filled_args"])
             for i, arg in enumerate(modified_args):
                 if i < len(param_list):
                     param_name = param_list[i][0]
-                    if (param_name == 'session' or param_name == 'request_session') and arg is None:
+                    if (
+                        param_name == "session" or param_name == "request_session"
+                    ) and arg is None:
                         modified_args[i] = db
-            
+
             # Create a new partial with the modified args if needed
-            if modified_args != list(metadata['filled_args']):
-                handler = partial(metadata['underlying_func'], *modified_args, **metadata['filled_kwargs'])
-            
+            if modified_args != list(metadata["filled_args"]):
+                handler = partial(
+                    metadata["underlying_func"],
+                    *modified_args,
+                    **metadata["filled_kwargs"],
+                )
+
             # Skip filled positional arguments and add unfilled dependencies
             for i, (param_name, param) in enumerate(param_list):
                 # Skip if it's a positional arg that was filled
@@ -178,44 +191,44 @@ class FastAPIEndpointRegistry:
                 # Skip if it's a keyword arg that was filled
                 if param_name in filled_kwargs:
                     continue
-                
+
                 # Add dependency injection for unfilled parameters
-                if param_name == 'session' or param_name == 'request_session':
+                if param_name == "session" or param_name == "request_session":
                     kwargs[param_name] = db
-                elif param_name == 'msg_handler':
-                    kwargs[param_name] = app_state.get('msg_handler')
-                elif param_name == 'accounts_manager':
-                    kwargs[param_name] = app_state.get('accounts_manager')
-                elif param_name == 'transactions_processor':
-                    kwargs[param_name] = app_state.get('transactions_processor')
-                elif param_name == 'validators_registry':
-                    kwargs[param_name] = app_state.get('validators_registry')
-                elif param_name == 'modifiable_validators_registry':
-                    kwargs[param_name] = app_state.get('modifiable_validators_registry')
-                elif param_name == 'validators_manager':
-                    kwargs[param_name] = app_state.get('validators_manager')
-                elif param_name == 'llm_provider_registry':
-                    kwargs[param_name] = app_state.get('llm_provider_registry')
-                elif param_name == 'consensus':
-                    kwargs[param_name] = app_state.get('consensus')
-                elif param_name == 'consensus_service':
-                    kwargs[param_name] = app_state.get('consensus_service')
-                elif param_name == 'snapshot_manager':
-                    kwargs[param_name] = app_state.get('snapshot_manager')
-                elif param_name == 'transactions_parser':
-                    kwargs[param_name] = app_state.get('transactions_parser')
-                elif param_name == 'sqlalchemy_db':
-                    kwargs[param_name] = app_state.get('sqlalchemy_db')
+                elif param_name == "msg_handler":
+                    kwargs[param_name] = app_state.get("msg_handler")
+                elif param_name == "accounts_manager":
+                    kwargs[param_name] = app_state.get("accounts_manager")
+                elif param_name == "transactions_processor":
+                    kwargs[param_name] = app_state.get("transactions_processor")
+                elif param_name == "validators_registry":
+                    kwargs[param_name] = app_state.get("validators_registry")
+                elif param_name == "modifiable_validators_registry":
+                    kwargs[param_name] = app_state.get("modifiable_validators_registry")
+                elif param_name == "validators_manager":
+                    kwargs[param_name] = app_state.get("validators_manager")
+                elif param_name == "llm_provider_registry":
+                    kwargs[param_name] = app_state.get("llm_provider_registry")
+                elif param_name == "consensus":
+                    kwargs[param_name] = app_state.get("consensus")
+                elif param_name == "consensus_service":
+                    kwargs[param_name] = app_state.get("consensus_service")
+                elif param_name == "snapshot_manager":
+                    kwargs[param_name] = app_state.get("snapshot_manager")
+                elif param_name == "transactions_parser":
+                    kwargs[param_name] = app_state.get("transactions_parser")
+                elif param_name == "sqlalchemy_db":
+                    kwargs[param_name] = app_state.get("sqlalchemy_db")
         else:
             # For non-partial functions, inject all dependencies
             for param_name in sig.parameters:
-                if param_name == 'session' or param_name == 'request_session':
+                if param_name == "session" or param_name == "request_session":
                     kwargs[param_name] = db
-                elif param_name == 'msg_handler':
-                    kwargs[param_name] = app_state.get('msg_handler')
+                elif param_name == "msg_handler":
+                    kwargs[param_name] = app_state.get("msg_handler")
                 elif param_name in app_state:
                     kwargs[param_name] = app_state.get(param_name)
-        
+
         # Call the handler with params
         try:
             if isinstance(params, list):
@@ -231,26 +244,27 @@ class FastAPIEndpointRegistry:
             else:
                 # Single parameter
                 result = handler(params, **kwargs)
-            
+
             # Handle async functions
             if inspect.iscoroutinefunction(underlying_func):
                 result = await result
             elif hasattr(result, "__await__"):
                 result = await result
-            
+
             # Log successful endpoint call
-            self.msg_handler.send_message(
-                LogEvent(
-                    name="endpoint_success",
-                    type=EventType.INFO,
-                    scope=EventScope.RPC,
-                    message=f"RPC method completed: {method_name}",
-                    data={"method": method_name}
+            if should_log:
+                self.msg_handler.send_message(
+                    LogEvent(
+                        name="endpoint_success",
+                        type=EventType.INFO,
+                        scope=EventScope.RPC,
+                        message=f"RPC method completed: {method_name}",
+                        data={"method": method_name},
+                    )
                 )
-            )
-            
+
             return _serialize(result)
-            
+
         except Exception as e:
             # Log the error as endpoint_error event
             self.msg_handler.send_message(
@@ -259,17 +273,17 @@ class FastAPIEndpointRegistry:
                     type=EventType.ERROR,
                     scope=EventScope.RPC,
                     message=f"Error in {method_name}: {str(e)}",
-                    data={"method": method_name, "error": str(e)}
+                    data={"method": method_name, "error": str(e)},
                 )
             )
-            
+
             # Rollback the database session on any error
-            if db and hasattr(db, 'rollback'):
+            if db and hasattr(db, "rollback"):
                 try:
                     db.rollback()
                 except:
                     pass  # Ignore rollback errors
-            
+
             raise
 
 
@@ -293,65 +307,263 @@ def register_endpoints_for_fastapi(
     This replaces the Flask-JSONRPC registration.
     """
     from backend.protocol_rpc import endpoints
-    
+
     registry = FastAPIEndpointRegistry(msg_handler)
-    
+
     # Helper function to register endpoints
     def register(func, method_name=None):
         return registry.generate_rpc_endpoint(func, method_name)
-    
+
     # Register all endpoints (same as in endpoints.py register_endpoints)
     register(endpoints.ping)
     register(partial(endpoints.clear_db_tables, request_session), "sim_clearDbTables")
-    register(partial(endpoints.fund_account, accounts_manager, transactions_processor), "sim_fundAccount")
-    register(partial(endpoints.get_providers_and_models, llm_provider_registry, validators_manager), "sim_getProvidersAndModels")
-    register(partial(endpoints.reset_defaults_llm_providers, llm_provider_registry), "sim_resetDefaultsLlmProviders")
+    register(
+        partial(endpoints.fund_account, accounts_manager, transactions_processor),
+        "sim_fundAccount",
+    )
+    register(
+        partial(
+            endpoints.get_providers_and_models,
+            llm_provider_registry,
+            validators_manager,
+        ),
+        "sim_getProvidersAndModels",
+    )
+    register(
+        partial(endpoints.reset_defaults_llm_providers, llm_provider_registry),
+        "sim_resetDefaultsLlmProviders",
+    )
     register(partial(endpoints.add_provider, llm_provider_registry), "sim_addProvider")
-    register(partial(endpoints.update_provider, llm_provider_registry), "sim_updateProvider")
-    register(partial(endpoints.delete_provider, llm_provider_registry), "sim_deleteProvider")
+    register(
+        partial(endpoints.update_provider, llm_provider_registry), "sim_updateProvider"
+    )
+    register(
+        partial(endpoints.delete_provider, llm_provider_registry), "sim_deleteProvider"
+    )
     # Use validators_manager.registry instead of modifiable_validators_registry for proper session management
-    register(partial(endpoints.create_validator, validators_manager.registry if validators_manager else modifiable_validators_registry, accounts_manager), "sim_createValidator")
-    register(partial(endpoints.create_random_validator, validators_manager.registry if validators_manager else modifiable_validators_registry, accounts_manager, llm_provider_registry, validators_manager), "sim_createRandomValidator")
-    register(partial(endpoints.create_random_validators, validators_manager.registry if validators_manager else modifiable_validators_registry, accounts_manager, llm_provider_registry, validators_manager), "sim_createRandomValidators")
-    register(partial(endpoints.update_validator, validators_manager.registry if validators_manager else modifiable_validators_registry, accounts_manager), "sim_updateValidator")
-    register(partial(endpoints.delete_validator, validators_manager.registry if validators_manager else modifiable_validators_registry, accounts_manager), "sim_deleteValidator")
-    register(partial(endpoints.delete_all_validators, validators_manager.registry if validators_manager else modifiable_validators_registry), "sim_deleteAllValidators")
+    register(
+        partial(
+            endpoints.create_validator,
+            (
+                validators_manager.registry
+                if validators_manager
+                else modifiable_validators_registry
+            ),
+            accounts_manager,
+        ),
+        "sim_createValidator",
+    )
+    register(
+        partial(
+            endpoints.create_random_validator,
+            (
+                validators_manager.registry
+                if validators_manager
+                else modifiable_validators_registry
+            ),
+            accounts_manager,
+            llm_provider_registry,
+            validators_manager,
+        ),
+        "sim_createRandomValidator",
+    )
+    register(
+        partial(
+            endpoints.create_random_validators,
+            (
+                validators_manager.registry
+                if validators_manager
+                else modifiable_validators_registry
+            ),
+            accounts_manager,
+            llm_provider_registry,
+            validators_manager,
+        ),
+        "sim_createRandomValidators",
+    )
+    register(
+        partial(
+            endpoints.update_validator,
+            (
+                validators_manager.registry
+                if validators_manager
+                else modifiable_validators_registry
+            ),
+            accounts_manager,
+        ),
+        "sim_updateValidator",
+    )
+    register(
+        partial(
+            endpoints.delete_validator,
+            (
+                validators_manager.registry
+                if validators_manager
+                else modifiable_validators_registry
+            ),
+            accounts_manager,
+        ),
+        "sim_deleteValidator",
+    )
+    register(
+        partial(
+            endpoints.delete_all_validators,
+            (
+                validators_manager.registry
+                if validators_manager
+                else modifiable_validators_registry
+            ),
+        ),
+        "sim_deleteAllValidators",
+    )
     # Use validators_manager.registry for read operations too to ensure consistency
-    register(partial(endpoints.get_all_validators, validators_manager.registry if validators_manager else validators_registry), "sim_getAllValidators")
-    register(partial(endpoints.get_validator, validators_manager.registry if validators_manager else validators_registry), "sim_getValidator")
-    register(partial(endpoints.count_validators, validators_manager.registry if validators_manager else validators_registry), "sim_countValidators")
-    register(partial(endpoints.get_transactions_for_address, transactions_processor, accounts_manager), "sim_getTransactionsForAddress")
-    register(partial(endpoints.set_finality_window_time, consensus), "sim_setFinalityWindowTime")
-    register(partial(endpoints.get_finality_window_time, consensus), "sim_getFinalityWindowTime")
-    register(partial(endpoints.get_contract, accounts_manager), "sim_getConsensusContract")
+    register(
+        partial(
+            endpoints.get_all_validators,
+            validators_manager.registry if validators_manager else validators_registry,
+        ),
+        "sim_getAllValidators",
+    )
+    register(
+        partial(
+            endpoints.get_validator,
+            validators_manager.registry if validators_manager else validators_registry,
+        ),
+        "sim_getValidator",
+    )
+    register(
+        partial(
+            endpoints.count_validators,
+            validators_manager.registry if validators_manager else validators_registry,
+        ),
+        "sim_countValidators",
+    )
+    register(
+        partial(
+            endpoints.get_transactions_for_address,
+            transactions_processor,
+            accounts_manager,
+        ),
+        "sim_getTransactionsForAddress",
+    )
+    register(
+        partial(endpoints.set_finality_window_time, consensus),
+        "sim_setFinalityWindowTime",
+    )
+    register(
+        partial(endpoints.get_finality_window_time, consensus),
+        "sim_getFinalityWindowTime",
+    )
+    register(
+        partial(endpoints.get_contract, accounts_manager), "sim_getConsensusContract"
+    )
     register(partial(endpoints.create_snapshot, snapshot_manager), "sim_createSnapshot")
-    register(partial(endpoints.restore_snapshot, snapshot_manager, msg_handler, consensus, validators_manager), "sim_restoreSnapshot")
-    register(partial(endpoints.delete_all_snapshots, snapshot_manager), "sim_deleteAllSnapshots")
-    
+    register(
+        partial(
+            endpoints.restore_snapshot,
+            snapshot_manager,
+            msg_handler,
+            consensus,
+            validators_manager,
+        ),
+        "sim_restoreSnapshot",
+    )
+    register(
+        partial(endpoints.delete_all_snapshots, snapshot_manager),
+        "sim_deleteAllSnapshots",
+    )
+
     # GenLayer endpoints
-    register(partial(endpoints.get_contract_schema, accounts_manager, msg_handler), "gen_getContractSchema")
-    register(partial(endpoints.get_contract_schema_for_code, msg_handler), "gen_getContractSchemaForCode")
-    register(partial(endpoints.get_contract_code, request_session), "gen_getContractCode")
-    register(partial(endpoints.gen_call, request_session, accounts_manager, msg_handler, transactions_parser, validators_manager), "gen_call")
-    register(partial(endpoints.sim_call, request_session, accounts_manager, msg_handler, transactions_parser, validators_manager), "sim_call")
-    
+    register(
+        partial(endpoints.get_contract_schema, accounts_manager, msg_handler),
+        "gen_getContractSchema",
+    )
+    register(
+        partial(endpoints.get_contract_schema_for_code, msg_handler),
+        "gen_getContractSchemaForCode",
+    )
+    register(
+        partial(endpoints.get_contract_code, request_session), "gen_getContractCode"
+    )
+    register(
+        partial(
+            endpoints.gen_call,
+            request_session,
+            accounts_manager,
+            msg_handler,
+            transactions_parser,
+            validators_manager,
+        ),
+        "gen_call",
+    )
+    register(
+        partial(
+            endpoints.sim_call,
+            request_session,
+            accounts_manager,
+            msg_handler,
+            transactions_parser,
+            validators_manager,
+        ),
+        "sim_call",
+    )
+
     # Ethereum-compatible endpoints
     register(partial(endpoints.get_balance, accounts_manager), "eth_getBalance")
-    register(partial(endpoints.get_transaction_by_hash, transactions_processor), "eth_getTransactionByHash")
-    register(partial(endpoints.eth_call, request_session, accounts_manager, msg_handler, transactions_parser, validators_manager), "eth_call")
-    register(partial(endpoints.send_raw_transaction, transactions_processor, msg_handler, accounts_manager, transactions_parser, consensus_service), "eth_sendRawTransaction")
-    register(partial(endpoints.get_transaction_count, transactions_processor), "eth_getTransactionCount")
+    register(
+        partial(endpoints.get_transaction_by_hash, transactions_processor),
+        "eth_getTransactionByHash",
+    )
+    register(
+        partial(
+            endpoints.eth_call,
+            request_session,
+            accounts_manager,
+            msg_handler,
+            transactions_parser,
+            validators_manager,
+        ),
+        "eth_call",
+    )
+    register(
+        partial(
+            endpoints.send_raw_transaction,
+            transactions_processor,
+            msg_handler,
+            accounts_manager,
+            transactions_parser,
+            consensus_service,
+        ),
+        "eth_sendRawTransaction",
+    )
+    register(
+        partial(endpoints.get_transaction_count, transactions_processor),
+        "eth_getTransactionCount",
+    )
     register(endpoints.get_chain_id, "eth_chainId")
     register(endpoints.get_net_version, "net_version")
-    register(partial(endpoints.get_block_number, transactions_processor), "eth_blockNumber")
-    register(partial(endpoints.get_block_by_number, transactions_processor), "eth_getBlockByNumber")
+    register(
+        partial(endpoints.get_block_number, transactions_processor), "eth_blockNumber"
+    )
+    register(
+        partial(endpoints.get_block_by_number, transactions_processor),
+        "eth_getBlockByNumber",
+    )
     register(endpoints.get_gas_price, "eth_gasPrice")
     register(endpoints.get_gas_estimate, "eth_estimateGas")
-    register(partial(endpoints.get_transaction_receipt, transactions_processor), "eth_getTransactionReceipt")
-    register(partial(endpoints.get_block_by_hash, transactions_processor), "eth_getBlockByHash")
-    
+    register(
+        partial(endpoints.get_transaction_receipt, transactions_processor),
+        "eth_getTransactionReceipt",
+    )
+    register(
+        partial(endpoints.get_block_by_hash, transactions_processor),
+        "eth_getBlockByHash",
+    )
+
     # Dev endpoints
     if sqlalchemy_db:
-        register(partial(endpoints.dev_get_pool_status, sqlalchemy_db), "dev_getPoolStatus")
-    
+        register(
+            partial(endpoints.dev_get_pool_status, sqlalchemy_db), "dev_getPoolStatus"
+        )
+
     return registry
