@@ -8,7 +8,7 @@ import dataclasses
 from typing import Callable
 from flask_jsonrpc import JSONRPC
 import flask
-from flask_jsonrpc.exceptions import JSONRPCError
+from backend.protocol_rpc.exceptions import JSONRPCError
 from functools import partial, wraps
 import requests
 import os

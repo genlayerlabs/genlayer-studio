@@ -5,7 +5,7 @@ import eth_utils
 from functools import partial, wraps
 from typing import Any
 from flask_jsonrpc import JSONRPC
-from flask_jsonrpc.exceptions import JSONRPCError
+from backend.protocol_rpc.exceptions import JSONRPCError
 from sqlalchemy import Table
 from sqlalchemy.orm import Session
 import backend.validators as validators
@@ -727,9 +727,9 @@ def get_transaction_count(
 
 
 def get_transaction_by_hash(
-    transactions_processor: TransactionsProcessor, 
+    transactions_processor: TransactionsProcessor,
     transaction_hash: str,
-    sim_config: dict | None = None
+    sim_config: dict | None = None,
 ) -> dict | None:
     return transactions_processor.get_transaction_by_hash(transaction_hash, sim_config)
 

@@ -5,7 +5,7 @@ from functools import wraps
 import traceback
 
 from flask import request
-from flask_jsonrpc.exceptions import JSONRPCError
+from backend.protocol_rpc.exceptions import JSONRPCError
 from loguru import logger
 import sys
 

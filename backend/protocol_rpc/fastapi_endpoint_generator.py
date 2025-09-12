@@ -266,6 +266,16 @@ class FastAPIEndpointRegistry:
             return _serialize(result)
 
         except Exception as e:
+            import traceback
+
+            print(f"Error in {method_name}")
+            print(
+                {
+                    "type": type(e).__name__,
+                    "message": str(e),
+                    "traceback": traceback.format_exc(),
+                }
+            )
             # Log the error as endpoint_error event
             self.msg_handler.send_message(
                 LogEvent(
@@ -273,7 +283,11 @@ class FastAPIEndpointRegistry:
                     type=EventType.ERROR,
                     scope=EventScope.RPC,
                     message=f"Error in {method_name}: {str(e)}",
-                    data={"method": method_name, "error": str(e)},
+                    data={
+                        "method": method_name,
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                    },
                 )
             )
 
