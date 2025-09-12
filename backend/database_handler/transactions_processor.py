@@ -309,7 +309,11 @@ class TransactionsProcessor:
                 len(transaction_data["consensus_history"]["consensus_results"]) - 1
             )
             last_round = transaction_data["consensus_history"]["consensus_results"][-1]
-            if "leader_result" in last_round and len(last_round["leader_result"]) > 1:
+            if (
+                "leader_result" in last_round
+                and last_round["leader_result"] is not None
+                and len(last_round["leader_result"]) > 1
+            ):
                 leader = last_round["leader_result"][1]
                 validator_votes_name.append(leader["vote"].upper())
                 vote_number = int(Vote.from_string(leader["vote"]))
@@ -548,7 +552,9 @@ class TransactionsProcessor:
         transaction_data["result_name"] = consensus_result.value
         return transaction_data
 
-    def get_transaction_by_hash(self, transaction_hash: str, sim_config: dict | None = None) -> dict | None:
+    def get_transaction_by_hash(
+        self, transaction_hash: str, sim_config: dict | None = None
+    ) -> dict | None:
         transaction = (
             self.session.query(Transactions)
             .filter_by(hash=transaction_hash)
@@ -561,16 +567,21 @@ class TransactionsProcessor:
         transaction_data = self._parse_transaction_data(transaction)
 
         # Handle contract_state based on sim_config
-        include_contract_state = sim_config and sim_config.get("include_contract_state", False)
-        
+        include_contract_state = sim_config and sim_config.get(
+            "include_contract_state", False
+        )
+
         # Remove contract_state from consensus_data by default (unless explicitly requested)
-        if transaction_data.get("consensus_data") and "leader_receipt" in transaction_data["consensus_data"]:
+        if (
+            transaction_data.get("consensus_data")
+            and "leader_receipt" in transaction_data["consensus_data"]
+        ):
             leader_receipt = transaction_data["consensus_data"]["leader_receipt"]
-            
+
             if isinstance(leader_receipt, dict):
                 if not include_contract_state and "contract_state" in leader_receipt:
                     del leader_receipt["contract_state"]
-                    
+
             elif isinstance(leader_receipt, list):
                 for receipt in leader_receipt:
                     if isinstance(receipt, dict):
