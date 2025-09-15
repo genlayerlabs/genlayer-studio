@@ -13,7 +13,6 @@ from pathlib import Path
 import json
 import contextlib
 import re
-import socket
 
 from dotenv import load_dotenv
 
@@ -29,17 +28,17 @@ def extract_error_message(stdout: str) -> str:
         # Pattern to match: "code": Str("error_code"), "message": Str("error message")
         pattern = r'"code":\s*Str\("([^"]+)"\),\s*"message":\s*Str\("([^"]*(?:[^"\\]|\\.)*?)"\)'
         match = re.search(pattern, stdout)
-        
+
         if match:
             error_code = match.group(1)
             error_message = match.group(2)
             return f'code: "{error_code}", message: "{error_message}"'
-        
+
         # Fallback: if no structured error found, return a truncated version
         if len(stdout) > 500:
             return stdout[:500] + "... [truncated]"
         return stdout
-        
+
     except Exception:
         # If parsing fails, return truncated version
         if len(stdout) > 500:
@@ -60,10 +59,7 @@ class LLMModule:
     _process: asyncio.subprocess.Process | None
 
     def __init__(self):
-        # Try to find an available port
-        self.port = self._find_available_port(3032, 3042)
-        self.address = f"127.0.0.1:{self.port}"
-        print(f"[LLMModule] Using port {self.port} for LLM module")
+        self.address = f"127.0.0.1:3032"
 
         self._terminated = False
 
@@ -79,31 +75,6 @@ class LLMModule:
             conf["bind_address"] = self.address
 
         self._config.write_default()
-    
-    def _find_available_port(self, start_port, end_port):
-        """Find an available port in the given range."""
-        for port in range(start_port, end_port + 1):
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.bind(('127.0.0.1', port))
-                    return port
-            except OSError:
-                continue
-        
-        # If no port in range is available, use a random high port
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(('127.0.0.1', 0))
-            port = s.getsockname()[1]
-            return port
-    
-    def _is_port_available(self, port):
-        """Check if a port is available."""
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(('127.0.0.1', port))
-                return True
-        except OSError:
-            return False
 
     async def terminate(self):
         if self._terminated:
@@ -158,26 +129,6 @@ class LLMModule:
         await self.stop()
 
         exe_path = Path(os.environ["GENVM_BIN"]).joinpath("genvm-modules")
-        if not exe_path.exists():
-            error_msg = f"[LLMModule] genvm-modules binary not found at: {exe_path}"
-            print(error_msg)
-            raise RuntimeError(error_msg)
-
-        # Check if port is still available, find a new one if not
-        if not self._is_port_available(self.port):
-            print(f"[LLMModule] Port {self.port} is in use, finding new port...")
-            self.port = self._find_available_port(3032, 3042)
-            self.address = f"127.0.0.1:{self.port}"
-            print(f"[LLMModule] Now using port {self.port}")
-            
-            # Update config with new address
-            with self._config.change_default() as conf:
-                conf["bind_address"] = self.address
-            self._config.write_default()
-
-        print(f"[LLMModule] Starting LLM module with binary: {exe_path}")
-        print(f"[LLMModule] Config: {self._config.new_path}")
-        print(f"[LLMModule] Bind address: {self.address}")
 
         self._process = await asyncio.subprocess.create_subprocess_exec(
             exe_path,
@@ -187,48 +138,9 @@ class LLMModule:
             "--allow-empty-backends",
             "--die-with-parent",
             stdin=None,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
         )
-        
-        # Start background task to monitor process output
-        asyncio.create_task(self._monitor_process())
-    
-    async def _monitor_process(self):
-        """Monitor process output for debugging."""
-        if self._process is None:
-            return
-            
-        try:
-            # Read stdout
-            if self._process.stdout:
-                asyncio.create_task(self._read_stream(self._process.stdout, "stdout"))
-            
-            # Read stderr
-            if self._process.stderr:
-                asyncio.create_task(self._read_stream(self._process.stderr, "stderr"))
-                
-            # Wait for process to exit
-            return_code = await self._process.wait()
-            if return_code != 0:
-                print(f"[LLMModule] Process exited with code {return_code}")
-        except Exception as e:
-            print(f"[LLMModule] Error monitoring process: {e}")
-    
-    async def _read_stream(self, stream, stream_name):
-        """Read and log output from a stream."""
-        try:
-            while True:
-                line = await stream.readline()
-                if not line:
-                    break
-                decoded_line = line.decode('utf-8').strip()
-                if decoded_line:
-                    # Only log errors and warnings to avoid flooding logs
-                    if "error" in decoded_line.lower() or "warn" in decoded_line.lower() or "fail" in decoded_line.lower():
-                        print(f"[LLMModule] {stream_name}: {decoded_line}")
-        except Exception as e:
-            print(f"[LLMModule] Error reading {stream_name}: {e}")
 
     async def verify_for_read(self):
         if self._process is None:
@@ -236,7 +148,9 @@ class LLMModule:
             await self.restart()
         elif self._process.returncode is not None:
             # Restart the process if it's dead
-            print(f"LLM process died with code {self._process.returncode}, restarting...")
+            print(
+                f"LLM process died with code {self._process.returncode}, restarting..."
+            )
             await self.restart()
 
     async def change_config(self, new_providers: list[SimulatorProvider]):
