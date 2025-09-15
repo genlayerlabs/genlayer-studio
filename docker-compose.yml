@@ -190,6 +190,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - WEBDRIVERHOST=${WEBDRIVERHOST}
       - WEBDRIVERPORT=${WEBDRIVERPORT}
+      - JSONRPC_SERVER_URL=${JSONRPC_SERVER_URL:-http://jsonrpc:4000}
     volumes:
       - ./.env:/app/.env
       - ./backend:/app/backend
@@ -201,6 +202,8 @@ services:
       ollama:
         condition: service_started
         required: false
+      jsonrpc:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4001/health"]
       interval: 30s

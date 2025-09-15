@@ -15,11 +15,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
 from backend.protocol_rpc.configuration import GlobalConfiguration
-from backend.protocol_rpc.message_handler.fastapi_handler import (
-    MessageHandler,
-    setup_loguru_config,
-)
-
+from backend.protocol_rpc.message_handler.fastapi_handler import MessageHandler, setup_loguru_config
+from loguru import logger
 # from backend.protocol_rpc.endpoints import register_all_rpc_endpoints
 from backend.protocol_rpc.fastapi_rpc_handler import (
     RPCHandler,
@@ -366,6 +363,46 @@ async def jsonrpc_endpoint(request: Request):
         )
         return JSONResponse(content=response.model_dump(exclude_none=True))
 
+
+# Internal endpoint for workers to send events
+@app.post("/internal/events")
+async def internal_events_endpoint(request: Request):
+    """
+    Internal endpoint for workers to send events that should be
+    forwarded to WebSocket clients.
+    """
+    # Verify internal secret if configured
+    internal_secret = os.environ.get("INTERNAL_EVENT_SECRET")
+    if internal_secret:
+        provided_secret = request.headers.get("X-Internal-Secret")
+        if provided_secret != internal_secret:
+            raise HTTPException(status_code=403, detail="Invalid internal secret")
+    
+    try:
+        body = await request.json()
+        worker_id = body.get("worker_id", "unknown")
+        event_name = body.get("event")
+        event_data = body.get("data", {})
+        transaction_hash = body.get("transaction_hash")
+        
+        # Log the received event
+        logger.debug(f"Received event from worker {worker_id}: {event_name}")
+        
+        # If there's a transaction hash, emit to that room
+        if transaction_hash:
+            await manager.emit_to_room(transaction_hash, event_name, event_data)
+            logger.debug(f"Forwarded event to room {transaction_hash}: {event_name}")
+        else:
+            # Otherwise broadcast to all connections
+            message = json.dumps({"event": event_name, "data": event_data})
+            await manager.broadcast(message)
+            logger.debug(f"Broadcasted event: {event_name}")
+        
+        return {"status": "ok", "worker_id": worker_id}
+        
+    except Exception as e:
+        logger.error(f"Error processing internal event: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # WebSocket endpoint with native WebSocket support
 # Use both /socket.io/ and /ws for compatibility

@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
 
 from backend.consensus.worker import ConsensusWorker
-from backend.protocol_rpc.message_handler.base import MessageHandler
+from backend.protocol_rpc.message_handler.worker_handler import WorkerMessageHandler
 from backend.protocol_rpc.configuration import GlobalConfiguration
 from backend.rollup.consensus_service import ConsensusService
 import backend.validators as validators
@@ -62,18 +62,23 @@ async def lifespan(app: FastAPI):
     def get_session():
         return SessionLocal()
     
+    # Get worker configuration from environment
+    worker_id = os.environ.get("WORKER_ID", None)  # Auto-generate if not set
+    poll_interval = int(os.environ.get("WORKER_POLL_INTERVAL", "5"))
+    transaction_timeout = int(os.environ.get("TRANSACTION_TIMEOUT_MINUTES", "30"))
+    jsonrpc_url = os.environ.get("JSONRPC_SERVER_URL", "http://localhost:4000")
+    
     # Initialize components
-    msg_handler = MessageHandler(None, config=GlobalConfiguration())  # No WebSocket in worker
+    msg_handler = WorkerMessageHandler(
+        config=GlobalConfiguration(),
+        jsonrpc_url=jsonrpc_url,
+        worker_id=worker_id
+    )
     consensus_service = ConsensusService()
     
     # Initialize validators manager
     validators_manager = validators.Manager(SessionLocal())
     await validators_manager.restart()
-    
-    # Get worker configuration from environment
-    worker_id = os.environ.get("WORKER_ID", None)  # Auto-generate if not set
-    poll_interval = int(os.environ.get("WORKER_POLL_INTERVAL", "5"))
-    transaction_timeout = int(os.environ.get("TRANSACTION_TIMEOUT_MINUTES", "30"))
     
     # Create and start the worker
     worker = ConsensusWorker(
@@ -105,6 +110,10 @@ async def lifespan(app: FastAPI):
             await worker_task
         except asyncio.CancelledError:
             pass
+    
+    # Clean up message handler
+    if msg_handler:
+        await msg_handler.close()
     
     print("Consensus Worker Service stopped")
 

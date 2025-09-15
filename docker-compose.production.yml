@@ -63,12 +63,16 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - WORKER_POLL_INTERVAL=${WORKER_POLL_INTERVAL:-5}
       - TRANSACTION_TIMEOUT_MINUTES=${TRANSACTION_TIMEOUT_MINUTES:-30}
+      - JSONRPC_SERVER_URL=${JSONRPC_SERVER_URL:-http://jsonrpc:4000}
     deploy:
       replicas: ${CONSENSUS_WORKERS:-3}
       restart_policy:
         condition: on-failure
         delay: 5s
         max_attempts: 3
+    depends_on:
+      jsonrpc:
+        condition: service_healthy
 
   # Redis service for production (message queue for Socket.IO)
   redis:

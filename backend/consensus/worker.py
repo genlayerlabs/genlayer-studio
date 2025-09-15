@@ -338,6 +338,7 @@ class ConsensusWorker:
         """
         Recover transactions that have been stuck for too long.
         Resets them back to PENDING status and clears blocking fields.
+        Also recovers orphaned transactions (in processing states but no worker).
         
         Returns:
             Number of transactions recovered
@@ -347,15 +348,26 @@ class ConsensusWorker:
             SET blocked_at = NULL,
                 worker_id = NULL,
                 status = 'PENDING'
-            WHERE blocked_at IS NOT NULL
-                AND blocked_at < NOW() - INTERVAL :timeout
-                AND status NOT IN ('FINALIZED', 'CANCELED')
+            WHERE (
+                -- Case 1: Transactions with expired blocks
+                (blocked_at IS NOT NULL
+                 AND blocked_at < NOW() - INTERVAL :timeout
+                 AND status NOT IN ('FINALIZED', 'CANCELED'))
+                OR
+                -- Case 2: Orphaned transactions in processing states with no block
+                (blocked_at IS NULL
+                 AND status IN ('PROPOSING', 'COMMITTING', 'REVEALING')
+                 AND created_at < NOW() - INTERVAL :orphan_timeout)
+            )
             RETURNING hash, status;
         """)
         
         result = session.execute(
             recovery_query,
-            {"timeout": f"{self.transaction_timeout_minutes} minutes"}
+            {
+                "timeout": f"{self.transaction_timeout_minutes} minutes",
+                "orphan_timeout": "5 minutes"  # Shorter timeout for orphaned transactions
+            }
         )
         
         recovered = result.fetchall()

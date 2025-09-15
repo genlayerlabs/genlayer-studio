@@ -33,6 +33,14 @@ class ConsensusService:
         # Load deployment data
         deployment_data = self._load_deployment_data(contract_name)
         if not deployment_data:
+            # For ConsensusMain, we'll use the default contract if deployment not found
+            if contract_name == "ConsensusMain":
+                default_contract = get_default_consensus_main_contract()
+                if default_contract and "address" in default_contract and "abi" in default_contract:
+                    return self.web3.eth.contract(
+                        address=default_contract["address"], 
+                        abi=default_contract["abi"]
+                    )
             raise Exception(f"Failed to load {contract_name} deployment data")
 
         # Verify contract exists on chain
@@ -74,7 +82,7 @@ class ConsensusService:
             if contract_name == "ConsensusMain":
                 default_contract = get_default_consensus_main_contract()
                 print(
-                    f"[CONSENSUS_SERVICE]: Error loading contract from netowrk, retrieving default contract: {str(e)}"
+                    f"[CONSENSUS_SERVICE]: Error loading contract from network, retrieving default contract: {str(e)}"
                 )
                 return default_contract
             else:
