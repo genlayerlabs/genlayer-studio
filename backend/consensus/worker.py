@@ -531,7 +531,9 @@ class ConsensusWorker:
                 session.commit()
                 print(f"[Worker {self.worker_id}] Successfully finalized transaction {transaction.hash}")
             else:
-                print(f"[Worker {self.worker_id}] Transaction {transaction.hash} not ready for finalization yet")
+                # Don't log this - it's normal for transactions to wait for appeal window
+                # print(f"[Worker {self.worker_id}] Transaction {transaction.hash} not ready for finalization yet")
+                pass
                 
         except Exception as e:
             print(f"[Worker {self.worker_id}] Error processing finalization {finalization_data['hash']}: {e}")
@@ -657,9 +659,10 @@ class ConsensusWorker:
                     else:
                         # No appeals, try to claim a finalization
                         finalization_data = await self.claim_next_finalization(session)
-                        
+
                         if finalization_data:
-                            print(f"[Worker {self.worker_id}] Claimed finalization for transaction {finalization_data['hash']}")
+                            # Only log if we're actually going to finalize (not just checking)
+                            # print(f"[Worker {self.worker_id}] Claimed finalization for transaction {finalization_data['hash']}")
                             # Process in a new session
                             with self.get_session() as process_session:
                                 await self.process_finalization(finalization_data, process_session)

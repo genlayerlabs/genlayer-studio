@@ -253,28 +253,28 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  hardhat:
-    profiles: ["hardhat"]
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.hardhat
-    ports:
-      - "${HARDHAT_PORT:-8545}:8545"
-    env_file:
-      - .env
-    volumes:
-      - ./hardhat:/app/hardhat_src
-      - hardhat_artifacts:/app/artifacts
-      - hardhat_cache:/app/cache
-      - hardhat_deployments:/app/deployments
-      - hardhat_snapshots:/app/snapshots
-    restart: always
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "10"
-    # For local dev, hardhat is accessed directly on its port
+  # hardhat:
+  #   profiles: ["hardhat"]
+  #   build:
+  #     context: .
+  #     dockerfile: docker/Dockerfile.hardhat
+  #   ports:
+  #     - "${HARDHAT_PORT:-8545}:8545"
+  #   env_file:
+  #     - .env
+  #   volumes:
+  #     - ./hardhat:/app/hardhat_src
+  #     - hardhat_artifacts:/app/artifacts
+  #     - hardhat_cache:/app/cache
+  #     - hardhat_deployments:/app/deployments
+  #     - hardhat_snapshots:/app/snapshots
+  #   restart: always
+  #   logging:
+  #     driver: "json-file"
+  #     options:
+  #       max-size: "50m"
+  #       max-file: "10"
+  #   # For local dev, hardhat is accessed directly on its port
 
   redis:
     image: redis:7-alpine
