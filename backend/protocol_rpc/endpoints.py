@@ -56,16 +56,24 @@ from backend.database_handler.snapshot_manager import SnapshotManager
 import asyncio
 
 
+####### RAISE NON ALLOWED OPERATION ERROR #######
+def raise_non_allowed_in_hosted_studio():
+    """
+    Raise a JSONRPCError with a non-allowed operation message
+    """
+    if os.getenv("VITE_IS_HOSTED") == "true":
+        raise JSONRPCError(
+            code=-32000,
+            message="Non-allowed operation",
+            data={},
+        )
+
+
 ####### WRAPPER TO BLOCK ENDPOINTS FOR HOSTED ENVIRONMENT #######
 def check_forbidden_method_in_hosted_studio(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
-        if os.getenv("VITE_IS_HOSTED") == "true":
-            raise JSONRPCError(
-                code=-32000,
-                message="Non-allowed operation",
-                data={},
-            )
+        raise_non_allowed_in_hosted_studio()
         return func(*args, **kwargs)
 
     return wrapper
@@ -809,6 +817,9 @@ def send_raw_transaction(
     signed_rollup_transaction: str,
     sim_config: dict | None = None,
 ) -> str:
+    # Hosted studio should not be able to use sim_config for this endpoint
+    if sim_config is not None and sim_config:
+        raise_non_allowed_in_hosted_studio()
     # Decode transaction
     decoded_rollup_transaction = transactions_parser.decode_signed_transaction(
         signed_rollup_transaction
