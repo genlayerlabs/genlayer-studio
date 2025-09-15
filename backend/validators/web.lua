@@ -120,12 +120,12 @@ function Request(ctx, payload)
     ---@cast payload WebRequestPayload
 
     web.check_url(payload.url)
-    if ctx.host_data.mock_web_request then
-        for url, response in pairs(ctx.host_data.mock_web_request.nondet_web_request) do
-            if url == payload.url and payload.method == response.method then
+    if ctx.host_data.mock_web_response then
+        for url, mock_response_data in pairs(ctx.host_data.mock_web_response.nondet_web_request) do
+            if url == payload.url and payload.method == mock_response_data.method then
                 return {
-                    body = response.body,
-                    status = response.status,
+                    body = mock_response_data.body,
+                    status = mock_response_data.status,
                     headers = {},
                 }
             end
