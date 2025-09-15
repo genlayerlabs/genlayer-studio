@@ -48,9 +48,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      hardhat:
-        condition: service_healthy
-        required: false
+      # hardhat:
+      #   condition: service_healthy
+      #   required: false
       ollama:
         condition: service_started
         required: false

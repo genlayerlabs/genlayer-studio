@@ -275,52 +275,104 @@ async def health_check():
     return {"status": "healthy"}
 
 
-# JSON-RPC endpoint
+# JSON-RPC endpoint (supports single and batch requests)
 @app.post("/api")
 async def jsonrpc_endpoint(request: Request):
-    """Main JSON-RPC endpoint."""
+    """Main JSON-RPC endpoint with JSON-RPC 2.0 batch support."""
     try:
         body = await request.json()
 
-        # Parse request
-        rpc_request = JSONRPCRequest(**body)
-
-        # Fast path: healthcheck ping without DB or full initialization
-        if rpc_request.method == "ping":
-            response = JSONRPCResponse(jsonrpc="2.0", result="OK", id=rpc_request.id)
-            return JSONResponse(content=response.model_dump(exclude_none=True))
-
-        # For other methods, require handler and DB session
         rpc_handler = app_state.get("rpc_handler")
-        if not rpc_handler:
-            response = JSONRPCResponse(
-                jsonrpc="2.0",
-                error={"code": -32603, "message": "RPC handler not initialized"},
-                id=rpc_request.id,
-            )
-            return JSONResponse(content=response.model_dump(exclude_none=True))
 
-        db: Session | None = None
-        try:
-            db = SessionLocal()
-            response = await rpc_handler.handle_request(
-                rpc_request,
-                db,
-                app_state,
-            )
-            # Commit if handler did not raise
+        async def handle_one(payload: Dict[str, Any]) -> JSONRPCResponse:
+            # Parse request
+            rpc_request = JSONRPCRequest(**payload)
+
+            # Fast path: healthcheck ping without DB or full initialization
+            if rpc_request.method == "ping":
+                return JSONRPCResponse(jsonrpc="2.0", result="OK", id=rpc_request.id)
+
+            # For other methods, require handler and DB session
+            if not rpc_handler:
+                return JSONRPCResponse(
+                    jsonrpc="2.0",
+                    error={
+                        "code": -32603,
+                        "message": "RPC handler not initialized",
+                    },
+                    id=rpc_request.id,
+                )
+
+            db: Session | None = None
             try:
-                db.commit()
-            except Exception:
-                db.rollback()
-                raise
-            return JSONResponse(content=response.model_dump(exclude_none=True))
-        finally:
-            if db is not None:
+                db = SessionLocal()
+                response = await rpc_handler.handle_request(
+                    rpc_request,
+                    db,
+                    app_state,
+                )
+                # Commit if handler did not raise
                 try:
-                    db.close()
+                    db.commit()
                 except Exception:
-                    pass
+                    db.rollback()
+                    raise
+                return response
+            finally:
+                if db is not None:
+                    try:
+                        db.close()
+                    except Exception:
+                        pass
+
+        # Handle batch requests
+        if isinstance(body, list):
+            if len(body) == 0:
+                invalid = JSONRPCResponse(
+                    jsonrpc="2.0",
+                    error={"code": -32600, "message": "Invalid Request"},
+                    id=None,
+                )
+                return JSONResponse(content=[invalid.model_dump(exclude_none=True)])
+
+            responses: List[Dict[str, Any]] = []
+            for item in body:
+                if not isinstance(item, dict):
+                    resp = JSONRPCResponse(
+                        jsonrpc="2.0",
+                        error={"code": -32600, "message": "Invalid Request"},
+                        id=None,
+                    )
+                else:
+                    try:
+                        resp = await handle_one(item)
+                    except json.JSONDecodeError:
+                        resp = JSONRPCResponse(
+                            jsonrpc="2.0",
+                            error={"code": -32700, "message": "Parse error"},
+                            id=item.get("id") if isinstance(item, dict) else None,
+                        )
+                    except Exception as e:
+                        resp = JSONRPCResponse(
+                            jsonrpc="2.0",
+                            error={"code": -32603, "message": str(e)},
+                            id=item.get("id") if isinstance(item, dict) else None,
+                        )
+                responses.append(resp.model_dump(exclude_none=True))
+            return JSONResponse(content=responses)
+
+        # Handle single request object
+        if isinstance(body, dict):
+            resp = await handle_one(body)
+            return JSONResponse(content=resp.model_dump(exclude_none=True))
+
+        # Invalid top-level type
+        response = JSONRPCResponse(
+            jsonrpc="2.0",
+            error={"code": -32600, "message": "Invalid Request"},
+            id=None,
+        )
+        return JSONResponse(content=response.model_dump(exclude_none=True))
 
     except json.JSONDecodeError:
         response = JSONRPCResponse(
@@ -331,7 +383,7 @@ async def jsonrpc_endpoint(request: Request):
         response = JSONRPCResponse(
             jsonrpc="2.0",
             error={"code": -32603, "message": str(e)},
-            id=body.get("id") if "body" in locals() else None,
+            id=None,
         )
         return JSONResponse(content=response.model_dump(exclude_none=True))
 
