@@ -40,6 +40,7 @@ from backend.rollup.consensus_service import ConsensusService
 from backend.protocol_rpc.aio import MAIN_SERVER_LOOP, MAIN_LOOP_EXITING, MAIN_LOOP_DONE
 from backend.domain.types import TransactionType
 import backend.validators as validators
+from backend.protocol_rpc.redis_subscriber import RedisEventSubscriber
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -98,6 +99,7 @@ class ConnectionManager:
 # Global instances
 manager = ConnectionManager()
 app_state = {}
+redis_subscriber: Optional[RedisEventSubscriber] = None
 
 
 def get_db_name(database: str) -> str:
@@ -212,6 +214,21 @@ async def lifespan(app: FastAPI):
 
         # Initialize RPC handler with app_state
         app_state["rpc_handler"] = RPCHandler(app_state)
+
+        # Initialize Redis subscriber for horizontal scaling
+        global redis_subscriber
+        redis_url = os.environ.get("REDIS_URL")
+        if redis_url:
+            redis_subscriber = RedisEventSubscriber(
+                redis_url=redis_url,
+                connection_manager=manager,
+                instance_id=f"rpc-{os.getpid()}"
+            )
+            await redis_subscriber.connect()
+            await redis_subscriber.start()
+            logger.info("Redis subscriber started for event broadcasting")
+        else:
+            logger.warning("Redis URL not configured - running without horizontal scaling support")
 
         print("FastAPI application started successfully")
 

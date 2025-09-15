@@ -11,11 +11,12 @@ from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
 
 from backend.consensus.worker import ConsensusWorker
-from backend.protocol_rpc.message_handler.worker_handler import WorkerMessageHandler
+from backend.protocol_rpc.message_handler.redis_worker_handler import RedisWorkerMessageHandler
 from backend.protocol_rpc.configuration import GlobalConfiguration
 from backend.rollup.consensus_service import ConsensusService
 import backend.validators as validators
 from backend.database_handler.models import Base
+from loguru import logger
 
 # Load environment variables
 load_dotenv()
@@ -66,14 +67,18 @@ async def lifespan(app: FastAPI):
     worker_id = os.environ.get("WORKER_ID", None)  # Auto-generate if not set
     poll_interval = int(os.environ.get("WORKER_POLL_INTERVAL", "5"))
     transaction_timeout = int(os.environ.get("TRANSACTION_TIMEOUT_MINUTES", "30"))
-    jsonrpc_url = os.environ.get("JSONRPC_SERVER_URL", "http://localhost:4000")
-    
-    # Initialize components
-    msg_handler = WorkerMessageHandler(
+    redis_url = os.environ.get("REDIS_URL", "redis://redis:6379/0")
+
+    # Initialize Redis-based message handler for horizontal scaling
+    msg_handler = RedisWorkerMessageHandler(
         config=GlobalConfiguration(),
-        jsonrpc_url=jsonrpc_url,
-        worker_id=worker_id
+        worker_id=worker_id,
+        redis_url=redis_url
     )
+
+    # Initialize Redis connection
+    await msg_handler.initialize()
+    logger.info(f"Worker {worker_id} connected to Redis for event broadcasting")
     consensus_service = ConsensusService()
     
     # Initialize validators manager
