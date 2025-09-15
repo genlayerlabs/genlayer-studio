@@ -325,10 +325,6 @@ class ConsensusAlgorithm:
             {}
         )  # Track running state for each pending queue
         self.validators_manager = validators_manager
-        
-        # Semaphore to limit concurrent access to LLM/Web modules
-        # Only one transaction at a time can use these shared resources
-        self.llm_web_semaphore = asyncio.Semaphore(1)
 
     async def run_crawl_snapshot_loop(
         self,
@@ -457,29 +453,6 @@ class ConsensusAlgorithm:
             traceback.print_exception(e)
             raise
 
-    def _transaction_uses_llm_or_web(self, transaction: Transaction) -> bool:
-        """
-        Check if a transaction will use LLM or Web modules during execution.
-        
-        Returns True if the transaction:
-        - Has validators configured (they always use LLM)
-        - Is a contract deployment or execution (may use LLM/Web)
-        
-        Returns False for simple SEND transactions.
-        """
-        # Transactions with validators always use LLM module for consensus
-        if transaction.sim_config and transaction.sim_config.validators:
-            return True
-        
-        # Contract deployments and executions may use LLM/Web modules
-        if transaction.type in [TransactionType.DEPLOY_CONTRACT, TransactionType.RUN_CONTRACT]:
-            # For now, assume all contract operations might use LLM/Web
-            # In the future, we could inspect the contract code to be more precise
-            return True
-        
-        # SEND transactions don't use LLM/Web modules
-        return False
-
     async def _process_pending_transactions(
         self,
         chain_snapshot_factory: Callable[[Session], ChainSnapshot],
@@ -519,49 +492,97 @@ class ConsensusAlgorithm:
                             # Reference: https://docs.sqlalchemy.org/en/20/orm/session_basics.html#is-the-session-thread-safe-is-asyncsession-safe-to-share-in-concurrent-tasks
                             self.pending_queue_task_running[queue_address] = True
                             transaction: Transaction = await queue.get()
-                            
-                            # Check if this transaction needs LLM/Web modules
-                            uses_llm_web = self._transaction_uses_llm_or_web(transaction)
-                            if uses_llm_web:
-                                print(f"[Consensus] Transaction {transaction.hash} requires LLM/Web modules - will serialize")
-                            else:
-                                print(f"[Consensus] Transaction {transaction.hash} does not require LLM/Web - can run in parallel")
 
                             async def exec_transaction_with_session_handling(
                                 transaction: Transaction,
                                 queue_address: str,
-                                uses_llm_web: bool,
                             ):
                                 try:
-                                    # If transaction uses LLM/Web, acquire semaphore for exclusive access
-                                    if uses_llm_web:
-                                        async with self.llm_web_semaphore:
-                                            await self._execute_transaction_logic(
-                                                transaction, queue_address,
-                                                chain_snapshot_factory,
-                                                transactions_processor_factory,
-                                                accounts_manager_factory,
-                                                contract_snapshot_factory,
-                                                contract_processor_factory,
-                                                node_factory
+                                    with self.get_session() as session:
+                                        virtual_validators = []
+                                        if (
+                                            transaction.sim_config
+                                            and transaction.sim_config.validators
+                                        ):
+                                            for (
+                                                validator
+                                            ) in transaction.sim_config.validators:
+                                                provider = validator.provider
+                                                model = validator.model
+                                                config = validator.config
+                                                plugin = validator.plugin
+                                                plugin_config = validator.plugin_config
+
+                                                if (
+                                                    config is None
+                                                    or plugin is None
+                                                    or plugin_config is None
+                                                ):
+                                                    llm_provider = (
+                                                        get_default_provider_for(
+                                                            provider, model
+                                                        )
+                                                    )
+                                                else:
+                                                    llm_provider = LLMProvider(
+                                                        provider=provider,
+                                                        model=model,
+                                                        config=config,
+                                                        plugin=plugin,
+                                                        plugin_config=plugin_config,
+                                                    )
+                                                    validate_provider(llm_provider)
+
+                                                account = accounts_manager_factory(
+                                                    session
+                                                ).create_new_account()
+                                                virtual_validators.append(
+                                                    Validator(
+                                                        address=account.address,
+                                                        private_key=account.key.to_0x_hex(),
+                                                        stake=validator.stake,
+                                                        llmprovider=llm_provider,
+                                                    )
+                                                )
+                                        if len(virtual_validators) > 0:
+                                            snapshot_func = (
+                                                self.validators_manager.temporal_snapshot
                                             )
-                                    else:
-                                        # Execute without semaphore (can run in parallel)
-                                        await self._execute_transaction_logic(
-                                            transaction, queue_address,
-                                            chain_snapshot_factory,
-                                            transactions_processor_factory,
-                                            accounts_manager_factory,
-                                            contract_snapshot_factory,
-                                            contract_processor_factory,
-                                            node_factory
+                                            args = [virtual_validators]
+                                        else:
+                                            snapshot_func = (
+                                                self.validators_manager.snapshot
+                                            )
+                                            args = []
+                                        transactions_processor = (
+                                            transactions_processor_factory(session)
                                         )
+                                        async with snapshot_func(
+                                            *args
+                                        ) as validators_snapshot:
+                                            await self.exec_transaction(
+                                                transaction,
+                                                transactions_processor,
+                                                chain_snapshot_factory(session),
+                                                accounts_manager_factory(session),
+                                                lambda contract_address: contract_snapshot_factory(
+                                                    contract_address,
+                                                    session,
+                                                    transaction,
+                                                ),
+                                                contract_processor_factory(session),
+                                                node_factory,
+                                                validators_snapshot,
+                                            )
+                                        session.commit()
                                 finally:
-                                    self.pending_queue_task_running[queue_address] = False
+                                    self.pending_queue_task_running[queue_address] = (
+                                        False
+                                    )
 
                             tg.create_task(
                                 exec_transaction_with_session_handling(
-                                    transaction, queue_address, uses_llm_web
+                                    transaction, queue_address
                                 )
                             )
 
@@ -572,94 +593,6 @@ class ConsensusAlgorithm:
                 for queue_address in self.pending_queues:
                     self.pending_queue_task_running[queue_address] = False
             await asyncio.sleep(self.consensus_sleep_time)
-
-    async def _execute_transaction_logic(
-        self,
-        transaction: Transaction,
-        queue_address: str,
-        chain_snapshot_factory,
-        transactions_processor_factory,
-        accounts_manager_factory,
-        contract_snapshot_factory,
-        contract_processor_factory,
-        node_factory,
-    ):
-        """Execute the actual transaction logic (extracted for reuse)."""
-        with self.get_session() as session:
-            virtual_validators = []
-            if (
-                transaction.sim_config
-                and transaction.sim_config.validators
-            ):
-                for validator in transaction.sim_config.validators:
-                    provider = validator.provider
-                    model = validator.model
-                    config = validator.config
-                    plugin = validator.plugin
-                    plugin_config = validator.plugin_config
-
-                    if (
-                        config is None
-                        or plugin is None
-                        or plugin_config is None
-                    ):
-                        llm_provider = (
-                            get_default_provider_for(
-                                provider, model
-                            )
-                        )
-                    else:
-                        llm_provider = LLMProvider(
-                            provider=provider,
-                            model=model,
-                            config=config,
-                            plugin=plugin,
-                            plugin_config=plugin_config,
-                        )
-                        validate_provider(llm_provider)
-
-                    account = accounts_manager_factory(
-                        session
-                    ).create_new_account()
-                    virtual_validators.append(
-                        Validator(
-                            address=account.address,
-                            private_key=account.key.to_0x_hex(),
-                            stake=validator.stake,
-                            llmprovider=llm_provider,
-                        )
-                    )
-            if len(virtual_validators) > 0:
-                snapshot_func = (
-                    self.validators_manager.temporal_snapshot
-                )
-                args = [virtual_validators]
-            else:
-                snapshot_func = (
-                    self.validators_manager.snapshot
-                )
-                args = []
-            transactions_processor = (
-                transactions_processor_factory(session)
-            )
-            async with snapshot_func(
-                *args
-            ) as validators_snapshot:
-                await self.exec_transaction(
-                    transaction,
-                    transactions_processor,
-                    chain_snapshot_factory(session),
-                    accounts_manager_factory(session),
-                    lambda contract_address: contract_snapshot_factory(
-                        contract_address,
-                        session,
-                        transaction,
-                    ),
-                    contract_processor_factory(session),
-                    node_factory,
-                    validators_snapshot,
-                )
-            session.commit()
 
     def is_pending_queue_task_running(self, address: str):
         """
