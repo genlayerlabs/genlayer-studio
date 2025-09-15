@@ -1088,3 +1088,12 @@ class TransactionsProcessor:
             .count()
         )
         return count
+
+    def get_transaction_status(self, transaction_hash: str) -> str | None:
+        transaction = (
+            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
+        )
+        if not transaction:
+            return None
+        transaction_status = transaction.status
+        return transaction_status.value
