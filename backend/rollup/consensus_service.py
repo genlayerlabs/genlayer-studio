@@ -20,6 +20,12 @@ class ConsensusService:
         # Use singleton Web3 connection pool
         self.web3 = Web3ConnectionPool.get()
 
+    def _is_connected(self):
+        """
+        Check if the Web3 connection is connected
+        """
+        return self.web3 is not None and self.web3.is_connected()
+
     def _get_contract(self, contract_name: str):
         """
         Get a contract instance
@@ -154,7 +160,7 @@ class ConsensusService:
         """
         Forward a transaction to the consensus rollup and wait for NewTransaction event
         """
-        if not self.web3.is_connected():
+        if not self._is_connected():
             print(
                 "[CONSENSUS_SERVICE]: Not connected to Hardhat node, skipping transaction forwarding"
             )
@@ -208,7 +214,7 @@ class ConsensusService:
             account (dict): Account object containing address and private key
             *args: Arguments to pass to the event function
         """
-        if not self.web3.is_connected():
+        if not self._is_connected():
             print(
                 "[CONSENSUS_SERVICE]: Not connected to Hardhat node, skipping transaction forwarding"
             )

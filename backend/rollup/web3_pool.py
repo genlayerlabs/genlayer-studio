@@ -24,13 +24,16 @@ class Web3ConnectionPool:
         Creates a new instance if one doesn't exist.
 
         Returns:
-            Web3: The singleton Web3 instance connected to Hardhat
+            Web3 | None: The singleton Web3 instance connected to Hardhat, or None if
+            HARDHAT_URL is not set
         """
         if cls._web3 is None:
             with cls._lock:
                 if cls._web3 is None:
                     # Construct endpoint URL properly
-                    base = os.environ.get("HARDHAT_URL", "http://127.0.0.1")
+                    base = os.environ.get("HARDHAT_URL")
+                    if not base:
+                        return None
                     port = os.environ.get("HARDHAT_PORT", "8545")
 
                     # Ensure scheme is present
@@ -86,6 +89,7 @@ class Web3ConnectionPool:
         Alias for get() for backward compatibility.
 
         Returns:
-            Web3: The singleton Web3 instance connected to Hardhat
+            Web3 | None: The singleton Web3 instance connected to Hardhat, or None if
+            HARDHAT_URL is not set
         """
         return cls.get()
