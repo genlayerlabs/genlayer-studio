@@ -101,9 +101,7 @@ local function just_in_backend(ctx, args, mapped_prompt)
 
 	-- First: Try primary model (3 attempts)
 	local primary_provider_id = ctx.host_data.studio_llm_id
-	lib.log{message = "primary_provider_id", primary_provider_id = primary_provider_id}
 	local primary_model = lib.get_first_from_table(llm.providers[primary_provider_id].models).key
-	lib.log{message = "primary_model", primary_model = primary_model}
 	if primary_provider_id then
 		for attempt = 1, max_attempts_per_provider do
 			local success, result
@@ -125,7 +123,7 @@ local function just_in_backend(ctx, args, mapped_prompt)
 				end)
 			end
 
-			lib.log{message = "executed with", success = success, type = type(result), res = result}
+			lib.log{level = "debug", message = "executed with", success = success, type = type(result), res = result}
 			if success and result then
 				return result
 			end
@@ -149,11 +147,9 @@ local function just_in_backend(ctx, args, mapped_prompt)
 
 	-- Second: Try fallback model (3 attempts) if available
 	local fallback_provider_id = ctx.host_data.fallback_llm_id
-	lib.log{message = "fallback_provider_id", fallback_provider_id = fallback_provider_id}
 	local fallback_model = lib.get_first_from_table(llm.providers[fallback_provider_id].models).key
-	lib.log{message = "fallback_model", fallback_model = fallback_model}
 	if fallback_provider_id then
-		lib.log{message = "Switching to fallback model"}
+		lib.log{level = "debug", message = "Switching to fallback model"}
 
 		for attempt = 1, max_attempts_per_provider do
 			local success, result
@@ -175,7 +171,7 @@ local function just_in_backend(ctx, args, mapped_prompt)
 				end)
 			end
 
-			lib.log{message = "executed with", success = success, type = type(result), res = result}
+			lib.log{level = "debug", message = "executed with", success = success, type = type(result), res = result}
 			if success and result then
 				return result
 			end
@@ -198,7 +194,7 @@ local function just_in_backend(ctx, args, mapped_prompt)
 	end
 
 	lib.rs.user_error({
-		causes = {"all_attempts_exhausted"},
+		causes = {"NO_PROVIDER_FOR_PROMPT"},
 		fatal = true,
 		ctx = {
 			prompt = mapped_prompt,
