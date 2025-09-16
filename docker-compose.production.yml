@@ -29,14 +29,14 @@ services:
       retries: 3
       start_period: 40s
     deploy:
-      replicas: ${JSONRPC_REPLICAS:-2}
+      replicas: ${JSONRPC_REPLICAS:-1}
       resources:
         limits:
-          cpus: '2'
-          memory: 2G
+          cpus: '12'
+          memory: 42gb
         reservations:
-          cpus: '1'
-          memory: 1G
+          cpus: '2'
+          memory: 8gb
       restart_policy:
         condition: on-failure
         delay: 5s
@@ -54,6 +54,8 @@ services:
       ollama:
         condition: service_started
         required: false
+    mem_limit: 42gb
+    mem_reservation: 8gb
 
   # Redis service for production (message queue for Socket.IO)
   redis:
