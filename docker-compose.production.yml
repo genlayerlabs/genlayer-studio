@@ -32,11 +32,11 @@ services:
       replicas: ${JSONRPC_REPLICAS:-1}
       resources:
         limits:
-          cpus: '12'
-          memory: 42gb
+          cpus: '${COMPOSE_CPU_LIMIT:-2}'
+          memory: ${COMPOSE_MEM_LIMIT:-8}
         reservations:
-          cpus: '2'
-          memory: 8gb
+          cpus: ${COMPOSE_CPU_RESERVATION:-1}
+          memory: ${COMPOSE_MEM_RESERVATION:-2}
       restart_policy:
         condition: on-failure
         delay: 5s
