@@ -165,10 +165,11 @@ class Node:
         enhanced_node_config = {
             "address": node_config["address"],
             "private_key": node_config["private_key"],
+            "stake": node_config["stake"],
             "primary_model": {
                 k: v
                 for k, v in node_config.items()
-                if k not in ["address", "private_key"]
+                if k not in ["address", "private_key", "stake"]
             },
             "secondary_model": None,
         }
@@ -192,7 +193,6 @@ class Node:
                     "plugin": fallback_validator.llmprovider.plugin,
                     "plugin_config": fallback_validator.llmprovider.plugin_config,
                     "config": fallback_validator.llmprovider.config,
-                    "stake": fallback_validator.stake,
                 }
 
         return enhanced_node_config

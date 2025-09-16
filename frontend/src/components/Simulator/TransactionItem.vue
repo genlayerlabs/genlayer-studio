@@ -333,8 +333,7 @@ const badgeColorClass = computed(() => {
               </div>
               <div>
                 <span class="font-medium"
-                  >Stake:
-                  {{ leaderReceipt.node_config.primary_model?.stake }}</span
+                  >Stake: {{ leaderReceipt.node_config.stake }}</span
                 >
               </div>
             </div>
