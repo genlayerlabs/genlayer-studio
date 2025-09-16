@@ -151,6 +151,52 @@ class Node:
             raise Exception(f"unknown transaction type {transaction.type}")
         return receipt
 
+    def _create_enhanced_node_config(self, host_data: dict | None) -> dict:
+        """
+        Create enhanced node_config that includes both primary and fallback provider info.
+
+        Args:
+            host_data: The host_data dict containing primary and fallback provider IDs
+
+        Returns:
+            Enhanced node_config dict with fallback information
+        """
+        node_config = self.validator.to_dict()
+        enhanced_node_config = {
+            "address": node_config["address"],
+            "private_key": node_config["private_key"],
+            "primary_model": {
+                k: v
+                for k, v in node_config.items()
+                if k not in ["address", "private_key"]
+            },
+            "secondary_model": None,
+        }
+
+        if host_data is None:
+            return enhanced_node_config
+
+        fallback_llm_id = host_data.get("fallback_llm_id")
+        if fallback_llm_id and self.validators_snapshot:
+            current_node = None
+            for node in self.validators_snapshot.nodes:
+                if node.validator.address == self.validator.address:
+                    current_node = node
+                    break
+
+            if current_node and current_node.fallback_validator:
+                fallback_validator = current_node.fallback_validator
+                enhanced_node_config["secondary_model"] = {
+                    "provider": fallback_validator.llmprovider.provider,
+                    "model": fallback_validator.llmprovider.model,
+                    "plugin": fallback_validator.llmprovider.plugin,
+                    "plugin_config": fallback_validator.llmprovider.plugin_config,
+                    "config": fallback_validator.llmprovider.config,
+                    "stake": fallback_validator.stake,
+                }
+
+        return enhanced_node_config
+
     def _set_vote(self, receipt: Receipt) -> Receipt:
         if (receipt.result[0] == ResultCode.VM_ERROR) and (
             receipt.result[1:] == b"timeout"
@@ -379,7 +425,7 @@ class Node:
             ],
             calldata=calldata,
             mode=self.validator_mode,
-            node_config=self.validator.to_dict(),
+            node_config=self._create_enhanced_node_config(host_data),
             genvm_result={
                 "stdout": res.stdout,
                 "stderr": res.stderr,

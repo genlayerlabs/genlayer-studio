@@ -120,6 +120,7 @@ class ModifiableValidatorsRegistryInterceptor(vr.ModifiableValidatorsRegistry):
 class SingleValidatorSnapshot:
     validator: domain.Validator
     genvm_host_arg: typing.Any
+    fallback_validator: domain.Validator | None = None
 
 
 @dataclasses.dataclass
@@ -286,6 +287,8 @@ class Manager:
                     i.genvm_host_arg["fallback_llm_id"] = (
                         f"node-{i.validator.address}-1"
                     )
+                    # Store the selected fallback validator in the snapshot
+                    i.fallback_validator = fallback_validator
 
                     new_providers.append(
                         SimulatorProvider(
