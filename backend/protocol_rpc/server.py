@@ -103,13 +103,14 @@ async def create_app():
     setup_eth_method_handler(jsonrpc)
     # Configure SocketIO - use appropriate async mode based on deployment
     # For uvicorn/ASGI: use 'asgi' mode for native WebSocket support
-    # For standalone: use 'eventlet' for WebSocket support
+    # For standalone: use 'threading' to avoid subprocess conflicts
     if os.environ.get('UVICORN_WORKER'):
         # Running under uvicorn - use ASGI mode for WebSocket support
         async_mode = 'asgi'
     else:
-        # Standalone mode - use eventlet
-        async_mode = 'eventlet'
+        # Standalone mode - use threading instead of eventlet to avoid subprocess conflicts
+        # eventlet's monkey patching interferes with GenVM subprocess execution
+        async_mode = 'threading'
     
     socketio = SocketIO(app, cors_allowed_origins="*", async_mode=async_mode, logger=False, engineio_logger=False)
     

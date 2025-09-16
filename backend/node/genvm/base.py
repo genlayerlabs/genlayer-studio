@@ -17,6 +17,20 @@ import datetime
 import abc
 import time
 import copy
+import logging
+import os
+
+# Configure logging
+logger = logging.getLogger(__name__)
+DEBUG_GENVM = True
+if DEBUG_GENVM:
+    logger.setLevel(logging.DEBUG)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        )
+        logger.addHandler(handler)
 
 from backend.node.types import (
     PendingTransaction,
@@ -282,10 +296,34 @@ class _Host(genvmhost.IHost):
 
     async def loop_enter(self) -> socket.socket:
         async_loop = asyncio.get_event_loop()
-        self.sock, _addr = await async_loop.sock_accept(self.sock_listen)
-        self.sock.setblocking(False)
-        self.sock_listen.close()
-        return self.sock
+        if DEBUG_GENVM:
+            logger.debug("Waiting for GenVM to connect to socket...")
+
+        try:
+            # Add timeout for socket accept
+            accept_timeout = float(os.getenv("GENVM_ACCEPT_TIMEOUT", "10"))
+            accept_coro = async_loop.sock_accept(self.sock_listen)
+            self.sock, _addr = await asyncio.wait_for(
+                accept_coro, timeout=accept_timeout
+            )
+
+            if DEBUG_GENVM:
+                logger.debug(f"GenVM connected from {_addr}")
+
+            self.sock.setblocking(False)
+            self.sock_listen.close()
+            return self.sock
+        except asyncio.TimeoutError:
+            error_msg = (
+                f"Timeout waiting for GenVM to connect (waited {accept_timeout}s)"
+            )
+            if DEBUG_GENVM:
+                logger.error(error_msg)
+            raise TimeoutError(error_msg)
+        except Exception as e:
+            if DEBUG_GENVM:
+                logger.error(f"Error accepting GenVM connection: {e}")
+            raise
 
     async def get_calldata(self, /) -> bytes:
         return self.calldata_bytes
@@ -312,14 +350,28 @@ class _Host(genvmhost.IHost):
     async def consume_result(
         self, type: ResultCode, data: collections.abc.Buffer, /
     ) -> None:
+        if DEBUG_GENVM:
+            logger.debug(f"Consuming result: type={type}, data_len={len(data)}")
+
         if type == ResultCode.RETURN:
             self._result = ExecutionReturn(ret=bytes(data))
+            if DEBUG_GENVM:
+                logger.debug("Result: SUCCESS (RETURN)")
         elif type == ResultCode.USER_ERROR:
-            self._result = ExecutionError(str(data, encoding="utf-8"), type)
+            error_msg = str(data, encoding="utf-8")
+            self._result = ExecutionError(error_msg, type)
+            if DEBUG_GENVM:
+                logger.debug(f"Result: USER_ERROR - {error_msg}")
         elif type == ResultCode.VM_ERROR:
-            self._result = ExecutionError(str(data, encoding="utf-8"), type)
+            error_msg = str(data, encoding="utf-8")
+            self._result = ExecutionError(error_msg, type)
+            if DEBUG_GENVM:
+                logger.debug(f"Result: VM_ERROR - {error_msg}")
         elif type == ResultCode.INTERNAL_ERROR:
-            raise Exception("GenVM internal error", str(data, encoding="utf-8"))
+            error_msg = str(data, encoding="utf-8")
+            if DEBUG_GENVM:
+                logger.error(f"GenVM INTERNAL_ERROR: {error_msg}")
+            raise Exception("GenVM internal error", error_msg)
         else:
             assert False, f"invalid result {type}"
 
@@ -434,12 +486,23 @@ async def _run_genvm_host(
     config_path: Path | None,
 ) -> ExecutionResult:
     tmpdir = Path(tempfile.mkdtemp())
+    if DEBUG_GENVM:
+        logger.debug(f"Created temp directory: {tmpdir}")
+        logger.debug(f"Config path: {config_path}")
+        logger.debug(f"Args: {args}")
+
     try:
-        timeout = 600  # seconds
+        # Reduce timeout for faster debugging
+        timeout = int(
+            os.getenv("GENVM_TIMEOUT", "600")
+        )  # Default 60 seconds instead of 600
         base_delay = 5  # seconds
         start_time = time.time()
         retry_count = 0
         last_error = ""
+
+        if DEBUG_GENVM:
+            logger.debug(f"Starting GenVM execution with timeout={timeout}s")
 
         # Extract the original arguments from the partial function
         host_args = (
@@ -453,10 +516,19 @@ async def _run_genvm_host(
             remaining_time = timeout - (time.time() - start_time)
             if remaining_time <= 0:
                 # When the genvm keeps crashing we send a timeout error
+                if DEBUG_GENVM:
+                    logger.error(
+                        f"Timeout after {timeout}s and {retry_count} retries. Last error: {last_error}"
+                    )
                 return _create_timeout_result(
                     last_error,
                     fresh_args.get("state_proxy", host_args.get("state_proxy")),
                     timeout * 1000,
+                )
+
+            if DEBUG_GENVM and retry_count > 0:
+                logger.warning(
+                    f"Retry attempt #{retry_count} (remaining time: {remaining_time:.1f}s)"
                 )
 
             # Create fresh copies of the arguments for each attempt
@@ -473,8 +545,15 @@ async def _run_genvm_host(
                 sock_listener.bind(str(sock_path))
                 sock_listener.listen(1)
 
+                # Check if GenVM binary exists
+                genvm_path = get_genvm_path()
+                if DEBUG_GENVM:
+                    logger.debug(f"GenVM binary path: {genvm_path}")
+                    if not genvm_path.exists():
+                        logger.error(f"GenVM binary not found at: {genvm_path}")
+
                 new_args: list[str | Path] = [
-                    get_genvm_path(),
+                    genvm_path,
                 ]
                 if config_path is not None:
                     new_args.extend(["--config", config_path])
@@ -489,6 +568,11 @@ async def _run_genvm_host(
 
                 new_args.extend(args)
 
+                if DEBUG_GENVM:
+                    logger.debug(
+                        f"Full GenVM command: {' '.join(str(x) for x in new_args)}"
+                    )
+
                 fresh_host_supplier = functools.partial(
                     (
                         host_supplier.func
@@ -500,10 +584,22 @@ async def _run_genvm_host(
                 host: _Host = fresh_host_supplier(sock_listener)
 
                 try:
+                    if DEBUG_GENVM:
+                        logger.debug(
+                            f"Running GenVM with deadline={remaining_time:.1f}s"
+                        )
+
+                    run_result = await genvmhost.run_host_and_program(
+                        host, new_args, deadline=remaining_time
+                    )
+
+                    if DEBUG_GENVM:
+                        logger.debug("GenVM execution completed successfully")
+                        if run_result.stderr:
+                            logger.debug(f"GenVM stderr: {run_result.stderr[:500]}")
+
                     result = host.provide_result(
-                        await genvmhost.run_host_and_program(
-                            host, new_args, deadline=remaining_time
-                        ),
+                        run_result,
                         state=fresh_args.get(
                             "state_proxy", host_args.get("state_proxy")
                         ),
@@ -513,10 +609,31 @@ async def _run_genvm_host(
                 except Exception as e:
                     last_error = str(e)
 
+                    if DEBUG_GENVM:
+                        logger.error(f"GenVM execution failed: {last_error}")
+                        if hasattr(e, "__cause__") and e.__cause__:
+                            logger.error(f"Caused by: {e.__cause__}")
+
                     # Check if llm failed, immediately return timeout error
                     if "fatal: true" in last_error:
+                        if DEBUG_GENVM:
+                            logger.error(
+                                "Fatal LLM error detected - exiting immediately"
+                            )
                         return _create_timeout_result(
                             last_error,
+                            fresh_args.get("state_proxy", host_args.get("state_proxy")),
+                            int((time.time() - start_time) * 1000),
+                        )
+
+                    # Check for specific errors that shouldn't be retried
+                    if "Can't find executable genvm" in last_error:
+                        if DEBUG_GENVM:
+                            logger.error(
+                                "GenVM binary not found - exiting without retry"
+                            )
+                        return _create_timeout_result(
+                            f"GenVM binary not found: {last_error}",
                             fresh_args.get("state_proxy", host_args.get("state_proxy")),
                             int((time.time() - start_time) * 1000),
                         )
@@ -524,6 +641,8 @@ async def _run_genvm_host(
                     retry_count += 1
                     # Sleep for a longer time than the previous attempt to avoid executing it too many times
                     delay = min(base_delay * (2 ** (retry_count - 1)), remaining_time)
+                    if DEBUG_GENVM:
+                        logger.info(f"Waiting {delay:.1f}s before retry #{retry_count}")
                     await asyncio.sleep(delay)
 
                 finally:
