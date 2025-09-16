@@ -1,14 +1,15 @@
-__all__ = ("Manager", "with_lock")
+__all__ = ("Manager", "with_lock", "select_random_different_validator")
 
 import typing
 import contextlib
 import dataclasses
 import os
+import random
 
 from copy import deepcopy
 from pathlib import Path
 
-from .llm import LLMModule
+from .llm import LLMModule, SimulatorProvider
 from .web import WebModule
 from .base import ChangedConfigFile
 
@@ -16,6 +17,56 @@ import backend.database_handler.validators_registry as vr
 from sqlalchemy.orm import Session
 
 import backend.domain.types as domain
+
+
+def select_random_different_validator(
+    primary_validator: domain.Validator, all_validators: list[domain.Validator]
+) -> domain.Validator | None:
+    """
+    Select a random validator for fallback with two-tier priority system.
+
+    Priority 1: Different provider class from existing validators
+    Priority 2: Same provider class, different model from existing validators
+
+    Args:
+        primary_validator: The current validator
+        all_validators: List of all existing validators (user-configured)
+
+    Returns:
+        Fallback validator object, or None if no suitable fallback
+    """
+    primary_provider_class = primary_validator.llmprovider.provider
+    primary_model = primary_validator.llmprovider.model
+
+    # Priority 1: Different provider classes from existing validators
+    different_provider_validators = [
+        v
+        for v in all_validators
+        if (
+            v.llmprovider.provider != primary_provider_class
+            and v.address != primary_validator.address
+        )
+    ]
+
+    if different_provider_validators:
+        return random.choice(different_provider_validators)
+
+    # Priority 2: Same provider class, different model from existing validators
+    same_provider_different_model = [
+        v
+        for v in all_validators
+        if (
+            v.llmprovider.provider == primary_provider_class
+            and v.llmprovider.model != primary_model
+            and v.address != primary_validator.address
+        )
+    ]
+
+    if same_provider_different_model:
+        return random.choice(same_provider_different_model)
+
+    # No suitable fallback found
+    return None
 
 
 class ILock(typing.Protocol):
@@ -210,18 +261,43 @@ class Manager:
     async def _change_providers_from_snapshot(self, snap: Snapshot):
         self._cached_snapshot = None
 
-        new_providers: list[llm.SimulatorProvider] = []
+        new_providers: list[SimulatorProvider] = []
+
+        all_validators = [node.validator for node in snap.nodes]
+        has_multiple_validators = len(all_validators) > 1
 
         for i in snap.nodes:
             new_providers.append(
-                llm.SimulatorProvider(
-                    model=i.validator.llmprovider.model,
+                SimulatorProvider(
                     id=f"node-{i.validator.address}",
+                    model=i.validator.llmprovider.model,
                     url=i.validator.llmprovider.plugin_config["api_url"],
                     plugin=i.validator.llmprovider.plugin,
                     key_env=i.validator.llmprovider.plugin_config["api_key_env_var"],
                 )
             )
+
+            if has_multiple_validators:
+                fallback_validator = select_random_different_validator(
+                    i.validator, all_validators
+                )
+
+                if fallback_validator:
+                    i.genvm_host_arg["fallback_llm_id"] = (
+                        f"node-{i.validator.address}-1"
+                    )
+
+                    new_providers.append(
+                        SimulatorProvider(
+                            id=f"node-{i.validator.address}-1",
+                            model=fallback_validator.llmprovider.model,
+                            url=fallback_validator.llmprovider.plugin_config["api_url"],
+                            plugin=fallback_validator.llmprovider.plugin,
+                            key_env=fallback_validator.llmprovider.plugin_config[
+                                "api_key_env_var"
+                            ],
+                        )
+                    )
 
         await self.llm_module.change_config(new_providers)
 
