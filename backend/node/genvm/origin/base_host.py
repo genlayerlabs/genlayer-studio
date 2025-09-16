@@ -5,23 +5,10 @@ import asyncio
 import os
 import abc
 import json
-import logging
-import time
 
 from dataclasses import dataclass
 
 from pathlib import Path
-
-# Configure logging for debugging
-logger = logging.getLogger(__name__)
-DEBUG_GENVM = True
-if DEBUG_GENVM:
-    logger.setLevel(logging.DEBUG)
-    handler = logging.StreamHandler()
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    )
-    logger.addHandler(handler)
 
 from .host_fns import *
 from .result_codes import *
@@ -134,58 +121,20 @@ async def save_code_to_host(host: IHost, address: bytes, code: bytes):
 
 async def host_loop(handler: IHost):
     async_loop = asyncio.get_event_loop()
-    if DEBUG_GENVM:
-        logger.debug("Starting host_loop")
 
     sock = await handler.loop_enter()
-    if DEBUG_GENVM:
-        logger.debug(f"Socket connected: {sock}")
 
     async def send_all(data: collections.abc.Buffer):
-        socket_timeout = float(os.getenv("GENVM_SOCKET_TIMEOUT", "600"))
-        try:
-            send_coro = async_loop.sock_sendall(sock, data)
-            await asyncio.wait_for(send_coro, timeout=socket_timeout)
-        except asyncio.TimeoutError:
-            error_msg = f"Socket send timeout after {socket_timeout}s"
-            if DEBUG_GENVM:
-                logger.error(error_msg)
-            raise TimeoutError(error_msg)
-        except Exception as e:
-            if DEBUG_GENVM:
-                logger.error(f"Socket send error: {e}")
-            raise
+        await async_loop.sock_sendall(sock, data)
 
     async def read_exact(le: int) -> bytes:
         buf = bytearray([0] * le)
         idx = 0
-
-        # Add socket timeout support
-        socket_timeout = float(os.getenv("GENVM_SOCKET_TIMEOUT", "600"))
-
         while idx < le:
-            try:
-                # Use asyncio.wait_for to add timeout to socket reads
-                read_coro = async_loop.sock_recv_into(sock, memoryview(buf)[idx:le])
-                read = await asyncio.wait_for(read_coro, timeout=socket_timeout)
-
-                if read == 0:
-                    if DEBUG_GENVM:
-                        logger.warning(
-                            f"Socket closed while reading (expected {le} bytes, got {idx})"
-                        )
-                    raise ConnectionResetError(f"Socket closed (read {idx}/{le} bytes)")
-                idx += read
-            except asyncio.TimeoutError:
-                error_msg = f"Socket read timeout after {socket_timeout}s (read {idx}/{le} bytes)"
-                if DEBUG_GENVM:
-                    logger.error(error_msg)
-                raise TimeoutError(error_msg)
-            except Exception as e:
-                if DEBUG_GENVM:
-                    logger.error(f"Socket read error: {e} (read {idx}/{le} bytes)")
-                raise
-
+            read = await async_loop.sock_recv_into(sock, memoryview(buf)[idx:le])
+            if read == 0:
+                raise ConnectionResetError()
+            idx += read
         return bytes(buf)
 
     async def recv_int(bytes: int = 4) -> int:
@@ -200,34 +149,14 @@ async def host_loop(handler: IHost):
         data = await read_exact(le)
         return (ResultCode(type), data)
 
-    method_count = 0
     while True:
-        method_count += 1
-        start_time = time.time() if DEBUG_GENVM else 0
-
-        try:
-            meth_id_raw = await recv_int(1)
-        except ConnectionResetError:
-            if DEBUG_GENVM:
-                logger.debug("Connection reset while waiting for method ID")
-            raise
-        except Exception as e:
-            if DEBUG_GENVM:
-                logger.error(f"Error receiving method ID: {e}")
-            raise
-
-        meth_id = Methods(meth_id_raw)
-        if DEBUG_GENVM:
-            logger.debug(f"[Request #{method_count}] Received method: {meth_id.name}")
-
+        meth_id = Methods(await recv_int(1))
         match meth_id:
             case Methods.GET_CALLDATA:
                 cd = await handler.get_calldata()
                 await send_all(bytes([Errors.OK]))
                 await send_int(len(cd))
                 await send_all(cd)
-                if DEBUG_GENVM:
-                    logger.debug(f"  -> Sent calldata ({len(cd)} bytes)")
             case Methods.STORAGE_READ:
                 mode = await read_exact(1)
                 mode = StorageType(mode[0])
@@ -248,15 +177,8 @@ async def host_loop(handler: IHost):
                 await handler.storage_write(account, slot, index, got)
                 await send_all(bytes([Errors.OK]))
             case Methods.CONSUME_RESULT:
-                result = await read_result()
-                if DEBUG_GENVM:
-                    logger.debug(
-                        f"  -> Consuming result: type={result[0]}, data_len={len(result[1])}"
-                    )
-                await handler.consume_result(*result)
+                await handler.consume_result(*await read_result())
                 await send_all(b"\x00")
-                if DEBUG_GENVM:
-                    logger.debug("Host loop finished - result consumed")
                 return
             case Methods.GET_LEADER_NONDET_RESULT:
                 call_no = await recv_int()
@@ -325,14 +247,7 @@ async def host_loop(handler: IHost):
                 await send_all(bytes([Errors.OK]))
                 await send_all(res.to_bytes(32, byteorder="little", signed=False))
             case x:
-                error_msg = f"unknown method {x}"
-                if DEBUG_GENVM:
-                    logger.error(error_msg)
-                raise Exception(error_msg)
-
-        if DEBUG_GENVM and start_time:
-            elapsed = (time.time() - start_time) * 1000
-            logger.debug(f"  -> Method {meth_id.name} completed in {elapsed:.2f}ms")
+                raise Exception(f"unknown method {x}")
 
 
 @dataclass
@@ -348,13 +263,9 @@ async def run_host_and_program(
     *,
     env=None,
     cwd: Path | None = None,
-    exit_timeout=5.0,  # Increased from 0.05 to 5.0 seconds for proper cleanup
+    exit_timeout=0.05,
     deadline: float | None = None,
 ) -> RunHostAndProgramRes:
-    if DEBUG_GENVM:
-        logger.debug(f"Starting GenVM process with deadline={deadline}s")
-        logger.debug(f"Program command: {' '.join(str(p) for p in program)}")
-
     loop = asyncio.get_running_loop()
 
     async def connect_reader(fd):
@@ -376,25 +287,15 @@ async def run_host_and_program(
     program.insert(run_idx, "--log-fd")
     program.insert(run_idx + 1, str(genvm_log_wfd))
 
-    if DEBUG_GENVM:
-        logger.debug(f"Creating subprocess with command: {program}")
-
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *program,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=stdout_wfd,
-            stderr=stderr_wfd,
-            cwd=cwd,
-            env=env,
-            pass_fds=(genvm_log_wfd,),
-        )
-        if DEBUG_GENVM:
-            logger.debug(f"GenVM process started with PID: {process.pid}")
-    except Exception as e:
-        if DEBUG_GENVM:
-            logger.error(f"Failed to start GenVM process: {e}")
-        raise
+    process = await asyncio.create_subprocess_exec(
+        *program,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=stdout_wfd,
+        stderr=stderr_wfd,
+        cwd=cwd,
+        env=env,
+        pass_fds=(genvm_log_wfd,),
+    )
     os.close(stdout_wfd)
     os.close(stderr_wfd)
     os.close(genvm_log_wfd)
@@ -438,23 +339,10 @@ async def run_host_and_program(
         deadline_future = asyncio.ensure_future(asyncio.sleep(deadline))
         all_proc.append(deadline_future)
 
-    if DEBUG_GENVM:
-        logger.debug(f"Waiting for tasks: coro_loop, coro_proc, deadline={deadline}")
-
     done, _pending = await asyncio.wait(
         all_proc,
         return_when=asyncio.FIRST_COMPLETED,
     )
-
-    if DEBUG_GENVM:
-        done_names = []
-        if coro_loop in done:
-            done_names.append("host_loop")
-        if coro_proc in done:
-            done_names.append("genvm_process")
-        if deadline_future and deadline_future in done:
-            done_names.append("deadline")
-        logger.debug(f"First completed: {', '.join(done_names)}")
 
     errors = []
 
@@ -468,13 +356,7 @@ async def run_host_and_program(
 
     # coro_loop must finish first if everything succeeded
     if not coro_loop.done() and not handler.has_result() and deadline is None:
-        warning_msg = "WARNING: genvm finished first (process terminated before host loop completed)"
-        print(warning_msg)
-        if DEBUG_GENVM:
-            logger.warning(warning_msg)
-            logger.debug(
-                f"coro_loop.done(): {coro_loop.done()}, handler.has_result(): {handler.has_result()}"
-            )
+        print("WARNING: genvm finished first")
         coro_loop.cancel()
 
     async def wait_all_timeout():
@@ -493,30 +375,17 @@ async def run_host_and_program(
         await wait_all_timeout()
 
     if not coro_proc.done():
-        if DEBUG_GENVM:
-            logger.warning(
-                f"GenVM process still running after completion, attempting graceful termination (PID: {process.pid})"
-            )
         try:
             process.terminate()
-        except Exception as e:
-            if DEBUG_GENVM:
-                logger.error(f"Failed to terminate process: {e}")
-
-        # Wait for graceful termination
+        except:
+            pass
         await wait_all_timeout()
-
         if not coro_proc.done():
-            # genvm exit takes too long, forcefully quit it
-            if DEBUG_GENVM:
-                logger.error(
-                    f"GenVM process did not terminate gracefully, forcing kill (PID: {process.pid})"
-                )
+            # genvm exit takes to long, forcefully quit it
             try:
                 process.kill()
-            except Exception as e:
-                if DEBUG_GENVM:
-                    logger.error(f"Failed to kill process: {e}")
+            except:
+                pass
 
     try:
         await coro_loop
@@ -526,23 +395,6 @@ async def run_host_and_program(
         errors.append(e)
 
     exit_code = await process.wait()
-    if DEBUG_GENVM:
-        logger.debug(f"GenVM process exited with code: {exit_code}")
-
-    # Check for abnormal exit codes
-    if exit_code == -9:
-        error_msg = (
-            "GenVM process was killed with SIGKILL (exit code -9). This may indicate:"
-        )
-        error_msg += "\n  - Memory limit exceeded"
-        error_msg += "\n  - Process killed by OOM killer"
-        error_msg += "\n  - Timeout or resource constraint"
-        if DEBUG_GENVM:
-            logger.error(error_msg)
-        errors.append(Exception(error_msg))
-    elif exit_code != 0 and exit_code is not None:
-        if DEBUG_GENVM:
-            logger.warning(f"GenVM process exited with non-zero code: {exit_code}")
 
     if not handler.has_result():
         if (
@@ -550,13 +402,8 @@ async def run_host_and_program(
             or deadline_future is not None
             and deadline_future not in done
         ):
-            error_msg = "no result provided"
-            if DEBUG_GENVM:
-                logger.error(f"Error: {error_msg}")
-            errors.append(Exception(error_msg))
+            errors.append(Exception("no result provided"))
         else:
-            if DEBUG_GENVM:
-                logger.warning("Deadline exceeded - setting timeout result")
             await handler.consume_result(ResultCode.VM_ERROR, b"timeout")
 
     result = RunHostAndProgramRes(
