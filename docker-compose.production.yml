@@ -54,8 +54,8 @@ services:
       ollama:
         condition: service_started
         required: false
-    mem_limit: 42gb
-    mem_reservation: 8gb
+    mem_limit: ${COMPOSE_MEM_LIMIT:-8}
+    mem_reservation: ${COMPOSE_MEM_RESERVATION:-2}
 
   # Redis service for production (message queue for Socket.IO)
   redis:
