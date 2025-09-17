@@ -733,6 +733,14 @@ def get_transaction_by_hash(
     return transactions_processor.get_transaction_by_hash(transaction_hash)
 
 
+def get_studio_transaction_by_hash(
+    transactions_processor: TransactionsProcessor,
+    transaction_hash: str,
+    full: bool = True,
+) -> dict | None:
+    return transactions_processor.get_studio_transaction_by_hash(transaction_hash, full)
+
+
 def get_transaction_status(
     transactions_processor: TransactionsProcessor, transaction_hash: str
 ) -> str | None:
@@ -1353,6 +1361,10 @@ def register_all_rpc_endpoints(
     register_rpc_endpoint(
         partial(get_transaction_by_hash, transactions_processor),
         method_name="eth_getTransactionByHash",
+    )
+    register_rpc_endpoint(
+        partial(get_studio_transaction_by_hash, transactions_processor),
+        method_name="sim_getTransactionByHash",
     )
     register_rpc_endpoint(
         partial(

@@ -569,6 +569,52 @@ class TransactionsProcessor:
         transaction_data = self._process_round_data(transaction_data)
         return transaction_data
 
+    def get_studio_transaction_by_hash(
+        self, transaction_hash: str, full: bool
+    ) -> dict | None:
+        transaction = (
+            self.session.query(Transactions)
+            .filter_by(hash=transaction_hash)
+            .one_or_none()
+        )
+
+        if transaction is None:
+            return None
+
+        transaction_data = self._parse_transaction_data(transaction)
+
+        # Transform studio fields to testnet fields
+        transaction_data["tx_id"] = transaction_data.pop("hash", None)
+        transaction_data["sender"] = transaction_data.pop("from_address", None)
+        transaction_data["recipient"] = transaction_data.pop("to_address", None)
+        transaction_data["initial_rotations"] = transaction_data.pop(
+            "config_rotation_rounds", None
+        )
+        transaction_data["created_timestamp"] = str(
+            int(
+                datetime.fromisoformat(
+                    transaction_data.pop("created_at", "0")
+                ).timestamp()
+            )
+        )
+        transaction_data["last_vote_timestamp"] = str(
+            transaction_data.pop("last_vote_timestamp", 0)
+        )
+
+        if not full:
+            # Remove validators info and encoded data
+            for key in [
+                "data",
+                "consensus_data",
+                "consensus_history",
+                "contract_snapshot",
+                "leader_timeout_validators",
+                "sim_config",
+            ]:
+                transaction_data.pop(key, None)
+
+        return transaction_data
+
     def update_transaction_status(
         self,
         transaction_hash: str,
