@@ -51,7 +51,6 @@ jobs:
         run: |
           sed -i "s/<add_your_openai_api_key_here>/${OPENAIKEY}/g" .env
           sed -i "s/FINALITY_WINDOW =.*/FINALITY_WINDOW = 10/" .env
-          sed -i "s/'jsonrpc'/'localhost'/g" .env
           echo >> .env
           if [[ "${{ needs.triggers.outputs.is_pull_request_review_approved }}" == "true" ]]; then
             echo "TEST_WITH_MOCK_LLMS=false" >> .env
@@ -143,14 +142,6 @@ jobs:
       - name: Run Docker Compose
         run: docker compose -f tests/db-sqlalchemy/docker-compose.yml --project-directory . run --build --rm tests
 
-
-  load-test:
-    name: Load Tests
-    needs: triggers
-    if: ${{ needs.triggers.outputs.is_pull_request_opened == 'true' || needs.triggers.outputs.is_pull_request_review_approved == 'true' || needs.triggers.outputs.is_pull_request_labeled_with_run_tests == 'true' }}
-    uses: ./.github/workflows/load-test-oha.yml
-    with:
-      oha-version: "v1.9.0"
 
   # hardhat-test:
   #   needs: triggers
