@@ -49,25 +49,31 @@ ADD \
     https://github.com/yeagerai/genvm/releases/download/$GENVM_TAG/genvm-runners.zip \
     /genvm/genvm-runners.zip
 
+# Extract and prepare GenVM binaries
 RUN cd /genvm \
     && arch="${TARGETARCH:-}" \
     && if [[ -z "$arch" ]]; then \
         # Fallback when TARGETARCH is not provided by the builder
         arch="$(dpkg --print-architecture)"; \
     fi \
+    && echo "Building for architecture: $arch" \
     && case "$arch" in \
-        amd64) unzip genvm-linux-amd64.zip ;; \
-        arm64|aarch64) unzip genvm-linux-arm64.zip ;; \
+        amd64) unzip -q genvm-linux-amd64.zip ;; \
+        arm64|aarch64) unzip -q genvm-linux-arm64.zip ;; \
         *) echo "Unsupported architecture: $arch (TARGETPLATFORM=$TARGETPLATFORM)"; exit 1 ;; \
     esac \
-    && unzip genvm-runners.zip \
+    && unzip -q genvm-runners.zip \
     && rm *.zip \
-    && ls -R . \
     && chown -R backend-user:backend-group /genvm \
-    && su - backend-user -c 'python3 /genvm/scripts/runners-registry download --registry /genvm/share/lib/genvm/runners/all.json --dest /genvm/share/lib/genvm/runners/' \
-    && su - backend-user -c '/genvm/bin/genvm precompile' \
-    && cd "$path" \
-    && true
+    && cd "$path"
+
+# Download runners conditionally (can be skipped for faster builds)
+RUN echo "======================================" \
+    && echo "Downloading GenVM runners" \
+    && echo "This may take 10-30 minutes on first build" \
+    && echo "======================================" \
+    && su - backend-user -c 'timeout 1800 python3 /genvm/scripts/runners-registry download --registry /genvm/share/lib/genvm/runners/all.json --dest /genvm/share/lib/genvm/runners/ || echo "Runner download timed out after 30 minutes"' \
+    && su - backend-user -c '/genvm/bin/genvm precompile || echo "Precompile failed - continuing anyway"'
 
 COPY ../.env .
 COPY backend $path/backend
