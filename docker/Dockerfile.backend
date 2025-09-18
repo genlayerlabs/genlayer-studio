@@ -1,6 +1,4 @@
 # Build arguments that can be overridden
-=true
-
 FROM ubuntu:24.04 AS base
 
 ARG TARGETPLATFORM

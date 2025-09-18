@@ -573,6 +573,10 @@ def register_endpoints_for_fastapi(
         partial(endpoints.get_block_by_hash, transactions_processor),
         "eth_getBlockByHash",
     )
+    register(
+        partial(endpoints.update_transaction_status, transactions_processor),
+        "sim_updateTransactionStatus",
+    )
 
     # Dev endpoints
     if sqlalchemy_db:
