@@ -13,7 +13,7 @@ import backend.validators as validators
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.database_handler.llm_providers import LLMProviderRegistry
 from backend.rollup.consensus_service import ConsensusService
-from backend.database_handler.models import Base
+from backend.database_handler.models import Base, TransactionStatus
 from backend.domain.types import LLMProvider, Validator, TransactionType, SimConfig
 from backend.node.create_nodes.providers import (
     get_default_provider_for,
@@ -1178,6 +1178,72 @@ def delete_all_snapshots(
     return {"deleted_count": deleted_count}
 
 
+@check_forbidden_method_in_hosted_studio
+def update_transaction_status(
+    transactions_processor: TransactionsProcessor,
+    transaction_hash: str,
+    new_status: str
+) -> dict:
+    # Validate transaction hash format
+    if not transaction_hash or not isinstance(transaction_hash, str):
+        raise JSONRPCError(
+            code=-32602,
+            message="Invalid transaction hash: must be a non-empty string",
+            data={}
+        )
+    
+    if not transaction_hash.startswith("0x") or len(transaction_hash) != 66:
+        raise JSONRPCError(
+            code=-32602,
+            message="Invalid transaction hash format: must be a 66-character hex string starting with '0x'",
+            data={}
+        )
+    
+    try:
+        int(transaction_hash, 16)
+    except ValueError:
+        raise JSONRPCError(
+            code=-32602,
+            message="Invalid transaction hash format: contains non-hexadecimal characters",
+            data={}
+        )
+    
+    # Validate new status is a valid TransactionStatus enum value
+    if not new_status or not isinstance(new_status, str):
+        raise JSONRPCError(
+            code=-32602,
+            message="Invalid status: must be a non-empty string",
+            data={}
+        )
+    
+    try:
+        status_enum = TransactionStatus(new_status)
+    except ValueError:
+        valid_statuses = [status.value for status in TransactionStatus]
+        raise JSONRPCError(
+            code=-32602,
+            message=f"Invalid status '{new_status}': must be one of {valid_statuses}",
+            data={}
+        )
+    
+    transactions_processor.update_transaction_status(
+        transaction_hash=transaction_hash,
+        new_status=status_enum,
+        update_current_status_changes=True
+    )
+    
+    # Return the updated transaction
+    updated_transaction = transactions_processor.get_transaction_by_hash(transaction_hash)
+    if updated_transaction is None:
+        raise JSONRPCError(
+            code=-32602,
+            message=f"Transaction not found: {transaction_hash}",
+            data={}
+        )
+    
+    return updated_transaction
+
+
 def dev_get_pool_status(sqlalchemy_db) -> dict:
     """
     Development endpoint to monitor database connection pool status.
@@ -1422,6 +1488,10 @@ def register_all_rpc_endpoints(
     register_rpc_endpoint(
         partial(delete_all_snapshots, snapshot_manager),
         method_name="sim_deleteAllSnapshots",
+    )
+    register_rpc_endpoint(
+        partial(update_transaction_status, transactions_processor),
+        method_name="sim_updateTransactionStatus",
     )
     register_rpc_endpoint(
         partial(dev_get_pool_status, sqlalchemy_db),
