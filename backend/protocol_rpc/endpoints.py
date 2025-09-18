@@ -733,6 +733,20 @@ def get_transaction_by_hash(
     return transactions_processor.get_transaction_by_hash(transaction_hash)
 
 
+def get_studio_transaction_by_hash(
+    transactions_processor: TransactionsProcessor,
+    transaction_hash: str,
+    full: bool = True,
+) -> dict | None:
+    return transactions_processor.get_studio_transaction_by_hash(transaction_hash, full)
+
+
+def get_transaction_status(
+    transactions_processor: TransactionsProcessor, transaction_hash: str
+) -> str | None:
+    return transactions_processor.get_transaction_status(transaction_hash)
+
+
 async def eth_call(
     session: Session,
     accounts_manager: AccountsManager,
@@ -1413,6 +1427,10 @@ def register_all_rpc_endpoints(
         method_name="eth_getTransactionByHash",
     )
     register_rpc_endpoint(
+        partial(get_studio_transaction_by_hash, transactions_processor),
+        method_name="sim_getTransactionByHash",
+    )
+    register_rpc_endpoint(
         partial(
             eth_call,
             request_session,
@@ -1494,4 +1512,8 @@ def register_all_rpc_endpoints(
     register_rpc_endpoint(
         partial(dev_get_pool_status, sqlalchemy_db),
         method_name="dev_getPoolStatus",
+    )
+    register_rpc_endpoint(
+        partial(get_transaction_status, transactions_processor),
+        method_name="gen_getTransactionStatus",
     )
