@@ -13,7 +13,9 @@ class TestUpdateTransactionStatusEndpoint:
     def setup_method(self):
         """Set up test fixtures."""
         self.mock_transactions_processor = Mock(spec=TransactionsProcessor)
-        self.valid_tx_hash = "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        self.valid_tx_hash = (
+            "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        )
         self.valid_status = TransactionStatus.FINALIZED.value
         self.mock_transaction_data = {
             "hash": self.valid_tx_hash,
@@ -23,26 +25,28 @@ class TestUpdateTransactionStatusEndpoint:
             "data": {"test": "data"},
             "value": 1.0,
             "type": 1,
-            "created_at": "2023-01-01T00:00:00"
+            "created_at": "2023-01-01T00:00:00",
         }
 
     def test_valid_transaction_hash_and_status(self):
         """Test successful update with valid inputs."""
         self.mock_transactions_processor.update_transaction_status.return_value = None
-        self.mock_transactions_processor.get_transaction_by_hash.return_value = self.mock_transaction_data
+        self.mock_transactions_processor.get_transaction_by_hash.return_value = (
+            self.mock_transaction_data
+        )
 
         result = update_transaction_status(
-            self.mock_transactions_processor,
-            self.valid_tx_hash,
-            self.valid_status
+            self.mock_transactions_processor, self.valid_tx_hash, self.valid_status
         )
 
         self.mock_transactions_processor.update_transaction_status.assert_called_once_with(
             transaction_hash=self.valid_tx_hash,
             new_status=TransactionStatus.FINALIZED,
-            update_current_status_changes=True
+            update_current_status_changes=True,
         )
-        self.mock_transactions_processor.get_transaction_by_hash.assert_called_once_with(self.valid_tx_hash)
+        self.mock_transactions_processor.get_transaction_by_hash.assert_called_once_with(
+            self.valid_tx_hash
+        )
 
         assert result == self.mock_transaction_data
 
@@ -53,9 +57,7 @@ class TestUpdateTransactionStatusEndpoint:
 
         with pytest.raises(JSONRPCError) as exc_info:
             update_transaction_status(
-                self.mock_transactions_processor,
-                self.valid_tx_hash,
-                self.valid_status
+                self.mock_transactions_processor, self.valid_tx_hash, self.valid_status
             )
 
         assert exc_info.value.code == -32602
@@ -66,72 +68,79 @@ class TestUpdateTransactionStatusEndpoint:
         """Test validation error for empty transaction hash."""
         with pytest.raises(JSONRPCError) as exc_info:
             update_transaction_status(
-                self.mock_transactions_processor,
-                "",
-                self.valid_status
+                self.mock_transactions_processor, "", self.valid_status
             )
 
         assert exc_info.value.code == -32602
-        assert "Invalid transaction hash: must be a non-empty string" in exc_info.value.message
+        assert (
+            "Invalid transaction hash: must be a non-empty string"
+            in exc_info.value.message
+        )
 
     def test_invalid_transaction_hash_none(self):
         """Test validation error for None transaction hash."""
         with pytest.raises(JSONRPCError) as exc_info:
             update_transaction_status(
-                self.mock_transactions_processor,
-                None,
-                self.valid_status
+                self.mock_transactions_processor, None, self.valid_status
             )
 
         assert exc_info.value.code == -32602
-        assert "Invalid transaction hash: must be a non-empty string" in exc_info.value.message
+        assert (
+            "Invalid transaction hash: must be a non-empty string"
+            in exc_info.value.message
+        )
 
     def test_invalid_transaction_hash_wrong_length(self):
         """Test validation error for transaction hash with wrong length."""
         short_hash = "0x123"
         with pytest.raises(JSONRPCError) as exc_info:
             update_transaction_status(
-                self.mock_transactions_processor,
-                short_hash,
-                self.valid_status
+                self.mock_transactions_processor, short_hash, self.valid_status
             )
 
         assert exc_info.value.code == -32602
-        assert "Invalid transaction hash format: must be a 66-character hex string starting with '0x'" in exc_info.value.message
+        assert (
+            "Invalid transaction hash format: must be a 66-character hex string starting with '0x'"
+            in exc_info.value.message
+        )
 
     def test_invalid_transaction_hash_no_prefix(self):
         """Test validation error for transaction hash without 0x prefix."""
-        no_prefix_hash = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        no_prefix_hash = (
+            "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        )
         with pytest.raises(JSONRPCError) as exc_info:
             update_transaction_status(
-                self.mock_transactions_processor,
-                no_prefix_hash,
-                self.valid_status
+                self.mock_transactions_processor, no_prefix_hash, self.valid_status
             )
 
         assert exc_info.value.code == -32602
-        assert "Invalid transaction hash format: must be a 66-character hex string starting with '0x'" in exc_info.value.message
+        assert (
+            "Invalid transaction hash format: must be a 66-character hex string starting with '0x'"
+            in exc_info.value.message
+        )
 
     def test_invalid_transaction_hash_non_hex_characters(self):
         """Test validation error for transaction hash with non-hex characters."""
-        invalid_hash = "0x123456789gabcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        invalid_hash = (
+            "0x123456789gabcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        )
         with pytest.raises(JSONRPCError) as exc_info:
             update_transaction_status(
-                self.mock_transactions_processor,
-                invalid_hash,
-                self.valid_status
+                self.mock_transactions_processor, invalid_hash, self.valid_status
             )
 
         assert exc_info.value.code == -32602
-        assert "Invalid transaction hash format: contains non-hexadecimal characters" in exc_info.value.message
+        assert (
+            "Invalid transaction hash format: contains non-hexadecimal characters"
+            in exc_info.value.message
+        )
 
     def test_invalid_status_empty_string(self):
         """Test validation error for empty status."""
         with pytest.raises(JSONRPCError) as exc_info:
             update_transaction_status(
-                self.mock_transactions_processor,
-                self.valid_tx_hash,
-                ""
+                self.mock_transactions_processor, self.valid_tx_hash, ""
             )
 
         assert exc_info.value.code == -32602
@@ -141,9 +150,7 @@ class TestUpdateTransactionStatusEndpoint:
         """Test validation error for None status."""
         with pytest.raises(JSONRPCError) as exc_info:
             update_transaction_status(
-                self.mock_transactions_processor,
-                self.valid_tx_hash,
-                None
+                self.mock_transactions_processor, self.valid_tx_hash, None
             )
 
         assert exc_info.value.code == -32602
@@ -154,9 +161,7 @@ class TestUpdateTransactionStatusEndpoint:
         invalid_status = "INVALID_STATUS"
         with pytest.raises(JSONRPCError) as exc_info:
             update_transaction_status(
-                self.mock_transactions_processor,
-                self.valid_tx_hash,
-                invalid_status
+                self.mock_transactions_processor, self.valid_tx_hash, invalid_status
             )
 
         assert exc_info.value.code == -32602
@@ -166,46 +171,48 @@ class TestUpdateTransactionStatusEndpoint:
     def test_all_valid_transaction_statuses(self):
         """Test that all valid TransactionStatus enum values are accepted."""
         self.mock_transactions_processor.update_transaction_status.return_value = None
-        self.mock_transactions_processor.get_transaction_by_hash.return_value = self.mock_transaction_data
+        self.mock_transactions_processor.get_transaction_by_hash.return_value = (
+            self.mock_transaction_data
+        )
 
         for status in TransactionStatus:
             self.mock_transactions_processor.reset_mock()
-            self.mock_transactions_processor.get_transaction_by_hash.return_value = self.mock_transaction_data
+            self.mock_transactions_processor.get_transaction_by_hash.return_value = (
+                self.mock_transaction_data
+            )
 
             result = update_transaction_status(
-                self.mock_transactions_processor,
-                self.valid_tx_hash,
-                status.value
+                self.mock_transactions_processor, self.valid_tx_hash, status.value
             )
 
             self.mock_transactions_processor.update_transaction_status.assert_called_once_with(
                 transaction_hash=self.valid_tx_hash,
                 new_status=status,
-                update_current_status_changes=True
+                update_current_status_changes=True,
             )
             assert result == self.mock_transaction_data
 
-    @patch('backend.protocol_rpc.endpoints.check_forbidden_method_in_hosted_studio')
+    @patch("backend.protocol_rpc.endpoints.check_forbidden_method_in_hosted_studio")
     def test_decorator_is_applied(self, mock_decorator):
         """Test that the @check_forbidden_method_in_hosted_studio decorator is applied."""
         import backend.protocol_rpc.endpoints as endpoints_module
-        
-        func = getattr(endpoints_module, 'update_transaction_status')
-        
+
+        func = getattr(endpoints_module, "update_transaction_status")
+
         assert callable(func)
-        assert hasattr(func, '__name__')
-        assert func.__name__ == 'update_transaction_status'
+        assert hasattr(func, "__name__")
+        assert func.__name__ == "update_transaction_status"
 
     def test_edge_case_exactly_66_characters(self):
         """Test that exactly 66-character hex string is valid."""
         valid_66_char_hash = "0x" + "a" * 64  # 0x + 64 hex chars = 66 total
         self.mock_transactions_processor.update_transaction_status.return_value = None
-        self.mock_transactions_processor.get_transaction_by_hash.return_value = self.mock_transaction_data
+        self.mock_transactions_processor.get_transaction_by_hash.return_value = (
+            self.mock_transaction_data
+        )
 
         result = update_transaction_status(
-            self.mock_transactions_processor,
-            valid_66_char_hash,
-            self.valid_status
+            self.mock_transactions_processor, valid_66_char_hash, self.valid_status
         )
 
         assert result == self.mock_transaction_data
@@ -217,7 +224,7 @@ class TestUpdateTransactionStatusEndpoint:
             update_transaction_status(
                 self.mock_transactions_processor,
                 invalid_65_char_hash,
-                self.valid_status
+                self.valid_status,
             )
 
         assert exc_info.value.code == -32602
@@ -230,7 +237,7 @@ class TestUpdateTransactionStatusEndpoint:
             update_transaction_status(
                 self.mock_transactions_processor,
                 invalid_67_char_hash,
-                self.valid_status
+                self.valid_status,
             )
 
         assert exc_info.value.code == -32602
