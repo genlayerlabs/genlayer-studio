@@ -148,7 +148,7 @@ class NativeWebSocketClient {
           code: event.code,
           reason: event.reason,
           wasClean: event.wasClean,
-          readyState: event.target?.readyState,
+          readyState: (event.target as WebSocket)?.readyState,
         });
         console.log('Connection URL was:', this.url);
 
@@ -290,6 +290,7 @@ export function useWebSocketClient(): NativeWebSocketClient {
   console.log('Existing client:', !!webSocketClient);
   console.log('Client connected:', webSocketClient?.connected);
   console.log('Is initializing:', isInitializing);
+  console.log('Call stack:', new Error().stack);
 
   // Return existing client if already created or currently initializing
   if (webSocketClient && (webSocketClient.connected || isInitializing)) {
@@ -350,14 +351,24 @@ export function useWebSocketClient(): NativeWebSocketClient {
       );
     }
 
-    // Check for Service Workers or other interceptors (simplified)
+    // Check for Service Workers or other interceptors
     console.log('=== SERVICE WORKER & INTERCEPTOR CHECK ===');
-    console.log('ServiceWorker support:', 'serviceWorker' in navigator);
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then((registrations) => {
+        console.log('Service Worker registrations:', registrations.length);
+        registrations.forEach((reg) => console.log('  - SW scope:', reg.scope));
+      });
+    }
+
+    // Check for any global WebSocket overrides
+    console.log('WebSocket constructor:', WebSocket);
     console.log(
-      'WebSocket constructor exists:',
-      typeof WebSocket === 'function',
+      'WebSocket prototype:',
+      Object.getOwnPropertyNames(WebSocket.prototype),
     );
-    console.log('fetch function exists:', typeof fetch === 'function');
+
+    // Check if fetch has been overridden (could affect our connectivity tests)
+    console.log('fetch function:', fetch.toString().substring(0, 100) + '...');
 
     webSocketClient = new NativeWebSocketClient(wsUrl);
 
