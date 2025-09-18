@@ -174,19 +174,19 @@ async def lifespan(app: FastAPI):
     print(f"FastAPI running on port: {os.getenv('RPCPORT', '4000')}")
     print(f"Process ID: {os.getpid()}")
     print(f"Working directory: {os.getcwd()}")
-    print(f"Python path: {sys.path}")
     print(f"Command line: {sys.argv}")
-    print(f"Environment variables:")
-    print(f"  UVICORN_WORKER: {os.getenv('UVICORN_WORKER', 'NOT_SET')}")
-    print(f"  BACKEND_BUILD_TARGET: {os.getenv('BACKEND_BUILD_TARGET', 'NOT_SET')}")
-    print(f"  LOG_LEVEL: {os.getenv('LOG_LEVEL', 'NOT_SET')}")
-    print(f"  FLASK_ENV: {os.getenv('FLASK_ENV', 'NOT_SET')}")
-    print(f"  FLASK_APP: {os.getenv('FLASK_APP', 'NOT_SET')}")
-    print(f"  PYTHONPATH: {os.getenv('PYTHONPATH', 'NOT_SET')}")
-    print(f"  WEB_CONCURRENCY: {os.getenv('WEB_CONCURRENCY', 'NOT_SET')}")
-    print(f"All environment variables:")
-    for key, value in sorted(os.environ.items()):
-        print(f"    {key}={value}")
+    # Log critical env vars only (avoid overwhelming logs)
+    critical_vars = [
+        "UVICORN_WORKER",
+        "BACKEND_BUILD_TARGET",
+        "LOG_LEVEL",
+        "FLASK_ENV",
+        "FLASK_APP",
+        "RPCPORT",
+    ]
+    print(
+        f"Critical env vars: {dict((k, os.getenv(k, 'NOT_SET')) for k in critical_vars)}"
+    )
     print("Starting up FastAPI application...")
 
     # Initialize database
@@ -276,35 +276,26 @@ async def lifespan(app: FastAPI):
 
         print("=== FASTAPI APPLICATION STARTED SUCCESSFULLY ===")
 
-        # Debug: Print all registered routes
-        print("=== REGISTERED ROUTES ===")
-        for route in app.routes:
-            if hasattr(route, "path"):
-                route_type = (
-                    "WebSocket"
-                    if "WebSocket" in str(type(route))
-                    else str(getattr(route, "methods", "Unknown"))
-                )
-                print(f"  {route_type}: {route.path}")
+        # Debug: Print registered WebSocket routes only
+        print("=== WEBSOCKET ROUTES CHECK ===")
+        ws_routes = [
+            route
+            for route in app.routes
+            if hasattr(route, "path") and "WebSocket" in str(type(route))
+        ]
+        for route in ws_routes:
+            print(f"  WebSocket: {route.path}")
+        print(f"Total WebSocket routes: {len(ws_routes)}")
 
-        # Test if WebSocket endpoints are callable
-        print("=== TESTING WEBSOCKET ENDPOINT REGISTRATION ===")
-        try:
-            import inspect
+        # Check WebSocket functions exist (safe)
+        print("=== WEBSOCKET FUNCTIONS ===")
+        print(
+            f"websocket_handler exists: {callable(globals().get('websocket_handler', None))}"
+        )
 
-            print(f"websocket_endpoint function: {websocket_endpoint}")
-            print(
-                f"websocket_socketio_endpoint function: {websocket_socketio_endpoint}"
-            )
-            print(f"websocket_handler function: {websocket_handler}")
-        except Exception as e:
-            print(f"Error checking WebSocket functions: {e}")
-
-        # Check if the server is using the correct ASGI application
-        print("=== SERVER CONFIGURATION ===")
-        print(f"FastAPI app instance: {app}")
+        # Basic server state
+        print("=== SERVER STATE ===")
         print(f"App state keys: {list(app_state.keys())}")
-        print(f"ConnectionManager instance: {manager}")
         print(f"Active connections: {len(manager.active_connections)}")
 
         yield
@@ -376,12 +367,15 @@ async def debug_requests(request: Request, call_next):
         print(f"Connection header: {request.headers.get('connection', 'NONE')}")
         print(f"All headers: {dict(request.headers)}")
 
-    # Log requests from frontend IPs specifically
-    client_host = str(request.client.host) if request.client else "UNKNOWN"
-    if client_host.startswith("172.18.0") or "frontend" in client_host:
-        print(f"=== FRONTEND REQUEST ===")
-        print(f"Method: {request.method}, Path: {url_path}")
-        print(f"Client: {request.client}")
+    # Log requests from frontend IPs specifically (safe client check)
+    try:
+        client_host = str(request.client.host) if request.client else "UNKNOWN"
+        if client_host.startswith("172.18.0") or "frontend" in client_host:
+            print(f"=== FRONTEND REQUEST ===")
+            print(f"Method: {request.method}, Path: {url_path}")
+            print(f"Client: {request.client}")
+    except Exception:
+        pass  # Ignore client parsing errors
 
     response = await call_next(request)
 
