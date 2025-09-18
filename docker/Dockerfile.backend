@@ -3,9 +3,7 @@ FROM ubuntu:24.04 AS base
 ARG TARGETPLATFORM
 ARG TARGETARCH
 
-ARG GENVM_TAG=v0.2.0
-
-ENV GENVM_TAG=$GENVM_TAG
+ARG GENVM_TAG=v0.1.3
 
 ARG path=/app
 WORKDIR $path
@@ -13,7 +11,7 @@ WORKDIR $path
 SHELL ["/bin/bash", "-x", "-c"]
 RUN apt-get update -y \
     && DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install -y --no-install-recommends \
-        curl unzip xz-utils ca-certificates python3.12 python3.12-venv libssl3 \
+        curl unzip xz-utils ca-certificates python3.12 libssl3 \
     && mkdir -p "$HOME/.config/pip/" \
     && printf "[global]\nbreak-system-packages = true\n" >> "$HOME/.config/pip/pip.conf" \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2 \
@@ -40,16 +38,16 @@ ENV HUGGINGFACE_HUB_CACHE /home/backend-user/.cache/huggingface
 ENV RUST_BACKTRACE=1
 
 ADD \
-   https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-linux-amd64.tar.xz \
-   /genvm/genvm-linux-amd64.tar.xz
+    https://github.com/yeagerai/genvm/releases/download/$GENVM_TAG/genvm-linux-amd64.zip \
+    /genvm/genvm-linux-amd64.zip
 
 ADD \
-   https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-linux-arm64.tar.xz \
-   /genvm/genvm-linux-arm64.tar.xz
+    https://github.com/yeagerai/genvm/releases/download/$GENVM_TAG/genvm-linux-arm64.zip \
+    /genvm/genvm-linux-arm64.zip
 
 ADD \
-   https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-universal.tar.xz \
-   /genvm/genvm-universal.tar.xz
+    https://github.com/yeagerai/genvm/releases/download/$GENVM_TAG/genvm-runners.zip \
+    /genvm/genvm-runners.zip
 
 RUN cd /genvm \
     && arch="${TARGETARCH:-}" \
@@ -66,7 +64,8 @@ RUN cd /genvm \
     && rm *.zip \
     && ls -R . \
     && chown -R backend-user:backend-group /genvm \
-    && su - backend-user -c "/genvm/executor/$GENVM_TAG/bin/post-install.py" \
+    && su - backend-user -c 'python3 /genvm/scripts/runners-registry download --registry /genvm/share/lib/genvm/runners/all.json --dest /genvm/share/lib/genvm/runners/' \
+    && su - backend-user -c '/genvm/bin/genvm precompile' \
     && cd "$path" \
     && true
 

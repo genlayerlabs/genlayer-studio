@@ -6,7 +6,7 @@ import contextlib
 
 from pathlib import Path
 
-from .base import ChangedConfigFile, WEB_CONFIG_PATH, MODULES_BINARY
+from .base import ChangedConfigFile
 
 
 class WebModule:
@@ -19,7 +19,7 @@ class WebModule:
 
         self._process = None
 
-        self._config = ChangedConfigFile(WEB_CONFIG_PATH)
+        self._config = ChangedConfigFile("genvm-module-web.yaml")
 
         web_script_path = Path(__file__).parent.joinpath("web.lua")
 
@@ -46,8 +46,10 @@ class WebModule:
     async def restart(self):
         await self.stop()
 
+        exe_path = Path(os.environ["GENVM_BIN"]).joinpath("genvm-modules")
+
         self._process = await asyncio.subprocess.create_subprocess_exec(
-            MODULES_BINARY,
+            exe_path,
             "web",
             "--config",
             self._config.new_path,

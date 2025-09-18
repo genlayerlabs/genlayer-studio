@@ -71,13 +71,15 @@ class _SnapshotView(genvmbase.StateProxy):
 
     def storage_write(
         self,
+        account: Address,
         slot: bytes,
         index: int,
         got: collections.abc.Buffer,
         /,
     ) -> None:
+        assert account == self.contract_address
         assert not self.readonly
-        snap = self._get_snapshot(self.contract_address)
+        snap = self._get_snapshot(account)
         slot_id = base64.b64encode(slot).decode("ascii")
         for_slot = snap.states[self.state_status].setdefault(slot_id, "")
         data = bytearray(base64.b64decode(for_slot))
@@ -163,12 +165,9 @@ class Node:
             and leader_receipt.contract_state == receipt.contract_state
             and leader_receipt.pending_transactions == receipt.pending_transactions
         ):
-            if receipt.nondet_disagree is not None:
-                receipt.vote = Vote.DISAGREE
-            else:
-                receipt.vote = Vote.AGREE
+            receipt.vote = Vote.AGREE
         else:
-            receipt.vote = Vote.DETERMINISTIC_VIOLATION
+            receipt.vote = Vote.DISAGREE
 
         return receipt
 
@@ -205,7 +204,11 @@ class Node:
         )
 
         base_host.save_code_callback(
-            code_to_deploy, snapshot_view_for_code.storage_write
+            Address(self.contract_snapshot.contract_address).as_bytes,
+            code_to_deploy,
+            lambda addr, *rest: snapshot_view_for_code.storage_write(
+                Address(addr), *rest
+            ),
         )
 
         return await self._run_genvm(
@@ -382,7 +385,6 @@ class Node:
                 "stderr": res.stderr,
             },
             processing_time=res.processing_time,
-            nondet_disagree=res.nondet_disagree,
         )
 
         if self.validator_mode == ExecutionMode.LEADER:

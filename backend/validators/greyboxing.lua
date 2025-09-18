@@ -119,12 +119,6 @@ local function just_in_backend(ctx, args, mapped_prompt)
 					request
 				)
 			end)
-
-			if success then
-				result.consumed_gen = 0
-
-				return result
-			end
 		end
 
 		lib.log{level = "debug", message = "executed with", success = success, type = type(result), res = result}
@@ -158,7 +152,7 @@ local function just_in_backend(ctx, args, mapped_prompt)
 	})
 end
 
-function ExecPrompt(ctx, args, remaining_gen)
+function ExecPrompt(ctx, args)
 	---@cast args LLMExecPromptPayload
 
 	local mapped = llm.exec_prompt_transform(args)
@@ -166,7 +160,7 @@ function ExecPrompt(ctx, args, remaining_gen)
 	return just_in_backend(ctx, args, mapped)
 end
 
-function ExecPromptTemplate(ctx, args, remaining_gen)
+function ExecPromptTemplate(ctx, args)
 	---@cast args LLMExecPromptTemplatePayload
 
 	local template = args.template -- workaround by kp2pml30 (Kira) GVM-86
