@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .llm import LLMModule
 from .web import WebModule
-from .base import ChangedConfigFile
+from .base import ChangedConfigFile, GENVM_CONFIG_PATH
 
 import backend.database_handler.validators_registry as vr
 from sqlalchemy.orm import Session
@@ -96,7 +96,7 @@ class Manager:
         self.llm_module = LLMModule()
         self.web_module = WebModule()
 
-        self._genvm_config = ChangedConfigFile("genvm.yaml")
+        self._genvm_config = ChangedConfigFile(GENVM_CONFIG_PATH)
         with self._genvm_config.change_default() as config:
             config["modules"]["llm"]["address"] = "ws://" + self.llm_module.address
             config["modules"]["web"]["address"] = "ws://" + self.web_module.address
@@ -150,7 +150,10 @@ class Manager:
     ) -> Snapshot:
         current_validators: list[SingleValidatorSnapshot] = []
         for val in validators:
-            host_data = {"studio_llm_id": f"node-{val.address}"}
+            host_data = {
+                "studio_llm_id": f"node-{val.address}",
+                "node_address": val.address,
+            }
             if (
                 "mock_response" in val.llmprovider.plugin_config
                 and len(val.llmprovider.plugin_config["mock_response"]) > 0
