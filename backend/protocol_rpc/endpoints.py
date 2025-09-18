@@ -1182,40 +1182,38 @@ def delete_all_snapshots(
 def update_transaction_status(
     transactions_processor: TransactionsProcessor,
     transaction_hash: str,
-    new_status: str
+    new_status: str,
 ) -> dict:
     # Validate transaction hash format
     if not transaction_hash or not isinstance(transaction_hash, str):
         raise JSONRPCError(
             code=-32602,
             message="Invalid transaction hash: must be a non-empty string",
-            data={}
+            data={},
         )
-    
+
     if not transaction_hash.startswith("0x") or len(transaction_hash) != 66:
         raise JSONRPCError(
             code=-32602,
             message="Invalid transaction hash format: must be a 66-character hex string starting with '0x'",
-            data={}
+            data={},
         )
-    
+
     try:
         int(transaction_hash, 16)
     except ValueError:
         raise JSONRPCError(
             code=-32602,
             message="Invalid transaction hash format: contains non-hexadecimal characters",
-            data={}
+            data={},
         )
-    
+
     # Validate new status is a valid TransactionStatus enum value
     if not new_status or not isinstance(new_status, str):
         raise JSONRPCError(
-            code=-32602,
-            message="Invalid status: must be a non-empty string",
-            data={}
+            code=-32602, message="Invalid status: must be a non-empty string", data={}
         )
-    
+
     try:
         status_enum = TransactionStatus(new_status)
     except ValueError:
@@ -1223,24 +1221,24 @@ def update_transaction_status(
         raise JSONRPCError(
             code=-32602,
             message=f"Invalid status '{new_status}': must be one of {valid_statuses}",
-            data={}
+            data={},
         )
-    
+
     transactions_processor.update_transaction_status(
         transaction_hash=transaction_hash,
         new_status=status_enum,
-        update_current_status_changes=True
+        update_current_status_changes=True,
     )
-    
+
     # Return the updated transaction
-    updated_transaction = transactions_processor.get_transaction_by_hash(transaction_hash)
+    updated_transaction = transactions_processor.get_transaction_by_hash(
+        transaction_hash
+    )
     if updated_transaction is None:
         raise JSONRPCError(
-            code=-32602,
-            message=f"Transaction not found: {transaction_hash}",
-            data={}
+            code=-32602, message=f"Transaction not found: {transaction_hash}", data={}
         )
-    
+
     return updated_transaction
 
 
