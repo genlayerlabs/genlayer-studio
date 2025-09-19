@@ -538,11 +538,12 @@ class TransactionsProcessor:
         if (transaction_data["consensus_data"] is not None) and (
             "votes" in transaction_data["consensus_data"]
         ):
-            votes_temp = list(transaction_data["consensus_data"]["votes"].values())
-            if len(votes_temp) == 0:
+            votes_values = list(transaction_data["consensus_data"]["votes"].values())
+            if len(votes_values) == 0:
                 consensus_result = ConsensusResult.TIMEOUT
             else:
-                consensus_result = determine_consensus_from_votes(votes_temp)
+                normalized_votes = [str(v).lower() for v in votes_values]
+                consensus_result = determine_consensus_from_votes(normalized_votes)
         else:
             consensus_result = ConsensusResult.NO_MAJORITY
 
