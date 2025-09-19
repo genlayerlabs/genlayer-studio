@@ -3,6 +3,7 @@ from datetime import datetime
 from enum import Enum
 import rlp
 import re
+import random
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, desc, and_, JSON, type_coerce, text
 from sqlalchemy.orm.attributes import flag_modified
@@ -187,31 +188,27 @@ class TransactionsProcessor:
         type: int,
         nonce: int,
     ) -> str:
-        from_address_bytes = (
-            to_bytes(hexstr=from_address) if is_address(from_address) else None
+        """Generate a fallback transaction hash similar to ConsensusMain._generateTx."""
+
+        # Prepare recipient bytes as the solidity address encoding (20 bytes)
+        recipient_bytes = (
+            to_bytes(hexstr=to_address) if is_address(to_address) else b"\x00" * 20
         )
-        to_address_bytes = (
-            to_bytes(hexstr=to_address) if is_address(to_address) else None
+
+        # Use current timestamp to mimic block.timestamp
+        timestamp = int(time.time())
+        timestamp_bytes = timestamp.to_bytes(32, byteorder="big", signed=False)
+
+        # Derive a deterministic pseudo-random seed from the recipient address
+        seed_source = f"{to_address or '0x0'}:{timestamp}"
+        rng = random.Random(seed_source)
+        random_hex = "".join(rng.choice("0123456789abcdef") for _ in range(64))
+        random_seed_bytes = bytes.fromhex(random_hex)
+
+        tx_hash = (
+            "0x" + keccak(recipient_bytes + timestamp_bytes + random_seed_bytes).hex()
         )
-
-        data_bytes = to_bytes(text=TransactionsProcessor._transaction_data_to_str(data))
-
-        tx_elements = [
-            from_address_bytes,
-            to_address_bytes,
-            to_bytes(hexstr=hex(int(value))),
-            data_bytes,
-            to_bytes(hexstr=hex(type)),
-            to_bytes(hexstr=hex(nonce)),
-            to_bytes(hexstr=hex(0)),  # gas price (placeholder)
-            to_bytes(hexstr=hex(0)),  # gas limit (placeholder)
-        ]
-
-        # Filter out None values
-        tx_elements = [elem for elem in tx_elements if elem is not None]
-        rlp_encoded = rlp.encode(tx_elements)
-        hash = "0x" + keccak(rlp_encoded).hex()
-        return hash
+        return tx_hash
 
     def insert_transaction(
         self,
