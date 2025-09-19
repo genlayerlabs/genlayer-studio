@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from .base import *
+import backend.validators.base as base
 
 
 @dataclasses.dataclass
@@ -41,7 +41,7 @@ class LLMModule:
 
         greyboxing_path = Path(__file__).parent.joinpath("greyboxing.lua")
 
-        self._config = ChangedConfigFile(LLM_CONFIG_PATH)
+        self._config = base.ChangedConfigFile(base.LLM_CONFIG_PATH)
 
         with self._config.change_default() as conf:
             conf["lua_script_path"] = str(greyboxing_path)
@@ -103,7 +103,7 @@ class LLMModule:
         await self.stop()
 
         self._process = await asyncio.subprocess.create_subprocess_exec(
-            MODULES_BINARY,
+            base.MODULES_BINARY,
             "llm",
             "--config",
             self._config.new_path,
@@ -150,7 +150,7 @@ class LLMModule:
 
         try:
             proc = await asyncio.subprocess.create_subprocess_exec(
-                MODULES_BINARY,
+                base.MODULES_BINARY,
                 "llm-check",
                 "--provider",
                 plugin,

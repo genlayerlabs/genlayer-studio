@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .llm import LLMModule
 from .web import WebModule
-from .base import ChangedConfigFile, GENVM_CONFIG_PATH
+import backend.validators.base as base
 
 import backend.database_handler.validators_registry as vr
 from sqlalchemy.orm import Session
@@ -96,7 +96,7 @@ class Manager:
         self.llm_module = LLMModule()
         self.web_module = WebModule()
 
-        self._genvm_config = ChangedConfigFile(GENVM_CONFIG_PATH)
+        self._genvm_config = base.ChangedConfigFile(base.GENVM_CONFIG_PATH)
         with self._genvm_config.change_default() as config:
             config["modules"]["llm"]["address"] = "ws://" + self.llm_module.address
             config["modules"]["web"]["address"] = "ws://" + self.web_module.address

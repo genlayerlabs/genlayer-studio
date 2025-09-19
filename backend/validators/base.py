@@ -9,16 +9,36 @@ from copy import deepcopy
 
 import backend.node.genvm.config as genvm_config
 
-GENVM_BINARY = genvm_config._find_exe("genvm")
-MODULES_BINARY = genvm_config._find_exe("genvm-modules", env_name="GENVMROOT")
+_DYN_ATTRS = set(
+    [
+        "GENVM_BINARY",
+        "MODULES_BINARY",
+        "GENVM_CONFIG_PATH",
+        "LLM_CONFIG_PATH",
+        "WEB_CONFIG_PATH",
+    ]
+)
 
-GENVM_CONFIG_PATH = GENVM_BINARY.parent.parent.joinpath("config", "genvm.yaml")
-LLM_CONFIG_PATH = MODULES_BINARY.parent.parent.joinpath(
-    "config", "genvm-module-llm.yaml"
-)
-WEB_CONFIG_PATH = MODULES_BINARY.parent.parent.joinpath(
-    "config", "genvm-module-web.yaml"
-)
+
+def __getattr__(name: str) -> typing.Any:
+    if name not in _DYN_ATTRS:
+        raise AttributeError(f"module {__name__} has no attribute {name}")
+
+    GENVM_BINARY = genvm_config._find_exe("genvm")
+    MODULES_BINARY = genvm_config._find_exe("genvm-modules", env_name="GENVMROOT")
+
+    GENVM_CONFIG_PATH = GENVM_BINARY.parent.parent.joinpath("config", "genvm.yaml")
+    LLM_CONFIG_PATH = MODULES_BINARY.parent.parent.joinpath(
+        "config", "genvm-module-llm.yaml"
+    )
+    WEB_CONFIG_PATH = MODULES_BINARY.parent.parent.joinpath(
+        "config", "genvm-module-web.yaml"
+    )
+
+    for k in _DYN_ATTRS:
+        globals()[k] = locals()[k]
+
+    return globals()[name]
 
 
 class _Stream:

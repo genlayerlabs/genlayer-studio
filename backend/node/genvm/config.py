@@ -1,8 +1,6 @@
 import os
 from pathlib import Path
 
-# TODO(kp2pml30): this needs to be rewritten
-
 
 def _check_one(check: Path) -> bool:
     try:

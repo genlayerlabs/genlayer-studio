@@ -6,7 +6,7 @@ import contextlib
 
 from pathlib import Path
 
-from .base import ChangedConfigFile, WEB_CONFIG_PATH, MODULES_BINARY
+import backend.validators.base as base
 
 
 class WebModule:
@@ -19,7 +19,7 @@ class WebModule:
 
         self._process = None
 
-        self._config = ChangedConfigFile(WEB_CONFIG_PATH)
+        self._config = base.ChangedConfigFile(base.WEB_CONFIG_PATH)
 
         web_script_path = Path(__file__).parent.joinpath("web.lua")
 
@@ -47,7 +47,7 @@ class WebModule:
         await self.stop()
 
         self._process = await asyncio.subprocess.create_subprocess_exec(
-            MODULES_BINARY,
+            base.MODULES_BINARY,
             "web",
             "--config",
             self._config.new_path,

@@ -109,7 +109,9 @@ def get_code_slot() -> bytes:
     return code_slot
 
 
-def save_code_callback[T](
+def save_code_callback[
+    T
+](
     code: bytes, cb: typing.Callable[[bytes, int, bytes], T]
 ) -> tuple[T, T]:
     code_slot = get_code_slot()
