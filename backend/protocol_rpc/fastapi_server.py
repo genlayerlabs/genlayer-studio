@@ -60,27 +60,8 @@ class ConnectionManager:
         self.room_connections: Dict[str, List[WebSocket]] = {}
 
     async def connect(self, websocket: WebSocket):
-        print(f"=== ConnectionManager.connect() called ===")
-        print(f"WebSocket object: {websocket}")
-        print(f"WebSocket type: {type(websocket)}")
-        print(f"Current active connections: {len(self.active_connections)}")
-
-        try:
-            print(f"=== Calling websocket.accept() ===")
-            await websocket.accept()
-            print(f"=== websocket.accept() completed successfully ===")
-
-            self.active_connections.append(websocket)
-            print(f"=== WebSocket added to connections list ===")
-            print(f"New total connections: {len(self.active_connections)}")
-        except Exception as e:
-            print(f"=== ERROR in ConnectionManager.connect() ===")
-            print(f"Error during accept: {e}")
-            print(f"Error type: {type(e)}")
-            import traceback
-
-            print(f"Full traceback: {traceback.format_exc()}")
-            raise
+        await websocket.accept()
+        self.active_connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket):
         self.active_connections.remove(websocket)
@@ -169,25 +150,6 @@ def get_db():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle."""
-    print("=== FASTAPI APPLICATION STARTUP ===")
-    print(f"Python version: {sys.version}")
-    print(f"FastAPI running on port: {os.getenv('RPCPORT', '4000')}")
-    print(f"Process ID: {os.getpid()}")
-    print(f"Working directory: {os.getcwd()}")
-    print(f"Python path: {sys.path}")
-    print(f"Command line: {sys.argv}")
-    print(f"Environment variables:")
-    print(f"  UVICORN_WORKER: {os.getenv('UVICORN_WORKER', 'NOT_SET')}")
-    print(f"  BACKEND_BUILD_TARGET: {os.getenv('BACKEND_BUILD_TARGET', 'NOT_SET')}")
-    print(f"  LOG_LEVEL: {os.getenv('LOG_LEVEL', 'NOT_SET')}")
-    print(f"  FLASK_ENV: {os.getenv('FLASK_ENV', 'NOT_SET')}")
-    print(f"  FLASK_APP: {os.getenv('FLASK_APP', 'NOT_SET')}")
-    print(f"  PYTHONPATH: {os.getenv('PYTHONPATH', 'NOT_SET')}")
-    print(f"  WEB_CONCURRENCY: {os.getenv('WEB_CONCURRENCY', 'NOT_SET')}")
-    print(f"All environment variables:")
-    for key, value in sorted(os.environ.items()):
-        print(f"    {key}={value}")
-    print("Starting up FastAPI application...")
 
     # Initialize database
     Base.metadata.create_all(bind=engine)
@@ -260,8 +222,6 @@ async def lifespan(app: FastAPI):
             app_state["consensus"].run_appeal_window_loop(stop_event=stop_event)
         )
 
-        print("Consensus background tasks started")
-
         # Store SQLAlchemy db for dev endpoints (if needed)
         # Since we're using SQLAlchemy directly, we can create a simple wrapper
         class SQLAlchemyDBWrapper:
@@ -274,48 +234,12 @@ async def lifespan(app: FastAPI):
         # Initialize RPC handler with app_state
         app_state["rpc_handler"] = RPCHandler(app_state)
 
-        print("=== FASTAPI APPLICATION STARTED SUCCESSFULLY ===")
-
-        # Debug: Print all registered routes
-        print("=== REGISTERED ROUTES ===")
-        for route in app.routes:
-            if hasattr(route, "path"):
-                route_type = (
-                    "WebSocket"
-                    if "WebSocket" in str(type(route))
-                    else str(getattr(route, "methods", "Unknown"))
-                )
-                print(f"  {route_type}: {route.path}")
-
-        # Test if WebSocket endpoints are callable
-        print("=== TESTING WEBSOCKET ENDPOINT REGISTRATION ===")
-        try:
-            import inspect
-
-            print(f"websocket_endpoint function: {websocket_endpoint}")
-            print(
-                f"websocket_socketio_endpoint function: {websocket_socketio_endpoint}"
-            )
-            print(f"websocket_handler function: {websocket_handler}")
-        except Exception as e:
-            print(f"Error checking WebSocket functions: {e}")
-
-        # Check if the server is using the correct ASGI application
-        print("=== SERVER CONFIGURATION ===")
-        print(f"FastAPI app instance: {app}")
-        print(f"App state keys: {list(app_state.keys())}")
-        print(f"ConnectionManager instance: {manager}")
-        print(f"Active connections: {len(manager.active_connections)}")
-
         yield
 
         # Cleanup on shutdown
-        print("Shutting down FastAPI application...")
-
         # Stop consensus tasks
         if "consensus_stop_event" in app_state:
             app_state["consensus_stop_event"].set()
-            print("Stopping consensus background tasks...")
 
         MAIN_LOOP_EXITING.set_result(True)
         await asyncio.wrap_future(MAIN_LOOP_DONE)
@@ -342,56 +266,6 @@ app.add_middleware(
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy"}
-
-
-# Debug middleware to catch all requests
-@app.middleware("http")
-async def debug_requests(request: Request, call_next):
-    """Debug middleware to log all incoming requests for production debugging."""
-    url_path = str(request.url.path)
-
-    # Log Socket.IO related requests
-    if "socket.io" in url_path:
-        print(f"=== SOCKET.IO REQUEST DETECTED ===")
-        print(f"Method: {request.method}")
-        print(f"Path: {url_path}")
-        print(f"Query params: {request.url.query}")
-        print(f"Client: {request.client}")
-        print(f"Headers: {dict(request.headers)}")
-
-    # Log WebSocket upgrade requests
-    if request.headers.get("upgrade", "").lower() == "websocket":
-        print(f"=== WEBSOCKET UPGRADE REQUEST ===")
-        print(f"Path: {url_path}")
-        print(f"Client: {request.client}")
-        print(f"Headers: {dict(request.headers)}")
-
-    # Log ALL /ws requests (both HTTP and WebSocket)
-    if url_path == "/ws" or url_path.startswith("/ws/"):
-        print(f"=== /WS PATH REQUEST ===")
-        print(f"Method: {request.method}")
-        print(f"Path: {url_path}")
-        print(f"Client: {request.client}")
-        print(f"Upgrade header: {request.headers.get('upgrade', 'NONE')}")
-        print(f"Connection header: {request.headers.get('connection', 'NONE')}")
-        print(f"All headers: {dict(request.headers)}")
-
-    # Log requests from frontend IPs specifically
-    client_host = str(request.client.host) if request.client else "UNKNOWN"
-    if client_host.startswith("172.18.0") or "frontend" in client_host:
-        print(f"=== FRONTEND REQUEST ===")
-        print(f"Method: {request.method}, Path: {url_path}")
-        print(f"Client: {request.client}")
-
-    response = await call_next(request)
-
-    # Log response details for WebSocket-related requests
-    if "socket.io" in url_path or "/ws" in url_path:
-        print(f"=== RESPONSE FOR {url_path} ===")
-        print(f"Status: {response.status_code}")
-        print(f"Headers: {dict(response.headers)}")
-
-    return response
 
 
 # JSON-RPC endpoint (supports single and batch requests)
@@ -512,43 +386,19 @@ async def jsonrpc_endpoint(request: Request):
 @app.websocket("/socket.io/")
 async def websocket_socketio_endpoint(websocket: WebSocket):
     """Socket.IO-compatible WebSocket endpoint."""
-    print(f"=== WEBSOCKET /socket.io/ ENDPOINT HIT ===")
-    print(f"Client: {websocket.client}")
-    print(f"Headers: {dict(websocket.headers)}")
     return await websocket_handler(websocket)
 
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """Standard WebSocket endpoint."""
-    print(f"=== WEBSOCKET /ws ENDPOINT HIT ===")
-    print(f"Client: {websocket.client}")
-    print(f"Headers: {dict(websocket.headers)}")
     return await websocket_handler(websocket)
 
 
 async def websocket_handler(websocket: WebSocket):
     """WebSocket handler for real-time communication."""
     client_id = id(websocket)
-    print(f"=== WEBSOCKET HANDLER CALLED ===")
-    print(f"Client ID: {client_id}")
-    print(f"WebSocket state: {websocket.client_state}")
-    print(f"WebSocket scope: {websocket.scope}")
-
-    try:
-        print(f"=== ATTEMPTING TO ACCEPT WEBSOCKET ===")
-        await manager.connect(websocket)
-        print(f"=== WEBSOCKET CLIENT {client_id} CONNECTED SUCCESSFULLY ===")
-        print(f"Manager total connections: {len(manager.active_connections)}")
-    except Exception as e:
-        print(f"=== WEBSOCKET CONNECTION FAILED ===")
-        print(f"Error type: {type(e)}")
-        print(f"Error message: {e}")
-        print(f"WebSocket state after error: {websocket.client_state}")
-        import traceback
-
-        print(f"Full traceback: {traceback.format_exc()}")
-        raise
+    await manager.connect(websocket)
 
     # Send initial connect confirmation
     await websocket.send_text(
@@ -573,7 +423,6 @@ async def websocket_handler(websocket: WebSocket):
                         await websocket.send_text(
                             json.dumps({"event": "subscribed", "data": {"room": topic}})
                         )
-                        print(f"Client {client_id} joined room: {topic}")
 
                 elif event == "unsubscribe":
                     # Handle room unsubscriptions
@@ -585,7 +434,6 @@ async def websocket_handler(websocket: WebSocket):
                                 {"event": "unsubscribed", "data": {"room": topic}}
                             )
                         )
-                        print(f"Client {client_id} left room: {topic}")
 
                 else:
                     # Handle other events
@@ -602,9 +450,7 @@ async def websocket_handler(websocket: WebSocket):
 
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-        print(f"Client {client_id} disconnected")
     except Exception as e:
-        print(f"WebSocket error: {e}")
         manager.disconnect(websocket)
 
 
