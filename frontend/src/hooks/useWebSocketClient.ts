@@ -64,7 +64,7 @@ class NativeWebSocketClient {
         console.error('WebSocket error:', error);
       };
 
-      this.ws.onclose = (event) => {
+      this.ws.onclose = () => {
         this.id = null;
         this.connected = false;
         this.triggerEvent('disconnect', null);
@@ -181,7 +181,6 @@ class NativeWebSocketClient {
   }
 }
 
-// Module startup logging
 // Singleton instance with initialization state tracking
 let webSocketClient: NativeWebSocketClient | null = null;
 let isInitializing: boolean = false;

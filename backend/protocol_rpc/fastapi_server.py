@@ -60,11 +60,8 @@ class ConnectionManager:
         self.room_connections: Dict[str, List[WebSocket]] = {}
 
     async def connect(self, websocket: WebSocket):
-        try:
-            await websocket.accept()
-            self.active_connections.append(websocket)
-        except Exception as e:
-            raise
+        await websocket.accept()
+        self.active_connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket):
         self.active_connections.remove(websocket)
@@ -271,17 +268,6 @@ async def health_check():
     return {"status": "healthy"}
 
 
-# Debug middleware to catch all requests
-@app.middleware("http")
-async def debug_requests(request: Request, call_next):
-    """Debug middleware to log all incoming requests for production debugging."""
-    url_path = str(request.url.path)
-
-    response = await call_next(request)
-
-    return response
-
-
 # JSON-RPC endpoint (supports single and batch requests)
 @app.post("/api")
 async def jsonrpc_endpoint(request: Request):
@@ -412,11 +398,7 @@ async def websocket_endpoint(websocket: WebSocket):
 async def websocket_handler(websocket: WebSocket):
     """WebSocket handler for real-time communication."""
     client_id = id(websocket)
-
-    try:
-        await manager.connect(websocket)
-    except Exception as e:
-        raise
+    await manager.connect(websocket)
 
     # Send initial connect confirmation
     await websocket.send_text(
