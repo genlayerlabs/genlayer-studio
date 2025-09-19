@@ -6,7 +6,7 @@ import contextlib
 
 from pathlib import Path
 
-from .base import ChangedConfigFile
+import backend.validators.base as base
 
 
 class WebModule:
@@ -19,7 +19,7 @@ class WebModule:
 
         self._process = None
 
-        self._config = ChangedConfigFile("genvm-module-web.yaml")
+        self._config = base.ChangedConfigFile(base.WEB_CONFIG_PATH)
 
         web_script_path = Path(__file__).parent.joinpath("web.lua")
 
@@ -46,10 +46,8 @@ class WebModule:
     async def restart(self):
         await self.stop()
 
-        exe_path = Path(os.environ["GENVM_BIN"]).joinpath("genvm-modules")
-
         self._process = await asyncio.subprocess.create_subprocess_exec(
-            exe_path,
+            base.MODULES_BINARY,
             "web",
             "--config",
             self._config.new_path,
