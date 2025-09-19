@@ -15,8 +15,7 @@ import base64
 import time
 from backend.domain.types import TransactionType
 from web3 import Web3
-import os
-from backend.consensus.types import ConsensusRound
+from backend.consensus.types import ConsensusRound, ConsensusResult
 from backend.consensus.utils import determine_consensus_from_votes
 from backend.rollup.web3_pool import Web3ConnectionPool
 
@@ -540,9 +539,13 @@ class TransactionsProcessor:
             "votes" in transaction_data["consensus_data"]
         ):
             votes_temp = list(transaction_data["consensus_data"]["votes"].values())
+            if len(votes_temp) == 0:
+                consensus_result = ConsensusResult.TIMEOUT
+            else:
+                consensus_result = determine_consensus_from_votes(votes_temp)
         else:
-            votes_temp = []
-        consensus_result = determine_consensus_from_votes(votes_temp)
+            consensus_result = ConsensusResult.NO_MAJORITY
+
         transaction_data["result"] = int(consensus_result)
         transaction_data["result_name"] = consensus_result.value
         return transaction_data
