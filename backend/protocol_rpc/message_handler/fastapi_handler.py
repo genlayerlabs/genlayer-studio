@@ -1,38 +1,42 @@
-import os
-import json
-import copy
 import asyncio
-from functools import wraps
+import copy
+import json
+import os
+import sys
 import traceback
-from typing import Optional, Any
+from functools import wraps
+from typing import Any
 
 from loguru import logger
-import sys
 
-from backend.protocol_rpc.message_handler.types import LogEvent
 from backend.protocol_rpc.configuration import GlobalConfiguration
-from backend.protocol_rpc.message_handler.types import EventScope, EventType, LogEvent
+from backend.protocol_rpc.message_handler.types import (
+    EventScope,
+    EventType,
+    LogEvent,
+)
+from backend.protocol_rpc.broadcast import Broadcast
+from backend.protocol_rpc.websocket import GLOBAL_CHANNEL
 
 MAX_LOG_MESSAGE_LENGTH = 3000
 
 
 class MessageHandler:
-    """FastAPI-compatible MessageHandler using WebSocket ConnectionManager."""
-    
-    def __init__(self, connection_manager, config: GlobalConfiguration):
-        self.connection_manager = connection_manager
+    """FastAPI-compatible MessageHandler backed by Starlette Broadcast."""
+
+    def __init__(self, broadcast: Broadcast, config: GlobalConfiguration):
+        self.broadcast = broadcast
         self.config = config
         self.client_session_id = None
-        # Store the emit function for async operations
-        self._emit_task_queue = []
-    
+
     def with_client_session(self, client_session_id: str):
-        new_msg_handler = MessageHandler(self.connection_manager, self.config)
+        new_msg_handler = MessageHandler(self.broadcast, self.config)
         new_msg_handler.client_session_id = client_session_id
         return new_msg_handler
-    
+
     def log_endpoint_info(self, func):
         """Decorator for logging endpoint information."""
+
         @wraps(func)
         def wrapper(*args, **kwargs):
             # Log endpoint call
@@ -43,35 +47,36 @@ class MessageHandler:
             except Exception as e:
                 logger.error(f"Endpoint error in {func.__name__}: {e}")
                 raise
+
         return wrapper
-    
-    def _socket_emit(self, log_event: LogEvent):
-        """Emit a log event via WebSocket."""
+
+    def _publish(self, channel: str, payload: dict[str, Any]) -> None:
+        """Queue a broadcast publish for the given channel."""
+
+        if self.broadcast is None:
+            return
+
+        message = json.dumps(payload)
         try:
-            if log_event.transaction_hash:
-                # Schedule async emit to room
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.create_task(
-                        self.connection_manager.emit_to_room(
-                            log_event.transaction_hash,
-                            log_event.name,
-                            log_event.to_dict()
-                        )
-                    )
-            elif log_event.scope == EventScope.RPC:
-                # Broadcast to all connections
-                message = json.dumps({
-                    "event": log_event.name,
-                    "data": log_event.to_dict()
-                })
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.create_task(self.connection_manager.broadcast(message))
+            loop = asyncio.get_running_loop()
         except RuntimeError:
-            # No event loop running, skip WebSocket emission
-            pass
-    
+            return
+
+        if not loop.is_running():
+            return
+
+        loop.create_task(self.broadcast.publish(channel=channel, message=message))
+
+    def _socket_emit(self, log_event: LogEvent) -> None:
+        """Emit a log event via broadcast channels."""
+
+        payload = {"event": log_event.name, "data": log_event.to_dict()}
+
+        if log_event.transaction_hash:
+            self._publish(log_event.transaction_hash, payload)
+        else:
+            self._publish(GLOBAL_CHANNEL, payload)
+
     def _log_event(self, log_event: LogEvent):
         """Log an event to the appropriate channels."""
         # Console logging
@@ -81,10 +86,10 @@ class MessageHandler:
             logger.warning(log_event.message)
         else:
             logger.info(log_event.message)
-        
+
         # WebSocket emission
         self._socket_emit(log_event)
-    
+
     def log(self, message: str, level: str = "info", **kwargs):
         """Generic logging method."""
         log_event = LogEvent(
@@ -92,10 +97,10 @@ class MessageHandler:
             type=EventType.INFO if level == "info" else EventType.ERROR,
             message=message,
             scope=EventScope.RPC,
-            **kwargs
+            **kwargs,
         )
         self._log_event(log_event)
-    
+
     def error(self, message: str, **kwargs):
         """Log an error message."""
         log_event = LogEvent(
@@ -103,10 +108,10 @@ class MessageHandler:
             type=EventType.ERROR,
             message=message,
             scope=EventScope.RPC,
-            **kwargs
+            **kwargs,
         )
         self._log_event(log_event)
-    
+
     def warning(self, message: str, **kwargs):
         """Log a warning message."""
         log_event = LogEvent(
@@ -114,10 +119,10 @@ class MessageHandler:
             type=EventType.WARNING,
             message=message,
             scope=EventScope.RPC,
-            **kwargs
+            **kwargs,
         )
         self._log_event(log_event)
-    
+
     def info(self, message: str, **kwargs):
         """Log an info message."""
         log_event = LogEvent(
@@ -125,10 +130,10 @@ class MessageHandler:
             type=EventType.INFO,
             message=message,
             scope=EventScope.RPC,
-            **kwargs
+            **kwargs,
         )
         self._log_event(log_event)
-    
+
     def send_message(self, log_event: LogEvent, log_to_terminal: bool = True):
         """Send a message via WebSocket and optionally log to terminal."""
         if log_to_terminal:
@@ -136,7 +141,7 @@ class MessageHandler:
         else:
             # Just emit via WebSocket without terminal logging
             self._socket_emit(log_event)
-    
+
     # Transaction-specific logging methods
     def send_transaction_status_update(
         self, transaction_hash: str, status: str, **kwargs
@@ -151,10 +156,8 @@ class MessageHandler:
             scope=EventScope.TRANSACTION,
         )
         self._socket_emit(log_event)
-    
-    def send_transaction_event(
-        self, transaction_hash: str, event_name: str, data: Any
-    ):
+
+    def send_transaction_event(self, transaction_hash: str, event_name: str, data: Any):
         """Send a custom transaction event."""
         log_event = LogEvent(
             name=event_name,
@@ -171,10 +174,10 @@ def setup_loguru_config():
     """Set up unified logging configuration using Loguru."""
     # Remove default handler
     logger.remove()
-    
+
     # Add custom handler with formatting
     log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
-    
+
     # Console handler
     logger.add(
         sys.stderr,
@@ -182,7 +185,7 @@ def setup_loguru_config():
         level=log_level,
         colorize=True,
     )
-    
+
     # File handler (optional)
     if os.environ.get("LOG_TO_FILE"):
         logger.add(
@@ -192,5 +195,5 @@ def setup_loguru_config():
             level=log_level,
             format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
         )
-    
+
     return logger
