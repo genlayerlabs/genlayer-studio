@@ -81,9 +81,7 @@ export async function lintGenVMCode(
           startColumn: err.column,
           endLineNumber: err.line,
           endColumn: endColumn,
-          message: err.suggestion ?
-            `${err.message}\n💡 Suggestion: ${err.suggestion}` :
-            err.message,
+          message: err.message, // Clean message without suggestion
           code: `${err.rule_id}`,
           source: 'GenLayer Linter',
           // Add relatedInformation for better hover display
