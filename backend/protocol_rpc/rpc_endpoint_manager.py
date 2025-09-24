@@ -150,6 +150,7 @@ class RPCEndpointManager:
                         data={
                             "method": request.method,
                             "code": exc.code,
+                            "error_data": getattr(exc, "data", None),
                             "traceback": stack_trace,
                         },
                     )

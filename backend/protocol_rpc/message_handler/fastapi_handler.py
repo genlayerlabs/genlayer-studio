@@ -79,13 +79,25 @@ class MessageHandler:
 
     def _log_event(self, log_event: LogEvent):
         """Log an event to the appropriate channels."""
-        # Console logging
+        # Console logging with optional data payload
+        message = log_event.message
+        gray = "\033[38;5;245m"
+        reset = "\033[0m"
+
+        if getattr(log_event, "data", None):
+            try:
+                data_to_log = self._apply_log_level_truncation(log_event.data)
+                data_str = json.dumps(data_to_log, default=lambda o: o.__dict__)
+                message = f"{message} {gray}{data_str}{reset}"
+            except TypeError as e:
+                message = f"{message} {gray}{str(log_event.data)} (serialization error: {e}){reset}"
+
         if log_event.type == EventType.ERROR:
-            logger.error(log_event.message)
+            logger.error(message)
         elif log_event.type == EventType.WARNING:
-            logger.warning(log_event.message)
+            logger.warning(message)
         else:
-            logger.info(log_event.message)
+            logger.info(message)
 
         # WebSocket emission
         self._socket_emit(log_event)
@@ -168,6 +180,57 @@ class MessageHandler:
             scope=EventScope.TRANSACTION,
         )
         self._socket_emit(log_event)
+
+    def _apply_log_level_truncation(self, data, max_length=100):
+        """Apply LOG_LEVEL-based truncation to log data for better readability."""
+        should_truncate = os.environ.get("LOG_LEVEL", "INFO").upper() != "DEBUG"
+
+        if not should_truncate or not isinstance(data, dict):
+            return data
+
+        truncated_data = copy.deepcopy(data)
+        self._truncate_dict(truncated_data, max_length)
+
+        return truncated_data
+
+    def _truncate_dict(self, data_dict, max_length):
+        """Recursively truncate dictionary values based on key patterns."""
+        if not isinstance(data_dict, dict):
+            return
+
+        for key in ["calldata", "contract_code", "result"]:
+            if (
+                key in data_dict
+                and isinstance(data_dict[key], str)
+                and len(data_dict[key]) > max_length
+            ):
+                data_dict[key] = (
+                    f"{data_dict[key][:max_length]}... ({len(data_dict[key])} chars)"
+                )
+
+        if "contract_state" in data_dict and data_dict["contract_state"]:
+            value = data_dict["contract_state"]
+            if len(str(value)) > max_length:
+                if isinstance(value, dict):
+                    data_dict["contract_state"] = f"<{len(value)} entries, truncated>"
+                else:
+                    data_dict["contract_state"] = (
+                        f"<{len(str(value))} chars, truncated>"
+                    )
+
+        if "state" in data_dict:
+            data_dict["state"] = "<truncated>"
+
+        if "code" in data_dict and isinstance(data_dict["code"], str):
+            data_dict["code"] = f"<{len(data_dict['code'])} chars>"
+
+        for key, value in data_dict.items():
+            if isinstance(value, dict):
+                self._truncate_dict(value, max_length)
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict):
+                        self._truncate_dict(item, max_length)
 
 
 def setup_loguru_config():
