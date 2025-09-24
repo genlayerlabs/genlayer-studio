@@ -1093,17 +1093,17 @@ def get_transaction_receipt(
 
 def get_block_by_hash(
     transactions_processor: TransactionsProcessor,
-    transaction_hash: str,
+    block_hash: str,
     full_tx: bool = False,
 ) -> dict | None:
 
-    transaction = transactions_processor.get_transaction_by_hash(transaction_hash)
+    transaction = transactions_processor.get_transaction_by_hash(block_hash)
 
     if not transaction:
         return None
 
     block_details = {
-        "hash": transaction_hash,
+        "hash": block_hash,
         "parentHash": "0x" + "00" * 32,
         "number": hex(transaction.get("block_number", 0)),
         "timestamp": hex(transaction.get("timestamp", 0)),
@@ -1125,7 +1125,7 @@ def get_block_by_hash(
     if full_tx:
         block_details["transactions"].append(transaction)
     else:
-        block_details["transactions"].append(transaction_hash)
+        block_details["transactions"].append(block_hash)
 
     return block_details
 
