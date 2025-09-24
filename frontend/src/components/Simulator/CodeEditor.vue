@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
-import { ref, shallowRef, watch, computed, onMounted } from 'vue';
+import { ref, shallowRef, watch, computed, onMounted, onUnmounted } from 'vue';
 import { useContractsStore, useUIStore } from '@/stores';
 import { type ContractFile } from '@/types';
 import pythonSyntax from '@/constants/pythonSyntax';
+import { setupAutoLinting } from '@/utils/monacoLinter';
 
 const uiStore = useUIStore();
 const contractStore = useContractsStore();
@@ -15,6 +16,7 @@ const editorElement = ref<HTMLDivElement | null>(null);
 const containerElement = ref<HTMLElement | null | undefined>(null);
 const editorRef = shallowRef<monaco.editor.IStandaloneCodeEditor | null>(null);
 const theme = computed(() => (uiStore.mode === 'light' ? 'vs' : 'vs-dark'));
+let stopLinting: (() => void) | null = null;
 
 function initEditor() {
   containerElement.value = editorElement.value?.parentElement;
@@ -34,10 +36,21 @@ function initEditor() {
       updatedAt: new Date().toISOString(),
     });
   });
+
+  // Setup auto-linting
+  console.log('[CodeEditor] Setting up GenVM linter...');
+  stopLinting = setupAutoLinting(editorRef.value, monaco);
 }
 
 onMounted(() => {
   initEditor();
+});
+
+onUnmounted(() => {
+  if (stopLinting) {
+    console.log('[CodeEditor] Cleaning up linter...');
+    stopLinting();
+  }
 });
 
 watch(

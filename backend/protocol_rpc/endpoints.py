@@ -580,12 +580,14 @@ def sim_lintContract(source_code: str, filename: str = "contract.py") -> dict:
     Returns:
         dict with 'results' array and 'summary' object
     """
+    print(f"[LINTER] Called with filename: {filename}, code length: {len(source_code)}")
     try:
         from genvm_linter.linter import GenVMLinter
         from genvm_linter.rules import Severity
 
         linter = GenVMLinter()
         results = linter.lint_source(source_code, filename)
+        print(f"[LINTER] Found {len(results)} issues")
 
         # Convert results to JSON-serializable format
         results_json = []

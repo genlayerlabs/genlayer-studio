@@ -39,7 +39,7 @@ class TestContract(gl.Contract):
 '''
 
 
-def test_linter_endpoint(url="http://localhost:5001/api"):
+def test_linter_endpoint(url="http://localhost:4000/api"):
     """Test the linter endpoint with various contracts"""
 
     print("Testing GenVM Linter Endpoint...")
@@ -99,7 +99,7 @@ if __name__ == "__main__":
     import sys
 
     # Allow custom URL as argument
-    url = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:5001/api"
+    url = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:4000/api"
 
     try:
         test_linter_endpoint(url)
