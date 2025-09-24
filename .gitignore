@@ -166,3 +166,4 @@ hardhat/deployments/*
 
 # Geth keystore
 hardhat/geth_keystore/*
+genvm_linter_src/
