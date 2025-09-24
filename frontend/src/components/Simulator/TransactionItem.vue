@@ -55,7 +55,7 @@ const leaderReceipt = computed(() => {
 const eqOutputs = computed(() => {
   const outputs = leaderReceipt.value?.eq_outputs || {};
   return Object.entries(outputs).map(([key, value]: [string, unknown]) => {
-    const decodedResult = resultToUserFriendlyJson(String(value));
+    const decodedResult = resultToUserFriendlyJson(value as any);
     const parsedValue = decodedResult?.payload?.readable ?? value;
     try {
       if (typeof parsedValue === 'string') {
@@ -129,10 +129,8 @@ function prettifyTxData(x: any): any {
   try {
     const new_eq_outputs = Object.fromEntries(
       Object.entries(oldEqOutputs).map(([k, v]) => {
-        const arrayBuffer = b64ToArray(String(v));
-        const val = resultToUserFriendlyJson(
-          new TextDecoder().decode(arrayBuffer),
-        );
+        const bytes = b64ToArray(v as any);
+        const val = resultToUserFriendlyJson(bytes);
         return [k, val];
       }),
     );
