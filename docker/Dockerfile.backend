@@ -25,9 +25,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # Copy local genvm-linter package (before it's published)
 COPY genvm_linter_src /app/genvm_linter
-# Install genvm-linter dependencies
+# Install genvm-linter dependencies including mypy for type checking
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --cache-dir=/root/.cache/pip click>=8.0.0 colorama>=0.4.0
+    pip install --cache-dir=/root/.cache/pip click>=8.0.0 colorama>=0.4.0 mypy>=1.0.0
 
 RUN groupadd -r backend-group \
     && useradd -r -g backend-group backend-user \

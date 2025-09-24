@@ -3,7 +3,7 @@
  * This file provides linting functionality for GenLayer contracts in Monaco Editor
  */
 
-import type * as Monaco from 'monaco-editor/esm/vs/editor/editor.api';
+import * as Monaco from 'monaco-editor/esm/vs/editor/editor.api';
 import { RpcClient } from '@/clients/rpc';
 import type { JsonRPCResponse } from '@/types';
 
@@ -29,6 +29,9 @@ interface LintResponse {
   };
 }
 
+// Store current markers (for potential future use)
+let currentMarkers: Monaco.editor.IMarkerData[] = [];
+
 /**
  * Lint GenVM code and update Monaco Editor markers
  */
@@ -43,10 +46,7 @@ export async function lintGenVMCode(
     const rpcClient = new RpcClient();
     const response: JsonRPCResponse<LintResponse> = await rpcClient.call({
       method: 'sim_lintContract',
-      params: {
-        source_code: code,
-        filename: 'contract.py'
-      }
+      params: [code, 'contract.py']  // Pass as positional arguments in array
     });
 
     console.log('[Monaco Linter] Response received:', response);
@@ -61,28 +61,63 @@ export async function lintGenVMCode(
       console.log(`[Monaco Linter] Processing ${summary.total} issues`);
 
       // Convert linter results to Monaco markers
-      const markers: Monaco.editor.IMarkerData[] = results.map(err => ({
-        severity: err.severity === 'error' ?
-          monaco.MarkerSeverity.Error :
-          err.severity === 'warning' ?
-          monaco.MarkerSeverity.Warning :
-          monaco.MarkerSeverity.Info,
-        startLineNumber: err.line,
-        startColumn: err.column,
-        endLineNumber: err.line,
-        endColumn: err.column + 10, // Approximate end column
-        message: err.suggestion ?
-          `${err.message}\n💡 ${err.suggestion}` :
-          err.message,
-        code: err.rule_id,
-        source: 'GenVM Linter'
-      }));
-
-      // Set markers on the model
       const model = editor.getModel();
+      const markers: Monaco.editor.IMarkerData[] = results.map(err => {
+        // Calculate better end column based on actual line content
+        const line = model?.getLineContent(err.line) || '';
+        const tokenMatch = line.slice(Math.max(0, err.column - 1)).match(/^[\w\.]+/);
+        const endColumn = err.column + (tokenMatch?.[0]?.length || 10);
+
+        const severityIcon = err.severity === 'error' ? '❌' :
+                             err.severity === 'warning' ? '⚠️' : 'ℹ️';
+
+        return {
+          severity: err.severity === 'error' ?
+            Monaco.MarkerSeverity.Error :
+            err.severity === 'warning' ?
+            Monaco.MarkerSeverity.Warning :
+            Monaco.MarkerSeverity.Info,
+          startLineNumber: err.line,
+          startColumn: err.column,
+          endLineNumber: err.line,
+          endColumn: endColumn,
+          message: err.suggestion ?
+            `${err.message}\n💡 Suggestion: ${err.suggestion}` :
+            err.message,
+          code: `${err.rule_id}`,
+          source: 'GenLayer Linter',
+          // Add relatedInformation for better hover display
+          relatedInformation: err.suggestion && model ? [{
+            startLineNumber: err.line,
+            startColumn: err.column,
+            endLineNumber: err.line,
+            endColumn: endColumn,
+            message: `💡 ${err.suggestion}`,
+            resource: model.uri
+          }] : []
+        };
+      });
+
+      // Set markers on the model - Monaco will handle hover automatically
       if (model) {
+        // Use Monaco's native marker system which includes built-in hover
         monaco.editor.setModelMarkers(model, 'genvm-linter', markers);
-        console.log(`[Monaco Linter] Set ${markers.length} markers`);
+
+        // Store for our custom hover provider as backup
+        currentMarkers = markers;
+
+        // Log status summary
+        const errorCount = markers.filter(m => m.severity === Monaco.MarkerSeverity.Error).length;
+        const warningCount = markers.filter(m => m.severity === Monaco.MarkerSeverity.Warning).length;
+        const infoCount = markers.filter(m => m.severity === Monaco.MarkerSeverity.Info).length;
+
+        console.log(
+          `[Monaco Linter] ✅ Linting complete: ` +
+          `${errorCount > 0 ? `❌ ${errorCount} errors ` : ''}` +
+          `${warningCount > 0 ? `⚠️ ${warningCount} warnings ` : ''}` +
+          `${infoCount > 0 ? `ℹ️ ${infoCount} info ` : ''}` +
+          `${markers.length === 0 ? '✨ No issues found!' : ''}`
+        );
       }
     }
   } catch (error) {
@@ -90,16 +125,18 @@ export async function lintGenVMCode(
   }
 }
 
+
 /**
  * Setup automatic linting on content change with debouncing
  */
 export function setupAutoLinting(
   editor: Monaco.editor.IStandaloneCodeEditor,
   monaco: typeof Monaco,
-  debounceMs: number = 1000
+  debounceMs: number = 500
 ): () => void {
   let lintTimeout: NodeJS.Timeout;
   console.log('[Monaco Linter] Setting up auto-linting with', debounceMs, 'ms debounce');
+  console.log('[Monaco Linter] Using Monaco built-in hover for markers');
 
   // Lint on content change with debouncing
   const disposable = editor.onDidChangeModelContent(() => {
@@ -124,5 +161,6 @@ export function setupAutoLinting(
     if (model) {
       monaco.editor.setModelMarkers(model, 'genvm-linter', []);
     }
+    currentMarkers = [];
   };
 }
