@@ -730,7 +730,7 @@ def get_transaction_count(
 def get_transaction_by_hash(
     transactions_processor: TransactionsProcessor, transaction_hash: str
 ) -> dict | None:
-    return transactions_processor.get_transaction_by_hash(transaction_hash)
+    return transactions_processor.get_transaction_by_hash(transaction_hash, True)
 
 
 async def eth_call(
@@ -1048,6 +1048,19 @@ def get_transaction_receipt(
         }
     ]
 
+    if (
+        transaction["type"] == TransactionType.DEPLOY_CONTRACT.value
+        and transaction["last_round"]["result"] == 6
+        and "leader_receipt" in transaction["consensus_data"]
+        and transaction["consensus_data"]["leader_receipt"] is not None
+        and len(transaction["consensus_data"]["leader_receipt"]) > 0
+        and transaction["consensus_data"]["leader_receipt"][0]["execution_result"]
+        == ExecutionResultStatus.SUCCESS.value
+    ):
+        contract_address = transaction["to_address"]
+    else:
+        contract_address = None
+
     receipt = {
         "transactionHash": transaction_hash,
         "transactionIndex": hex(0),
@@ -1057,11 +1070,7 @@ def get_transaction_receipt(
         "to": to_addr,
         "cumulativeGasUsed": hex(transaction.get("gas_used", 21000)),
         "gasUsed": hex(transaction.get("gas_used", 21000)),
-        "contractAddress": (
-            transaction.get("contract_address")
-            if transaction.get("contract_address")
-            else None
-        ),
+        "contractAddress": contract_address,
         "logs": logs,
         "logsBloom": "0x" + "00" * 256,
         "status": hex(1 if transaction.get("status", True) else 0),
@@ -1076,7 +1085,7 @@ def get_block_by_hash(
     full_tx: bool = False,
 ) -> dict | None:
 
-    transaction = transactions_processor.get_transaction_by_hash(transaction_hash)
+    transaction = transactions_processor.get_transaction_by_hash(transaction_hash, True)
 
     if not transaction:
         return None
