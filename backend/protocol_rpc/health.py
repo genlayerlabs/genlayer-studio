@@ -2,6 +2,7 @@
 import time
 import os
 from typing import Optional, Union
+import logging
 
 from fastapi import APIRouter, FastAPI
 from backend.database_handler.session_factory import get_database_manager
@@ -30,7 +31,8 @@ async def health_check():
             conn.commit()
         db_status = "healthy"
     except Exception as e:
-        db_status = f"unhealthy: {str(e)}"
+        logging.exception("Database health check failed.")
+        db_status = "unhealthy"
         status = "degraded"
 
     # Check Redis (if configured)
