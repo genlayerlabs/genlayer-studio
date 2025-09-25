@@ -580,45 +580,10 @@ def sim_lintContract(source_code: str, filename: str = "contract.py") -> dict:
     Returns:
         dict with 'results' array and 'summary' object
     """
-    print(f"[LINTER] Called with filename: {filename}, code length: {len(source_code)}")
-    try:
-        from genvm_linter.linter import GenVMLinter
-        from genvm_linter.rules import Severity
+    from backend.protocol_rpc.contract_linter import ContractLinter
 
-        linter = GenVMLinter()
-        results = linter.lint_source(source_code, filename)
-        print(f"[LINTER] Found {len(results)} issues")
-
-        # Convert results to JSON-serializable format
-        results_json = []
-        severity_counts = {"error": 0, "warning": 0, "info": 0}
-
-        for result in results:
-            severity = result.severity.value
-            severity_counts[severity] += 1
-            results_json.append({
-                "rule_id": result.rule_id,
-                "message": result.message,
-                "severity": severity,
-                "line": result.line,
-                "column": result.column,
-                "filename": result.filename,
-                "suggestion": result.suggestion
-            })
-
-        return {
-            "results": results_json,
-            "summary": {
-                "total": len(results),
-                "by_severity": severity_counts
-            }
-        }
-    except Exception as e:
-        raise JSONRPCError(
-            code=-32000,
-            message=f"Linting failed: {str(e)}",
-            data={}
-        )
+    linter = ContractLinter()
+    return linter.lint_contract(source_code, filename)
 
 
 async def sim_call(
