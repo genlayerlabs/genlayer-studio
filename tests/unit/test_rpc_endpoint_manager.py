@@ -36,7 +36,17 @@ async def test_manager_invokes_endpoint_with_dependencies():
     manager.register(RPCEndpointDefinition(name="sum_plus_one", handler=endpoint))
 
     request_payload = JSONRPCRequest(method="sum_plus_one", params=[41], id=1)
-    request = Request({"type": "http", "method": "POST", "headers": [], "app": app})
+    request = Request({
+        "type": "http",
+        "method": "POST",
+        "headers": [],
+        "app": app,
+        "query_string": b"",
+        "path": "/api",
+        "root_path": "",
+        "scheme": "http",
+        "server": ("localhost", 4000)
+    })
 
     response = await manager.invoke(request_payload, request)
 
@@ -60,7 +70,17 @@ async def test_manager_returns_jsonrpc_error_response():
     manager.register(RPCEndpointDefinition(name="explode", handler=failing_endpoint))
 
     request_payload = JSONRPCRequest(method="explode", params=None, id=7)
-    request = Request({"type": "http", "method": "POST", "headers": [], "app": app})
+    request = Request({
+        "type": "http",
+        "method": "POST",
+        "headers": [],
+        "app": app,
+        "query_string": b"",
+        "path": "/api",
+        "root_path": "",
+        "scheme": "http",
+        "server": ("localhost", 4000)
+    })
 
     response = await manager.invoke(request_payload, request)
 
@@ -75,7 +95,17 @@ async def test_manager_raises_method_not_found_for_unknown_method():
     manager = RPCEndpointManager(stub_logger, dependency_overrides_provider=app)
 
     request_payload = JSONRPCRequest(method="unknown", params=None, id=9)
-    request = Request({"type": "http", "method": "POST", "headers": [], "app": app})
+    request = Request({
+        "type": "http",
+        "method": "POST",
+        "headers": [],
+        "app": app,
+        "query_string": b"",
+        "path": "/api",
+        "root_path": "",
+        "scheme": "http",
+        "server": ("localhost", 4000)
+    })
 
     with pytest.raises(MethodNotFound):
         await manager.invoke(request_payload, request)
@@ -93,7 +123,17 @@ async def test_manager_returns_invalid_params_when_arguments_missing():
     manager.register(RPCEndpointDefinition(name="needs_value", handler=requires_value))
 
     request_payload = JSONRPCRequest(method="needs_value", params=None, id=11)
-    request = Request({"type": "http", "method": "POST", "headers": [], "app": app})
+    request = Request({
+        "type": "http",
+        "method": "POST",
+        "headers": [],
+        "app": app,
+        "query_string": b"",
+        "path": "/api",
+        "root_path": "",
+        "scheme": "http",
+        "server": ("localhost", 4000)
+    })
 
     response = await manager.invoke(request_payload, request)
 
