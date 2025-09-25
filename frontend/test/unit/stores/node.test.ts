@@ -63,6 +63,7 @@ describe('useNodeStore', () => {
   };
 
   const mockWebSocketClient = {
+    id: 'mocked-socket-id',
     connected: false,
     connect: vi.fn(),
     on: vi.fn(),

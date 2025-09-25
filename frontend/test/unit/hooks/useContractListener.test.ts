@@ -32,6 +32,7 @@ describe('useContractListener', () => {
     };
 
     webSocketClientMock = {
+      id: 'mocked-socket-id',
       on: vi.fn(),
     };
 

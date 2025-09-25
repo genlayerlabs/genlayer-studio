@@ -6,13 +6,17 @@ import type { TransactionItem } from '@/types';
 import type { Address, TransactionHash } from 'genlayer-js/types';
 import { TransactionStatus } from 'genlayer-js/types';
 
+let mockWebSocketClientGlobal: any = {
+  connected: true,
+  emit: vi.fn(),
+  on: vi.fn(),
+  off: vi.fn(),
+};
+
 vi.mock('@/hooks', () => ({
   useGenlayer: vi.fn(),
   useRpcClient: vi.fn(),
-  useWebSocketClient: vi.fn(() => ({
-    connected: true,
-    emit: vi.fn(),
-  })),
+  useWebSocketClient: vi.fn(() => mockWebSocketClientGlobal),
   useDb: vi.fn(() => ({
     transaction: vi.fn(),
     get: vi.fn(),
@@ -44,6 +48,7 @@ const updatedTransactionPayload: TransactionItem = {
 
 describe('useTransactionsStore', () => {
   let transactionsStore: ReturnType<typeof useTransactionsStore>;
+  let mockWebSocketClient: any;
   const mockGenlayerClient = {
     getTransaction: vi.fn(),
   };
@@ -58,14 +63,30 @@ describe('useTransactionsStore', () => {
   };
 
   beforeEach(() => {
+    // Set up mocks BEFORE creating the store
+    mockWebSocketClient = {
+      connected: true,
+      emit: vi.fn(),
+      on: vi.fn(),
+      off: vi.fn(),
+    };
+    mockWebSocketClientGlobal = mockWebSocketClient;
+
     setActivePinia(createPinia());
     (useGenlayer as Mock).mockReturnValue({
       client: { value: mockGenlayerClient },
     });
     (useDb as Mock).mockReturnValue(mockDb);
+
+    // Clear mocks before creating store
+    mockGenlayerClient.getTransaction.mockClear();
+    mockWebSocketClient.emit.mockClear();
+    mockWebSocketClient.on.mockClear();
+    mockWebSocketClient.off.mockClear();
+
+    // Now create the store - this will trigger the WebSocket setup
     transactionsStore = useTransactionsStore();
     transactionsStore.transactions = [];
-    mockGenlayerClient.getTransaction.mockClear();
   });
 
   it('should add a transaction', () => {
@@ -158,5 +179,82 @@ describe('useTransactionsStore', () => {
     expect(transactionsStore.transactions[0].statusName).toBe(
       TransactionStatus.FINALIZED,
     );
+  });
+
+  describe('WebSocket reconnection', () => {
+    it('should set up connect event handler on store initialization', () => {
+      expect(mockWebSocketClient.on).toHaveBeenCalledWith(
+        'connect',
+        expect.any(Function),
+      );
+    });
+
+    it('should resubscribe to all transaction topics on WebSocket connect when subscriptions exist', () => {
+      // Add some transactions to create subscriptions
+      transactionsStore.addTransaction(testTransaction);
+      const transaction2 = {
+        ...testTransaction,
+        hash: '0x9876543210987654321098765432109876543210' as TransactionHash,
+      };
+      transactionsStore.addTransaction(transaction2);
+
+      mockWebSocketClient.emit.mockClear();
+
+      // Simulate WebSocket connect event
+      const connectHandler = mockWebSocketClient.on.mock.calls.find(
+        (call: any[]) => call[0] === 'connect',
+      )?.[1];
+
+      if (connectHandler) {
+        connectHandler();
+      }
+
+      // Should resubscribe to both transaction hashes
+      expect(mockWebSocketClient.emit).toHaveBeenCalledWith(
+        'subscribe',
+        expect.arrayContaining([testTransaction.hash, transaction2.hash]),
+      );
+    });
+
+    it('should not emit subscribe on WebSocket connect when no subscriptions exist', () => {
+      mockWebSocketClient.emit.mockClear();
+
+      // Simulate WebSocket connect event without any transactions added
+      const connectHandler = mockWebSocketClient.on.mock.calls.find(
+        (call: any[]) => call[0] === 'connect',
+      )?.[1];
+
+      if (connectHandler) {
+        connectHandler();
+      }
+
+      expect(mockWebSocketClient.emit).not.toHaveBeenCalledWith(
+        'subscribe',
+        expect.anything(),
+      );
+    });
+
+    it('should subscribe to transaction when adding new transaction', () => {
+      mockWebSocketClient.emit.mockClear();
+
+      transactionsStore.addTransaction(testTransaction);
+
+      expect(mockWebSocketClient.emit).toHaveBeenCalledWith('subscribe', [
+        testTransaction.hash,
+      ]);
+    });
+
+    it('should unsubscribe from transaction when removing transaction', () => {
+      // Add transaction first
+      transactionsStore.addTransaction(testTransaction);
+      mockWebSocketClient.emit.mockClear();
+
+      // Remove transaction
+      transactionsStore.removeTransaction(testTransaction);
+
+      expect(mockWebSocketClient.emit).toHaveBeenCalledWith('unsubscribe', [
+        testTransaction.hash,
+      ]);
+    });
   });
 });
