@@ -40,7 +40,6 @@ export async function lintGenVMCode(
   monaco: typeof Monaco
 ) {
   const code = editor.getValue();
-  console.log('[Monaco Linter] Starting lint, code length:', code.length);
 
   try {
     const rpcClient = new RpcClient();
@@ -49,8 +48,6 @@ export async function lintGenVMCode(
       params: [code, 'contract.py']  // Pass as positional arguments in array
     });
 
-    console.log('[Monaco Linter] Response received:', response);
-
     if (response.error) {
       console.error('[Monaco Linter] Error from server:', response.error);
       return;
@@ -58,7 +55,6 @@ export async function lintGenVMCode(
 
     if (response.result) {
       const { results, summary } = response.result;
-      console.log(`[Monaco Linter] Processing ${summary.total} issues`);
 
       // Convert linter results to Monaco markers
       const model = editor.getModel();
@@ -103,19 +99,6 @@ export async function lintGenVMCode(
 
         // Store for our custom hover provider as backup
         currentMarkers = markers;
-
-        // Log status summary
-        const errorCount = markers.filter(m => m.severity === Monaco.MarkerSeverity.Error).length;
-        const warningCount = markers.filter(m => m.severity === Monaco.MarkerSeverity.Warning).length;
-        const infoCount = markers.filter(m => m.severity === Monaco.MarkerSeverity.Info).length;
-
-        console.log(
-          `[Monaco Linter] ✅ Linting complete: ` +
-          `${errorCount > 0 ? `❌ ${errorCount} errors ` : ''}` +
-          `${warningCount > 0 ? `⚠️ ${warningCount} warnings ` : ''}` +
-          `${infoCount > 0 ? `ℹ️ ${infoCount} info ` : ''}` +
-          `${markers.length === 0 ? '✨ No issues found!' : ''}`
-        );
       }
     }
   } catch (error) {
@@ -133,25 +116,20 @@ export function setupAutoLinting(
   debounceMs: number = 500
 ): () => void {
   let lintTimeout: NodeJS.Timeout;
-  console.log('[Monaco Linter] Setting up auto-linting with', debounceMs, 'ms debounce');
-  console.log('[Monaco Linter] Using Monaco built-in hover for markers');
 
   // Lint on content change with debouncing
   const disposable = editor.onDidChangeModelContent(() => {
     clearTimeout(lintTimeout);
     lintTimeout = setTimeout(() => {
-      console.log('[Monaco Linter] Content changed, triggering lint...');
       lintGenVMCode(editor, monaco);
     }, debounceMs);
   });
 
   // Initial linting
-  console.log('[Monaco Linter] Performing initial lint...');
   lintGenVMCode(editor, monaco);
 
   // Return cleanup function
   return () => {
-    console.log('[Monaco Linter] Cleaning up linter...');
     clearTimeout(lintTimeout);
     disposable.dispose();
     // Clear all markers when cleaning up

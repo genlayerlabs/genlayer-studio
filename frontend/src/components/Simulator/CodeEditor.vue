@@ -1,38 +1,21 @@
 <script setup lang="ts">
 import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
-// CRITICAL: Import hover contribution for hover functionality to work
+// Import hover contribution for hover functionality to work
 import 'monaco-editor/esm/vs/editor/contrib/hover/browser/hoverContribution.js';
-// Import workers for Monaco Editor to function properly in ESM/Vite
+// Import base editor worker for Monaco to function
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
-import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
-import cssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker';
-import htmlWorker from 'monaco-editor/esm/vs/language/html/html.worker?worker';
-import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker';
 
 import { ref, shallowRef, watch, computed, onMounted, onUnmounted } from 'vue';
 import { useContractsStore, useUIStore } from '@/stores';
 import { type ContractFile } from '@/types';
 import pythonSyntax from '@/constants/pythonSyntax';
-import { setupAutoLinting } from '@/utils/monacoLinter';
+import { setupAutoLinting } from '@/services/monacoLinter';
 
-// Configure Monaco Environment for proper worker loading
+// Configure Monaco Environment for Python editor
 (self as any).MonacoEnvironment = {
   globalAPI: true, // Enable global API for hover providers to work
-  getWorker: (_: any, label: string) => {
-    console.log('[Monaco] Loading worker for:', label);
-    if (label === 'json') {
-      return new jsonWorker();
-    }
-    if (label === 'css' || label === 'scss' || label === 'less') {
-      return new cssWorker();
-    }
-    if (label === 'html' || label === 'handlebars' || label === 'razor') {
-      return new htmlWorker();
-    }
-    if (label === 'typescript' || label === 'javascript') {
-      return new tsWorker();
-    }
-    // Python and other languages use the default editor worker
+  getWorker: () => {
+    // Python uses the default editor worker
     return new editorWorker();
   }
 };
@@ -77,7 +60,6 @@ function initEditor() {
   });
 
   // Setup auto-linting with 500ms debounce for faster feedback
-  console.log('[CodeEditor] Setting up GenVM linter...');
   stopLinting = setupAutoLinting(editorRef.value, monaco, 500);
 }
 
@@ -87,7 +69,6 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (stopLinting) {
-    console.log('[CodeEditor] Cleaning up linter...');
     stopLinting();
   }
 });
