@@ -12,7 +12,7 @@ export function useWebSocketClient() {
   });
 
   webSocketClient.on('disconnect', () => {
-    console.log('webSocketClient.disconnnect', webSocketClient?.id);
+    console.log('webSocketClient.disconnect', webSocketClient?.id);
   });
 
   return webSocketClient;
