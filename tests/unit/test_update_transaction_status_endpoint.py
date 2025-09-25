@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import Mock, patch
-from flask_jsonrpc.exceptions import JSONRPCError
+from backend.protocol_rpc.exceptions import JSONRPCError
 
 from backend.protocol_rpc.endpoints import update_transaction_status
 from backend.database_handler.models import TransactionStatus
