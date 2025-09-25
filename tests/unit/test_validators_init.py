@@ -9,10 +9,12 @@ async def test_initialize_validators_empty_json():
     mock_db_session = Mock()
     mock_creator = AsyncMock()
 
-    with patch('backend.protocol_rpc.validators_init.ModifiableValidatorsRegistry') as mock_registry_class:
+    with patch(
+        "backend.protocol_rpc.validators_init.ModifiableValidatorsRegistry"
+    ) as mock_registry_class:
         mock_registry = AsyncMock()
         mock_registry_class.return_value = mock_registry
-        
+
         await initialize_validators("", mock_db_session, mock_creator)
 
         mock_registry_class.assert_not_called()
@@ -62,15 +64,17 @@ async def test_initialize_validators_success():
         }
     ]"""
 
-    with patch('backend.protocol_rpc.validators_init.ModifiableValidatorsRegistry') as mock_registry_class:
+    with patch(
+        "backend.protocol_rpc.validators_init.ModifiableValidatorsRegistry"
+    ) as mock_registry_class:
         mock_registry = AsyncMock()
         mock_registry_class.return_value = mock_registry
-        
+
         await initialize_validators(validators_json, mock_db_session, mock_creator)
 
         # Verify that ModifiableValidatorsRegistry was created with db_session
         mock_registry_class.assert_called_once_with(mock_db_session)
-        
+
         # Verify that existing validators were deleted
         mock_registry.delete_all_validators.assert_called_once()
 
@@ -114,10 +118,12 @@ async def test_initialize_validators_invalid_config():
         }
     ]"""
 
-    with patch('backend.protocol_rpc.validators_init.ModifiableValidatorsRegistry') as mock_registry_class:
+    with patch(
+        "backend.protocol_rpc.validators_init.ModifiableValidatorsRegistry"
+    ) as mock_registry_class:
         mock_registry = AsyncMock()
         mock_registry_class.return_value = mock_registry
-        
+
         with pytest.raises(ValueError, match="Failed to create validator"):
             await initialize_validators(validators_json, mock_db_session, mock_creator)
 
@@ -136,9 +142,13 @@ async def test_initialize_validators_creator_error():
         }
     ]"""
 
-    with patch('backend.protocol_rpc.validators_init.ModifiableValidatorsRegistry') as mock_registry_class:
+    with patch(
+        "backend.protocol_rpc.validators_init.ModifiableValidatorsRegistry"
+    ) as mock_registry_class:
         mock_registry = AsyncMock()
         mock_registry_class.return_value = mock_registry
-        
-        with pytest.raises(ValueError, match="Failed to create validator.*Creator error"):
+
+        with pytest.raises(
+            ValueError, match="Failed to create validator.*Creator error"
+        ):
             await initialize_validators(validators_json, mock_db_session, mock_creator)

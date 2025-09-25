@@ -26,7 +26,9 @@ from copy import deepcopy
 
 DEFAULT_FINALITY_WINDOW = 5
 # Reduce sleep time for faster tests when using mocks
-DEFAULT_CONSENSUS_SLEEP_TIME = 0.1 if os.getenv("TEST_WITH_MOCK_LLMS", "true").lower() == "true" else 2
+DEFAULT_CONSENSUS_SLEEP_TIME = (
+    0.1 if os.getenv("TEST_WITH_MOCK_LLMS", "true").lower() == "true" else 2
+)
 DEFAULT_EXEC_RESULT = b"\x00\x00"  # success(null)
 TIMEOUT_EXEC_RESULT = b"\x02timeout"
 
@@ -135,7 +137,9 @@ class TransactionsProcessorMock:
             # In mock mode, use an incrementing counter to ensure timestamps increase
             if USE_MOCK_LLMS:
                 self._mock_time_counter += 1
-                transaction["timestamp_awaiting_finalization"] = int(time.time()) + self._mock_time_counter
+                transaction["timestamp_awaiting_finalization"] = (
+                    int(time.time()) + self._mock_time_counter
+                )
             else:
                 transaction["timestamp_awaiting_finalization"] = int(time.time())
         self.commit(transaction)
@@ -516,7 +520,7 @@ def node_factory(
             # Add small delay to simulate processing
             if USE_MOCK_LLMS:
                 await asyncio.sleep(0.01)  # Small delay for mocked responses
-            
+
             accepted_state = contract_snapshot.states["accepted"]
             set_value = transaction.hash[-1]
             if len(accepted_state) == 0:
@@ -546,9 +550,13 @@ def node_factory(
         # Use real node with actual LLM calls (slow, requires API keys)
         # This would require proper validator setup with real LLM providers
         # For now, we'll still use mocks but log that real mode was requested
-        print(f"[WARNING] Real LLM mode requested but not fully implemented in unit tests")
-        print(f"[WARNING] Using mocked responses. For real LLMs, use integration tests.")
-        
+        print(
+            f"[WARNING] Real LLM mode requested but not fully implemented in unit tests"
+        )
+        print(
+            f"[WARNING] Using mocked responses. For real LLMs, use integration tests."
+        )
+
         # Fall back to mock for now
         mock = Mock(Node)
         mock.validator_mode = mode
@@ -556,7 +564,7 @@ def node_factory(
         mock.leader_receipt = receipt
         mock.private_key = node["private_key"]
         mock.contract_snapshot = contract_snapshot
-        
+
         async def exec_with_dynamic_state(transaction: Transaction):
             accepted_state = contract_snapshot.states["accepted"]
             set_value = transaction.hash[-1]
@@ -580,7 +588,7 @@ def node_factory(
                 eq_outputs={},
                 execution_result=ExecutionResultStatus.SUCCESS,
             )
-        
+
         mock.exec_transaction = AsyncMock(side_effect=exec_with_dynamic_state)
         return mock
 
@@ -811,14 +819,18 @@ def assert_transaction_status_match(
 ) -> TransactionStatus:
     # Use adaptive timeout based on LLM mode
     if timeout is None:
-        timeout = 60 if USE_MOCK_LLMS else 180  # 1 minute for mocks, 3 minutes for real LLMs
-    
+        timeout = (
+            60 if USE_MOCK_LLMS else 180
+        )  # 1 minute for mocks, 3 minutes for real LLMs
+
     last_status = None
     start_time = time.time()
-    
+
     # Log mode if using real LLMs
     if not USE_MOCK_LLMS:
-        print(f"[LLM Mode: REAL] Waiting for status {expected_statuses} with timeout {timeout}s")
+        print(
+            f"[LLM Mode: REAL] Waiting for status {expected_statuses} with timeout {timeout}s"
+        )
 
     while time.time() - start_time < timeout:
         current_status = transactions_processor.get_transaction_by_hash(

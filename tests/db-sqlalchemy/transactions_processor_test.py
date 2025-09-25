@@ -77,7 +77,7 @@ def test_transactions_processor(
     transactions_processor.web3 = mock_env_and_web3_connected
 
     import time
-    
+
     from_address = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
     to_address = "0xAcec3A6d871C25F591aBd4fC24054e524BBbF794"
     data = {"key": "value"}
@@ -176,7 +176,7 @@ def test_transactions_processor(
 
 def test_get_highest_timestamp(transactions_processor: TransactionsProcessor):
     import time
-    
+
     # Initially should return 0 when no transactions exist
     assert transactions_processor.get_highest_timestamp() == 0
 
@@ -187,8 +187,15 @@ def test_get_highest_timestamp(transactions_processor: TransactionsProcessor):
 
     # First transaction with timestamp 1000
     tx1_hash = transactions_processor.insert_transaction(
-        from_address, to_address, {"key": "value1"}, 1.0, 1, 0, True, 3,
-        transaction_hash=f"0x{'3' * 64}"
+        from_address,
+        to_address,
+        {"key": "value1"},
+        1.0,
+        1,
+        0,
+        True,
+        3,
+        transaction_hash=f"0x{'3' * 64}",
     )
     transactions_processor.session.commit()
     assert transactions_processor.get_highest_timestamp() == 0
@@ -198,8 +205,15 @@ def test_get_highest_timestamp(transactions_processor: TransactionsProcessor):
 
     # Second transaction with timestamp 2000
     tx2_hash = transactions_processor.insert_transaction(
-        from_address, to_address, {"key": "value2"}, 2.0, 1, 1, True, 3,
-        transaction_hash=f"0x{'4' * 64}"
+        from_address,
+        to_address,
+        {"key": "value2"},
+        2.0,
+        1,
+        1,
+        True,
+        3,
+        transaction_hash=f"0x{'4' * 64}",
     )
     transactions_processor.set_transaction_timestamp_awaiting_finalization(
         tx2_hash, 2000
@@ -207,8 +221,15 @@ def test_get_highest_timestamp(transactions_processor: TransactionsProcessor):
 
     # Third transaction with no timestamp (should be ignored)
     transactions_processor.insert_transaction(
-        from_address, to_address, {"key": "value3"}, 3.0, 1, 2, True, 3,
-        transaction_hash=f"0x{'5' * 64}"
+        from_address,
+        to_address,
+        {"key": "value3"},
+        3.0,
+        1,
+        2,
+        True,
+        3,
+        transaction_hash=f"0x{'5' * 64}",
     )
 
     transactions_processor.session.commit()

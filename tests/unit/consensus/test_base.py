@@ -95,16 +95,20 @@ async def test_no_consensus(consensus_algorithm):
     try:
         # Use a longer timeout for complex consensus operations
         assert_transaction_status_match(
-            transactions_processor, transaction, [TransactionStatus.UNDETERMINED.value],
-            timeout=50  # Increase timeout to 50 seconds
+            transactions_processor,
+            transaction,
+            [TransactionStatus.UNDETERMINED.value],
+            timeout=50,  # Increase timeout to 50 seconds
         )
         assert len(created_nodes) == (transaction.num_of_initial_validators + 1) * (
             rotation_rounds + 1
         )
 
         assert_transaction_status_match(
-            transactions_processor, transaction, [TransactionStatus.FINALIZED.value],
-            timeout=10  # Add explicit timeout
+            transactions_processor,
+            transaction,
+            [TransactionStatus.FINALIZED.value],
+            timeout=10,  # Add explicit timeout
         )
 
         assert transactions_processor.updated_transaction_status_history == {

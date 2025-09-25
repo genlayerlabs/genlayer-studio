@@ -8,17 +8,17 @@ import multiprocessing
 # Server socket
 bind = f"0.0.0.0:{os.getenv('RPCPORT', '4000')}"
 host = "0.0.0.0"
-port = int(os.getenv('RPCPORT', '4000'))
+port = int(os.getenv("RPCPORT", "4000"))
 
 # Worker processes
-workers = int(os.getenv('WEB_CONCURRENCY', multiprocessing.cpu_count()))
+workers = int(os.getenv("WEB_CONCURRENCY", multiprocessing.cpu_count()))
 
 # Worker class - use uvloop for better async performance
 worker_class = "uvicorn.workers.UvicornWorker"
 loop = "uvloop"  # High-performance event loop
 
 # Logging
-log_level = os.getenv('LOG_LEVEL', 'info').lower()
+log_level = os.getenv("LOG_LEVEL", "info").lower()
 access_log = True
 error_log = "-"
 access_log_format = '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s" %(D)s'
@@ -35,7 +35,7 @@ keepalive = 5
 reload = False  # Never use in production
 
 # Process naming
-proc_name = 'genlayer-asgi'
+proc_name = "genlayer-asgi"
 
 # Server mechanics
 forwarded_allow_ips = "*"  # Be careful with this in production
