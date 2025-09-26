@@ -1,14 +1,35 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  beforeAll,
+  afterAll,
+} from 'vitest';
 import { useWebSocketClient } from '@/hooks/useWebSocketClient';
 
-// Mock WebSocket
-global.WebSocket = vi.fn(() => ({
+const originalWebSocket = global.WebSocket;
+const mockFactory = vi.fn(() => ({
   send: vi.fn(),
   close: vi.fn(),
   addEventListener: vi.fn(),
   removeEventListener: vi.fn(),
-  readyState: WebSocket.OPEN,
-})) as any;
+  readyState: 1,
+}));
+
+beforeAll(() => {
+  const mockConstructor = mockFactory as unknown as typeof WebSocket;
+  Object.defineProperty(mockConstructor, 'OPEN', {
+    value: 1,
+    configurable: true,
+  });
+  (global as any).WebSocket = mockConstructor;
+});
+
+afterAll(() => {
+  (global as any).WebSocket = originalWebSocket;
+});
 
 describe('useWebSocketClient', () => {
   beforeEach(() => {

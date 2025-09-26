@@ -2,9 +2,11 @@
 
 import os
 import threading
+from typing import ClassVar
+
+import requests
 from web3 import Web3
 from web3.providers.rpc import HTTPProvider
-import requests
 
 
 class Web3ConnectionPool:
@@ -13,12 +15,12 @@ class Web3ConnectionPool:
     Ensures only one Web3 instance is created and reused across the application.
     """
 
-    _web3 = None
-    _lock = threading.Lock()
-    _session = None
+    _web3: ClassVar[Web3 | None] = None
+    _lock: ClassVar[threading.Lock] = threading.Lock()
+    _session: ClassVar[requests.Session | None] = None
 
     @classmethod
-    def get(cls):
+    def get(cls) -> Web3 | None:
         """
         Get the singleton Web3 instance with thread-safe initialization.
         Creates a new instance if one doesn't exist.
@@ -83,7 +85,7 @@ class Web3ConnectionPool:
         cls.reset()
 
     @classmethod
-    def get_connection(cls):
+    def get_connection(cls) -> Web3 | None:
         """
         Get the singleton Web3 instance.
         Alias for get() for backward compatibility.

@@ -21,13 +21,18 @@ load_dotenv()
 from .base import *
 
 
+ERROR_RE = re.compile(
+    r'"code":\s*Str\("([^"]+)"\),\s*"message":\s*Str\("((?:[^"\\]|\\.)*)"\)',
+    re.DOTALL,
+)
+
+
 def extract_error_message(stdout: str) -> str:
     """Extract relevant error message from GenVM stdout."""
     try:
         # Look for JSON-like error structure in the output
         # Pattern to match: "code": Str("error_code"), "message": Str("error message")
-        pattern = r'"code":\s*Str\("([^"]+)"\),\s*"message":\s*Str\("([^"]*(?:[^"\\]|\\.)*?)"\)'
-        match = re.search(pattern, stdout)
+        match = ERROR_RE.search(stdout)
 
         if match:
             error_code = match.group(1)
@@ -130,6 +135,9 @@ class LLMModule:
 
         exe_path = Path(os.environ["GENVM_BIN"]).joinpath("genvm-modules")
 
+        debug_enabled = os.getenv("GENVM_LLM_DEBUG") == "1"
+        stream_target = None if debug_enabled else asyncio.subprocess.DEVNULL
+
         self._process = await asyncio.subprocess.create_subprocess_exec(
             exe_path,
             "llm",
@@ -138,8 +146,8 @@ class LLMModule:
             "--allow-empty-backends",
             "--die-with-parent",
             stdin=None,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stdout=stream_target,
+            stderr=stream_target,
         )
 
     async def verify_for_read(self):

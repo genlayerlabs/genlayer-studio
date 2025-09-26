@@ -9,11 +9,20 @@ export const useConsensusStore = defineStore('consensusStore', () => {
   const isLoading = ref<boolean>(true); // Needed for the delay between creating the variable and fetching the initial value
   const maxRotations = ref(Number(import.meta.env.VITE_MAX_ROTATIONS));
 
+  type FinalityWindowPayload = {
+    data: {
+      time: number;
+    };
+  };
+
   // Track initialization state to prevent duplicate loading state changes
   let hasInitialized = false;
+  let listenersRegistered = false;
 
   // Get the value when the frontend or backend is reloaded
-  webSocketClient.on('connect', fetchFinalityWindowTime);
+  const handleConnect = () => {
+    void fetchFinalityWindowTime();
+  };
 
   async function fetchFinalityWindowTime() {
     try {
@@ -32,9 +41,19 @@ export const useConsensusStore = defineStore('consensusStore', () => {
   }
 
   // Get the value when the backend updates its value from an RPC request
-  webSocketClient.on('finality_window_time_updated', (eventData: any) => {
-    finalityWindow.value = eventData.data.time;
-  });
+  const handleFinalityWindowUpdate = (eventData: FinalityWindowPayload) => {
+    if (eventData?.data?.time !== undefined) {
+      finalityWindow.value = eventData.data.time;
+    }
+  };
+  if (!listenersRegistered) {
+    webSocketClient.on('connect', handleConnect);
+    webSocketClient.on(
+      'finality_window_time_updated',
+      handleFinalityWindowUpdate,
+    );
+    listenersRegistered = true;
+  }
 
   // Set the value when the frontend updates its value
   async function setFinalityWindowTime(time: number) {
@@ -44,6 +63,21 @@ export const useConsensusStore = defineStore('consensusStore', () => {
 
   function setMaxRotations(rotations: number) {
     maxRotations.value = rotations;
+  }
+
+  function disposeListeners() {
+    webSocketClient.off('connect', handleConnect);
+    webSocketClient.off(
+      'finality_window_time_updated',
+      handleFinalityWindowUpdate,
+    );
+    listenersRegistered = false;
+  }
+
+  if (import.meta.hot) {
+    import.meta.hot.dispose(() => {
+      disposeListeners();
+    });
   }
 
   return {

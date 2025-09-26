@@ -1,7 +1,6 @@
 import { abi } from 'genlayer-js';
 
 function normalizeBase64(input: string): string | null {
-  if (typeof input !== 'string') return null;
   let s = input.trim().replace(/[\r\n\s]/g, '');
   if (s.length === 0) return null;
   s = s.replace(/-/g, '+').replace(/_/g, '/');
@@ -18,7 +17,7 @@ export function b64ToArray(b64: unknown): Uint8Array {
   const normalized = normalizeBase64(b64);
   if (!normalized) return new Uint8Array();
   try {
-    const binary = atob(normalized);
+    const binary = decodeBase64(normalized);
     const out = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
     return out;
@@ -48,7 +47,7 @@ function arrayToB64(bytes: Uint8Array): string {
   for (let i = 0; i < bytes.length; i++)
     binary += String.fromCharCode(bytes[i]);
   // btoa throws on non-Latin1; bytes are arbitrary here but safe for btoa
-  return btoa(binary);
+  return encodeBase64(binary);
 }
 
 type ResultLike = {
@@ -114,4 +113,21 @@ export function resultToUserFriendlyJson(input: unknown): any {
     status,
     payload,
   };
+}
+
+function decodeBase64(s: string): string {
+  const globalObject = globalThis as { atob?: (value: string) => string };
+  if (typeof globalObject?.atob === 'function') return globalObject.atob(s);
+  if (typeof Buffer !== 'undefined')
+    return Buffer.from(s, 'base64').toString('binary');
+  throw new Error('No base64 decoder available in this environment');
+}
+
+function encodeBase64(binary: string): string {
+  const globalObject = globalThis as { btoa?: (value: string) => string };
+  if (typeof globalObject?.btoa === 'function')
+    return globalObject.btoa(binary);
+  if (typeof Buffer !== 'undefined')
+    return Buffer.from(binary, 'binary').toString('base64');
+  throw new Error('No base64 encoder available in this environment');
 }
