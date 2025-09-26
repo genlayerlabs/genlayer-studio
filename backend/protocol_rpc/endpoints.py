@@ -570,6 +570,22 @@ async def gen_call(
     return eth_utils.hexadecimal.encode_hex(receipt.result[1:])[2:]
 
 
+def sim_lintContract(source_code: str, filename: str = "contract.py") -> dict:
+    """Lint GenVM contract source code.
+
+    Args:
+        source_code: Python source code to lint
+        filename: Optional filename for error reporting
+
+    Returns:
+        dict with 'results' array and 'summary' object
+    """
+    from backend.protocol_rpc.contract_linter import ContractLinter
+
+    linter = ContractLinter()
+    return linter.lint_contract(source_code, filename)
+
+
 async def sim_call(
     session: Session,
     accounts_manager: AccountsManager,
@@ -1346,6 +1362,7 @@ def register_all_rpc_endpoints(
         ),
         method_name="sim_createRandomValidators",
     )
+    register_rpc_endpoint(sim_lintContract, method_name="sim_lintContract")
     register_rpc_endpoint(
         partial(update_validator, validators_registry, accounts_manager),
         method_name="sim_updateValidator",
