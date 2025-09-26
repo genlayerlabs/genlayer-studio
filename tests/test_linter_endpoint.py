@@ -8,7 +8,7 @@ import requests
 import json
 
 # Test contract with various issues
-TEST_CONTRACT_WITH_ISSUES = '''# Missing magic comment
+TEST_CONTRACT_WITH_ISSUES = """# Missing magic comment
 
 from genlayer import *
 
@@ -20,10 +20,10 @@ class TestContract(gl.Contract):
     @gl.public.view
     def get_balance(self) -> u256:  # Should return int
         return self.balance
-'''
+"""
 
 # Valid contract
-VALID_CONTRACT = '''# { "Depends": "py-genlayer:test" }
+VALID_CONTRACT = """# { "Depends": "py-genlayer:test" }
 
 from genlayer import *
 
@@ -36,7 +36,7 @@ class TestContract(gl.Contract):
     @gl.public.view
     def get_balance(self) -> int:
         return self.balance
-'''
+"""
 
 
 def test_linter_endpoint(url="http://localhost:4000/api"):
@@ -47,15 +47,19 @@ def test_linter_endpoint(url="http://localhost:4000/api"):
 
     # Test 1: Contract with issues
     print("\n1. Testing contract with issues:")
-    response = requests.post(url, json={
-        "jsonrpc": "2.0",
-        "method": "sim_lintContract",
-        "params": {
-            "source_code": TEST_CONTRACT_WITH_ISSUES,
-            "filename": "test_with_issues.py"
+    response = requests.post(
+        url,
+        json={
+            "jsonrpc": "2.0",
+            "method": "sim_lintContract",
+            "params": {
+                "source_code": TEST_CONTRACT_WITH_ISSUES,
+                "filename": "test_with_issues.py",
+            },
+            "id": 1,
         },
-        "id": 1
-    })
+        timeout=10,
+    )
 
     result = response.json()
 
@@ -63,29 +67,32 @@ def test_linter_endpoint(url="http://localhost:4000/api"):
         print(f"❌ Error: {result['error']}")
     elif "result" in result:
         print(f"✅ Found {result['result']['summary']['total']} issues:")
-        for issue in result['result']['results']:
-            print(f"   - Line {issue['line']}: {issue['severity'].upper()} - {issue['message']}")
-            if issue['suggestion']:
+        for issue in result["result"]["results"]:
+            print(
+                f"   - Line {issue['line']}: {issue['severity'].upper()} - {issue['message']}"
+            )
+            if issue["suggestion"]:
                 print(f"     💡 {issue['suggestion']}")
 
     # Test 2: Valid contract
     print("\n2. Testing valid contract:")
-    response = requests.post(url, json={
-        "jsonrpc": "2.0",
-        "method": "sim_lintContract",
-        "params": {
-            "source_code": VALID_CONTRACT,
-            "filename": "valid_contract.py"
+    response = requests.post(
+        url,
+        json={
+            "jsonrpc": "2.0",
+            "method": "sim_lintContract",
+            "params": {"source_code": VALID_CONTRACT, "filename": "valid_contract.py"},
+            "id": 2,
         },
-        "id": 2
-    })
+        timeout=10,
+    )
 
     result = response.json()
 
     if "error" in result:
         print(f"❌ Error: {result['error']}")
     elif "result" in result:
-        total_issues = result['result']['summary']['total']
+        total_issues = result["result"]["summary"]["total"]
         if total_issues == 0:
             print("✅ No issues found - contract is valid!")
         else:

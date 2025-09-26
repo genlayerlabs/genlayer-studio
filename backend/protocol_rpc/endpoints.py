@@ -1362,10 +1362,7 @@ def register_all_rpc_endpoints(
         ),
         method_name="sim_createRandomValidators",
     )
-    register_rpc_endpoint(
-        sim_lintContract,
-        method_name="sim_lintContract"
-    )
+    register_rpc_endpoint(sim_lintContract, method_name="sim_lintContract")
     register_rpc_endpoint(
         partial(update_validator, validators_registry, accounts_manager),
         method_name="sim_updateValidator",

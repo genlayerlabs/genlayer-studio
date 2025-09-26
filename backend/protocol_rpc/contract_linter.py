@@ -14,7 +14,9 @@ class ContractLinter:
         """Initialize the ContractLinter."""
         pass
 
-    def lint_contract(self, source_code: str, filename: str = "contract.py") -> Dict[str, Any]:
+    def lint_contract(
+        self, source_code: str, filename: str = "contract.py"
+    ) -> Dict[str, Any]:
         """
         Lint GenVM contract source code.
 
@@ -30,7 +32,9 @@ class ContractLinter:
         Raises:
             JSONRPCError: If linting fails
         """
-        print(f"[LINTER] Called with filename: {filename}, code length: {len(source_code)}")
+        print(
+            f"[LINTER] Called with filename: {filename}, code length: {len(source_code)}"
+        )
 
         try:
             from genvm_linter.linter import GenVMLinter
@@ -47,34 +51,31 @@ class ContractLinter:
             for result in results:
                 severity = result.severity.value
                 severity_counts[severity] += 1
-                results_json.append({
-                    "rule_id": result.rule_id,
-                    "message": result.message,
-                    "severity": severity,
-                    "line": result.line,
-                    "column": result.column,
-                    "filename": result.filename,
-                    "suggestion": result.suggestion
-                })
+                results_json.append(
+                    {
+                        "rule_id": result.rule_id,
+                        "message": result.message,
+                        "severity": severity,
+                        "line": result.line,
+                        "column": result.column,
+                        "filename": result.filename,
+                        "suggestion": result.suggestion,
+                    }
+                )
 
             return {
                 "results": results_json,
-                "summary": {
-                    "total": len(results),
-                    "by_severity": severity_counts
-                }
+                "summary": {"total": len(results), "by_severity": severity_counts},
             }
         except ImportError as e:
             print(f"[LINTER] Import error: {e}")
             raise JSONRPCError(
                 code=-32000,
                 message="GenVM linter not available. Please ensure genvm-linter is installed.",
-                data={"error": str(e)}
+                data={"error": str(e)},
             )
         except Exception as e:
             print(f"[LINTER] Unexpected error: {e}")
             raise JSONRPCError(
-                code=-32000,
-                message=f"Linting failed: {str(e)}",
-                data={}
+                code=-32000, message=f"Linting failed: {str(e)}", data={}
             )
