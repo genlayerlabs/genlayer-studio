@@ -71,6 +71,10 @@ onUnmounted(() => {
   if (stopLinting) {
     stopLinting();
   }
+  if (editorRef.value) {
+    editorRef.value.dispose();
+    editorRef.value = null;
+  }
 });
 
 watch(
