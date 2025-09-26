@@ -1,14 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { useWebSocketClient } from '@/hooks/useWebSocketClient';
 
-// Mock WebSocket
-global.WebSocket = vi.fn(() => ({
+// Mock WebSocket with readyState constants
+const WebSocketMock: any = vi.fn(() => ({
   send: vi.fn(),
   close: vi.fn(),
   addEventListener: vi.fn(),
   removeEventListener: vi.fn(),
-  readyState: WebSocket.OPEN,
-})) as any;
+  readyState: 1, // OPEN
+}));
+Object.assign(WebSocketMock, {
+  CONNECTING: 0,
+  OPEN: 1,
+  CLOSING: 2,
+  CLOSED: 3,
+});
+(global as any).WebSocket = WebSocketMock;
 
 describe('useWebSocketClient', () => {
   beforeEach(() => {
