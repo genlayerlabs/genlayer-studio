@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass
-from backend.database_handler.accounts_manager import AccountsManager
+from sqlalchemy.orm import Session
 from backend.database_handler.validators_registry import ModifiableValidatorsRegistry
 
 
@@ -17,8 +17,7 @@ class ValidatorConfig:
 
 async def initialize_validators(
     validators_json: str,
-    validators_registry: ModifiableValidatorsRegistry,
-    accounts_manager: AccountsManager,
+    db_session: Session,
     validator_creator=None,
 ):
     """
@@ -26,8 +25,7 @@ async def initialize_validators(
 
     Args:
         validators_json: JSON string containing validator configurations
-        validators_registry: Registry to store validator information
-        accounts_manager: AccountsManager to create validator accounts
+        db_session: Session to store validator information
         validator_creator: Function to create validators (defaults to endpoints.create_validator)
     """
 
@@ -50,6 +48,7 @@ async def initialize_validators(
         raise ValueError("validators_json must contain a JSON array")
 
     # Delete all existing validators
+    validators_registry = ModifiableValidatorsRegistry(db_session)
     await validators_registry.delete_all_validators()
 
     # Create new validators
@@ -59,8 +58,7 @@ async def initialize_validators(
 
             for _ in range(validator.amount):
                 await validator_creator(
-                    validators_registry,
-                    accounts_manager,
+                    db_session,
                     validator.stake,
                     validator.provider,
                     validator.model,

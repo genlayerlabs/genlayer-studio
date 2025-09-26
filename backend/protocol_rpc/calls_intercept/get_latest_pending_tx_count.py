@@ -1,7 +1,7 @@
 import eth_utils
 from backend.database_handler.transactions_processor import TransactionsProcessor
 from backend.protocol_rpc.calls_intercept import CallHandler
-from flask_jsonrpc.exceptions import JSONRPCError
+from backend.protocol_rpc.exceptions import JSONRPCError
 from sqlalchemy.exc import SQLAlchemyError
 
 
