@@ -9,7 +9,11 @@ const source = path.resolve('../examples');
 const destionation =  path.resolve('./src/assets/examples');
 if (existsSync(destionation)) {
     console.log('Contract Examples already exists');
-    fs.rmSync(destionation, { recursive: true, force: true });
+    try {
+        fs.rmSync(destionation, { recursive: true, force: true });
+    } catch (error) {
+        console.log('Could not remove existing examples, copying anyway...');
+    }
 }
 
 ncp(source, destionation,

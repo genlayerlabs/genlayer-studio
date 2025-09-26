@@ -159,6 +159,7 @@ read_contract_async() {
                 \"from\": \"0x0000000000000000000000000000000000000000\",
                 \"to\": \"$CONTRACT_ADDR\",
                 \"data\": \"0x20965255\",
+                \"type\": \"read\",
                 \"transaction_hash_variant\": \"latest-final\"
             }],
             \"id\": $READ_ID

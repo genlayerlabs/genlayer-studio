@@ -21,8 +21,6 @@ export const useNodeStore = defineStore('nodeStore', () => {
   const isLoadingProviders = ref<boolean>(true);
   const searchFilter = ref<string>('');
 
-  if (!webSocketClient.connected) webSocketClient.connect();
-
   const trackedEvents = [
     'endpoint_call',
     'endpoint_success',

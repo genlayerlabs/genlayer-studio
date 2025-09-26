@@ -6,6 +6,7 @@ class EventType(Enum):
     DEBUG = "debug"
     INFO = "info"
     SUCCESS = "success"
+    WARNING = "warning"
     ERROR = "error"
 
 
