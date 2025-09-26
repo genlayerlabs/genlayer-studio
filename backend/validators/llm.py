@@ -69,6 +69,7 @@ class LLMModule:
         self._terminated = False
 
         self._process = None
+        self._restart_lock = asyncio.Lock()
 
         greyboxing_path = Path(__file__).parent.joinpath("greyboxing.lua")
 
@@ -93,73 +94,78 @@ class LLMModule:
             raise Exception("service was not terminated")
 
     async def stop(self):
-        if self._process is None:
-            return
+        async with self._restart_lock:
+            if self._process is None:
+                return
 
-        # Fast-path: check if process has already exited
-        if self._process.returncode is not None:
-            self._process = None
-            return
+            # Fast-path: check if process has already exited
+            if self._process.returncode is not None:
+                self._process = None
+                return
 
-        print(f"[LLMModule] Stopping process (PID: {self._process.pid})")
-
-        try:
-            # Try graceful shutdown with SIGINT
-            with contextlib.suppress(ProcessLookupError):
-                self._process.send_signal(signal.SIGINT)
+            print(f"[LLMModule] Stopping process (PID: {self._process.pid})")
 
             try:
-                # Wait for process to terminate with a timeout
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
-                print("[LLMModule] Process terminated gracefully")
-            except asyncio.TimeoutError:
-                print(
-                    "[LLMModule] Process didn't terminate with SIGINT, trying forceful termination"
-                )
-                # If SIGINT didn't work, use kill() for cross-platform compatibility
+                # Try graceful shutdown with SIGINT
                 with contextlib.suppress(ProcessLookupError):
-                    self._process.kill()
-                    try:
-                        await asyncio.wait_for(self._process.wait(), timeout=2.0)
-                        print("[LLMModule] Process terminated forcefully")
-                    except asyncio.TimeoutError:
-                        print(
-                            "[LLMModule] Process termination failed, continuing anyway"
-                        )
-        finally:
-            # Ensure process handle is cleared even if exception occurs
-            self._process = None
+                    self._process.send_signal(signal.SIGINT)
+
+                try:
+                    # Wait for process to terminate with a timeout
+                    await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                    print("[LLMModule] Process terminated gracefully")
+                except asyncio.TimeoutError:
+                    print(
+                        "[LLMModule] Process didn't terminate with SIGINT, trying forceful termination"
+                    )
+                    # If SIGINT didn't work, use kill() for cross-platform compatibility
+                    with contextlib.suppress(ProcessLookupError):
+                        self._process.kill()
+                        try:
+                            await asyncio.wait_for(self._process.wait(), timeout=2.0)
+                            print("[LLMModule] Process terminated forcefully")
+                        except asyncio.TimeoutError:
+                            print(
+                                "[LLMModule] Process termination failed, continuing anyway"
+                            )
+            finally:
+                # Ensure process handle is cleared even if exception occurs
+                self._process = None
 
     async def restart(self):
-        await self.stop()
+        async with self._restart_lock:
+            await self.stop()
 
-        exe_path = Path(os.environ["GENVM_BIN"]).joinpath("genvm-modules")
+            exe_path = Path(os.environ["GENVM_BIN"]).joinpath("genvm-modules")
 
-        debug_enabled = os.getenv("GENVM_LLM_DEBUG") == "1"
-        stream_target = None if debug_enabled else asyncio.subprocess.DEVNULL
+            debug_enabled = os.getenv("GENVM_LLM_DEBUG") == "1"
+            stream_target = None if debug_enabled else asyncio.subprocess.DEVNULL
 
-        self._process = await asyncio.subprocess.create_subprocess_exec(
-            exe_path,
-            "llm",
-            "--config",
-            self._config.new_path,
-            "--allow-empty-backends",
-            "--die-with-parent",
-            stdin=None,
-            stdout=stream_target,
-            stderr=stream_target,
-        )
+            self._process = await asyncio.subprocess.create_subprocess_exec(
+                exe_path,
+                "llm",
+                "--config",
+                self._config.new_path,
+                "--allow-empty-backends",
+                "--die-with-parent",
+                stdin=None,
+                stdout=stream_target,
+                stderr=stream_target,
+            )
 
     async def verify_for_read(self):
-        if self._process is None:
-            # Start the process if it hasn't been started
-            await self.restart()
-        elif self._process.returncode is not None:
-            # Restart the process if it's dead
-            print(
-                f"LLM process died with code {self._process.returncode}, restarting..."
-            )
-            await self.restart()
+        async with self._restart_lock:
+            if self._process is None:
+                # Start the process if it hasn't been started
+                await self.restart()
+                return
+
+            if self._process.returncode is not None:
+                # Restart the process if it's dead
+                print(
+                    f"LLM process died with code {self._process.returncode}, restarting..."
+                )
+                await self.restart()
 
     async def change_config(self, new_providers: list[SimulatorProvider]):
         await self.stop()
