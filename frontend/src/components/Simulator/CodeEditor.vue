@@ -59,8 +59,8 @@ function initEditor() {
     });
   });
 
-  // Setup auto-linting with 500ms debounce for faster feedback
-  stopLinting = setupAutoLinting(editorRef.value, monaco, 500);
+  // Setup auto-linting with 300ms debounce for faster feedback
+  stopLinting = setupAutoLinting(editorRef.value, monaco, 300);
 }
 
 onMounted(() => {
