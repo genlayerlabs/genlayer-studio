@@ -21,6 +21,9 @@ from backend.protocol_rpc.rpc_endpoint_manager import (
 )
 
 
+MAX_BATCH_SIZE = 100
+
+
 class FastAPIRPCRouter:
     """Bridges FastAPI requests with the RPC endpoint manager."""
 
@@ -45,7 +48,19 @@ class FastAPIRPCRouter:
                 response = JSONRPCResponse(
                     jsonrpc="2.0", error=invalid, id=None
                 ).model_dump(exclude_none=True)
-                return JSONResponse(status_code=400, content=[response])
+                return JSONResponse(status_code=200, content=response)
+
+            if len(payload) > MAX_BATCH_SIZE:
+                error = InvalidRequest(
+                    data={
+                        "message": f"Batch request exceeds maximum size of {MAX_BATCH_SIZE}",
+                        "size": len(payload),
+                    }
+                ).to_dict()
+                response = JSONRPCResponse(
+                    jsonrpc="2.0", error=error, id=None
+                ).model_dump(exclude_none=True)
+                return JSONResponse(status_code=200, content=response)
 
             responses: List[Dict[str, Any]] = []
             for entry in payload:
