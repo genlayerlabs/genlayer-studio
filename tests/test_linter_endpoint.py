@@ -61,18 +61,21 @@ def test_linter_endpoint(url="http://localhost:4000/api"):
         timeout=10,
     )
 
-    result = response.json()
+    response.raise_for_status()
+    payload = response.json()
+    assert "result" in payload, f"Unexpected payload: {payload}"
 
-    if "error" in result:
-        print(f"❌ Error: {result['error']}")
-    elif "result" in result:
-        print(f"✅ Found {result['result']['summary']['total']} issues:")
-        for issue in result["result"]["results"]:
-            print(
-                f"   - Line {issue['line']}: {issue['severity'].upper()} - {issue['message']}"
-            )
-            if issue["suggestion"]:
-                print(f"     💡 {issue['suggestion']}")
+    contract_result = payload["result"]
+    total_issues = contract_result["summary"]["total"]
+    assert total_issues > 0, "Expected the linter to report issues for the bad contract"
+
+    print(f"✅ Found {total_issues} issues:")
+    for issue in contract_result["results"]:
+        print(
+            f"   - Line {issue['line']}: {issue['severity'].upper()} - {issue['message']}"
+        )
+        if issue["suggestion"]:
+            print(f"     💡 {issue['suggestion']}")
 
     # Test 2: Valid contract
     print("\n2. Testing valid contract:")
@@ -87,16 +90,13 @@ def test_linter_endpoint(url="http://localhost:4000/api"):
         timeout=10,
     )
 
-    result = response.json()
+    response.raise_for_status()
+    payload = response.json()
+    assert "result" in payload, f"Unexpected payload: {payload}"
 
-    if "error" in result:
-        print(f"❌ Error: {result['error']}")
-    elif "result" in result:
-        total_issues = result["result"]["summary"]["total"]
-        if total_issues == 0:
-            print("✅ No issues found - contract is valid!")
-        else:
-            print(f"Found {total_issues} issues")
+    total_issues = payload["result"]["summary"]["total"]
+    assert total_issues == 0, f"Expected no issues for valid contract, got {total_issues}"
+    print("✅ No issues found - contract is valid!")
 
     print("\n" + "-" * 50)
     print("Test complete!")
