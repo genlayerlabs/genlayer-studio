@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Dict, List
 
-from fastapi import Request
+from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
@@ -24,13 +25,16 @@ from backend.protocol_rpc.rpc_endpoint_manager import (
 MAX_BATCH_SIZE = 100
 
 
+logger = logging.getLogger(__name__)
+
+
 class FastAPIRPCRouter:
     """Bridges FastAPI requests with the RPC endpoint manager."""
 
     def __init__(self, endpoint_manager: RPCEndpointManager) -> None:
         self._endpoint_manager = endpoint_manager
 
-    async def handle_http_request(self, request: Request) -> JSONResponse:
+    async def handle_http_request(self, request: Request) -> Response:
         try:
             payload = await request.json()
         except json.JSONDecodeError:
@@ -64,10 +68,17 @@ class FastAPIRPCRouter:
 
             responses: List[Dict[str, Any]] = []
             for entry in payload:
-                responses.append(await self._dispatch_entry(entry, request=request))
+                response = await self._dispatch_entry(entry, request=request)
+                if entry.get("id") is not None:
+                    responses.append(response)
+            if not responses:
+                return Response(status_code=204)
             return JSONResponse(content=responses)
 
         if isinstance(payload, dict):
+            if "id" not in payload:
+                return Response(status_code=204)
+
             response = await self._dispatch_entry(payload, request=request)
             return JSONResponse(content=response)
 
@@ -83,10 +94,17 @@ class FastAPIRPCRouter:
         *,
         request: Request,
     ) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            invalid = InvalidRequest().to_dict()
+            return JSONRPCResponse(jsonrpc="2.0", error=invalid, id=None).model_dump(
+                exclude_none=True
+            )
+
         try:
             rpc_request = JSONRPCRequest(**payload)
         except ValidationError as exc:
-            error = InvalidRequest(data={"errors": exc.errors()}).to_dict()
+            logger.exception("Invalid JSON-RPC request payload failed validation")
+            error = InvalidRequest().to_dict()
             return JSONRPCResponse(
                 jsonrpc="2.0", error=error, id=payload.get("id")
             ).model_dump(exclude_none=True)

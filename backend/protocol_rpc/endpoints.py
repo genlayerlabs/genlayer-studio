@@ -893,7 +893,14 @@ def send_raw_transaction(
                 #     message="Failed to add transaction to consensus layer",
                 #     data={},
                 # )
-                print("Failed to add transaction to consensus layer")
+                logger.warning(
+                    "Failed to add transaction to consensus layer",
+                    extra={
+                        "from_address": from_address,
+                        "transaction_type": genlayer_transaction.type.name,
+                        "leader_only": leader_only,
+                    },
+                )
 
         if genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT:
             if value > 0:

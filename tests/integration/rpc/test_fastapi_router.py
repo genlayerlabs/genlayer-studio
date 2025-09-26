@@ -122,3 +122,15 @@ async def test_router_handles_batch_requests(router_setup):
         {"jsonrpc": "2.0", "result": 1, "id": "a"},
         {"jsonrpc": "2.0", "result": 2, "id": "b"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_router_returns_no_content_for_notification(router_setup):
+    router, _manager, app = router_setup
+
+    payload = {"jsonrpc": "2.0", "method": "notify", "params": ["ping"]}
+
+    response = await router.handle_http_request(make_request(app, payload))
+
+    assert response.status_code == 204
+    assert response.body == b""

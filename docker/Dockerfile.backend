@@ -87,10 +87,6 @@ CMD python3 -m debugpy --listen 0.0.0.0:${RPCDEBUGPORT} -m uvicorn asgi:applicat
 
 ###########START NEW IMAGE: PRODUCTION ###################
 FROM base AS prod
-# Install uvicorn and production dependencies as root
-USER root
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --cache-dir=/root/.cache/pip uvicorn[standard] hypercorn asgiref redis psutil
-# Switch back to backend-user
+# Dependencies are already installed from backend/protocol_rpc/requirements.txt in the base stage
 USER backend-user
 CMD uvicorn asgi:application --host 0.0.0.0 --port ${RPCPORT:-4000} --workers ${WEB_CONCURRENCY:-1} --log-level ${LOG_LEVEL:-info}

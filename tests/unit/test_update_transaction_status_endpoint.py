@@ -198,6 +198,7 @@ class TestUpdateTransactionStatusEndpoint:
 
         assert exc_info.value.code == -32000
         assert exc_info.value.message == "Non-allowed operation"
+        assert exc_info.value.data == {}
         self.mock_transactions_processor.update_transaction_status.assert_not_called()
 
     def test_edge_case_exactly_66_characters(self):
