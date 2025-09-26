@@ -11,10 +11,10 @@ from backend.protocol_rpc.rpc_endpoint_manager import (
 
 
 class StubMessageHandler:
-    def __init__(self):
-        self.messages = []
+    def __init__(self) -> None:
+        self.messages: list[object] = []
 
-    def send_message(self, event):
+    def send_message(self, event: object) -> None:
         self.messages.append(event)
 
 

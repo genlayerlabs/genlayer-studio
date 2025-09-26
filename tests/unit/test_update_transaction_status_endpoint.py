@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import Mock, patch
-from flask_jsonrpc.exceptions import JSONRPCError
+
+from backend.protocol_rpc.exceptions import JSONRPCError
 
 from backend.protocol_rpc.endpoints import update_transaction_status
 from backend.database_handler.models import TransactionStatus
@@ -12,7 +13,7 @@ class TestUpdateTransactionStatusEndpoint:
 
     def setup_method(self):
         """Set up test fixtures."""
-        self.session = object()
+        self.session: Mock = Mock(name="Session")
         self.mock_transactions_processor = Mock(spec=TransactionsProcessor)
         self.transactions_processor_patch = patch(
             "backend.protocol_rpc.endpoints.TransactionsProcessor",
@@ -185,16 +186,19 @@ class TestUpdateTransactionStatusEndpoint:
             )
             assert result == self.mock_transaction_data
 
-    @patch("backend.protocol_rpc.endpoints.check_forbidden_method_in_hosted_studio")
-    def test_decorator_is_applied(self, mock_decorator):
-        """Test that the @check_forbidden_method_in_hosted_studio decorator is applied."""
-        import backend.protocol_rpc.endpoints as endpoints_module
+    def test_decorator_blocks_calls_in_hosted_mode(self, monkeypatch):
+        """Ensure the hosted-studio guard rejects update attempts when enabled."""
 
-        func = getattr(endpoints_module, "update_transaction_status")
+        monkeypatch.setenv("VITE_IS_HOSTED", "true")
 
-        assert callable(func)
-        assert hasattr(func, "__name__")
-        assert func.__name__ == "update_transaction_status"
+        with pytest.raises(JSONRPCError) as exc_info:
+            update_transaction_status(
+                self.session, self.valid_tx_hash, self.valid_status
+            )
+
+        assert exc_info.value.code == -32000
+        assert exc_info.value.message == "Non-allowed operation"
+        self.mock_transactions_processor.update_transaction_status.assert_not_called()
 
     def test_edge_case_exactly_66_characters(self):
         """Test that exactly 66-character hex string is valid."""

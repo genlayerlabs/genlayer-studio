@@ -45,9 +45,11 @@ def test_fund_account_raises_for_invalid_address(monkeypatch):
     accounts_manager_instance.is_valid_address.return_value = False
 
     monkeypatch.setattr(
-        endpoints, "AccountsManager", lambda s: accounts_manager_instance
+        endpoints, "AccountsManager", lambda _session: accounts_manager_instance
     )
-    monkeypatch.setattr(endpoints, "TransactionsProcessor", lambda s: MagicMock())
+    monkeypatch.setattr(
+        endpoints, "TransactionsProcessor", lambda _session: MagicMock()
+    )
 
     with pytest.raises(InvalidAddressError):
         endpoints.fund_account(session, "0x" + "2" * 40, 10)
@@ -64,7 +66,7 @@ def test_fund_account_instantiates_managers_per_session(monkeypatch):
         managers_created.append(mgr)
         return mgr
 
-    def fake_transactions_processor(session):
+    def fake_transactions_processor(_session):
         proc = MagicMock()
         proc.get_transaction_count.return_value = 1
         proc.insert_transaction.return_value = "0xhash"
@@ -92,7 +94,7 @@ def test_add_provider_uses_request_scoped_session(monkeypatch):
     registry_instance = MagicMock()
     captured_sessions = []
 
-    monkeypatch.setattr(endpoints, "validate_provider", lambda provider: None)
+    monkeypatch.setattr(endpoints, "validate_provider", lambda _provider: None)
     monkeypatch.setattr(
         endpoints,
         "LLMProviderRegistry",
@@ -123,7 +125,7 @@ def test_update_provider_uses_request_scoped_session(monkeypatch):
     registry_instance = MagicMock()
     captured_sessions = []
 
-    monkeypatch.setattr(endpoints, "validate_provider", lambda provider: None)
+    monkeypatch.setattr(endpoints, "validate_provider", lambda _provider: None)
     monkeypatch.setattr(
         endpoints,
         "LLMProviderRegistry",
@@ -175,7 +177,7 @@ async def test_create_validator_uses_request_scoped_session(monkeypatch):
         create_validator=AsyncMock(return_value={"address": account.address})
     )
 
-    monkeypatch.setattr(endpoints, "validate_provider", lambda provider: None)
+    monkeypatch.setattr(endpoints, "validate_provider", lambda _provider: None)
     monkeypatch.setattr(
         endpoints,
         "AccountsManager",
@@ -241,9 +243,9 @@ async def test_create_random_validators_use_request_session(monkeypatch):
 
     async def fake_random_validator_config(
         get_all_fn,
-        availability_fn,
-        limit_providers,
-        limit_models,
+        _availability_fn,
+        _limit_providers,
+        _limit_models,
         amount,
     ):
         assert get_all_fn() == []
@@ -296,7 +298,7 @@ async def test_update_validator_uses_request_session(monkeypatch):
         update_validator=AsyncMock(return_value={"address": "0xabc"})
     )
 
-    monkeypatch.setattr(endpoints, "validate_provider", lambda provider: None)
+    monkeypatch.setattr(endpoints, "validate_provider", lambda _provider: None)
 
     def update_registry_factory(s):
         assert s is session
