@@ -69,17 +69,16 @@ class FastAPIRPCRouter:
             responses: List[Dict[str, Any]] = []
             for entry in payload:
                 response = await self._dispatch_entry(entry, request=request)
-                if entry.get("id") is not None:
+                if isinstance(response, dict) and response.get("id") is not None:
                     responses.append(response)
             if not responses:
                 return Response(status_code=204)
             return JSONResponse(content=responses)
 
         if isinstance(payload, dict):
-            if "id" not in payload:
-                return Response(status_code=204)
-
             response = await self._dispatch_entry(payload, request=request)
+            if isinstance(response, dict) and response.get("id") is None:
+                return Response(status_code=204)
             return JSONResponse(content=response)
 
         invalid = InvalidRequest().to_dict()
@@ -102,7 +101,7 @@ class FastAPIRPCRouter:
 
         try:
             rpc_request = JSONRPCRequest(**payload)
-        except ValidationError as exc:
+        except ValidationError:
             logger.exception("Invalid JSON-RPC request payload failed validation")
             error = InvalidRequest().to_dict()
             return JSONRPCResponse(
