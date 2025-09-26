@@ -17,7 +17,7 @@ import { setupAutoLinting } from '@/services/monacoLinter';
   getWorker: () => {
     // Python uses the default editor worker
     return new editorWorker();
-  }
+  },
 };
 
 const uiStore = useUIStore();
@@ -47,10 +47,10 @@ function initEditor() {
     hover: {
       enabled: true,
       delay: 500,
-      sticky: true  // Keeps tooltip visible when moving mouse over it
+      sticky: true, // Keeps tooltip visible when moving mouse over it
     },
     // Ensure hover widgets display correctly
-    fixedOverflowWidgets: true
+    fixedOverflowWidgets: true,
   });
   editorRef.value.onDidChangeModelContent(() => {
     contractStore.updateContractFile(props.contract.id!, {

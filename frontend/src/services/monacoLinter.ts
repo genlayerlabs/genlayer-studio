@@ -37,7 +37,7 @@ let currentMarkers: Monaco.editor.IMarkerData[] = [];
  */
 export async function lintGenVMCode(
   editor: Monaco.editor.IStandaloneCodeEditor,
-  monaco: typeof Monaco
+  monaco: typeof Monaco,
 ) {
   const code = editor.getValue();
 
@@ -45,7 +45,7 @@ export async function lintGenVMCode(
     const rpcClient = new RpcClient();
     const response: JsonRPCResponse<LintResponse> = await rpcClient.call({
       method: 'sim_lintContract',
-      params: [code, 'contract.py']  // Pass as positional arguments in array
+      params: [code, 'contract.py'], // Pass as positional arguments in array
     });
 
     if (response.error) {
@@ -58,21 +58,28 @@ export async function lintGenVMCode(
 
       // Convert linter results to Monaco markers
       const model = editor.getModel();
-      const markers: Monaco.editor.IMarkerData[] = results.map(err => {
+      const markers: Monaco.editor.IMarkerData[] = results.map((err) => {
         // Calculate better end column based on actual line content
         const line = model?.getLineContent(err.line) || '';
-        const tokenMatch = line.slice(Math.max(0, err.column - 1)).match(/^[\w\.]+/);
+        const tokenMatch = line
+          .slice(Math.max(0, err.column - 1))
+          .match(/^[\w.]+/);
         const endColumn = err.column + (tokenMatch?.[0]?.length || 10);
 
-        const severityIcon = err.severity === 'error' ? '❌' :
-                             err.severity === 'warning' ? '⚠️' : 'ℹ️';
+        const severityIcon =
+          err.severity === 'error'
+            ? '❌'
+            : err.severity === 'warning'
+              ? '⚠️'
+              : 'ℹ️';
 
         return {
-          severity: err.severity === 'error' ?
-            Monaco.MarkerSeverity.Error :
-            err.severity === 'warning' ?
-            Monaco.MarkerSeverity.Warning :
-            Monaco.MarkerSeverity.Info,
+          severity:
+            err.severity === 'error'
+              ? Monaco.MarkerSeverity.Error
+              : err.severity === 'warning'
+                ? Monaco.MarkerSeverity.Warning
+                : Monaco.MarkerSeverity.Info,
           startLineNumber: err.line,
           startColumn: err.column,
           endLineNumber: err.line,
@@ -81,14 +88,19 @@ export async function lintGenVMCode(
           code: `${err.rule_id}`,
           source: 'GenLayer Linter',
           // Add relatedInformation for better hover display
-          relatedInformation: err.suggestion && model ? [{
-            startLineNumber: err.line,
-            startColumn: err.column,
-            endLineNumber: err.line,
-            endColumn: endColumn,
-            message: `💡 ${err.suggestion}`,
-            resource: model.uri
-          }] : []
+          relatedInformation:
+            err.suggestion && model
+              ? [
+                  {
+                    startLineNumber: err.line,
+                    startColumn: err.column,
+                    endLineNumber: err.line,
+                    endColumn: endColumn,
+                    message: `💡 ${err.suggestion}`,
+                    resource: model.uri,
+                  },
+                ]
+              : [],
         };
       });
 
@@ -106,14 +118,13 @@ export async function lintGenVMCode(
   }
 }
 
-
 /**
  * Setup automatic linting on content change with debouncing
  */
 export function setupAutoLinting(
   editor: Monaco.editor.IStandaloneCodeEditor,
   monaco: typeof Monaco,
-  debounceMs: number = 500
+  debounceMs: number = 500,
 ): () => void {
   let lintTimeout: NodeJS.Timeout;
 
