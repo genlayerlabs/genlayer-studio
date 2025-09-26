@@ -95,7 +95,9 @@ def test_linter_endpoint(url="http://localhost:4000/api"):
     assert "result" in payload, f"Unexpected payload: {payload}"
 
     total_issues = payload["result"]["summary"]["total"]
-    assert total_issues == 0, f"Expected no issues for valid contract, got {total_issues}"
+    assert (
+        total_issues == 0
+    ), f"Expected no issues for valid contract, got {total_issues}"
     print("✅ No issues found - contract is valid!")
 
     print("\n" + "-" * 50)
