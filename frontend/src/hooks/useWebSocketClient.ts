@@ -37,13 +37,9 @@ class NativeWebSocketClient {
       this.ws = new WebSocket(this.url);
 
       this.ws.onopen = () => {
-        this.id = `ws-${Date.now()}`;
         this.connected = true;
         this.reconnectAttempts = 0;
         this.reconnectTimeout = 1000;
-
-        // Trigger connect event
-        this.triggerEvent('connect', null);
 
         // Re-subscribe to topics after reconnection
         if (this.subscribedTopics.size > 0) {
