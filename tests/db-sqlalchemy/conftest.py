@@ -11,14 +11,6 @@ from backend.database_handler.transactions_processor import TransactionsProcesso
 # import debugpy
 
 
-# debugpy.listen(("0.0.0.0", 5678))
-# if os.getenv("WAIT_FOR_DEBUGGER"):
-#     # TODO: this is not printing anything
-#     print("Waiting for debugger to attach...")
-#     debugpy.wait_for_client()
-#     print("Debugger attached")
-
-
 @pytest.fixture
 def engine() -> Iterable[Engine]:
     postgres_url = os.getenv("POSTGRES_URL")
