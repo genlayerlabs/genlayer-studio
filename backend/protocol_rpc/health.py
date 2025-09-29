@@ -30,7 +30,7 @@ async def health_check():
             conn.execute(text("SELECT 1"))
             conn.commit()
         db_status = "healthy"
-    except Exception as e:
+    except Exception:
         logging.exception("Database health check failed.")
         db_status = "unhealthy"
         status = "degraded"
