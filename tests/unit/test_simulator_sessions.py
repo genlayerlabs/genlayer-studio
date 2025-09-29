@@ -243,9 +243,9 @@ async def test_create_random_validators_use_request_session(monkeypatch):
 
     async def fake_random_validator_config(
         get_all_fn,
-        _availability_fn,
-        _limit_providers,
-        _limit_models,
+        availability_fn,
+        limit_providers,
+        limit_models,
         amount,
     ):
         assert get_all_fn() == []
