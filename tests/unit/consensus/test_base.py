@@ -1452,8 +1452,6 @@ async def test_leader_appeal(consensus_algorithm):
             TransactionStatus.REVEALING,
             TransactionStatus.PENDING,
         ]
-        if current_status == TransactionStatus.ACTIVATED.value:
-            transaction_status_history.append(TransactionStatus.ACTIVATED)
 
         assert dict(transactions_processor.updated_transaction_status_history) == {
             "transaction_hash_1": transaction_status_history
@@ -2043,7 +2041,6 @@ async def test_leader_timeout_appeal_success(consensus_algorithm):
                 TransactionStatus.COMMITTING,
                 TransactionStatus.REVEALING,
                 TransactionStatus.ACCEPTED,
-                TransactionStatus.ACTIVATED,
             ],
         }
 
