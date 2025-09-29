@@ -89,7 +89,7 @@ class FastAPIRPCRouter:
 
     async def _dispatch_entry(
         self,
-        payload: Dict[str, Any],
+        payload: Any,
         *,
         request: Request,
     ) -> Dict[str, Any]:
