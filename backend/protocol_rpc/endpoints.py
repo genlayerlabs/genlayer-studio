@@ -266,9 +266,9 @@ async def create_random_validators(
     details = await random_validator_config(
         llm_provider_registry.get_all,
         partial(check_provider_is_available, validators_manager),
-        limit_providers=set(limit_providers),
-        limit_models=set(limit_models),
-        amount=count,
+        set(limit_providers),
+        set(limit_models),
+        count,
     )
 
     response = []
