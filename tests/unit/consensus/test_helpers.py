@@ -534,7 +534,7 @@ def node_factory(
             eq_outputs={},
             execution_result=ExecutionResultStatus.SUCCESS,
         )
-    
+
     if USE_MOCK_LLMS:
         # Use mocked node (default, fast)
         mock = Mock(Node)
@@ -546,7 +546,7 @@ def node_factory(
 
         async def mock_exec_transaction(transaction: Transaction):
             return await exec_with_dynamic_state(transaction, llm_mocked=True)
-        
+
         mock.exec_transaction = AsyncMock(side_effect=mock_exec_transaction)
         return mock
     else:
@@ -570,7 +570,7 @@ def node_factory(
 
         async def mock_exec_transaction(transaction: Transaction):
             return await exec_with_dynamic_state(transaction, llm_mocked=False)
-        
+
         mock.exec_transaction = AsyncMock(side_effect=mock_exec_transaction)
         return mock
 
