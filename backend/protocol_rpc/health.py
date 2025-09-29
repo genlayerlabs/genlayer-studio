@@ -13,7 +13,7 @@ health_router = APIRouter(tags=["health"])
 
 
 @health_router.get("/health")
-async def health_check():
+async def health_check() -> dict:
     """Comprehensive health check endpoint for load balancers and monitoring."""
     start = time.time()
 
