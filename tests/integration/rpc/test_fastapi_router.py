@@ -1,4 +1,6 @@
 import json
+from typing import Any
+
 import pytest
 from fastapi import FastAPI
 from starlette.requests import Request
@@ -11,7 +13,7 @@ from backend.protocol_rpc.rpc_endpoint_manager import (
 )
 
 
-def make_request(app: FastAPI, payload):
+def make_request(app: FastAPI, payload: Any) -> Request:
     body = json.dumps(payload).encode()
     sent = False
 
@@ -33,10 +35,10 @@ def make_request(app: FastAPI, payload):
 
 
 class StubMessageHandler:
-    def __init__(self):
-        self.messages = []
+    def __init__(self) -> None:
+        self.messages: list[object] = []
 
-    def send_message(self, event):
+    def send_message(self, event: object) -> None:
         self.messages.append(event)
 
 
@@ -90,7 +92,7 @@ async def test_router_returns_jsonrpc_error(router_setup):
 
 @pytest.mark.asyncio
 async def test_router_reports_missing_method(router_setup):
-    router, manager, app = router_setup
+    router, _manager, app = router_setup
 
     request = make_request(app, {"jsonrpc": "2.0", "method": "missing", "id": 3})
     response = await router.handle_http_request(request)
@@ -120,3 +122,15 @@ async def test_router_handles_batch_requests(router_setup):
         {"jsonrpc": "2.0", "result": 1, "id": "a"},
         {"jsonrpc": "2.0", "result": 2, "id": "b"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_router_returns_no_content_for_notification(router_setup):
+    router, _manager, app = router_setup
+
+    payload = {"jsonrpc": "2.0", "method": "notify", "params": ["ping"]}
+
+    response = await router.handle_http_request(make_request(app, payload))
+
+    assert response.status_code == 204
+    assert response.body == b""

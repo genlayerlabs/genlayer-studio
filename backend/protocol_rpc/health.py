@@ -55,7 +55,7 @@ async def health_check() -> dict:
         import psutil
 
         metrics = {
-            "cpu_percent": psutil.cpu_percent(interval=0.1),
+            "cpu_percent": psutil.cpu_percent(interval=None),
             "memory_percent": psutil.virtual_memory().percent,
         }
     except ImportError:

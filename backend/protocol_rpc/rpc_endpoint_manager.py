@@ -203,6 +203,7 @@ class RPCEndpointManager:
         solved = await solve_dependencies(
             request=fastapi_request,
             dependant=registered.dependant,
+            body=synthetic_body,
             dependency_overrides_provider=self._dependency_overrides_provider,
         )
         values, errors = solved[0], solved[1]

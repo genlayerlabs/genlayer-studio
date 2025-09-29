@@ -7,9 +7,13 @@ import tempfile
 from pathlib import Path
 from copy import deepcopy
 
-GENVM_BIN_DIR = Path(os.environ["GENVM_BIN"])
-GENVM_DEFAULT_CONFIG_DIR = Path(os.environ["GENVM_BIN"]).parent.joinpath("config")
-GENVM_SCRIPT_DIR = Path(os.environ["GENVM_BIN"]).parent.joinpath("scripts")
+GENVM_BIN = os.getenv("GENVM_BIN")
+if not GENVM_BIN:
+    raise RuntimeError("GENVM_BIN environment variable must be set")
+
+GENVM_BIN_DIR = Path(GENVM_BIN)
+GENVM_DEFAULT_CONFIG_DIR = GENVM_BIN_DIR.parent.joinpath("config")
+GENVM_SCRIPT_DIR = GENVM_BIN_DIR.parent.joinpath("scripts")
 
 
 class _Stream:

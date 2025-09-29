@@ -29,13 +29,13 @@ class JSONRPCError(Exception):
         """
         self.code = code
         self.message = message
-        self.data = data if data is not None else {}
+        self.data = data
         super().__init__(self.message)
 
     def to_dict(self) -> dict:
         """Convert the error to a JSON-RPC error response format."""
         error_dict = {"code": self.code, "message": self.message}
-        if self.data:
+        if self.data is not None:
             error_dict["data"] = self.data
         return error_dict
 

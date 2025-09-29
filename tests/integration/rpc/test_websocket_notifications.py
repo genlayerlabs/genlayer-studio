@@ -1,4 +1,5 @@
 import json
+from contextlib import asynccontextmanager
 
 import anyio
 from fastapi import FastAPI, WebSocket
@@ -15,19 +16,20 @@ class TestApplication:
     """Helper wrapper to expose shared broadcast channel."""
 
     def __init__(self) -> None:
-        self.app = FastAPI()
         self.broadcast = Broadcast("memory://")
         self.emit_event = create_emit_event_function(self.broadcast)
 
-        @self.app.on_event("startup")
-        async def startup() -> None:  # pragma: no cover - exercised via TestClient
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):  # pragma: no cover - exercised via TestClient
             await self.broadcast.connect()
-            self.app.state.broadcast = self.broadcast
-            self.app.state.emit_event = self.emit_event
+            app.state.broadcast = self.broadcast
+            app.state.emit_event = self.emit_event
+            try:
+                yield
+            finally:
+                await self.broadcast.disconnect()
 
-        @self.app.on_event("shutdown")
-        async def shutdown() -> None:  # pragma: no cover - exercised via TestClient
-            await self.broadcast.disconnect()
+        self.app = FastAPI(lifespan=lifespan)
 
         @self.app.websocket("/ws")
         async def ws_endpoint(

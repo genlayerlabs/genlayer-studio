@@ -90,7 +90,7 @@ class ModifiableValidatorsRegistry(ValidatorsRegistry):
         self.session.flush()  # Ensure the validator deletion is persisted
 
     async def delete_all_validators(self):
-        self.session.query(Validators).delete()
+        self.session.query(Validators).delete(synchronize_session=False)
         self.session.flush()  # Ensure all validator deletions are persisted
 
 
