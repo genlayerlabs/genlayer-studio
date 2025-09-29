@@ -22,10 +22,10 @@ class WebModule:
 
         self._process = None
 
-        try:
-            genvm_bin = os.environ["GENVM_BIN"]
-        except KeyError as exc:  # pragma: no cover - startup validation
-            raise RuntimeError("GENVM_BIN environment variable must be set") from exc
+        genvm_bin = os.getenv("GENVM_BIN")
+        if not genvm_bin:  # pragma: no cover - startup validation
+            logger.error("GENVM_BIN environment variable must be set")
+            raise RuntimeError("GENVM_BIN environment variable must be set")
 
         protocol = os.getenv("WEBDRIVERPROTOCOL", "http")
         try:

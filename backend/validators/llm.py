@@ -8,6 +8,7 @@ import signal
 import os
 import sys
 import dataclasses
+import logging
 import aiohttp
 from pathlib import Path
 import json
@@ -19,6 +20,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from .base import *
+
+
+logger = logging.getLogger(__name__)
 
 
 ERROR_RE = re.compile(
@@ -201,7 +205,14 @@ class LLMModule:
         if plugin == "custom":
             return await self.call_custom_model(model, url, key_env)
 
-        exe_path = Path(os.environ["GENVM_BIN"]).joinpath("genvm-modules")
+        genvm_bin = os.getenv("GENVM_BIN")
+        if not genvm_bin:
+            logger.error(
+                "GENVM_BIN env var is not set; cannot validate provider %s", model
+            )
+            return False
+
+        exe_path = Path(genvm_bin).joinpath("genvm-modules")
 
         try:
             proc = await asyncio.subprocess.create_subprocess_exec(
@@ -222,11 +233,15 @@ class LLMModule:
             stdout, _ = await proc.communicate()
             return_code = await proc.wait()
 
-            stdout = stdout.decode("utf-8")
+            stdout_text = stdout.decode("utf-8", errors="replace")
 
             if return_code != 0:
-                error_info = extract_error_message(stdout)
-                print(f"provider not available model={model} error={error_info}")
+                error_info = extract_error_message(stdout_text)
+                logger.warning(
+                    "Provider not available model=%s error=%s",
+                    model,
+                    error_info,
+                )
 
             return return_code == 0
 
