@@ -22,10 +22,10 @@ describe('useWebSocketClient', () => {
     const client = useWebSocketClient();
     const expectedUrl = (client as unknown as { url: string }).url;
 
-    webSocketCtor.mockClear();
+    WebSocketMock.mockClear();
     client.connect();
 
-    expect(webSocketCtor).toHaveBeenCalledWith(expectedUrl);
+    expect(WebSocketMock).toHaveBeenCalledWith(expectedUrl);
   });
 
   it('should have an emit method', async () => {
