@@ -1,29 +1,20 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-let webSocketCtor: vi.Mock;
-
-beforeEach(() => {
-  vi.resetModules();
-  webSocketCtor = vi.fn(() => ({
-    send: vi.fn(),
-    close: vi.fn(),
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn(),
-    readyState: 1,
-  }));
-
-  Object.defineProperty(webSocketCtor, 'OPEN', {
-    value: 1,
-    configurable: true,
-  });
-
-  vi.stubGlobal('WebSocket', webSocketCtor);
+// Mock WebSocket with readyState constants
+const WebSocketMock: any = vi.fn(() => ({
+  send: vi.fn(),
+  close: vi.fn(),
+  addEventListener: vi.fn(),
+  removeEventListener: vi.fn(),
+  readyState: 1, // OPEN
+}));
+Object.assign(WebSocketMock, {
+  CONNECTING: 0,
+  OPEN: 1,
+  CLOSING: 2,
+  CLOSED: 3,
 });
-
-afterEach(() => {
-  vi.clearAllMocks();
-  vi.unstubAllGlobals();
-});
+(global as any).WebSocket = WebSocketMock;
 
 describe('useWebSocketClient', () => {
   it('should create a WebSocket client with the correct URL', async () => {

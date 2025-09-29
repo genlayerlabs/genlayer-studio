@@ -2,6 +2,7 @@
 import time
 import os
 from typing import Optional, Union
+import logging
 
 from fastapi import APIRouter, FastAPI
 from backend.database_handler.session_factory import get_database_manager
@@ -12,7 +13,7 @@ health_router = APIRouter(tags=["health"])
 
 
 @health_router.get("/health")
-async def health_check():
+async def health_check() -> dict:
     """Comprehensive health check endpoint for load balancers and monitoring."""
     start = time.time()
 
@@ -29,8 +30,9 @@ async def health_check():
             conn.execute(text("SELECT 1"))
             conn.commit()
         db_status = "healthy"
-    except Exception as e:
-        db_status = f"unhealthy: {str(e)}"
+    except Exception:
+        logging.exception("Database health check failed.")
+        db_status = "unhealthy"
         status = "degraded"
 
     # Check Redis (if configured)
