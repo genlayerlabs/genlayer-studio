@@ -8,6 +8,7 @@ import signal
 import os
 import sys
 import dataclasses
+import logging
 import aiohttp
 from pathlib import Path
 import json
@@ -21,13 +22,21 @@ load_dotenv()
 from .base import *
 
 
+logger = logging.getLogger(__name__)
+
+
+ERROR_RE = re.compile(
+    r'"code":\s*Str\("([^"]+)"\),\s*"message":\s*Str\("((?:[^"\\]|\\.)*)"\)',
+    re.DOTALL,
+)
+
+
 def extract_error_message(stdout: str) -> str:
     """Extract relevant error message from GenVM stdout."""
     try:
         # Look for JSON-like error structure in the output
         # Pattern to match: "code": Str("error_code"), "message": Str("error message")
-        pattern = r'"code":\s*Str\("([^"]+)"\),\s*"message":\s*Str\("([^"]*(?:[^"\\]|\\.)*?)"\)'
-        match = re.search(pattern, stdout)
+        match = ERROR_RE.search(stdout)
 
         if match:
             error_code = match.group(1)
@@ -64,6 +73,7 @@ class LLMModule:
         self._terminated = False
 
         self._process = None
+        self._restart_lock = asyncio.Lock()
 
         greyboxing_path = Path(__file__).parent.joinpath("greyboxing.lua")
 
@@ -87,7 +97,11 @@ class LLMModule:
         if not self._terminated:
             raise Exception("service was not terminated")
 
-    async def stop(self):
+    async def stop(self, *, locked: bool = False) -> None:
+        if not locked:
+            async with self._restart_lock:
+                return await self.stop(locked=True)
+
         if self._process is None:
             return
 
@@ -125,10 +139,21 @@ class LLMModule:
             # Ensure process handle is cleared even if exception occurs
             self._process = None
 
-    async def restart(self):
-        await self.stop()
+    async def restart(self) -> None:
+        async with self._restart_lock:
+            await self._restart_locked()
 
-        exe_path = Path(os.environ["GENVM_BIN"]).joinpath("genvm-modules")
+    async def _restart_locked(self) -> None:
+        await self.stop(locked=True)
+
+        genvm_bin = os.getenv("GENVM_BIN")
+        if genvm_bin is None:
+            raise RuntimeError("GENVM_BIN env var is not set")
+
+        exe_path = Path(genvm_bin).joinpath("genvm-modules")
+
+        debug_enabled = os.getenv("GENVM_LLM_DEBUG") == "1"
+        stream_target = None if debug_enabled else asyncio.subprocess.DEVNULL
 
         self._process = await asyncio.subprocess.create_subprocess_exec(
             exe_path,
@@ -138,20 +163,19 @@ class LLMModule:
             "--allow-empty-backends",
             "--die-with-parent",
             stdin=None,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stdout=stream_target,
+            stderr=stream_target,
         )
 
-    async def verify_for_read(self):
-        if self._process is None:
-            # Start the process if it hasn't been started
-            await self.restart()
-        elif self._process.returncode is not None:
-            # Restart the process if it's dead
-            print(
-                f"LLM process died with code {self._process.returncode}, restarting..."
-            )
-            await self.restart()
+    async def verify_for_read(self) -> None:
+        async with self._restart_lock:
+            if self._process is None:
+                await self._restart_locked()
+            elif self._process.returncode is not None:
+                print(
+                    f"LLM process died with code {self._process.returncode}, restarting..."
+                )
+                await self._restart_locked()
 
     async def change_config(self, new_providers: list[SimulatorProvider]):
         await self.stop()
@@ -181,7 +205,14 @@ class LLMModule:
         if plugin == "custom":
             return await self.call_custom_model(model, url, key_env)
 
-        exe_path = Path(os.environ["GENVM_BIN"]).joinpath("genvm-modules")
+        genvm_bin = os.getenv("GENVM_BIN")
+        if not genvm_bin:
+            logger.error(
+                "GENVM_BIN env var is not set; cannot validate provider %s", model
+            )
+            return False
+
+        exe_path = Path(genvm_bin).joinpath("genvm-modules")
 
         try:
             proc = await asyncio.subprocess.create_subprocess_exec(
@@ -202,11 +233,15 @@ class LLMModule:
             stdout, _ = await proc.communicate()
             return_code = await proc.wait()
 
-            stdout = stdout.decode("utf-8")
+            stdout_text = stdout.decode("utf-8", errors="replace")
 
             if return_code != 0:
-                error_info = extract_error_message(stdout)
-                print(f"provider not available model={model} error={error_info}")
+                error_info = extract_error_message(stdout_text)
+                logger.warning(
+                    "Provider not available model=%s error=%s",
+                    model,
+                    error_info,
+                )
 
             return return_code == 0
 

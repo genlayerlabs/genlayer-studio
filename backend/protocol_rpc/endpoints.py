@@ -2,6 +2,7 @@
 import random
 import json
 import eth_utils
+import logging
 from functools import partial, wraps
 from typing import Any
 from backend.protocol_rpc.exceptions import JSONRPCError
@@ -39,6 +40,9 @@ from backend.database_handler.transactions_processor import (
     TransactionAddressFilter,
     TransactionsProcessor,
 )
+
+
+logger = logging.getLogger(__name__)
 from backend.node.base import Node, SIMULATOR_CHAIN_ID
 from backend.node.types import ExecutionMode, ExecutionResultStatus
 from backend.consensus.base import ConsensusAlgorithm
@@ -826,10 +830,7 @@ def send_raw_transaction(
     decoded_rollup_transaction = transactions_parser.decode_signed_transaction(
         signed_rollup_transaction
     )
-    print("DECODED ROLLUP TRANSACTION", decoded_rollup_transaction)
-    # Debug logging - only in DEBUG mode
-    if os.environ.get("LOG_LEVEL", "INFO").upper() == "DEBUG":
-        print("DECODED ROLLUP TRANSACTION", decoded_rollup_transaction)
+    logger.debug("Decoded rollup transaction %s", decoded_rollup_transaction)
 
     # Validate transaction
     if decoded_rollup_transaction is None:
@@ -892,7 +893,14 @@ def send_raw_transaction(
                 #     message="Failed to add transaction to consensus layer",
                 #     data={},
                 # )
-                print("Failed to add transaction to consensus layer")
+                logger.warning(
+                    "Failed to add transaction to consensus layer",
+                    extra={
+                        "from_address": from_address,
+                        "transaction_type": genlayer_transaction.type.name,
+                        "leader_only": leader_only,
+                    },
+                )
 
         if genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT:
             if value > 0:

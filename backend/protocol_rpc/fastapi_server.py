@@ -95,7 +95,7 @@ async def websocket_endpoint(
 
 
 # Method to emit events (to be used by other parts of the application)
-async def emit_event(room: str, event: str, data: Any):
+async def emit_event(room: str, event: str, data: Any) -> None:
     """Emit an event to all clients in a room."""
     emit_fn = getattr(app.state, "emit_event", None)
     if emit_fn is not None:

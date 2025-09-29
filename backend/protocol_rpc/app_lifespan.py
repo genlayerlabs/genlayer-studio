@@ -210,7 +210,8 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
         dependency_overrides_provider=app,
     )
 
-    from backend.protocol_rpc import rpc_methods  # noqa: F401
+    # Import registers RPC methods via decorators (module import has side effects).
+    from backend.protocol_rpc import rpc_methods
 
     for definition in rpc.to_list():
         endpoint_manager.register(definition)

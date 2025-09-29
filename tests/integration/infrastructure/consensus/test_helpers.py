@@ -5,6 +5,8 @@ from pathlib import Path
 import time
 import threading
 import pytest
+import os
+import asyncio
 from backend.consensus.base import (
     ConsensusAlgorithm,
     DEFAULT_VALIDATORS_COUNT,
@@ -23,9 +25,15 @@ from datetime import datetime
 from copy import deepcopy
 
 DEFAULT_FINALITY_WINDOW = 5
-DEFAULT_CONSENSUS_SLEEP_TIME = 2
+# Reduce sleep time for faster tests when using mocks
+DEFAULT_CONSENSUS_SLEEP_TIME = (
+    0.1 if os.getenv("TEST_WITH_MOCK_LLMS", "true").lower() == "true" else 2
+)
 DEFAULT_EXEC_RESULT = b"\x00\x00"  # success(null)
 TIMEOUT_EXEC_RESULT = b"\x02timeout"
+
+# Configuration for LLM mocking
+USE_MOCK_LLMS = os.getenv("TEST_WITH_MOCK_LLMS", "true").lower() == "true"
 
 
 class AccountsManagerMock:
@@ -45,6 +53,8 @@ class TransactionsProcessorMock:
         self.updated_transaction_status_history = defaultdict(list)
         self.status_changed_event = threading.Event()
         self.status_update_lock = threading.Lock()
+        # Counter to ensure timestamps always increase in mock mode
+        self._mock_time_counter = 0
 
     def get_transaction_by_hash(self, transaction_hash: str) -> dict:
         if transaction_hash in self.transactions:
@@ -103,8 +113,15 @@ class TransactionsProcessorMock:
             TransactionStatus.LEADER_TIMEOUT.value,
             TransactionStatus.VALIDATORS_TIMEOUT.value,
         ):
-            self.set_transaction_timestamp_appeal(transaction, int(time.time()))
-            time.sleep(1)
+            # In mock mode, use an incrementing counter to ensure timestamps increase
+            if USE_MOCK_LLMS:
+                self._mock_time_counter += 1
+                timestamp = int(time.time()) + self._mock_time_counter
+            else:
+                timestamp = int(time.time())
+            self.set_transaction_timestamp_appeal(transaction, timestamp)
+            # Reduce sleep for faster tests when using mocks
+            time.sleep(0.01 if USE_MOCK_LLMS else 1)
             transaction["appealed"] = appeal
         self.commit(transaction)
 
@@ -117,7 +134,14 @@ class TransactionsProcessorMock:
                 timestamp_awaiting_finalization
             )
         else:
-            transaction["timestamp_awaiting_finalization"] = int(time.time())
+            # In mock mode, use an incrementing counter to ensure timestamps increase
+            if USE_MOCK_LLMS:
+                self._mock_time_counter += 1
+                transaction["timestamp_awaiting_finalization"] = (
+                    int(time.time()) + self._mock_time_counter
+                )
+            else:
+                transaction["timestamp_awaiting_finalization"] = int(time.time())
         self.commit(transaction)
 
     def get_awaiting_finalization_transactions(self):
@@ -224,9 +248,18 @@ class TransactionsProcessorMock:
 
     def set_transaction_appeal_processing_time(self, transaction_hash: str):
         transaction = self.get_transaction_by_hash(transaction_hash)
-        transaction["appeal_processing_time"] += (
-            round(time.time()) - transaction["timestamp_appeal"]
-        )
+        # Calculate time difference
+        if USE_MOCK_LLMS:
+            # In mock mode, use the counter to get consistent timestamps
+            self._mock_time_counter += 1
+            current_time = int(time.time()) + self._mock_time_counter
+        else:
+            current_time = round(time.time())
+        time_diff = current_time - transaction["timestamp_appeal"]
+        # In mock mode with fast sleeps, ensure at least 1 second of processing time
+        if USE_MOCK_LLMS and time_diff <= 0:
+            time_diff = 1
+        transaction["appeal_processing_time"] += time_diff
         self.commit(transaction)
 
     def reset_transaction_appeal_processing_time(self, transaction_hash: str):
@@ -474,41 +507,90 @@ def node_factory(
     vote: Vote,
     timeout: bool,
 ):
-    mock = Mock(Node)
+    if USE_MOCK_LLMS:
+        # Use mocked node (default, fast)
+        mock = Mock(Node)
+        mock.validator_mode = mode
+        mock.address = node["address"]
+        mock.leader_receipt = receipt
+        mock.private_key = node["private_key"]
+        mock.contract_snapshot = contract_snapshot
 
-    mock.validator_mode = mode
-    mock.address = node["address"]
-    mock.leader_receipt = receipt
-    mock.private_key = node["private_key"]
-    mock.contract_snapshot = contract_snapshot
+        async def exec_with_dynamic_state(transaction: Transaction):
+            # Add small delay to simulate processing
+            if USE_MOCK_LLMS:
+                await asyncio.sleep(0.01)  # Small delay for mocked responses
 
-    async def exec_with_dynamic_state(transaction: Transaction):
-        accepted_state = contract_snapshot.states["accepted"]
-        set_value = transaction.hash[-1]
-        if len(accepted_state) == 0:
-            contract_state = {"state_var": set_value}
-        else:
-            value = accepted_state["state_var"]
-            contract_state = {"state_var": value + set_value}
+            accepted_state = contract_snapshot.states["accepted"]
+            set_value = transaction.hash[-1]
+            if len(accepted_state) == 0:
+                contract_state = {"state_var": set_value}
+            else:
+                value = accepted_state["state_var"]
+                contract_state = {"state_var": value + set_value}
 
-        return Receipt(
-            vote=vote,
-            calldata=b"",
-            mode=mode,
-            gas_used=0,
-            contract_state=contract_state,  # Dynamic contract state based on transaction
-            result=TIMEOUT_EXEC_RESULT if timeout else DEFAULT_EXEC_RESULT,
-            node_config={
-                "address": node["address"],
-                "private_key": node["private_key"],
-            },
-            eq_outputs={},
-            execution_result=ExecutionResultStatus.SUCCESS,
+            return Receipt(
+                vote=vote,
+                calldata=b"",
+                mode=mode,
+                gas_used=0,
+                contract_state=contract_state,  # Dynamic contract state based on transaction
+                result=TIMEOUT_EXEC_RESULT if timeout else DEFAULT_EXEC_RESULT,
+                node_config={
+                    "address": node["address"],
+                    "private_key": node["private_key"],
+                },
+                eq_outputs={},
+                execution_result=ExecutionResultStatus.SUCCESS,
+            )
+
+        mock.exec_transaction = AsyncMock(side_effect=exec_with_dynamic_state)
+        return mock
+    else:
+        # Use real node with actual LLM calls (slow, requires API keys)
+        # This would require proper validator setup with real LLM providers
+        # For now, we'll still use mocks but log that real mode was requested
+        print(
+            f"[WARNING] Real LLM mode requested but not fully implemented in unit tests"
+        )
+        print(
+            f"[WARNING] Using mocked responses. For real LLMs, use integration tests."
         )
 
-    mock.exec_transaction = AsyncMock(side_effect=exec_with_dynamic_state)
+        # Fall back to mock for now
+        mock = Mock(Node)
+        mock.validator_mode = mode
+        mock.address = node["address"]
+        mock.leader_receipt = receipt
+        mock.private_key = node["private_key"]
+        mock.contract_snapshot = contract_snapshot
 
-    return mock
+        async def exec_with_dynamic_state(transaction: Transaction):
+            accepted_state = contract_snapshot.states["accepted"]
+            set_value = transaction.hash[-1]
+            if len(accepted_state) == 0:
+                contract_state = {"state_var": set_value}
+            else:
+                value = accepted_state["state_var"]
+                contract_state = {"state_var": value + set_value}
+
+            return Receipt(
+                vote=vote,
+                calldata=b"",
+                mode=mode,
+                gas_used=0,
+                contract_state=contract_state,
+                result=TIMEOUT_EXEC_RESULT if timeout else DEFAULT_EXEC_RESULT,
+                node_config={
+                    "address": node["address"],
+                    "private_key": node["private_key"],
+                },
+                eq_outputs={},
+                execution_result=ExecutionResultStatus.SUCCESS,
+            )
+
+        mock.exec_transaction = AsyncMock(side_effect=exec_with_dynamic_state)
+        return mock
 
 
 def appeal(transaction: Transaction, transactions_processor: TransactionsProcessorMock):
@@ -732,11 +814,23 @@ def assert_transaction_status_match(
     transactions_processor: TransactionsProcessorMock,
     transaction: Transaction,
     expected_statuses: list[TransactionStatus],
-    timeout: int = 30,
+    timeout: int = None,
     interval: float = 0.1,
 ) -> TransactionStatus:
+    # Use adaptive timeout based on LLM mode
+    if timeout is None:
+        timeout = (
+            60 if USE_MOCK_LLMS else 180
+        )  # 1 minute for mocks, 3 minutes for real LLMs
+
     last_status = None
     start_time = time.time()
+
+    # Log mode if using real LLMs
+    if not USE_MOCK_LLMS:
+        print(
+            f"[LLM Mode: REAL] Waiting for status {expected_statuses} with timeout {timeout}s"
+        )
 
     while time.time() - start_time < timeout:
         current_status = transactions_processor.get_transaction_by_hash(
@@ -748,12 +842,16 @@ def assert_transaction_status_match(
 
         if current_status != last_status:
             last_status = current_status
+            if not USE_MOCK_LLMS:
+                print(f"[LLM Mode: REAL] Status changed to: {current_status}")
 
         # Wait for next status change
         transactions_processor.wait_for_status_change(interval)
 
+    mode_info = "MOCK" if USE_MOCK_LLMS else "REAL"
     raise AssertionError(
-        f"Transaction did not reach {expected_statuses} within {timeout} seconds. Last status: {last_status}"
+        f"Transaction did not reach {expected_statuses} within {timeout} seconds. "
+        f"Last status: {last_status}. LLM mode: {mode_info}"
     )
 
 

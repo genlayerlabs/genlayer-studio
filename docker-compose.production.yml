@@ -54,10 +54,10 @@ services:
       ollama:
         condition: service_started
         required: false
-    mem_limit: ${COMPOSE_MEM_LIMIT:-8}
-    mem_reservation: ${COMPOSE_MEM_RESERVATION:-2}
+    mem_limit: '${COMPOSE_MEM_LIMIT:-8g}'
+    mem_reservation: '${COMPOSE_MEM_RESERVATION:-2g}'
 
-  # Redis service for production (message queue for Socket.IO)
+  # Redis service for production (broadcast hub for WebSocket notifications)
   redis:
     image: redis:7-alpine
     ports:

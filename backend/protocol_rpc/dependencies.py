@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, Generator, Optional
+from typing import (
+    Annotated,
+    Any,
+    Awaitable,
+    Callable,
+    Generator,
+    Optional,
+    TypeVar,
+    cast,
+)
 
 from fastapi import Depends, HTTPException, Request, status
 from starlette.websockets import WebSocket
@@ -30,11 +39,14 @@ def _get_app_state(request: Request) -> Any:
     return state
 
 
-def _require_state_attr(state: Any, attr: str, detail: str) -> Any:
+T = TypeVar("T")
+
+
+def _require_state_attr(state: Any, attr: str, detail: str) -> T:
     value = getattr(state, attr, None)
     if value is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail)
-    return value
+    return cast(T, value)
 
 
 def _peek_state_attr(state: Any, attr: str) -> Any:
@@ -48,7 +60,7 @@ def get_db_manager(request: Request) -> DatabaseSessionManager:
 
 
 def get_db_session(
-    db_manager: DatabaseSessionManager = Depends(get_db_manager),
+    db_manager: Annotated[DatabaseSessionManager, Depends(get_db_manager)],
 ) -> Generator[Session, None, None]:
     session = db_manager.open_session()
     try:
@@ -153,24 +165,24 @@ def get_sqlalchemy_db(request: Request):
 
 
 def get_accounts_manager(
-    session: Session = Depends(get_db_session),
+    session: Annotated[Session, Depends(get_db_session)],
 ) -> AccountsManager:
     return AccountsManager(session)
 
 
 def get_transactions_processor(
-    session: Session = Depends(get_db_session),
+    session: Annotated[Session, Depends(get_db_session)],
 ) -> TransactionsProcessor:
     return TransactionsProcessor(session)
 
 
 def get_snapshot_manager(
-    session: Session = Depends(get_db_session),
+    session: Annotated[Session, Depends(get_db_session)],
 ) -> SnapshotManager:
     return SnapshotManager(session)
 
 
 def get_llm_provider_registry(
-    session: Session = Depends(get_db_session),
+    session: Annotated[Session, Depends(get_db_session)],
 ) -> LLMProviderRegistry:
     return LLMProviderRegistry(session)

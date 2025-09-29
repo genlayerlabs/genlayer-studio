@@ -14,16 +14,16 @@ class StubMessageHandler:
     """Minimal message handler for capturing log events during tests."""
 
     def __init__(self) -> None:
-        self.events = []
+        self.events: list[object] = []
 
     def send_message(
-        self, event
+        self, event: object
     ) -> None:  # pragma: no cover - inspected in assertions when needed
         self.events.append(event)
 
 
 @pytest.fixture
-def jsonrpc_test_app():
+def jsonrpc_test_app() -> tuple[FastAPI, RPCEndpointManager]:
     app = FastAPI()
     stub_logger = StubMessageHandler()
     manager = RPCEndpointManager(
@@ -64,6 +64,20 @@ def test_jsonrpc_batch_request(jsonrpc_test_app):
     ]
 
 
+def test_jsonrpc_batch_limit_exceeded(jsonrpc_test_app):
+    app, _ = jsonrpc_test_app
+
+    oversized = [{"jsonrpc": "2.0", "method": "echo", "id": str(i)} for i in range(101)]
+
+    with TestClient(app) as client:
+        response = client.post("/api", json=oversized)
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == -32600
+    assert body["error"]["data"]["size"] == len(oversized)
+
+
 def test_jsonrpc_empty_batch_is_invalid(jsonrpc_test_app):
     app, _ = jsonrpc_test_app
 
@@ -71,11 +85,9 @@ def test_jsonrpc_empty_batch_is_invalid(jsonrpc_test_app):
         response = client.post("/api", json=[])
 
     assert response.status_code == 400
-    # InvalidRequest => code -32600
     body = response.json()
-    assert len(body) == 1
-    assert body[0]["error"]["code"] == -32600
-    assert body[0]["id"] is None
+    assert body["error"]["code"] == -32600
+    assert body["id"] is None
 
 
 def test_jsonrpc_malformed_payload_returns_parse_error(jsonrpc_test_app):

@@ -6,16 +6,16 @@
 - The divergence only happens when Hardhat is offline, yet it is not caused by the Ethereum layer; it originates in our backend session architecture.
 
 ## Root Cause
-1. **Process-wide SQLAlchemy Session**  
+1. **Process-wide SQLAlchemy Session**
    `TransactionsProcessor`, `AccountsManager`, `SnapshotManager`, and others are instantiated once in `backend/protocol_rpc/server.py` with a single `sqlalchemy_db.session`. Every RPC request reuses that session.
 
-2. **Concurrent Request Collision**  
+2. **Concurrent Request Collision**
    When two `eth_sendRawTransaction` calls overlap, they share the same session identity map. Request A inserts a new `Transactions` row and sets its `.hash`. Before the session flushes, request B mutates the same identity map; A returns the hash it computed, but by commit time the underlying ORM object reflects B’s update. The database therefore persists B’s hash while A’s caller remembers its own response.
 
-3. **Mixed Session Lifetimes Elsewhere**  
+3. **Mixed Session Lifetimes Elsewhere**
    Validators and consensus routines construct independent `SessionLocal()` instances, further blurring transaction boundaries and increasing the chance of cross-talk. There is no clear ownership of connection lifecycle or isolation level.
 
-4. **Opaque Dependency Injection**  
+4. **Opaque Dependency Injection**
    The current RPC registration pipeline (`endpoint_generator → fastapi_endpoint_generator → endpoints`) uses partially applied functions to hide dependencies. It is hard to detect at code review that components are sharing a mutable session, so the race went unnoticed.
 
 ## Why Refactor Now
