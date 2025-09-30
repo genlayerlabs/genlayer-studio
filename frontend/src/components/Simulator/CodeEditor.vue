@@ -10,6 +10,7 @@ import { useContractsStore, useUIStore } from '@/stores';
 import { type ContractFile } from '@/types';
 import pythonSyntax from '@/constants/pythonSyntax';
 import { setupAutoLinting } from '@/services/monacoLinter';
+import { setupGenVMAutocomplete } from '@/services/monaco/monacoAutocomplete';
 
 // Configure Monaco Environment for Python editor
 (self as any).MonacoEnvironment = {
@@ -31,11 +32,19 @@ const containerElement = ref<HTMLElement | null | undefined>(null);
 const editorRef = shallowRef<monaco.editor.IStandaloneCodeEditor | null>(null);
 const theme = computed(() => (uiStore.mode === 'light' ? 'vs' : 'vs-dark'));
 let stopLinting: (() => void) | null = null;
+let autocompleteDisposable: monaco.IDisposable | null = null;
 
 function initEditor() {
   containerElement.value = editorElement.value?.parentElement;
+
+  // Register Python language first
   monaco.languages.register({ id: 'python' });
   monaco.languages.setMonarchTokensProvider('python', pythonSyntax);
+
+  // Setup GenVM autocomplete BEFORE creating the editor
+  autocompleteDisposable = setupGenVMAutocomplete(monaco);
+
+  // Now create the editor
   editorRef.value = monaco.editor.create(editorElement.value!, {
     value: props.contract.content || '',
     language: 'python',
@@ -51,7 +60,15 @@ function initEditor() {
     },
     // Ensure hover widgets display correctly
     fixedOverflowWidgets: true,
+    // Enable quick suggestions for better autocomplete experience
+    quickSuggestions: {
+      other: true,
+      comments: false,
+      strings: false,
+    },
+    suggestOnTriggerCharacters: true,
   });
+
   editorRef.value.onDidChangeModelContent(() => {
     contractStore.updateContractFile(props.contract.id!, {
       content: editorRef.value?.getValue() || '',
@@ -70,6 +87,10 @@ onMounted(() => {
 onUnmounted(() => {
   if (stopLinting) {
     stopLinting();
+  }
+  if (autocompleteDisposable) {
+    autocompleteDisposable.dispose();
+    autocompleteDisposable = null;
   }
   if (editorRef.value) {
     editorRef.value.dispose();
