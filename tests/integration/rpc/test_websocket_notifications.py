@@ -3,8 +3,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
 from fastapi.testclient import TestClient
 import pytest
-
-pytestmark = pytest.mark.skipif(not HAS_FASTAPI, reason="FastAPI not installed")
 from backend.protocol_rpc.broadcast import Broadcast
 from backend.protocol_rpc.websocket import (
     GLOBAL_CHANNEL,
