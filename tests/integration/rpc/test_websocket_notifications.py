@@ -1,7 +1,15 @@
 import json
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket
-from fastapi.testclient import TestClient
+
+try:
+    from fastapi import FastAPI, WebSocket
+    from fastapi.testclient import TestClient
+    HAS_FASTAPI = True
+except ImportError:
+    HAS_FASTAPI = False
+
+import pytest
+pytestmark = pytest.mark.skipif(not HAS_FASTAPI, reason="FastAPI not installed")
 from backend.protocol_rpc.broadcast import Broadcast
 from backend.protocol_rpc.websocket import (
     GLOBAL_CHANNEL,

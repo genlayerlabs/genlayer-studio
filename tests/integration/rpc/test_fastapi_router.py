@@ -2,8 +2,15 @@ import json
 from typing import Any
 
 import pytest
-from fastapi import FastAPI
-from starlette.requests import Request
+
+try:
+    from fastapi import FastAPI
+    from starlette.requests import Request
+    HAS_FASTAPI = True
+except ImportError:
+    HAS_FASTAPI = False
+
+pytestmark = pytest.mark.skipif(not HAS_FASTAPI, reason="FastAPI not installed")
 
 from backend.protocol_rpc.exceptions import JSONRPCError
 from backend.protocol_rpc.fastapi_rpc_router import FastAPIRPCRouter
