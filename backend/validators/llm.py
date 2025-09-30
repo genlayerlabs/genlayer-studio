@@ -8,16 +8,51 @@ import signal
 import os
 import sys
 import dataclasses
+import logging
 import aiohttp
 from pathlib import Path
 import json
 import contextlib
+import re
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
 import backend.validators.base as base
+
+
+logger = logging.getLogger(__name__)
+
+
+ERROR_RE = re.compile(
+    r'"code":\s*Str\("([^"]+)"\),\s*"message":\s*Str\("((?:[^"\\]|\\.)*)"\)',
+    re.DOTALL,
+)
+
+
+def extract_error_message(stdout: str) -> str:
+    """Extract relevant error message from GenVM stdout."""
+    try:
+        # Look for JSON-like error structure in the output
+        # Pattern to match: "code": Str("error_code"), "message": Str("error message")
+        match = ERROR_RE.search(stdout)
+
+        if match:
+            error_code = match.group(1)
+            error_message = match.group(2)
+            return f'code: "{error_code}", message: "{error_message}"'
+
+        # Fallback: if no structured error found, return a truncated version
+        if len(stdout) > 500:
+            return stdout[:500] + "... [truncated]"
+        return stdout
+
+    except Exception:
+        # If parsing fails, return truncated version
+        if len(stdout) > 500:
+            return stdout[:500] + "... [truncated]"
+        return stdout
 
 
 @dataclasses.dataclass
@@ -38,6 +73,7 @@ class LLMModule:
         self._terminated = False
 
         self._process = None
+        self._restart_lock = asyncio.Lock()
 
         greyboxing_path = Path(__file__).parent.joinpath("greyboxing.lua")
 
@@ -61,7 +97,11 @@ class LLMModule:
         if not self._terminated:
             raise Exception("service was not terminated")
 
-    async def stop(self):
+    async def stop(self, *, locked: bool = False) -> None:
+        if not locked:
+            async with self._restart_lock:
+                return await self.stop(locked=True)
+
         if self._process is None:
             return
 
@@ -99,8 +139,21 @@ class LLMModule:
             # Ensure process handle is cleared even if exception occurs
             self._process = None
 
-    async def restart(self):
-        await self.stop()
+    async def restart(self) -> None:
+        async with self._restart_lock:
+            await self._restart_locked()
+
+    async def _restart_locked(self) -> None:
+        await self.stop(locked=True)
+
+        genvm_bin = os.getenv("GENVM_BIN")
+        if genvm_bin is None:
+            raise RuntimeError("GENVM_BIN env var is not set")
+
+        exe_path = Path(genvm_bin).joinpath("genvm-modules")
+
+        debug_enabled = os.getenv("GENVM_LLM_DEBUG") == "1"
+        stream_target = None if debug_enabled else asyncio.subprocess.DEVNULL
 
         self._process = await asyncio.subprocess.create_subprocess_exec(
             base.MODULES_BINARY,
@@ -110,15 +163,19 @@ class LLMModule:
             "--allow-empty-backends",
             "--die-with-parent",
             stdin=None,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
+            stdout=stream_target,
+            stderr=stream_target,
         )
 
-    async def verify_for_read(self):
-        if self._process is None:
-            raise Exception("process is not started")
-        if self._process.returncode is not None:
-            raise Exception(f"process is dead {self._process.returncode}")
+    async def verify_for_read(self) -> None:
+        async with self._restart_lock:
+            if self._process is None:
+                await self._restart_locked()
+            elif self._process.returncode is not None:
+                print(
+                    f"LLM process died with code {self._process.returncode}, restarting..."
+                )
+                await self._restart_locked()
 
     async def change_config(self, new_providers: list[SimulatorProvider]):
         await self.stop()
@@ -167,10 +224,15 @@ class LLMModule:
             stdout, _ = await proc.communicate()
             return_code = await proc.wait()
 
-            stdout = stdout.decode("utf-8")
+            stdout_text = stdout.decode("utf-8", errors="replace")
 
             if return_code != 0:
-                print(f"provider not available model={model} stdout={stdout!r}")
+                error_info = extract_error_message(stdout_text)
+                logger.warning(
+                    "Provider not available model=%s error=%s",
+                    model,
+                    error_info,
+                )
 
             return return_code == 0
 

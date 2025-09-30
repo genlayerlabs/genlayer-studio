@@ -16,7 +16,7 @@ from backend.protocol_rpc.calls_intercept.get_latest_pending_tx_count import (
     GetLatestPendingTxCountHandler,
 )
 from backend.errors.errors import InvalidAddressError
-from flask_jsonrpc.exceptions import JSONRPCError
+from backend.protocol_rpc.exceptions import JSONRPCError
 from backend.node.types import ExecutionResultStatus
 
 

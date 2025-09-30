@@ -1,6 +1,8 @@
 FROM ubuntu:24.04 AS base
 
 ARG TARGETPLATFORM
+ARG TARGETARCH
+
 
 ARG GENVM_TAG=v0.2.1
 
@@ -12,7 +14,7 @@ WORKDIR $path
 SHELL ["/bin/bash", "-x", "-c"]
 RUN apt-get update -y \
     && DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install -y --no-install-recommends \
-        curl unzip xz-utils ca-certificates python3.12 python3.12-venv libssl3 \
+        curl unzip xz-utils ca-certificates python3.12 python3-dev gcc libssl3 \
     && mkdir -p "$HOME/.config/pip/" \
     && printf "[global]\nbreak-system-packages = true\n" >> "$HOME/.config/pip/pip.conf" \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2 \
@@ -33,7 +35,6 @@ RUN groupadd -r backend-group \
     && mkdir -p /genvm
 
 ENV PYTHONPATH "${PYTHONPATH}:/${path}"
-ENV FLASK_APP backend/protocol_rpc/server.py
 ENV HUGGINGFACE_HUB_CACHE /home/backend-user/.cache/huggingface
 
 ENV RUST_BACKTRACE=1
@@ -50,6 +51,7 @@ ADD \
    https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-universal.tar.xz \
    /genvm/genvm-universal.tar.xz
 
+# Extract and prepare GenVM binaries
 RUN cd /genvm \
     && if [[ "$TARGETPLATFORM" == "linux/amd64" ]] ; \
         then \
@@ -70,17 +72,22 @@ RUN cd /genvm \
 
 COPY ../.env .
 COPY backend $path/backend
+COPY asgi.py $path/asgi.py
+COPY uvicorn_config.py $path/uvicorn_config.py
 
-HEALTHCHECK --interval=1s --timeout=1s --retries=30 --start-period=3s CMD python3 backend/healthcheck.py --port ${FLASK_SERVER_PORT}
+HEALTHCHECK --interval=1s --timeout=1s --retries=30 --start-period=3s CMD python3 backend/healthcheck.py --port ${RPCPORT:-4000}
 
 ###########START NEW IMAGE : DEBUGGER ###################
 FROM base AS debug
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --cache-dir=/root/.cache/pip debugpy watchdog
+    pip install --cache-dir=/root/.cache/pip debugpy
 USER backend-user
-CMD watchmedo auto-restart --no-restart-on-command-exit --recursive --pattern="*.py" --ignore-patterns="*.pyc;*__pycache__*" -- python3 -m debugpy --listen 0.0.0.0:${RPCDEBUGPORT} -m flask run -h 0.0.0.0 -p ${FLASK_SERVER_PORT}
+# Use uvicorn's native --reload flag for hot reloading
+# This watches all Python files and automatically restarts on changes
+CMD python3 -m debugpy --listen 0.0.0.0:${RPCDEBUGPORT} -m uvicorn asgi:application --host 0.0.0.0 --port ${RPCPORT:-4000} --reload --reload-dir /app/backend
 
 ###########START NEW IMAGE: PRODUCTION ###################
 FROM base AS prod
+# Dependencies are already installed from backend/protocol_rpc/requirements.txt in the base stage
 USER backend-user
-CMD flask run -h 0.0.0.0 -p ${FLASK_SERVER_PORT}
+CMD uvicorn asgi:application --host 0.0.0.0 --port ${RPCPORT:-4000} --workers ${WEB_CONCURRENCY:-1} --log-level ${LOG_LEVEL:-info}

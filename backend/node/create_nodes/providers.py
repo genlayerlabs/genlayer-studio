@@ -48,6 +48,17 @@ def validate_provider(provider: LLMProvider):
         raise ValueError(f"Error validating provider: {e}")
 
 
+def _to_domain(provider: dict) -> LLMProvider:
+    return LLMProvider(
+        id=None,
+        provider=provider["provider"],
+        model=provider["model"],
+        config=provider["config"],
+        plugin=provider["plugin"],
+        plugin_config=provider["plugin_config"],
+    )
+
+
 def get_default_providers() -> List[LLMProvider]:
     global default_providers_cache
     if default_providers_cache:
@@ -97,17 +108,6 @@ def get_default_provider_for(provider: str, model: str) -> LLMProvider:
     if len(matches) > 1:
         raise ValueError(f"Multiple default providers found for {provider} and {model}")
     return matches[0]
-
-
-def _to_domain(provider: dict) -> LLMProvider:
-    return LLMProvider(
-        id=None,
-        provider=provider["provider"],
-        model=provider["model"],
-        config=provider["config"],
-        plugin=provider["plugin"],
-        plugin_config=provider["plugin_config"],
-    )
 
 
 # TODO: We could merge part of this logic of getting the available providers by loading the plugins. The plugins could have methods like `is_available` and `get_available_models` that would simplify this logic.

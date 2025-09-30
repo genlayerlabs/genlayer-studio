@@ -1,12 +1,15 @@
 import asyncio
-import signal
-import os
-import sys
 import contextlib
+import logging
+import os
+import signal
 
 from pathlib import Path
 
 import backend.validators.base as base
+
+
+logger = logging.getLogger(__name__)
 
 
 class WebModule:
@@ -24,26 +27,29 @@ class WebModule:
         web_script_path = Path(__file__).parent.joinpath("web.lua")
 
         with self._config.change_default() as conf:
-            conf["webdriver_host"] = (
-                f"{os.getenv('WEBDRIVERPROTOCOL', 'http')}://{os.environ['WEBDRIVERHOST']}:{os.environ['WEBDRIVERPORT']}"
-            )
+            conf["webdriver_host"] = f"{protocol}://{webdriver_host}:{webdriver_port}"
             conf["bind_address"] = self.address
             conf["lua_script_path"] = str(web_script_path)
 
         self._config.write_default()
 
-    async def terminate(self):
+        self._genvm_bin = genvm_bin
+
+    async def terminate(self) -> None:
         if self._terminated:
             return
         self._terminated = True
         await self.stop()
         self._config.terminate()
 
-    def __del__(self):
+    def __del__(self) -> None:
         if not self._terminated:
-            raise Exception("service was not terminated")
+            try:
+                logger.warning("WebModule was not terminated")
+            except Exception:  # pragma: no cover - best effort cleanup
+                pass
 
-    async def restart(self):
+    async def restart(self) -> None:
         await self.stop()
 
         self._process = await asyncio.subprocess.create_subprocess_exec(
@@ -53,11 +59,11 @@ class WebModule:
             self._config.new_path,
             "--die-with-parent",
             stdin=None,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
         )
 
-    async def stop(self):
+    async def stop(self) -> None:
         if self._process is None:
             return
 
@@ -66,7 +72,7 @@ class WebModule:
             self._process = None
             return
 
-        print(f"[WebModule] Stopping process (PID: {self._process.pid})")
+        logger.info("Stopping WebModule process (PID: %s)", self._process.pid)
 
         try:
             # Try graceful shutdown with SIGINT
@@ -76,27 +82,33 @@ class WebModule:
             try:
                 # Wait for process to terminate with a timeout
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
-                print("[WebModule] Process terminated gracefully")
+                logger.info("WebModule process terminated gracefully")
             except asyncio.TimeoutError:
-                print(
-                    "[WebModule] Process didn't terminate with SIGINT, trying forceful termination"
+                logger.warning(
+                    "WebModule process did not terminate with SIGINT; attempting kill"
                 )
                 # If SIGINT didn't work, use kill() for cross-platform compatibility
                 with contextlib.suppress(ProcessLookupError):
                     self._process.kill()
                     try:
                         await asyncio.wait_for(self._process.wait(), timeout=2.0)
-                        print("[WebModule] Process terminated forcefully")
+                        logger.info("WebModule process terminated forcefully")
                     except asyncio.TimeoutError:
-                        print(
-                            "[WebModule] Process termination failed, continuing anyway"
+                        logger.warning(
+                            "WebModule process termination forced kill timed out; continuing"
                         )
         finally:
             # Ensure process handle is cleared even if exception occurs
             self._process = None
 
-    async def verify_for_read(self):
+    async def verify_for_read(self) -> None:
         if self._process is None:
-            raise Exception("process is not started")
-        if self._process.returncode is not None:
-            raise Exception(f"process is dead {self._process.returncode}")
+            # Start the process if it hasn't been started
+            await self.restart()
+        elif self._process.returncode is not None:
+            # Restart the process if it's dead
+            logger.warning(
+                "WebModule process exited with code %s; restarting",
+                self._process.returncode,
+            )
+            await self.restart()
