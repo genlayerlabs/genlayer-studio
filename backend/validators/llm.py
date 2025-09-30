@@ -146,12 +146,6 @@ class LLMModule:
     async def _restart_locked(self) -> None:
         await self.stop(locked=True)
 
-        genvm_bin = os.getenv("GENVM_BIN")
-        if genvm_bin is None:
-            raise RuntimeError("GENVM_BIN env var is not set")
-
-        exe_path = Path(genvm_bin).joinpath("genvm-modules")
-
         debug_enabled = os.getenv("GENVM_LLM_DEBUG") == "1"
         stream_target = None if debug_enabled else asyncio.subprocess.DEVNULL
 
