@@ -1,6 +1,7 @@
 """
 Configuration for contract integration tests
 """
+
 import sys
 from pathlib import Path
 

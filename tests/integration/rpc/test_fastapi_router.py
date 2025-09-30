@@ -6,6 +6,7 @@ import pytest
 try:
     from fastapi import FastAPI
     from starlette.requests import Request
+
     HAS_FASTAPI = True
 except ImportError:
     HAS_FASTAPI = False

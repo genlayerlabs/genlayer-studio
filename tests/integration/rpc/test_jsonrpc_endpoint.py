@@ -3,6 +3,7 @@ import pytest
 try:
     from fastapi import FastAPI, Request
     from fastapi.testclient import TestClient
+
     HAS_FASTAPI = True
 except ImportError:
     HAS_FASTAPI = False
