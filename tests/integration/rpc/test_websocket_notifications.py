@@ -1,14 +1,7 @@
 import json
 from contextlib import asynccontextmanager
-
-try:
-    from fastapi import FastAPI, WebSocket
-    from fastapi.testclient import TestClient
-
-    HAS_FASTAPI = True
-except ImportError:
-    HAS_FASTAPI = False
-
+from fastapi import FastAPI, WebSocket
+from fastapi.testclient import TestClient
 import pytest
 
 pytestmark = pytest.mark.skipif(not HAS_FASTAPI, reason="FastAPI not installed")

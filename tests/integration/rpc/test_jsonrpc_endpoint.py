@@ -1,15 +1,8 @@
 import pytest
 
-try:
-    from fastapi import FastAPI, Request
-    from fastapi.testclient import TestClient
 
-    HAS_FASTAPI = True
-except ImportError:
-    HAS_FASTAPI = False
-
-pytestmark = pytest.mark.skipif(not HAS_FASTAPI, reason="FastAPI not installed")
-
+from fastapi import FastAPI, Request
+from fastapi.testclient import TestClient
 from backend.protocol_rpc.fastapi_rpc_router import FastAPIRPCRouter
 from backend.protocol_rpc.health import create_readiness_check_with_state
 from backend.protocol_rpc.rpc_endpoint_manager import (
