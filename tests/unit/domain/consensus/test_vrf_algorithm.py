@@ -1,6 +1,7 @@
 """
 Test for VRF algorithm without importing from backend to avoid circular import
 """
+
 from unittest.mock import Mock, patch
 import numpy as np
 from datetime import datetime
@@ -22,7 +23,7 @@ def get_validators_for_transaction_test(
     The selection and order is given by a random sampling based on the stake of the validators.
     """
     DEFAULT_VALIDATORS_COUNT = 5  # Local constant to avoid import
-    
+
     if num_validators is None:
         num_validators = DEFAULT_VALIDATORS_COUNT
 
@@ -70,7 +71,7 @@ def test_get_validators_for_transaction_2():
     accumulated = set()
     iterations = 0
     max_iterations = 100  # Prevent infinite loop
-    
+
     while iterations < max_iterations:
         validators = get_validators_for_transaction_test(nodes, 2)
         accumulated.update(list_of_dicts_to_set(validators))
@@ -78,8 +79,10 @@ def test_get_validators_for_transaction_2():
         if accumulated == nodes_set:
             break
         iterations += 1
-    
-    assert accumulated == nodes_set, f"Failed to get all nodes after {max_iterations} iterations"
+
+    assert (
+        accumulated == nodes_set
+    ), f"Failed to get all nodes after {max_iterations} iterations"
 
 
 def test_get_validators_for_transaction_3():
@@ -115,9 +118,9 @@ def test_vrf_algorithm_with_default_validators():
         {"stake": 5, "id": 5},
         {"stake": 6, "id": 6},
     ]
-    
+
     validators = get_validators_for_transaction_test(nodes)
-    
+
     # Should return 5 validators by default (DEFAULT_VALIDATORS_COUNT)
     assert len(validators) == 5
     assert all(v in nodes for v in validators)
@@ -131,14 +134,16 @@ def test_vrf_algorithm_stake_weighting():
         {"stake": 1, "id": "low"},
         {"stake": 100, "id": "high"},
     ]
-    
+
     high_stake_count = 0
     iterations = 100
-    
+
     for _ in range(iterations):
         validators = get_validators_for_transaction_test(nodes, 1)
         if validators[0]["id"] == "high":
             high_stake_count += 1
-    
+
     # With 100:1 stake ratio, high stake should be selected ~99% of the time
-    assert high_stake_count > 90, f"High stake selected only {high_stake_count}% of the time"
+    assert (
+        high_stake_count > 90
+    ), f"High stake selected only {high_stake_count}% of the time"
