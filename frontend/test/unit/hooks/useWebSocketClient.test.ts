@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 // Mock WebSocket with readyState constants
 const WebSocketMock: any = vi.fn(() => ({
@@ -22,10 +22,10 @@ describe('useWebSocketClient', () => {
     const client = useWebSocketClient();
     const expectedUrl = (client as unknown as { url: string }).url;
 
-    webSocketCtor.mockClear();
+    WebSocketMock.mockClear();
     client.connect();
 
-    expect(webSocketCtor).toHaveBeenCalledWith(expectedUrl);
+    expect(WebSocketMock).toHaveBeenCalledWith(expectedUrl);
   });
 
   it('should have an emit method', async () => {
