@@ -106,7 +106,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -123,11 +123,11 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 retries=actual_wait_retries,
             )
 
-/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 /opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/genlayer_py/client/genlayer_client.py:184: in wait_for_transaction_receipt
     return wait_for_transaction_receipt(
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = <genlayer_py.client.genlayer_client.GenLayerClient object at 0x7f5f3215e510>
 transaction_hash = '0xc2bd306c96ffde5709d5813f154b13b848ae8b64bf9f49708974ff765c8481d8'
@@ -141,7 +141,7 @@ retries = 140
         interval: int = transaction_config.wait_interval,
         retries: int = transaction_config.retries,
     ) -> GenLayerTransaction:
-    
+
         attempts = 0
         while attempts < retries:
             transaction = self.get_transaction(transaction_hash=transaction_hash)
@@ -153,7 +153,7 @@ retries = 140
                 TransactionStatus.FINALIZED
             ]
             requested_status = TRANSACTION_STATUS_NAME_TO_NUMBER[status]
-    
+
             if transaction_status == requested_status or (
                 status == TransactionStatus.ACCEPTED
                 and transaction_status == finalized_status
@@ -271,14 +271,14 @@ setup_validators = <function setup_validators.<locals>._setup at 0x7f5f31e796c0>
                 ),
             },
         }
-    
+
         setup_validators(mock_response)
-    
+
         factory = get_contract_factory("CompanyNaming")
 >       contract = factory.deploy(args=[])
 
-tests/integration/contracts/analytics/test_company_naming.py:22: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/integration/contracts/analytics/test_company_naming.py:22:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = ContractFactory(contract_name='CompanyNaming', contract_code='# { "Depends": "py-genlayer:test" }\n\nimport json\nfrom...dex != -1 and start_index < end_index:\n        return s[start_index : end_index + 1]\n    else:\n        return ""\n')
 args = [], account = None, consensus_max_rotations = None, wait_interval = None
@@ -317,7 +317,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -337,7 +337,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 raise ValueError(
                     f"Deployment transaction finalized with error: {tx_receipt}"
                 )
-    
+
             if wait_triggered_transactions:
                 triggered_transactions = tx_receipt["triggered_transactions"]
                 for triggered_transaction in triggered_transactions:
@@ -347,7 +347,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                         interval=actual_wait_interval,
                         retries=actual_wait_retries,
                     )
-    
+
             if (
                 "tx_data_decoded" in tx_receipt
                 and "contract_address" in tx_receipt["tx_data_decoded"]
@@ -357,13 +357,13 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 contract_address = tx_receipt["data"]["contract_address"]
             else:
                 raise ValueError("Transaction receipt missing contract address")
-    
+
             schema = self._get_schema_with_fallback()
             if schema is None:
                 raise ValueError(
                     "Failed to get schema from all clients (default, hosted studio, and local)"
                 )
-    
+
             return Contract.new(
                 address=contract_address, schema=schema, account=account
             )
@@ -496,7 +496,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -513,11 +513,11 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 retries=actual_wait_retries,
             )
 
-/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 /opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/genlayer_py/client/genlayer_client.py:184: in wait_for_transaction_receipt
     return wait_for_transaction_receipt(
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = <genlayer_py.client.genlayer_client.GenLayerClient object at 0x7f5f3215e510>
 transaction_hash = '0x4d6655e79c4b49b56470c74d1223a01329977360c340a04d790e23ed2dca50f8'
@@ -531,7 +531,7 @@ retries = 140
         interval: int = transaction_config.wait_interval,
         retries: int = transaction_config.retries,
     ) -> GenLayerTransaction:
-    
+
         attempts = 0
         while attempts < retries:
             transaction = self.get_transaction(transaction_hash=transaction_hash)
@@ -543,7 +543,7 @@ retries = 140
                 TransactionStatus.FINALIZED
             ]
             requested_status = TRANSACTION_STATUS_NAME_TO_NUMBER[status]
-    
+
             if transaction_status == requested_status or (
                 status == TransactionStatus.ACCEPTED
                 and transaction_status == finalized_status
@@ -656,8 +656,8 @@ setup_validators = <function setup_validators.<locals>._setup at 0x7f5f31d2fec0>
         factory = get_contract_factory("LogIndexer")
 >       contract = factory.deploy(args=[])
 
-tests/integration/contracts/analytics/test_log_indexer.py:15: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/integration/contracts/analytics/test_log_indexer.py:15:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = ContractFactory(contract_name='LogIndexer', contract_code='# v0.1.0\n# {\n#   "Seq": [\n#     { "Depends": "py-lib-gen... -> None:\n        for el in self.vector_store:\n            if el.value.log_id == id:\n                el.remove()\n')
 args = [], account = None, consensus_max_rotations = None, wait_interval = None
@@ -696,7 +696,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -716,7 +716,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 raise ValueError(
                     f"Deployment transaction finalized with error: {tx_receipt}"
                 )
-    
+
             if wait_triggered_transactions:
                 triggered_transactions = tx_receipt["triggered_transactions"]
                 for triggered_transaction in triggered_transactions:
@@ -726,7 +726,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                         interval=actual_wait_interval,
                         retries=actual_wait_retries,
                     )
-    
+
             if (
                 "tx_data_decoded" in tx_receipt
                 and "contract_address" in tx_receipt["tx_data_decoded"]
@@ -736,13 +736,13 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 contract_address = tx_receipt["data"]["contract_address"]
             else:
                 raise ValueError("Transaction receipt missing contract address")
-    
+
             schema = self._get_schema_with_fallback()
             if schema is None:
                 raise ValueError(
                     "Failed to get schema from all clients (default, hosted studio, and local)"
                 )
-    
+
             return Contract.new(
                 address=contract_address, schema=schema, account=account
             )
@@ -875,7 +875,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -892,11 +892,11 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 retries=actual_wait_retries,
             )
 
-/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 /opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/genlayer_py/client/genlayer_client.py:184: in wait_for_transaction_receipt
     return wait_for_transaction_receipt(
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = <genlayer_py.client.genlayer_client.GenLayerClient object at 0x7f5f3215e510>
 transaction_hash = '0xf754a443d6aa498a62ba089f005a380dee1374672c7ad2780ebbba042a5b8e9e'
@@ -910,7 +910,7 @@ retries = 140
         interval: int = transaction_config.wait_interval,
         retries: int = transaction_config.retries,
     ) -> GenLayerTransaction:
-    
+
         attempts = 0
         while attempts < retries:
             transaction = self.get_transaction(transaction_hash=transaction_hash)
@@ -922,7 +922,7 @@ retries = 140
                 TransactionStatus.FINALIZED
             ]
             requested_status = TRANSACTION_STATUS_NAME_TO_NUMBER[status]
-    
+
             if transaction_status == requested_status or (
                 status == TransactionStatus.ACCEPTED
                 and transaction_status == finalized_status
@@ -1039,8 +1039,8 @@ setup_validators = <function setup_validators.<locals>._setup at 0x7f5f31c78900>
             wait_triggered_transactions_status=TransactionStatus.ACCEPTED,
         )
 
-tests/integration/contracts/deployment/test_multi_file_contract.py:9: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/integration/contracts/deployment/test_multi_file_contract.py:9:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = ContractFactory(contract_name='MultiFileContract', contract_code=b'PK\x03\x04\x14\x00\x00\x00\x00\x00Kv>[^\xc4\xb8\x88...x00\xa4\x81q\x03\x00\x00runner.jsonPK\x05\x06\x00\x00\x00\x00\x03\x00\x03\x00\xba\x00\x00\x00\xc6\x03\x00\x00\x00\x00')
 args = [], account = None, consensus_max_rotations = None, wait_interval = None
@@ -1079,7 +1079,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -1099,7 +1099,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 raise ValueError(
                     f"Deployment transaction finalized with error: {tx_receipt}"
                 )
-    
+
             if wait_triggered_transactions:
                 triggered_transactions = tx_receipt["triggered_transactions"]
                 for triggered_transaction in triggered_transactions:
@@ -1109,7 +1109,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                         interval=actual_wait_interval,
                         retries=actual_wait_retries,
                     )
-    
+
             if (
                 "tx_data_decoded" in tx_receipt
                 and "contract_address" in tx_receipt["tx_data_decoded"]
@@ -1119,13 +1119,13 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 contract_address = tx_receipt["data"]["contract_address"]
             else:
                 raise ValueError("Transaction receipt missing contract address")
-    
+
             schema = self._get_schema_with_fallback()
             if schema is None:
                 raise ValueError(
                     "Failed to get schema from all clients (default, hosted studio, and local)"
                 )
-    
+
             return Contract.new(
                 address=contract_address, schema=schema, account=account
             )
@@ -1258,7 +1258,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -1275,11 +1275,11 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 retries=actual_wait_retries,
             )
 
-/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 /opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/genlayer_py/client/genlayer_client.py:184: in wait_for_transaction_receipt
     return wait_for_transaction_receipt(
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = <genlayer_py.client.genlayer_client.GenLayerClient object at 0x7f5f3215e510>
 transaction_hash = '0x1a1f278aeee9853cfa2d82fca57ae75a6eb068e01097aefaf2de8879c78bd76b'
@@ -1293,7 +1293,7 @@ retries = 140
         interval: int = transaction_config.wait_interval,
         retries: int = transaction_config.retries,
     ) -> GenLayerTransaction:
-    
+
         attempts = 0
         while attempts < retries:
             transaction = self.get_transaction(transaction_hash=transaction_hash)
@@ -1305,7 +1305,7 @@ retries = 140
                 TransactionStatus.FINALIZED
             ]
             requested_status = TRANSACTION_STATUS_NAME_TO_NUMBER[status]
-    
+
             if transaction_status == requested_status or (
                 status == TransactionStatus.ACCEPTED
                 and transaction_status == finalized_status
@@ -1427,12 +1427,12 @@ setup_validators = <function setup_validators.<locals>._setup at 0x7f5f31c78cc0>
             },
         }
         setup_validators(mock_response)
-    
+
         factory = get_contract_factory("WizardOfCoin")
 >       contract = factory.deploy(args=[True])
 
-tests/integration/contracts/gaming/test_wizard_of_coin.py:24: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/integration/contracts/gaming/test_wizard_of_coin.py:24:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = ContractFactory(contract_name='WizardOfCoin', contract_code='# v0.1.0\n# { "Depends": "py-genlayer:latest" }\nfrom gen...sed_result["give_coin"]\n\n    @gl.public.view\n    def get_have_coin(self) -> bool:\n        return self.have_coin\n')
 args = [True], account = None, consensus_max_rotations = None
@@ -1471,7 +1471,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -1491,7 +1491,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 raise ValueError(
                     f"Deployment transaction finalized with error: {tx_receipt}"
                 )
-    
+
             if wait_triggered_transactions:
                 triggered_transactions = tx_receipt["triggered_transactions"]
                 for triggered_transaction in triggered_transactions:
@@ -1501,7 +1501,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                         interval=actual_wait_interval,
                         retries=actual_wait_retries,
                     )
-    
+
             if (
                 "tx_data_decoded" in tx_receipt
                 and "contract_address" in tx_receipt["tx_data_decoded"]
@@ -1511,13 +1511,13 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 contract_address = tx_receipt["data"]["contract_address"]
             else:
                 raise ValueError("Transaction receipt missing contract address")
-    
+
             schema = self._get_schema_with_fallback()
             if schema is None:
                 raise ValueError(
                     "Failed to get schema from all clients (default, hosted studio, and local)"
                 )
-    
+
             return Contract.new(
                 address=contract_address, schema=schema, account=account
             )
@@ -1651,7 +1651,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -1668,11 +1668,11 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 retries=actual_wait_retries,
             )
 
-/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 /opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/genlayer_py/client/genlayer_client.py:184: in wait_for_transaction_receipt
     return wait_for_transaction_receipt(
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = <genlayer_py.client.genlayer_client.GenLayerClient object at 0x7f5f3215e510>
 transaction_hash = '0x9eaa978f3ed735a8e42d5aeb56df18216c4732faddb3d723c74b5df34364c4a6'
@@ -1686,7 +1686,7 @@ retries = 140
         interval: int = transaction_config.wait_interval,
         retries: int = transaction_config.retries,
     ) -> GenLayerTransaction:
-    
+
         attempts = 0
         while attempts < retries:
             transaction = self.get_transaction(transaction_hash=transaction_hash)
@@ -1698,7 +1698,7 @@ retries = 140
                 TransactionStatus.FINALIZED
             ]
             requested_status = TRANSACTION_STATUS_NAME_TO_NUMBER[status]
-    
+
             if transaction_status == requested_status or (
                 status == TransactionStatus.ACCEPTED
                 and transaction_status == finalized_status
@@ -1834,12 +1834,12 @@ setup_validators = <function setup_validators.<locals>._setup at 0x7f5f3340da80>
                 "evidence_urls": "https://www.bbc.com/news/election/2024/us/results",
             },
         ]
-    
+
         reasoning_single_source_marathon = "The HTML content contains the results of the Madrid Marathon 2024, which occurred on April 28, 2024. Mitku Tafa won and matches the name 'Tafa Mitku' in the list of potential outcomes."
         reasoning_all_sources_marathon = "The URL indicates that the Madrid Marathon 2024 has occurred on April 28, 2024, and Mitku Tafa was the winner. The name matches one of the potential outcomes. There are no conflicting sources."
         reasoning_single_source_election = "The URL is a valid news page. The election has occurred, and Donald Trump is reported to have won with 312 votes. The rule specifies that the outcome is based on official election results."
         reasoning_all_sources_election = "The only data source provided is from BBC News. It reports that Donald Trump won the 2024 US presidential election with 312 votes. The rule specifies that the outcome is based on official election results. There are no other sources contradicting this information."
-    
+
         mock_response = {
             "response": {
                 f"outcomes.\n\n### Inputs\n<title>\n{markets_data[0]['title']}": json.dumps(
@@ -1880,20 +1880,20 @@ setup_validators = <function setup_validators.<locals>._setup at 0x7f5f3340da80>
                 reasoning_all_sources_election: True,
             },
         }
-    
+
         setup_validators(mock_response)
-    
+
         # Get the intelligent oracle factory
         intelligent_oracle_factory = get_contract_factory("IntelligentOracle")
-    
+
         # Deploy the Registry contract with the IntelligentOracle code
         registry_factory = get_contract_factory("Registry")
 >       registry_contract = registry_factory.deploy(
             args=[intelligent_oracle_factory.contract_code]
         )
 
-tests/integration/contracts/oracle/test_intelligent_oracle_factory_pattern.py:90: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/integration/contracts/oracle/test_intelligent_oracle_factory_pattern.py:90:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = ContractFactory(contract_name='Registry', contract_code='# v0.1.0\n# { "Depends": "py-genlayer:test" }\n\nfrom genlaye...  @gl.public.view\n    def get_contract_addresses(self) -> list[str]:\n        return list(self.contract_addresses)\n')
 args = ['# v0.1.0\n# { "Depends": "py-genlayer:test" }\n\nimport json\nfrom enum import Enum\nfrom datetime import datetime, ...str = re.sub(r",(?!\\s*?[\\{\\[\\"\\\'\\w])", "", json_str)\n    print(json_str)\n\n    return json.loads(json_str)\n']
@@ -1933,7 +1933,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -1953,7 +1953,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 raise ValueError(
                     f"Deployment transaction finalized with error: {tx_receipt}"
                 )
-    
+
             if wait_triggered_transactions:
                 triggered_transactions = tx_receipt["triggered_transactions"]
                 for triggered_transaction in triggered_transactions:
@@ -1963,7 +1963,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                         interval=actual_wait_interval,
                         retries=actual_wait_retries,
                     )
-    
+
             if (
                 "tx_data_decoded" in tx_receipt
                 and "contract_address" in tx_receipt["tx_data_decoded"]
@@ -1973,13 +1973,13 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 contract_address = tx_receipt["data"]["contract_address"]
             else:
                 raise ValueError("Transaction receipt missing contract address")
-    
+
             schema = self._get_schema_with_fallback()
             if schema is None:
                 raise ValueError(
                     "Failed to get schema from all clients (default, hosted studio, and local)"
                 )
-    
+
             return Contract.new(
                 address=contract_address, schema=schema, account=account
             )
@@ -2112,7 +2112,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -2129,11 +2129,11 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 retries=actual_wait_retries,
             )
 
-/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 /opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/genlayer_py/client/genlayer_client.py:184: in wait_for_transaction_receipt
     return wait_for_transaction_receipt(
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = <genlayer_py.client.genlayer_client.GenLayerClient object at 0x7f5f3215e510>
 transaction_hash = '0x5493c13b176ba0cf20a35736e0b00d178171a29aaef79a9a9c124b7b64f6ca03'
@@ -2147,7 +2147,7 @@ retries = 140
         interval: int = transaction_config.wait_interval,
         retries: int = transaction_config.retries,
     ) -> GenLayerTransaction:
-    
+
         attempts = 0
         while attempts < retries:
             transaction = self.get_transaction(transaction_hash=transaction_hash)
@@ -2159,7 +2159,7 @@ retries = 140
                 TransactionStatus.FINALIZED
             ]
             requested_status = TRANSACTION_STATUS_NAME_TO_NUMBER[status]
-    
+
             if transaction_status == requested_status or (
                 status == TransactionStatus.ACCEPTED
                 and transaction_status == finalized_status
@@ -2282,13 +2282,13 @@ setup_validators = <function setup_validators.<locals>._setup at 0x7f5f31c78680>
             }
         }
         setup_validators(mock_response)
-    
+
         # Deploy Contract
         factory = get_contract_factory("PredictionMarket")
 >       contract = factory.deploy(args=["2024-06-26", team_1, team_2])
 
-tests/integration/contracts/prediction_markets/test_football_prediction_market.py:26: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/integration/contracts/prediction_markets/test_football_prediction_market.py:26:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = ContractFactory(contract_name='PredictionMarket', contract_code='# v0.1.0\n# { "Depends": "py-genlayer:latest" }\n\nfr..."winner": self.winner,\n            "score": self.score,\n            "has_resolved": self.has_resolved,\n        }\n')
 args = ['2024-06-26', 'Georgia', 'Portugal'], account = None
@@ -2327,7 +2327,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -2347,7 +2347,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 raise ValueError(
                     f"Deployment transaction finalized with error: {tx_receipt}"
                 )
-    
+
             if wait_triggered_transactions:
                 triggered_transactions = tx_receipt["triggered_transactions"]
                 for triggered_transaction in triggered_transactions:
@@ -2357,7 +2357,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                         interval=actual_wait_interval,
                         retries=actual_wait_retries,
                     )
-    
+
             if (
                 "tx_data_decoded" in tx_receipt
                 and "contract_address" in tx_receipt["tx_data_decoded"]
@@ -2367,13 +2367,13 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 contract_address = tx_receipt["data"]["contract_address"]
             else:
                 raise ValueError("Transaction receipt missing contract address")
-    
+
             schema = self._get_schema_with_fallback()
             if schema is None:
                 raise ValueError(
                     "Failed to get schema from all clients (default, hosted studio, and local)"
                 )
-    
+
             return Contract.new(
                 address=contract_address, schema=schema, account=account
             )
@@ -2506,7 +2506,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -2523,11 +2523,11 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 retries=actual_wait_retries,
             )
 
-/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 /opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/genlayer_py/client/genlayer_client.py:184: in wait_for_transaction_receipt
     return wait_for_transaction_receipt(
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = <genlayer_py.client.genlayer_client.GenLayerClient object at 0x7f5f3215e510>
 transaction_hash = '0x214a728613bb8a9faa02ea9a273350ace6053d8ba3f0abd18fa359b883291565'
@@ -2541,7 +2541,7 @@ retries = 140
         interval: int = transaction_config.wait_interval,
         retries: int = transaction_config.retries,
     ) -> GenLayerTransaction:
-    
+
         attempts = 0
         while attempts < retries:
             transaction = self.get_transaction(transaction_hash=transaction_hash)
@@ -2553,7 +2553,7 @@ retries = 140
                 TransactionStatus.FINALIZED
             ]
             requested_status = TRANSACTION_STATUS_NAME_TO_NUMBER[status]
-    
+
             if transaction_status == requested_status or (
                 status == TransactionStatus.ACCEPTED
                 and transaction_status == finalized_status
@@ -2664,29 +2664,29 @@ setup_validators = <function setup_validators.<locals>._setup at 0x7f5f31c78900>
         """
         This test verifies the functionality of a multi-tenant storage contract. It deploys two separate storage contracts
         and a multi-tenant storage contract that manages them. The test aims to:
-    
+
         1. Deploy two different storage contracts with initial storage values.
         2. Deploy a multi-tenant storage contract that can interact with multiple storage contracts.
         3. Test the ability of the multi-tenant contract to update and retrieve storage values for multiple users
            across different storage contracts.
         4. Ensure the multi-tenant contract correctly assigns users to storage contracts and manages their data.
-    
+
         This test demonstrates contract-to-contract interactions and multi-tenant data management.
         """
         setup_validators()
         user_account_a = create_account()
         user_account_b = create_account()
-    
+
         # Storage Contracts
         storage_factory = get_contract_factory(
             contract_file_path="examples/contracts/storage.py"
         )
-    
+
         ## Deploy first Storage Contract
 >       first_storage_contract = storage_factory.deploy(args=["initial_storage_a"])
 
-tests/integration/contracts/storage/test_multi_tenant_storage.py:29: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/integration/contracts/storage/test_multi_tenant_storage.py:29:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = ContractFactory(contract_name='Storage', contract_code='# v0.1.0\n# { "Depends": "py-genlayer:latest" }\n\nfrom genlay...\n    @gl.public.write\n    def update_storage(self, new_storage: str) -> None:\n        self.storage = new_storage\n')
 args = ['initial_storage_a'], account = None, consensus_max_rotations = None
@@ -2725,7 +2725,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -2745,7 +2745,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 raise ValueError(
                     f"Deployment transaction finalized with error: {tx_receipt}"
                 )
-    
+
             if wait_triggered_transactions:
                 triggered_transactions = tx_receipt["triggered_transactions"]
                 for triggered_transaction in triggered_transactions:
@@ -2755,7 +2755,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                         interval=actual_wait_interval,
                         retries=actual_wait_retries,
                     )
-    
+
             if (
                 "tx_data_decoded" in tx_receipt
                 and "contract_address" in tx_receipt["tx_data_decoded"]
@@ -2765,13 +2765,13 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 contract_address = tx_receipt["data"]["contract_address"]
             else:
                 raise ValueError("Transaction receipt missing contract address")
-    
+
             schema = self._get_schema_with_fallback()
             if schema is None:
                 raise ValueError(
                     "Failed to get schema from all clients (default, hosted studio, and local)"
                 )
-    
+
             return Contract.new(
                 address=contract_address, schema=schema, account=account
             )
@@ -2904,7 +2904,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -2921,11 +2921,11 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 retries=actual_wait_retries,
             )
 
-/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 /opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/genlayer_py/client/genlayer_client.py:184: in wait_for_transaction_receipt
     return wait_for_transaction_receipt(
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = <genlayer_py.client.genlayer_client.GenLayerClient object at 0x7f5f3215e510>
 transaction_hash = '0xeca4928382ce643b6229401710faf8516b309c0a2e38e54f6262280bedd99edd'
@@ -2939,7 +2939,7 @@ retries = 140
         interval: int = transaction_config.wait_interval,
         retries: int = transaction_config.retries,
     ) -> GenLayerTransaction:
-    
+
         attempts = 0
         while attempts < retries:
             transaction = self.get_transaction(transaction_hash=transaction_hash)
@@ -2951,7 +2951,7 @@ retries = 140
                 TransactionStatus.FINALIZED
             ]
             requested_status = TRANSACTION_STATUS_NAME_TO_NUMBER[status]
-    
+
             if transaction_status == requested_status or (
                 status == TransactionStatus.ACCEPTED
                 and transaction_status == finalized_status
@@ -3063,8 +3063,8 @@ setup_validators = <function setup_validators.<locals>._setup at 0x7f5f31c7a160>
         factory = get_contract_factory(contract_file_path="examples/contracts/storage.py")
 >       contract = factory.deploy(args=[INITIAL_STATE])
 
-tests/integration/contracts/storage/test_storage.py:19: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/integration/contracts/storage/test_storage.py:19:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = ContractFactory(contract_name='Storage', contract_code='# v0.1.0\n# { "Depends": "py-genlayer:latest" }\n\nfrom genlay...\n    @gl.public.write\n    def update_storage(self, new_storage: str) -> None:\n        self.storage = new_storage\n')
 args = ['a'], account = None, consensus_max_rotations = None
@@ -3103,7 +3103,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -3123,7 +3123,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 raise ValueError(
                     f"Deployment transaction finalized with error: {tx_receipt}"
                 )
-    
+
             if wait_triggered_transactions:
                 triggered_transactions = tx_receipt["triggered_transactions"]
                 for triggered_transaction in triggered_transactions:
@@ -3133,7 +3133,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                         interval=actual_wait_interval,
                         retries=actual_wait_retries,
                     )
-    
+
             if (
                 "tx_data_decoded" in tx_receipt
                 and "contract_address" in tx_receipt["tx_data_decoded"]
@@ -3143,13 +3143,13 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 contract_address = tx_receipt["data"]["contract_address"]
             else:
                 raise ValueError("Transaction receipt missing contract address")
-    
+
             schema = self._get_schema_with_fallback()
             if schema is None:
                 raise ValueError(
                     "Failed to get schema from all clients (default, hosted studio, and local)"
                 )
-    
+
             return Contract.new(
                 address=contract_address, schema=schema, account=account
             )
@@ -3282,7 +3282,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -3299,11 +3299,11 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 retries=actual_wait_retries,
             )
 
-/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 /opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/genlayer_py/client/genlayer_client.py:184: in wait_for_transaction_receipt
     return wait_for_transaction_receipt(
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = <genlayer_py.client.genlayer_client.GenLayerClient object at 0x7f5f3215e510>
 transaction_hash = '0x25b67d7a4d30984163ba5b96be6c54b27770d6d92a3f9312d048bcc492b01a38'
@@ -3317,7 +3317,7 @@ retries = 140
         interval: int = transaction_config.wait_interval,
         retries: int = transaction_config.retries,
     ) -> GenLayerTransaction:
-    
+
         attempts = 0
         while attempts < retries:
             transaction = self.get_transaction(transaction_hash=transaction_hash)
@@ -3329,7 +3329,7 @@ retries = 140
                 TransactionStatus.FINALIZED
             ]
             requested_status = TRANSACTION_STATUS_NAME_TO_NUMBER[status]
-    
+
             if transaction_status == requested_status or (
                 status == TransactionStatus.ACCEPTED
                 and transaction_status == finalized_status
@@ -3442,12 +3442,12 @@ default_account = <eth_account.signers.local.LocalAccount object at 0x7f5f31c8e9
         # Account Setup
         from_account_a = default_account
         from_account_b = create_account()
-    
+
         factory = get_contract_factory("UserStorage")
 >       contract = factory.deploy()
 
-tests/integration/contracts/storage/test_user_storage.py:24: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/integration/contracts/storage/test_user_storage.py:24:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = ContractFactory(contract_name='UserStorage', contract_code='# v0.1.0\n# { "Depends": "py-genlayer:latest" }\n\nfrom ge... def update_storage(self, new_storage: str) -> None:\n        self.storage[gl.message.sender_address] = new_storage\n')
 args = [], account = None, consensus_max_rotations = None, wait_interval = None
@@ -3486,7 +3486,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -3506,7 +3506,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 raise ValueError(
                     f"Deployment transaction finalized with error: {tx_receipt}"
                 )
-    
+
             if wait_triggered_transactions:
                 triggered_transactions = tx_receipt["triggered_transactions"]
                 for triggered_transaction in triggered_transactions:
@@ -3516,7 +3516,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                         interval=actual_wait_interval,
                         retries=actual_wait_retries,
                     )
-    
+
             if (
                 "tx_data_decoded" in tx_receipt
                 and "contract_address" in tx_receipt["tx_data_decoded"]
@@ -3526,13 +3526,13 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 contract_address = tx_receipt["data"]["contract_address"]
             else:
                 raise ValueError("Transaction receipt missing contract address")
-    
+
             schema = self._get_schema_with_fallback()
             if schema is None:
                 raise ValueError(
                     "Failed to get schema from all clients (default, hosted studio, and local)"
                 )
-    
+
             return Contract.new(
                 address=contract_address, schema=schema, account=account
             )
@@ -3665,7 +3665,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -3682,11 +3682,11 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 retries=actual_wait_retries,
             )
 
-/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 /opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/genlayer_py/client/genlayer_client.py:184: in wait_for_transaction_receipt
     return wait_for_transaction_receipt(
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = <genlayer_py.client.genlayer_client.GenLayerClient object at 0x7f5f3215e510>
 transaction_hash = '0x987ba13ef67acae7eb88d6193ad5c1fd8b3588c51e90343ec61468420bd808f7'
@@ -3700,7 +3700,7 @@ retries = 140
         interval: int = transaction_config.wait_interval,
         retries: int = transaction_config.retries,
     ) -> GenLayerTransaction:
-    
+
         attempts = 0
         while attempts < retries:
             transaction = self.get_transaction(transaction_hash=transaction_hash)
@@ -3712,7 +3712,7 @@ retries = 140
                 TransactionStatus.FINALIZED
             ]
             requested_status = TRANSACTION_STATUS_NAME_TO_NUMBER[status]
-    
+
             if transaction_status == requested_status or (
                 status == TransactionStatus.ACCEPTED
                 and transaction_status == finalized_status
@@ -3824,7 +3824,7 @@ default_account = <eth_account.signers.local.LocalAccount object at 0x7f5f31c8e9
         # Account Setup
         from_account_a = default_account
         from_account_b = create_account()
-    
+
         mock_response = {
             "response": {
                 "The balance of the sender": json.dumps(
@@ -3841,13 +3841,13 @@ default_account = <eth_account.signers.local.LocalAccount object at 0x7f5f31c8e9
             "eq_principle_prompt_non_comparative": {"The balance of the sender": True},
         }
         setup_validators(mock_response)
-    
+
         # Deploy Contract
         factory = get_contract_factory("LlmErc20")
 >       contract = factory.deploy(args=[TOKEN_TOTAL_SUPPLY])
 
-tests/integration/contracts/tokens/test_llm_erc20.py:34: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/integration/contracts/tokens/test_llm_erc20.py:34:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = ContractFactory(contract_name='LlmErc20', contract_code='# v0.1.0\n# { "Depends": "py-genlayer:latest" }\n\nimport jso...lic.view\n    def get_balance_of(self, address: str) -> int:\n        return self.balances.get(Address(address), 0)\n')
 args = [1000], account = None, consensus_max_rotations = None
@@ -3886,7 +3886,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -3906,7 +3906,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 raise ValueError(
                     f"Deployment transaction finalized with error: {tx_receipt}"
                 )
-    
+
             if wait_triggered_transactions:
                 triggered_transactions = tx_receipt["triggered_transactions"]
                 for triggered_transaction in triggered_transactions:
@@ -3916,7 +3916,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                         interval=actual_wait_interval,
                         retries=actual_wait_retries,
                     )
-    
+
             if (
                 "tx_data_decoded" in tx_receipt
                 and "contract_address" in tx_receipt["tx_data_decoded"]
@@ -3926,13 +3926,13 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 contract_address = tx_receipt["data"]["contract_address"]
             else:
                 raise ValueError("Transaction receipt missing contract address")
-    
+
             schema = self._get_schema_with_fallback()
             if schema is None:
                 raise ValueError(
                     "Failed to get schema from all clients (default, hosted studio, and local)"
                 )
-    
+
             return Contract.new(
                 address=contract_address, schema=schema, account=account
             )
@@ -4066,7 +4066,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -4083,11 +4083,11 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 retries=actual_wait_retries,
             )
 
-/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 /opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/genlayer_py/client/genlayer_client.py:184: in wait_for_transaction_receipt
     return wait_for_transaction_receipt(
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = <genlayer_py.client.genlayer_client.GenLayerClient object at 0x7f5f3215e510>
 transaction_hash = '0xbbfb90b5cc2c56781b1548eae5a0bac6f128d4eee5fefaee87c58c3c1a5ba439'
@@ -4101,7 +4101,7 @@ retries = 140
         interval: int = transaction_config.wait_interval,
         retries: int = transaction_config.retries,
     ) -> GenLayerTransaction:
-    
+
         attempts = 0
         while attempts < retries:
             transaction = self.get_transaction(transaction_hash=transaction_hash)
@@ -4113,7 +4113,7 @@ retries = 140
                 TransactionStatus.FINALIZED
             ]
             requested_status = TRANSACTION_STATUS_NAME_TO_NUMBER[status]
-    
+
             if transaction_status == requested_status or (
                 status == TransactionStatus.ACCEPTED
                 and transaction_status == finalized_status
@@ -4224,30 +4224,30 @@ setup_validators = <function setup_validators.<locals>._setup at 0x7f5f31c79c60>
         """
         This test verifies the functionality of a multi-read ERC20 contract. It deploys two separate ERC20 token contracts
         (referred to as 'doge' and 'shiba') and a multi-read ERC20 contract. The test aims to:
-    
+
         1. Deploy two different ERC20 token contracts with a total supply of 1000 tokens each.
         2. Deploy a multi-read ERC20 contract that can interact with multiple ERC20 tokens.
         3. Test the ability of the multi-read contract to update and retrieve token balances for multiple ERC20 tokens
            and multiple accounts simultaneously.
         4. Ensure the multi-read contract correctly maintains and reports balances for different account-token combinations.
-    
+
         This test demonstrates the integration contract to contract reads
         """
         setup_validators()
         TOKEN_TOTAL_SUPPLY = 1000
         from_account_doge = create_account()
         from_account_shiba = create_account()
-    
+
         # LLM ERC20
         llm_erc20_factory = get_contract_factory("LlmErc20")
-    
+
         ## Deploy first LLM ERC20 Contract
 >       doge_contract = llm_erc20_factory.deploy(
             args=[TOKEN_TOTAL_SUPPLY], account=from_account_doge
         )
 
-tests/integration/contracts/tokens/test_multi_read_erc20.py:27: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/integration/contracts/tokens/test_multi_read_erc20.py:27:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = ContractFactory(contract_name='LlmErc20', contract_code='# v0.1.0\n# { "Depends": "py-genlayer:latest" }\n\nimport jso...lic.view\n    def get_balance_of(self, address: str) -> int:\n        return self.balances.get(Address(address), 0)\n')
 args = [1000]
@@ -4287,7 +4287,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -4307,7 +4307,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 raise ValueError(
                     f"Deployment transaction finalized with error: {tx_receipt}"
                 )
-    
+
             if wait_triggered_transactions:
                 triggered_transactions = tx_receipt["triggered_transactions"]
                 for triggered_transaction in triggered_transactions:
@@ -4317,7 +4317,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                         interval=actual_wait_interval,
                         retries=actual_wait_retries,
                     )
-    
+
             if (
                 "tx_data_decoded" in tx_receipt
                 and "contract_address" in tx_receipt["tx_data_decoded"]
@@ -4327,13 +4327,13 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 contract_address = tx_receipt["data"]["contract_address"]
             else:
                 raise ValueError("Transaction receipt missing contract address")
-    
+
             schema = self._get_schema_with_fallback()
             if schema is None:
                 raise ValueError(
                     "Failed to get schema from all clients (default, hosted studio, and local)"
                 )
-    
+
             return Contract.new(
                 address=contract_address, schema=schema, account=account
             )
@@ -4466,7 +4466,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -4483,11 +4483,11 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 retries=actual_wait_retries,
             )
 
-/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 /opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/genlayer_py/client/genlayer_client.py:184: in wait_for_transaction_receipt
     return wait_for_transaction_receipt(
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = <genlayer_py.client.genlayer_client.GenLayerClient object at 0x7f5f3215e510>
 transaction_hash = '0xf8d54c63a0fe25a138564e62c4b8f507ef50b4567f0e32f6383019aa112d6ebe'
@@ -4501,7 +4501,7 @@ retries = 140
         interval: int = transaction_config.wait_interval,
         retries: int = transaction_config.retries,
     ) -> GenLayerTransaction:
-    
+
         attempts = 0
         while attempts < retries:
             transaction = self.get_transaction(transaction_hash=transaction_hash)
@@ -4513,7 +4513,7 @@ retries = 140
                 TransactionStatus.FINALIZED
             ]
             requested_status = TRANSACTION_STATUS_NAME_TO_NUMBER[status]
-    
+
             if transaction_status == requested_status or (
                 status == TransactionStatus.ACCEPTED
                 and transaction_status == finalized_status
@@ -4628,20 +4628,20 @@ default_account = <eth_account.signers.local.LocalAccount object at 0x7f5f31c8e9
         2. creating a read_erc20 contract that reads the LLM ERC20 contract
         3. creating a read_erc20 contract that reads the previous read_erc20 contract
         Repeats step 3 a few times.
-    
+
         It's like a linked list, but with contracts.
         """
         setup_validators()
         TOKEN_TOTAL_SUPPLY = 1000
-    
+
         # LLM ERC20
         llm_erc20_factory = get_contract_factory("LlmErc20")
-    
+
         # Deploy Contract
 >       llm_erc20_contract = llm_erc20_factory.deploy(args=[TOKEN_TOTAL_SUPPLY])
 
-tests/integration/contracts/tokens/test_read_erc20.py:21: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/integration/contracts/tokens/test_read_erc20.py:21:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = ContractFactory(contract_name='LlmErc20', contract_code='# v0.1.0\n# { "Depends": "py-genlayer:latest" }\n\nimport jso...lic.view\n    def get_balance_of(self, address: str) -> int:\n        return self.balances.get(Address(address), 0)\n')
 args = [1000], account = None, consensus_max_rotations = None
@@ -4680,7 +4680,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -4700,7 +4700,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 raise ValueError(
                     f"Deployment transaction finalized with error: {tx_receipt}"
                 )
-    
+
             if wait_triggered_transactions:
                 triggered_transactions = tx_receipt["triggered_transactions"]
                 for triggered_transaction in triggered_transactions:
@@ -4710,7 +4710,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                         interval=actual_wait_interval,
                         retries=actual_wait_retries,
                     )
-    
+
             if (
                 "tx_data_decoded" in tx_receipt
                 and "contract_address" in tx_receipt["tx_data_decoded"]
@@ -4720,13 +4720,13 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 contract_address = tx_receipt["data"]["contract_address"]
             else:
                 raise ValueError("Transaction receipt missing contract address")
-    
+
             schema = self._get_schema_with_fallback()
             if schema is None:
                 raise ValueError(
                     "Failed to get schema from all clients (default, hosted studio, and local)"
                 )
-    
+
             return Contract.new(
                 address=contract_address, schema=schema, account=account
             )
