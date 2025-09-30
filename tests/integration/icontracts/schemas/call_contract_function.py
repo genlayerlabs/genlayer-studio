@@ -8,7 +8,6 @@ call_contract_function_response = {
             {
                 "result": dict,
                 "calldata": dict,
-                "contract_state": dict,
                 "eq_outputs": dict,
                 "execution_result": str,
                 "gas_used": int,

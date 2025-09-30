@@ -3,6 +3,7 @@ __all__ = ("Manager", "with_lock")
 import typing
 import contextlib
 import dataclasses
+import logging
 import os
 
 from copy import deepcopy
@@ -16,6 +17,9 @@ import backend.database_handler.validators_registry as vr
 from sqlalchemy.orm import Session
 
 import backend.domain.types as domain
+
+
+logger = logging.getLogger(__name__)
 
 
 class ILock(typing.Protocol):
@@ -106,6 +110,8 @@ class Manager:
     async def restart(self):
         await self.lock.writer.acquire()
         try:
+            # Restart both LLM and web modules to ensure clean state
+            await self.llm_module.restart()
             await self.web_module.restart()
 
             new_validators = await self._get_snap_from_registry()
@@ -133,8 +139,17 @@ class Manager:
 
     async def _get_snap_from_registry(self) -> Snapshot:
         cur_validators_as_dict = self.registry.get_all_validators()
+        logger.info(
+            "ValidatorManager retrieved %d validators from registry",
+            len(cur_validators_as_dict),
+        )
         validators = [domain.Validator.from_dict(i) for i in cur_validators_as_dict]
-        return await self._get_snap_from_validators(validators)
+        snapshot = await self._get_snap_from_validators(validators)
+        logger.info(
+            "ValidatorManager created snapshot with %d validator nodes",
+            len(snapshot.nodes),
+        )
+        return snapshot
 
     async def _get_snap_from_validators(
         self, validators: list[domain.Validator]

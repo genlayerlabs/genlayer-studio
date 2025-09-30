@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import Mock, patch
-from flask_jsonrpc.exceptions import JSONRPCError
+from backend.protocol_rpc.exceptions import JSONRPCError
 
 from backend.protocol_rpc.endpoints import update_transaction_status
 from backend.database_handler.models import TransactionStatus
@@ -12,7 +12,13 @@ class TestUpdateTransactionStatusEndpoint:
 
     def setup_method(self):
         """Set up test fixtures."""
+        self.session: Mock = Mock(name="Session")
         self.mock_transactions_processor = Mock(spec=TransactionsProcessor)
+        self.transactions_processor_patch = patch(
+            "backend.protocol_rpc.endpoints.TransactionsProcessor",
+            return_value=self.mock_transactions_processor,
+        )
+        self.transactions_processor_patch.start()
         self.valid_tx_hash = (
             "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
         )
@@ -28,6 +34,9 @@ class TestUpdateTransactionStatusEndpoint:
             "created_at": "2023-01-01T00:00:00",
         }
 
+    def teardown_method(self):
+        self.transactions_processor_patch.stop()
+
     def test_valid_transaction_hash_and_status(self):
         """Test successful update with valid inputs."""
         self.mock_transactions_processor.update_transaction_status.return_value = None
@@ -36,7 +45,7 @@ class TestUpdateTransactionStatusEndpoint:
         )
 
         result = update_transaction_status(
-            self.mock_transactions_processor, self.valid_tx_hash, self.valid_status
+            self.session, self.valid_tx_hash, self.valid_status
         )
 
         self.mock_transactions_processor.update_transaction_status.assert_called_once_with(
@@ -57,7 +66,7 @@ class TestUpdateTransactionStatusEndpoint:
 
         with pytest.raises(JSONRPCError) as exc_info:
             update_transaction_status(
-                self.mock_transactions_processor, self.valid_tx_hash, self.valid_status
+                self.session, self.valid_tx_hash, self.valid_status
             )
 
         assert exc_info.value.code == -32602
@@ -67,9 +76,7 @@ class TestUpdateTransactionStatusEndpoint:
     def test_invalid_transaction_hash_empty_string(self):
         """Test validation error for empty transaction hash."""
         with pytest.raises(JSONRPCError) as exc_info:
-            update_transaction_status(
-                self.mock_transactions_processor, "", self.valid_status
-            )
+            update_transaction_status(self.session, "", self.valid_status)
 
         assert exc_info.value.code == -32602
         assert (
@@ -80,9 +87,7 @@ class TestUpdateTransactionStatusEndpoint:
     def test_invalid_transaction_hash_none(self):
         """Test validation error for None transaction hash."""
         with pytest.raises(JSONRPCError) as exc_info:
-            update_transaction_status(
-                self.mock_transactions_processor, None, self.valid_status
-            )
+            update_transaction_status(self.session, None, self.valid_status)
 
         assert exc_info.value.code == -32602
         assert (
@@ -94,9 +99,7 @@ class TestUpdateTransactionStatusEndpoint:
         """Test validation error for transaction hash with wrong length."""
         short_hash = "0x123"
         with pytest.raises(JSONRPCError) as exc_info:
-            update_transaction_status(
-                self.mock_transactions_processor, short_hash, self.valid_status
-            )
+            update_transaction_status(self.session, short_hash, self.valid_status)
 
         assert exc_info.value.code == -32602
         assert (
@@ -110,9 +113,7 @@ class TestUpdateTransactionStatusEndpoint:
             "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
         )
         with pytest.raises(JSONRPCError) as exc_info:
-            update_transaction_status(
-                self.mock_transactions_processor, no_prefix_hash, self.valid_status
-            )
+            update_transaction_status(self.session, no_prefix_hash, self.valid_status)
 
         assert exc_info.value.code == -32602
         assert (
@@ -126,9 +127,7 @@ class TestUpdateTransactionStatusEndpoint:
             "0x123456789gabcdef1234567890abcdef1234567890abcdef1234567890abcdef"
         )
         with pytest.raises(JSONRPCError) as exc_info:
-            update_transaction_status(
-                self.mock_transactions_processor, invalid_hash, self.valid_status
-            )
+            update_transaction_status(self.session, invalid_hash, self.valid_status)
 
         assert exc_info.value.code == -32602
         assert (
@@ -139,9 +138,7 @@ class TestUpdateTransactionStatusEndpoint:
     def test_invalid_status_empty_string(self):
         """Test validation error for empty status."""
         with pytest.raises(JSONRPCError) as exc_info:
-            update_transaction_status(
-                self.mock_transactions_processor, self.valid_tx_hash, ""
-            )
+            update_transaction_status(self.session, self.valid_tx_hash, "")
 
         assert exc_info.value.code == -32602
         assert "Invalid status: must be a non-empty string" in exc_info.value.message
@@ -149,9 +146,7 @@ class TestUpdateTransactionStatusEndpoint:
     def test_invalid_status_none(self):
         """Test validation error for None status."""
         with pytest.raises(JSONRPCError) as exc_info:
-            update_transaction_status(
-                self.mock_transactions_processor, self.valid_tx_hash, None
-            )
+            update_transaction_status(self.session, self.valid_tx_hash, None)
 
         assert exc_info.value.code == -32602
         assert "Invalid status: must be a non-empty string" in exc_info.value.message
@@ -160,9 +155,7 @@ class TestUpdateTransactionStatusEndpoint:
         """Test validation error for status not in TransactionStatus enum."""
         invalid_status = "INVALID_STATUS"
         with pytest.raises(JSONRPCError) as exc_info:
-            update_transaction_status(
-                self.mock_transactions_processor, self.valid_tx_hash, invalid_status
-            )
+            update_transaction_status(self.session, self.valid_tx_hash, invalid_status)
 
         assert exc_info.value.code == -32602
         assert f"Invalid status '{invalid_status}'" in exc_info.value.message
@@ -182,7 +175,7 @@ class TestUpdateTransactionStatusEndpoint:
             )
 
             result = update_transaction_status(
-                self.mock_transactions_processor, self.valid_tx_hash, status.value
+                self.session, self.valid_tx_hash, status.value
             )
 
             self.mock_transactions_processor.update_transaction_status.assert_called_once_with(
@@ -192,16 +185,21 @@ class TestUpdateTransactionStatusEndpoint:
             )
             assert result == self.mock_transaction_data
 
-    @patch("backend.protocol_rpc.endpoints.check_forbidden_method_in_hosted_studio")
-    def test_decorator_is_applied(self, mock_decorator):
-        """Test that the @check_forbidden_method_in_hosted_studio decorator is applied."""
-        import backend.protocol_rpc.endpoints as endpoints_module
+    def test_decorator_blocks_calls_in_hosted_mode(self, monkeypatch):
+        """Ensure the hosted-studio guard rejects update attempts when enabled."""
 
-        func = getattr(endpoints_module, "update_transaction_status")
+        monkeypatch.setenv("VITE_IS_HOSTED", "true")
 
-        assert callable(func)
-        assert hasattr(func, "__name__")
-        assert func.__name__ == "update_transaction_status"
+        with pytest.raises(JSONRPCError) as exc_info:
+            update_transaction_status(
+                self.session, self.valid_tx_hash, self.valid_status
+            )
+
+        assert exc_info.value.code == -32000
+        assert exc_info.value.message == "Non-allowed operation"
+        assert isinstance(exc_info.value.data, dict)
+        assert exc_info.value.data == {}
+        self.mock_transactions_processor.update_transaction_status.assert_not_called()
 
     def test_edge_case_exactly_66_characters(self):
         """Test that exactly 66-character hex string is valid."""
@@ -212,7 +210,7 @@ class TestUpdateTransactionStatusEndpoint:
         )
 
         result = update_transaction_status(
-            self.mock_transactions_processor, valid_66_char_hash, self.valid_status
+            self.session, valid_66_char_hash, self.valid_status
         )
 
         assert result == self.mock_transaction_data
@@ -222,7 +220,7 @@ class TestUpdateTransactionStatusEndpoint:
         invalid_65_char_hash = "0x" + "a" * 63  # 0x + 63 hex chars = 65 total
         with pytest.raises(JSONRPCError) as exc_info:
             update_transaction_status(
-                self.mock_transactions_processor,
+                self.session,
                 invalid_65_char_hash,
                 self.valid_status,
             )
@@ -235,7 +233,7 @@ class TestUpdateTransactionStatusEndpoint:
         invalid_67_char_hash = "0x" + "a" * 65  # 0x + 65 hex chars = 67 total
         with pytest.raises(JSONRPCError) as exc_info:
             update_transaction_status(
-                self.mock_transactions_processor,
+                self.session,
                 invalid_67_char_hash,
                 self.valid_status,
             )

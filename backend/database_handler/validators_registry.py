@@ -62,7 +62,9 @@ class ValidatorsRegistry:
 
 class ModifiableValidatorsRegistry(ValidatorsRegistry):
     async def create_validator(self, validator: Validator) -> dict:
-        self.session.add(_to_db_model(validator))
+        db_validator = _to_db_model(validator)
+        self.session.add(db_validator)
+        self.session.flush()  # Ensure the validator is persisted and queryable
         return self.get_validator(validator.address, False)
 
     async def update_validator(
@@ -78,15 +80,18 @@ class ModifiableValidatorsRegistry(ValidatorsRegistry):
         validator.plugin = new_validator.llmprovider.plugin
         validator.plugin_config = new_validator.llmprovider.plugin_config
 
+        self.session.flush()  # Ensure the validator update is persisted
         return to_dict(validator, False)
 
     async def delete_validator(self, validator_address):
         validator = self._get_validator_or_fail(validator_address)
 
         self.session.delete(validator)
+        self.session.flush()  # Ensure the validator deletion is persisted
 
     async def delete_all_validators(self):
-        self.session.query(Validators).delete()
+        self.session.query(Validators).delete(synchronize_session=False)
+        self.session.flush()  # Ensure all validator deletions are persisted
 
 
 def _to_db_model(validator: Validator) -> Validators:
