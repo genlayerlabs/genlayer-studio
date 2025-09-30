@@ -6,8 +6,12 @@ import signal
 
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 import backend.validators.base as base
 
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -26,14 +30,24 @@ class WebModule:
 
         web_script_path = Path(__file__).parent.joinpath("web.lua")
 
+        # Resolve webdriver endpoint from environment (defaults align with docker-compose)
+        webdriver_host = os.getenv("WEBDRIVERHOST", "webdriver")
+        webdriver_port = os.getenv("WEBDRIVERPORT", "5001")
+        webdriver_protocol = os.getenv("WEBDRIVERPROTOCOL") or os.getenv(
+            "RPCPROTOCOL", "http"
+        )
+
         with self._config.change_default() as conf:
-            conf["webdriver_host"] = f"{protocol}://{webdriver_host}:{webdriver_port}"
+            conf["webdriver_host"] = (
+                f"{webdriver_protocol}://{webdriver_host}:{webdriver_port}"
+            )
             conf["bind_address"] = self.address
             conf["lua_script_path"] = str(web_script_path)
 
         self._config.write_default()
 
-        self._genvm_bin = genvm_bin
+        # Keep reference to the GenVM binary root for consistency with LLM module
+        self._genvm_bin = base.GENVM_BINARY
 
     async def terminate(self) -> None:
         if self._terminated:

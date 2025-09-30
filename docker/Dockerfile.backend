@@ -14,7 +14,7 @@ WORKDIR $path
 SHELL ["/bin/bash", "-x", "-c"]
 RUN apt-get update -y \
     && DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install -y --no-install-recommends \
-        curl unzip xz-utils ca-certificates python3.12 python3-dev gcc libssl3 \
+        curl unzip xz-utils ca-certificates python3.12 python3.12-venv python3-dev gcc libssl3 \
     && mkdir -p "$HOME/.config/pip/" \
     && printf "[global]\nbreak-system-packages = true\n" >> "$HOME/.config/pip/pip.conf" \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2 \
