@@ -507,6 +507,34 @@ def node_factory(
     vote: Vote,
     timeout: bool,
 ):
+    async def exec_with_dynamic_state(transaction: Transaction, llm_mocked: bool):
+        if llm_mocked:
+            # Add small delay to simulate processing
+            await asyncio.sleep(0.01)  # Small delay for mocked responses
+
+        accepted_state = contract_snapshot.states["accepted"]
+        set_value = transaction.hash[-1]
+        if len(accepted_state) == 0:
+            contract_state = {"state_var": set_value}
+        else:
+            value = accepted_state["state_var"]
+            contract_state = {"state_var": value + set_value}
+
+        return Receipt(
+            vote=vote,
+            calldata=b"",
+            mode=mode,
+            gas_used=0,
+            contract_state=contract_state,  # Dynamic contract state based on transaction
+            result=TIMEOUT_EXEC_RESULT if timeout else DEFAULT_EXEC_RESULT,
+            node_config={
+                "address": node["address"],
+                "private_key": node["private_key"],
+            },
+            eq_outputs={},
+            execution_result=ExecutionResultStatus.SUCCESS,
+        )
+
     if USE_MOCK_LLMS:
         # Use mocked node (default, fast)
         mock = Mock(Node)
@@ -516,35 +544,10 @@ def node_factory(
         mock.private_key = node["private_key"]
         mock.contract_snapshot = contract_snapshot
 
-        async def exec_with_dynamic_state(transaction: Transaction):
-            # Add small delay to simulate processing
-            if USE_MOCK_LLMS:
-                await asyncio.sleep(0.01)  # Small delay for mocked responses
+        async def mock_exec_transaction(transaction: Transaction):
+            return await exec_with_dynamic_state(transaction, llm_mocked=True)
 
-            accepted_state = contract_snapshot.states["accepted"]
-            set_value = transaction.hash[-1]
-            if len(accepted_state) == 0:
-                contract_state = {"state_var": set_value}
-            else:
-                value = accepted_state["state_var"]
-                contract_state = {"state_var": value + set_value}
-
-            return Receipt(
-                vote=vote,
-                calldata=b"",
-                mode=mode,
-                gas_used=0,
-                contract_state=contract_state,  # Dynamic contract state based on transaction
-                result=TIMEOUT_EXEC_RESULT if timeout else DEFAULT_EXEC_RESULT,
-                node_config={
-                    "address": node["address"],
-                    "private_key": node["private_key"],
-                },
-                eq_outputs={},
-                execution_result=ExecutionResultStatus.SUCCESS,
-            )
-
-        mock.exec_transaction = AsyncMock(side_effect=exec_with_dynamic_state)
+        mock.exec_transaction = AsyncMock(side_effect=mock_exec_transaction)
         return mock
     else:
         # Use real node with actual LLM calls (slow, requires API keys)
@@ -565,31 +568,10 @@ def node_factory(
         mock.private_key = node["private_key"]
         mock.contract_snapshot = contract_snapshot
 
-        async def exec_with_dynamic_state(transaction: Transaction):
-            accepted_state = contract_snapshot.states["accepted"]
-            set_value = transaction.hash[-1]
-            if len(accepted_state) == 0:
-                contract_state = {"state_var": set_value}
-            else:
-                value = accepted_state["state_var"]
-                contract_state = {"state_var": value + set_value}
+        async def mock_exec_transaction(transaction: Transaction):
+            return await exec_with_dynamic_state(transaction, llm_mocked=False)
 
-            return Receipt(
-                vote=vote,
-                calldata=b"",
-                mode=mode,
-                gas_used=0,
-                contract_state=contract_state,
-                result=TIMEOUT_EXEC_RESULT if timeout else DEFAULT_EXEC_RESULT,
-                node_config={
-                    "address": node["address"],
-                    "private_key": node["private_key"],
-                },
-                eq_outputs={},
-                execution_result=ExecutionResultStatus.SUCCESS,
-            )
-
-        mock.exec_transaction = AsyncMock(side_effect=exec_with_dynamic_state)
+        mock.exec_transaction = AsyncMock(side_effect=mock_exec_transaction)
         return mock
 
 

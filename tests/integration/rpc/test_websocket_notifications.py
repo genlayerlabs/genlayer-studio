@@ -1,7 +1,5 @@
 import json
 from contextlib import asynccontextmanager
-
-import anyio
 from fastapi import FastAPI, WebSocket
 from fastapi.testclient import TestClient
 from backend.protocol_rpc.broadcast import Broadcast
@@ -31,6 +29,21 @@ class TestApplication:
 
         self.app = FastAPI(lifespan=lifespan)
 
+        @self.app.post("/emit")
+        async def emit_endpoint(payload: dict) -> dict:  # pragma: no cover
+            room = payload.get("room")
+            event = payload.get("event")
+            data = payload.get("data")
+            await self.emit_event(room, event, data)
+            return {"ok": True}
+
+        @self.app.post("/broadcast")
+        async def broadcast_endpoint(payload: dict) -> dict:  # pragma: no cover
+            await self.broadcast.publish(
+                channel=GLOBAL_CHANNEL, message=json.dumps(payload)
+            )
+            return {"ok": True}
+
         @self.app.websocket("/ws")
         async def ws_endpoint(
             websocket: WebSocket,
@@ -50,8 +63,9 @@ def test_websocket_subscription_and_room_emit() -> None:
             subscribed = websocket.receive_json()
             assert subscribed == {"event": "subscribed", "data": {"room": "tx-123"}}
 
-            anyio.from_thread.run(
-                test_app.emit_event, "tx-123", "update", {"status": "ready"}
+            client.post(
+                "/emit",
+                json={"room": "tx-123", "event": "update", "data": {"status": "ready"}},
             )
 
             delivered = websocket.receive_json()
@@ -69,11 +83,7 @@ def test_websocket_broadcast_reaches_all_clients() -> None:
                 second.receive_json()
 
                 payload = {"event": "sync", "data": {"height": 7}}
-                anyio.from_thread.run(
-                    test_app.broadcast.publish,
-                    channel=GLOBAL_CHANNEL,
-                    message=json.dumps(payload),
-                )
+                client.post("/broadcast", json=payload)
 
                 assert first.receive_json() == payload
                 assert second.receive_json() == payload
