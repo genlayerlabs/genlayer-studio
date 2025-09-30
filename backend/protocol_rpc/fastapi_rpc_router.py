@@ -38,33 +38,34 @@ class FastAPIRPCRouter:
         try:
             payload = await request.json()
         except json.JSONDecodeError:
-            response = ParseError().to_dict()
+            # Malformed JSON payload. Always include id: null per JSON-RPC 2.0.
+            error = ParseError().to_dict()
             return JSONResponse(
                 status_code=400,
-                content=JSONRPCResponse(
-                    jsonrpc="2.0", error=response, id=None
-                ).model_dump(exclude_none=True),
+                content={"jsonrpc": "2.0", "error": error, "id": None},
             )
 
         if isinstance(payload, list):
             if not payload:
+                # Empty batch is invalid per JSON-RPC 2.0, respond 400
                 invalid = InvalidRequest().to_dict()
-                response = JSONRPCResponse(
-                    jsonrpc="2.0", error=invalid, id=None
-                ).model_dump(exclude_none=True)
-                return JSONResponse(status_code=200, content=response)
+                return JSONResponse(
+                    status_code=400,
+                    content={"jsonrpc": "2.0", "error": invalid, "id": None},
+                )
 
             if len(payload) > MAX_BATCH_SIZE:
-                error = InvalidRequest(
+                invalid = InvalidRequest(
                     data={
                         "message": f"Batch request exceeds maximum size of {MAX_BATCH_SIZE}",
                         "size": len(payload),
                     }
                 ).to_dict()
-                response = JSONRPCResponse(
-                    jsonrpc="2.0", error=error, id=None
-                ).model_dump(exclude_none=True)
-                return JSONResponse(status_code=200, content=response)
+                # Oversized batch also returns 400
+                return JSONResponse(
+                    status_code=400,
+                    content={"jsonrpc": "2.0", "error": invalid, "id": None},
+                )
 
             responses: List[Dict[str, Any]] = []
             for entry in payload:
@@ -82,10 +83,10 @@ class FastAPIRPCRouter:
             return JSONResponse(content=response)
 
         invalid = InvalidRequest().to_dict()
-        response = JSONRPCResponse(jsonrpc="2.0", error=invalid, id=None).model_dump(
-            exclude_none=True
+        return JSONResponse(
+            status_code=400,
+            content={"jsonrpc": "2.0", "error": invalid, "id": None},
         )
-        return JSONResponse(status_code=400, content=response)
 
     async def _dispatch_entry(
         self,
@@ -95,8 +96,9 @@ class FastAPIRPCRouter:
     ) -> Dict[str, Any]:
         if not isinstance(payload, dict):
             invalid = InvalidRequest().to_dict()
+            # Ensure id is present and null when invalid
             return JSONRPCResponse(jsonrpc="2.0", error=invalid, id=None).model_dump(
-                exclude_none=True
+                exclude_none=False
             )
 
         try:
@@ -106,7 +108,7 @@ class FastAPIRPCRouter:
             error = InvalidRequest().to_dict()
             return JSONRPCResponse(
                 jsonrpc="2.0", error=error, id=payload.get("id")
-            ).model_dump(exclude_none=True)
+            ).model_dump(exclude_none=False)
 
         if rpc_request.method == "ping":
             response = JSONRPCResponse(

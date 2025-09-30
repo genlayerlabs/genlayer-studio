@@ -30,6 +30,10 @@ def make_request(app: FastAPI, payload: Any) -> Request:
         "path": "/api",
         "headers": [(b"content-type", b"application/json")],
         "app": app,
+        "query_string": b"",
+        "root_path": "",
+        "scheme": "http",
+        "server": ("localhost", 4000),
     }
     return Request(scope, receive)
 
