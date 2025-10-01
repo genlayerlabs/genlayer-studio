@@ -25,15 +25,16 @@ def mock_llm_providers():
     try:
         import openai
 
-        # Mock chat completion response
+        # Mock chat completion response for modern SDK
         mock_completion = Mock()
         mock_completion.choices = [
             Mock(message=Mock(content="Mocked LLM response"), finish_reason="stop")
         ]
         mock_completion.usage = Mock(total_tokens=100)
 
-        mock_create = Mock(return_value=mock_completion)
-        patches.append(patch("openai.ChatCompletion.create", mock_create))
+        mock_client = Mock()
+        mock_client.chat.completions.create = Mock(return_value=mock_completion)
+        patches.append(patch("openai.OpenAI", Mock(return_value=mock_client)))
     except ImportError:
         pass
 
