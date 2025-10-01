@@ -100,8 +100,6 @@ def mock_external_services():
                 patch("requests.post", mock_post),
                 patch("requests.put", mock_put),
                 patch("requests.delete", mock_delete),
-                patch("requests.Session.get", mock_get),
-                patch("requests.Session.post", mock_post),
             ]
         )
     except ImportError:
