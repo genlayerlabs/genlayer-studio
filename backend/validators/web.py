@@ -66,6 +66,9 @@ class WebModule:
     async def restart(self) -> None:
         await self.stop()
 
+        debug_enabled = os.getenv("GENVM_WEB_DEBUG") == "1"
+        stream_target = None if debug_enabled else asyncio.subprocess.DEVNULL
+
         self._process = await asyncio.subprocess.create_subprocess_exec(
             base.MODULES_BINARY,
             "web",
@@ -73,8 +76,8 @@ class WebModule:
             self._config.new_path,
             "--die-with-parent",
             stdin=None,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stdout=stream_target,
+            stderr=stream_target,
         )
 
     async def stop(self) -> None:
