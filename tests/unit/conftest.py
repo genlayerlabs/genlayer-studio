@@ -5,6 +5,7 @@ Global fixtures and configuration for unit tests
 import os
 import pytest
 from unittest.mock import Mock, MagicMock, patch, AsyncMock
+from typing import Generator
 import json
 
 # Check if we should use mocks
@@ -12,7 +13,7 @@ USE_MOCKS = os.getenv("TEST_WITH_MOCK_LLMS", "true").lower() == "true"
 
 
 @pytest.fixture(autouse=True)
-def mock_llm_providers():
+def mock_llm_providers() -> Generator[None, None, None]:
     """
     Mock LLM provider calls specifically
     """
@@ -64,7 +65,7 @@ def mock_llm_providers():
 
 
 @pytest.fixture(autouse=True)
-def mock_external_services():
+def mock_external_services() -> Generator[None, None, None]:
     """
     Automatically mock all external services when TEST_WITH_MOCK_LLMS=true
     Returns mock responses instead of throwing exceptions
@@ -164,7 +165,7 @@ def mock_external_services():
 
 
 @pytest.fixture(autouse=True)
-def mock_webdriver():
+def mock_webdriver() -> Generator[None, None, None]:
     """
     Mock WebDriver/Selenium to prevent real browser instances
     Returns mock driver instances instead of throwing exceptions
