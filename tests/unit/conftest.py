@@ -9,7 +9,7 @@ from typing import Generator
 import json
 
 # Check if we should use mocks
-USE_MOCKS = os.getenv("TEST_WITH_MOCK_LLMS", "true").lower() == "true"
+USE_MOCKS: bool = os.getenv("TEST_WITH_MOCK_LLMS", "true").lower() == "true"
 
 
 @pytest.fixture(autouse=True)
@@ -27,15 +27,16 @@ def mock_llm_providers() -> Generator[None, None, None]:
     try:
         import openai
 
-        # Mock chat completion response
+        # Mock chat completion response for modern SDK
         mock_completion = Mock()
         mock_completion.choices = [
             Mock(message=Mock(content="Mocked LLM response"), finish_reason="stop")
         ]
         mock_completion.usage = Mock(total_tokens=100)
 
-        mock_create = Mock(return_value=mock_completion)
-        patches.append(patch("openai.ChatCompletion.create", mock_create))
+        mock_client = Mock()
+        mock_client.chat.completions.create = Mock(return_value=mock_completion)
+        patches.append(patch("openai.OpenAI", Mock(return_value=mock_client)))
     except ImportError:
         pass
 
@@ -102,8 +103,6 @@ def mock_external_services() -> Generator[None, None, None]:
                 patch("requests.post", mock_post),
                 patch("requests.put", mock_put),
                 patch("requests.delete", mock_delete),
-                patch("requests.Session.get", mock_get),
-                patch("requests.Session.post", mock_post),
             ]
         )
     except ImportError:
