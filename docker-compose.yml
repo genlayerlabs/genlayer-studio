@@ -103,7 +103,7 @@ services:
       traefik.http.routers.jsonrpc.tls: true
 
   webdriver:
-    image: yeagerai/genlayer-genvm-webdriver:0.0.5
+    image: yeagerai/genlayer-genvm-webdriver:0.0.7
     shm_size: 2gb
     environment:
       - PORT=${WEBDRIVERPORT:-4444}
