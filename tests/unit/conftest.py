@@ -5,10 +5,9 @@ Global fixtures and configuration for unit tests
 import os
 import pytest
 from unittest.mock import Mock, MagicMock, patch, AsyncMock
-import json
 
 # Check if we should use mocks
-USE_MOCKS = os.getenv("TEST_WITH_MOCK_LLMS", "true").lower() == "true"
+USE_MOCKS: bool = os.getenv("TEST_WITH_MOCK_LLMS", "true").lower() == "true"
 
 
 @pytest.fixture(autouse=True)
