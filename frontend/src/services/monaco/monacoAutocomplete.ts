@@ -1,6 +1,12 @@
 /**
  * Monaco Editor Autocomplete Provider for GenVM/GenLayer contracts
- * Provides intelligent code completion for gl.* APIs and GenLayer-specific constructs
+ *
+ * Provides intelligent code completion for:
+ * - gl.* module methods and properties
+ * - Contract instances and their methods
+ * - Address objects and their properties
+ * - Decorators like @gl.public.view and @gl.public.write
+ * - Common GenLayer patterns and constructs
  */
 
 import * as Monaco from 'monaco-editor/esm/vs/editor/editor.api';
@@ -11,23 +17,41 @@ import {
   propertyDescriptions,
 } from './completionData';
 
+/**
+ * Main completion provider class for GenVM/GenLayer smart contracts
+ */
 export class GenVMCompletionProvider
   implements Monaco.languages.CompletionItemProvider
 {
+  private currentRange: Monaco.IRange | undefined;
+
   /**
-   * Provide completion items for the current cursor position
+   * Main entry point for providing completion items
+   * Called by Monaco when user types or requests completions
+   *
+   * @param model - The text model
+   * @param position - Current cursor position
+   * @param context - Completion context (how it was triggered)
+   * @param token - Cancellation token
+   * @returns List of completion suggestions
    */
-  provideCompletionItems(
+  public provideCompletionItems(
     model: Monaco.editor.ITextModel,
     position: Monaco.Position,
-    context: Monaco.languages.CompletionContext,
-    token: Monaco.CancellationToken,
+    context?: Monaco.languages.CompletionContext,
+    token?: Monaco.CancellationToken,
   ): Monaco.languages.ProviderResult<Monaco.languages.CompletionList> {
     const line = model.getLineContent(position.lineNumber);
     const linePrefix = line.substring(0, position.column - 1);
 
-    // Debug logging
-    console.log('[GenVM Autocomplete] Line prefix:', linePrefix);
+    // Calculate the range for completions
+    const word = model.getWordUntilPosition(position);
+    this.currentRange = {
+      startLineNumber: position.lineNumber,
+      endLineNumber: position.lineNumber,
+      startColumn: word.startColumn,
+      endColumn: word.endColumn,
+    } as Monaco.IRange;
 
     const items: Monaco.languages.CompletionItem[] = [];
 
@@ -77,6 +101,7 @@ export class GenVMCompletionProvider
           Monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
         detail: 'Address constructor',
         documentation: 'Create a new Address instance',
+        range: this.currentRange!,
       };
       items.push(item);
     }
@@ -85,16 +110,14 @@ export class GenVMCompletionProvider
     // Check if we're after .emit().
     if (linePrefix.match(/\.emit\(.*?\)\.(\s*)$/)) {
       items.push(...this.createEmitMethodCompletions());
-    }
-    // Check if we're after .view().
-    else if (linePrefix.match(/\.view\(.*?\)\.(\s*)$/)) {
+    } else if (linePrefix.match(/\.view\(.*?\)\.(\s*)$/)) {
+      // Check if we're after .view().
       items.push(...this.createViewMethodCompletions());
-    }
-    // Check if variable might be a contract instance
-    else if (
+    } else if (
       linePrefix.match(/(\w+)\.(\s*)$/) &&
       this.mightBeContractInstance(model, position, linePrefix)
     ) {
+      // Check if variable might be a contract instance
       items.push(...this.createContractInstanceCompletions());
     }
 
@@ -109,7 +132,6 @@ export class GenVMCompletionProvider
       }
     }
 
-    console.log('[GenVM Autocomplete] Returning', items.length, 'items');
     return {
       suggestions: items,
       incomplete: false,
@@ -130,6 +152,7 @@ export class GenVMCompletionProvider
       detail: description,
       documentation: description,
       insertText: name,
+      range: this.currentRange!,
     };
   }
 
@@ -148,6 +171,7 @@ export class GenVMCompletionProvider
       detail: description,
       documentation: description,
       insertText: name,
+      range: this.currentRange!,
     };
 
     // Use snippet for insert text if we have parameters
@@ -641,10 +665,6 @@ export class GenVMCompletionProvider
         'update_storage',
         methodSignatures.update_storage.description,
       ),
-      // Generic method names often used
-      this.createMethodCompletion('foo', 'Call foo method'),
-      this.createMethodCompletion('bar', 'Call bar method'),
-      this.createMethodCompletion('test', 'Call test method'),
     ];
   }
 
@@ -668,23 +688,19 @@ export class GenVMCompletionProvider
       this.createMethodCompletion('get_name', 'Get contract name'),
       this.createMethodCompletion('get_symbol', 'Get token symbol'),
       this.createMethodCompletion('owner', 'Get contract owner'),
-      // Generic method names often used
-      this.createMethodCompletion('foo', 'Call foo view method'),
-      this.createMethodCompletion('test', 'Call test view method'),
-      this.createMethodCompletion('nested', 'Call nested view method'),
     ];
   }
 
   /**
    * Check if a variable might be a contract instance
+   * Uses heuristics to determine if a variable is likely a contract proxy
    */
   private mightBeContractInstance(
     model: Monaco.editor.ITextModel,
     position: Monaco.Position,
     linePrefix: string,
   ): boolean {
-    // Simple heuristic: check if variable was assigned from gl.ContractAt
-    const varMatch = linePrefix.match(/(\w+)\.$/);
+    const varMatch = linePrefix.match(/(\w+)\.(\s*)$/);
     if (!varMatch) return false;
 
     const varName = varMatch[1];
@@ -717,17 +733,24 @@ export class GenVMCompletionProvider
 }
 
 /**
- * Setup autocomplete for GenVM in Monaco Editor
+ * Initialize and register the GenVM autocomplete provider
+ * Should be called once when setting up the Monaco editor
+ *
+ * @param monaco - Monaco editor namespace
+ * @returns Disposable to clean up the provider
  */
 export function setupGenVMAutocomplete(
   monaco: typeof Monaco,
 ): Monaco.IDisposable {
+  // Create provider instance
   const provider = new GenVMCompletionProvider();
 
-  // Register the completion provider for Python
-  return monaco.languages.registerCompletionItemProvider('python', {
+  // Register with trigger characters to auto-show on dot
+  const disposable = monaco.languages.registerCompletionItemProvider('python', {
     provideCompletionItems: (model, position, context, token) =>
       provider.provideCompletionItems(model, position, context, token),
-    triggerCharacters: ['.', 'g', 'l', 'A'],
+    triggerCharacters: ['.']
   });
+
+  return disposable;
 }

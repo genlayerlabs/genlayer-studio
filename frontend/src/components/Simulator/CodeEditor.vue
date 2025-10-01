@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
+// Import core commands for basic editor functionality
+import 'monaco-editor/esm/vs/editor/browser/coreCommands.js';
 // Import hover contribution for hover functionality to work
 import 'monaco-editor/esm/vs/editor/contrib/hover/browser/hoverContribution.js';
+// Import suggest contribution for autocomplete functionality
+import 'monaco-editor/esm/vs/editor/contrib/suggest/browser/suggestController.js';
 // Import base editor worker for Monaco to function
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 
@@ -32,7 +36,9 @@ const containerElement = ref<HTMLElement | null | undefined>(null);
 const editorRef = shallowRef<monaco.editor.IStandaloneCodeEditor | null>(null);
 const theme = computed(() => (uiStore.mode === 'light' ? 'vs' : 'vs-dark'));
 let stopLinting: (() => void) | null = null;
-let autocompleteDisposable: monaco.IDisposable | null = null;
+
+// Track global provider registration to avoid duplicates
+let globalAutocompleteRegistered = false;
 
 function initEditor() {
   containerElement.value = editorElement.value?.parentElement;
@@ -41,8 +47,11 @@ function initEditor() {
   monaco.languages.register({ id: 'python' });
   monaco.languages.setMonarchTokensProvider('python', pythonSyntax);
 
-  // Setup GenVM autocomplete BEFORE creating the editor
-  autocompleteDisposable = setupGenVMAutocomplete(monaco);
+  // Setup GenVM autocomplete BEFORE creating the editor (only once globally)
+  if (!globalAutocompleteRegistered) {
+    setupGenVMAutocomplete(monaco);
+    globalAutocompleteRegistered = true;
+  }
 
   // Now create the editor
   editorRef.value = monaco.editor.create(editorElement.value!, {
@@ -60,13 +69,24 @@ function initEditor() {
     },
     // Ensure hover widgets display correctly
     fixedOverflowWidgets: true,
-    // Enable quick suggestions for better autocomplete experience
-    quickSuggestions: {
-      other: true,
-      comments: false,
-      strings: false,
-    },
+    // Autocomplete configuration optimized for GenVM
+    quickSuggestions: true,
+    wordBasedSuggestions: 'off', // Disable to avoid conflicts with GenVM completions
+    snippetSuggestions: 'inline',
     suggestOnTriggerCharacters: true,
+    acceptSuggestionOnEnter: 'on',
+    tabCompletion: 'on',
+    suggest: {
+      insertMode: 'replace',
+      filterGraceful: true,
+      localityBonus: true,
+      shareSuggestSelections: false,
+      showWords: false,
+      showSnippets: true,
+      showClasses: true,
+      showFunctions: true,
+      showModules: true,
+    },
   });
 
   editorRef.value.onDidChangeModelContent(() => {
@@ -78,6 +98,19 @@ function initEditor() {
 
   // Setup auto-linting with 300ms debounce for faster feedback
   stopLinting = setupAutoLinting(editorRef.value, monaco, 300);
+
+  // Add keyboard shortcuts for triggering suggestions
+  editorRef.value.addAction({
+    id: 'trigger-genvm-suggest',
+    label: 'Trigger GenVM Suggestions',
+    keybindings: [
+      monaco.KeyMod.Alt | monaco.KeyCode.Space, // Alt+Space
+      monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyI, // Cmd+I on Mac, Ctrl+I on Windows
+    ],
+    run: (editor) => {
+      editor.trigger('genvm', 'editor.action.triggerSuggest', {});
+    },
+  });
 }
 
 onMounted(() => {
@@ -88,10 +121,7 @@ onUnmounted(() => {
   if (stopLinting) {
     stopLinting();
   }
-  if (autocompleteDisposable) {
-    autocompleteDisposable.dispose();
-    autocompleteDisposable = null;
-  }
+  // Dispose only the editor instance, not the global autocomplete provider
   if (editorRef.value) {
     editorRef.value.dispose();
     editorRef.value = null;
