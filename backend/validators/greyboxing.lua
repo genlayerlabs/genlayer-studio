@@ -73,6 +73,58 @@ local function handle_custom_plugin(ctx, args, mapped_prompt)
 	return true, result
 end
 
+local function try_provider(ctx, args, mapped_prompt, provider_id, max_attempts_per_provider)
+	if not provider_id then
+		return nil
+	end
+
+	local model = lib.get_first_from_table(llm.providers[provider_id].models).key
+
+	for attempt = 1, max_attempts_per_provider do
+		local success, result
+		local request
+		if ctx.host_data.custom_plugin_data then
+			success, result = handle_custom_plugin(ctx, args, mapped_prompt)
+		else
+			request = {
+				provider = provider_id,
+				model = model,
+				prompt = mapped_prompt.prompt,
+				format = mapped_prompt.format,
+			}
+
+			success, result = pcall(function ()
+				return llm.rs.exec_prompt_in_provider(
+					ctx,
+					request
+				)
+			end)
+		end
+
+		lib.log{level = "debug", message = "executed with", success = success, type = type(result), res = result}
+		if success and result then
+			return result
+		end
+
+		local as_user_error = lib.rs.as_user_error(result)
+		if as_user_error == nil then
+			error(result)
+		end
+
+		if llm.overloaded_statuses[as_user_error.ctx.status] then
+			lib.log{level = "warning", message = "service is overloaded", error = as_user_error, request = request}
+		else
+			lib.log{level = "warning", message = "provider failed", error = as_user_error, request = request}
+		end
+
+		lib.log{level = "warning", message = "sleeping before retry"}
+
+		lib.rs.sleep_seconds(1.5)
+	end
+
+	return nil
+end
+
 local function just_in_backend(ctx, args, mapped_prompt)
 	---@cast mapped_prompt MappedPrompt
 	---@cast args LLMExecPromptPayload | LLMExecPromptTemplatePayload
@@ -101,95 +153,18 @@ local function just_in_backend(ctx, args, mapped_prompt)
 
 	-- First: Try primary model (3 attempts)
 	local primary_provider_id = ctx.host_data.studio_llm_id
-	local primary_model = lib.get_first_from_table(llm.providers[primary_provider_id].models).key
-	if primary_provider_id then
-		for attempt = 1, max_attempts_per_provider do
-			local success, result
-			if ctx.host_data.custom_plugin_data then
-				success, result = handle_custom_plugin(ctx, args, mapped_prompt)
-			else
-				local request = {
-					provider = primary_provider_id,
-					model = primary_model,
-					prompt = mapped_prompt.prompt,
-					format = mapped_prompt.format,
-				}
-
-				success, result = pcall(function ()
-					return llm.rs.exec_prompt_in_provider(
-						ctx,
-						request
-					)
-				end)
-			end
-
-			lib.log{level = "debug", message = "executed with", success = success, type = type(result), res = result}
-			if success and result then
-				return result
-			end
-
-			local as_user_error = lib.rs.as_user_error(result)
-			if as_user_error == nil then
-				error(result)
-			end
-
-			if llm.overloaded_statuses[as_user_error.ctx.status] then
-				lib.log{level = "warning", message = "service is overloaded", error = as_user_error, request = request}
-			else
-				lib.log{level = "warning", message = "provider failed", error = as_user_error, request = request}
-			end
-
-			lib.log{level = "warning", message = "sleeping before retry"}
-
-			lib.rs.sleep_seconds(1.5)
-		end
+	local primary_result = try_provider(ctx, args, mapped_prompt, primary_provider_id, max_attempts_per_provider)
+	if primary_result then
+		return primary_result
 	end
 
 	-- Second: Try fallback model (3 attempts) if available
 	local fallback_provider_id = ctx.host_data.fallback_llm_id
-	local fallback_model = lib.get_first_from_table(llm.providers[fallback_provider_id].models).key
 	if fallback_provider_id then
 		lib.log{level = "debug", message = "Switching to fallback model"}
-
-		for attempt = 1, max_attempts_per_provider do
-			local success, result
-			if ctx.host_data.custom_plugin_data then
-				success, result = handle_custom_plugin(ctx, args, mapped_prompt)
-			else
-				local request = {
-					provider = fallback_provider_id,
-					model = fallback_model,
-					prompt = mapped_prompt.prompt,
-					format = mapped_prompt.format,
-				}
-
-				success, result = pcall(function ()
-					return llm.rs.exec_prompt_in_provider(
-						ctx,
-						request
-					)
-				end)
-			end
-
-			lib.log{level = "debug", message = "executed with", success = success, type = type(result), res = result}
-			if success and result then
-				return result
-			end
-
-			local as_user_error = lib.rs.as_user_error(result)
-			if as_user_error == nil then
-				error(result)
-			end
-
-			if llm.overloaded_statuses[as_user_error.ctx.status] then
-				lib.log{level = "warning", message = "service is overloaded", error = as_user_error, request = request}
-			else
-				lib.log{level = "warning", message = "provider failed", error = as_user_error, request = request}
-			end
-
-			lib.log{level = "warning", message = "sleeping before retry"}
-
-			lib.rs.sleep_seconds(1.5)
+		local fallback_result = try_provider(ctx, args, mapped_prompt, fallback_provider_id, max_attempts_per_provider)
+		if fallback_result then
+			return fallback_result
 		end
 	end
 

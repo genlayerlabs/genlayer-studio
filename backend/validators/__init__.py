@@ -123,8 +123,7 @@ class ModifiableValidatorsRegistryInterceptor(vr.ModifiableValidatorsRegistry):
 @dataclasses.dataclass
 class SingleValidatorSnapshot:
     validator: domain.Validator
-    genvm_host_arg: typing.Any
-    fallback_validator: domain.Validator | None = None
+    genvm_host_data: typing.Any
 
 
 @dataclasses.dataclass
@@ -166,7 +165,12 @@ class Manager:
             await self.llm_module.restart()
             await self.web_module.restart()
 
+            # Fetches the validators from the database
+            # creates the general Snapshot with:
+            # - SingleValidatorSnapshot (validator, genvm_host_data)
+            # - the genvm_config_path
             new_validators = await self._get_snap_from_registry()
+            # Registers all the validators providers and models to the LLM module
             await self._change_providers_from_snapshot(new_validators)
         finally:
             self.lock.writer.release()
@@ -207,6 +211,8 @@ class Manager:
         self, validators: list[domain.Validator]
     ) -> Snapshot:
         current_validators: list[SingleValidatorSnapshot] = []
+        has_multiple_validators = len(validators) > 1
+
         for val in validators:
             host_data = {"studio_llm_id": f"node-{val.address}"}
             if (
@@ -235,6 +241,14 @@ class Manager:
                 val.llmprovider.plugin = (
                     "openai-compatible"  # so genvm thinks it is an implemented plugin
                 )
+            if has_multiple_validators:
+                fallback_validator = select_random_different_validator(val, validators)
+                if fallback_validator:
+                    host_data["fallback_llm_id"] = (
+                        f"node-{fallback_validator.address}-1"
+                    )
+                    val.fallback_validator = fallback_validator.address
+
             current_validators.append(SingleValidatorSnapshot(val, host_data))
         return Snapshot(
             nodes=current_validators, genvm_config_path=self._genvm_config.new_path
@@ -292,30 +306,6 @@ class Manager:
                     key_env=i.validator.llmprovider.plugin_config["api_key_env_var"],
                 )
             )
-
-            if has_multiple_validators:
-                fallback_validator = select_random_different_validator(
-                    i.validator, all_validators
-                )
-
-                if fallback_validator:
-                    i.genvm_host_arg["fallback_llm_id"] = (
-                        f"node-{i.validator.address}-1"
-                    )
-                    # Store the selected fallback validator in the snapshot
-                    i.fallback_validator = fallback_validator
-
-                    new_providers.append(
-                        SimulatorProvider(
-                            id=f"node-{i.validator.address}-1",
-                            model=fallback_validator.llmprovider.model,
-                            url=fallback_validator.llmprovider.plugin_config["api_url"],
-                            plugin=fallback_validator.llmprovider.plugin,
-                            key_env=fallback_validator.llmprovider.plugin_config[
-                                "api_key_env_var"
-                            ],
-                        )
-                    )
 
         await self.llm_module.change_config(new_providers)
 

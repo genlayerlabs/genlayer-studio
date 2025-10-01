@@ -76,7 +76,7 @@ class TestValidatorsManagerHostData:
         await mock_manager._change_providers_from_snapshot(snapshot)
 
         # Verify no fallback_llm_id was added to host_data
-        assert "fallback_llm_id" not in snapshot.nodes[0].genvm_host_arg
+        assert "fallback_llm_id" not in snapshot.nodes[0].genvm_host_data
 
         # Verify llm_module.change_config was called with only 1 provider
         mock_manager.llm_module.change_config.assert_called_once()
@@ -125,14 +125,14 @@ class TestValidatorsManagerHostData:
         await mock_manager._change_providers_from_snapshot(snapshot)
 
         # Verify fallback_llm_id was added to host_data with correct format
-        assert "fallback_llm_id" in snapshot.nodes[0].genvm_host_arg
-        assert "fallback_llm_id" in snapshot.nodes[1].genvm_host_arg
+        assert "fallback_llm_id" in snapshot.nodes[0].genvm_host_data
+        assert "fallback_llm_id" in snapshot.nodes[1].genvm_host_data
         assert (
-            snapshot.nodes[0].genvm_host_arg["fallback_llm_id"]
+            snapshot.nodes[0].genvm_host_data["fallback_llm_id"]
             == "node-test-addr-123-1"
         )
         assert (
-            snapshot.nodes[1].genvm_host_arg["fallback_llm_id"]
+            snapshot.nodes[1].genvm_host_data["fallback_llm_id"]
             == "node-another-addr-456-1"
         )
 
@@ -213,8 +213,8 @@ class TestValidatorsManagerHostData:
         await mock_manager._change_providers_from_snapshot(snapshot)
 
         # Verify no fallback_llm_id was added
-        assert "fallback_llm_id" not in snapshot.nodes[0].genvm_host_arg
-        assert "fallback_llm_id" not in snapshot.nodes[1].genvm_host_arg
+        assert "fallback_llm_id" not in snapshot.nodes[0].genvm_host_data
+        assert "fallback_llm_id" not in snapshot.nodes[1].genvm_host_data
 
         # Verify only 2 providers were created (no fallbacks)
         mock_manager.llm_module.change_config.assert_called_once()

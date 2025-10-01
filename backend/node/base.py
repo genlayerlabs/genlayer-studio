@@ -179,14 +179,13 @@ class Node:
 
         fallback_llm_id = host_data.get("fallback_llm_id")
         if fallback_llm_id and self.validators_snapshot:
-            current_node = None
+            fallback_validator = None
             for node in self.validators_snapshot.nodes:
-                if node.validator.address == self.validator.address:
-                    current_node = node
+                if f"node-{node.validator.address}-1" == fallback_llm_id:
+                    fallback_validator = node.validator
                     break
 
-            if current_node and current_node.fallback_validator:
-                fallback_validator = current_node.fallback_validator
+            if fallback_validator:
                 enhanced_node_config["secondary_model"] = {
                     "provider": fallback_validator.llmprovider.provider,
                     "model": fallback_validator.llmprovider.model,
@@ -386,7 +385,7 @@ class Node:
             config_path = self.validators_snapshot.genvm_config_path
             for n in self.validators_snapshot.nodes:
                 if n.validator.address == self.validator.address:
-                    host_data = n.genvm_host_arg
+                    host_data = n.genvm_host_data
         result_exec_code: ExecutionResultStatus
         res = await genvm.run_contract(
             snapshot_view,
