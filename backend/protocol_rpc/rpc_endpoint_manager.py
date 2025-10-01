@@ -140,7 +140,6 @@ class RPCEndpointManager:
         except JSONRPCError as exc:
             if should_log and definition.log_policy.log_failure:
                 stack_trace = traceback.format_exc()
-                print(f"JSONRPCError in {request.method}:\n{stack_trace}")
                 self._logger.send_message(
                     LogEvent(
                         name="endpoint_error",
@@ -180,7 +179,6 @@ class RPCEndpointManager:
         request: JSONRPCRequest,
         fastapi_request: Request,
     ) -> Any:
-
         try:
             bound_arguments = self._bind_rpc_arguments(registered, request.params)
         except InvalidParams as exc:
@@ -197,6 +195,15 @@ class RPCEndpointManager:
                 )
             )
             raise
+
+        # Fast-path: if there are no FastAPI dependencies required by the handler,
+        # avoid solving dependencies (which expects a full ASGI request scope).
+        if not registered.dependant.dependencies:
+            call_kwargs = bound_arguments
+            result = registered.dependant.call(**call_kwargs)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
 
         synthetic_body = bound_arguments or {}
 
