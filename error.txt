@@ -38,7 +38,7 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
             if general_config.check_studio_based_rpc()
             else False
         )
-    
+
         client = get_gl_client()
         try:
             tx_hash = client.deploy_contract(
@@ -55,11 +55,11 @@ wait_triggered_transactions_status = <TransactionStatus.ACCEPTED: 'ACCEPTED'>
                 retries=actual_wait_retries,
             )
 
-/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/gltest/contracts/contract_factory.py:145:
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 /opt/hostedtoolcache/Python/3.13.3/x64/lib/python3.13/site-packages/genlayer_py/client/genlayer_client.py:184: in wait_for_transaction_receipt
     return wait_for_transaction_receipt(
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
 
 self = <genlayer_py.client.genlayer_client.GenLayerClient object at 0x7f1e0208e510>
 transaction_hash = '0x10c9887f01dae12e4f8a1449f71e949bcd1ed28a01ef76f870bdae8041b9691d'
@@ -73,7 +73,7 @@ retries = 140
         interval: int = transaction_config.wait_interval,
         retries: int = transaction_config.retries,
     ) -> GenLayerTransaction:
-    
+
         attempts = 0
         while attempts < retries:
             transaction = self.get_transaction(transaction_hash=transaction_hash)
@@ -85,7 +85,7 @@ retries = 140
                 TransactionStatus.FINALIZED
             ]
             requested_status = TRANSACTION_STATUS_NAME_TO_NUMBER[status]
-    
+
             if transaction_status == requested_status or (
                 status == TransactionStatus.ACCEPTED
                 and transaction_status == finalized_status
