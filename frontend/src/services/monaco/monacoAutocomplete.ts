@@ -96,7 +96,8 @@ export class GenVMCompletionProvider
       const item: Monaco.languages.CompletionItem = {
         label: 'Address()',
         kind: Monaco.languages.CompletionItemKind.Constructor,
-        insertText: 'Address("${1:0x742d35Cc6634C0532925a3b8D4C9db96C4b4d8b6}")',
+        insertText:
+          'Address("${1:0x742d35Cc6634C0532925a3b8D4C9db96C4b4d8b6}")',
         insertTextRules:
           Monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
         detail: 'Address constructor',
@@ -342,14 +343,20 @@ export class GenVMCompletionProvider
    */
   private createWebCompletions(): Monaco.languages.CompletionItem[] {
     return [
-      this.createMethodCompletion('render', methodSignatures.render.description),
+      this.createMethodCompletion(
+        'render',
+        methodSignatures.render.description,
+      ),
       this.createMethodCompletion(
         'request',
         methodSignatures.request.description,
       ),
       this.createMethodCompletion('get', methodSignatures.get.description),
       this.createMethodCompletion('post', methodSignatures.post.description),
-      this.createMethodCompletion('delete', methodSignatures.delete.description),
+      this.createMethodCompletion(
+        'delete',
+        methodSignatures.delete.description,
+      ),
       this.createMethodCompletion('head', methodSignatures.head.description),
       this.createMethodCompletion('patch', methodSignatures.patch.description),
     ];
@@ -749,7 +756,7 @@ export function setupGenVMAutocomplete(
   const disposable = monaco.languages.registerCompletionItemProvider('python', {
     provideCompletionItems: (model, position, context, token) =>
       provider.provideCompletionItems(model, position, context, token),
-    triggerCharacters: ['.']
+    triggerCharacters: ['.'],
   });
 
   return disposable;
