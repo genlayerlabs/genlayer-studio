@@ -2,7 +2,7 @@
 from gltest import get_contract_factory
 from gltest.assertions import tx_execution_succeeded
 
-from tests.integration.icontracts.schemas.call_contract_function import (
+from tests.integration.fixtures.schemas.call_contract_function import (
     call_contract_function_response,
 )
 from tests.common.response import (
