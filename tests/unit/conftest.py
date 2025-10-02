@@ -9,7 +9,7 @@ from typing import Generator
 import json
 
 # Check if we should use mocks
-USE_MOCKS: bool = os.getenv("TEST_WITH_MOCK_LLMS", "true").lower() == "true"
+USE_MOCKS: bool = os.getenv("TEST_WITH_MOCKS", "true").lower() == "true"
 
 
 @pytest.fixture(autouse=True)
@@ -68,7 +68,7 @@ def mock_llm_providers() -> Generator[None, None, None]:
 @pytest.fixture(autouse=True)
 def mock_external_services() -> Generator[None, None, None]:
     """
-    Automatically mock all external services when TEST_WITH_MOCK_LLMS=true
+    Automatically mock all external services when TEST_WITH_MOCKS=true
     Returns mock responses instead of throwing exceptions
     """
     if not USE_MOCKS:
