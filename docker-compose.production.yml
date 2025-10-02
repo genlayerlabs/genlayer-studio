@@ -33,10 +33,10 @@ services:
       resources:
         limits:
           cpus: '${COMPOSE_CPU_LIMIT:-2}'
-          memory: ${COMPOSE_MEM_LIMIT:-8}
+          memory: ${COMPOSE_MEM_LIMIT:-8g}
         reservations:
           cpus: ${COMPOSE_CPU_RESERVATION:-1}
-          memory: ${COMPOSE_MEM_RESERVATION:-2}
+          memory: ${COMPOSE_MEM_RESERVATION:-2g}
       restart_policy:
         condition: on-failure
         delay: 5s
