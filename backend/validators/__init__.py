@@ -1,15 +1,16 @@
-__all__ = ("Manager", "with_lock")
+__all__ = ("Manager", "with_lock", "select_random_different_validator")
 
 import typing
 import contextlib
 import dataclasses
 import logging
 import os
+import random
 
 from copy import deepcopy
 from pathlib import Path
 
-from .llm import LLMModule
+from .llm import LLMModule, SimulatorProvider
 from .web import WebModule
 import backend.validators.base as base
 
@@ -17,6 +18,56 @@ import backend.database_handler.validators_registry as vr
 from sqlalchemy.orm import Session
 
 import backend.domain.types as domain
+
+
+def select_random_different_validator(
+    primary_validator: domain.Validator, all_validators: list[domain.Validator]
+) -> domain.Validator | None:
+    """
+    Select a random validator for fallback with two-tier priority system.
+
+    Priority 1: Different provider class from existing validators
+    Priority 2: Same provider class, different model from existing validators
+
+    Args:
+        primary_validator: The current validator
+        all_validators: List of all existing validators (user-configured)
+
+    Returns:
+        Fallback validator object, or None if no suitable fallback
+    """
+    primary_provider_class = primary_validator.llmprovider.provider
+    primary_model = primary_validator.llmprovider.model
+
+    # Priority 1: Different provider classes from existing validators
+    different_provider_validators = [
+        v
+        for v in all_validators
+        if (
+            v.llmprovider.provider != primary_provider_class
+            and v.address != primary_validator.address
+        )
+    ]
+
+    if different_provider_validators:
+        return random.choice(different_provider_validators)
+
+    # Priority 2: Same provider class, different model from existing validators
+    same_provider_different_model = [
+        v
+        for v in all_validators
+        if (
+            v.llmprovider.provider == primary_provider_class
+            and v.llmprovider.model != primary_model
+            and v.address != primary_validator.address
+        )
+    ]
+
+    if same_provider_different_model:
+        return random.choice(same_provider_different_model)
+
+    # No suitable fallback found
+    return None
 
 
 logger = logging.getLogger(__name__)
@@ -72,7 +123,7 @@ class ModifiableValidatorsRegistryInterceptor(vr.ModifiableValidatorsRegistry):
 @dataclasses.dataclass
 class SingleValidatorSnapshot:
     validator: domain.Validator
-    genvm_host_arg: typing.Any
+    genvm_host_data: typing.Any
 
 
 @dataclasses.dataclass
@@ -114,7 +165,12 @@ class Manager:
             await self.llm_module.restart()
             await self.web_module.restart()
 
+            # Fetches the validators from the database
+            # creates the general Snapshot with:
+            # - SingleValidatorSnapshot (validator, genvm_host_data)
+            # - the genvm_config_path
             new_validators = await self._get_snap_from_registry()
+            # Registers all the validators providers and models to the LLM module
             await self._change_providers_from_snapshot(new_validators)
         finally:
             self.lock.writer.release()
@@ -155,6 +211,8 @@ class Manager:
         self, validators: list[domain.Validator]
     ) -> Snapshot:
         current_validators: list[SingleValidatorSnapshot] = []
+        has_multiple_validators = len(validators) > 1
+
         for val in validators:
             host_data = {
                 "studio_llm_id": f"node-{val.address}",
@@ -186,6 +244,12 @@ class Manager:
                 val.llmprovider.plugin = (
                     "openai-compatible"  # so genvm thinks it is an implemented plugin
                 )
+            if has_multiple_validators:
+                fallback_validator = select_random_different_validator(val, validators)
+                if fallback_validator:
+                    host_data["fallback_llm_id"] = f"node-{fallback_validator.address}"
+                    val.fallback_validator = fallback_validator.address
+
             current_validators.append(SingleValidatorSnapshot(val, host_data))
         return Snapshot(
             nodes=current_validators, genvm_config_path=self._genvm_config.new_path
@@ -228,13 +292,16 @@ class Manager:
     async def _change_providers_from_snapshot(self, snap: Snapshot):
         self._cached_snapshot = None
 
-        new_providers: list[llm.SimulatorProvider] = []
+        new_providers: list[SimulatorProvider] = []
+
+        all_validators = [node.validator for node in snap.nodes]
+        has_multiple_validators = len(all_validators) > 1
 
         for i in snap.nodes:
             new_providers.append(
-                llm.SimulatorProvider(
-                    model=i.validator.llmprovider.model,
+                SimulatorProvider(
                     id=f"node-{i.validator.address}",
+                    model=i.validator.llmprovider.model,
                     url=i.validator.llmprovider.plugin_config["api_url"],
                     plugin=i.validator.llmprovider.plugin,
                     key_env=i.validator.llmprovider.plugin_config["api_key_env_var"],

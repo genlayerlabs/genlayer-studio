@@ -336,13 +336,26 @@ const badgeColorClass = computed(() => {
             </div>
 
             <div>
+              <div class="mb-1 font-medium">LLM-0:</div>
               <div>
                 <span class="font-medium">Model:</span>
-                {{ leaderReceipt.node_config.model }}
+                {{ leaderReceipt.node_config.primary_model?.model }}
               </div>
               <div>
                 <span class="font-medium">Provider:</span>
-                {{ leaderReceipt.node_config.provider }}
+                {{ leaderReceipt.node_config.primary_model?.provider }}
+              </div>
+            </div>
+
+            <div v-if="leaderReceipt.node_config.secondary_model">
+              <div class="mb-1 font-medium">LLM-1:</div>
+              <div>
+                <span class="font-medium">Model:</span>
+                {{ leaderReceipt.node_config.secondary_model.model }}
+              </div>
+              <div>
+                <span class="font-medium">Provider:</span>
+                {{ leaderReceipt.node_config.secondary_model.provider }}
               </div>
             </div>
           </div>

@@ -113,6 +113,7 @@ def node_factory(
                 plugin=validator["plugin"],
                 plugin_config=validator["plugin_config"],
             ),
+            fallback_validator=validator["fallback_validator"],
         ),
         contract_snapshot_factory=contract_snapshot_factory,
         validators_snapshot=validators_manager_snapshot,
