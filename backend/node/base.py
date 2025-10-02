@@ -181,7 +181,7 @@ class Node:
         if fallback_llm_id and self.validators_snapshot:
             fallback_validator = None
             for node in self.validators_snapshot.nodes:
-                if f"node-{node.validator.address}-1" == fallback_llm_id:
+                if f"node-{node.validator.address}" == fallback_llm_id:
                     fallback_validator = node.validator
                     break
 

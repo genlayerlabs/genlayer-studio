@@ -244,9 +244,7 @@ class Manager:
             if has_multiple_validators:
                 fallback_validator = select_random_different_validator(val, validators)
                 if fallback_validator:
-                    host_data["fallback_llm_id"] = (
-                        f"node-{fallback_validator.address}-1"
-                    )
+                    host_data["fallback_llm_id"] = f"node-{fallback_validator.address}"
                     val.fallback_validator = fallback_validator.address
 
             current_validators.append(SingleValidatorSnapshot(val, host_data))
