@@ -106,6 +106,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements.test.txt
+          pip install -r backend/protocol_rpc/requirements.txt
 
       - name: Run tests
         run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/ -svv

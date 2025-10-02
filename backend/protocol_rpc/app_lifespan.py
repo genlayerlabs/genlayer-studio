@@ -177,9 +177,15 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
     emit_event = create_emit_event_function(broadcast)
 
     validators_session = db_manager.open_session()
+    # Manages the validators registry with locking for concurrent access
+    # Handles LLM and web modules and configuration file changes
+    # Loads GenVM configuration
     validators_manager = validators.Manager(validators_session)
 
+    # Delete all validators from the database and create new ones based on env.VAlIDATORS_CONFIG_JSON
     await _initialise_validators(settings.validators_config_json, db_manager)
+
+    # Restart web and llm modules, created the validators Snapshot, and registers providers and models to the LLM module
     await validators_manager.restart()
 
     validators_registry = validators_manager.registry
@@ -205,6 +211,7 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
 
     sql_db = _SQLAlchemyDBWrapper(db_manager)
 
+    # Registers the RPC methods via decorators, injects dependencies, and orchestrates the invokes with logging for execution
     endpoint_manager = RPCEndpointManager(
         logger=msg_handler,
         dependency_overrides_provider=app,
@@ -216,6 +223,7 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
     for definition in rpc.to_list():
         endpoint_manager.register(definition)
 
+    # Creates the RPC router with the endpoint manager to handle the HTTP requests
     rpc_router = FastAPIRPCRouter(endpoint_manager=endpoint_manager)
 
     app_state = RPCAppState(
