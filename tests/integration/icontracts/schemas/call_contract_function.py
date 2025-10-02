@@ -8,19 +8,22 @@ call_contract_function_response = {
             {
                 "result": dict,
                 "calldata": dict,
-                "contract_state": dict,
                 "eq_outputs": dict,
                 "execution_result": str,
                 "gas_used": int,
                 "mode": str,
                 "node_config": {
                     "address": str,
-                    "config": dict,
-                    "model": str,
-                    "provider": str,
+                    "private_key": str,
                     "stake": int,
-                    "plugin": str,
-                    "plugin_config": dict,
+                    "primary_model": {
+                        "config": dict,
+                        "model": str,
+                        "provider": str,
+                        "plugin": str,
+                        "plugin_config": dict,
+                    },
+                    "secondary_model": Optional[dict],
                 },
                 "vote": Optional[str],
             }
