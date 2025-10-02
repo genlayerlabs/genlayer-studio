@@ -1,0 +1,41 @@
+{
+  "render": {
+    "bbc.com": {
+      "text": "BBC Sport Football fixtures and results for today. Manchester United vs Liverpool: Final Score 2-1. Arsenal vs Chelsea: 1-0."
+    },
+    "httpbin.org": {
+      "text": "HTTPBin Test Response - Status 200 OK"
+    },
+    "example.com": {
+      "text": "Example Domain - This domain is for use in illustrative examples in documents."
+    },
+    "this-domain-definitely-does-not-exist": {
+      "text": "Mock error response for non-existent domain"
+    },
+    "flash.siwalik.in/delay": {
+      "text": "Mock timeout response"
+    }
+  },
+  "request": {
+    "api.weather.com": {
+      "status": 200,
+      "body": "{\"temperature\": 22, \"condition\": \"sunny\", \"humidity\": 65}",
+      "headers": {"content-type": "application/json"}
+    },
+    "httpbin.org/status/404": {
+      "status": 404,
+      "body": "Not Found",
+      "headers": {"content-type": "text/plain"}
+    },
+    "api.example.com": {
+      "status": 200,
+      "body": "{\"message\": \"Hello from mock API\", \"timestamp\": \"2024-01-01T00:00:00Z\"}",
+      "headers": {"content-type": "application/json"}
+    },
+    "httpbin.org/json": {
+      "status": 200,
+      "body": "{\"slideshow\": {\"author\": \"Yours Truly\", \"date\": \"2024-01-01\", \"slides\": [{\"title\": \"Wake up to WonderWidgets!\", \"type\": \"all\"}], \"title\": \"Sample Slideshow\"}}",
+      "headers": {"content-type": "application/json"}
+    }
+  }
+}
