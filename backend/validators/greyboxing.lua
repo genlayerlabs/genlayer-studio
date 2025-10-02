@@ -146,20 +146,16 @@ local function just_in_backend(ctx, args, mapped_prompt)
 
 	-- First: Try primary model (1 attempts)
 	local primary_provider_id = ctx.host_data.studio_llm_id
-	lib.log{level = "warning", message = "primary provider id", primary_provider_id = primary_provider_id}
 	local primary_result = try_provider(ctx, args, mapped_prompt, primary_provider_id)
-	lib.log{level = "warning", message = "primary result", primary_result = primary_result}
 	if primary_result then
 		return primary_result
 	end
 
 	-- Second: Try fallback model (3 attempts) if available
 	local fallback_provider_id = ctx.host_data.fallback_llm_id
-	lib.log{level = "warning", message = "fallback provider id", fallback_provider_id = fallback_provider_id}
 	if fallback_provider_id then
-		lib.log{level = "warning", message = "Switching to fallback model"}
+		lib.log{level = "warning", message = "switching to fallback model"}
 		local fallback_result = try_provider(ctx, args, mapped_prompt, fallback_provider_id)
-		lib.log{level = "warning", message = "fallback result", fallback_result = fallback_result}
 		if fallback_result then
 			return fallback_result
 		end
