@@ -111,9 +111,7 @@ def get_code_slot() -> bytes:
 
 def save_code_callback[
     T
-](
-    code: bytes, cb: typing.Callable[[bytes, int, bytes], T]
-) -> tuple[T, T]:
+](code: bytes, cb: typing.Callable[[bytes, int, bytes], T]) -> tuple[T, T]:
     code_slot = get_code_slot()
 
     r1 = cb(code_slot, 0, len(code).to_bytes(4, byteorder="little", signed=False))
