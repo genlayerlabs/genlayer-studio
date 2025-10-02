@@ -5,6 +5,9 @@ on:
     types:
       - opened
       - synchronize
+  pull_request_review:
+    types:
+      - submitted
   push:
     branches:
       - main # so that test reports get uploaded to Codecov and SonarCloud
@@ -25,17 +28,44 @@ jobs:
     if: (github.actor != 'dependabot[bot]' && github.actor != 'renovate[bot]')
     runs-on: ubuntu-latest
     env:
-      # For unit tests, always use mocks for speed and reliability
-      TEST_WITH_MOCKS: "true"
+      # Determine mocking based on PR approval status
+      # If it's a PR review approval event, don't use mocks. Otherwise, use mocks.
+      TEST_WITH_MOCKS: ${{ github.event_name != 'pull_request_review' || github.event.review.state != 'approved' }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Display mocking configuration
+        run: |
+          echo "Event: ${{ github.event_name }}"
+          if [[ "${{ github.event_name }}" == "pull_request_review" ]]; then
+            echo "Review state: ${{ github.event.review.state }}"
+          fi
+          echo "TEST_WITH_MOCKS=${{ env.TEST_WITH_MOCKS }}"
+
+      - name: Set API keys for real tests
+        if: env.TEST_WITH_MOCKS == 'false'
+        run: |
+          echo "Running with real services - setting API keys"
+          echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> $GITHUB_ENV
+          echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}" >> $GITHUB_ENV
+
       - uses: actions/setup-python@v5
         with:
           python-version: 3.13.3
           cache: pip
+
       - run: pip install -r backend/protocol_rpc/requirements.txt
       - run: pip install pytest-cov
-      - run: pytest tests/unit --cov=backend --cov-report=xml --cov-branch
+
+      - name: Run unit tests
+        run: |
+          if [[ "${{ env.TEST_WITH_MOCKS }}" == "false" ]]; then
+            echo "🚀 Running tests with REAL services (PR approved)"
+          else
+            echo "🔧 Running tests with MOCKED services"
+          fi
+          pytest tests/unit --cov=backend --cov-report=xml --cov-branch
+
       - name: SonarCloud Scan
         uses: sonarsource/sonarqube-scan-action@v5.1.0
         env:
