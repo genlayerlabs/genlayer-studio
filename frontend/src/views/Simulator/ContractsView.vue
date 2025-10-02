@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useContractsStore } from '@/stores';
-import { FilePlus2, Upload, FileInput } from 'lucide-vue-next';
+import { FilePlus2, Upload, FileDown } from 'lucide-vue-next';
 import { ref } from 'vue';
 import { v4 as uuidv4 } from 'uuid';
 import ContractItem from '@/components/Simulator/ContractItem.vue';
@@ -80,7 +80,7 @@ const handleSaveNewFile = (name: string) => {
         </GhostBtn>
 
         <GhostBtn @click="showImportModal = true" v-tooltip="'Import Contract'">
-          <FileInput :size="16" />
+          <FileDown :size="16" />
         </GhostBtn>
       </template>
     </MainTitle>
