@@ -71,15 +71,13 @@ class _SnapshotView(genvmbase.StateProxy):
 
     def storage_write(
         self,
-        account: Address,
         slot: bytes,
         index: int,
         got: collections.abc.Buffer,
         /,
     ) -> None:
-        assert account == self.contract_address
         assert not self.readonly
-        snap = self._get_snapshot(account)
+        snap = self._get_snapshot(self.contract_address)
         slot_id = base64.b64encode(slot).decode("ascii")
         for_slot = snap.states[self.state_status].setdefault(slot_id, "")
         data = bytearray(base64.b64decode(for_slot))
@@ -151,6 +149,51 @@ class Node:
             raise Exception(f"unknown transaction type {transaction.type}")
         return receipt
 
+    def _create_enhanced_node_config(self, host_data: dict | None) -> dict:
+        """
+        Create enhanced node_config that includes both primary and fallback provider info.
+
+        Args:
+            host_data: The host_data dict containing primary and fallback provider IDs
+
+        Returns:
+            Enhanced node_config dict with fallback information
+        """
+        node_config = self.validator.to_dict()
+        enhanced_node_config = {
+            "address": node_config["address"],
+            "private_key": node_config["private_key"],
+            "stake": node_config["stake"],
+            "primary_model": {
+                k: v
+                for k, v in node_config.items()
+                if k not in ["address", "private_key", "stake"]
+            },
+            "secondary_model": None,
+        }
+
+        if host_data is None:
+            return enhanced_node_config
+
+        fallback_llm_id = host_data.get("fallback_llm_id")
+        if fallback_llm_id and self.validators_snapshot:
+            fallback_validator = None
+            for node in self.validators_snapshot.nodes:
+                if f"node-{node.validator.address}" == fallback_llm_id:
+                    fallback_validator = node.validator
+                    break
+
+            if fallback_validator:
+                enhanced_node_config["secondary_model"] = {
+                    "provider": fallback_validator.llmprovider.provider,
+                    "model": fallback_validator.llmprovider.model,
+                    "plugin": fallback_validator.llmprovider.plugin,
+                    "plugin_config": fallback_validator.llmprovider.plugin_config,
+                    "config": fallback_validator.llmprovider.config,
+                }
+
+        return enhanced_node_config
+
     def _set_vote(self, receipt: Receipt) -> Receipt:
         if (receipt.result[0] == ResultCode.VM_ERROR) and (
             receipt.result[1:] == b"timeout"
@@ -165,9 +208,12 @@ class Node:
             and leader_receipt.contract_state == receipt.contract_state
             and leader_receipt.pending_transactions == receipt.pending_transactions
         ):
-            receipt.vote = Vote.AGREE
+            if receipt.nondet_disagree is not None:
+                receipt.vote = Vote.DISAGREE
+            else:
+                receipt.vote = Vote.AGREE
         else:
-            receipt.vote = Vote.DISAGREE
+            receipt.vote = Vote.DETERMINISTIC_VIOLATION
 
         return receipt
 
@@ -204,11 +250,7 @@ class Node:
         )
 
         base_host.save_code_callback(
-            Address(self.contract_snapshot.contract_address).as_bytes,
-            code_to_deploy,
-            lambda addr, *rest: snapshot_view_for_code.storage_write(
-                Address(addr), *rest
-            ),
+            code_to_deploy, snapshot_view_for_code.storage_write
         )
 
         return await self._run_genvm(
@@ -340,7 +382,7 @@ class Node:
             config_path = self.validators_snapshot.genvm_config_path
             for n in self.validators_snapshot.nodes:
                 if n.validator.address == self.validator.address:
-                    host_data = n.genvm_host_arg
+                    host_data = n.genvm_host_data
         result_exec_code: ExecutionResultStatus
         res = await genvm.run_contract(
             snapshot_view,
@@ -379,12 +421,13 @@ class Node:
             ],
             calldata=calldata,
             mode=self.validator_mode,
-            node_config=self.validator.to_dict(),
+            node_config=self._create_enhanced_node_config(host_data),
             genvm_result={
                 "stdout": res.stdout,
                 "stderr": res.stderr,
             },
             processing_time=res.processing_time,
+            nondet_disagree=res.nondet_disagree,
         )
 
         if self.validator_mode == ExecutionMode.LEADER:
