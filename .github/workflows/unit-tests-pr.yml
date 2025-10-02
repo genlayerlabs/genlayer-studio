@@ -30,20 +30,20 @@ jobs:
           GITHUB_EVENT_REVIEW_STATE: ${{ github.event.review.state }}
         run: |
           SHOULD_RUN="false"
-          
+
           # Run on push to main
           if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
             echo "Event is push to main"
             SHOULD_RUN="true"
           fi
-          
+
           # Run on PR open/sync
           if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]] && \
              [[ "$GITHUB_EVENT_ACTION" == "opened" || "$GITHUB_EVENT_ACTION" == "synchronize" ]]; then
             echo "Event is pull request opened or synchronized"
             SHOULD_RUN="true"
           fi
-          
+
           # Run when labeled with "run-tests"
           if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]] && \
              [[ "$GITHUB_EVENT_ACTION" == "labeled" ]] && \
@@ -51,16 +51,16 @@ jobs:
             echo "Event is pull request labeled with 'run-tests'"
             SHOULD_RUN="true"
           fi
-          
+
           # Run on PR approval
           if [[ "$GITHUB_EVENT_NAME" == "pull_request_review" ]] && \
              [[ "$GITHUB_EVENT_REVIEW_STATE" == "approved" ]]; then
             echo "Event is pull request review approved"
             SHOULD_RUN="true"
           fi
-          
+
           echo "should_run=$SHOULD_RUN" >> $GITHUB_OUTPUT
-          
+
       - name: Check PR review state
         id: check_pr_review_state
         env:
@@ -68,13 +68,13 @@ jobs:
           GITHUB_EVENT_REVIEW_STATE: ${{ github.event.review.state }}
         run: |
           IS_APPROVED="false"
-          
+
           if [[ "$GITHUB_EVENT_NAME" == "pull_request_review" ]] && \
              [[ "$GITHUB_EVENT_REVIEW_STATE" == "approved" ]]; then
             echo "Pull request review is approved"
             IS_APPROVED="true"
           fi
-          
+
           echo "is_pull_request_review_approved=$IS_APPROVED" >> $GITHUB_OUTPUT
 
   frontend-unit-tests:
@@ -91,7 +91,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Set mocking configuration
         run: |
           if [[ "${{ needs.triggers.outputs.is_pull_request_review_approved }}" == "true" ]]; then
@@ -101,26 +101,26 @@ jobs:
             echo "# Regular PR/push - Mock both LLMs and web requests"
             echo "TEST_WITH_MOCKS=true" >> $GITHUB_ENV
           fi
-          
+
       - name: Set API keys for approved PRs
         if: needs.triggers.outputs.is_pull_request_review_approved == 'true'
         run: |
           echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> $GITHUB_ENV
           echo "ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}" >> $GITHUB_ENV
-          
+
       - uses: actions/setup-python@v5
         with:
           python-version: 3.13.3
           cache: pip
-          
+
       - run: pip install -r backend/protocol_rpc/requirements.txt
       - run: pip install pytest-cov
-      
+
       - name: Run unit tests
         run: |
           echo "Running tests with TEST_WITH_MOCKS=$TEST_WITH_MOCKS"
           pytest tests/unit --cov=backend --cov-report=xml --cov-branch
-          
+
       - name: SonarCloud Scan
         if: github.event_name == 'push' || needs.triggers.outputs.is_pull_request_review_approved == 'true'
         uses: sonarsource/sonarqube-scan-action@v5.1.0
