@@ -1,6 +1,10 @@
 local lib = require('lib-genvm')
 local web = require('lib-web')
 
+local function status_is_good(status)
+	return status >= 200 and status < 300 or status == 304
+end
+
 function Render(ctx, payload)
     ---@cast payload WebRenderPayload
     web.check_url(payload.url)
@@ -22,7 +26,7 @@ function Render(ctx, payload)
 
     local status = tonumber(result.headers['resulting-status'])
 
-    if status ~= 200 then
+    if not status_is_good(status) then
         lib.rs.user_error({
             causes = {"WEBPAGE_LOAD_FAILED"},
             fatal = false,
