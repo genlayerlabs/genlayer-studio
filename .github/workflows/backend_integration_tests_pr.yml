@@ -45,7 +45,7 @@ jobs:
 
       # TODO: we should also add also heuristai and anthropic keys to the e2e tests and test all providers
 
-      - name: Set OPENAIKEY in the .env file so it can be loaded from the environment
+      - name: Set mocking environment variables in .env file
         env:
           OPENAIKEY: ${{ secrets.OPENAIKEY }}
         run: |
@@ -53,9 +53,11 @@ jobs:
           sed -i "s/FINALITY_WINDOW =.*/FINALITY_WINDOW = 10/" .env
           echo >> .env
           if [[ "${{ needs.triggers.outputs.is_pull_request_review_approved }}" == "true" ]]; then
-            echo "TEST_WITH_MOCK_LLMS=false" >> .env
+            echo "# Approved PR - Use real LLMs and real web requests"
+            echo "TEST_WITH_MOCKS=false" >> .env
           else
-            echo "TEST_WITH_MOCK_LLMS=true" >> .env
+            echo "# Regular PR - Mock both LLMs and web requests"
+            echo "TEST_WITH_MOCKS=true" >> .env
           fi
 
       - name: Set up Docker Buildx
