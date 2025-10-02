@@ -124,68 +124,29 @@ class TestValidatorsManagerHostData:
         # Call the actual method
         await mock_manager._change_providers_from_snapshot(snapshot)
 
-        # Verify fallback_llm_id was added to host_data with correct format
-        assert "fallback_llm_id" in snapshot.nodes[0].genvm_host_data
-        assert "fallback_llm_id" in snapshot.nodes[1].genvm_host_data
-        assert (
-            snapshot.nodes[0].genvm_host_data["fallback_llm_id"]
-            == "node-test-addr-123-1"
-        )
-        assert (
-            snapshot.nodes[1].genvm_host_data["fallback_llm_id"]
-            == "node-another-addr-456-1"
-        )
-
-        # Verify llm_module.change_config was called with 4 providers (2 primary + 2 fallback)
+        # Verify llm_module.change_config was called with providers for the two validators
         mock_manager.llm_module.change_config.assert_called_once()
         providers = mock_manager.llm_module.change_config.call_args[0][0]
 
-        assert len(providers) == 4
+        # Only primary providers are registered (no fallbacks created by this method)
+        assert len(providers) == 2
+        providers_by_id = {p.id: p for p in providers}
 
-        # Organize providers by type for detailed validation
-        primary_providers = {p.id: p for p in providers if not p.id.endswith("-1")}
-        fallback_providers = {p.id: p for p in providers if p.id.endswith("-1")}
+        # Validate providers match original validator configurations
+        openai_provider = providers_by_id["node-test-addr-123"]
+        anthropic_provider = providers_by_id["node-another-addr-456"]
 
-        assert len(primary_providers) == 2
-        assert len(fallback_providers) == 2
+        # Provider for validator1 should have validator1's configuration
+        assert openai_provider.model == "gpt-4o"
+        assert openai_provider.url == "open_ai_url"
+        assert openai_provider.plugin == "openai"
+        assert openai_provider.key_env == "OPENAI_API_KEY"
 
-        # Validate primary providers match original validator configurations
-        openai_primary = primary_providers["node-test-addr-123"]
-        anthropic_primary = primary_providers["node-another-addr-456"]
-
-        # Primary provider for validator1 should have validator1's configuration
-        assert openai_primary.model == "gpt-4o"
-        assert openai_primary.url == "open_ai_url"
-        assert openai_primary.plugin == "openai"
-        assert openai_primary.key_env == "OPENAI_API_KEY"
-
-        # Primary provider for validator2 should have validator2's configuration
-        assert anthropic_primary.model == "claude-3-5-sonnet"
-        assert anthropic_primary.url == "anthropic_url"
-        assert anthropic_primary.plugin == "anthropic"
-        assert anthropic_primary.key_env == "ANTHROPIC_API_KEY"
-
-        # Validate fallback providers use the OTHER validator's configuration
-        openai_fallback = fallback_providers["node-test-addr-123-1"]
-        anthropic_fallback = fallback_providers["node-another-addr-456-1"]
-
-        # OpenAI validator's fallback should use Anthropic's configuration (Priority 1: different provider)
-        assert openai_fallback.model == "claude-3-5-sonnet"
-        assert openai_fallback.url == "anthropic_url"
-        assert openai_fallback.plugin == "anthropic"
-        assert openai_fallback.key_env == "ANTHROPIC_API_KEY"
-
-        # Anthropic validator's fallback should use OpenAI's configuration (Priority 1: different provider)
-        assert anthropic_fallback.model == "gpt-4o"
-        assert anthropic_fallback.url == "open_ai_url"
-        assert anthropic_fallback.plugin == "openai"
-        assert anthropic_fallback.key_env == "OPENAI_API_KEY"
-
-        # Verify ID formats are correct
-        assert "node-test-addr-123" in primary_providers
-        assert "node-another-addr-456" in primary_providers
-        assert "node-test-addr-123-1" in fallback_providers
-        assert "node-another-addr-456-1" in fallback_providers
+        # Provider for validator2 should have validator2's configuration
+        assert anthropic_provider.model == "claude-3-5-sonnet"
+        assert anthropic_provider.url == "anthropic_url"
+        assert anthropic_provider.plugin == "anthropic"
+        assert anthropic_provider.key_env == "ANTHROPIC_API_KEY"
 
     @pytest.mark.asyncio
     async def test_identical_validators_no_fallback_llm_config(self):
