@@ -13,7 +13,7 @@ def setup_validators():
         # Load default mock web responses if mocking is enabled (uses same var as LLM mocking)
         if mock_web_responses is None and mock_llms():
             mock_web_responses = load_mock_web_responses()
-        
+
         if mock_llms():
             for _ in range(5):
                 plugin_config = {
@@ -21,11 +21,11 @@ def setup_validators():
                     "api_url": "https://api.openai.com",
                     "mock_response": mock_response if mock_response else {},
                 }
-                
+
                 # Add mock web responses if web mocking is enabled
                 if mock_web_responses:
                     plugin_config["mock_web_responses"] = mock_web_responses
-                
+
                 result = post_request_localhost(
                     payload(
                         "sim_createValidator",
@@ -68,18 +68,18 @@ def load_mock_web_responses():
     """Load mock web responses from JSON file"""
     if not mock_llms():
         return None
-    
+
     mock_file = os.path.join(
-        os.path.dirname(__file__), 
-        "..", 
-        "fixtures", 
-        "mock_responses", 
-        "web", 
-        "example_responses.json"
+        os.path.dirname(__file__),
+        "..",
+        "fixtures",
+        "mock_responses",
+        "web",
+        "example_responses.json",
     )
-    
+
     try:
-        with open(mock_file, 'r') as f:
+        with open(mock_file, "r") as f:
             return json.loads(f.read())
     except (FileNotFoundError, json.JSONDecodeError) as e:
         print(f"Warning: Could not load mock web responses: {e}")

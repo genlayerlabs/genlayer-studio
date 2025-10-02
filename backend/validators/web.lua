@@ -61,12 +61,12 @@ function Render(ctx, payload)
     -- Return mock response if web mocking is enabled
     if should_mock_web_requests(ctx) then
         local mock_response = get_mock_web_response_from_table(
-            ctx.host_data.mock_web_responses.render, 
+            ctx.host_data.mock_web_responses.render,
             payload.url
         )
         if mock_response then
             lib.log{level = "debug", message = "using mock web response for render", url = payload.url, response_type = type(mock_response)}
-            
+
             if payload.mode == "screenshot" then
                 return {
                     image = lib.rs.base64_decode(mock_response.image_base64 or "")
@@ -164,7 +164,7 @@ function Request(ctx, payload)
     -- Return mock response if web mocking is enabled
     if should_mock_web_requests(ctx) then
         local mock_response = get_mock_web_response_from_table(
-            ctx.host_data.mock_web_responses.request, 
+            ctx.host_data.mock_web_responses.request,
             payload.url
         )
         if mock_response then
