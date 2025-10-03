@@ -124,9 +124,22 @@ class TransactionParser:
             if to_raw is None:
                 to_address = None
             elif isinstance(to_raw, (bytes, bytearray, HexBytes)):
-                to_address = to_checksum_address(f"0x{HexBytes(to_raw).hex()}")
-            elif isinstance(to_raw, str) and len(to_raw) > 0:
-                to_address = to_checksum_address(to_raw)
+                # Treat empty bytes as burn (no recipient)
+                if len(to_raw) == 0:
+                    to_address = None
+                else:
+                    hex_to = HexBytes(to_raw).hex()
+                    to_address = (
+                        to_checksum_address(f"0x{hex_to}")
+                        if len(hex_to) == 40
+                        else None
+                    )
+            elif isinstance(to_raw, str):
+                # Accept only full hex addresses; '0x' or empty means burn
+                if to_raw.lower() == "0x" or len(to_raw) == 0:
+                    to_address = None
+                else:
+                    to_address = to_checksum_address(to_raw)
             else:
                 to_address = None
             nonce = signed_transaction_as_dict["nonce"]
