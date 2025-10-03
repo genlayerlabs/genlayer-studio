@@ -8,6 +8,7 @@ from backend.protocol_rpc.transactions_parser import (
     DecodedDeploymentData,
 )
 import re
+from typing import Optional, List, Any
 from rlp import encode
 import backend.node.genvm.origin.calldata as calldata
 
@@ -194,20 +195,19 @@ def test_finalized_transaction_with_decoded_return_value(tx_data, tx_result):
 
 
 def _build_eip1559_raw(
-    chain_id=1,
-    nonce=0,
-    max_priority_fee=1,
-    max_fee=2,
-    gas=21000,
-    to=b"",
-    value=0,
-    data=b"",
-    access_list=None,
-    v=1,
-    r=1,
-    s=1,
-):
-    import rlp
+    chain_id: int = 1,
+    nonce: int = 0,
+    max_priority_fee: int = 1,
+    max_fee: int = 2,
+    gas: int = 21000,
+    to: bytes = b"",
+    value: int = 0,
+    data: bytes = b"",
+    access_list: Optional[List] = None,
+    v: int = 1,
+    r: int = 1,
+    s: int = 1,
+) -> str:
 
     if access_list is None:
         access_list = []
@@ -226,23 +226,22 @@ def _build_eip1559_raw(
         r,
         s,
     ]
-    return "0x" + (b"\x02" + rlp.encode(tx_fields)).hex()
+    return "0x" + (b"\x02" + encode(tx_fields)).hex()
 
 
 def _build_eip2930_raw(
-    chain_id=1,
-    nonce=0,
-    gas_price=1,
-    gas=21000,
-    to=b"",
-    value=0,
-    data=b"",
-    access_list=None,
-    v=1,
-    r=1,
-    s=1,
-):
-    import rlp
+    chain_id: int = 1,
+    nonce: int = 0,
+    gas_price: int = 1,
+    gas: int = 21000,
+    to: bytes = b"",
+    value: int = 0,
+    data: bytes = b"",
+    access_list: Optional[List[Any]] = None,
+    v: int = 1,
+    r: int = 1,
+    s: int = 1,
+) -> str:
 
     if access_list is None:
         access_list = []
@@ -260,7 +259,7 @@ def _build_eip2930_raw(
         r,
         s,
     ]
-    return "0x" + (b"\x01" + rlp.encode(tx_fields)).hex()
+    return "0x" + (b"\x01" + encode(tx_fields)).hex()
 
 
 def test_decode_signed_transaction_typed_eip1559_minimal(
