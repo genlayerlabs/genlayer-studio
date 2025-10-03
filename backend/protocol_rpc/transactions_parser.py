@@ -69,27 +69,84 @@ class TransactionParser:
     ) -> DecodedRollupTransaction | None:
         try:
             transaction_bytes = HexBytes(raw_transaction)
-            signed_transaction = Transaction.from_bytes(transaction_bytes)
+            # Try decoding typed transactions first (supports EIP-2718/EIP-1559)
+            signed_transaction_as_dict = None
+            typed_decode_err = None
+            try:
+                if len(transaction_bytes) > 0 and transaction_bytes[0] in (1, 2):
+                    tx_type = transaction_bytes[0]
+                    decoded_items = rlp.decode(bytes(transaction_bytes[1:]))
+                    # EIP-2930 (0x01) and EIP-1559 (0x02) share first positions for common fields
+                    # Index mapping for 0x02 dynamic fee:
+                    # 0 chainId, 1 nonce, 2 maxPriorityFeePerGas, 3 maxFeePerGas, 4 gas,
+                    # 5 to, 6 value, 7 data, 8 accessList, 9 v, 10 r, 11 s
+
+                    def _to_int(value: bytes) -> int:
+                        return int.from_bytes(value, byteorder="big") if value else 0
+
+                    chain_id = _to_int(decoded_items[0])
+                    nonce = _to_int(decoded_items[1])
+                    gas = _to_int(decoded_items[4])
+                    to_field = decoded_items[5] if decoded_items[5] else None
+                    value = _to_int(decoded_items[6])
+                    data_field = decoded_items[7] if decoded_items[7] else b""
+
+                    signed_transaction_as_dict = {
+                        "type": tx_type,
+                        "chainId": chain_id,
+                        "nonce": nonce,
+                        "gas": gas,
+                        "to": to_field,
+                        "value": value,
+                        "data": data_field,
+                    }
+                else:
+                    raise ValueError("Not a typed transaction")
+            except Exception as e:
+                typed_decode_err = e
+                # Fallback to legacy transaction decoding
+                try:
+                    signed_transaction = Transaction.from_bytes(transaction_bytes)
+                    signed_transaction_as_dict = signed_transaction.as_dict()
+                except Exception as legacy_err:
+                    print(
+                        "Error decoding transaction (typed and legacy failed)",
+                        typed_decode_err,
+                        legacy_err,
+                    )
+                    raise
 
             # extracting sender address
             sender = Account.recover_transaction(raw_transaction)
-            signed_transaction_as_dict = signed_transaction.as_dict()
-            to_address = (
-                to_checksum_address(f"0x{signed_transaction_as_dict['to'].hex()}")
-                if signed_transaction_as_dict["to"]
-                else None
-            )
+
+            # Normalize `to` field which may be bytes/HexBytes or string depending on decoder
+            to_raw = signed_transaction_as_dict.get("to")
+            if to_raw is None:
+                to_address = None
+            elif isinstance(to_raw, (bytes, bytearray, HexBytes)):
+                to_address = to_checksum_address(f"0x{HexBytes(to_raw).hex()}")
+            elif isinstance(to_raw, str) and len(to_raw) > 0:
+                to_address = to_checksum_address(to_raw)
+            else:
+                to_address = None
             nonce = signed_transaction_as_dict["nonce"]
             value = signed_transaction_as_dict["value"]
-            data = (
-                signed_transaction_as_dict["data"].hex()
-                if signed_transaction_as_dict["data"]
-                else None
+            # Some decoders return `data`, others return `input`
+            input_raw = (
+                signed_transaction_as_dict.get("data")
+                if signed_transaction_as_dict.get("data") is not None
+                else signed_transaction_as_dict.get("input")
             )
-
+            if input_raw is None:
+                data = None
+            elif isinstance(input_raw, (bytes, bytearray, HexBytes)):
+                data = HexBytes(input_raw).hex()
+            elif isinstance(input_raw, str):
+                data = input_raw
+            else:
+                data = None
             decoded_data = None
             contract_abi = self._get_contract_abi()
-
             if data and contract_abi:
                 # Remove '0x' prefix if present
                 data = data.removeprefix("0x")
