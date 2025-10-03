@@ -5,7 +5,6 @@ ARG TARGETARCH
 
 
 ARG GENVM_TAG=v0.2.4
-ARG GENVM_POSTINSTALL_TIMEOUT=120
 
 ENV GENVM_TAG=$GENVM_TAG
 
@@ -67,16 +66,9 @@ RUN cd /genvm \
     && rm *.tar.xz \
     && ls -R . \
     && chown -R backend-user:backend-group /genvm \
-    # Ensure GenVM binaries are discoverable without running heavy precompile at build time
-    && echo "export PATH=/genvm/executor/$GENVM_TAG/bin:/genvm/bin:\$PATH" >> /etc/profile.d/genvm.sh \
-    && chmod 0644 /etc/profile.d/genvm.sh \
-    # Attempt a light post-install but avoid hanging on precompile; proceed on timeout
-    && su - backend-user -c "timeout ${GENVM_POSTINSTALL_TIMEOUT}s /genvm/executor/$GENVM_TAG/bin/post-install.py || echo 'post-install skipped or timed out; continuing'" \
+    && su - backend-user -c "/genvm/executor/$GENVM_TAG/bin/post-install.py" \
     && cd "$path" \
     && true
-
-# Keep PATH in non-login shells too
-ENV PATH="/genvm/executor/$GENVM_TAG/bin:/genvm/bin:${PATH}"
 
 COPY ../.env .
 COPY backend $path/backend
