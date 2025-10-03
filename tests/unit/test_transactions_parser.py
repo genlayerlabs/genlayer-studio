@@ -17,6 +17,8 @@ def transaction_parser():
     # Create a mock ConsensusService
     consensus_service = Mock()
     consensus_service.web3 = Mock()
+    # Ensure no ABI is returned so function decoding is skipped
+    consensus_service.load_contract = Mock(return_value=None)
     return TransactionParser(consensus_service)
 
 
@@ -189,3 +191,134 @@ def test_finalized_transaction_with_decoded_return_value(tx_data, tx_result):
     else:
         assert len(result) == 0
     assert result == tx_result
+
+
+def _build_eip1559_raw(
+    chain_id=1,
+    nonce=0,
+    max_priority_fee=1,
+    max_fee=2,
+    gas=21000,
+    to=b"",
+    value=0,
+    data=b"",
+    access_list=None,
+    v=1,
+    r=1,
+    s=1,
+):
+    import rlp
+
+    if access_list is None:
+        access_list = []
+
+    tx_fields = [
+        chain_id,
+        nonce,
+        max_priority_fee,
+        max_fee,
+        gas,
+        to,
+        value,
+        data,
+        access_list,
+        v,
+        r,
+        s,
+    ]
+    return "0x" + (b"\x02" + rlp.encode(tx_fields)).hex()
+
+
+def _build_eip2930_raw(
+    chain_id=1,
+    nonce=0,
+    gas_price=1,
+    gas=21000,
+    to=b"",
+    value=0,
+    data=b"",
+    access_list=None,
+    v=1,
+    r=1,
+    s=1,
+):
+    import rlp
+
+    if access_list is None:
+        access_list = []
+
+    tx_fields = [
+        chain_id,
+        nonce,
+        gas_price,
+        gas,
+        to,
+        value,
+        data,
+        access_list,
+        v,
+        r,
+        s,
+    ]
+    return "0x" + (b"\x01" + rlp.encode(tx_fields)).hex()
+
+
+def test_decode_signed_transaction_typed_eip1559_minimal(
+    transaction_parser, monkeypatch
+):
+    # Mock signature recovery to avoid needing a valid signature
+    monkeypatch.setattr(
+        "backend.protocol_rpc.transactions_parser.Account.recover_transaction",
+        lambda raw: "0x1111111111111111111111111111111111111111",
+    )
+
+    raw = _build_eip1559_raw(
+        chain_id=1,
+        nonce=5,
+        max_priority_fee=10,
+        max_fee=20,
+        gas=30000,
+        to=b"",  # contract creation / burn address
+        value=1000,
+        data=b"",
+    )
+
+    decoded = transaction_parser.decode_signed_transaction(raw)
+
+    assert decoded is not None
+    assert decoded.type == 2
+    assert decoded.from_address == "0x1111111111111111111111111111111111111111"
+    assert decoded.to_address is None
+    assert decoded.nonce == 5
+    assert decoded.value == 1000
+    # No ABI provided, so data should be None
+    assert decoded.data is None
+
+
+def test_decode_signed_transaction_typed_eip2930_minimal(
+    transaction_parser, monkeypatch
+):
+    monkeypatch.setattr(
+        "backend.protocol_rpc.transactions_parser.Account.recover_transaction",
+        lambda raw: "0x2222222222222222222222222222222222222222",
+    )
+
+    raw = _build_eip2930_raw(
+        chain_id=1,
+        nonce=7,
+        gas_price=9,
+        gas=25000,
+        to=b"",  # contract creation / burn address
+        value=2000,
+        data=b"",
+    )
+
+    decoded = transaction_parser.decode_signed_transaction(raw)
+
+    assert decoded is not None
+    assert decoded.type == 1
+    assert decoded.from_address == "0x2222222222222222222222222222222222222222"
+    assert decoded.to_address is None
+    assert decoded.nonce == 7
+    assert decoded.value == 2000
+    assert decoded.data is None

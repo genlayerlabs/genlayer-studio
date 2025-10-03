@@ -76,20 +76,30 @@ class TransactionParser:
                 if len(transaction_bytes) > 0 and transaction_bytes[0] in (1, 2):
                     tx_type = transaction_bytes[0]
                     decoded_items = rlp.decode(bytes(transaction_bytes[1:]))
-                    # EIP-2930 (0x01) and EIP-1559 (0x02) share first positions for common fields
-                    # Index mapping for 0x02 dynamic fee:
-                    # 0 chainId, 1 nonce, 2 maxPriorityFeePerGas, 3 maxFeePerGas, 4 gas,
-                    # 5 to, 6 value, 7 data, 8 accessList, 9 v, 10 r, 11 s
+                    # EIP-2930 (0x01) access list tx
+                    # Fields: 0 chainId, 1 nonce, 2 gasPrice, 3 gas, 4 to, 5 value, 6 data, 7 accessList, 8 v, 9 r, 10 s
+                    # EIP-1559 (0x02) dynamic fee tx
+                    # Fields: 0 chainId, 1 nonce, 2 maxPriorityFeePerGas, 3 maxFeePerGas, 4 gas, 5 to, 6 value, 7 data, 8 accessList, 9 v, 10 r, 11 s
 
                     def _to_int(value: bytes) -> int:
                         return int.from_bytes(value, byteorder="big") if value else 0
 
                     chain_id = _to_int(decoded_items[0])
                     nonce = _to_int(decoded_items[1])
-                    gas = _to_int(decoded_items[4])
-                    to_field = decoded_items[5] if decoded_items[5] else None
-                    value = _to_int(decoded_items[6])
-                    data_field = decoded_items[7] if decoded_items[7] else b""
+
+                    if tx_type == 2:
+                        gas = _to_int(decoded_items[4])
+                        to_field = decoded_items[5] if decoded_items[5] else None
+                        value = _to_int(decoded_items[6])
+                        data_field = decoded_items[7] if decoded_items[7] else b""
+                    elif tx_type == 1:
+                        gas = _to_int(decoded_items[3])
+                        to_field = decoded_items[4] if decoded_items[4] else None
+                        value = _to_int(decoded_items[5])
+                        data_field = decoded_items[6] if decoded_items[6] else b""
+                    else:
+                        # Unknown typed transaction; fallback to legacy path below
+                        raise ValueError("Unsupported typed transaction")
 
                     signed_transaction_as_dict = {
                         "type": tx_type,
