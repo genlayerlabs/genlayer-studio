@@ -406,6 +406,26 @@ class ConsensusAlgorithm:
                             self.msg_handler,
                         )
 
+                # Clear stale blocked heads before recovery
+                for address, blocked_tx in list(self.blocked_heads.items()):
+                    if blocked_tx:
+                        # Check if the blocked transaction is still valid
+                        tx_status = transactions_processor.get_transaction_by_hash(
+                            blocked_tx.hash
+                        )
+                        if not tx_status or tx_status["status"] not in [
+                            TransactionStatus.ACTIVATED.value,
+                            TransactionStatus.PROPOSING.value,
+                            TransactionStatus.COMMITTING.value,
+                            TransactionStatus.REVEALING.value,
+                            TransactionStatus.ACCEPTED.value,
+                        ]:
+                            # Transaction is no longer in a valid state - clear the stale entry
+                            print(
+                                f"Clearing stale blocked head {blocked_tx.hash} for address {address}"
+                            )
+                            self.blocked_heads[address] = None
+
                 # Check for stuck ACTIVATED transactions (safety mechanism)
                 # This recovers orphaned transactions that may have been lost due to errors
                 activated_transactions = (
@@ -415,6 +435,26 @@ class ConsensusAlgorithm:
                     address = tx_data["to_address"]
                     if not address:
                         continue
+
+                    # Check if this address has a blocked head
+                    blocked_tx = self.blocked_heads.get(address)
+                    if blocked_tx:
+                        # Check if the blocked head is stale
+                        if blocked_tx.hash == tx_data["hash"]:
+                            # This is the blocked transaction itself - skip recovery
+                            print(
+                                f"Skipping recovery for {tx_data['hash']} at address {address} - currently blocked waiting for predecessor"
+                            )
+                            continue
+                        else:
+                            # Different transaction is blocked for this address
+                            # The activated transaction shouldn't be recovered while another is blocked
+                            print(
+                                f"Skipping recovery for {tx_data['hash']} at address {address} - another transaction is blocked"
+                            )
+                            continue
+
+                    # Original recovery logic for non-blocked addresses
                     queue = self.pending_queues.get(address)
                     should_reset = queue is None or (
                         queue.empty()
@@ -2005,12 +2045,31 @@ class PendingState(TransactionState):
         else:
             # If there was no validator appeal or leader appeal
             if context.transaction.consensus_data:
-                # Transaction was rolled back, so we need to reuse the validators and leader
+                # Transaction was rolled back, try to reuse the validators and leader
                 context.involved_validators, _ = (
                     ConsensusAlgorithm.get_validators_from_consensus_data(
                         all_validators, context.transaction.consensus_data, True
                     )
                 )
+
+                # If original validators no longer exist, select new ones
+                if not context.involved_validators:
+                    context.msg_handler.send_message(
+                        LogEvent(
+                            "consensus_event",
+                            EventType.WARNING,
+                            EventScope.CONSENSUS,
+                            "Original validators not found for rolled-back transaction, selecting new validators",
+                            {"transaction_hash": context.transaction.hash},
+                            transaction_hash=context.transaction.hash,
+                        )
+                    )
+                    # Clear the old consensus data since validators changed
+                    context.transaction.consensus_data = None
+                    # Select new validators
+                    context.involved_validators = get_validators_for_transaction(
+                        all_validators, context.transaction.num_of_initial_validators
+                    )
 
             else:
                 # Transaction was never executed, get the default number of validators for the transaction
