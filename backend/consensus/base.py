@@ -325,6 +325,8 @@ class ConsensusAlgorithm:
         self.pending_queue_task_running: dict[str, bool] = (
             {}
         )  # Track running state for each pending queue
+        # Per-address blocked head to preserve order when predecessor isn't ready
+        self.blocked_heads: dict[str, Transaction | None] = {}
         self.validators_manager = validators_manager
 
     async def run_crawl_snapshot_loop(
@@ -401,6 +403,72 @@ class ConsensusAlgorithm:
                             transactions_processor,
                             transaction.hash,
                             TransactionStatus.ACTIVATED,
+                            self.msg_handler,
+                        )
+
+                # Clear stale blocked heads before recovery
+                for address, blocked_tx in list(self.blocked_heads.items()):
+                    if blocked_tx:
+                        # Check if the blocked transaction is still valid
+                        tx_status = transactions_processor.get_transaction_by_hash(
+                            blocked_tx.hash
+                        )
+                        if not tx_status or tx_status["status"] not in [
+                            TransactionStatus.ACTIVATED.value,
+                            TransactionStatus.PROPOSING.value,
+                            TransactionStatus.COMMITTING.value,
+                            TransactionStatus.REVEALING.value,
+                            TransactionStatus.ACCEPTED.value,
+                        ]:
+                            # Transaction is no longer in a valid state - clear the stale entry
+                            print(
+                                f"Clearing stale blocked head {blocked_tx.hash} for address {address}"
+                            )
+                            self.blocked_heads[address] = None
+
+                # Check for stuck ACTIVATED transactions (safety mechanism)
+                # This recovers orphaned transactions that may have been lost due to errors
+                activated_transactions = (
+                    transactions_processor.get_activated_transactions_older_than(300)
+                )
+                for tx_data in activated_transactions:
+                    address = tx_data["to_address"]
+                    if not address:
+                        continue
+
+                    # Check if this address has a blocked head
+                    blocked_tx = self.blocked_heads.get(address)
+                    if blocked_tx:
+                        # Check if the blocked head is stale
+                        if blocked_tx.hash == tx_data["hash"]:
+                            # This is the blocked transaction itself - skip recovery
+                            print(
+                                f"Skipping recovery for {tx_data['hash']} at address {address} - currently blocked waiting for predecessor"
+                            )
+                            continue
+                        else:
+                            # Different transaction is blocked for this address
+                            # The activated transaction shouldn't be recovered while another is blocked
+                            print(
+                                f"Skipping recovery for {tx_data['hash']} at address {address} - another transaction is blocked"
+                            )
+                            continue
+
+                    # Original recovery logic for non-blocked addresses
+                    queue = self.pending_queues.get(address)
+                    should_reset = queue is None or (
+                        queue.empty()
+                        and not self.pending_queue_task_running.get(address, False)
+                    )
+                    if should_reset:
+                        reason = "no queue present" if queue is None else "idle queue"
+                        print(
+                            f"Recovering stuck transaction {tx_data['hash']} for address {address} ({reason})"
+                        )
+                        ConsensusAlgorithm.dispatch_transaction_status_update(
+                            transactions_processor,
+                            tx_data["hash"],
+                            TransactionStatus.PENDING,
                             self.msg_handler,
                         )
 
@@ -484,21 +552,48 @@ class ConsensusAlgorithm:
                 async with asyncio.TaskGroup() as tg:
                     for queue_address, queue in self.pending_queues.items():
                         if (
-                            not queue.empty()
+                            (not queue.empty() or self.blocked_heads.get(queue_address))
                             and not self.pending_queue_stop_events.get(
                                 queue_address, asyncio.Event()
                             ).is_set()
+                            and not self.pending_queue_task_running.get(
+                                queue_address, False
+                            )
                         ):
                             # Sessions cannot be shared between coroutines; create a new session for each coroutine
                             # Reference: https://docs.sqlalchemy.org/en/20/orm/session_basics.html#is-the-session-thread-safe-is-asyncsession-safe-to-share-in-concurrent-tasks
-                            self.pending_queue_task_running[queue_address] = True
-                            transaction: Transaction = await queue.get()
 
                             async def exec_transaction_with_session_handling(
-                                transaction: Transaction,
+                                queue: asyncio.Queue,
                                 queue_address: str,
                             ):
+                                transaction: Transaction | None = None
                                 try:
+                                    # Mark as running before dequeuing to prevent race conditions
+                                    self.pending_queue_task_running[queue_address] = (
+                                        True
+                                    )
+
+                                    # Prefer blocked head if present; else attempt to dequeue
+                                    existing_blocked = self.blocked_heads.get(
+                                        queue_address
+                                    )
+                                    if existing_blocked is not None:
+                                        transaction = existing_blocked
+                                    else:
+                                        try:
+                                            transaction = await asyncio.wait_for(
+                                                queue.get(), timeout=0.1
+                                            )
+                                        except asyncio.TimeoutError:
+                                            # Queue became empty between check and task creation
+                                            print(
+                                                f"Queue became empty between check and task creation for address {queue_address}"
+                                            )
+                                            return
+                                        # Hold as blocked head until predecessor readiness confirmed
+                                        self.blocked_heads[queue_address] = transaction
+
                                     with self.get_session() as session:
                                         virtual_validators = []
                                         if (
@@ -558,6 +653,69 @@ class ConsensusAlgorithm:
                                         transactions_processor = (
                                             transactions_processor_factory(session)
                                         )
+
+                                        # Check predecessor readiness before executing
+                                        previous_transaction = transactions_processor.get_previous_transaction(
+                                            transaction.hash,
+                                        )
+                                        predecessor_ready = (
+                                            (previous_transaction is None)
+                                            or (
+                                                previous_transaction["appealed"]
+                                            )  # noqa: E711
+                                            or (
+                                                previous_transaction[
+                                                    "appeal_undetermined"
+                                                ]
+                                            )  # noqa: E711
+                                            or (
+                                                previous_transaction[
+                                                    "appeal_leader_timeout"
+                                                ]
+                                            )  # noqa: E711
+                                            or (
+                                                previous_transaction[
+                                                    "appeal_validators_timeout"
+                                                ]
+                                            )  # noqa: E711
+                                            or (
+                                                previous_transaction["status"]
+                                                in [
+                                                    TransactionStatus.ACCEPTED.value,
+                                                    TransactionStatus.UNDETERMINED.value,
+                                                    TransactionStatus.FINALIZED.value,
+                                                    TransactionStatus.LEADER_TIMEOUT.value,
+                                                    TransactionStatus.VALIDATORS_TIMEOUT.value,
+                                                ]
+                                            )
+                                        )
+
+                                        if not predecessor_ready:
+                                            # Keep as blocked head and skip execution this cycle
+                                            self.blocked_heads[queue_address] = (
+                                                transaction
+                                            )
+                                            try:
+                                                self.msg_handler.send_message(
+                                                    LogEvent(
+                                                        "consensus_event",
+                                                        EventType.INFO,
+                                                        EventScope.CONSENSUS,
+                                                        "Head blocked; predecessor not ready",
+                                                        {
+                                                            "hash": transaction.hash,
+                                                            "address": queue_address,
+                                                            "previous_status": previous_transaction[
+                                                                "status"
+                                                            ],
+                                                        },
+                                                        transaction_hash=transaction.hash,
+                                                    )
+                                                )
+                                            except Exception:
+                                                pass
+                                            return
+
                                         async with snapshot_func(
                                             *args
                                         ) as validators_snapshot:
@@ -576,6 +734,12 @@ class ConsensusAlgorithm:
                                                 validators_snapshot,
                                             )
                                         session.commit()
+                                        # Clear blocked head after successful execution
+                                        if (
+                                            self.blocked_heads.get(queue_address)
+                                            is transaction
+                                        ):
+                                            self.blocked_heads[queue_address] = None
                                 finally:
                                     self.pending_queue_task_running[queue_address] = (
                                         False
@@ -583,7 +747,7 @@ class ConsensusAlgorithm:
 
                             tg.create_task(
                                 exec_transaction_with_session_handling(
-                                    transaction, queue_address
+                                    queue, queue_address
                                 )
                             )
 
@@ -1881,12 +2045,31 @@ class PendingState(TransactionState):
         else:
             # If there was no validator appeal or leader appeal
             if context.transaction.consensus_data:
-                # Transaction was rolled back, so we need to reuse the validators and leader
+                # Transaction was rolled back, try to reuse the validators and leader
                 context.involved_validators, _ = (
                     ConsensusAlgorithm.get_validators_from_consensus_data(
                         all_validators, context.transaction.consensus_data, True
                     )
                 )
+
+                # If original validators no longer exist, select new ones
+                if not context.involved_validators:
+                    context.msg_handler.send_message(
+                        LogEvent(
+                            "consensus_event",
+                            EventType.WARNING,
+                            EventScope.CONSENSUS,
+                            "Original validators not found for rolled-back transaction, selecting new validators",
+                            {"transaction_hash": context.transaction.hash},
+                            transaction_hash=context.transaction.hash,
+                        )
+                    )
+                    # Clear the old consensus data since validators changed
+                    context.transaction.consensus_data = None
+                    # Select new validators
+                    context.involved_validators = get_validators_for_transaction(
+                        all_validators, context.transaction.num_of_initial_validators
+                    )
 
             else:
                 # Transaction was never executed, get the default number of validators for the transaction
