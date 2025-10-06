@@ -315,6 +315,13 @@ class TransactionsProcessorMock:
         self.commit(transaction)
         return appeal_validators_timeout
 
+    def get_activated_transactions_older_than(self, seconds: int) -> list[dict]:
+        """Get ACTIVATED transactions that have been stuck for more than the specified seconds.
+        Mock implementation that returns empty list to prevent interference with tests.
+        """
+        # Return empty list in tests to prevent the safety mechanism from interfering
+        return []
+
 
 class SnapshotMock:
     def __init__(self, transactions_processor: TransactionsProcessorMock):
