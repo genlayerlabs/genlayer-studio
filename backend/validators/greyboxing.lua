@@ -11,7 +11,7 @@ llm.exec_prompt_template_transform = function(args)
 	}
 
 	my_data = my_data[args.template]
-	local my_template = M.rs.templates[my_data.template_id]
+	local my_template = lib.rs.templates[my_data.template_id]
 
 	args.template = nil
 	local vars = args
