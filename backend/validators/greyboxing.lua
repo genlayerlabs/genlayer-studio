@@ -1,6 +1,44 @@
 local lib = require("lib-genvm")
 local llm = require("lib-llm")
 
+llm.exec_prompt_template_transform = function(args)
+	lib.log{level = "debug", message = "exec_prompt_template_transform", args = args}
+
+	my_data = {
+		EqComparative = { template_id = "eq_comparative", format = "bool" },
+		EqNonComparativeValidator = { template_id = "eq_non_comparative_validator", format = "bool" },
+		EqNonComparativeLeader = { template_id = "eq_non_comparative_leader", format = "text" },
+	}
+
+	my_data = my_data[args.template]
+	local my_template = M.rs.templates[my_data.template_id]
+
+	args.template = nil
+	local vars = args
+
+	local as_user_text = my_template.user
+	for key, val in pairs(vars) do
+		local val_escaped = string.gsub(val, "%%", "%%%%")
+		as_user_text = string.gsub(as_user_text, "#{" .. key .. "}", val_escaped)
+	end
+
+	local format = my_data.format
+
+	local mapped_prompt = {
+		system_message = my_template.system,
+		user_message = as_user_text,
+		temperature = 0.7,
+		images = {},
+		max_tokens = 1000,
+		use_max_completion_tokens = false,
+	}
+
+	return {
+		prompt = mapped_prompt,
+		format = format
+	}
+end
+
 -- check https://github.com/genlayerlabs/genvm/blob/v0.1.2/executor/modules/implementation/scripting/llm-default.lua
 
 -- Used to look up mock responses for testing
@@ -189,8 +227,6 @@ function ExecPromptTemplate(ctx, args, remaining_gen)
 	---@cast args LLMExecPromptTemplatePayload
 
 	local template = args.template -- workaround by kp2pml30 (Kira) GVM-86
-	print("ExecPromptTemplate", args.template)
-	print("args", args)
 	local mapped = llm.exec_prompt_template_transform(args)
 	args.template = template
 
