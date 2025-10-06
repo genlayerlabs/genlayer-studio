@@ -189,6 +189,8 @@ function ExecPromptTemplate(ctx, args, remaining_gen)
 	---@cast args LLMExecPromptTemplatePayload
 
 	local template = args.template -- workaround by kp2pml30 (Kira) GVM-86
+	print("ExecPromptTemplate", args.template)
+	print("args", args)
 	local mapped = llm.exec_prompt_template_transform(args)
 	args.template = template
 
