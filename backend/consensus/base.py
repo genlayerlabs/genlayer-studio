@@ -887,7 +887,7 @@ class ConsensusAlgorithm:
         Returns:
             True if the transaction is stuck, False otherwise
         """
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
 
         tx_data = transactions_processor.get_transaction_by_hash(transaction_hash)
         if not tx_data:
@@ -899,7 +899,14 @@ class ConsensusAlgorithm:
 
         # Check if it's been stuck for too long
         created_at = datetime.fromisoformat(tx_data["created_at"])
-        cutoff_time = datetime.now() - timedelta(seconds=stuck_threshold_seconds)
+        # Use timezone-aware datetime for comparison
+        cutoff_time = datetime.now(timezone.utc) - timedelta(
+            seconds=stuck_threshold_seconds
+        )
+
+        # Convert created_at to UTC if it has a different timezone
+        if created_at.tzinfo != timezone.utc:
+            created_at = created_at.astimezone(timezone.utc)
 
         return created_at < cutoff_time
 
