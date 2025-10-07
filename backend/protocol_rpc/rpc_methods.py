@@ -379,6 +379,30 @@ def eth_get_transaction_by_hash(
     )
 
 
+@rpc.method("gen_getStudioTransactionByHash")
+def get_studio_transaction_by_hash(
+    transaction_hash: str,
+    full: bool = True,
+    transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
+) -> dict | None:
+    return impl.get_studio_transaction_by_hash(
+        transactions_processor=transactions_processor,
+        transaction_hash=transaction_hash,
+        full=full,
+    )
+
+
+@rpc.method("gen_getTransactionStatus")
+def get_transaction_status(
+    transaction_hash: str,
+    transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
+) -> str | None:
+    return impl.get_transaction_status(
+        transactions_processor=transactions_processor,
+        transaction_hash=transaction_hash,
+    )
+
+
 @rpc.method("eth_call")
 async def eth_call(
     params: dict,
