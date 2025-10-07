@@ -59,6 +59,8 @@ services:
       - RPCDEBUGPORT=${RPCDEBUGPORT}
       - WEBDRIVERHOST=${WEBDRIVERHOST}
       - WEBDRIVERPORT=${WEBDRIVERPORT}
+      - GENVMROOT=/genvm
+      - GENVM_TAG=v0.2.4
     ports:
       - "${RPCPORT}:${RPCPORT}"
       - "${RPCDEBUGPORT}:${RPCDEBUGPORT}"
