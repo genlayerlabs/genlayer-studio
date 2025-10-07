@@ -72,6 +72,9 @@ type NodeFactory = Callable[
     Node,
 ]
 
+EXECUTING_TRANSACTION_TIMEOUT = 600
+ACTIVATED_TRANSACTION_TIMEOUT = 1800
+
 
 def node_factory(
     validator: dict,
@@ -326,7 +329,8 @@ class ConsensusAlgorithm:
             {}
         )  # Track running state for each pending queue
         # Per-address blocked head to preserve order when predecessor isn't ready
-        self.blocked_heads: dict[str, Transaction | None] = {}
+        # Structure: {address: {"transaction": Transaction, "blocked_at": timestamp}}
+        self.blocked_heads: dict[str, dict | None] = {}
         self.validators_manager = validators_manager
 
     async def run_crawl_snapshot_loop(
@@ -407,8 +411,19 @@ class ConsensusAlgorithm:
                         )
 
                 # Clear stale blocked heads before recovery
-                for address, blocked_tx in list(self.blocked_heads.items()):
-                    if blocked_tx:
+                for address, blocked_data in list(self.blocked_heads.items()):
+                    if blocked_data:
+                        blocked_tx = blocked_data["transaction"]
+                        blocked_at = blocked_data["blocked_at"]
+
+                        # Check if the blocked transaction has timed out (blocked for > 600 seconds)
+                        if time.time() - blocked_at > EXECUTING_TRANSACTION_TIMEOUT:
+                            print(
+                                f"Clearing timed-out blocked head {blocked_tx.hash} for address {address} (blocked for {time.time() - blocked_at:.0f}s)"
+                            )
+                            self.blocked_heads[address] = None
+                            continue
+
                         # Check if the blocked transaction is still valid
                         tx_status = transactions_processor.get_transaction_by_hash(
                             blocked_tx.hash
@@ -429,7 +444,9 @@ class ConsensusAlgorithm:
                 # Check for stuck ACTIVATED transactions (safety mechanism)
                 # This recovers orphaned transactions that may have been lost due to errors
                 activated_transactions = (
-                    transactions_processor.get_activated_transactions_older_than(300)
+                    transactions_processor.get_activated_transactions_older_than(
+                        ACTIVATED_TRANSACTION_TIMEOUT
+                    )
                 )
                 for tx_data in activated_transactions:
                     address = tx_data["to_address"]
@@ -437,8 +454,9 @@ class ConsensusAlgorithm:
                         continue
 
                     # Check if this address has a blocked head
-                    blocked_tx = self.blocked_heads.get(address)
-                    if blocked_tx:
+                    blocked_data = self.blocked_heads.get(address)
+                    if blocked_data:
+                        blocked_tx = blocked_data["transaction"]
                         # Check if the blocked head is stale
                         if blocked_tx.hash == tx_data["hash"]:
                             # This is the blocked transaction itself - skip recovery
@@ -447,12 +465,36 @@ class ConsensusAlgorithm:
                             )
                             continue
                         else:
-                            # Different transaction is blocked for this address
-                            # The activated transaction shouldn't be recovered while another is blocked
-                            print(
-                                f"Skipping recovery for {tx_data['hash']} at address {address} - another transaction is blocked"
+                            # Check if this activated transaction is the predecessor of the blocked transaction
+                            previous_tx = (
+                                transactions_processor.get_previous_transaction(
+                                    blocked_tx.hash
+                                )
                             )
-                            continue
+                            if previous_tx and previous_tx["hash"] == tx_data["hash"]:
+                                # This is the predecessor of the blocked transaction
+                                # It's been stuck for >300s, so we need to clear the blocked head to allow recovery
+                                print(
+                                    f"Clearing blocked head {blocked_tx.hash} to allow recovery of stuck predecessor {tx_data['hash']}"
+                                )
+                                self.blocked_heads[address] = None
+                                # Now recover the stuck predecessor
+                                print(
+                                    f"Recovering stuck predecessor transaction {tx_data['hash']} for address {address}"
+                                )
+                                ConsensusAlgorithm.dispatch_transaction_status_update(
+                                    transactions_processor,
+                                    tx_data["hash"],
+                                    TransactionStatus.PENDING,
+                                    self.msg_handler,
+                                )
+                                continue
+                            else:
+                                # Different transaction is blocked for this address, skip recovery
+                                print(
+                                    f"Skipping recovery for {tx_data['hash']} at address {address} - another transaction is blocked"
+                                )
+                                continue
 
                     # Original recovery logic for non-blocked addresses
                     queue = self.pending_queues.get(address)
@@ -575,11 +617,13 @@ class ConsensusAlgorithm:
                                     )
 
                                     # Prefer blocked head if present; else attempt to dequeue
-                                    existing_blocked = self.blocked_heads.get(
+                                    existing_blocked_data = self.blocked_heads.get(
                                         queue_address
                                     )
-                                    if existing_blocked is not None:
-                                        transaction = existing_blocked
+                                    if existing_blocked_data is not None:
+                                        transaction = existing_blocked_data[
+                                            "transaction"
+                                        ]
                                     else:
                                         try:
                                             transaction = await asyncio.wait_for(
@@ -592,7 +636,10 @@ class ConsensusAlgorithm:
                                             )
                                             return
                                         # Hold as blocked head until predecessor readiness confirmed
-                                        self.blocked_heads[queue_address] = transaction
+                                        self.blocked_heads[queue_address] = {
+                                            "transaction": transaction,
+                                            "blocked_at": time.time(),
+                                        }
 
                                     with self.get_session() as session:
                                         virtual_validators = []
@@ -691,10 +738,48 @@ class ConsensusAlgorithm:
                                         )
 
                                         if not predecessor_ready:
+                                            # Check if the predecessor is stuck before blocking
+                                            if (
+                                                previous_transaction
+                                                and self.is_transaction_stuck(
+                                                    previous_transaction["hash"],
+                                                    transactions_processor,
+                                                    ACTIVATED_TRANSACTION_TIMEOUT,
+                                                )
+                                            ):
+                                                # Predecessor is stuck - recover it instead of blocking
+                                                print(
+                                                    f"Predecessor {previous_transaction['hash']} is stuck, recovering it instead of blocking {transaction.hash}"
+                                                )
+                                                ConsensusAlgorithm.dispatch_transaction_status_update(
+                                                    transactions_processor,
+                                                    previous_transaction["hash"],
+                                                    TransactionStatus.PENDING,
+                                                    self.msg_handler,
+                                                )
+                                                # Also reset the current transaction
+                                                ConsensusAlgorithm.dispatch_transaction_status_update(
+                                                    transactions_processor,
+                                                    transaction.hash,
+                                                    TransactionStatus.PENDING,
+                                                    self.msg_handler,
+                                                )
+                                                return
+
                                             # Keep as blocked head and skip execution this cycle
-                                            self.blocked_heads[queue_address] = (
-                                                transaction
+                                            # Check if it's already blocked to preserve original timestamp
+                                            existing_blocked = self.blocked_heads.get(
+                                                queue_address
                                             )
+                                            if (
+                                                not existing_blocked
+                                                or existing_blocked["transaction"].hash
+                                                != transaction.hash
+                                            ):
+                                                self.blocked_heads[queue_address] = {
+                                                    "transaction": transaction,
+                                                    "blocked_at": time.time(),
+                                                }
                                             try:
                                                 self.msg_handler.send_message(
                                                     LogEvent(
@@ -735,8 +820,12 @@ class ConsensusAlgorithm:
                                             )
                                         session.commit()
                                         # Clear blocked head after successful execution
+                                        blocked_data = self.blocked_heads.get(
+                                            queue_address
+                                        )
                                         if (
-                                            self.blocked_heads.get(queue_address)
+                                            blocked_data
+                                            and blocked_data["transaction"]
                                             is transaction
                                         ):
                                             self.blocked_heads[queue_address] = None
@@ -780,6 +869,39 @@ class ConsensusAlgorithm:
         """
         if address in self.pending_queue_stop_events:
             self.pending_queue_stop_events[address].clear()
+
+    def is_transaction_stuck(
+        self,
+        transaction_hash: str,
+        transactions_processor: TransactionsProcessor,
+        stuck_threshold_seconds: int = ACTIVATED_TRANSACTION_TIMEOUT,
+    ) -> bool:
+        """
+        Check if a transaction has been stuck in ACTIVATED state for too long.
+
+        Args:
+            transaction_hash: Hash of the transaction to check
+            transactions_processor: Processor to query transaction status
+            stuck_threshold_seconds: Number of seconds to consider a transaction stuck
+
+        Returns:
+            True if the transaction is stuck, False otherwise
+        """
+        from datetime import datetime, timedelta
+
+        tx_data = transactions_processor.get_transaction_by_hash(transaction_hash)
+        if not tx_data:
+            return False
+
+        # Check if transaction is in ACTIVATED state
+        if tx_data["status"] != TransactionStatus.ACTIVATED.value:
+            return False
+
+        # Check if it's been stuck for too long
+        created_at = datetime.fromisoformat(tx_data["created_at"])
+        cutoff_time = datetime.now() - timedelta(seconds=stuck_threshold_seconds)
+
+        return created_at < cutoff_time
 
     async def exec_transaction(
         self,
