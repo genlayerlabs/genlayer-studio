@@ -3,6 +3,7 @@ from datetime import datetime
 from enum import Enum
 import rlp
 import re
+import random
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, desc, and_, JSON, type_coerce, text
 from sqlalchemy.orm.attributes import flag_modified
@@ -187,31 +188,27 @@ class TransactionsProcessor:
         type: int,
         nonce: int,
     ) -> str:
-        from_address_bytes = (
-            to_bytes(hexstr=from_address) if is_address(from_address) else None
+        """Generate a fallback transaction hash similar to ConsensusMain._generateTx."""
+
+        # Prepare recipient bytes as the solidity address encoding (20 bytes)
+        recipient_bytes = (
+            to_bytes(hexstr=to_address) if is_address(to_address) else b"\x00" * 20
         )
-        to_address_bytes = (
-            to_bytes(hexstr=to_address) if is_address(to_address) else None
+
+        # Use current timestamp to mimic block.timestamp
+        timestamp = int(time.time())
+        timestamp_bytes = timestamp.to_bytes(32, byteorder="big", signed=False)
+
+        # Derive a deterministic pseudo-random seed from the recipient address
+        seed_source = f"{to_address or '0x0'}:{timestamp}"
+        rng = random.Random(seed_source)
+        random_hex = "".join(rng.choice("0123456789abcdef") for _ in range(64))
+        random_seed_bytes = bytes.fromhex(random_hex)
+
+        tx_hash = (
+            "0x" + keccak(recipient_bytes + timestamp_bytes + random_seed_bytes).hex()
         )
-
-        data_bytes = to_bytes(text=TransactionsProcessor._transaction_data_to_str(data))
-
-        tx_elements = [
-            from_address_bytes,
-            to_address_bytes,
-            to_bytes(hexstr=hex(int(value))),
-            data_bytes,
-            to_bytes(hexstr=hex(type)),
-            to_bytes(hexstr=hex(nonce)),
-            to_bytes(hexstr=hex(0)),  # gas price (placeholder)
-            to_bytes(hexstr=hex(0)),  # gas limit (placeholder)
-        ]
-
-        # Filter out None values
-        tx_elements = [elem for elem in tx_elements if elem is not None]
-        rlp_encoded = rlp.encode(tx_elements)
-        hash = "0x" + keccak(rlp_encoded).hex()
-        return hash
+        return tx_hash
 
     def insert_transaction(
         self,
@@ -286,6 +283,7 @@ class TransactionsProcessor:
         self.session.add(new_transaction)
 
         self.session.flush()  # So that `created_at` gets set
+        self.session.commit()  # Persist the transaction to the database
 
         return new_transaction.hash
 
@@ -308,7 +306,11 @@ class TransactionsProcessor:
                 len(transaction_data["consensus_history"]["consensus_results"]) - 1
             )
             last_round = transaction_data["consensus_history"]["consensus_results"][-1]
-            if "leader_result" in last_round and len(last_round["leader_result"]) > 1:
+            if (
+                "leader_result" in last_round
+                and last_round["leader_result"] is not None
+                and len(last_round["leader_result"]) > 1
+            ):
                 leader = last_round["leader_result"][1]
                 validator_votes_name.append(leader["vote"].upper())
                 vote_number = int(Vote.from_string(leader["vote"]))
@@ -547,7 +549,9 @@ class TransactionsProcessor:
         transaction_data["result_name"] = consensus_result.value
         return transaction_data
 
-    def get_transaction_by_hash(self, transaction_hash: str) -> dict | None:
+    def get_transaction_by_hash(
+        self, transaction_hash: str, sim_config: dict | None = None
+    ) -> dict | None:
         transaction = (
             self.session.query(Transactions)
             .filter_by(hash=transaction_hash)
@@ -558,6 +562,28 @@ class TransactionsProcessor:
             return None
 
         transaction_data = self._parse_transaction_data(transaction)
+
+        # Handle contract_state based on sim_config
+        include_contract_state = sim_config and sim_config.get(
+            "include_contract_state", False
+        )
+
+        # Remove contract_state from consensus_data by default (unless explicitly requested)
+        if (
+            transaction_data.get("consensus_data")
+            and "leader_receipt" in transaction_data["consensus_data"]
+        ):
+            leader_receipt = transaction_data["consensus_data"]["leader_receipt"]
+
+            if isinstance(leader_receipt, dict):
+                if not include_contract_state and "contract_state" in leader_receipt:
+                    del leader_receipt["contract_state"]
+
+            elif isinstance(leader_receipt, list):
+                for receipt in leader_receipt:
+                    if isinstance(receipt, dict):
+                        if not include_contract_state and "contract_state" in receipt:
+                            del receipt["contract_state"]
 
         # Process for testnet
         transaction_data = self._prepare_basic_transaction_data(transaction_data)
@@ -614,6 +640,34 @@ class TransactionsProcessor:
                 transaction_data.pop(key, None)
 
         return transaction_data
+
+    def get_activated_transactions_older_than(self, seconds: int) -> list[dict]:
+        """
+        Get ACTIVATED transactions that have been stuck for more than the specified seconds.
+
+        Args:
+            seconds: Number of seconds a transaction must be ACTIVATED to be considered stuck
+
+        Returns:
+            List of transaction data dictionaries for stuck transactions
+        """
+        from datetime import datetime, timedelta
+
+        cutoff_time = datetime.now() - timedelta(seconds=seconds)
+        stuck_transactions = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.status == TransactionStatus.ACTIVATED,
+                Transactions.created_at < cutoff_time,
+            )
+            .order_by(Transactions.created_at)
+            .all()
+        )
+
+        return [
+            self._parse_transaction_data(transaction)
+            for transaction in stuck_transactions
+        ]
 
     def update_transaction_status(
         self,

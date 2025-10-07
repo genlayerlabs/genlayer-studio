@@ -2,10 +2,10 @@
 import random
 import json
 import eth_utils
+import logging
 from functools import partial, wraps
 from typing import Any
-from flask_jsonrpc import JSONRPC
-from flask_jsonrpc.exceptions import JSONRPCError
+from backend.protocol_rpc.exceptions import JSONRPCError
 from sqlalchemy import Table
 from sqlalchemy.orm import Session
 import backend.validators as validators
@@ -13,7 +13,7 @@ import backend.validators as validators
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.database_handler.llm_providers import LLMProviderRegistry
 from backend.rollup.consensus_service import ConsensusService
-from backend.database_handler.models import Base
+from backend.database_handler.models import Base, TransactionStatus
 from backend.domain.types import LLMProvider, Validator, TransactionType, SimConfig
 from backend.node.create_nodes.providers import (
     get_default_provider_for,
@@ -33,8 +33,6 @@ from backend.node.create_nodes.create_nodes import (
     random_validator_config,
 )
 
-from backend.protocol_rpc.endpoint_generator import generate_rpc_endpoint
-
 from backend.protocol_rpc.transactions_parser import TransactionParser
 from backend.errors.errors import InvalidAddressError, InvalidTransactionError
 
@@ -42,12 +40,14 @@ from backend.database_handler.transactions_processor import (
     TransactionAddressFilter,
     TransactionsProcessor,
 )
+
+
+logger = logging.getLogger(__name__)
 from backend.node.base import Node, SIMULATOR_CHAIN_ID
 from backend.node.types import ExecutionMode, ExecutionResultStatus
 from backend.consensus.base import ConsensusAlgorithm
 from backend.protocol_rpc.call_interceptor import handle_consensus_data_call
 
-from flask_jsonrpc.exceptions import JSONRPCError
 import base64
 import os
 from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope
@@ -87,11 +87,14 @@ def clear_db_tables(session: Session, tables: list) -> None:
 
 
 def fund_account(
-    accounts_manager: AccountsManager,
-    transactions_processor: TransactionsProcessor,
+    session: Session,
     account_address: str,
     amount: int,
 ) -> str:
+    """Fund an account within a request-scoped database session."""
+    accounts_manager = AccountsManager(session)
+    transactions_processor = TransactionsProcessor(session)
+
     if not accounts_manager.is_valid_address(account_address):
         raise InvalidAddressError(account_address)
 
@@ -146,7 +149,10 @@ async def get_providers_and_models(
 
 
 @check_forbidden_method_in_hosted_studio
-def add_provider(llm_provider_registry: LLMProviderRegistry, params: dict) -> int:
+def add_provider(session: Session, params: dict) -> int:
+    """Add a provider using the request-scoped session."""
+    llm_provider_registry = LLMProviderRegistry(session)
+
     provider = LLMProvider(
         provider=params["provider"],
         model=params["model"],
@@ -161,9 +167,10 @@ def add_provider(llm_provider_registry: LLMProviderRegistry, params: dict) -> in
 
 
 @check_forbidden_method_in_hosted_studio
-def update_provider(
-    llm_provider_registry: LLMProviderRegistry, id: int, params: dict
-) -> None:
+def update_provider(session: Session, id: int, params: dict) -> None:
+    """Update a provider using the request-scoped session."""
+    llm_provider_registry = LLMProviderRegistry(session)
+
     provider = LLMProvider(
         provider=params["provider"],
         model=params["model"],
@@ -177,13 +184,14 @@ def update_provider(
 
 
 @check_forbidden_method_in_hosted_studio
-def delete_provider(llm_provider_registry: LLMProviderRegistry, id: int) -> None:
+def delete_provider(session: Session, id: int) -> None:
+    """Delete a provider using the request-scoped session."""
+    llm_provider_registry = LLMProviderRegistry(session)
     llm_provider_registry.delete(id)
 
 
 async def create_validator(
-    validators_registry: ModifiableValidatorsRegistry,
-    accounts_manager: AccountsManager,
+    session: Session,
     stake: int,
     provider: str,
     model: str,
@@ -206,6 +214,9 @@ async def create_validator(
         )
         validate_provider(llm_provider)
 
+    accounts_manager = AccountsManager(session)
+    validators_registry = ModifiableValidatorsRegistry(session)
+
     account = accounts_manager.create_new_account()
 
     return await validators_registry.create_validator(
@@ -220,17 +231,13 @@ async def create_validator(
 
 @check_forbidden_method_in_hosted_studio
 async def create_random_validator(
-    validators_registry: ModifiableValidatorsRegistry,
-    accounts_manager: AccountsManager,
-    llm_provider_registry: LLMProviderRegistry,
+    session: Session,
     validators_manager: validators.Manager,
     stake: int,
 ) -> dict:
     return (
         await create_random_validators(
-            validators_registry,
-            accounts_manager,
-            llm_provider_registry,
+            session,
             validators_manager,
             1,
             stake,
@@ -241,9 +248,7 @@ async def create_random_validator(
 
 @check_forbidden_method_in_hosted_studio
 async def create_random_validators(
-    validators_registry: ModifiableValidatorsRegistry,
-    accounts_manager: AccountsManager,
-    llm_provider_registry: LLMProviderRegistry,
+    session: Session,
     validators_manager: validators.Manager,
     count: int,
     min_stake: int,
@@ -251,15 +256,19 @@ async def create_random_validators(
     limit_providers: list[str] = None,
     limit_models: list[str] = None,
 ) -> list[dict]:
+    accounts_manager = AccountsManager(session)
+    validators_registry = ModifiableValidatorsRegistry(session)
+    llm_provider_registry = LLMProviderRegistry(session)
+
     limit_providers = limit_providers or []
     limit_models = limit_models or []
 
     details = await random_validator_config(
         llm_provider_registry.get_all,
         partial(check_provider_is_available, validators_manager),
-        limit_providers=set(limit_providers),
-        limit_models=set(limit_models),
-        amount=count,
+        set(limit_providers),
+        set(limit_models),
+        count,
     )
 
     response = []
@@ -282,8 +291,7 @@ async def create_random_validators(
 
 @check_forbidden_method_in_hosted_studio
 async def update_validator(
-    validators_registry: ModifiableValidatorsRegistry,
-    accounts_manager: AccountsManager,
+    session: Session,
     validator_address: str,
     stake: int,
     provider: str,
@@ -313,6 +321,8 @@ async def update_validator(
         )
         validate_provider(llm_provider)
 
+    validators_registry = ModifiableValidatorsRegistry(session)
+
     validator = Validator(
         address=validator_address,
         stake=stake,
@@ -323,13 +333,14 @@ async def update_validator(
 
 @check_forbidden_method_in_hosted_studio
 async def delete_validator(
-    validators_registry: ModifiableValidatorsRegistry,
-    accounts_manager: AccountsManager,
+    session: Session,
     validator_address: str,
 ) -> str:
     # Remove validation while adding migration to update the db address
     # if not accounts_manager.is_valid_address(validator_address):
     #     raise InvalidAddressError(validator_address)
+
+    validators_registry = ModifiableValidatorsRegistry(session)
 
     await validators_registry.delete_validator(validator_address)
     return validator_address
@@ -337,8 +348,9 @@ async def delete_validator(
 
 @check_forbidden_method_in_hosted_studio
 async def delete_all_validators(
-    validators_registry: ModifiableValidatorsRegistry,
+    session: Session,
 ) -> list:
+    validators_registry = ModifiableValidatorsRegistry(session)
     await validators_registry.delete_all_validators()
     return validators_registry.get_all_validators()
 
@@ -728,9 +740,11 @@ def get_transaction_count(
 
 
 def get_transaction_by_hash(
-    transactions_processor: TransactionsProcessor, transaction_hash: str
+    transactions_processor: TransactionsProcessor,
+    transaction_hash: str,
+    sim_config: dict | None = None,
 ) -> dict | None:
-    return transactions_processor.get_transaction_by_hash(transaction_hash)
+    return transactions_processor.get_transaction_by_hash(transaction_hash, sim_config)
 
 
 def get_studio_transaction_by_hash(
@@ -815,21 +829,22 @@ async def eth_call(
 
 
 def send_raw_transaction(
-    transactions_processor: TransactionsProcessor,
+    session: Session,
     msg_handler: MessageHandler,
-    accounts_manager: AccountsManager,
     transactions_parser: TransactionParser,
     consensus_service: ConsensusService,
     signed_rollup_transaction: str,
     sim_config: dict | None = None,
 ) -> str:
+    """Persist a raw transaction using a request-scoped session."""
+    accounts_manager = AccountsManager(session)
+    transactions_processor = TransactionsProcessor(session)
+
     # Decode transaction
     decoded_rollup_transaction = transactions_parser.decode_signed_transaction(
         signed_rollup_transaction
     )
-    # Debug logging - only in DEBUG mode
-    if os.environ.get("LOG_LEVEL", "INFO").upper() == "DEBUG":
-        print("DECODED ROLLUP TRANSACTION", decoded_rollup_transaction)
+    logger.debug("Decoded rollup transaction %s", decoded_rollup_transaction)
 
     # Validate transaction
     if decoded_rollup_transaction is None:
@@ -887,10 +902,18 @@ def send_raw_transaction(
                 consensus_service.web3.is_connected()
                 and rollup_transaction_details is None
             ):
-                raise JSONRPCError(
-                    code=-32000,
-                    message="Failed to add transaction to consensus layer",
-                    data={},
+                # raise JSONRPCError(
+                #     code=-32000,
+                #     message="Failed to add transaction to consensus layer",
+                #     data={},
+                # )
+                logger.warning(
+                    "Failed to add transaction to consensus layer",
+                    extra={
+                        "from_address": from_address,
+                        "transaction_type": genlayer_transaction.type.name,
+                        "leader_only": leader_only,
+                    },
                 )
 
         if genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT:
@@ -967,10 +990,16 @@ def get_transactions_for_address(
 
 @check_forbidden_method_in_hosted_studio
 def set_finality_window_time(consensus: ConsensusAlgorithm, time: int) -> None:
+    if consensus is None:
+        # Silently ignore when consensus is not initialized
+        return
     consensus.set_finality_window_time(time)
 
 
 def get_finality_window_time(consensus: ConsensusAlgorithm) -> int:
+    if consensus is None:
+        # Return default finality window time when consensus is not initialized
+        return os.environ.get("VITE_FINALITY_WINDOW", 1800)  # Default to 60 seconds
     return consensus.finality_window_time
 
 
@@ -1069,8 +1098,8 @@ def get_transaction_receipt(
         "blockNumber": hex(transaction.get("block_number", 0)),
         "from": from_addr,
         "to": to_addr,
-        "cumulativeGasUsed": hex(transaction.get("gas_used", 21000)),
-        "gasUsed": hex(transaction.get("gas_used", 21000)),
+        "cumulativeGasUsed": hex(transaction.get("gas_used", 8000000)),
+        "gasUsed": hex(transaction.get("gas_used", 8000000)),
         "contractAddress": (
             transaction.get("contract_address")
             if transaction.get("contract_address")
@@ -1086,17 +1115,17 @@ def get_transaction_receipt(
 
 def get_block_by_hash(
     transactions_processor: TransactionsProcessor,
-    transaction_hash: str,
+    block_hash: str,
     full_tx: bool = False,
 ) -> dict | None:
 
-    transaction = transactions_processor.get_transaction_by_hash(transaction_hash)
+    transaction = transactions_processor.get_transaction_by_hash(block_hash)
 
     if not transaction:
         return None
 
     block_details = {
-        "hash": transaction_hash,
+        "hash": block_hash,
         "parentHash": "0x" + "00" * 32,
         "number": hex(transaction.get("block_number", 0)),
         "timestamp": hex(transaction.get("timestamp", 0)),
@@ -1110,7 +1139,7 @@ def get_block_by_hash(
         "size": "0x0",
         "extraData": "0x",
         "gasLimit": hex(transaction.get("gas_limit", 8000000)),
-        "gasUsed": hex(transaction.get("gas_used", 21000)),
+        "gasUsed": hex(transaction.get("gas_used", 8000000)),
         "logsBloom": "0x" + "00" * 256,
         "transactions": [],
     }
@@ -1118,7 +1147,7 @@ def get_block_by_hash(
     if full_tx:
         block_details["transactions"].append(transaction)
     else:
-        block_details["transactions"].append(transaction_hash)
+        block_details["transactions"].append(block_hash)
 
     return block_details
 
@@ -1192,6 +1221,73 @@ def delete_all_snapshots(
     return {"deleted_count": deleted_count}
 
 
+@check_forbidden_method_in_hosted_studio
+def update_transaction_status(
+    session: Session,
+    transaction_hash: str,
+    new_status: str,
+) -> dict:
+    """Update a transaction status using a request-scoped session."""
+    # Validate transaction hash format
+    if not transaction_hash or not isinstance(transaction_hash, str):
+        raise JSONRPCError(
+            code=-32602,
+            message="Invalid transaction hash: must be a non-empty string",
+            data={},
+        )
+
+    if not transaction_hash.startswith("0x") or len(transaction_hash) != 66:
+        raise JSONRPCError(
+            code=-32602,
+            message="Invalid transaction hash format: must be a 66-character hex string starting with '0x'",
+            data={},
+        )
+
+    try:
+        int(transaction_hash, 16)
+    except ValueError:
+        raise JSONRPCError(
+            code=-32602,
+            message="Invalid transaction hash format: contains non-hexadecimal characters",
+            data={},
+        )
+
+    # Validate new status is a valid TransactionStatus enum value
+    if not new_status or not isinstance(new_status, str):
+        raise JSONRPCError(
+            code=-32602, message="Invalid status: must be a non-empty string", data={}
+        )
+
+    try:
+        status_enum = TransactionStatus(new_status)
+    except ValueError:
+        valid_statuses = [status.value for status in TransactionStatus]
+        raise JSONRPCError(
+            code=-32602,
+            message=f"Invalid status '{new_status}': must be one of {valid_statuses}",
+            data={},
+        )
+
+    transactions_processor = TransactionsProcessor(session)
+
+    transactions_processor.update_transaction_status(
+        transaction_hash=transaction_hash,
+        new_status=status_enum,
+        update_current_status_changes=True,
+    )
+
+    # Return the updated transaction
+    updated_transaction = transactions_processor.get_transaction_by_hash(
+        transaction_hash
+    )
+    if updated_transaction is None:
+        raise JSONRPCError(
+            code=-32602, message=f"Transaction not found: {transaction_hash}", data={}
+        )
+
+    return updated_transaction
+
+
 def dev_get_pool_status(sqlalchemy_db) -> dict:
     """
     Development endpoint to monitor database connection pool status.
@@ -1220,232 +1316,3 @@ def dev_get_pool_status(sqlalchemy_db) -> dict:
             "total": pool.size() + pool.overflow(),
         },
     }
-
-
-def register_all_rpc_endpoints(
-    jsonrpc: JSONRPC,
-    msg_handler: MessageHandler,
-    request_session: Session,
-    accounts_manager: AccountsManager,
-    snapshot_manager: SnapshotManager,
-    transactions_processor: TransactionsProcessor,
-    validators_registry: ModifiableValidatorsRegistry,
-    validators_manager: validators.Manager,
-    llm_provider_registry: LLMProviderRegistry,
-    consensus: ConsensusAlgorithm,
-    consensus_service: ConsensusService,
-    transactions_parser: TransactionParser,
-    sqlalchemy_db=None,  # Optional for backward compatibility
-):
-    register_rpc_endpoint = partial(generate_rpc_endpoint, jsonrpc, msg_handler)
-
-    register_rpc_endpoint(ping)
-    register_rpc_endpoint(
-        partial(clear_db_tables, request_session),
-        method_name="sim_clearDbTables",
-    )
-    register_rpc_endpoint(
-        partial(fund_account, accounts_manager, transactions_processor),
-        method_name="sim_fundAccount",
-    )
-    register_rpc_endpoint(
-        partial(get_providers_and_models, llm_provider_registry, validators_manager),
-        method_name="sim_getProvidersAndModels",
-    )
-    register_rpc_endpoint(
-        partial(reset_defaults_llm_providers, llm_provider_registry),
-        method_name="sim_resetDefaultsLlmProviders",
-    )
-    register_rpc_endpoint(
-        partial(add_provider, llm_provider_registry),
-        method_name="sim_addProvider",
-    )
-    register_rpc_endpoint(
-        partial(update_provider, llm_provider_registry),
-        method_name="sim_updateProvider",
-    )
-    register_rpc_endpoint(
-        partial(delete_provider, llm_provider_registry),
-        method_name="sim_deleteProvider",
-    )
-    register_rpc_endpoint(
-        partial(
-            check_forbidden_method_in_hosted_studio(create_validator),
-            validators_registry,
-            accounts_manager,
-        ),
-        method_name="sim_createValidator",
-    )
-    register_rpc_endpoint(
-        partial(
-            create_random_validator,
-            validators_registry,
-            accounts_manager,
-            llm_provider_registry,
-            validators_manager,
-        ),
-        method_name="sim_createRandomValidator",
-    )
-    register_rpc_endpoint(
-        partial(
-            create_random_validators,
-            validators_registry,
-            accounts_manager,
-            llm_provider_registry,
-            validators_manager,
-        ),
-        method_name="sim_createRandomValidators",
-    )
-    register_rpc_endpoint(
-        partial(update_validator, validators_registry, accounts_manager),
-        method_name="sim_updateValidator",
-    )
-    register_rpc_endpoint(
-        partial(delete_validator, validators_registry, accounts_manager),
-        method_name="sim_deleteValidator",
-    )
-    register_rpc_endpoint(
-        partial(delete_all_validators, validators_registry),
-        method_name="sim_deleteAllValidators",
-    )
-    register_rpc_endpoint(
-        partial(get_all_validators, validators_registry),
-        method_name="sim_getAllValidators",
-    )
-    register_rpc_endpoint(
-        partial(get_validator, validators_registry),
-        method_name="sim_getValidator",
-    )
-    register_rpc_endpoint(
-        partial(count_validators, validators_registry),
-        method_name="sim_countValidators",
-    )
-    register_rpc_endpoint(
-        partial(get_contract_schema, accounts_manager, msg_handler),
-        method_name="gen_getContractSchema",
-    )
-    register_rpc_endpoint(
-        partial(get_contract_schema_for_code, msg_handler),
-        method_name="gen_getContractSchemaForCode",
-    )
-    register_rpc_endpoint(
-        partial(get_contract_code, request_session),
-        method_name="gen_getContractCode",
-    )
-    register_rpc_endpoint(
-        partial(
-            gen_call,
-            request_session,
-            accounts_manager,
-            msg_handler,
-            transactions_parser,
-            validators_manager,
-        ),
-        method_name="gen_call",
-    )
-    register_rpc_endpoint(
-        partial(
-            sim_call,
-            request_session,
-            accounts_manager,
-            msg_handler,
-            transactions_parser,
-            validators_manager,
-        ),
-        method_name="sim_call",
-    )
-    register_rpc_endpoint(
-        partial(get_balance, accounts_manager),
-        method_name="eth_getBalance",
-    )
-    register_rpc_endpoint(
-        partial(get_transaction_by_hash, transactions_processor),
-        method_name="eth_getTransactionByHash",
-    )
-    register_rpc_endpoint(
-        partial(get_studio_transaction_by_hash, transactions_processor),
-        method_name="sim_getTransactionByHash",
-    )
-    register_rpc_endpoint(
-        partial(
-            eth_call,
-            request_session,
-            accounts_manager,
-            msg_handler,
-            transactions_parser,
-            validators_manager,
-            transactions_processor,
-        ),
-        method_name="eth_call",
-    )
-    register_rpc_endpoint(
-        partial(
-            send_raw_transaction,
-            transactions_processor,
-            msg_handler,
-            accounts_manager,
-            transactions_parser,
-            consensus_service,
-        ),
-        method_name="eth_sendRawTransaction",
-    )
-    register_rpc_endpoint(
-        partial(get_transaction_count, transactions_processor),
-        method_name="eth_getTransactionCount",
-    )
-    register_rpc_endpoint(
-        partial(get_transactions_for_address, transactions_processor, accounts_manager),
-        method_name="sim_getTransactionsForAddress",
-    )
-    register_rpc_endpoint(
-        partial(set_finality_window_time, consensus),
-        method_name="sim_setFinalityWindowTime",
-    )
-    register_rpc_endpoint(
-        partial(get_finality_window_time, consensus),
-        method_name="sim_getFinalityWindowTime",
-    )
-    register_rpc_endpoint(
-        partial(get_contract, consensus_service),
-        method_name="sim_getConsensusContract",
-    )
-    register_rpc_endpoint(get_chain_id, method_name="eth_chainId")
-    register_rpc_endpoint(get_net_version, method_name="net_version")
-    register_rpc_endpoint(
-        partial(get_block_number, transactions_processor),
-        method_name="eth_blockNumber",
-    )
-    register_rpc_endpoint(
-        partial(get_block_by_number, transactions_processor),
-        method_name="eth_getBlockByNumber",
-    )
-    register_rpc_endpoint(get_gas_price, method_name="eth_gasPrice")
-    register_rpc_endpoint(get_gas_estimate, method_name="eth_estimateGas")
-    register_rpc_endpoint(
-        partial(get_transaction_receipt, transactions_processor),
-        method_name="eth_getTransactionReceipt",
-    )
-    register_rpc_endpoint(
-        partial(get_block_by_hash, transactions_processor),
-        method_name="eth_getBlockByHash",
-    )
-    register_rpc_endpoint(
-        partial(create_snapshot, snapshot_manager),
-        method_name="sim_createSnapshot",
-    )
-    register_rpc_endpoint(
-        partial(restore_snapshot, snapshot_manager),
-        method_name="sim_restoreSnapshot",
-    )
-    register_rpc_endpoint(
-        partial(delete_all_snapshots, snapshot_manager),
-        method_name="sim_deleteAllSnapshots",
-    )
-    register_rpc_endpoint(
-        partial(dev_get_pool_status, sqlalchemy_db),
-        method_name="dev_getPoolStatus",
-    )
-    register_rpc_endpoint(
-        partial(get_transaction_status, transactions_processor),
-        method_name="gen_getTransactionStatus",
-    )
