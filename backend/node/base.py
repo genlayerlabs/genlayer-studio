@@ -316,7 +316,7 @@ class Node:
                 message="execution finished",
                 data={
                     "result": f"{res.result!r}",
-                    "stdout": res.stdout,
+                    "stdout": res.stdout[:5000],
                     "stderr": res.stderr,
                     "genvm_log": res.genvm_log,
                 },
@@ -423,7 +423,7 @@ class Node:
             mode=self.validator_mode,
             node_config=self._create_enhanced_node_config(host_data),
             genvm_result={
-                "stdout": res.stdout,
+                "stdout": res.stdout[:5000],
                 "stderr": res.stderr,
             },
             processing_time=res.processing_time,
