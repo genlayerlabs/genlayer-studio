@@ -2,6 +2,8 @@
 
 DEFAULT_VALIDATORS_COUNT = 5
 DEFAULT_CONSENSUS_SLEEP_TIME = 5
+EXECUTING_TRANSACTION_TIMEOUT = 600
+ACTIVATED_TRANSACTION_TIMEOUT = 900
 
 import os
 import asyncio
@@ -71,9 +73,6 @@ type NodeFactory = Callable[
     ],
     Node,
 ]
-
-EXECUTING_TRANSACTION_TIMEOUT = 600
-ACTIVATED_TRANSACTION_TIMEOUT = 1800
 
 
 def node_factory(
@@ -316,21 +315,13 @@ class ConsensusAlgorithm:
         self.get_session = get_session
         self.msg_handler = msg_handler
         self.consensus_service = consensus_service
-        self.pending_queues: dict[str, asyncio.Queue] = {}
         self.finality_window_time = int(os.environ["VITE_FINALITY_WINDOW"])
         self.finality_window_appeal_failed_reduction = float(
             os.environ["VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION"]
         )
         self.consensus_sleep_time = DEFAULT_CONSENSUS_SLEEP_TIME
-        self.pending_queue_stop_events: dict[str, asyncio.Event] = (
-            {}
-        )  # Events to stop tasks for each pending queue
-        self.pending_queue_task_running: dict[str, bool] = (
-            {}
-        )  # Track running state for each pending queue
-        # Per-address blocked head to preserve order when predecessor isn't ready
-        # Structure: {address: {"transaction": Transaction, "blocked_at": timestamp}}
-        self.blocked_heads: dict[str, dict | None] = {}
+        # Simple tracking of what's currently being processed per contract
+        self.processing_transactions: dict[str, str] = {}  # {contract_address: tx_hash}
         self.validators_manager = validators_manager
 
     async def run_crawl_snapshot_loop(
@@ -370,151 +361,83 @@ class ConsensusAlgorithm:
         stop_event: threading.Event,
     ):
         """
-        Crawl snapshots and process pending transactions.
+        Periodically check for stuck transactions and reset them to PENDING.
+        This is now just a recovery mechanism, not for queuing transactions.
+        Also cleans up orphaned entries in the processing_transactions tracker.
 
         Args:
             chain_snapshot_factory (Callable[[Session], ChainSnapshot]): Creates snapshots of the blockchain state at specific points in time.
             transactions_processor_factory (Callable[[Session], TransactionsProcessor]): Creates processors to modify transactions.
             stop_event (threading.Event): Control signal to terminate the loop.
         """
+        print("Starting _crawl_snapshot recovery loop")
         while not stop_event.is_set():
-            with self.get_session() as session:
-                chain_snapshot = chain_snapshot_factory(session)
-                transactions_processor = transactions_processor_factory(session)
-                pending_transactions = chain_snapshot.get_pending_transactions()
-                for transaction in pending_transactions:
-                    transaction = Transaction.from_dict(transaction)
-                    address = transaction.to_address
+            try:
+                with self.get_session() as session:
+                    transactions_processor = transactions_processor_factory(session)
 
-                    if address is None:
-                        # it happens in tests/integration/accounts/test_accounts.py::test_accounts_burn
-                        print(f"_crawl_snapshot: address is None, tx {transaction}")
-                        traceback.print_stack()
-
-                    # Initialize queue and stop event for the address if not present
-                    if address not in self.pending_queues:
-                        self.pending_queues[address] = asyncio.Queue()
-
-                    if address not in self.pending_queue_stop_events:
-                        self.pending_queue_stop_events[address] = asyncio.Event()
-
-                    # Only add to the queue if the stop event is not set
-                    if not self.pending_queue_stop_events[address].is_set():
-                        await self.pending_queues[address].put(transaction)
-
-                        # Set the transaction as activated so it is not added to the queue again
-                        ConsensusAlgorithm.dispatch_transaction_status_update(
-                            transactions_processor,
-                            transaction.hash,
-                            TransactionStatus.ACTIVATED,
-                            self.msg_handler,
-                        )
-
-                # Clear stale blocked heads before recovery
-                for address, blocked_data in list(self.blocked_heads.items()):
-                    if blocked_data:
-                        blocked_tx = blocked_data["transaction"]
-                        blocked_at = blocked_data["blocked_at"]
-
-                        # Check if the blocked transaction has timed out (blocked for > 600 seconds)
-                        if time.time() - blocked_at > EXECUTING_TRANSACTION_TIMEOUT:
-                            print(
-                                f"Clearing timed-out blocked head {blocked_tx.hash} for address {address} (blocked for {time.time() - blocked_at:.0f}s)"
-                            )
-                            self.blocked_heads[address] = None
-                            continue
-
-                        # Check if the blocked transaction is still valid
-                        tx_status = transactions_processor.get_transaction_by_hash(
-                            blocked_tx.hash
-                        )
-                        if not tx_status or tx_status["status"] not in [
-                            TransactionStatus.ACTIVATED.value,
-                            TransactionStatus.PROPOSING.value,
-                            TransactionStatus.COMMITTING.value,
-                            TransactionStatus.REVEALING.value,
-                            TransactionStatus.ACCEPTED.value,
-                        ]:
-                            # Transaction is no longer in a valid state - clear the stale entry
-                            print(
-                                f"Clearing stale blocked head {blocked_tx.hash} for address {address}"
-                            )
-                            self.blocked_heads[address] = None
-
-                # Check for stuck ACTIVATED transactions (safety mechanism)
-                # This recovers orphaned transactions that may have been lost due to errors
-                activated_transactions = (
-                    transactions_processor.get_activated_transactions_older_than(
-                        ACTIVATED_TRANSACTION_TIMEOUT
+                    # Reset stuck transactions that have been processing for too long
+                    # This handles ACTIVATED, PROPOSING, COMMITTING, REVEALING states
+                    reset_count = transactions_processor.reset_stuck_transactions(
+                        timeout_seconds=ACTIVATED_TRANSACTION_TIMEOUT
                     )
-                )
-                for tx_data in activated_transactions:
-                    address = tx_data["to_address"]
-                    if not address:
-                        continue
 
-                    # Check if this address has a blocked head
-                    blocked_data = self.blocked_heads.get(address)
-                    if blocked_data:
-                        blocked_tx = blocked_data["transaction"]
-                        # Check if the blocked head is stale
-                        if blocked_tx.hash == tx_data["hash"]:
-                            # This is the blocked transaction itself - skip recovery
-                            print(
-                                f"Skipping recovery for {tx_data['hash']} at address {address} - currently blocked waiting for predecessor"
+                    if reset_count > 0:
+                        self.msg_handler.send_message(
+                            LogEvent(
+                                "consensus_event",
+                                EventType.INFO,
+                                EventScope.CONSENSUS,
+                                f"Reset {reset_count} stuck transactions to PENDING",
+                                {"count": reset_count},
                             )
-                            continue
+                        )
+                        session.commit()
+
+                    # Clean up orphaned entries in processing_transactions
+                    # Check for transactions that are in terminal states but still tracked
+                    orphaned_addresses = []
+                    for contract_address, tx_hash in list(
+                        self.processing_transactions.items()
+                    ):
+                        tx = transactions_processor.get_transaction_by_hash(tx_hash)
+                        if tx:
+                            # If transaction is in a terminal state, remove from processing
+                            if tx["status"] in [
+                                TransactionStatus.ACCEPTED.value,
+                                TransactionStatus.FINALIZED.value,
+                                TransactionStatus.UNDETERMINED.value,
+                                TransactionStatus.CANCELED.value,
+                                TransactionStatus.LEADER_TIMEOUT.value,
+                                TransactionStatus.VALIDATORS_TIMEOUT.value,
+                                TransactionStatus.PENDING.value,  # If reset to PENDING
+                            ]:
+                                orphaned_addresses.append(contract_address)
                         else:
-                            # Check if this activated transaction is the predecessor of the blocked transaction
-                            previous_tx = (
-                                transactions_processor.get_previous_transaction(
-                                    blocked_tx.hash
+                            # Transaction doesn't exist anymore, remove from processing
+                            orphaned_addresses.append(contract_address)
+
+                    # Remove orphaned entries
+                    for contract_address in orphaned_addresses:
+                        if contract_address in self.processing_transactions:
+                            del self.processing_transactions[contract_address]
+                            self.msg_handler.send_message(
+                                LogEvent(
+                                    "processing_tracker_cleaned",
+                                    EventType.DEBUG,
+                                    EventScope.CONSENSUS,
+                                    f"Cleaned up processing tracker for contract address {contract_address}",
+                                    {"contract_address": contract_address},
                                 )
                             )
-                            if previous_tx and previous_tx["hash"] == tx_data["hash"]:
-                                # This is the predecessor of the blocked transaction
-                                # It's been stuck for >300s, so we need to clear the blocked head to allow recovery
-                                print(
-                                    f"Clearing blocked head {blocked_tx.hash} to allow recovery of stuck predecessor {tx_data['hash']}"
-                                )
-                                self.blocked_heads[address] = None
-                                # Now recover the stuck predecessor
-                                print(
-                                    f"Recovering stuck predecessor transaction {tx_data['hash']} for address {address}"
-                                )
-                                ConsensusAlgorithm.dispatch_transaction_status_update(
-                                    transactions_processor,
-                                    tx_data["hash"],
-                                    TransactionStatus.PENDING,
-                                    self.msg_handler,
-                                )
-                                continue
-                            else:
-                                # Different transaction is blocked for this address, skip recovery
-                                print(
-                                    f"Skipping recovery for {tx_data['hash']} at address {address} - another transaction is blocked"
-                                )
-                                continue
 
-                    # Original recovery logic for non-blocked addresses
-                    queue = self.pending_queues.get(address)
-                    should_reset = queue is None or (
-                        queue.empty()
-                        and not self.pending_queue_task_running.get(address, False)
-                    )
-                    if should_reset:
-                        reason = "no queue present" if queue is None else "idle queue"
-                        print(
-                            f"Recovering stuck transaction {tx_data['hash']} for address {address} ({reason})"
-                        )
-                        ConsensusAlgorithm.dispatch_transaction_status_update(
-                            transactions_processor,
-                            tx_data["hash"],
-                            TransactionStatus.PENDING,
-                            self.msg_handler,
-                        )
+            except Exception as e:
+                print(f"Error in recovery loop: {e}")
+                traceback.print_exc()
 
-            await asyncio.sleep(self.consensus_sleep_time)
+            await asyncio.sleep(
+                self.consensus_sleep_time * 10
+            )  # Run recovery less frequently
 
     async def run_process_pending_transactions_loop(
         self,
@@ -577,7 +500,8 @@ class ConsensusAlgorithm:
         stop_event: threading.Event,
     ):
         """
-        Process pending transactions.
+        Process pending transactions using direct database queries.
+        Each contract gets its own continuous processing task.
 
         Args:
             chain_snapshot_factory (Callable[[Session], ChainSnapshot]): Creates snapshots of the blockchain state at specific points in time.
@@ -587,328 +511,215 @@ class ConsensusAlgorithm:
             node_factory (Callable[[dict, ExecutionMode, ContractSnapshot, Receipt | None, MessageHandler, Callable[[str], ContractSnapshot]], Node]): Creates node instances that can execute contracts and process transactions.
             stop_event (threading.Event): Control signal to terminate the pending transactions process.
         """
-        # Note: ollama uses GPU resources and webrequest aka selenium uses RAM
-        # TODO: Consider using async sessions to avoid blocking the current thread
+        print("Starting _process_pending_transactions loop")
+
+        # Track active processing tasks per contract
+        contract_tasks = {}  # {contract_address: Task}
+
+        async def process_contract_continuously(contract_address):
+            """Process all pending transactions for a single contract continuously."""
+            print(f"Starting continuous processing for contract {contract_address}")
+            try:
+                while not stop_event.is_set():
+                    # Check if there's already a transaction being processed
+                    with self.get_session() as session:
+                        transactions_processor = transactions_processor_factory(session)
+
+                        # Check for transactions in processing states
+                        processing_tx = transactions_processor.get_processing_transaction_for_contract(
+                            contract_address
+                        )
+
+                        if processing_tx:
+                            # Wait a bit and check again
+                            await asyncio.sleep(
+                                DEFAULT_CONSENSUS_SLEEP_TIME
+                            )  # Shorter wait to be more responsive
+                            continue
+
+                        # Get the next pending transaction
+                        next_tx_data = (
+                            transactions_processor.get_oldest_pending_for_contract(
+                                contract_address
+                            )
+                        )
+
+                        if not next_tx_data:
+                            # No more pending transactions for this contract
+                            print(
+                                f"No more pending transactions for contract {contract_address}, stopping continuous processing"
+                            )
+                            break
+
+                        # Mark as ACTIVATED
+                        print(
+                            f"  Processing transaction {next_tx_data['hash']} for {contract_address}"
+                        )
+                        transactions_processor.update_transaction_status(
+                            next_tx_data["hash"],
+                            TransactionStatus.ACTIVATED,
+                        )
+                        session.commit()
+
+                        # Track it
+                        self.processing_transactions[contract_address] = next_tx_data[
+                            "hash"
+                        ]
+
+                    # Process the transaction
+                    try:
+                        await self._process_single_transaction(
+                            next_tx_data,
+                            contract_address,
+                            chain_snapshot_factory,
+                            transactions_processor_factory,
+                            accounts_manager_factory,
+                            contract_snapshot_factory,
+                            contract_processor_factory,
+                            node_factory,
+                        )
+                    except Exception as e:
+                        print(
+                            f"Error processing transaction {next_tx_data['hash']}: {e}"
+                        )
+                        import traceback
+
+                        traceback.print_exc()
+
+                    # Small delay before checking for next transaction
+                    await asyncio.sleep(DEFAULT_CONSENSUS_SLEEP_TIME)
+
+            finally:
+                # Clean up when done
+                if contract_address in contract_tasks:
+                    del contract_tasks[contract_address]
+                print(f"Stopped continuous processing for contract {contract_address}")
+
+        # Main loop to spawn contract processing tasks
         while not stop_event.is_set():
             try:
-                async with asyncio.TaskGroup() as tg:
-                    for queue_address, queue in self.pending_queues.items():
-                        if (
-                            (not queue.empty() or self.blocked_heads.get(queue_address))
-                            and not self.pending_queue_stop_events.get(
-                                queue_address, asyncio.Event()
-                            ).is_set()
-                            and not self.pending_queue_task_running.get(
-                                queue_address, False
-                            )
-                        ):
-                            # Sessions cannot be shared between coroutines; create a new session for each coroutine
-                            # Reference: https://docs.sqlalchemy.org/en/20/orm/session_basics.html#is-the-session-thread-safe-is-asyncsession-safe-to-share-in-concurrent-tasks
+                # Get contracts with pending transactions
+                with self.get_session() as session:
+                    transactions_processor = transactions_processor_factory(session)
+                    contracts_with_pending = (
+                        transactions_processor.get_contracts_with_pending()
+                    )
 
-                            async def exec_transaction_with_session_handling(
-                                queue: asyncio.Queue,
-                                queue_address: str,
-                            ):
-                                transaction: Transaction | None = None
-                                try:
-                                    # Mark as running before dequeuing to prevent race conditions
-                                    self.pending_queue_task_running[queue_address] = (
-                                        True
-                                    )
+                # Spawn new tasks for contracts that don't have one
+                for contract_address in contracts_with_pending:
+                    if contract_address not in contract_tasks:
+                        # Create a new continuous processing task for this contract
+                        print(
+                            f"Spawning continuous processor for contract {contract_address}"
+                        )
+                        task = asyncio.create_task(
+                            process_contract_continuously(contract_address)
+                        )
+                        contract_tasks[contract_address] = task
 
-                                    # Prefer blocked head if present; else attempt to dequeue
-                                    existing_blocked_data = self.blocked_heads.get(
-                                        queue_address
-                                    )
-                                    if existing_blocked_data is not None:
-                                        transaction = existing_blocked_data[
-                                            "transaction"
-                                        ]
-                                    else:
-                                        try:
-                                            transaction = await asyncio.wait_for(
-                                                queue.get(), timeout=0.1
-                                            )
-                                        except asyncio.TimeoutError:
-                                            # Queue became empty between check and task creation
-                                            print(
-                                                f"Queue became empty between check and task creation for address {queue_address}"
-                                            )
-                                            return
-                                        # Hold as blocked head until predecessor readiness confirmed
-                                        self.blocked_heads[queue_address] = {
-                                            "transaction": transaction,
-                                            "blocked_at": time.time(),
-                                        }
+                # Clean up completed tasks
+                completed_contracts = []
+                for address, task in contract_tasks.items():
+                    if task.done():
+                        completed_contracts.append(address)
 
-                                    with self.get_session() as session:
-                                        virtual_validators = []
-                                        if (
-                                            transaction.sim_config
-                                            and transaction.sim_config.validators
-                                        ):
-                                            for (
-                                                validator
-                                            ) in transaction.sim_config.validators:
-                                                provider = validator.provider
-                                                model = validator.model
-                                                config = validator.config
-                                                plugin = validator.plugin
-                                                plugin_config = validator.plugin_config
+                for address in completed_contracts:
+                    del contract_tasks[address]
 
-                                                if (
-                                                    config is None
-                                                    or plugin is None
-                                                    or plugin_config is None
-                                                ):
-                                                    llm_provider = (
-                                                        get_default_provider_for(
-                                                            provider, model
-                                                        )
-                                                    )
-                                                else:
-                                                    llm_provider = LLMProvider(
-                                                        provider=provider,
-                                                        model=model,
-                                                        config=config,
-                                                        plugin=plugin,
-                                                        plugin_config=plugin_config,
-                                                    )
-                                                    validate_provider(llm_provider)
-
-                                                account = accounts_manager_factory(
-                                                    session
-                                                ).create_new_account()
-                                                virtual_validators.append(
-                                                    Validator(
-                                                        address=account.address,
-                                                        private_key=account.key.to_0x_hex(),
-                                                        stake=validator.stake,
-                                                        llmprovider=llm_provider,
-                                                    )
-                                                )
-                                        if len(virtual_validators) > 0:
-                                            snapshot_func = (
-                                                self.validators_manager.temporal_snapshot
-                                            )
-                                            args = [virtual_validators]
-                                        else:
-                                            snapshot_func = (
-                                                self.validators_manager.snapshot
-                                            )
-                                            args = []
-                                        transactions_processor = (
-                                            transactions_processor_factory(session)
-                                        )
-
-                                        # Check predecessor readiness before executing
-                                        previous_transaction = transactions_processor.get_previous_transaction(
-                                            transaction.hash,
-                                        )
-                                        predecessor_ready = (
-                                            (previous_transaction is None)
-                                            or (
-                                                previous_transaction["appealed"]
-                                            )  # noqa: E711
-                                            or (
-                                                previous_transaction[
-                                                    "appeal_undetermined"
-                                                ]
-                                            )  # noqa: E711
-                                            or (
-                                                previous_transaction[
-                                                    "appeal_leader_timeout"
-                                                ]
-                                            )  # noqa: E711
-                                            or (
-                                                previous_transaction[
-                                                    "appeal_validators_timeout"
-                                                ]
-                                            )  # noqa: E711
-                                            or (
-                                                previous_transaction["status"]
-                                                in [
-                                                    TransactionStatus.ACCEPTED.value,
-                                                    TransactionStatus.UNDETERMINED.value,
-                                                    TransactionStatus.FINALIZED.value,
-                                                    TransactionStatus.LEADER_TIMEOUT.value,
-                                                    TransactionStatus.VALIDATORS_TIMEOUT.value,
-                                                ]
-                                            )
-                                        )
-
-                                        if not predecessor_ready:
-                                            # Check if the predecessor is stuck before blocking
-                                            if (
-                                                previous_transaction
-                                                and self.is_transaction_stuck(
-                                                    previous_transaction["hash"],
-                                                    transactions_processor,
-                                                    ACTIVATED_TRANSACTION_TIMEOUT,
-                                                )
-                                            ):
-                                                # Predecessor is stuck - recover it instead of blocking
-                                                print(
-                                                    f"Predecessor {previous_transaction['hash']} is stuck, recovering it instead of blocking {transaction.hash}"
-                                                )
-                                                ConsensusAlgorithm.dispatch_transaction_status_update(
-                                                    transactions_processor,
-                                                    previous_transaction["hash"],
-                                                    TransactionStatus.PENDING,
-                                                    self.msg_handler,
-                                                )
-                                                # Also reset the current transaction
-                                                ConsensusAlgorithm.dispatch_transaction_status_update(
-                                                    transactions_processor,
-                                                    transaction.hash,
-                                                    TransactionStatus.PENDING,
-                                                    self.msg_handler,
-                                                )
-                                                return
-
-                                            # Keep as blocked head and skip execution this cycle
-                                            # Check if it's already blocked to preserve original timestamp
-                                            existing_blocked = self.blocked_heads.get(
-                                                queue_address
-                                            )
-                                            if (
-                                                not existing_blocked
-                                                or existing_blocked["transaction"].hash
-                                                != transaction.hash
-                                            ):
-                                                self.blocked_heads[queue_address] = {
-                                                    "transaction": transaction,
-                                                    "blocked_at": time.time(),
-                                                }
-                                            try:
-                                                self.msg_handler.send_message(
-                                                    LogEvent(
-                                                        "consensus_event",
-                                                        EventType.INFO,
-                                                        EventScope.CONSENSUS,
-                                                        "Head blocked; predecessor not ready",
-                                                        {
-                                                            "hash": transaction.hash,
-                                                            "address": queue_address,
-                                                            "previous_status": previous_transaction[
-                                                                "status"
-                                                            ],
-                                                        },
-                                                        transaction_hash=transaction.hash,
-                                                    )
-                                                )
-                                            except Exception:
-                                                pass
-                                            return
-
-                                        async with snapshot_func(
-                                            *args
-                                        ) as validators_snapshot:
-                                            await self.exec_transaction(
-                                                transaction,
-                                                transactions_processor,
-                                                chain_snapshot_factory(session),
-                                                accounts_manager_factory(session),
-                                                lambda contract_address: contract_snapshot_factory(
-                                                    contract_address,
-                                                    session,
-                                                    transaction,
-                                                ),
-                                                contract_processor_factory(session),
-                                                node_factory,
-                                                validators_snapshot,
-                                            )
-                                        session.commit()
-                                        # Clear blocked head after successful execution
-                                        blocked_data = self.blocked_heads.get(
-                                            queue_address
-                                        )
-                                        if (
-                                            blocked_data
-                                            and blocked_data["transaction"]
-                                            is transaction
-                                        ):
-                                            self.blocked_heads[queue_address] = None
-                                finally:
-                                    self.pending_queue_task_running[queue_address] = (
-                                        False
-                                    )
-
-                            tg.create_task(
-                                exec_transaction_with_session_handling(
-                                    queue, queue_address
-                                )
-                            )
+                # Status update
+                if contract_tasks:
+                    print(
+                        f"Active contract processors: {len(contract_tasks)} - {list(contract_tasks.keys())[:5]}"
+                    )
 
             except Exception as e:
-                print("Error running consensus", e)
-                print(traceback.format_exc())
-            finally:
-                for queue_address in self.pending_queues:
-                    self.pending_queue_task_running[queue_address] = False
-            await asyncio.sleep(self.consensus_sleep_time)
+                print(f"Error in _process_pending_transactions main loop: {e}")
+                import traceback
 
-    def is_pending_queue_task_running(self, address: str):
-        """
-        Check if a task for a specific pending queue is currently running.
-        """
-        return self.pending_queue_task_running.get(address, False)
+                traceback.print_exc()
 
-    def stop_pending_queue_task(self, address: str):
-        """
-        Signal the task for a specific pending queue to stop.
-        """
-        if address in self.pending_queues:
-            if address not in self.pending_queue_stop_events:
-                self.pending_queue_stop_events[address] = asyncio.Event()
-            self.pending_queue_stop_events[address].set()
+            # Check for new contracts periodically
+            await asyncio.sleep(2)  # Check every 2 seconds for new contracts
 
-    def start_pending_queue_task(self, address: str):
-        """
-        Allow the task for a specific pending queue to start.
-        """
-        if address in self.pending_queue_stop_events:
-            self.pending_queue_stop_events[address].clear()
-
-    def is_transaction_stuck(
+    async def _process_single_transaction(
         self,
-        transaction_hash: str,
-        transactions_processor: TransactionsProcessor,
-        stuck_threshold_seconds: int = ACTIVATED_TRANSACTION_TIMEOUT,
-    ) -> bool:
+        transaction: dict,
+        address: str,
+        chain_snapshot_factory,
+        transactions_processor_factory,
+        accounts_manager_factory,
+        contract_snapshot_factory,
+        contract_processor_factory,
+        node_factory,
+    ):
         """
-        Check if a transaction has been stuck in ACTIVATED state for too long.
+        Process a single transaction through the consensus system.
 
         Args:
-            transaction_hash: Hash of the transaction to check
-            transactions_processor: Processor to query transaction status
-            stuck_threshold_seconds: Number of seconds to consider a transaction stuck
-
-        Returns:
-            True if the transaction is stuck, False otherwise
+            transaction (dict): The transaction dictionary
+            address (str): The contract address
+            chain_snapshot_factory: Factory for creating chain snapshots
+            transactions_processor_factory: Factory for creating transaction processors
+            accounts_manager_factory: Factory for creating account managers
+            contract_snapshot_factory: Factory for creating contract snapshots
+            contract_processor_factory: Factory for creating contract processors
+            node_factory: Factory for creating nodes
         """
-        from datetime import datetime, timedelta, timezone
+        try:
+            # Convert dict to Transaction object
+            current_transaction = Transaction.from_dict(transaction)
 
-        tx_data = transactions_processor.get_transaction_by_hash(transaction_hash)
-        if not tx_data:
-            return False
+            # Create session for this transaction execution
+            with self.get_session() as session:
+                transactions_processor = transactions_processor_factory(session)
+                chain_snapshot = chain_snapshot_factory(session)
+                accounts_manager = accounts_manager_factory(session)
+                contract_processor = contract_processor_factory(session)
 
-        # Check if transaction is in ACTIVATED state
-        if tx_data["status"] != TransactionStatus.ACTIVATED.value:
-            return False
+                # Get validators snapshot for consensus
+                async with self.validators_manager.snapshot() as validators_snapshot:
+                    # Execute the transaction through the consensus system
+                    await self.exec_transaction(
+                        current_transaction,
+                        transactions_processor,
+                        chain_snapshot,
+                        accounts_manager,
+                        lambda contract_address: contract_snapshot_factory(
+                            contract_address,
+                            session,
+                            current_transaction,
+                        ),
+                        contract_processor,
+                        node_factory,
+                        validators_snapshot,
+                    )
 
-        # Check if it's been stuck for too long
-        created_at = datetime.fromisoformat(tx_data["created_at"])
-        # Use timezone-aware datetime for comparison
-        cutoff_time = datetime.now(timezone.utc) - timedelta(
-            seconds=stuck_threshold_seconds
-        )
+                # Commit the session after successful execution
+                session.commit()
 
-        # Convert created_at to UTC if it has a different timezone
-        if created_at.tzinfo != timezone.utc:
-            created_at = created_at.astimezone(timezone.utc)
+        except Exception as e:
+            self.msg_handler.send_message(
+                LogEvent(
+                    "transaction_execution_failed",
+                    EventType.ERROR,
+                    EventScope.CONSENSUS,
+                    f"Failed to execute transaction {transaction['hash']}: {str(e)}",
+                    {
+                        "hash": transaction["hash"],
+                        "error": str(e),
+                        "address": address,
+                    },
+                    transaction_hash=transaction["hash"],
+                )
+            )
+            print(f"Error executing transaction {transaction['hash']}: {e}")
+            import traceback
 
-        return created_at < cutoff_time
+            traceback.print_exc()
+        finally:
+            # Always remove from processing_transactions when done
+            if address in self.processing_transactions:
+                del self.processing_transactions[address]
 
     async def exec_transaction(
         self,
@@ -1756,20 +1567,15 @@ class ConsensusAlgorithm:
     def rollback_transactions(self, context: TransactionContext, stop_pending_queue):
         """
         Rollback newer transactions.
+        In the simplified system, we just need to reset future transactions to PENDING.
         """
         # Rollback all future transactions for the current contract
         address = context.transaction.to_address
 
-        # Stop the _crawl_snapshot and the _run_consensus for the current contract
-        if stop_pending_queue:
-            self.stop_pending_queue_task(address)
-
-            # Wait until task is finished
-            while self.is_pending_queue_task_running(address):
-                time.sleep(1)
-
-        # Empty the pending queue
-        self.pending_queues[address] = asyncio.Queue()
+        # Clear the processing tracker for this address if it exists
+        # This allows the next pending transaction to be picked up
+        if address in self.processing_transactions:
+            del self.processing_transactions[address]
 
         # Set all transactions with higher created_at to PENDING
         future_transactions = context.transactions_processor.get_newer_transactions(
@@ -1787,10 +1593,6 @@ class ConsensusAlgorithm:
             context.transactions_processor.set_transaction_contract_snapshot(
                 future_transaction["hash"], None
             )
-
-        # Start the queue loop again
-        if stop_pending_queue:
-            self.start_pending_queue_task(address)
 
     @staticmethod
     def get_extra_validators(

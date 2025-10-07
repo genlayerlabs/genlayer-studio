@@ -1197,3 +1197,114 @@ class TransactionsProcessor:
             return None
         transaction_status = transaction.status
         return transaction_status.value
+
+    def get_processing_transaction_for_contract(
+        self, contract_address: str
+    ) -> dict | None:
+        """
+        Check if there's a transaction currently being processed for a contract.
+
+        Args:
+            contract_address: The contract address to check
+
+        Returns:
+            Transaction data if processing, None otherwise
+        """
+        processing_tx = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.to_address == contract_address,
+                Transactions.status.in_(
+                    [
+                        TransactionStatus.ACTIVATED,
+                        TransactionStatus.PROPOSING,
+                        TransactionStatus.COMMITTING,
+                        TransactionStatus.REVEALING,
+                    ]
+                ),
+            )
+            .first()
+        )
+
+        return self._parse_transaction_data(processing_tx) if processing_tx else None
+
+    def get_oldest_pending_for_contract(self, contract_address: str) -> dict | None:
+        """
+        Get the oldest pending transaction for a specific contract.
+
+        Args:
+            contract_address: The contract address
+
+        Returns:
+            Oldest pending transaction data or None
+        """
+        pending_tx = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.to_address == contract_address,
+                Transactions.status == TransactionStatus.PENDING,
+            )
+            .order_by(Transactions.created_at)
+            .first()
+        )
+
+        return self._parse_transaction_data(pending_tx) if pending_tx else None
+
+    def get_contracts_with_pending(self) -> list[str]:
+        """
+        Get all distinct contract addresses that have pending transactions.
+
+        Returns:
+            List of contract addresses with pending transactions
+        """
+        results = (
+            self.session.query(Transactions.to_address)
+            .filter(
+                Transactions.status == TransactionStatus.PENDING,
+                Transactions.to_address.isnot(None),
+            )
+            .distinct()
+            .all()
+        )
+
+        return [addr for (addr,) in results]
+
+    def reset_stuck_transactions(self, timeout_seconds: int = 900) -> int:
+        """
+        Reset transactions that have been stuck in processing states.
+
+        Args:
+            timeout_seconds: How long a transaction must be in processing state to be considered stuck
+
+        Returns:
+            Number of transactions reset
+        """
+        from datetime import datetime, timedelta, timezone
+
+        cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)
+
+        stuck_transactions = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.status.in_(
+                    [
+                        TransactionStatus.ACTIVATED,
+                        TransactionStatus.PROPOSING,
+                        TransactionStatus.COMMITTING,
+                        TransactionStatus.REVEALING,
+                    ]
+                ),
+                Transactions.created_at < cutoff_time,
+            )
+            .all()
+        )
+
+        count = 0
+        for tx in stuck_transactions:
+            tx.status = TransactionStatus.PENDING
+            count += 1
+
+        if count > 0:
+            self.session.commit()
+
+        return count
