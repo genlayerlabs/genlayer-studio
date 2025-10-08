@@ -74,6 +74,30 @@ type NodeFactory = Callable[
 ]
 
 
+def _redact_consensus_data_for_log(consensus_data_dict: dict) -> dict:
+    """
+    Return a redacted copy of the consensus data suitable for logging.
+
+    Removes heavy/noisy fields like `contract_state` from any leader receipts,
+    without mutating the original consensus data.
+    """
+    try:
+        redacted = deepcopy(consensus_data_dict)
+    except Exception:
+        # In case deepcopy fails for any reason, avoid breaking logging
+        return {"error": "failed_to_copy_consensus_data_for_log"}
+
+    leader_receipt = redacted.get("leader_receipt")
+    if isinstance(leader_receipt, dict):
+        leader_receipt.pop("contract_state", None)
+    elif isinstance(leader_receipt, list):
+        for receipt in leader_receipt:
+            if isinstance(receipt, dict):
+                receipt.pop("contract_state", None)
+
+    return redacted
+
+
 def node_factory(
     validator: dict,
     validator_mode: ExecutionMode,
@@ -368,73 +392,147 @@ class ConsensusAlgorithm:
             transactions_processor_factory (Callable[[Session], TransactionsProcessor]): Creates processors to modify transactions.
             stop_event (threading.Event): Control signal to terminate the loop.
         """
-        print("Starting _crawl_snapshot recovery loop")
-        while not stop_event.is_set():
-            try:
-                with self.get_session() as session:
-                    transactions_processor = transactions_processor_factory(session)
+        from backend.consensus.monitoring import (
+            monitored_task,
+            get_monitor,
+            OperationTimer,
+        )
+        from loguru import logger
 
-                    # Reset stuck transactions that have been processing for too long
-                    # This handles ACTIVATED, PROPOSING, COMMITTING, REVEALING states
-                    reset_count = transactions_processor.reset_stuck_transactions(
-                        timeout_seconds=ACTIVATED_TRANSACTION_TIMEOUT
-                    )
+        monitor = get_monitor()
+        logger.info("[CONSENSUS] Starting _crawl_snapshot recovery loop")
 
-                    if reset_count > 0:
-                        self.msg_handler.send_message(
-                            LogEvent(
-                                "consensus_event",
-                                EventType.INFO,
-                                EventScope.CONSENSUS,
-                                f"Reset {reset_count} stuck transactions to PENDING",
-                                {"count": reset_count},
-                            )
-                        )
+        async with monitored_task("crawl_snapshot_recovery") as task_id:
+            iteration = 0
+            total_reset = 0
+            total_orphaned = 0
 
-                    # Clean up orphaned entries in processing_transactions
-                    # Check for transactions that are in terminal states but still tracked
-                    orphaned_addresses = []
-                    for contract_address, tx_hash in list(
-                        self.processing_transactions.items()
+            while not stop_event.is_set():
+                iteration += 1
+                monitor.heartbeat(task_id, iteration, f"checking stuck transactions")
+
+                try:
+                    with OperationTimer(
+                        "crawl_snapshot_iteration", warn_threshold=10.0
                     ):
-                        tx = transactions_processor.get_transaction_by_hash(tx_hash)
-                        if tx:
-                            # If transaction is in a terminal state, remove from processing
-                            if tx["status"] in [
-                                TransactionStatus.ACCEPTED.value,
-                                TransactionStatus.FINALIZED.value,
-                                TransactionStatus.UNDETERMINED.value,
-                                TransactionStatus.CANCELED.value,
-                                TransactionStatus.LEADER_TIMEOUT.value,
-                                TransactionStatus.VALIDATORS_TIMEOUT.value,
-                                TransactionStatus.PENDING.value,  # If reset to PENDING
-                            ]:
-                                orphaned_addresses.append(contract_address)
-                        else:
-                            # Transaction doesn't exist anymore, remove from processing
-                            orphaned_addresses.append(contract_address)
-
-                    # Remove orphaned entries
-                    for contract_address in orphaned_addresses:
-                        if contract_address in self.processing_transactions:
-                            del self.processing_transactions[contract_address]
-                            self.msg_handler.send_message(
-                                LogEvent(
-                                    "processing_tracker_cleaned",
-                                    EventType.DEBUG,
-                                    EventScope.CONSENSUS,
-                                    f"Cleaned up processing tracker for contract address {contract_address}",
-                                    {"contract_address": contract_address},
-                                )
+                        with self.get_session() as session:
+                            transactions_processor = transactions_processor_factory(
+                                session
                             )
 
-            except Exception as e:
-                print(f"Error in recovery loop: {e}")
-                traceback.print_exc()
+                            # Reset stuck transactions that have been processing for too long
+                            # This handles ACTIVATED, PROPOSING, COMMITTING, REVEALING states
+                            with OperationTimer(
+                                "reset_stuck_transactions", warn_threshold=5.0
+                            ):
+                                reset_count = (
+                                    transactions_processor.reset_stuck_transactions(
+                                        timeout_seconds=ACTIVATED_TRANSACTION_TIMEOUT
+                                    )
+                                )
 
-            await asyncio.sleep(
-                self.consensus_sleep_time * 10
-            )  # Run recovery less frequently
+                            if reset_count > 0:
+                                total_reset += reset_count
+                                logger.warning(
+                                    f"[RECOVERY] Reset {reset_count} stuck transactions to PENDING "
+                                    f"(total this session: {total_reset})"
+                                )
+                                self.msg_handler.send_message(
+                                    LogEvent(
+                                        "consensus_event",
+                                        EventType.INFO,
+                                        EventScope.CONSENSUS,
+                                        f"Reset {reset_count} stuck transactions to PENDING",
+                                        {
+                                            "count": reset_count,
+                                            "total_reset": total_reset,
+                                        },
+                                    )
+                                )
+
+                            # Clean up orphaned entries in processing_transactions
+                            # Check for transactions that are in terminal states but still tracked
+                            orphaned_addresses = []
+                            tracker_size = len(self.processing_transactions)
+
+                            if tracker_size > 0:
+                                logger.debug(
+                                    f"[RECOVERY] Checking {tracker_size} tracked transactions for orphans"
+                                )
+
+                            for contract_address, tx_hash in list(
+                                self.processing_transactions.items()
+                            ):
+                                tx = transactions_processor.get_transaction_by_hash(
+                                    tx_hash
+                                )
+                                if tx:
+                                    # If transaction is in a terminal state, remove from processing
+                                    if tx["status"] in [
+                                        TransactionStatus.ACCEPTED.value,
+                                        TransactionStatus.FINALIZED.value,
+                                        TransactionStatus.UNDETERMINED.value,
+                                        TransactionStatus.CANCELED.value,
+                                        TransactionStatus.LEADER_TIMEOUT.value,
+                                        TransactionStatus.VALIDATORS_TIMEOUT.value,
+                                        TransactionStatus.PENDING.value,  # If reset to PENDING
+                                    ]:
+                                        orphaned_addresses.append(contract_address)
+                                        logger.debug(
+                                            f"[RECOVERY] Found orphaned tx {tx_hash} in status {tx['status']} "
+                                            f"for contract {contract_address}"
+                                        )
+                                else:
+                                    # Transaction doesn't exist anymore, remove from processing
+                                    orphaned_addresses.append(contract_address)
+                                    logger.warning(
+                                        f"[RECOVERY] Transaction {tx_hash} no longer exists for contract {contract_address}"
+                                    )
+
+                            # Remove orphaned entries
+                            for contract_address in orphaned_addresses:
+                                if contract_address in self.processing_transactions:
+                                    del self.processing_transactions[contract_address]
+                                    total_orphaned += 1
+                                    monitor.track_processing(
+                                        contract_address, None
+                                    )  # Clear tracking
+                                    self.msg_handler.send_message(
+                                        LogEvent(
+                                            "processing_tracker_cleaned",
+                                            EventType.DEBUG,
+                                            EventScope.CONSENSUS,
+                                            f"Cleaned up processing tracker for contract address {contract_address}",
+                                            {
+                                                "contract_address": contract_address,
+                                                "total_orphaned": total_orphaned,
+                                            },
+                                        )
+                                    )
+
+                            if iteration % 10 == 0:  # Log summary every 10 iterations
+                                logger.info(
+                                    f"[RECOVERY] Crawl snapshot summary - "
+                                    f"Iteration: {iteration}, "
+                                    f"Total reset: {total_reset}, "
+                                    f"Total orphaned: {total_orphaned}, "
+                                    f"Currently tracking: {len(self.processing_transactions)}"
+                                )
+
+                except Exception as e:
+                    logger.error(
+                        f"[RECOVERY] Error in recovery loop iteration {iteration}: {e}"
+                    )
+                    logger.exception("Full traceback:")
+                    monitor.record_error(task_id, str(e))
+
+                await asyncio.sleep(
+                    self.consensus_sleep_time * 10
+                )  # Run recovery less frequently
+
+            logger.info(
+                f"[RECOVERY] Crawl snapshot recovery loop stopped after {iteration} iterations"
+            )
 
     async def run_process_pending_transactions_loop(
         self,
@@ -508,167 +606,265 @@ class ConsensusAlgorithm:
             node_factory (Callable[[dict, ExecutionMode, ContractSnapshot, Receipt | None, MessageHandler, Callable[[str], ContractSnapshot]], Node]): Creates node instances that can execute contracts and process transactions.
             stop_event (threading.Event): Control signal to terminate the pending transactions process.
         """
-        print("Starting _process_pending_transactions loop")
+        from backend.consensus.monitoring import (
+            monitored_task,
+            get_monitor,
+            OperationTimer,
+        )
+        from loguru import logger
+
+        monitor = get_monitor()
+        logger.info("[CONSENSUS] Starting _process_pending_transactions loop")
 
         # Track active processing tasks per contract
         contract_tasks = {}  # {contract_address: Task}
 
         async def process_contract_continuously(contract_address):
             """Process all pending transactions for a single contract continuously."""
-            print(f"Starting continuous processing for contract {contract_address}")
-            # Handle special marker for burn transactions (to_address=None)
-            actual_address = (
-                None if contract_address == "__zero_address__" else contract_address
+            from backend.consensus.monitoring import (
+                monitored_task,
+                get_monitor,
+                OperationTimer,
             )
-            try:
-                while not stop_event.is_set():
-                    # Check if there's already a transaction being processed
-                    with self.get_session() as session:
-                        transactions_processor = transactions_processor_factory(session)
-                        from backend.database_handler.models import Transactions
+            from loguru import logger
 
-                        # Handle None addresses (burn transactions) specially
-                        if actual_address is None:
-                            # Check for processing transactions with None to_address
-                            processing_tx = (
-                                session.query(Transactions)
-                                .filter(
-                                    Transactions.to_address.is_(None),
-                                    Transactions.status.in_(
-                                        [
-                                            TransactionStatus.ACTIVATED,
-                                            TransactionStatus.PROPOSING,
-                                            TransactionStatus.COMMITTING,
-                                            TransactionStatus.REVEALING,
-                                        ]
-                                    ),
+            monitor = get_monitor()
+
+            async with monitored_task(
+                f"contract_processor", contract_address
+            ) as task_id:
+                logger.info(
+                    f"[TX_PROCESSOR] Starting continuous processing for contract {contract_address}"
+                )
+
+                # Handle special marker for burn transactions (to_address=None)
+                actual_address = (
+                    None if contract_address == "__zero_address__" else contract_address
+                )
+
+                tx_count = 0
+                try:
+                    while not stop_event.is_set():
+                        monitor.heartbeat(
+                            task_id, tx_count, f"checking for pending transactions"
+                        )
+
+                        # Check if there's already a transaction being processed
+                        with self.get_session() as session:
+                            transactions_processor = transactions_processor_factory(
+                                session
+                            )
+                            from backend.database_handler.models import Transactions
+
+                            # Handle None addresses (burn transactions) specially
+                            if actual_address is None:
+                                # Check for processing transactions with None to_address
+                                processing_tx = (
+                                    session.query(Transactions)
+                                    .filter(
+                                        Transactions.to_address.is_(None),
+                                        Transactions.status.in_(
+                                            [
+                                                TransactionStatus.ACTIVATED,
+                                                TransactionStatus.PROPOSING,
+                                                TransactionStatus.COMMITTING,
+                                                TransactionStatus.REVEALING,
+                                            ]
+                                        ),
+                                    )
+                                    .first()
                                 )
-                                .first()
-                            )
 
-                            if processing_tx:
-                                await asyncio.sleep(self.consensus_sleep_time)
-                                continue
+                                if processing_tx:
+                                    logger.debug(
+                                        f"[TX_PROCESSOR] Burn transaction already processing, waiting..."
+                                    )
+                                    await asyncio.sleep(self.consensus_sleep_time)
+                                    continue
 
-                            # Get oldest pending with None to_address
-                            next_tx = (
-                                session.query(Transactions)
-                                .filter(
-                                    Transactions.to_address.is_(None),
-                                    Transactions.status == TransactionStatus.PENDING,
+                                # Get oldest pending with None to_address
+                                next_tx = (
+                                    session.query(Transactions)
+                                    .filter(
+                                        Transactions.to_address.is_(None),
+                                        Transactions.status
+                                        == TransactionStatus.PENDING,
+                                    )
+                                    .order_by(Transactions.created_at)
+                                    .first()
                                 )
-                                .order_by(Transactions.created_at)
-                                .first()
-                            )
 
-                            next_tx_data = (
-                                transactions_processor._parse_transaction_data(next_tx)
-                                if next_tx
-                                else None
-                            )
-                        else:
-                            # Normal contract processing
-                            processing_tx = transactions_processor.get_processing_transaction_for_contract(
-                                actual_address
-                            )
-
-                            if processing_tx:
-                                await asyncio.sleep(self.consensus_sleep_time)
-                                continue
-
-                            # Get the next pending transaction
-                            next_tx_data = (
-                                transactions_processor.get_oldest_pending_for_contract(
+                                next_tx_data = (
+                                    transactions_processor._parse_transaction_data(
+                                        next_tx
+                                    )
+                                    if next_tx
+                                    else None
+                                )
+                            else:
+                                # Normal contract processing
+                                processing_tx = transactions_processor.get_processing_transaction_for_contract(
                                     actual_address
                                 )
+
+                                if processing_tx:
+                                    logger.debug(
+                                        f"[TX_PROCESSOR] Contract {contract_address} has transaction in progress, waiting..."
+                                    )
+                                    await asyncio.sleep(self.consensus_sleep_time)
+                                    continue
+
+                                # Get the next pending transaction
+                                next_tx_data = transactions_processor.get_oldest_pending_for_contract(
+                                    actual_address
+                                )
+
+                            if not next_tx_data:
+                                # No more pending transactions for this contract
+                                logger.info(
+                                    f"[TX_PROCESSOR] No more pending transactions for contract {contract_address}, stopping processor"
+                                )
+                                break
+
+                            # Mark as ACTIVATED
+                            logger.info(
+                                f"[TX_PROCESSOR] Activating transaction {next_tx_data['hash']} for contract {contract_address}"
+                            )
+                            transactions_processor.update_transaction_status(
+                                next_tx_data["hash"],
+                                TransactionStatus.ACTIVATED,
+                            )
+                            session.commit()
+
+                            # Track it using the marker for None addresses
+                            self.processing_transactions[contract_address] = (
+                                next_tx_data["hash"]
+                            )
+                            monitor.track_processing(
+                                contract_address, next_tx_data["hash"]
                             )
 
-                        if not next_tx_data:
-                            # No more pending transactions for this contract
-                            break
+                        # Process the transaction
+                        tx_count += 1
+                        try:
+                            logger.info(
+                                f"[TX_PROCESSOR] Processing transaction {next_tx_data['hash']} (#{tx_count} for {contract_address})"
+                            )
+                            await self._process_single_transaction(
+                                next_tx_data,
+                                actual_address,  # Pass actual address (None for burn)
+                                chain_snapshot_factory,
+                                transactions_processor_factory,
+                                accounts_manager_factory,
+                                contract_snapshot_factory,
+                                contract_processor_factory,
+                                node_factory,
+                            )
+                            logger.info(
+                                f"[TX_PROCESSOR] Successfully processed transaction {next_tx_data['hash']}"
+                            )
+                        except Exception as e:
+                            logger.error(
+                                f"[TX_PROCESSOR] Error processing transaction {next_tx_data['hash']}: {e}"
+                            )
+                            logger.exception("Full traceback:")
+                            monitor.record_error(task_id, str(e))
 
-                        # Mark as ACTIVATED
-                        transactions_processor.update_transaction_status(
-                            next_tx_data["hash"],
-                            TransactionStatus.ACTIVATED,
-                        )
-                        session.commit()
+                        # Small delay before checking for next transaction
+                        await asyncio.sleep(self.consensus_sleep_time)
 
-                        # Track it using the marker for None addresses
-                        self.processing_transactions[contract_address] = next_tx_data[
-                            "hash"
-                        ]
-
-                    # Process the transaction
-                    try:
-                        await self._process_single_transaction(
-                            next_tx_data,
-                            actual_address,  # Pass actual address (None for burn)
-                            chain_snapshot_factory,
-                            transactions_processor_factory,
-                            accounts_manager_factory,
-                            contract_snapshot_factory,
-                            contract_processor_factory,
-                            node_factory,
-                        )
-                    except Exception as e:
-                        print(
-                            f"Error processing transaction {next_tx_data['hash']}: {e}"
-                        )
-                        import traceback
-
-                        traceback.print_exc()
-
-                    # Small delay before checking for next transaction
-                    await asyncio.sleep(self.consensus_sleep_time)
-
-            finally:
-                # Clean up when done
-                if contract_address in contract_tasks:
-                    del contract_tasks[contract_address]
-                print(f"Stopped continuous processing for contract {contract_address}")
-
-        # Main loop to spawn contract processing tasks
-        while not stop_event.is_set():
-            try:
-                # Get contracts with pending transactions
-                with self.get_session() as session:
-                    transactions_processor = transactions_processor_factory(session)
-                    contracts_with_pending = (
-                        transactions_processor.get_contracts_with_pending()
+                finally:
+                    # Clean up when done
+                    if contract_address in contract_tasks:
+                        del contract_tasks[contract_address]
+                    logger.info(
+                        f"[TX_PROCESSOR] Stopped continuous processing for contract {contract_address} after {tx_count} transactions"
                     )
 
-                # Spawn new tasks for contracts that don't have one
-                for contract_address in contracts_with_pending:
-                    if contract_address not in contract_tasks:
-                        # Create a new continuous processing task for this contract
-                        print(
-                            f"Spawning continuous processor for contract {contract_address}"
-                        )
-                        task = asyncio.create_task(
-                            process_contract_continuously(contract_address)
-                        )
-                        contract_tasks[contract_address] = task
+        # Monitor the main loop
+        async with monitored_task("pending_tx_main_loop") as main_task_id:
+            iteration = 0
+            total_spawned = 0
 
-                # Clean up completed tasks
-                completed_contracts = []
-                for address, task in contract_tasks.items():
-                    if task.done():
-                        completed_contracts.append(address)
+            # Main loop to spawn contract processing tasks
+            while not stop_event.is_set():
+                iteration += 1
+                monitor.heartbeat(
+                    main_task_id, iteration, f"active tasks: {len(contract_tasks)}"
+                )
 
-                for address in completed_contracts:
-                    del contract_tasks[address]
+                try:
+                    with OperationTimer("check_pending_contracts", warn_threshold=2.0):
+                        # Get contracts with pending transactions
+                        with self.get_session() as session:
+                            transactions_processor = transactions_processor_factory(
+                                session
+                            )
+                            contracts_with_pending = (
+                                transactions_processor.get_contracts_with_pending()
+                            )
 
-            except Exception as e:
-                print(f"Error in _process_pending_transactions main loop: {e}")
-                import traceback
+                        # Log active tasks status periodically
+                        if iteration % 20 == 0:  # Every 10 seconds (0.5s * 20)
+                            logger.info(
+                                f"[TX_MAIN] Status - Iteration: {iteration}, "
+                                f"Active tasks: {len(contract_tasks)}, "
+                                f"Total spawned: {total_spawned}, "
+                                f"Contracts with pending: {len(contracts_with_pending)}"
+                            )
 
-                traceback.print_exc()
+                        # Spawn new tasks for contracts that don't have one
+                        for contract_address in contracts_with_pending:
+                            if contract_address not in contract_tasks:
+                                # Create a new continuous processing task for this contract
+                                total_spawned += 1
+                                logger.info(
+                                    f"[TX_MAIN] Spawning processor #{total_spawned} for contract {contract_address} "
+                                    f"(active tasks: {len(contract_tasks) + 1})"
+                                )
+                                task = asyncio.create_task(
+                                    process_contract_continuously(contract_address)
+                                )
+                                contract_tasks[contract_address] = task
 
-            # Check for new contracts periodically
-            await asyncio.sleep(
-                0.5
-            )  # Check every 0.5 seconds for new contracts to improve responsiveness
+                        # Clean up completed tasks
+                        completed_contracts = []
+                        for address, task in contract_tasks.items():
+                            if task.done():
+                                completed_contracts.append(address)
+                                # Check if task raised an exception
+                                try:
+                                    task.result()  # This will raise if the task failed
+                                except Exception as e:
+                                    logger.error(
+                                        f"[TX_MAIN] Task for contract {address} failed: {e}"
+                                    )
+
+                        for address in completed_contracts:
+                            del contract_tasks[address]
+                            logger.debug(
+                                f"[TX_MAIN] Cleaned up completed task for contract {address}"
+                            )
+
+                except Exception as e:
+                    logger.error(
+                        f"[TX_MAIN] Error in main loop iteration {iteration}: {e}"
+                    )
+                    logger.exception("Full traceback:")
+                    monitor.record_error(main_task_id, str(e))
+
+                # Check for new contracts periodically
+                await asyncio.sleep(
+                    0.5
+                )  # Check every 0.5 seconds for new contracts to improve responsiveness
+
+            # Clean up remaining tasks on shutdown
+            logger.info(
+                f"[TX_MAIN] Shutting down, cancelling {len(contract_tasks)} active tasks"
+            )
+            for address, task in contract_tasks.items():
+                task.cancel()
+                logger.debug(f"[TX_MAIN] Cancelled task for contract {address}")
 
     async def _process_single_transaction(
         self,
@@ -694,104 +890,163 @@ class ConsensusAlgorithm:
             contract_processor_factory: Factory for creating contract processors
             node_factory: Factory for creating nodes
         """
+        from backend.consensus.monitoring import (
+            get_monitor,
+            OperationTimer,
+            monitored_session,
+        )
+        from loguru import logger
+
+        monitor = get_monitor()
+        tx_hash = transaction.get("hash", "unknown")
+        tx_type = transaction.get("type", "unknown")
+        start_time = time.time()
+
+        logger.info(
+            f"[TX_EXEC] Starting execution of transaction {tx_hash} (type: {tx_type}, address: {address})"
+        )
+
         try:
             # Convert dict to Transaction object
             current_transaction = Transaction.from_dict(transaction)
 
             # Create session for this transaction execution
             with self.get_session() as session:
-                transactions_processor = transactions_processor_factory(session)
-                chain_snapshot = chain_snapshot_factory(session)
-                accounts_manager = accounts_manager_factory(session)
-                contract_processor = contract_processor_factory(session)
-
-                # Build virtual validators if sim_config exists
-                virtual_validators = []
-                if (
-                    current_transaction.sim_config
-                    and current_transaction.sim_config.validators
-                ):
-                    for validator in current_transaction.sim_config.validators:
-                        provider = validator.provider
-                        model = validator.model
-                        config = validator.config
-                        plugin = validator.plugin
-                        plugin_config = validator.plugin_config
-
-                        if config is None or plugin is None or plugin_config is None:
-                            llm_provider = get_default_provider_for(provider, model)
-                        else:
-                            llm_provider = LLMProvider(
-                                provider=provider,
-                                model=model,
-                                config=config,
-                                plugin=plugin,
-                                plugin_config=plugin_config,
-                            )
-                            validate_provider(llm_provider)
-
-                        account = accounts_manager.create_new_account()
-                        virtual_validators.append(
-                            Validator(
-                                address=account.address,
-                                private_key=account.key.to_0x_hex(),
-                                stake=validator.stake,
-                                llmprovider=llm_provider,
-                            )
-                        )
-
-                # Choose snapshot function based on virtual validators
-                if len(virtual_validators) > 0:
-                    snapshot_func = self.validators_manager.temporal_snapshot
-                    args = [virtual_validators]
-                else:
-                    snapshot_func = self.validators_manager.snapshot
-                    args = []
-
-                # Get validators snapshot for consensus (virtual or regular)
-                async with snapshot_func(*args) as validators_snapshot:
-                    # Execute the transaction through the consensus system
-                    await self.exec_transaction(
-                        current_transaction,
-                        transactions_processor,
-                        chain_snapshot,
-                        accounts_manager,
-                        lambda contract_address: contract_snapshot_factory(
-                            contract_address,
-                            session,
-                            current_transaction,
-                        ),
-                        contract_processor,
-                        node_factory,
-                        validators_snapshot,
+                with monitored_session(session):
+                    logger.debug(
+                        f"[TX_EXEC] Created database session for transaction {tx_hash}"
                     )
 
-                # Commit the session after successful execution
-                session.commit()
+                    transactions_processor = transactions_processor_factory(session)
+                    chain_snapshot = chain_snapshot_factory(session)
+                    accounts_manager = accounts_manager_factory(session)
+                    contract_processor = contract_processor_factory(session)
+
+                    # Build virtual validators if sim_config exists
+                    virtual_validators = []
+                    if (
+                        current_transaction.sim_config
+                        and current_transaction.sim_config.validators
+                    ):
+                        logger.debug(
+                            f"[TX_EXEC] Building {len(current_transaction.sim_config.validators)} virtual validators"
+                        )
+                        with OperationTimer(
+                            "virtual_validators_setup",
+                            warn_threshold=3.0,
+                            context={"tx_hash": tx_hash},
+                        ):
+                            for validator in current_transaction.sim_config.validators:
+                                provider = validator.provider
+                                model = validator.model
+                                config = validator.config
+                                plugin = validator.plugin
+                                plugin_config = validator.plugin_config
+
+                                if (
+                                    config is None
+                                    or plugin is None
+                                    or plugin_config is None
+                                ):
+                                    llm_provider = get_default_provider_for(
+                                        provider, model
+                                    )
+                                else:
+                                    llm_provider = LLMProvider(
+                                        provider=provider,
+                                        model=model,
+                                        config=config,
+                                        plugin=plugin,
+                                        plugin_config=plugin_config,
+                                    )
+                                    validate_provider(llm_provider)
+
+                                account = accounts_manager.create_new_account()
+                                virtual_validators.append(
+                                    Validator(
+                                        address=account.address,
+                                        private_key=account.key.to_0x_hex(),
+                                        stake=validator.stake,
+                                        llmprovider=llm_provider,
+                                    )
+                                )
+
+                    # Choose snapshot function based on virtual validators
+                    if len(virtual_validators) > 0:
+                        snapshot_func = self.validators_manager.temporal_snapshot
+                        args = [virtual_validators]
+                        logger.debug(
+                            f"[TX_EXEC] Using temporal snapshot with {len(virtual_validators)} virtual validators"
+                        )
+                    else:
+                        snapshot_func = self.validators_manager.snapshot
+                        args = []
+
+                    # Get validators snapshot for consensus (virtual or regular)
+                    async with snapshot_func(*args) as validators_snapshot:
+                        logger.info(
+                            f"[TX_EXEC] Executing consensus for transaction {tx_hash}"
+                        )
+
+                        # Execute the transaction through the consensus system
+                        with OperationTimer(
+                            "consensus_execution",
+                            warn_threshold=60.0,
+                            context={"tx_hash": tx_hash, "address": address},
+                        ):
+                            await self.exec_transaction(
+                                current_transaction,
+                                transactions_processor,
+                                chain_snapshot,
+                                accounts_manager,
+                                lambda contract_address: contract_snapshot_factory(
+                                    contract_address,
+                                    session,
+                                    current_transaction,
+                                ),
+                                contract_processor,
+                                node_factory,
+                                validators_snapshot,
+                            )
+
+                    # Commit the session after successful execution
+                    session.commit()
+
+            execution_time = time.time() - start_time
+            logger.info(
+                f"[TX_EXEC] Successfully completed transaction {tx_hash} in {execution_time:.2f}s"
+            )
 
         except Exception as e:
+            execution_time = time.time() - start_time
+            logger.error(
+                f"[TX_EXEC] Failed to execute transaction {tx_hash} after {execution_time:.2f}s: {str(e)}"
+            )
+            logger.exception("Full traceback:")
+
             self.msg_handler.send_message(
                 LogEvent(
                     "transaction_execution_failed",
                     EventType.ERROR,
                     EventScope.CONSENSUS,
-                    f"Failed to execute transaction {transaction['hash']}: {str(e)}",
+                    f"Failed to execute transaction {tx_hash}: {str(e)}",
                     {
-                        "hash": transaction["hash"],
+                        "hash": tx_hash,
                         "error": str(e),
                         "address": address,
+                        "execution_time": execution_time,
                     },
-                    transaction_hash=transaction["hash"],
+                    transaction_hash=tx_hash,
                 )
             )
-            print(f"Error executing transaction {transaction['hash']}: {e}")
-            import traceback
-
-            traceback.print_exc()
         finally:
             # Always remove from processing_transactions when done
             if address in self.processing_transactions:
                 del self.processing_transactions[address]
+                monitor.track_processing(address, None)  # Clear tracking
+                logger.debug(
+                    f"[TX_EXEC] Cleared processing tracker for address {address}"
+                )
 
     async def exec_transaction(
         self,
@@ -1051,155 +1306,203 @@ class ConsensusAlgorithm:
             node_factory (Callable[[dict, ExecutionMode, ContractSnapshot, Receipt | None, MessageHandler, Callable[[str], ContractSnapshot]], Node]): Creates node instances that can execute contracts and process transactions.
             stop_event (threading.Event): Control signal to terminate the appeal window process.
         """
-        while not stop_event.is_set():
-            try:
-                async with asyncio.TaskGroup() as tg:
-                    with self.get_session() as session:
-                        # Get the accepted and undetermined transactions per contract address
-                        chain_snapshot = chain_snapshot_factory(session)
-                        awaiting_finalization_transactions = (
-                            chain_snapshot.get_awaiting_finalization_transactions()
-                        )
+        from backend.consensus.monitoring import (
+            monitored_task,
+            get_monitor,
+            OperationTimer,
+        )
+        from loguru import logger
 
-                        # Iterate over the contracts
-                        for (
-                            awaiting_finalization_queue
-                        ) in awaiting_finalization_transactions.values():
+        monitor = get_monitor()
+        logger.info("[CONSENSUS] Starting _appeal_window loop")
 
-                            # Create a new session for each task so tasks can be run concurrently
-                            async def exec_appeal_window_with_session_handling(
-                                awaiting_finalization_queue: list[dict],
-                                captured_chain_snapshot: ChainSnapshot = chain_snapshot,
-                            ):
-                                with self.get_session() as task_session:
-                                    transactions_processor = (
-                                        transactions_processor_factory(task_session)
+        async with monitored_task("appeal_window") as task_id:
+            iteration = 0
+            total_appeals = 0
+            total_finalizations = 0
+
+            while not stop_event.is_set():
+                iteration += 1
+                monitor.heartbeat(
+                    task_id, iteration, "checking for appeals and finalizations"
+                )
+
+                try:
+                    with OperationTimer("appeal_window_iteration", warn_threshold=15.0):
+                        async with asyncio.TaskGroup() as tg:
+                            with self.get_session() as session:
+                                # Get the accepted and undetermined transactions per contract address
+                                chain_snapshot = chain_snapshot_factory(session)
+                                awaiting_finalization_transactions = (
+                                    chain_snapshot.get_awaiting_finalization_transactions()
+                                )
+
+                                num_contracts = len(awaiting_finalization_transactions)
+                                total_txs = sum(
+                                    len(q)
+                                    for q in awaiting_finalization_transactions.values()
+                                )
+
+                                if total_txs > 0:
+                                    logger.debug(
+                                        f"[APPEAL] Processing {total_txs} transactions across {num_contracts} contracts"
                                     )
 
-                                    # Go through the whole queue to check for appeals and finalizations
-                                    for index, transaction in enumerate(
-                                        awaiting_finalization_queue
-                                    ):
-                                        current_transaction = Transaction.from_dict(
-                                            transaction
-                                        )
-
-                                        # Check if the transaction is appealed
-                                        if not current_transaction.appealed:
-
-                                            # Check if the transaction can be finalized
-                                            if self.can_finalize_transaction(
-                                                transactions_processor,
-                                                current_transaction,
-                                                index,
-                                                awaiting_finalization_queue,
-                                            ):
-
-                                                # Handle transactions that need to be finalized
-                                                await self.process_finalization(
-                                                    current_transaction,
-                                                    transactions_processor,
-                                                    captured_chain_snapshot,
-                                                    accounts_manager_factory(
-                                                        task_session
-                                                    ),
-                                                    lambda contract_address: contract_snapshot_factory(
-                                                        contract_address,
-                                                        task_session,
-                                                        current_transaction,
-                                                    ),
-                                                    contract_processor_factory(
-                                                        task_session
-                                                    ),
-                                                    node_factory,
-                                                )
-                                                task_session.commit()
-
-                                        else:
-                                            async with (
-                                                self.validators_manager.snapshot() as validators_snapshot
-                                            ):
-                                                # Handle transactions that are appealed
-                                                if (
-                                                    current_transaction.status
-                                                    == TransactionStatus.UNDETERMINED
-                                                ):
-                                                    # Leader appeal
-                                                    await self.process_leader_appeal(
-                                                        current_transaction,
-                                                        transactions_processor,
-                                                        captured_chain_snapshot,
-                                                        accounts_manager_factory(
-                                                            task_session
-                                                        ),
-                                                        lambda contract_address: contract_snapshot_factory(
-                                                            contract_address,
-                                                            task_session,
-                                                            current_transaction,
-                                                        ),
-                                                        contract_processor_factory(
-                                                            task_session
-                                                        ),
-                                                        node_factory,
-                                                        validators_snapshot,
-                                                    )
-                                                    task_session.commit()
-                                                elif (
-                                                    current_transaction.status
-                                                    == TransactionStatus.LEADER_TIMEOUT
-                                                ):
-                                                    # Leader timeout
-                                                    await self.process_leader_timeout_appeal(
-                                                        current_transaction,
-                                                        transactions_processor,
-                                                        captured_chain_snapshot,
-                                                        accounts_manager_factory(
-                                                            task_session
-                                                        ),
-                                                        lambda contract_address: contract_snapshot_factory(
-                                                            contract_address,
-                                                            task_session,
-                                                            current_transaction,
-                                                        ),
-                                                        contract_processor_factory(
-                                                            task_session
-                                                        ),
-                                                        node_factory,
-                                                        validators_snapshot,
-                                                    )
-                                                    task_session.commit()
-                                                else:
-                                                    # Validator appeal
-                                                    await self.process_validator_appeal(
-                                                        current_transaction,
-                                                        transactions_processor,
-                                                        captured_chain_snapshot,
-                                                        accounts_manager_factory(
-                                                            task_session
-                                                        ),
-                                                        lambda contract_address: contract_snapshot_factory(
-                                                            contract_address,
-                                                            task_session,
-                                                            current_transaction,
-                                                        ),
-                                                        contract_processor_factory(
-                                                            task_session
-                                                        ),
-                                                        node_factory,
-                                                        validators_snapshot,
-                                                    )
-                                                    task_session.commit()
-
-                            tg.create_task(
-                                exec_appeal_window_with_session_handling(
+                                # Iterate over the contracts
+                                for (
                                     awaiting_finalization_queue
-                                )
-                            )
+                                ) in awaiting_finalization_transactions.values():
 
-            except Exception as e:
-                print("Error running consensus", e)
-                print(traceback.format_exc())
-            await asyncio.sleep(self.consensus_sleep_time)
+                                    # Create a new session for each task so tasks can be run concurrently
+                                    async def exec_appeal_window_with_session_handling(
+                                        awaiting_finalization_queue: list[dict],
+                                        captured_chain_snapshot: ChainSnapshot = chain_snapshot,
+                                    ):
+                                        with self.get_session() as task_session:
+                                            transactions_processor = (
+                                                transactions_processor_factory(
+                                                    task_session
+                                                )
+                                            )
+
+                                            # Go through the whole queue to check for appeals and finalizations
+                                            for index, transaction in enumerate(
+                                                awaiting_finalization_queue
+                                            ):
+                                                current_transaction = (
+                                                    Transaction.from_dict(transaction)
+                                                )
+
+                                                # Check if the transaction is appealed
+                                                if not current_transaction.appealed:
+
+                                                    # Check if the transaction can be finalized
+                                                    if self.can_finalize_transaction(
+                                                        transactions_processor,
+                                                        current_transaction,
+                                                        index,
+                                                        awaiting_finalization_queue,
+                                                    ):
+
+                                                        # Handle transactions that need to be finalized
+                                                        await self.process_finalization(
+                                                            current_transaction,
+                                                            transactions_processor,
+                                                            captured_chain_snapshot,
+                                                            accounts_manager_factory(
+                                                                task_session
+                                                            ),
+                                                            lambda contract_address: contract_snapshot_factory(
+                                                                contract_address,
+                                                                task_session,
+                                                                current_transaction,
+                                                            ),
+                                                            contract_processor_factory(
+                                                                task_session
+                                                            ),
+                                                            node_factory,
+                                                        )
+                                                        task_session.commit()
+
+                                                else:
+                                                    async with (
+                                                        self.validators_manager.snapshot() as validators_snapshot
+                                                    ):
+                                                        # Handle transactions that are appealed
+                                                        if (
+                                                            current_transaction.status
+                                                            == TransactionStatus.UNDETERMINED
+                                                        ):
+                                                            # Leader appeal
+                                                            await self.process_leader_appeal(
+                                                                current_transaction,
+                                                                transactions_processor,
+                                                                captured_chain_snapshot,
+                                                                accounts_manager_factory(
+                                                                    task_session
+                                                                ),
+                                                                lambda contract_address: contract_snapshot_factory(
+                                                                    contract_address,
+                                                                    task_session,
+                                                                    current_transaction,
+                                                                ),
+                                                                contract_processor_factory(
+                                                                    task_session
+                                                                ),
+                                                                node_factory,
+                                                                validators_snapshot,
+                                                            )
+                                                            task_session.commit()
+                                                        elif (
+                                                            current_transaction.status
+                                                            == TransactionStatus.LEADER_TIMEOUT
+                                                        ):
+                                                            # Leader timeout
+                                                            await self.process_leader_timeout_appeal(
+                                                                current_transaction,
+                                                                transactions_processor,
+                                                                captured_chain_snapshot,
+                                                                accounts_manager_factory(
+                                                                    task_session
+                                                                ),
+                                                                lambda contract_address: contract_snapshot_factory(
+                                                                    contract_address,
+                                                                    task_session,
+                                                                    current_transaction,
+                                                                ),
+                                                                contract_processor_factory(
+                                                                    task_session
+                                                                ),
+                                                                node_factory,
+                                                                validators_snapshot,
+                                                            )
+                                                            task_session.commit()
+                                                        else:
+                                                            # Validator appeal
+                                                            await self.process_validator_appeal(
+                                                                current_transaction,
+                                                                transactions_processor,
+                                                                captured_chain_snapshot,
+                                                                accounts_manager_factory(
+                                                                    task_session
+                                                                ),
+                                                                lambda contract_address: contract_snapshot_factory(
+                                                                    contract_address,
+                                                                    task_session,
+                                                                    current_transaction,
+                                                                ),
+                                                                contract_processor_factory(
+                                                                    task_session
+                                                                ),
+                                                                node_factory,
+                                                                validators_snapshot,
+                                                            )
+                                                            task_session.commit()
+
+                                    tg.create_task(
+                                        exec_appeal_window_with_session_handling(
+                                            awaiting_finalization_queue
+                                        )
+                                    )
+
+                        # Log periodic summary
+                    if iteration % 20 == 0:  # Every 100 seconds (5s * 20)
+                        logger.info(
+                            f"[APPEAL] Summary - Iteration: {iteration}, "
+                            f"Total appeals: {total_appeals}, "
+                            f"Total finalizations: {total_finalizations}"
+                        )
+
+                except Exception as e:
+                    logger.error(f"[APPEAL] Error in iteration {iteration}: {e}")
+                    logger.exception("Full traceback:")
+                    monitor.record_error(task_id, str(e))
+
+                await asyncio.sleep(self.consensus_sleep_time)
+
+            logger.info(
+                f"[APPEAL] Appeal window loop stopped after {iteration} iterations"
+            )
 
     def can_finalize_transaction(
         self,
@@ -2625,7 +2928,9 @@ class AcceptedState(TransactionState):
                 "Reached consensus",
                 {
                     "transaction_hash": context.transaction.hash,
-                    "consensus_data": context.consensus_data.to_dict(),
+                    "consensus_data": _redact_consensus_data_for_log(
+                        context.consensus_data.to_dict()
+                    ),
                 },
                 transaction_hash=context.transaction.hash,
             )
@@ -2765,7 +3070,9 @@ class UndeterminedState(TransactionState):
                 "Failed to reach consensus",
                 {
                     "transaction_hash": context.transaction.hash,
-                    "consensus_data": context.consensus_data.to_dict(),
+                    "consensus_data": _redact_consensus_data_for_log(
+                        context.consensus_data.to_dict()
+                    ),
                 },
                 transaction_hash=context.transaction.hash,
             )

@@ -304,19 +304,16 @@ class Node:
         msg_handler = self.msg_handler
         if msg_handler is None:
             return
+        is_error = isinstance(res.result, genvmbase.ExecutionError)
         msg_handler.send_message(
             LogEvent(
                 name="execution_finished",
-                type=(
-                    EventType.INFO
-                    if isinstance(res.result, genvmbase.ExecutionReturn)
-                    else EventType.ERROR
-                ),
+                type=(EventType.INFO if not is_error else EventType.ERROR),
                 scope=EventScope.GENVM,
                 message="execution finished",
                 data={
                     "result": f"{res.result!r}",
-                    "stdout": res.stdout if EventType.ERROR else res.stdout[:500],
+                    "stdout": res.stdout if is_error else res.stdout[:500],
                     "stderr": res.stderr,
                     "genvm_log": res.genvm_log,
                 },
