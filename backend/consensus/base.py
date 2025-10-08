@@ -2,7 +2,6 @@
 
 DEFAULT_VALIDATORS_COUNT = 5
 DEFAULT_CONSENSUS_SLEEP_TIME = 5
-EXECUTING_TRANSACTION_TIMEOUT = 600
 ACTIVATED_TRANSACTION_TIMEOUT = 900
 
 import os
@@ -292,7 +291,6 @@ class ConsensusAlgorithm:
         get_session (Callable[[], Session]): Function to get a database session.
         msg_handler (MessageHandler): Handler for messaging.
         consensus_service (ConsensusService): Consensus service to interact with the rollup.
-        pending_queues (dict[str, asyncio.Queue]): Dictionary of pending_queues for transactions.
         finality_window_time (int): Time in seconds for the finality window.
         consensus_sleep_time (int): Time in seconds for the consensus sleep time.
     """
@@ -392,7 +390,6 @@ class ConsensusAlgorithm:
                                 {"count": reset_count},
                             )
                         )
-                        session.commit()
 
                     # Clean up orphaned entries in processing_transactions
                     # Check for transactions that are in terminal states but still tracked
@@ -578,7 +575,9 @@ class ConsensusAlgorithm:
                             )
 
                             if processing_tx:
-                                await asyncio.sleep(DEFAULT_CONSENSUS_SLEEP_TIME)
+                                await asyncio.sleep(
+                                    0.5
+                                )  # Reduced from 5s to 0.5s for faster polling
                                 continue
 
                             # Get the next pending transaction
@@ -625,7 +624,9 @@ class ConsensusAlgorithm:
                         traceback.print_exc()
 
                     # Small delay before checking for next transaction
-                    await asyncio.sleep(DEFAULT_CONSENSUS_SLEEP_TIME)
+                    await asyncio.sleep(
+                        0.1
+                    )  # Reduced from 5s to 0.1s for immediate processing of queued transactions
 
             finally:
                 # Clean up when done
@@ -671,7 +672,9 @@ class ConsensusAlgorithm:
                 traceback.print_exc()
 
             # Check for new contracts periodically
-            await asyncio.sleep(2)  # Check every 2 seconds for new contracts
+            await asyncio.sleep(
+                0.5
+            )  # Check every 0.5 seconds for new contracts to improve responsiveness
 
     async def _process_single_transaction(
         self,
