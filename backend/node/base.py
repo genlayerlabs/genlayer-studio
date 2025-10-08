@@ -316,7 +316,7 @@ class Node:
                 message="execution finished",
                 data={
                     "result": f"{res.result!r}",
-                    "stdout": res.stdout[:5000],
+                    "stdout": res.stdout if EventType.ERROR else res.stdout[:500],
                     "stderr": res.stderr,
                     "genvm_log": res.genvm_log,
                 },
