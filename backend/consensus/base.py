@@ -1039,6 +1039,21 @@ class ConsensusAlgorithm:
                     transaction_hash=tx_hash,
                 )
             )
+            try:
+                with self.get_session() as recovery_session:
+                    recovery_processor = transactions_processor_factory(
+                        recovery_session
+                    )
+                    recovery_processor.update_transaction_status(
+                        tx_hash,
+                        TransactionStatus.PENDING,
+                        update_current_status_changes=False,
+                    )
+            except Exception:
+                logger.exception(
+                    "[TX_EXEC] Failed to reset status after execution error",
+                    tx_hash=tx_hash,
+                )
         finally:
             # Always remove from processing_transactions when done
             tracker_key = address if address is not None else "__zero_address__"
