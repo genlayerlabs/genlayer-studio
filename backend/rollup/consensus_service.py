@@ -155,9 +155,9 @@ class ConsensusService:
         Forward a transaction to the consensus rollup and wait for NewTransaction event
         """
         if not self.web3.is_connected():
-            print(
-                "[CONSENSUS_SERVICE]: Not connected to Hardhat node, skipping transaction forwarding"
-            )
+            # print(
+            #     "[CONSENSUS_SERVICE]: Not connected to Hardhat node, skipping transaction forwarding"
+            # )
             return None
 
         try:
@@ -209,9 +209,9 @@ class ConsensusService:
             *args: Arguments to pass to the event function
         """
         if not self.web3.is_connected():
-            print(
-                "[CONSENSUS_SERVICE]: Not connected to Hardhat node, skipping transaction forwarding"
-            )
+            # print(
+            #     "[CONSENSUS_SERVICE]: Not connected to Hardhat node, skipping transaction forwarding"
+            # )
             return None
 
         if account.get("private_key") is not None:
