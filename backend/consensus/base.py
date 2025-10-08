@@ -519,49 +519,87 @@ class ConsensusAlgorithm:
         async def process_contract_continuously(contract_address):
             """Process all pending transactions for a single contract continuously."""
             print(f"Starting continuous processing for contract {contract_address}")
+            # Handle special marker for burn transactions (to_address=None)
+            actual_address = (
+                None if contract_address == "__zero_address__" else contract_address
+            )
             try:
                 while not stop_event.is_set():
                     # Check if there's already a transaction being processed
                     with self.get_session() as session:
                         transactions_processor = transactions_processor_factory(session)
+                        from backend.database_handler.models import Transactions
 
-                        # Check for transactions in processing states
-                        processing_tx = transactions_processor.get_processing_transaction_for_contract(
-                            contract_address
-                        )
-
-                        if processing_tx:
-                            # Wait a bit and check again
-                            await asyncio.sleep(
-                                DEFAULT_CONSENSUS_SLEEP_TIME
-                            )  # Shorter wait to be more responsive
-                            continue
-
-                        # Get the next pending transaction
-                        next_tx_data = (
-                            transactions_processor.get_oldest_pending_for_contract(
-                                contract_address
+                        # Handle None addresses (burn transactions) specially
+                        if actual_address is None:
+                            # Check for processing transactions with None to_address
+                            processing_tx = (
+                                session.query(Transactions)
+                                .filter(
+                                    Transactions.to_address.is_(None),
+                                    Transactions.status.in_(
+                                        [
+                                            TransactionStatus.ACTIVATED,
+                                            TransactionStatus.PROPOSING,
+                                            TransactionStatus.COMMITTING,
+                                            TransactionStatus.REVEALING,
+                                        ]
+                                    ),
+                                )
+                                .first()
                             )
-                        )
+
+                            if processing_tx:
+                                await asyncio.sleep(
+                                    0.5
+                                )  # Shorter wait since these are quick transactions
+                                continue
+
+                            # Get oldest pending with None to_address
+                            next_tx = (
+                                session.query(Transactions)
+                                .filter(
+                                    Transactions.to_address.is_(None),
+                                    Transactions.status == TransactionStatus.PENDING,
+                                )
+                                .order_by(Transactions.created_at)
+                                .first()
+                            )
+
+                            next_tx_data = (
+                                transactions_processor._parse_transaction_data(next_tx)
+                                if next_tx
+                                else None
+                            )
+                        else:
+                            # Normal contract processing
+                            processing_tx = transactions_processor.get_processing_transaction_for_contract(
+                                actual_address
+                            )
+
+                            if processing_tx:
+                                await asyncio.sleep(DEFAULT_CONSENSUS_SLEEP_TIME)
+                                continue
+
+                            # Get the next pending transaction
+                            next_tx_data = (
+                                transactions_processor.get_oldest_pending_for_contract(
+                                    actual_address
+                                )
+                            )
 
                         if not next_tx_data:
                             # No more pending transactions for this contract
-                            print(
-                                f"No more pending transactions for contract {contract_address}, stopping continuous processing"
-                            )
                             break
 
                         # Mark as ACTIVATED
-                        print(
-                            f"  Processing transaction {next_tx_data['hash']} for {contract_address}"
-                        )
                         transactions_processor.update_transaction_status(
                             next_tx_data["hash"],
                             TransactionStatus.ACTIVATED,
                         )
                         session.commit()
 
-                        # Track it
+                        # Track it using the marker for None addresses
                         self.processing_transactions[contract_address] = next_tx_data[
                             "hash"
                         ]
@@ -570,7 +608,7 @@ class ConsensusAlgorithm:
                     try:
                         await self._process_single_transaction(
                             next_tx_data,
-                            contract_address,
+                            actual_address,  # Pass actual address (None for burn)
                             chain_snapshot_factory,
                             transactions_processor_factory,
                             accounts_manager_factory,
@@ -625,12 +663,6 @@ class ConsensusAlgorithm:
 
                 for address in completed_contracts:
                     del contract_tasks[address]
-
-                # Status update
-                if contract_tasks:
-                    print(
-                        f"Active contract processors: {len(contract_tasks)} - {list(contract_tasks.keys())[:5]}"
-                    )
 
             except Exception as e:
                 print(f"Error in _process_pending_transactions main loop: {e}")

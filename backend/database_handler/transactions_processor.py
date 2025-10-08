@@ -1253,21 +1253,28 @@ class TransactionsProcessor:
     def get_contracts_with_pending(self) -> list[str]:
         """
         Get all distinct contract addresses that have pending transactions.
+        Also includes a special marker for None addresses (burn transactions).
 
         Returns:
-            List of contract addresses with pending transactions
+            List of contract addresses with pending transactions (may include special marker)
         """
         results = (
             self.session.query(Transactions.to_address)
-            .filter(
-                Transactions.status == TransactionStatus.PENDING,
-                Transactions.to_address.isnot(None),
-            )
+            .filter(Transactions.status == TransactionStatus.PENDING)
             .distinct()
             .all()
         )
 
-        return [addr for (addr,) in results]
+        # Convert None addresses to a special marker
+        addresses = []
+        for (addr,) in results:
+            if addr is None:
+                addresses.append(
+                    "__zero_address__"
+                )  # Special marker for burn transactions
+            else:
+                addresses.append(addr)
+        return addresses
 
     def reset_stuck_transactions(self, timeout_seconds: int = 900) -> int:
         """
