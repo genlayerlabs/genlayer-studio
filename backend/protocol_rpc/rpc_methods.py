@@ -221,9 +221,14 @@ def count_validators(
 @rpc.method("sim_getTransactionsForAddress")
 def get_transactions_for_address(
     address: str,
-    session: Session = Depends(get_db_session),
+    transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
+    accounts_manager: AccountsManager = Depends(get_accounts_manager),
 ) -> list[dict]:
-    return impl.get_transactions_for_address(session=session, address=address)
+    return impl.get_transactions_for_address(
+        transactions_processor=transactions_processor,
+        accounts_manager=accounts_manager,
+        address=address,
+    )
 
 
 @rpc.method("sim_setFinalityWindowTime")
