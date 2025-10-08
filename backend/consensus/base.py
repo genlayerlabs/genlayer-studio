@@ -547,9 +547,7 @@ class ConsensusAlgorithm:
                             )
 
                             if processing_tx:
-                                await asyncio.sleep(
-                                    0.5
-                                )  # Shorter wait since these are quick transactions
+                                await asyncio.sleep(self.consensus_sleep_time)
                                 continue
 
                             # Get oldest pending with None to_address
@@ -575,9 +573,7 @@ class ConsensusAlgorithm:
                             )
 
                             if processing_tx:
-                                await asyncio.sleep(
-                                    0.5
-                                )  # Reduced from 5s to 0.5s for faster polling
+                                await asyncio.sleep(self.consensus_sleep_time)
                                 continue
 
                             # Get the next pending transaction
@@ -624,9 +620,7 @@ class ConsensusAlgorithm:
                         traceback.print_exc()
 
                     # Small delay before checking for next transaction
-                    await asyncio.sleep(
-                        0.1
-                    )  # Reduced from 5s to 0.1s for immediate processing of queued transactions
+                    await asyncio.sleep(self.consensus_sleep_time)
 
             finally:
                 # Clean up when done
