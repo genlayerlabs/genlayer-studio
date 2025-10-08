@@ -705,8 +705,51 @@ class ConsensusAlgorithm:
                 accounts_manager = accounts_manager_factory(session)
                 contract_processor = contract_processor_factory(session)
 
-                # Get validators snapshot for consensus
-                async with self.validators_manager.snapshot() as validators_snapshot:
+                # Build virtual validators if sim_config exists
+                virtual_validators = []
+                if (
+                    current_transaction.sim_config
+                    and current_transaction.sim_config.validators
+                ):
+                    for validator in current_transaction.sim_config.validators:
+                        provider = validator.provider
+                        model = validator.model
+                        config = validator.config
+                        plugin = validator.plugin
+                        plugin_config = validator.plugin_config
+
+                        if config is None or plugin is None or plugin_config is None:
+                            llm_provider = get_default_provider_for(provider, model)
+                        else:
+                            llm_provider = LLMProvider(
+                                provider=provider,
+                                model=model,
+                                config=config,
+                                plugin=plugin,
+                                plugin_config=plugin_config,
+                            )
+                            validate_provider(llm_provider)
+
+                        account = accounts_manager.create_new_account()
+                        virtual_validators.append(
+                            Validator(
+                                address=account.address,
+                                private_key=account.key.to_0x_hex(),
+                                stake=validator.stake,
+                                llmprovider=llm_provider,
+                            )
+                        )
+
+                # Choose snapshot function based on virtual validators
+                if len(virtual_validators) > 0:
+                    snapshot_func = self.validators_manager.temporal_snapshot
+                    args = [virtual_validators]
+                else:
+                    snapshot_func = self.validators_manager.snapshot
+                    args = []
+
+                # Get validators snapshot for consensus (virtual or regular)
+                async with snapshot_func(*args) as validators_snapshot:
                     # Execute the transaction through the consensus system
                     await self.exec_transaction(
                         current_transaction,
