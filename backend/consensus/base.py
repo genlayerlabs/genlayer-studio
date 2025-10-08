@@ -1041,11 +1041,12 @@ class ConsensusAlgorithm:
             )
         finally:
             # Always remove from processing_transactions when done
-            if address in self.processing_transactions:
-                del self.processing_transactions[address]
-                monitor.track_processing(address, None)  # Clear tracking
+            tracker_key = address if address is not None else "__zero_address__"
+            if tracker_key in self.processing_transactions:
+                del self.processing_transactions[tracker_key]
+                monitor.track_processing(tracker_key, None)  # Clear tracking
                 logger.debug(
-                    f"[TX_EXEC] Cleared processing tracker for address {address}"
+                    f"[TX_EXEC] Cleared processing tracker for address {tracker_key}"
                 )
 
     async def exec_transaction(
@@ -1949,8 +1950,9 @@ class ConsensusAlgorithm:
 
         # Clear the processing tracker for this address if it exists
         # This allows the next pending transaction to be picked up
-        if address in self.processing_transactions:
-            del self.processing_transactions[address]
+        tracker_key = address if address is not None else "__zero_address__"
+        if tracker_key in self.processing_transactions:
+            del self.processing_transactions[tracker_key]
 
         # Set all transactions with higher created_at to PENDING
         future_transactions = context.transactions_processor.get_newer_transactions(

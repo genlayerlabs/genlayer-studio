@@ -232,7 +232,7 @@ class OperationTimer:
         self,
         operation_name: str,
         warn_threshold: float = 30.0,
-        context: Dict[str, Any] = None,
+        context: Optional[Dict[str, Any]] = None,
     ):
         self.operation_name = operation_name
         self.warn_threshold = warn_threshold
