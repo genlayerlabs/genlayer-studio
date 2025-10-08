@@ -322,6 +322,78 @@ class TransactionsProcessorMock:
         # Return empty list in tests to prevent the safety mechanism from interfering
         return []
 
+    def get_contracts_with_pending(self) -> list[str]:
+        addresses: set[str] = set()
+        for transaction in self.transactions.values():
+            if (
+                transaction.get("status") == TransactionStatus.PENDING.value
+                and transaction.get("to_address") is not None
+            ):
+                addresses.add(transaction["to_address"])
+        return sorted(addresses)
+
+    def get_oldest_pending_for_contract(self, contract_address: str) -> dict | None:
+        candidates = [
+            t
+            for t in self.transactions.values()
+            if t.get("to_address") == contract_address
+            and t.get("status") == TransactionStatus.PENDING.value
+        ]
+        if not candidates:
+            return None
+        # Return a copy to mimic DB row parsing behavior
+        from copy import deepcopy as _deepcopy
+
+        return _deepcopy(min(candidates, key=lambda x: x["created_at"]))
+
+    def get_processing_transaction_for_contract(
+        self, contract_address: str
+    ) -> dict | None:
+        processing_statuses = {
+            TransactionStatus.ACTIVATED.value,
+            TransactionStatus.PROPOSING.value,
+            TransactionStatus.COMMITTING.value,
+            TransactionStatus.REVEALING.value,
+        }
+        candidates = [
+            t
+            for t in self.transactions.values()
+            if t.get("to_address") == contract_address
+            and t.get("status") in processing_statuses
+        ]
+        if not candidates:
+            return None
+        from copy import deepcopy as _deepcopy
+
+        # Choose the most recent processing transaction
+        return _deepcopy(max(candidates, key=lambda x: x["created_at"]))
+
+    def reset_stuck_transactions(self, timeout_seconds: int = 900) -> int:
+        # Use naive datetime to match how mock transactions are created
+        from datetime import datetime, timedelta
+
+        cutoff_time = datetime.now() - timedelta(seconds=timeout_seconds)
+        processing_statuses = {
+            TransactionStatus.ACTIVATED.value,
+            TransactionStatus.PROPOSING.value,
+            TransactionStatus.COMMITTING.value,
+            TransactionStatus.REVEALING.value,
+        }
+
+        reset_count = 0
+        for tx in self.transactions.values():
+            if (
+                tx.get("status") in processing_statuses
+                and tx.get("created_at") < cutoff_time
+            ):
+                tx["status"] = TransactionStatus.PENDING.value
+                reset_count += 1
+
+        if reset_count > 0:
+            self.status_changed_event.set()
+
+        return reset_count
+
 
 class SnapshotMock:
     def __init__(self, transactions_processor: TransactionsProcessorMock):
