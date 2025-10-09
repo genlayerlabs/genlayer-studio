@@ -27,13 +27,13 @@ from copy import deepcopy
 DEFAULT_FINALITY_WINDOW = 5
 # Reduce sleep time for faster tests when using mocks
 DEFAULT_CONSENSUS_SLEEP_TIME = (
-    0.1 if os.getenv("TEST_WITH_MOCK_LLMS", "true").lower() == "true" else 2
+    0.1 if os.getenv("TEST_WITH_MOCKS", "true").lower() == "true" else 2
 )
 DEFAULT_EXEC_RESULT = b"\x00\x00"  # success(null)
 TIMEOUT_EXEC_RESULT = b"\x02timeout"
 
 # Configuration for LLM mocking
-USE_MOCK_LLMS = os.getenv("TEST_WITH_MOCK_LLMS", "true").lower() == "true"
+USE_MOCK_LLMS = os.getenv("TEST_WITH_MOCKS", "true").lower() == "true"
 
 
 class AccountsManagerMock:
