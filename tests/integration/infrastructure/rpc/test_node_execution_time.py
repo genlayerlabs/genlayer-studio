@@ -33,6 +33,7 @@ def create_mock_execution_result(processing_time=0, state=None):
         genvm_log=[],
         state=state,
         processing_time=processing_time,
+        nondet_disagree=None,
     )
 
 

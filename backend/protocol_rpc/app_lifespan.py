@@ -158,35 +158,63 @@ class _SQLAlchemyDBWrapper:
 @asynccontextmanager
 async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAppState]:
     """Prepare RPC services and ensure graceful shutdown."""
+    from loguru import logger
+    import time
+
+    startup_time = time.time()
+    logger.info("[STARTUP] Beginning application startup sequence")
 
     setup_loguru_config()
+    logger.info("[STARTUP] Logging configured")
 
+    logger.info(
+        f"[STARTUP] Initializing database connection: {settings.database_url.split('@')[1] if '@' in settings.database_url else 'local'}"
+    )
     db_manager = DatabaseSessionManager(settings.database_url)
     set_database_manager(db_manager)
 
+    logger.info("[STARTUP] Verifying database readiness and migrations")
     _verify_database_ready(db_manager)
+
+    logger.info("[STARTUP] Seeding LLM providers")
     _seed_llm_providers(db_manager)
 
     broadcast_backend = os.environ.get("WEBSOCKET_BROADCAST_BACKEND", "memory://")
+    logger.info(f"[STARTUP] Connecting to broadcast backend: {broadcast_backend}")
     broadcast = Broadcast(broadcast_backend)
     await broadcast.connect()
 
+    logger.info("[STARTUP] Initializing message handler and consensus services")
     msg_handler = MessageHandler(broadcast, config=GlobalConfiguration())
     consensus_service = ConsensusService()
     transactions_parser = TransactionParser(consensus_service)
     emit_event = create_emit_event_function(broadcast)
 
     validators_session = db_manager.open_session()
+    # Manages the validators registry with locking for concurrent access
+    # Handles LLM and web modules and configuration file changes
+    # Loads GenVM configuration
+    logger.info("[STARTUP] Initializing validators manager")
     validators_manager = validators.Manager(validators_session)
 
-    await _initialise_validators(settings.validators_config_json, db_manager)
+    # Delete all validators from the database and create new ones based on env.VAlIDATORS_CONFIG_JSON
+    if settings.validators_config_json:
+        logger.info("[STARTUP] Initializing validators from config")
+        await _initialise_validators(settings.validators_config_json, db_manager)
+
+    # Restart web and llm modules, created the validators Snapshot, and registers providers and models to the LLM module
+    logger.info("[STARTUP] Restarting validators and creating snapshot")
     await validators_manager.restart()
 
     validators_registry = validators_manager.registry
+    logger.info(
+        f"[STARTUP] Validators registry initialized with {len(validators_registry.nodes if hasattr(validators_registry, 'nodes') else [])} validators"
+    )
 
     def get_session() -> Session:
         return db_manager.open_session()
 
+    logger.info("[STARTUP] Creating consensus algorithm")
     consensus = ConsensusAlgorithm(
         get_session,
         msg_handler,
@@ -195,6 +223,7 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
     )
 
     stop_event = threading.Event()
+    logger.info("[STARTUP] Starting background consensus tasks")
     background_tasks = [
         asyncio.create_task(consensus.run_crawl_snapshot_loop(stop_event=stop_event)),
         asyncio.create_task(
@@ -202,20 +231,29 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
         ),
         asyncio.create_task(consensus.run_appeal_window_loop(stop_event=stop_event)),
     ]
+    logger.info(f"[STARTUP] Started {len(background_tasks)} background consensus tasks")
 
     sql_db = _SQLAlchemyDBWrapper(db_manager)
 
+    # Registers the RPC methods via decorators, injects dependencies, and orchestrates the invokes with logging for execution
+    logger.info("[STARTUP] Setting up RPC endpoint manager")
     endpoint_manager = RPCEndpointManager(
         logger=msg_handler,
         dependency_overrides_provider=app,
     )
 
     # Import registers RPC methods via decorators (module import has side effects).
+    logger.info("[STARTUP] Registering RPC methods")
     from backend.protocol_rpc import rpc_methods
 
+    rpc_method_count = 0
     for definition in rpc.to_list():
         endpoint_manager.register(definition)
+        rpc_method_count += 1
+    logger.info(f"[STARTUP] Registered {rpc_method_count} RPC methods")
 
+    # Creates the RPC router with the endpoint manager to handle the HTTP requests
+    logger.info("[STARTUP] Creating RPC router")
     rpc_router = FastAPIRPCRouter(endpoint_manager=endpoint_manager)
 
     app_state = RPCAppState(
@@ -241,12 +279,58 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
         broadcast=broadcast,
     )
 
+    startup_duration = time.time() - startup_time
+    logger.info(
+        f"[STARTUP] Application startup completed in {startup_duration:.2f} seconds"
+    )
+
+    # Start a periodic status logger if in debug mode
+    if os.environ.get("LOG_LEVEL", "INFO").upper() == "DEBUG":
+        from backend.consensus.monitoring import periodic_status_logger, get_monitor
+
+        logger.info("[STARTUP] Starting periodic monitoring status logger")
+        monitor_task = asyncio.create_task(periodic_status_logger(interval=300))
+        resources.background_tasks.append(monitor_task)
+
     try:
         yield app_state
     finally:
+        logger.info("[SHUTDOWN] Beginning graceful shutdown sequence")
+        shutdown_start = time.time()
+
+        logger.info("[SHUTDOWN] Signaling consensus tasks to stop")
         resources.consensus_stop_event.set()
+
+        logger.info(
+            f"[SHUTDOWN] Cancelling {len(resources.background_tasks)} background tasks"
+        )
         for task in resources.background_tasks:
             task.cancel()
+
+        logger.info("[SHUTDOWN] Waiting for tasks to complete")
         await asyncio.gather(*resources.background_tasks, return_exceptions=True)
+
+        logger.info("[SHUTDOWN] Closing validators session")
         resources.validators_session.close()
+
+        logger.info("[SHUTDOWN] Disconnecting broadcast backend")
         await resources.broadcast.disconnect()
+
+        # Log final monitoring status if available
+        try:
+            from backend.consensus.monitoring import get_monitor
+
+            monitor = get_monitor()
+            status = monitor.get_status()
+            logger.info(
+                f"[SHUTDOWN] Final monitoring status - "
+                f"Tasks processed: {status.get('active_tasks', 0)}, "
+                f"Memory usage: {status.get('memory_usage_mb', 0):.1f}MB"
+            )
+        except Exception:
+            pass
+
+        shutdown_duration = time.time() - shutdown_start
+        logger.info(
+            f"[SHUTDOWN] Graceful shutdown completed in {shutdown_duration:.2f} seconds"
+        )
