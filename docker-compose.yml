@@ -59,6 +59,8 @@ services:
       - RPCDEBUGPORT=${RPCDEBUGPORT}
       - WEBDRIVERHOST=${WEBDRIVERHOST}
       - WEBDRIVERPORT=${WEBDRIVERPORT}
+      - GENVMROOT=/genvm
+      - GENVM_TAG=v0.2.4
     ports:
       - "${RPCPORT}:${RPCPORT}"
       - "${RPCDEBUGPORT}:${RPCDEBUGPORT}"
@@ -103,7 +105,7 @@ services:
       traefik.http.routers.jsonrpc.tls: true
 
   webdriver:
-    image: yeagerai/genlayer-genvm-webdriver:0.0.3
+    image: yeagerai/genlayer-genvm-webdriver:0.0.7
     shm_size: 2gb
     environment:
       - PORT=${WEBDRIVERPORT:-4444}

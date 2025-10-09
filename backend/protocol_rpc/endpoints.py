@@ -747,6 +747,20 @@ def get_transaction_by_hash(
     return transactions_processor.get_transaction_by_hash(transaction_hash, sim_config)
 
 
+def get_studio_transaction_by_hash(
+    transactions_processor: TransactionsProcessor,
+    transaction_hash: str,
+    full: bool = True,
+) -> dict | None:
+    return transactions_processor.get_studio_transaction_by_hash(transaction_hash, full)
+
+
+def get_transaction_status(
+    transactions_processor: TransactionsProcessor, transaction_hash: str
+) -> str | None:
+    return transactions_processor.get_transaction_status(transaction_hash)
+
+
 async def eth_call(
     session: Session,
     accounts_manager: AccountsManager,
