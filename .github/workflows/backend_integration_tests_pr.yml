@@ -78,7 +78,7 @@ jobs:
 
       # Start services without rebuilding images
       - name: Run Docker Compose
-        run: docker compose up -d --no-build
+        run: docker compose up -d --no-build jsonrpc
 
 
 
