@@ -173,7 +173,7 @@ local function just_in_backend(ctx, args, mapped_prompt)
 	---@cast mapped_prompt MappedPrompt
 	---@cast args LLMExecPromptPayload | LLMExecPromptTemplatePayload
 
-	-- Return mock response if it exists
+	-- Return mock response if it exists and matches
 	if ctx.host_data.mock_response then
 		local result
 
@@ -188,8 +188,14 @@ local function just_in_backend(ctx, args, mapped_prompt)
 			-- EqNonComparativeLeader is essentially just exec_prompt
 			result = get_mock_response_from_table(ctx.host_data.mock_response.response, mapped_prompt.prompt.user_message)
 		end
-		lib.log{level = "debug", message = "executed with", type = type(result), res = result}
-		return result
+
+		-- Only return mock response if a match was found, otherwise fall through to real provider
+		if result.data ~= "no match" then
+			lib.log{level = "debug", message = "executed with mock response", type = type(result), res = result}
+			return result
+		else
+			lib.log{level = "debug", message = "no mock match found, falling through to real provider"}
+		end
 	end
 
 	mapped_prompt.prompt.use_max_completion_tokens = false
