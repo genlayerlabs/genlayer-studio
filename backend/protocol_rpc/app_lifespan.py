@@ -125,13 +125,16 @@ def _verify_database_ready(db_manager: DatabaseSessionManager) -> None:
 async def _initialise_validators(
     validators_config_json: Optional[str],
     db_manager: DatabaseSessionManager,
+    validators_manager: validators.Manager,
 ) -> None:
     if not validators_config_json:
         return
 
     init_session = db_manager.open_session()
     try:
-        await initialize_validators(validators_config_json, init_session)
+        await initialize_validators(
+            validators_config_json, init_session, validators_manager
+        )
         init_session.commit()
     finally:
         init_session.close()
@@ -200,7 +203,9 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
     # Delete all validators from the database and create new ones based on env.VAlIDATORS_CONFIG_JSON
     if settings.validators_config_json:
         logger.info("[STARTUP] Initializing validators from config")
-        await _initialise_validators(settings.validators_config_json, db_manager)
+        await _initialise_validators(
+            settings.validators_config_json, db_manager, validators_manager
+        )
 
     # Restart web and llm modules, created the validators Snapshot, and registers providers and models to the LLM module
     logger.info("[STARTUP] Restarting validators and creating snapshot")

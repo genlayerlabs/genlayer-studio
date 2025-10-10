@@ -52,7 +52,6 @@ jobs:
           sed -i "s/<add_your_openai_api_key_here>/${OPENAIKEY}/g" .env
           sed -i "s/FINALITY_WINDOW =.*/FINALITY_WINDOW = 10/" .env
           echo >> .env
-          echo "WEB_CONCURRENCY=1" >> .env
           if [[ "${{ needs.triggers.outputs.is_pull_request_review_approved }}" == "true" ]]; then
             echo "TEST_WITH_MOCK_LLMS=false" >> .env
           else
