@@ -46,10 +46,16 @@ end
 local function get_mock_response_from_table(table, message)
 	for key, value in pairs(table) do
 		if string.find(message, key) then
-			return value
+			return {
+				data = value,
+				consumed_gen = 0
+			}
 		end
 	end
-	return "no match"
+	return {
+		data = "no match",
+		consumed_gen = 0
+	}
 end
 
 local function handle_custom_plugin(ctx, args, mapped_prompt)
