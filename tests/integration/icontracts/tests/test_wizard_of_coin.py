@@ -7,12 +7,10 @@ import json
 def test_wizard_of_coin(setup_validators):
     mock_response = {
         "response": {
-            "wizard": json.dumps(
-                {
-                    "reasoning": "I am a grumpy wizard and I never give away my coins!",
-                    "give_coin": False,
-                }
-            ),
+            "wizard": {
+                "reasoning": "I am a grumpy wizard and I never give away my coins!",
+                "give_coin": False,
+            },
         },
         "eq_principle_prompt_comparative": {
             "The value of give_coin has to match": True

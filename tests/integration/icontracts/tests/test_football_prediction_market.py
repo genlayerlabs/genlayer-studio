@@ -11,12 +11,10 @@ def test_football_prediction_market(setup_validators):
     winner = 1
     mock_response = {
         "response": {
-            f"Team 1: {team_1}\nTeam 2: {team_2}": json.dumps(
-                {
-                    "score": score,
-                    "winner": winner,
-                }
-            ),
+            f"Team 1: {team_1}\nTeam 2: {team_2}": {
+                "score": score,
+                "winner": winner,
+            },
         }
     }
     setup_validators(mock_response)
