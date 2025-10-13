@@ -193,7 +193,7 @@ def log_endpoint_info_wrapper(msg_handler: MessageHandler, config: GlobalConfigu
             except Exception as e:
                 as_jsonrpc = None
                 if isinstance(e, JSONRPCError):
-                    as_jsonrpc = e.jsonrpc_format
+                    as_jsonrpc = e.to_dict()
                 msg_handler.send_message(
                     LogEvent(
                         "endpoint_error",

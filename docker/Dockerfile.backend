@@ -1,8 +1,12 @@
 FROM ubuntu:24.04 AS base
 
 ARG TARGETPLATFORM
+ARG TARGETARCH
 
-ARG GENVM_TAG=v0.1.3
+
+ARG GENVM_TAG=v0.2.4
+
+ENV GENVM_TAG=$GENVM_TAG
 
 ARG path=/app
 WORKDIR $path
@@ -10,7 +14,8 @@ WORKDIR $path
 SHELL ["/bin/bash", "-x", "-c"]
 RUN apt-get update -y \
     && DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install -y --no-install-recommends \
-        curl unzip xz-utils ca-certificates python3.12 python3.12-dev libssl3 gcc \
+        curl unzip xz-utils ca-certificates python3.12 python3.12-venv python3-dev gcc libssl3 \
+        musl musl-dev \
     && mkdir -p "$HOME/.config/pip/" \
     && printf "[global]\nbreak-system-packages = true\n" >> "$HOME/.config/pip/pip.conf" \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2 \
@@ -31,48 +36,70 @@ RUN groupadd -r backend-group \
     && mkdir -p /genvm
 
 ENV PYTHONPATH "${PYTHONPATH}:/${path}"
-ENV FLASK_APP backend/protocol_rpc/server.py
 ENV HUGGINGFACE_HUB_CACHE /home/backend-user/.cache/huggingface
 
 ENV RUST_BACKTRACE=1
 
-ADD \
-    https://github.com/yeagerai/genvm/releases/download/$GENVM_TAG/genvm-linux-amd64.zip \
-    /genvm/genvm-linux-amd64.zip
-
-ADD \
-    https://github.com/yeagerai/genvm/releases/download/$GENVM_TAG/genvm-linux-arm64.zip \
-    /genvm/genvm-linux-arm64.zip
-
-ADD \
-    https://github.com/yeagerai/genvm/releases/download/$GENVM_TAG/genvm-runners.zip \
-    /genvm/genvm-runners.zip
-
+# Download and extract GenVM binaries (sequential for Docker compatibility)
 RUN cd /genvm \
-    && if [[ "$TARGETPLATFORM" == "linux/amd64" ]] ; \
-        then \
-            unzip genvm-linux-amd64.zip ; \
-        elif [[ "$TARGETPLATFORM" == "linux/arm64" ]] ; \
-        then \
-            unzip genvm-linux-arm64.zip ; \
-        else \
-            echo "Sorry, $TARGETPLATFORM is not supported yet" ; exit 1 ; \
-        fi \
-    && unzip genvm-runners.zip \
-    && rm *.zip \
-    && ls -R . \
+    && echo "=== Starting GenVM $GENVM_TAG download ===" \
+    && if [[ "$TARGETPLATFORM" == "linux/amd64" ]] || [[ -z "$TARGETPLATFORM" ]]; then \
+        ARCH_FILE="genvm-linux-amd64.tar.xz" ; \
+    elif [[ "$TARGETPLATFORM" == "linux/arm64" ]]; then \
+        ARCH_FILE="genvm-linux-arm64.tar.xz" ; \
+    else \
+        echo "ERROR: Unsupported platform $TARGETPLATFORM" ; exit 1 ; \
+    fi \
+    && echo "Platform: $TARGETPLATFORM -> Architecture file: $ARCH_FILE" \
+    && echo "Downloading $ARCH_FILE..." \
+    && curl -L --fail --retry 3 --retry-delay 2 \
+        --connect-timeout 10 --max-time 300 \
+        --progress-bar \
+        -o "$ARCH_FILE" \
+        "https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/$ARCH_FILE" \
+    && echo "✓ Downloaded $ARCH_FILE" \
+    && echo "Downloading genvm-universal.tar.xz..." \
+    && curl -L --fail --retry 3 --retry-delay 2 \
+        --connect-timeout 10 --max-time 300 \
+        --progress-bar \
+        -o "genvm-universal.tar.xz" \
+        "https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-universal.tar.xz" \
+    && echo "✓ Downloaded genvm-universal.tar.xz" \
+    && echo "Verifying downloads..." \
+    && ls -lah *.tar.xz \
+    && for f in *.tar.xz; do \
+        if [ ! -s "$f" ]; then \
+            echo "ERROR: $f is empty or missing" ; exit 1 ; \
+        fi ; \
+    done \
+    && echo "Extracting archives..." \
+    && tar -xf "$ARCH_FILE" \
+    && tar -xf "genvm-universal.tar.xz" \
+    && rm *.tar.xz \
+    && echo "GenVM installed successfully:" \
+    && ls -la \
     && chown -R backend-user:backend-group /genvm \
-    && su - backend-user -c 'python3 /genvm/scripts/runners-registry download --registry /genvm/share/lib/genvm/runners/all.json --dest /genvm/share/lib/genvm/runners/' \
-    && su - backend-user -c '/genvm/bin/genvm precompile' \
-    && cd "$path" \
-    && true
+    && chmod +x /genvm/bin/* /genvm/executor/$GENVM_TAG/bin/* \
+    && echo "=== GenVM installation complete ===" \
+    && echo "Setting up musl loader for GenVM binaries..." \
+    && if [[ "$TARGETPLATFORM" == "linux/amd64" ]] || [[ -z "$TARGETPLATFORM" ]]; then \
+        ln -sf /lib/x86_64-linux-musl/libc.so /lib/ld-musl-x86_64.so.1 ; \
+    elif [[ "$TARGETPLATFORM" == "linux/arm64" ]]; then \
+        ln -sf /lib/aarch64-linux-musl/libc.so /lib/ld-musl-aarch64.so.1 ; \
+    fi \
+    && echo "Musl loader configured"
+
+# Set GenVM environment variables (GENVM_TAG is already set as ENV earlier)
+ENV GENVMROOT=/genvm
+ENV PATH="/genvm/bin:/genvm/executor/${GENVM_TAG}/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/genvm/lib:/genvm/executor/${GENVM_TAG}/lib:${LD_LIBRARY_PATH}"
 
 COPY ../.env .
 COPY backend $path/backend
 COPY asgi.py $path/asgi.py
 COPY uvicorn_config.py $path/uvicorn_config.py
 
-HEALTHCHECK --interval=1s --timeout=1s --retries=30 --start-period=3s CMD python3 backend/healthcheck.py --port ${FLASK_SERVER_PORT}
+HEALTHCHECK --interval=1s --timeout=1s --retries=30 --start-period=3s CMD python3 backend/healthcheck.py --port ${RPCPORT:-4000}
 
 ###########START NEW IMAGE : DEBUGGER ###################
 FROM base AS debug
@@ -81,14 +108,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 USER backend-user
 # Use uvicorn's native --reload flag for hot reloading
 # This watches all Python files and automatically restarts on changes
-CMD python3 -m debugpy --listen 0.0.0.0:${RPCDEBUGPORT} -m uvicorn asgi:application --host 0.0.0.0 --port ${FLASK_SERVER_PORT} --reload --reload-dir /app/backend
+CMD python3 -m debugpy --listen 0.0.0.0:${RPCDEBUGPORT} -m uvicorn asgi:application --host 0.0.0.0 --port ${RPCPORT:-4000} --reload --reload-dir /app/backend
 
 ###########START NEW IMAGE: PRODUCTION ###################
 FROM base AS prod
-# Install uvicorn and production dependencies as root
-USER root
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --cache-dir=/root/.cache/pip setuptools uvicorn[standard] hypercorn asgiref redis psutil prometheus-flask-exporter
-# Switch back to backend-user
+# Dependencies are already installed from backend/protocol_rpc/requirements.txt in the base stage
 USER backend-user
 CMD uvicorn asgi:application --host 0.0.0.0 --port ${RPCPORT:-4000} --workers ${WEB_CONCURRENCY:-1} --log-level ${LOG_LEVEL:-info}

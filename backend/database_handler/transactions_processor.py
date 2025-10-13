@@ -3,6 +3,7 @@ from datetime import datetime
 from enum import Enum
 import rlp
 import re
+import random
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, desc, and_, JSON, type_coerce, text
 from sqlalchemy.orm.attributes import flag_modified
@@ -187,31 +188,27 @@ class TransactionsProcessor:
         type: int,
         nonce: int,
     ) -> str:
-        from_address_bytes = (
-            to_bytes(hexstr=from_address) if is_address(from_address) else None
+        """Generate a fallback transaction hash similar to ConsensusMain._generateTx."""
+
+        # Prepare recipient bytes as the solidity address encoding (20 bytes)
+        recipient_bytes = (
+            to_bytes(hexstr=to_address) if is_address(to_address) else b"\x00" * 20
         )
-        to_address_bytes = (
-            to_bytes(hexstr=to_address) if is_address(to_address) else None
+
+        # Use current timestamp to mimic block.timestamp
+        timestamp = int(time.time())
+        timestamp_bytes = timestamp.to_bytes(32, byteorder="big", signed=False)
+
+        # Derive a deterministic pseudo-random seed from the recipient address
+        seed_source = f"{to_address or '0x0'}:{timestamp}"
+        rng = random.Random(seed_source)
+        random_hex = "".join(rng.choice("0123456789abcdef") for _ in range(64))
+        random_seed_bytes = bytes.fromhex(random_hex)
+
+        tx_hash = (
+            "0x" + keccak(recipient_bytes + timestamp_bytes + random_seed_bytes).hex()
         )
-
-        data_bytes = to_bytes(text=TransactionsProcessor._transaction_data_to_str(data))
-
-        tx_elements = [
-            from_address_bytes,
-            to_address_bytes,
-            to_bytes(hexstr=hex(int(value))),
-            data_bytes,
-            to_bytes(hexstr=hex(type)),
-            to_bytes(hexstr=hex(nonce)),
-            to_bytes(hexstr=hex(0)),  # gas price (placeholder)
-            to_bytes(hexstr=hex(0)),  # gas limit (placeholder)
-        ]
-
-        # Filter out None values
-        tx_elements = [elem for elem in tx_elements if elem is not None]
-        rlp_encoded = rlp.encode(tx_elements)
-        hash = "0x" + keccak(rlp_encoded).hex()
-        return hash
+        return tx_hash
 
     def insert_transaction(
         self,
@@ -597,6 +594,80 @@ class TransactionsProcessor:
         transaction_data = self._process_queue(transaction_data)
         transaction_data = self._process_round_data(transaction_data)
         return transaction_data
+
+    def get_studio_transaction_by_hash(
+        self, transaction_hash: str, full: bool
+    ) -> dict | None:
+        transaction = (
+            self.session.query(Transactions)
+            .filter_by(hash=transaction_hash)
+            .one_or_none()
+        )
+
+        if transaction is None:
+            return None
+
+        transaction_data = self._parse_transaction_data(transaction)
+
+        # Transform studio fields to testnet fields
+        transaction_data["tx_id"] = transaction_data.pop("hash", None)
+        transaction_data["sender"] = transaction_data.pop("from_address", None)
+        transaction_data["recipient"] = transaction_data.pop("to_address", None)
+        transaction_data["initial_rotations"] = transaction_data.pop(
+            "config_rotation_rounds", None
+        )
+        transaction_data["created_timestamp"] = str(
+            int(
+                datetime.fromisoformat(
+                    transaction_data.pop("created_at", "0")
+                ).timestamp()
+            )
+        )
+        transaction_data["last_vote_timestamp"] = str(
+            transaction_data.pop("last_vote_timestamp", 0)
+        )
+
+        if not full:
+            # Remove validators info and encoded data
+            for key in [
+                "data",
+                "consensus_data",
+                "consensus_history",
+                "contract_snapshot",
+                "leader_timeout_validators",
+                "sim_config",
+            ]:
+                transaction_data.pop(key, None)
+
+        return transaction_data
+
+    def get_activated_transactions_older_than(self, seconds: int) -> list[dict]:
+        """
+        Get ACTIVATED transactions that have been stuck for more than the specified seconds.
+
+        Args:
+            seconds: Number of seconds a transaction must be ACTIVATED to be considered stuck
+
+        Returns:
+            List of transaction data dictionaries for stuck transactions
+        """
+        from datetime import datetime, timedelta
+
+        cutoff_time = datetime.now() - timedelta(seconds=seconds)
+        stuck_transactions = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.status == TransactionStatus.ACTIVATED,
+                Transactions.created_at < cutoff_time,
+            )
+            .order_by(Transactions.created_at)
+            .all()
+        )
+
+        return [
+            self._parse_transaction_data(transaction)
+            for transaction in stuck_transactions
+        ]
 
     def update_transaction_status(
         self,
@@ -1116,4 +1187,131 @@ class TransactionsProcessor:
             )
             .count()
         )
+        return count
+
+    def get_transaction_status(self, transaction_hash: str) -> str | None:
+        transaction = (
+            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
+        )
+        if not transaction:
+            return None
+        transaction_status = transaction.status
+        return transaction_status.value
+
+    def get_processing_transaction_for_contract(
+        self, contract_address: str
+    ) -> dict | None:
+        """
+        Check if there's a transaction currently being processed for a contract.
+
+        Args:
+            contract_address: The contract address to check
+
+        Returns:
+            Transaction data if processing, None otherwise
+        """
+        processing_tx = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.to_address == contract_address,
+                Transactions.status.in_(
+                    [
+                        TransactionStatus.ACTIVATED,
+                        TransactionStatus.PROPOSING,
+                        TransactionStatus.COMMITTING,
+                        TransactionStatus.REVEALING,
+                    ]
+                ),
+            )
+            .first()
+        )
+
+        return self._parse_transaction_data(processing_tx) if processing_tx else None
+
+    def get_oldest_pending_for_contract(self, contract_address: str) -> dict | None:
+        """
+        Get the oldest pending transaction for a specific contract.
+
+        Args:
+            contract_address: The contract address
+
+        Returns:
+            Oldest pending transaction data or None
+        """
+        pending_tx = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.to_address == contract_address,
+                Transactions.status == TransactionStatus.PENDING,
+            )
+            .order_by(Transactions.created_at)
+            .first()
+        )
+
+        return self._parse_transaction_data(pending_tx) if pending_tx else None
+
+    def get_contracts_with_pending(self) -> list[str]:
+        """
+        Get all distinct contract addresses that have pending transactions.
+        Also includes a special marker for None addresses (burn transactions).
+
+        Returns:
+            List of contract addresses with pending transactions (may include special marker)
+        """
+        results = (
+            self.session.query(Transactions.to_address)
+            .filter(Transactions.status == TransactionStatus.PENDING)
+            .distinct()
+            .all()
+        )
+
+        # Convert None addresses to a special marker
+        addresses = []
+        for (addr,) in results:
+            if addr is None:
+                addresses.append(
+                    "__zero_address__"
+                )  # Special marker for burn transactions
+            else:
+                addresses.append(addr)
+        return addresses
+
+    def reset_stuck_transactions(self, timeout_seconds: int = 900) -> int:
+        """
+        Reset transactions that have been stuck in processing states.
+
+        Args:
+            timeout_seconds: How long a transaction must be in processing state to be considered stuck
+
+        Returns:
+            Number of transactions reset
+        """
+        from datetime import datetime, timedelta, timezone
+
+        cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)
+
+        stuck_transactions = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.status.in_(
+                    [
+                        TransactionStatus.ACTIVATED,
+                        TransactionStatus.PROPOSING,
+                        TransactionStatus.COMMITTING,
+                        TransactionStatus.REVEALING,
+                    ]
+                ),
+                Transactions.created_at < cutoff_time,
+            )
+            .all()
+        )
+
+        count = 0
+        for tx in stuck_transactions:
+            tx.status = TransactionStatus.PENDING
+            count += 1
+
+        if count > 0:
+            self.session.commit()
+
         return count

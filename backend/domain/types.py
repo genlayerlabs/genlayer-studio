@@ -105,6 +105,7 @@ class Validator:
     llmprovider: LLMProvider
     id: int | None = None
     private_key: str | None = None
+    fallback_validator: str | None = None
 
     @staticmethod
     def from_dict(d: dict) -> "Validator":
@@ -121,7 +122,7 @@ class Validator:
         )
         ret.id = d.get("id", None)
         ret.private_key = d.get("private_key", None)
-
+        ret.fallback_validator = d.get("fallback_validator", None)
         return ret
 
     def to_dict(self):
@@ -134,6 +135,7 @@ class Validator:
             "plugin": self.llmprovider.plugin,
             "plugin_config": self.llmprovider.plugin_config,
             "private_key": self.private_key,
+            "fallback_validator": self.fallback_validator,
         }
 
         if self.id:

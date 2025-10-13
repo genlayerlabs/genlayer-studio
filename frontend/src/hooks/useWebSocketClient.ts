@@ -35,7 +35,6 @@ class NativeWebSocketClient {
       this.ws = new WebSocket(this.url);
 
       this.ws.onopen = () => {
-        console.log('WebSocket connected');
         this.id = `ws-${Date.now()}`;
         this.connected = true;
         this.reconnectAttempts = 0;
@@ -64,7 +63,6 @@ class NativeWebSocketClient {
       };
 
       this.ws.onclose = () => {
-        console.log('WebSocket disconnected');
         this.id = null;
         this.connected = false;
         this.triggerEvent('disconnect', null);
@@ -80,14 +78,14 @@ class NativeWebSocketClient {
   }
 
   private reconnect() {
+    if (!this.shouldReconnect) {
+      return;
+    }
+
     this.reconnectAttempts++;
     const timeout = Math.min(
       this.reconnectTimeout * Math.pow(2, this.reconnectAttempts - 1),
       this.maxReconnectTimeout,
-    );
-
-    console.log(
-      `Reconnecting in ${timeout}ms (attempt ${this.reconnectAttempts})`,
     );
 
     setTimeout(() => {
@@ -122,7 +120,7 @@ class NativeWebSocketClient {
         try {
           handler(data);
         } catch (error) {
-          console.error(`Error in event handler for ${event}:`, error);
+          console.error('Error in event handler for %s:', event, error);
         }
       });
     }

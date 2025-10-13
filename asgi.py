@@ -7,21 +7,22 @@ import os
 import sys
 
 # Set production environment
-os.environ.setdefault('FLASK_ENV', 'production')
-os.environ.setdefault('UVICORN_WORKER', 'true')
+os.environ.setdefault("FLASK_ENV", "production")
+os.environ.setdefault("UVICORN_WORKER", "true")
 
 # Import FastAPI app
 from backend.protocol_rpc.fastapi_server import app
 
 # Export the ASGI application
+
 application = app
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     # Enable reload in development mode
     is_debug = os.getenv("BACKEND_BUILD_TARGET") == "debug"
-    
+
     uvicorn.run(
         "asgi:application",
         host="0.0.0.0",

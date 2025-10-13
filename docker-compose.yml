@@ -75,6 +75,8 @@ services:
       - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-20}
       - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-10}
       - LOG_LEVEL=${LOG_LEVEL:-info}
+      - GENVMROOT=/genvm
+      - GENVM_TAG=v0.2.4
     # No direct ports - Traefik handles load balancing
     expose:
       - "${RPCPORT}"  # Only expose internally for Traefik
@@ -129,7 +131,7 @@ services:
       - "traefik.http.services.jsonrpc.loadbalancer.healthcheck.interval=10s"
 
   webdriver:
-    image: yeagerai/genlayer-genvm-webdriver:0.0.3
+    image: yeagerai/genlayer-genvm-webdriver:0.0.7
     shm_size: 2gb
     environment:
       - PORT=${WEBDRIVERPORT:-4444}
@@ -239,7 +241,7 @@ services:
       retries: 3
       start_period: 40s
     deploy:
-      replicas: ${CONSENSUS_WORKERS:-3}
+      replicas: ${CONSENSUS_WORKERS:-1}  # Minimum 1 worker required for consensus processing
       restart_policy:
         condition: on-failure
         delay: 5s

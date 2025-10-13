@@ -1,6 +1,6 @@
 """
 Redis subscriber for RPC instances to receive events from consensus workers.
-Integrates with FastAPI to broadcast events to WebSocket clients.
+Integrates with Broadcast to forward events to WebSocket clients.
 """
 
 import os
@@ -10,39 +10,36 @@ from typing import Optional, Callable, Dict, Any
 import redis.asyncio as aioredis
 from loguru import logger
 
+from backend.protocol_rpc.broadcast import Broadcast
+
 
 class RedisEventSubscriber:
     """
-    Subscribes to Redis channels and forwards events to WebSocket clients.
+    Subscribes to Redis channels and forwards events to WebSocket clients via Broadcast.
     Each RPC instance runs its own subscriber to receive all worker events.
     """
 
     # Redis channels to subscribe to
-    CHANNELS = [
-        "consensus:events",
-        "transaction:events",
-        "general:events"
-    ]
+    CHANNELS = ["consensus:events", "transaction:events", "general:events"]
 
     def __init__(
         self,
         redis_url: Optional[str] = None,
-        connection_manager: Optional[Any] = None,
-        instance_id: Optional[str] = None
+        broadcast: Optional[Broadcast] = None,
+        instance_id: Optional[str] = None,
     ):
         """
         Initialize the Redis subscriber.
 
         Args:
             redis_url: Redis connection URL
-            connection_manager: FastAPI WebSocket connection manager
+            broadcast: Broadcast instance for WebSocket fan-out
             instance_id: Unique identifier for this RPC instance
         """
         self.redis_url = redis_url or os.environ.get(
-            "REDIS_URL",
-            "redis://redis:6379/0"
+            "REDIS_URL", "redis://redis:6379/0"
         )
-        self.connection_manager = connection_manager
+        self.broadcast = broadcast
         self.instance_id = instance_id or f"rpc-{os.getpid()}"
 
         self.redis_client: Optional[aioredis.Redis] = None
@@ -59,9 +56,7 @@ class RedisEventSubscriber:
         """Connect to Redis and set up pub/sub."""
         try:
             self.redis_client = await aioredis.from_url(
-                self.redis_url,
-                encoding="utf-8",
-                decode_responses=True
+                self.redis_url, encoding="utf-8", decode_responses=True
             )
 
             # Test connection
@@ -93,7 +88,9 @@ class RedisEventSubscriber:
 
         self.is_running = True
         self.subscription_task = asyncio.create_task(self._listen_for_events())
-        logger.info(f"RPC instance {self.instance_id} started listening for Redis events")
+        logger.info(
+            f"RPC instance {self.instance_id} started listening for Redis events"
+        )
 
     async def stop(self):
         """Stop listening and clean up."""
@@ -174,8 +171,8 @@ class RedisEventSubscriber:
             if event_name in self.event_handlers:
                 await self.event_handlers[event_name](event_payload)
 
-            # Broadcast to WebSocket clients if connection manager is available
-            if self.connection_manager:
+            # Broadcast to WebSocket clients if broadcast is available
+            if self.broadcast:
                 await self._broadcast_to_websocket(
                     channel, event_name, event_payload, transaction_hash
                 )
@@ -190,42 +187,43 @@ class RedisEventSubscriber:
         channel: str,
         event: str,
         data: Dict[str, Any],
-        transaction_hash: Optional[str] = None
+        transaction_hash: Optional[str] = None,
     ):
         """
-        Broadcast event to WebSocket clients.
+        Broadcast event to WebSocket clients via Broadcast channels.
 
         Args:
             channel: Redis channel the event came from
             event: Event name
             data: Event data
-            transaction_hash: Optional transaction hash for room-based routing
+            transaction_hash: Optional transaction hash for channel-based routing
         """
-        if not self.connection_manager:
+        if not self.broadcast:
             return
 
         try:
-            # Determine room based on transaction hash or channel
-            if transaction_hash:
-                # Send to transaction-specific room
-                room = f"transaction:{transaction_hash}"
-                await self.connection_manager.emit_to_room(room, event, data)
+            # Prepare message payload
+            message = json.dumps({"event": event, "data": data})
 
-                # Also send to general transaction room
-                await self.connection_manager.emit_to_room("transactions", event, data)
+            # Determine broadcast channel based on transaction hash or Redis channel
+            if transaction_hash:
+                # Send to transaction-specific channel
+                await self.broadcast.publish(channel=transaction_hash, message=message)
+                logger.debug(
+                    f"Published {event} to broadcast channel: {transaction_hash}"
+                )
             else:
-                # Send to channel-based room
-                room_map = {
+                # Send to general broadcast channel based on Redis channel
+                channel_map = {
                     "consensus:events": "consensus",
                     "transaction:events": "transactions",
-                    "general:events": "general"
+                    "general:events": "general",
                 }
-                room = room_map.get(channel, "general")
-                await self.connection_manager.emit_to_room(room, event, data)
-
-            # Always broadcast to all connections for backward compatibility
-            message = json.dumps({"event": event, "data": data})
-            await self.connection_manager.broadcast(message)
+                broadcast_channel = channel_map.get(channel, "__broadcast__")
+                await self.broadcast.publish(channel=broadcast_channel, message=message)
+                logger.debug(
+                    f"Published {event} to broadcast channel: {broadcast_channel}"
+                )
 
         except Exception as e:
             logger.error(f"Error broadcasting to WebSocket: {e}")
@@ -253,7 +251,7 @@ class RedisEventSubscriber:
             "redis_url": self.redis_url,
             "is_running": self.is_running,
             "redis_connected": False,
-            "subscribed_channels": []
+            "subscribed_channels": [],
         }
 
         if self.redis_client:
@@ -283,11 +281,9 @@ class RedisEventSubscriber:
             return
 
         try:
-            message = json.dumps({
-                "instance_id": self.instance_id,
-                "event": event,
-                "data": data
-            })
+            message = json.dumps(
+                {"instance_id": self.instance_id, "event": event, "data": data}
+            )
 
             await self.redis_client.publish(channel, message)
             logger.debug(f"Published {event} to {channel}")
