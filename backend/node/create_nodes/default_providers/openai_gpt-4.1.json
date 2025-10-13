@@ -2,10 +2,7 @@
   "provider": "openai",
   "plugin": "openai-compatible",
   "model": "gpt-4.1",
-  "config": {
-    "temperature": 0.75,
-    "max_tokens": 500
-  },
+  "config": {},
   "plugin_config": {
     "api_key_env_var": "OPENAIKEY",
     "api_url": "https://api.openai.com"
