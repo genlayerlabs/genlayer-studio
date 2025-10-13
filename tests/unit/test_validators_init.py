@@ -67,10 +67,10 @@ async def test_initialize_validators_success():
     ]"""
 
     with patch(
-        "backend.protocol_rpc.validators_init.AccountsManager"
+        "backend.database_handler.accounts_manager.AccountsManager"
     ) as mock_accounts_manager_class:
         with patch(
-            "backend.protocol_rpc.validators_init.get_default_provider_for"
+            "backend.node.create_nodes.providers.get_default_provider_for"
         ) as mock_get_provider:
             # Mock accounts manager
             mock_accounts_manager = Mock()
@@ -144,10 +144,10 @@ async def test_initialize_validators_creator_error():
     ]"""
 
     with patch(
-        "backend.protocol_rpc.validators_init.AccountsManager"
+        "backend.database_handler.accounts_manager.AccountsManager"
     ) as mock_accounts_manager_class:
         with patch(
-            "backend.protocol_rpc.validators_init.get_default_provider_for"
+            "backend.node.create_nodes.providers.get_default_provider_for"
         ) as mock_get_provider:
             # Mock accounts manager
             mock_accounts_manager = Mock()
