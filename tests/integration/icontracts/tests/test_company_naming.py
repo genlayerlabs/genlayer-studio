@@ -7,10 +7,12 @@ import json
 def test_company_naming(setup_validators):
     mock_response = {
         "response": {
-            "expert business analyst": {
-                "analysis": "The company name 'GenLayer' aligns reasonably well with its description. For relevance, it scores 2 points because 'Gen' could imply generation or general, aligning with the creation and management role of the digital court and jurisdiction, while 'Layer' suggests a foundational or infrastructural role, relevant to the concept of a trust layer. In terms of memorability, it scores 2 points as 'GenLayer' is distinctive and easy to remember. For description match, it scores 3 points. The name captures the essence of a foundational layer but does not fully convey the complexity of the decentralized digital court or intelligent contracts. Lastly, for brand potential, it scores 2 points. The name and description together create a cohesive and futuristic brand identity, suggesting innovation in digital governance and contract enforcement.",
-                "score": 9,
-            },
+            "expert business analyst": json.dumps(
+                {
+                    "analysis": "The company name 'GenLayer' aligns reasonably well with its description. For relevance, it scores 2 points because 'Gen' could imply generation or general, aligning with the creation and management role of the digital court and jurisdiction, while 'Layer' suggests a foundational or infrastructural role, relevant to the concept of a trust layer. In terms of memorability, it scores 2 points as 'GenLayer' is distinctive and easy to remember. For description match, it scores 3 points. The name captures the essence of a foundational layer but does not fully convey the complexity of the decentralized digital court or intelligent contracts. Lastly, for brand potential, it scores 2 points. The name and description together create a cohesive and futuristic brand identity, suggesting innovation in digital governance and contract enforcement.",
+                    "score": 9,
+                }
+            ),
         },
     }
 

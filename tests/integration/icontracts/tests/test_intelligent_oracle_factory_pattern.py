@@ -41,28 +41,36 @@ def test_intelligent_oracle_factory_pattern(setup_validators):
 
     mock_response = {
         "response": {
-            f"outcomes.\n\n### Inputs\n<title>\n{markets_data[0]['title']}": {
-                "valid_source": "true",
-                "event_has_occurred": "true",
-                "reasoning": reasoning_single_source_marathon,
-                "outcome": markets_data[0]["outcome"],
-            },
-            f"inputs\n\n    ### Inputs\n    <title>\n    {markets_data[0]['title']}\n": {
-                "relevant_sources": [markets_data[0]["evidence_urls"]],
-                "reasoning": reasoning_all_sources_marathon,
-                "outcome": markets_data[0]["outcome"],
-            },
-            f"outcomes.\n\n### Inputs\n<title>\n{markets_data[1]['title']}": {
-                "valid_source": "true",
-                "event_has_occurred": "true",
-                "reasoning": reasoning_single_source_election,
-                "outcome": markets_data[1]["outcome"],
-            },
-            f"inputs\n\n    ### Inputs\n    <title>\n    {markets_data[1]['title']}\n": {
-                "relevant_sources": [markets_data[1]["evidence_urls"]],
-                "reasoning": reasoning_all_sources_election,
-                "outcome": markets_data[1]["outcome"],
-            },
+            f"outcomes.\n\n### Inputs\n<title>\n{markets_data[0]['title']}": json.dumps(
+                {
+                    "valid_source": "true",
+                    "event_has_occurred": "true",
+                    "reasoning": reasoning_single_source_marathon,
+                    "outcome": markets_data[0]["outcome"],
+                }
+            ),
+            f"inputs\n\n    ### Inputs\n    <title>\n    {markets_data[0]['title']}\n": json.dumps(
+                {
+                    "relevant_sources": [markets_data[0]["evidence_urls"]],
+                    "reasoning": reasoning_all_sources_marathon,
+                    "outcome": markets_data[0]["outcome"],
+                }
+            ),
+            f"outcomes.\n\n### Inputs\n<title>\n{markets_data[1]['title']}": json.dumps(
+                {
+                    "valid_source": "true",
+                    "event_has_occurred": "true",
+                    "reasoning": reasoning_single_source_election,
+                    "outcome": markets_data[1]["outcome"],
+                }
+            ),
+            f"inputs\n\n    ### Inputs\n    <title>\n    {markets_data[1]['title']}\n": json.dumps(
+                {
+                    "relevant_sources": [markets_data[1]["evidence_urls"]],
+                    "reasoning": reasoning_all_sources_election,
+                    "outcome": markets_data[1]["outcome"],
+                }
+            ),
         },
         "eq_principle_prompt_comparative": {
             reasoning_single_source_marathon: True,

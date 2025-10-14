@@ -14,14 +14,16 @@ def test_llm_erc20(setup_validators, default_account):
 
     mock_response = {
         "response": {
-            "The balance of the sender": {
-                "transaction_success": True,
-                "transaction_error": "",
-                "updated_balances": {
-                    from_account_a.address: TOKEN_TOTAL_SUPPLY - TRANSFER_AMOUNT,
-                    from_account_b.address: TRANSFER_AMOUNT,
-                },
-            }
+            "The balance of the sender": json.dumps(
+                {
+                    "transaction_success": True,
+                    "transaction_error": "",
+                    "updated_balances": {
+                        from_account_a.address: TOKEN_TOTAL_SUPPLY - TRANSFER_AMOUNT,
+                        from_account_b.address: TRANSFER_AMOUNT,
+                    },
+                }
+            )
         },
         "eq_principle_prompt_non_comparative": {"The balance of the sender": True},
     }
