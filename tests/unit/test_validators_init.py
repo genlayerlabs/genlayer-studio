@@ -167,7 +167,7 @@ async def test_initialize_validators_creator_error():
             )
 
             with pytest.raises(
-                ValueError, match="Failed to create validator.*Creator error"
+                ValueError, match=r"Failed to create validator.*Creator error"
             ):
                 await initialize_validators(
                     validators_json, mock_db_session, validators_manager
