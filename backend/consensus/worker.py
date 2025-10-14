@@ -30,7 +30,7 @@ class ConsensusWorker:
     Each worker claims transactions from the database and processes them independently.
     This reuses the exec_transaction logic from ConsensusAlgorithm.
     """
-    
+
     def __init__(
         self,
         get_session: Callable[[], Session],
@@ -43,7 +43,7 @@ class ConsensusWorker:
     ):
         """
         Initialize the consensus worker.
-        
+
         Args:
             get_session: Function to get a database session
             msg_handler: Message handler for events
@@ -61,7 +61,7 @@ class ConsensusWorker:
         self.poll_interval = poll_interval
         self.transaction_timeout_minutes = transaction_timeout_minutes
         self.running = True
-        
+
         # Create a ConsensusAlgorithm instance to reuse its exec_transaction method
         self.consensus_algorithm = ConsensusAlgorithm(
             get_session,
@@ -69,32 +69,33 @@ class ConsensusWorker:
             consensus_service,
             validators_manager,
         )
-        
+
     async def claim_next_finalization(self, session: Session) -> Optional[dict]:
         """
         Claim the next transaction that needs finalization (appeal window expired).
-        
+
         Returns:
             Transaction data dict if claimed, None otherwise
         """
         # Query for transactions that are ready for finalization
         # They must be in ACCEPTED/UNDETERMINED/TIMEOUT states and appeal window must have passed
-        query = text("""
+        query = text(
+            """
             WITH ready_for_finalization AS (
                 SELECT t.*, ROW_NUMBER() OVER (
-                    PARTITION BY t.to_address 
+                    PARTITION BY t.to_address
                     ORDER BY t.created_at ASC
                 ) as rn
                 FROM transactions t
                 WHERE t.status IN ('ACCEPTED', 'UNDETERMINED', 'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT')
                     AND t.appealed = false
                     AND t.timestamp_awaiting_finalization IS NOT NULL
-                    AND (t.blocked_at IS NULL 
+                    AND (t.blocked_at IS NULL
                          OR t.blocked_at < NOW() - INTERVAL :timeout)
                     AND NOT EXISTS (
                         -- Ensure no other transaction for same contract is being processed
-                        SELECT 1 FROM transactions t2 
-                        WHERE t2.to_address = t.to_address 
+                        SELECT 1 FROM transactions t2
+                        WHERE t2.to_address = t.to_address
                             AND t2.blocked_at IS NOT NULL
                             AND t2.blocked_at > NOW() - INTERVAL :timeout
                             AND t2.hash != t.hash
@@ -114,68 +115,70 @@ class ConsensusWorker:
                       transactions.status, transactions.consensus_data, transactions.input_data,
                       transactions.created_at, transactions.timestamp_awaiting_finalization,
                       transactions.appeal_failed;
-        """)
-        
+        """
+        )
+
         result = session.execute(
-            query, 
+            query,
             {
                 "worker_id": self.worker_id,
-                "timeout": f"{self.transaction_timeout_minutes} minutes"
-            }
+                "timeout": f"{self.transaction_timeout_minutes} minutes",
+            },
         ).first()
-        
+
         if result:
             session.commit()
             # Convert result to dict
             return {
-                'hash': result.hash,
-                'from_address': result.from_address,
-                'to_address': result.to_address,
-                'data': result.data,
-                'value': result.value,
-                'type': result.type,
-                'nonce': result.nonce,
-                'gaslimit': result.gaslimit,
-                'r': result.r,
-                's': result.s,
-                'v': result.v,
-                'leader_only': result.leader_only,
-                'sim_config': result.sim_config,
-                'contract_snapshot': result.contract_snapshot,
-                'status': result.status,
-                'consensus_data': result.consensus_data,
-                'input_data': result.input_data,
-                'created_at': result.created_at,
-                'timestamp_awaiting_finalization': result.timestamp_awaiting_finalization,
-                'appeal_failed': result.appeal_failed,
+                "hash": result.hash,
+                "from_address": result.from_address,
+                "to_address": result.to_address,
+                "data": result.data,
+                "value": result.value,
+                "type": result.type,
+                "nonce": result.nonce,
+                "gaslimit": result.gaslimit,
+                "r": result.r,
+                "s": result.s,
+                "v": result.v,
+                "leader_only": result.leader_only,
+                "sim_config": result.sim_config,
+                "contract_snapshot": result.contract_snapshot,
+                "status": result.status,
+                "consensus_data": result.consensus_data,
+                "input_data": result.input_data,
+                "created_at": result.created_at,
+                "timestamp_awaiting_finalization": result.timestamp_awaiting_finalization,
+                "appeal_failed": result.appeal_failed,
             }
-        
+
         return None
-    
+
     async def claim_next_appeal(self, session: Session) -> Optional[dict]:
         """
         Claim the next available appealed transaction for processing.
         Uses FOR UPDATE SKIP LOCKED to ensure only one worker claims an appeal.
-        
+
         Returns:
             Transaction data dict if claimed, None otherwise
         """
         # Query to atomically claim an appealed transaction
-        query = text("""
+        query = text(
+            """
             WITH available_appeals AS (
                 SELECT t.*, ROW_NUMBER() OVER (
-                    PARTITION BY t.to_address 
+                    PARTITION BY t.to_address
                     ORDER BY t.created_at ASC
                 ) as rn
                 FROM transactions t
                 WHERE t.appealed = true
                     AND t.status IN ('ACCEPTED', 'UNDETERMINED', 'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT')
-                    AND (t.blocked_at IS NULL 
+                    AND (t.blocked_at IS NULL
                          OR t.blocked_at < NOW() - INTERVAL :timeout)
                     AND NOT EXISTS (
                         -- Ensure no other appeal for same contract is being processed
-                        SELECT 1 FROM transactions t2 
-                        WHERE t2.to_address = t.to_address 
+                        SELECT 1 FROM transactions t2
+                        WHERE t2.to_address = t.to_address
                             AND t2.appealed = true
                             AND t2.blocked_at IS NOT NULL
                             AND t2.blocked_at > NOW() - INTERVAL :timeout
@@ -197,77 +200,84 @@ class ConsensusWorker:
                       transactions.created_at, transactions.appealed, transactions.appeal_failed,
                       transactions.timestamp_appeal, transactions.appeal_undetermined,
                       transactions.appeal_leader_timeout, transactions.appeal_validators_timeout;
-        """)
-        
+        """
+        )
+
         result = session.execute(
-            query, 
+            query,
             {
                 "worker_id": self.worker_id,
-                "timeout": f"{self.transaction_timeout_minutes} minutes"
-            }
+                "timeout": f"{self.transaction_timeout_minutes} minutes",
+            },
         ).first()
-        
+
         if result:
             session.commit()
             # Convert result to dict
             return {
-                'hash': result.hash,
-                'from_address': result.from_address,
-                'to_address': result.to_address,
-                'data': result.data,
-                'value': result.value,
-                'type': result.type,
-                'nonce': result.nonce,
-                'gaslimit': result.gaslimit,
-                'r': result.r,
-                's': result.s,
-                'v': result.v,
-                'leader_only': result.leader_only,
-                'sim_config': result.sim_config,
-                'contract_snapshot': result.contract_snapshot,
-                'status': result.status,
-                'consensus_data': result.consensus_data,
-                'input_data': result.input_data,
-                'created_at': result.created_at,
-                'appealed': result.appealed,
-                'appeal_failed': result.appeal_failed,
-                'timestamp_appeal': result.timestamp_appeal,
-                'appeal_undetermined': result.appeal_undetermined,
-                'appeal_leader_timeout': result.appeal_leader_timeout,
-                'appeal_validators_timeout': result.appeal_validators_timeout,
+                "hash": result.hash,
+                "from_address": result.from_address,
+                "to_address": result.to_address,
+                "data": result.data,
+                "value": result.value,
+                "type": result.type,
+                "nonce": result.nonce,
+                "gaslimit": result.gaslimit,
+                "r": result.r,
+                "s": result.s,
+                "v": result.v,
+                "leader_only": result.leader_only,
+                "sim_config": result.sim_config,
+                "contract_snapshot": result.contract_snapshot,
+                "status": result.status,
+                "consensus_data": result.consensus_data,
+                "input_data": result.input_data,
+                "created_at": result.created_at,
+                "appealed": result.appealed,
+                "appeal_failed": result.appeal_failed,
+                "timestamp_appeal": result.timestamp_appeal,
+                "appeal_undetermined": result.appeal_undetermined,
+                "appeal_leader_timeout": result.appeal_leader_timeout,
+                "appeal_validators_timeout": result.appeal_validators_timeout,
             }
-        
+
         return None
-    
+
     async def claim_next_transaction(self, session: Session) -> Optional[dict]:
         """
         Claim the next available transaction for processing.
         Uses FOR UPDATE SKIP LOCKED to ensure only one worker claims a transaction.
-        
+
         Returns:
             Transaction data dict if claimed, None otherwise
         """
         # Query to atomically claim a transaction
         # Ensures only one transaction per contract is processed at a time
-        query = text("""
-            WITH available_transactions AS (
-                SELECT t.*, ROW_NUMBER() OVER (
-                    PARTITION BY t.to_address 
-                    ORDER BY t.created_at ASC
-                ) as rn
+        query = text(
+            """
+            WITH locked_transactions AS (
+                SELECT t.*
                 FROM transactions t
                 WHERE t.status IN ('PENDING', 'ACTIVATED')
-                    AND (t.blocked_at IS NULL 
+                    AND (t.blocked_at IS NULL
                          OR t.blocked_at < NOW() - INTERVAL :timeout)
                     AND NOT EXISTS (
                         -- Ensure no other transaction for same contract is being processed
-                        SELECT 1 FROM transactions t2 
-                        WHERE t2.to_address = t.to_address 
+                        SELECT 1 FROM transactions t2
+                        WHERE t2.to_address = t.to_address
                             AND t2.blocked_at IS NOT NULL
                             AND t2.blocked_at > NOW() - INTERVAL :timeout
                             AND t2.hash != t.hash
                     )
                 ORDER BY t.created_at ASC
+                FOR UPDATE SKIP LOCKED
+            ),
+            available_transactions AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY to_address
+                    ORDER BY created_at ASC
+                ) as rn
+                FROM locked_transactions
             )
             UPDATE transactions
             SET blocked_at = NOW(),
@@ -281,69 +291,73 @@ class ConsensusWorker:
                       transactions.leader_only, transactions.sim_config, transactions.contract_snapshot,
                       transactions.status, transactions.consensus_data, transactions.input_data,
                       transactions.created_at;
-        """)
-        
+        """
+        )
+
         result = session.execute(
-            query, 
+            query,
             {
                 "worker_id": self.worker_id,
-                "timeout": f"{self.transaction_timeout_minutes} minutes"
-            }
+                "timeout": f"{self.transaction_timeout_minutes} minutes",
+            },
         ).first()
-        
+
         if result:
             session.commit()
             # Convert result to dict
             return {
-                'hash': result.hash,
-                'from_address': result.from_address,
-                'to_address': result.to_address,
-                'data': result.data,
-                'value': result.value,
-                'type': result.type,
-                'nonce': result.nonce,
-                'gaslimit': result.gaslimit,
-                'r': result.r,
-                's': result.s,
-                'v': result.v,
-                'leader_only': result.leader_only,
-                'sim_config': result.sim_config,
-                'contract_snapshot': result.contract_snapshot,
-                'status': result.status,
-                'consensus_data': result.consensus_data,
-                'input_data': result.input_data,
-                'created_at': result.created_at,
+                "hash": result.hash,
+                "from_address": result.from_address,
+                "to_address": result.to_address,
+                "data": result.data,
+                "value": result.value,
+                "type": result.type,
+                "nonce": result.nonce,
+                "gaslimit": result.gaslimit,
+                "r": result.r,
+                "s": result.s,
+                "v": result.v,
+                "leader_only": result.leader_only,
+                "sim_config": result.sim_config,
+                "contract_snapshot": result.contract_snapshot,
+                "status": result.status,
+                "consensus_data": result.consensus_data,
+                "input_data": result.input_data,
+                "created_at": result.created_at,
             }
-        
+
         return None
-    
+
     def release_transaction(self, session: Session, transaction_hash: str):
         """
         Release a transaction by clearing its blocked_at and worker_id.
-        
+
         Args:
             session: Database session
             transaction_hash: Hash of the transaction to release
         """
-        update_query = text("""
+        update_query = text(
+            """
             UPDATE transactions
             SET blocked_at = NULL,
                 worker_id = NULL
             WHERE hash = :hash
-        """)
+        """
+        )
         session.execute(update_query, {"hash": transaction_hash})
         session.commit()
-    
+
     async def recover_stuck_transactions(self, session: Session) -> int:
         """
         Recover transactions that have been stuck for too long.
         Resets them back to PENDING status and clears blocking fields.
         Also recovers orphaned transactions (in processing states but no worker).
-        
+
         Returns:
             Number of transactions recovered
         """
-        recovery_query = text("""
+        recovery_query = text(
+            """
             UPDATE transactions
             SET blocked_at = NULL,
                 worker_id = NULL,
@@ -360,29 +374,32 @@ class ConsensusWorker:
                  AND created_at < NOW() - INTERVAL :orphan_timeout)
             )
             RETURNING hash, status;
-        """)
-        
+        """
+        )
+
         result = session.execute(
             recovery_query,
             {
                 "timeout": f"{self.transaction_timeout_minutes} minutes",
-                "orphan_timeout": "5 minutes"  # Shorter timeout for orphaned transactions
-            }
+                "orphan_timeout": "5 minutes",  # Shorter timeout for orphaned transactions
+            },
         )
-        
+
         recovered = result.fetchall()
         if recovered:
             session.commit()
             for row in recovered:
-                print(f"[Worker {self.worker_id}] Recovered stuck transaction {row.hash} (was {row.status}, now PENDING)")
-        
+                print(
+                    f"[Worker {self.worker_id}] Recovered stuck transaction {row.hash} (was {row.status}, now PENDING)"
+                )
+
         return len(recovered)
-    
+
     async def process_transaction(self, transaction_data: dict, session: Session):
         """
         Process a single transaction through consensus.
         Reuses the exec_transaction logic from ConsensusAlgorithm.
-        
+
         Args:
             transaction_data: Transaction data dictionary
             session: Database session
@@ -390,7 +407,7 @@ class ConsensusWorker:
         try:
             # Convert to Transaction domain object
             transaction = Transaction.from_dict(transaction_data)
-            
+
             # Import factories here to avoid circular imports
             from backend.consensus.base import (
                 contract_snapshot_factory,
@@ -400,7 +417,7 @@ class ConsensusWorker:
                 accounts_manager_factory,
                 node_factory,
             )
-            
+
             # Get or create validators snapshot based on sim_config
             virtual_validators = []
             if transaction.sim_config and transaction.sim_config.validators:
@@ -411,13 +428,13 @@ class ConsensusWorker:
                         validate_provider,
                     )
                     from backend.domain.types import LLMProvider, Validator
-                    
+
                     provider = validator.provider
                     model = validator.model
                     config = validator.config
                     plugin = validator.plugin
                     plugin_config = validator.plugin_config
-                    
+
                     if config is None or plugin is None or plugin_config is None:
                         llm_provider = get_default_provider_for(provider, model)
                     else:
@@ -429,7 +446,7 @@ class ConsensusWorker:
                             plugin_config=plugin_config,
                         )
                         validate_provider(llm_provider)
-                    
+
                     account = accounts_manager_factory(session).create_new_account()
                     virtual_validators.append(
                         Validator(
@@ -439,7 +456,7 @@ class ConsensusWorker:
                             llmprovider=llm_provider,
                         )
                     )
-            
+
             # Use appropriate validators snapshot
             if virtual_validators:
                 async with self.validators_manager.temporal_snapshot(
@@ -471,22 +488,26 @@ class ConsensusWorker:
                         node_factory,
                         validators_snapshot,
                     )
-            
+
             session.commit()
-            print(f"[Worker {self.worker_id}] Successfully processed transaction {transaction.hash}")
-            
+            print(
+                f"[Worker {self.worker_id}] Successfully processed transaction {transaction.hash}"
+            )
+
         except Exception as e:
-            print(f"[Worker {self.worker_id}] Error processing transaction {transaction_data['hash']}: {e}")
+            print(
+                f"[Worker {self.worker_id}] Error processing transaction {transaction_data['hash']}: {e}"
+            )
             traceback.print_exc()
             session.rollback()
         finally:
             # Always release the transaction when done
-            self.release_transaction(session, transaction_data['hash'])
-    
+            self.release_transaction(session, transaction_data["hash"])
+
     async def process_finalization(self, finalization_data: dict, session: Session):
         """
         Process a transaction that's ready for finalization.
-        
+
         Args:
             finalization_data: Transaction data dictionary
             session: Database session
@@ -494,7 +515,7 @@ class ConsensusWorker:
         try:
             # Convert to Transaction domain object
             transaction = Transaction.from_dict(finalization_data)
-            
+
             # Check if the appeal window has passed
             from backend.consensus.base import (
                 contract_snapshot_factory,
@@ -504,18 +525,20 @@ class ConsensusWorker:
                 accounts_manager_factory,
                 node_factory,
             )
-            
+
             transactions_processor = transactions_processor_factory(session)
-            
+
             # Check if can finalize (appeal window expired)
             if self.consensus_algorithm.can_finalize_transaction(
                 transactions_processor,
                 transaction,
                 0,  # index in queue (not used in our case)
-                [finalization_data]  # mock queue with just this transaction
+                [finalization_data],  # mock queue with just this transaction
             ):
-                print(f"[Worker {self.worker_id}] Finalizing transaction {transaction.hash}")
-                
+                print(
+                    f"[Worker {self.worker_id}] Finalizing transaction {transaction.hash}"
+                )
+
                 await self.consensus_algorithm.process_finalization(
                     transaction,
                     transactions_processor,
@@ -527,26 +550,30 @@ class ConsensusWorker:
                     contract_processor_factory(session),
                     node_factory,
                 )
-                
+
                 session.commit()
-                print(f"[Worker {self.worker_id}] Successfully finalized transaction {transaction.hash}")
+                print(
+                    f"[Worker {self.worker_id}] Successfully finalized transaction {transaction.hash}"
+                )
             else:
                 # Don't log this - it's normal for transactions to wait for appeal window
                 # print(f"[Worker {self.worker_id}] Transaction {transaction.hash} not ready for finalization yet")
                 pass
-                
+
         except Exception as e:
-            print(f"[Worker {self.worker_id}] Error processing finalization {finalization_data['hash']}: {e}")
+            print(
+                f"[Worker {self.worker_id}] Error processing finalization {finalization_data['hash']}: {e}"
+            )
             traceback.print_exc()
             session.rollback()
         finally:
             # Always release the transaction when done
-            self.release_transaction(session, finalization_data['hash'])
-    
+            self.release_transaction(session, finalization_data["hash"])
+
     async def process_appeal(self, appeal_data: dict, session: Session):
         """
         Process an appealed transaction through the appeal logic.
-        
+
         Args:
             appeal_data: Appeal transaction data dictionary
             session: Database session
@@ -554,9 +581,11 @@ class ConsensusWorker:
         try:
             # Convert to Transaction domain object
             transaction = Transaction.from_dict(appeal_data)
-            
-            print(f"[Worker {self.worker_id}] Processing appeal for transaction {transaction.hash} with status {appeal_data['status']}")
-            
+
+            print(
+                f"[Worker {self.worker_id}] Processing appeal for transaction {transaction.hash} with status {appeal_data['status']}"
+            )
+
             # Import factories
             from backend.consensus.base import (
                 contract_snapshot_factory,
@@ -566,12 +595,12 @@ class ConsensusWorker:
                 accounts_manager_factory,
                 node_factory,
             )
-            
+
             # Process the appeal based on status
             transactions_processor = transactions_processor_factory(session)
             chain_snapshot = chain_snapshot_factory(session)
             accounts_manager = accounts_manager_factory(session)
-            
+
             async with self.validators_manager.snapshot() as validators_snapshot:
                 if transaction.status == TransactionStatus.UNDETERMINED:
                     # Leader appeal
@@ -615,26 +644,30 @@ class ConsensusWorker:
                         node_factory,
                         validators_snapshot,
                     )
-            
+
             session.commit()
-            print(f"[Worker {self.worker_id}] Successfully processed appeal for transaction {transaction.hash}")
-            
+            print(
+                f"[Worker {self.worker_id}] Successfully processed appeal for transaction {transaction.hash}"
+            )
+
         except Exception as e:
-            print(f"[Worker {self.worker_id}] Error processing appeal {appeal_data['hash']}: {e}")
+            print(
+                f"[Worker {self.worker_id}] Error processing appeal {appeal_data['hash']}: {e}"
+            )
             traceback.print_exc()
             session.rollback()
         finally:
             # Always release the transaction when done
-            self.release_transaction(session, appeal_data['hash'])
-    
+            self.release_transaction(session, appeal_data["hash"])
+
     async def run(self):
         """
         Main worker loop that continuously claims and processes transactions, appeals, and finalizations.
         """
         print(f"[Worker {self.worker_id}] Starting consensus worker")
-        
+
         recovery_counter = 0
-        
+
         while self.running:
             try:
                 with self.get_session() as session:
@@ -644,15 +677,19 @@ class ConsensusWorker:
                         recovery_counter = 0
                         recovered = await self.recover_stuck_transactions(session)
                         if recovered > 0:
-                            print(f"[Worker {self.worker_id}] Recovered {recovered} stuck transactions")
-                    
+                            print(
+                                f"[Worker {self.worker_id}] Recovered {recovered} stuck transactions"
+                            )
+
                     # Priority order: appeals > finalizations > regular transactions
-                    
+
                     # Try to claim an appeal first (highest priority)
                     appeal_data = await self.claim_next_appeal(session)
-                    
+
                     if appeal_data:
-                        print(f"[Worker {self.worker_id}] Claimed appeal for transaction {appeal_data['hash']}")
+                        print(
+                            f"[Worker {self.worker_id}] Claimed appeal for transaction {appeal_data['hash']}"
+                        )
                         # Process in a new session
                         with self.get_session() as process_session:
                             await self.process_appeal(appeal_data, process_session)
@@ -665,25 +702,33 @@ class ConsensusWorker:
                             # print(f"[Worker {self.worker_id}] Claimed finalization for transaction {finalization_data['hash']}")
                             # Process in a new session
                             with self.get_session() as process_session:
-                                await self.process_finalization(finalization_data, process_session)
+                                await self.process_finalization(
+                                    finalization_data, process_session
+                                )
                         else:
                             # No finalizations, try to claim a regular transaction
-                            transaction_data = await self.claim_next_transaction(session)
-                            
+                            transaction_data = await self.claim_next_transaction(
+                                session
+                            )
+
                             if transaction_data:
-                                print(f"[Worker {self.worker_id}] Claimed transaction {transaction_data['hash']}")
+                                print(
+                                    f"[Worker {self.worker_id}] Claimed transaction {transaction_data['hash']}"
+                                )
                                 # Process in a new session
                                 with self.get_session() as process_session:
-                                    await self.process_transaction(transaction_data, process_session)
+                                    await self.process_transaction(
+                                        transaction_data, process_session
+                                    )
                             else:
                                 # No work available, wait before polling again
                                 await asyncio.sleep(self.poll_interval)
-                            
+
             except Exception as e:
                 print(f"[Worker {self.worker_id}] Error in main loop: {e}")
                 traceback.print_exc()
                 await asyncio.sleep(self.poll_interval)
-    
+
     def stop(self):
         """Stop the worker gracefully."""
         print(f"[Worker {self.worker_id}] Stopping consensus worker")
