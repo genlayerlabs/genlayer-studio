@@ -79,7 +79,7 @@ def _redact_consensus_data_for_log(consensus_data_dict: dict) -> dict:
     Return a redacted copy of the consensus data suitable for logging.
 
     Removes heavy/noisy fields like `contract_state` from any leader receipts,
-    without mutating the original consensus data.
+    and sensitive configuration data from node configs.
     """
     try:
         redacted = deepcopy(consensus_data_dict)
@@ -87,15 +87,55 @@ def _redact_consensus_data_for_log(consensus_data_dict: dict) -> dict:
         # In case deepcopy fails for any reason, avoid breaking logging
         return {"error": "failed_to_copy_consensus_data_for_log"}
 
+    # Remove validators key entirely
+    redacted.pop("validators", None)
+
     leader_receipt = redacted.get("leader_receipt")
     if isinstance(leader_receipt, dict):
-        leader_receipt.pop("contract_state", None)
+        _redact_receipt_data(leader_receipt)
     elif isinstance(leader_receipt, list):
-        for receipt in leader_receipt:
+        # Only keep the first receipt (leader_receipt[0]), remove others
+        if len(leader_receipt) > 1:
+            redacted["leader_receipt"] = [leader_receipt[0]]
+
+        for receipt in redacted["leader_receipt"]:
             if isinstance(receipt, dict):
-                receipt.pop("contract_state", None)
+                _redact_receipt_data(receipt)
 
     return redacted
+
+
+def _redact_receipt_data(receipt: dict) -> None:
+    """
+    Redact sensitive data from a single receipt.
+    """
+    # Remove contract_state (existing behavior)
+    receipt.pop("contract_state", None)
+
+    # Redact node_config sensitive data
+    node_config = receipt.get("node_config")
+    if isinstance(node_config, dict):
+        # Remove private_key
+        node_config.pop("private_key", None)
+
+        # Redact primary_model config data
+        primary_model = node_config.get("primary_model")
+        if isinstance(primary_model, dict):
+            primary_model.pop("config", None)
+            primary_model.pop("plugin_config", None)
+
+        # Redact secondary_model config data
+        secondary_model = node_config.get("secondary_model")
+        if isinstance(secondary_model, dict):
+            secondary_model.pop("config", None)
+            secondary_model.pop("plugin_config", None)
+
+    # Handle genvm_result stdout/stderr
+    genvm_result = receipt.get("genvm_result")
+    if isinstance(genvm_result, dict):
+        # Only remove stdout if stderr is not present
+        if "stderr" not in genvm_result or not genvm_result.get("stderr"):
+            genvm_result.pop("stdout", None)
 
 
 def node_factory(
