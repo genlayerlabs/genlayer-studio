@@ -3,7 +3,7 @@ from functools import partial
 from backend.database_handler.models import TransactionStatus
 from backend.node.types import Vote
 from backend.consensus.base import DEFAULT_VALIDATORS_COUNT, ConsensusRound
-from tests.unit.domain.consensus.test_helpers import (
+from tests.integration.infrastructure.consensus.test_helpers import (
     TransactionsProcessorMock,
     ContractDB,
     transaction_to_dict,
