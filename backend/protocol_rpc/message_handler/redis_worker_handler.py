@@ -30,7 +30,7 @@ class RedisWorkerMessageHandler(MessageHandler):
         self,
         config: GlobalConfiguration = None,
         worker_id: Optional[str] = None,
-        redis_url: Optional[str] = None
+        redis_url: Optional[str] = None,
     ):
         """
         Initialize the worker message handler with Redis.
@@ -48,8 +48,7 @@ class RedisWorkerMessageHandler(MessageHandler):
 
         # Redis configuration
         self.redis_url = redis_url or os.environ.get(
-            "REDIS_URL",
-            "redis://redis:6379/0"
+            "REDIS_URL", "redis://redis:6379/0"
         )
         self.redis_client: Optional[aioredis.Redis] = None
 
@@ -60,13 +59,13 @@ class RedisWorkerMessageHandler(MessageHandler):
         if not self.redis_client:
             try:
                 self.redis_client = await aioredis.from_url(
-                    self.redis_url,
-                    encoding="utf-8",
-                    decode_responses=True
+                    self.redis_url, encoding="utf-8", decode_responses=True
                 )
                 # Test connection
                 await self.redis_client.ping()
-                logger.info(f"Worker {self.worker_id} connected to Redis at {self.redis_url}")
+                logger.info(
+                    f"Worker {self.worker_id} connected to Redis at {self.redis_url}"
+                )
             except Exception as e:
                 logger.error(f"Worker {self.worker_id} failed to connect to Redis: {e}")
                 raise
@@ -103,12 +102,14 @@ class RedisWorkerMessageHandler(MessageHandler):
             channel = self._get_channel_for_event(log_event)
 
             # Prepare message
-            message = json.dumps({
-                "worker_id": self.worker_id,
-                "event": log_event.name,
-                "data": log_event.to_dict(),
-                "transaction_hash": log_event.transaction_hash
-            })
+            message = json.dumps(
+                {
+                    "worker_id": self.worker_id,
+                    "event": log_event.name,
+                    "data": log_event.to_dict(),
+                    "transaction_hash": log_event.transaction_hash,
+                }
+            )
 
             # Publish to Redis channel
             subscribers = await self.redis_client.publish(channel, message)
@@ -157,8 +158,32 @@ class RedisWorkerMessageHandler(MessageHandler):
             self._log_message(log_event)
 
         # Publish to Redis if it's an important event
-        if log_event.transaction_hash or log_event.scope.value in ["TRANSACTION", "CONSENSUS"]:
+        if log_event.transaction_hash or log_event.scope.value in [
+            "TRANSACTION",
+            "CONSENSUS",
+        ]:
             self._socket_emit(log_event)
+
+    async def send_message_async(
+        self, log_event: LogEvent, log_to_terminal: bool = True
+    ):
+        """
+        Send a message asynchronously and await Redis publish completion.
+        Use this when you need to ensure the message is published before continuing.
+
+        Args:
+            log_event: The event to log and send
+            log_to_terminal: Whether to log to terminal (default True)
+        """
+        if log_to_terminal:
+            self._log_message(log_event)
+
+        # Publish to Redis if it's an important event and await completion
+        if log_event.transaction_hash or log_event.scope.value in [
+            "TRANSACTION",
+            "CONSENSUS",
+        ]:
+            await self._publish_to_redis(log_event)
 
     async def close(self):
         """Clean up resources."""
@@ -177,7 +202,7 @@ class RedisWorkerMessageHandler(MessageHandler):
         health = {
             "worker_id": self.worker_id,
             "redis_url": self.redis_url,
-            "redis_connected": False
+            "redis_connected": False,
         }
 
         if self.redis_client:

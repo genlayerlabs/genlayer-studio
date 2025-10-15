@@ -1192,7 +1192,7 @@ class ConsensusAlgorithm:
                 state = next_state
 
     @staticmethod
-    def dispatch_transaction_status_update(
+    async def dispatch_transaction_status_update(
         transactions_processor: TransactionsProcessor,
         transaction_hash: str,
         new_status: TransactionStatus,
@@ -1200,13 +1200,15 @@ class ConsensusAlgorithm:
         update_current_status_changes: bool = True,
     ):
         """
-        Dispatch a transaction status update.
+        Dispatch a transaction status update asynchronously and await message delivery.
+        This ensures Redis publish completes before returning, preventing delays from blocking operations.
 
         Args:
             transactions_processor (TransactionsProcessor): Instance responsible for handling transaction operations within the database.
             transaction_hash (str): Hash of the transaction.
             new_status (TransactionStatus): New status of the transaction.
             msg_handler (MessageHandler): Handler for messaging.
+            update_current_status_changes (bool): Whether to update current status changes (default True)
         """
         # Update the transaction status in the transactions processor
         transactions_processor.update_transaction_status(
@@ -1215,20 +1217,25 @@ class ConsensusAlgorithm:
             update_current_status_changes,
         )
 
-        # Send a message indicating the transaction status update
-        msg_handler.send_message(
-            LogEvent(
-                "transaction_status_updated",
-                EventType.INFO,
-                EventScope.CONSENSUS,
-                f"{str(new_status.value)} {str(transaction_hash)}",
-                {
-                    "hash": str(transaction_hash),
-                    "new_status": str(new_status.value),
-                },
-                transaction_hash=transaction_hash,
-            )
+        # Send a message indicating the transaction status update and await completion
+        log_event = LogEvent(
+            "transaction_status_updated",
+            EventType.INFO,
+            EventScope.CONSENSUS,
+            f"{str(new_status.value)} {str(transaction_hash)}",
+            {
+                "hash": str(transaction_hash),
+                "new_status": str(new_status.value),
+            },
+            transaction_hash=transaction_hash,
         )
+
+        # Check if msg_handler has async send_message_async method
+        if hasattr(msg_handler, "send_message_async"):
+            await msg_handler.send_message_async(log_event)
+        else:
+            # Fallback to synchronous send_message
+            msg_handler.send_message(log_event)
 
     @staticmethod
     def execute_transfer(
@@ -1260,7 +1267,7 @@ class ConsensusAlgorithm:
             # Check if the sender has enough balance
             if from_balance < transaction.value:
                 # Set the transaction status to UNDETERMINED if balance is insufficient
-                ConsensusAlgorithm.dispatch_transaction_status_update(
+                await ConsensusAlgorithm.dispatch_transaction_status_update(
                     transactions_processor,
                     transaction.hash,
                     TransactionStatus.UNDETERMINED,
@@ -1285,7 +1292,7 @@ class ConsensusAlgorithm:
             )
 
         # Dispatch a transaction status update to FINALIZED
-        ConsensusAlgorithm.dispatch_transaction_status_update(
+        await ConsensusAlgorithm.dispatch_transaction_status_update(
             transactions_processor,
             transaction.hash,
             TransactionStatus.FINALIZED,
@@ -1984,7 +1991,7 @@ class ConsensusAlgorithm:
                             context.transaction.hash, None
                         )
 
-                    ConsensusAlgorithm.dispatch_transaction_status_update(
+                    await ConsensusAlgorithm.dispatch_transaction_status_update(
                         context.transactions_processor,
                         context.transaction.hash,
                         TransactionStatus.PENDING,
@@ -2014,7 +2021,7 @@ class ConsensusAlgorithm:
             context.transaction.hash
         )
         for future_transaction in future_transactions:
-            ConsensusAlgorithm.dispatch_transaction_status_update(
+            await ConsensusAlgorithm.dispatch_transaction_status_update(
                 context.transactions_processor,
                 future_transaction["hash"],
                 TransactionStatus.PENDING,
@@ -2470,7 +2477,7 @@ class ProposingState(TransactionState):
             TransactionState: The CommittingState or UndeterminedState if all rotations are done.
         """
         # Dispatch a transaction status update to PROPOSING
-        ConsensusAlgorithm.dispatch_transaction_status_update(
+        await ConsensusAlgorithm.dispatch_transaction_status_update(
             context.transactions_processor,
             context.transaction.hash,
             TransactionStatus.PROPOSING,
@@ -2593,7 +2600,7 @@ class CommittingState(TransactionState):
             )
 
         # Dispatch a transaction status update to COMMITTING
-        ConsensusAlgorithm.dispatch_transaction_status_update(
+        await ConsensusAlgorithm.dispatch_transaction_status_update(
             context.transactions_processor,
             context.transaction.hash,
             TransactionStatus.COMMITTING,
@@ -2669,16 +2676,13 @@ class RevealingState(TransactionState):
         Returns:
             TransactionState | None: The AcceptedState or ProposingState or None if the transaction is successfully appealed.
         """
-        # Update the transaction status to REVEALING
-        ConsensusAlgorithm.dispatch_transaction_status_update(
+        # Update the transaction status to REVEALING and await Redis publish completion
+        await ConsensusAlgorithm.dispatch_transaction_status_update(
             context.transactions_processor,
             context.transaction.hash,
             TransactionStatus.REVEALING,
             context.msg_handler,
         )
-
-        # Yield to event loop to allow Redis publish task to execute before blocking operations
-        await asyncio.sleep(0)
 
         # Process each validation result and update the context
         for i, validation_result in enumerate(context.validation_results):
@@ -2970,17 +2974,14 @@ class AcceptedState(TransactionState):
             TransactionStatus.ACCEPTED,
         )
 
-        # Update the transaction status to ACCEPTED
-        ConsensusAlgorithm.dispatch_transaction_status_update(
+        # Update the transaction status to ACCEPTED and await Redis publish completion
+        await ConsensusAlgorithm.dispatch_transaction_status_update(
             context.transactions_processor,
             context.transaction.hash,
             TransactionStatus.ACCEPTED,
             context.msg_handler,
             False,
         )
-
-        # Yield to event loop to allow Redis publish task to execute before blocking operations
-        await asyncio.sleep(0)
 
         # Send a message indicating consensus was reached
         context.msg_handler.send_message(
@@ -3188,7 +3189,7 @@ class UndeterminedState(TransactionState):
         )
 
         # Update the transaction status to undetermined
-        ConsensusAlgorithm.dispatch_transaction_status_update(
+        await ConsensusAlgorithm.dispatch_transaction_status_update(
             context.transactions_processor,
             context.transaction.hash,
             TransactionStatus.UNDETERMINED,
@@ -3257,7 +3258,7 @@ class LeaderTimeoutState(TransactionState):
         )
 
         # Update the transaction status to LEADER_TIMEOUT
-        ConsensusAlgorithm.dispatch_transaction_status_update(
+        await ConsensusAlgorithm.dispatch_transaction_status_update(
             context.transactions_processor,
             context.transaction.hash,
             TransactionStatus.LEADER_TIMEOUT,
@@ -3349,7 +3350,7 @@ class ValidatorsTimeoutState(TransactionState):
         )
 
         # Update the transaction status to VALIDATORS_TIMEOUT
-        ConsensusAlgorithm.dispatch_transaction_status_update(
+        await ConsensusAlgorithm.dispatch_transaction_status_update(
             context.transactions_processor,
             context.transaction.hash,
             TransactionStatus.VALIDATORS_TIMEOUT,
@@ -3381,7 +3382,7 @@ class FinalizingState(TransactionState):
             None: The transaction is finalized.
         """
         # Update the transaction status to FINALIZED
-        ConsensusAlgorithm.dispatch_transaction_status_update(
+        await ConsensusAlgorithm.dispatch_transaction_status_update(
             context.transactions_processor,
             context.transaction.hash,
             TransactionStatus.FINALIZED,
