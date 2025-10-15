@@ -326,8 +326,6 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
     try:
         yield app_state
 
-        MAIN_LOOP_EXITING.set()
-        await MAIN_LOOP_DONE.wait()
     finally:
         if redis_subscriber:
             await redis_subscriber.stop()
