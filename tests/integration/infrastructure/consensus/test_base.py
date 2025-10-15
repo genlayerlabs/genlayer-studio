@@ -559,6 +559,7 @@ async def test_validator_appeal_success_rotations_undetermined(
             transactions_processor,
             transaction,
             [TransactionStatus.PENDING.value, TransactionStatus.ACTIVATED.value],
+            interval=0.01,
         )
 
         transaction_status_history = [

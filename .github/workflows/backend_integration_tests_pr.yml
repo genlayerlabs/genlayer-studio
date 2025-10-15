@@ -50,7 +50,11 @@ jobs:
           OPENAIKEY: ${{ secrets.OPENAIKEY }}
         run: |
           sed -i "s/<add_your_openai_api_key_here>/${OPENAIKEY}/g" .env
-          sed -i "s/FINALITY_WINDOW =.*/FINALITY_WINDOW = 10/" .env
+          sed -i "s/VITE_FINALITY_WINDOW=\".*\"/VITE_FINALITY_WINDOW=\"10\"/" .env
+          sed -i "s/COMPOSE_CPU_LIMIT=\".*\"/COMPOSE_CPU_LIMIT=\"4\"/" .env
+          sed -i "s/COMPOSE_CPU_RESERVATION=\".*\"/COMPOSE_CPU_RESERVATION=\"1\"/" .env
+          sed -i "s/COMPOSE_MEM_LIMIT=\".*\"/COMPOSE_MEM_LIMIT=\"6gb\"/" .env
+          sed -i "s/COMPOSE_MEM_RESERVATION=\".*\"/COMPOSE_MEM_RESERVATION=\"2gb\"/" .env
           echo >> .env
           if [[ "${{ needs.triggers.outputs.is_pull_request_review_approved }}" == "true" ]]; then
             echo "TEST_WITH_MOCK_LLMS=false" >> .env
@@ -78,7 +82,7 @@ jobs:
 
       # Start services without rebuilding images
       - name: Run Docker Compose
-        run: docker compose up -d --no-build
+        run: docker compose -f docker-compose.yml -f docker-compose.production.yml up -d --no-build jsonrpc
 
 
 
@@ -119,12 +123,12 @@ jobs:
         run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/ -svv
 
       - name: Dump Docker Compose logs
-        run: docker compose logs
+        run: docker compose -f docker-compose.yml -f docker-compose.production.yml logs
         if: failure()
 
       - name: Shutdown Docker Compose
         if: always()
-        run: docker compose down
+        run: docker compose -f docker-compose.yml -f docker-compose.production.yml down
 
   db-integration-test:
     needs: triggers
