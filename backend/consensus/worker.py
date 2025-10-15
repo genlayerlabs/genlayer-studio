@@ -1,6 +1,7 @@
 # backend/consensus/worker.py
 
 import os
+import logging
 import asyncio
 import time
 import traceback
@@ -22,6 +23,8 @@ from backend.consensus.base import ConsensusAlgorithm
 from backend.protocol_rpc.message_handler.base import MessageHandler
 from backend.rollup.consensus_service import ConsensusService
 import backend.validators as validators
+
+logger = logging.getLogger(__name__)
 
 
 class ConsensusWorker:
@@ -389,7 +392,7 @@ class ConsensusWorker:
         if recovered:
             session.commit()
             for row in recovered:
-                print(
+                logger.info(
                     f"[Worker {self.worker_id}] Recovered stuck transaction {row.hash} (was {row.status}, now PENDING)"
                 )
 
@@ -490,15 +493,14 @@ class ConsensusWorker:
                     )
 
             session.commit()
-            print(
+            logger.info(
                 f"[Worker {self.worker_id}] Successfully processed transaction {transaction.hash}"
             )
 
         except Exception as e:
-            print(
+            logger.exception(
                 f"[Worker {self.worker_id}] Error processing transaction {transaction_data['hash']}: {e}"
             )
-            traceback.print_exc()
             session.rollback()
         finally:
             # Always release the transaction when done
@@ -535,7 +537,7 @@ class ConsensusWorker:
                 0,  # index in queue (not used in our case)
                 [finalization_data],  # mock queue with just this transaction
             ):
-                print(
+                logger.info(
                     f"[Worker {self.worker_id}] Finalizing transaction {transaction.hash}"
                 )
 
@@ -552,7 +554,7 @@ class ConsensusWorker:
                 )
 
                 session.commit()
-                print(
+                logger.info(
                     f"[Worker {self.worker_id}] Successfully finalized transaction {transaction.hash}"
                 )
             else:
@@ -561,10 +563,9 @@ class ConsensusWorker:
                 pass
 
         except Exception as e:
-            print(
+            logger.exception(
                 f"[Worker {self.worker_id}] Error processing finalization {finalization_data['hash']}: {e}"
             )
-            traceback.print_exc()
             session.rollback()
         finally:
             # Always release the transaction when done
@@ -582,7 +583,7 @@ class ConsensusWorker:
             # Convert to Transaction domain object
             transaction = Transaction.from_dict(appeal_data)
 
-            print(
+            logger.info(
                 f"[Worker {self.worker_id}] Processing appeal for transaction {transaction.hash} with status {appeal_data['status']}"
             )
 
@@ -646,15 +647,14 @@ class ConsensusWorker:
                     )
 
             session.commit()
-            print(
+            logger.info(
                 f"[Worker {self.worker_id}] Successfully processed appeal for transaction {transaction.hash}"
             )
 
         except Exception as e:
-            print(
+            logger.exception(
                 f"[Worker {self.worker_id}] Error processing appeal {appeal_data['hash']}: {e}"
             )
-            traceback.print_exc()
             session.rollback()
         finally:
             # Always release the transaction when done
@@ -664,7 +664,7 @@ class ConsensusWorker:
         """
         Main worker loop that continuously claims and processes transactions, appeals, and finalizations.
         """
-        print(f"[Worker {self.worker_id}] Starting consensus worker")
+        logger.info(f"[Worker {self.worker_id}] Starting consensus worker")
 
         recovery_counter = 0
 
@@ -677,7 +677,7 @@ class ConsensusWorker:
                         recovery_counter = 0
                         recovered = await self.recover_stuck_transactions(session)
                         if recovered > 0:
-                            print(
+                            logger.info(
                                 f"[Worker {self.worker_id}] Recovered {recovered} stuck transactions"
                             )
 
@@ -687,7 +687,7 @@ class ConsensusWorker:
                     appeal_data = await self.claim_next_appeal(session)
 
                     if appeal_data:
-                        print(
+                        logger.info(
                             f"[Worker {self.worker_id}] Claimed appeal for transaction {appeal_data['hash']}"
                         )
                         # Process in a new session
@@ -712,7 +712,7 @@ class ConsensusWorker:
                             )
 
                             if transaction_data:
-                                print(
+                                logger.info(
                                     f"[Worker {self.worker_id}] Claimed transaction {transaction_data['hash']}"
                                 )
                                 # Process in a new session
@@ -725,11 +725,10 @@ class ConsensusWorker:
                                 await asyncio.sleep(self.poll_interval)
 
             except Exception as e:
-                print(f"[Worker {self.worker_id}] Error in main loop: {e}")
-                traceback.print_exc()
+                logger.exception(f"[Worker {self.worker_id}] Error in main loop: {e}")
                 await asyncio.sleep(self.poll_interval)
 
     def stop(self):
         """Stop the worker gracefully."""
-        print(f"[Worker {self.worker_id}] Stopping consensus worker")
+        logger.info(f"[Worker {self.worker_id}] Stopping consensus worker")
         self.running = False
