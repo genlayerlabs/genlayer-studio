@@ -1185,7 +1185,7 @@ class ConsensusAlgorithm:
                             == ConsensusRound.VALIDATOR_TIMEOUT_APPEAL_SUCCESSFUL.value
                         )
                     ):
-                        self.rollback_transactions(
+                        await self.rollback_transactions(
                             context, False
                         )  # Put on False because this happens in the pending queue, so we don't need to stop it
                     break
@@ -1238,7 +1238,7 @@ class ConsensusAlgorithm:
             msg_handler.send_message(log_event)
 
     @staticmethod
-    def execute_transfer(
+    async def execute_transfer(
         transaction: Transaction,
         transactions_processor: TransactionsProcessor,
         accounts_manager: AccountsManager,
@@ -1746,7 +1746,7 @@ class ConsensusAlgorithm:
                 if next_state is None:
                     break
                 elif next_state == ConsensusRound.LEADER_APPEAL_SUCCESSFUL:
-                    self.rollback_transactions(context, True)
+                    await self.rollback_transactions(context, True)
                     break
                 state = next_state
 
@@ -1849,7 +1849,7 @@ class ConsensusAlgorithm:
                 if next_state is None:
                     break
                 elif next_state == ConsensusRound.LEADER_TIMEOUT_APPEAL_SUCCESSFUL:
-                    self.rollback_transactions(context, True)
+                    await self.rollback_transactions(context, True)
                     break
                 state = next_state
 
@@ -1970,7 +1970,7 @@ class ConsensusAlgorithm:
                     break
                 elif next_state == ConsensusRound.VALIDATOR_APPEAL_SUCCESSFUL:
                     if context.transaction.appealed:
-                        self.rollback_transactions(context, True)
+                        await self.rollback_transactions(context, True)
 
                         # Get the previous state of the contract
                         if context.transaction.contract_snapshot:
@@ -2002,7 +2002,9 @@ class ConsensusAlgorithm:
                     break
                 state = next_state
 
-    def rollback_transactions(self, context: TransactionContext, stop_pending_queue):
+    async def rollback_transactions(
+        self, context: TransactionContext, stop_pending_queue
+    ):
         """
         Rollback newer transactions.
         In the simplified system, we just need to reset future transactions to PENDING.
@@ -2318,7 +2320,7 @@ class PendingState(TransactionState):
         # If transaction is a transfer, execute it
         # TODO: consider when the transfer involves a contract account, bridging, etc.
         if context.transaction.type == TransactionType.SEND:
-            ConsensusAlgorithm.execute_transfer(
+            await ConsensusAlgorithm.execute_transfer(
                 context.transaction,
                 context.transactions_processor,
                 context.accounts_manager,
