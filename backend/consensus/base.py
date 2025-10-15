@@ -2677,6 +2677,9 @@ class RevealingState(TransactionState):
             context.msg_handler,
         )
 
+        # Yield to event loop to allow Redis publish task to execute before blocking operations
+        await asyncio.sleep(0)
+
         # Process each validation result and update the context
         for i, validation_result in enumerate(context.validation_results):
             # Store the vote from each validator node
@@ -2975,6 +2978,9 @@ class AcceptedState(TransactionState):
             context.msg_handler,
             False,
         )
+
+        # Yield to event loop to allow Redis publish task to execute before blocking operations
+        await asyncio.sleep(0)
 
         # Send a message indicating consensus was reached
         context.msg_handler.send_message(
