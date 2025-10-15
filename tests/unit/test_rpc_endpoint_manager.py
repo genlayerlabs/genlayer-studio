@@ -88,7 +88,7 @@ async def test_manager_returns_jsonrpc_error_response():
 
     response = await manager.invoke(request_payload, request)
 
-    assert response.error == {"code": 123, "message": "boom"}
+    assert response.error == {"code": 123, "message": "boom", "data": {}}
     assert stub_logger.messages[-1].name == "endpoint_error"
 
 
