@@ -257,10 +257,17 @@ class Node:
 
         return receipt
 
-    def _date_from_str(self, date: str | None) -> datetime.datetime | None:
+    def _date_from_str(
+        self, date: str | datetime.datetime | None
+    ) -> datetime.datetime | None:
         if date is None:
             return None
-        # Accept ISO‐8601 strings with a trailing ‘Z’ by normalizing to +00:00
+        # If already a datetime, ensure it's timezone-aware
+        if isinstance(date, datetime.datetime):
+            if date.tzinfo is None:
+                return date.replace(tzinfo=datetime.UTC)
+            return date
+        # Otherwise, parse from string; accept ISO-8601 with trailing 'Z'
         date_str = date.replace("Z", "+00:00")
         res = datetime.datetime.fromisoformat(date_str)
         if res.tzinfo is None:
