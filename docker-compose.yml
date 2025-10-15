@@ -116,6 +116,13 @@ services:
         max-file: "3"
     deploy:
       replicas: ${JSONRPC_REPLICAS:-3}
+      resources:
+        limits:
+          cpus: '${COMPOSE_RPC_CPU_LIMIT:-2}'
+          memory: ${COMPOSE_RPC_MEM_LIMIT:-8g}
+        reservations:
+          cpus: ${COMPOSE_RPC_CPU_RESERVATION:-1}
+          memory: ${COMPOSE_RPC_MEM_RESERVATION:-2g}
     labels:
       # Enable Traefik for this service
       - "traefik.enable=true"
@@ -246,6 +253,13 @@ services:
         condition: on-failure
         delay: 5s
         max_attempts: 3
+      resources:
+        limits:
+          cpus: '${COMPOSE_WORKER_CPU_LIMIT:-2}'
+          memory: ${COMPOSE_WORKER_MEM_LIMIT:-8g}
+        reservations:
+          cpus: ${COMPOSE_WORKER_CPU_RESERVATION:-1}
+          memory: ${COMPOSE_WORKER_MEM_RESERVATION:-2g}
     restart: always
     security_opt:
       - "no-new-privileges=true"
