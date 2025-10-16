@@ -203,7 +203,11 @@ services:
       context: .
       dockerfile: docker/Dockerfile.database-migration
     environment:
-      - DB_URL=postgresql://${DBUSER}:${DBPASSWORD}@${DBHOST}:${DBPORT}/${DBNAME}
+      - DBUSER=${DBUSER}
+      - DBPASSWORD=${DBPASSWORD}
+      - DBHOST=${DBHOST}
+      - DBPORT=${DBPORT}
+      - DBNAME=${DBNAME}
     depends_on:
       postgres:
         condition: service_healthy
