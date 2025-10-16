@@ -132,6 +132,13 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
 
+    # Terminate validators manager to shut down background tasks
+    if validators_manager:
+        try:
+            await validators_manager.terminate()
+        except Exception as e:
+            logger.error(f"Error terminating validators manager: {e}")
+
     # Clean up message handler
     if msg_handler:
         await msg_handler.close()
