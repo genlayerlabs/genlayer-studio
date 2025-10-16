@@ -80,9 +80,9 @@ class RedisWorkerMessageHandler(MessageHandler):
         Returns:
             The Redis channel name
         """
-        if log_event.scope.value == "TRANSACTION":
+        if log_event.scope.value == "Transaction":
             return self.TRANSACTION_CHANNEL
-        elif log_event.scope.value == "CONSENSUS":
+        elif log_event.scope.value == "Consensus":
             return self.CONSENSUS_CHANNEL
         else:
             return self.GENERAL_CHANNEL

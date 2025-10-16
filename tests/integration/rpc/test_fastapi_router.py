@@ -91,7 +91,7 @@ async def test_router_returns_jsonrpc_error(router_setup):
     response = await router.handle_http_request(request)
     data = json.loads(response.body.decode())
 
-    assert data["error"] == {"code": 123, "message": "failure", "data": {}}
+    assert data["error"] == {"code": 123, "message": "failure"}
 
 
 @pytest.mark.asyncio

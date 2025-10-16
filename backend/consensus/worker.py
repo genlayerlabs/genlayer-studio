@@ -1,7 +1,6 @@
 # backend/consensus/worker.py
 
 import os
-import logging
 import asyncio
 import time
 import traceback
@@ -23,8 +22,7 @@ from backend.consensus.base import ConsensusAlgorithm
 from backend.protocol_rpc.message_handler.base import MessageHandler
 from backend.rollup.consensus_service import ConsensusService
 import backend.validators as validators
-
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 
 class ConsensusWorker:
@@ -90,6 +88,12 @@ class ConsensusWorker:
                 WHERE t.status IN ('ACCEPTED', 'UNDETERMINED', 'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT')
                     AND t.appealed = false
                     AND t.timestamp_awaiting_finalization IS NOT NULL
+                    AND (
+                        t.leader_only = true
+                        OR (
+                            EXTRACT(EPOCH FROM NOW()) - t.timestamp_awaiting_finalization - COALESCE(t.appeal_processing_time, 0)
+                        ) > :finality_window_seconds * POWER(1 - :appeal_failed_reduction, COALESCE(t.appeal_failed, 0))
+                    )
                     AND (t.blocked_at IS NULL
                          OR t.blocked_at < NOW() - CAST(:timeout AS INTERVAL))
                     AND NOT EXISTS (
@@ -131,10 +135,15 @@ class ConsensusWorker:
             {
                 "worker_id": self.worker_id,
                 "timeout": f"{self.transaction_timeout_minutes} minutes",
+                "finality_window_seconds": self.consensus_algorithm.finality_window_time,
+                "appeal_failed_reduction": self.consensus_algorithm.finality_window_appeal_failed_reduction,
             },
         ).first()
 
         if result:
+            logger.info(
+                f"[Worker {self.worker_id}] Claimed next finalization result {result.hash}"
+            )
             session.commit()
             # Convert result to dict
             return {
@@ -316,6 +325,7 @@ class ConsensusWorker:
         ).first()
 
         if result:
+            logger.info(f"[Worker {self.worker_id}] Claimed transaction {result.hash}")
             session.commit()
             # Convert result to dict
             return {
@@ -355,10 +365,42 @@ class ConsensusWorker:
             SET blocked_at = NULL,
                 worker_id = NULL
             WHERE hash = :hash
+            RETURNING hash, status, blocked_at, worker_id
         """
         )
-        session.execute(update_query, {"hash": transaction_hash})
-        session.commit()
+
+        try:
+            result = session.execute(update_query, {"hash": transaction_hash})
+            row = result.first()
+            session.commit()
+
+            if row:
+                logger.debug(
+                    f"[Worker {self.worker_id}] Released transaction {transaction_hash} (status: {row.status})"
+                )
+            else:
+                logger.warning(
+                    f"[Worker {self.worker_id}] Transaction {transaction_hash} not found when releasing"
+                )
+        except Exception as e:
+            logger.error(
+                f"[Worker {self.worker_id}] Failed to release transaction {transaction_hash}: {e}",
+                exc_info=True,
+            )
+            # Try to rollback and commit again in a new transaction
+            try:
+                session.rollback()
+                result = session.execute(update_query, {"hash": transaction_hash})
+                row = result.first()
+                session.commit()
+                logger.info(
+                    f"[Worker {self.worker_id}] Successfully released transaction {transaction_hash} on retry"
+                )
+            except Exception as retry_error:
+                logger.error(
+                    f"[Worker {self.worker_id}] Failed to release transaction {transaction_hash} on retry: {retry_error}",
+                    exc_info=True,
+                )
 
     async def recover_stuck_transactions(self, session: Session) -> int:
         """
@@ -397,7 +439,6 @@ class ConsensusWorker:
                 "orphan_timeout": "5 minutes",  # Shorter timeout for orphaned transactions
             },
         )
-
         recovered = result.fetchall()
         if recovered:
             session.commit()
@@ -541,12 +582,14 @@ class ConsensusWorker:
             transactions_processor = transactions_processor_factory(session)
 
             # Check if can finalize (appeal window expired)
-            if self.consensus_algorithm.can_finalize_transaction(
+            can_finalize = self.consensus_algorithm.can_finalize_transaction(
                 transactions_processor,
                 transaction,
                 0,  # index in queue (not used in our case)
                 [finalization_data],  # mock queue with just this transaction
-            ):
+            )
+
+            if can_finalize:
                 logger.info(
                     f"[Worker {self.worker_id}] Finalizing transaction {transaction.hash}"
                 )
@@ -568,9 +611,9 @@ class ConsensusWorker:
                     f"[Worker {self.worker_id}] Successfully finalized transaction {transaction.hash}"
                 )
             else:
-                # Don't log this - it's normal for transactions to wait for appeal window
-                # print(f"[Worker {self.worker_id}] Transaction {transaction.hash} not ready for finalization yet")
-                pass
+                logger.debug(
+                    f"[Worker {self.worker_id}] Transaction {transaction.hash} not ready for finalization yet (appeal window active)"
+                )
 
         except Exception as e:
             logger.exception(
@@ -703,18 +746,23 @@ class ConsensusWorker:
                         # Process in a new session
                         with self.get_session() as process_session:
                             await self.process_appeal(appeal_data, process_session)
+                        # Continue to next iteration to ensure fresh session state
+                        continue
                     else:
                         # No appeals, try to claim a finalization
                         finalization_data = await self.claim_next_finalization(session)
 
                         if finalization_data:
-                            # Only log if we're actually going to finalize (not just checking)
-                            # print(f"[Worker {self.worker_id}] Claimed finalization for transaction {finalization_data['hash']}")
+                            logger.debug(
+                                f"[Worker {self.worker_id}] Claimed finalization for transaction {finalization_data['hash']}"
+                            )
                             # Process in a new session
                             with self.get_session() as process_session:
                                 await self.process_finalization(
                                     finalization_data, process_session
                                 )
+                            # Continue to next iteration to ensure fresh session state
+                            continue
                         else:
                             # No finalizations, try to claim a regular transaction
                             transaction_data = await self.claim_next_transaction(
@@ -730,6 +778,8 @@ class ConsensusWorker:
                                     await self.process_transaction(
                                         transaction_data, process_session
                                     )
+                                # Continue to next iteration to ensure fresh session state
+                                continue
                             else:
                                 # No work available, wait before polling again
                                 await asyncio.sleep(self.poll_interval)
