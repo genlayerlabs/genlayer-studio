@@ -58,7 +58,7 @@ class RedisWorkerMessageHandler(MessageHandler):
         """Initialize Redis connection."""
         if not self.redis_client:
             try:
-                self.redis_client = await aioredis.from_url(
+                self.redis_client = aioredis.from_url(
                     self.redis_url, encoding="utf-8", decode_responses=True
                 )
                 # Test connection

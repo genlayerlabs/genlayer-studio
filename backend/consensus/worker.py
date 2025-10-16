@@ -84,26 +84,31 @@ class ConsensusWorker:
         # They must be in ACCEPTED/UNDETERMINED/TIMEOUT states and appeal window must have passed
         query = text(
             """
-            WITH ready_for_finalization AS (
-                SELECT t.*, ROW_NUMBER() OVER (
-                    PARTITION BY t.to_address
-                    ORDER BY t.created_at ASC
-                ) as rn
+            WITH locked_finalizations AS (
+                SELECT t.*
                 FROM transactions t
                 WHERE t.status IN ('ACCEPTED', 'UNDETERMINED', 'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT')
                     AND t.appealed = false
                     AND t.timestamp_awaiting_finalization IS NOT NULL
                     AND (t.blocked_at IS NULL
-                         OR t.blocked_at < NOW() - INTERVAL :timeout)
+                         OR t.blocked_at < NOW() - CAST(:timeout AS INTERVAL))
                     AND NOT EXISTS (
                         -- Ensure no other transaction for same contract is being processed
                         SELECT 1 FROM transactions t2
                         WHERE t2.to_address = t.to_address
                             AND t2.blocked_at IS NOT NULL
-                            AND t2.blocked_at > NOW() - INTERVAL :timeout
+                            AND t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
                             AND t2.hash != t.hash
                     )
                 ORDER BY t.created_at ASC
+                FOR UPDATE SKIP LOCKED
+            ),
+            ready_for_finalization AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY to_address
+                    ORDER BY created_at ASC
+                ) as rn
+                FROM locked_finalizations
             )
             UPDATE transactions
             SET blocked_at = NOW(),
@@ -168,26 +173,31 @@ class ConsensusWorker:
         # Query to atomically claim an appealed transaction
         query = text(
             """
-            WITH available_appeals AS (
-                SELECT t.*, ROW_NUMBER() OVER (
-                    PARTITION BY t.to_address
-                    ORDER BY t.created_at ASC
-                ) as rn
+            WITH locked_appeals AS (
+                SELECT t.*
                 FROM transactions t
                 WHERE t.appealed = true
                     AND t.status IN ('ACCEPTED', 'UNDETERMINED', 'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT')
                     AND (t.blocked_at IS NULL
-                         OR t.blocked_at < NOW() - INTERVAL :timeout)
+                         OR t.blocked_at < NOW() - CAST(:timeout AS INTERVAL))
                     AND NOT EXISTS (
                         -- Ensure no other appeal for same contract is being processed
                         SELECT 1 FROM transactions t2
                         WHERE t2.to_address = t.to_address
                             AND t2.appealed = true
                             AND t2.blocked_at IS NOT NULL
-                            AND t2.blocked_at > NOW() - INTERVAL :timeout
+                            AND t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
                             AND t2.hash != t.hash
                     )
                 ORDER BY t.created_at ASC
+                FOR UPDATE SKIP LOCKED
+            ),
+            available_appeals AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY to_address
+                    ORDER BY created_at ASC
+                ) as rn
+                FROM locked_appeals
             )
             UPDATE transactions
             SET blocked_at = NOW(),
@@ -263,13 +273,13 @@ class ConsensusWorker:
                 FROM transactions t
                 WHERE t.status IN ('PENDING', 'ACTIVATED')
                     AND (t.blocked_at IS NULL
-                         OR t.blocked_at < NOW() - INTERVAL :timeout)
+                         OR t.blocked_at < NOW() - CAST(:timeout AS INTERVAL))
                     AND NOT EXISTS (
                         -- Ensure no other transaction for same contract is being processed
                         SELECT 1 FROM transactions t2
                         WHERE t2.to_address = t.to_address
                             AND t2.blocked_at IS NOT NULL
-                            AND t2.blocked_at > NOW() - INTERVAL :timeout
+                            AND t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
                             AND t2.hash != t.hash
                     )
                 ORDER BY t.created_at ASC
@@ -368,13 +378,13 @@ class ConsensusWorker:
             WHERE (
                 -- Case 1: Transactions with expired blocks
                 (blocked_at IS NOT NULL
-                 AND blocked_at < NOW() - INTERVAL :timeout
+                 AND blocked_at < NOW() - CAST(:timeout AS INTERVAL)
                  AND status NOT IN ('FINALIZED', 'CANCELED'))
                 OR
                 -- Case 2: Orphaned transactions in processing states with no block
                 (blocked_at IS NULL
                  AND status IN ('PROPOSING', 'COMMITTING', 'REVEALING')
-                 AND created_at < NOW() - INTERVAL :orphan_timeout)
+                 AND created_at < NOW() - CAST(:orphan_timeout AS INTERVAL))
             )
             RETURNING hash, status;
         """

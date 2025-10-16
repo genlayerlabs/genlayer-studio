@@ -29,7 +29,7 @@ class JSONRPCError(Exception):
         """
         self.code = code
         self.message = message
-        self.data = data if data is not None else {}
+        self.data = data
         super().__init__(self.message)
 
     def to_dict(self) -> dict:

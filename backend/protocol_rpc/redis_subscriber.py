@@ -55,7 +55,7 @@ class RedisEventSubscriber:
     async def connect(self):
         """Connect to Redis and set up pub/sub."""
         try:
-            self.redis_client = await aioredis.from_url(
+            self.redis_client = aioredis.from_url(
                 self.redis_url, encoding="utf-8", decode_responses=True
             )
 
@@ -139,7 +139,10 @@ class RedisEventSubscriber:
         except Exception as e:
             logger.error(f"Error in event listener: {e}")
             if self.is_running:
-                # Attempt to reconnect
+                # Clean up before reconnection
+                self.is_running = False
+                self.subscription_task = None
+                # Attempt to reconnect after delay
                 await asyncio.sleep(5)
                 await self.start()
 

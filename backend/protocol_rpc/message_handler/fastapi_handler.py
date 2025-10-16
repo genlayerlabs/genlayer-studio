@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import inspect
 import json
 import os
 import sys
@@ -37,18 +38,34 @@ class MessageHandler:
     def log_endpoint_info(self, func):
         """Decorator for logging endpoint information."""
 
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            # Log endpoint call
-            logger.info(f"Endpoint called: {func.__name__}")
-            try:
-                result = func(*args, **kwargs)
-                return result
-            except Exception as e:
-                logger.error(f"Endpoint error in {func.__name__}: {e}")
-                raise
+        if inspect.iscoroutinefunction(func):
+            # Async wrapper for coroutine functions
+            @wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                # Log endpoint call
+                logger.info(f"Endpoint called: {func.__name__}")
+                try:
+                    result = await func(*args, **kwargs)
+                    return result
+                except Exception as e:
+                    logger.error(f"Endpoint error in {func.__name__}: {e}")
+                    raise
 
-        return wrapper
+            return async_wrapper
+        else:
+            # Sync wrapper for regular functions
+            @wraps(func)
+            def sync_wrapper(*args, **kwargs):
+                # Log endpoint call
+                logger.info(f"Endpoint called: {func.__name__}")
+                try:
+                    result = func(*args, **kwargs)
+                    return result
+                except Exception as e:
+                    logger.error(f"Endpoint error in {func.__name__}: {e}")
+                    raise
+
+            return sync_wrapper
 
     def _publish(self, channel: str, payload: dict[str, Any]) -> None:
         """Queue a broadcast publish for the given channel."""
