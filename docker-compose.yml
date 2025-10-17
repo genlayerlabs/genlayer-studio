@@ -1,27 +1,13 @@
 services:
   traefik:
+    profiles: ["studio"]
     image: traefik:v3.3
-    command:
-      # Core configuration
-      - "--providers.docker=true"
-      - "--providers.docker.exposedbydefault=false"
-
-      # Entrypoints for local development
-      - "--entrypoints.web.address=:80"
-      - "--entrypoints.websecure.address=:443"  # Needed for frontend/hardhat labels
-      - "--entrypoints.api.address=:4000"       # JSON-RPC API
-
-      # API Dashboard (for local dev monitoring)
-      - "--api.dashboard=true"
-      - "--api.insecure=true"  # OK for local dev
     ports:
       - "80:80"
       - "443:443"
-      - "4000:4000"  # API endpoint through Traefik
-      - "8081:8080"  # Traefik dashboard (8081 to avoid conflict with frontend on 8080)
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # Removed traefik.yaml - using CLI config only
+      - ./traefik.yaml:/etc/traefik/traefik.yaml:ro
     logging:
       driver: "json-file"
       options:
@@ -56,13 +42,10 @@ services:
         max-size: "10m"
         max-file: "3"
     labels:
-      # Enable Traefik for frontend
-      - "traefik.enable=true"
-      # Route all HTTP and HTTPS traffic to frontend - low priority so API routes take precedence
-      - "traefik.http.routers.frontend.rule=Host(`${SERVER_NAME}`)"
-      - "traefik.http.routers.frontend.entrypoints=web,websecure"
-      - "traefik.http.routers.frontend.priority=1"
-      - "traefik.http.services.frontend.loadbalancer.server.port=8080"
+      traefik.enable: true
+      traefik.http.routers.frontend.rule: Host(`${SERVER_NAME}`)
+      traefik.http.routers.frontend.entrypoints: websecure
+      traefik.http.routers.frontend.tls: true
 
   jsonrpc:
     build:
@@ -130,26 +113,10 @@ services:
           cpus: ${COMPOSE_RPC_CPU_RESERVATION:-1}
           memory: ${COMPOSE_RPC_MEM_RESERVATION:-2g}
     labels:
-      # Enable Traefik for this service
-      - "traefik.enable=true"
-
-      # Router for port 4000 (direct API access)
-      - "traefik.http.routers.jsonrpc-api.rule=(PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/health`) || PathPrefix(`/ws`))"
-      - "traefik.http.routers.jsonrpc-api.entrypoints=api"
-      - "traefik.http.routers.jsonrpc-api.priority=10"
-
-      # Router for ports 80/443 (web access via domain) - higher priority than frontend
-      - "traefik.http.routers.jsonrpc-web.rule=Host(`${SERVER_NAME}`) && (PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/health`) || PathPrefix(`/ws`))"
-      - "traefik.http.routers.jsonrpc-web.entrypoints=web,websecure"
-      - "traefik.http.routers.jsonrpc-web.priority=10"
-
-      # Service configuration with load balancing
-      - "traefik.http.services.jsonrpc.loadbalancer.server.port=${RPCPORT}"
-      - "traefik.http.services.jsonrpc.loadbalancer.sticky.cookie=true"
-      - "traefik.http.services.jsonrpc.loadbalancer.sticky.cookie.name=jsonrpc"
-      # Health check for better load balancing
-      - "traefik.http.services.jsonrpc.loadbalancer.healthcheck.path=/health"
-      - "traefik.http.services.jsonrpc.loadbalancer.healthcheck.interval=10s"
+      traefik.enable: true
+      traefik.http.routers.jsonrpc.rule: Host(`${SERVER_NAME}`) && (PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/ws`) || PathPrefix(`/health`))
+      traefik.http.routers.jsonrpc.entrypoints: websecure
+      traefik.http.routers.jsonrpc.tls: true
 
   webdriver:
     image: yeagerai/genlayer-genvm-webdriver:0.0.7
