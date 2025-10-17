@@ -132,10 +132,17 @@ services:
     labels:
       # Enable Traefik for this service
       - "traefik.enable=true"
-      # HTTP router for API - expose on port 4000
-      - "traefik.http.routers.jsonrpc.rule=(PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/health`) || PathPrefix(`/ws`))"
-      - "traefik.http.routers.jsonrpc.entrypoints=api"
-      - "traefik.http.routers.jsonrpc.priority=10"
+
+      # Router for port 4000 (direct API access)
+      - "traefik.http.routers.jsonrpc-api.rule=(PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/health`) || PathPrefix(`/ws`))"
+      - "traefik.http.routers.jsonrpc-api.entrypoints=api"
+      - "traefik.http.routers.jsonrpc-api.priority=10"
+
+      # Router for ports 80/443 (web access via domain) - higher priority than frontend
+      - "traefik.http.routers.jsonrpc-web.rule=Host(`${SERVER_NAME}`) && (PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/health`) || PathPrefix(`/ws`))"
+      - "traefik.http.routers.jsonrpc-web.entrypoints=web,websecure"
+      - "traefik.http.routers.jsonrpc-web.priority=10"
+
       # Service configuration with load balancing
       - "traefik.http.services.jsonrpc.loadbalancer.server.port=${RPCPORT}"
       - "traefik.http.services.jsonrpc.loadbalancer.sticky.cookie=true"
