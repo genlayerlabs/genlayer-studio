@@ -20,6 +20,7 @@ export default defineConfig(({ mode }) => {
     preview: {
       port: 8080,
       strictPort: true,
+      host: true,
       allowedHosts: [
         '.genlayer.com', // match all genlayer.com sub-domains
         '.genlayerlabs.com', // match all genlayerlabs.com sub-domains
