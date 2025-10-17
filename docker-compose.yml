@@ -1,5 +1,6 @@
 services:
   traefik:
+    profiles: ["studio"]
     image: traefik:v3.3
     command:
       # Core configuration
@@ -87,6 +88,7 @@ services:
     depends_on:
       traefik:
         condition: service_started
+        required: false
       database-migration:
         condition: service_completed_successfully
       webdriver:
