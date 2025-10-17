@@ -77,9 +77,10 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - GENVMROOT=/genvm
       - GENVM_TAG=v0.2.4
-    # No direct ports - Traefik handles load balancing
+    ports:
+      - "${RPCPORT}:${RPCPORT}"
     expose:
-      - "${RPCPORT}"  # Only expose internally for Traefik
+      - "${RPCPORT}"
     volumes:
       - ./.env:/app/.env
       - ./backend:/app/backend
