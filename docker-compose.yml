@@ -60,7 +60,7 @@ services:
       - "traefik.enable=true"
       # Route all HTTP and HTTPS traffic to frontend - low priority so API routes take precedence
       - "traefik.http.routers.frontend.rule=Host(`${SERVER_NAME}`)"
-      - "traefik.http.routers.frontend.entrypoints=web,websecure"
+      - "traefik.http.routers.frontend.entrypoints=web"
       - "traefik.http.routers.frontend.priority=1"
       - "traefik.http.services.frontend.loadbalancer.server.port=8080"
 
