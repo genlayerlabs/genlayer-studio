@@ -460,35 +460,37 @@ class ConsensusAlgorithm:
                                 session
                             )
 
-                            # Reset stuck transactions that have been processing for too long
-                            # This handles ACTIVATED, PROPOSING, COMMITTING, REVEALING states
-                            with OperationTimer(
-                                "reset_stuck_transactions", warn_threshold=5.0
-                            ):
-                                reset_count = (
-                                    transactions_processor.reset_stuck_transactions(
-                                        timeout_seconds=ACTIVATED_TRANSACTION_TIMEOUT
-                                    )
-                                )
+                            # DISABLED: Reset stuck transactions that have been processing for too long
+                            # BUG: Uses created_at instead of status change time, resets old txs that waited in PENDING
+                            # TODO: Add status_updated_at field or use proper timestamp before re-enabling
+                            # # This handles ACTIVATED, PROPOSING, COMMITTING, REVEALING states
+                            # with OperationTimer(
+                            #     "reset_stuck_transactions", warn_threshold=5.0
+                            # ):
+                            #     reset_count = (
+                            #         transactions_processor.reset_stuck_transactions(
+                            #             timeout_seconds=ACTIVATED_TRANSACTION_TIMEOUT
+                            #         )
+                            #     )
 
-                            if reset_count > 0:
-                                total_reset += reset_count
-                                logger.warning(
-                                    f"[RECOVERY] Reset {reset_count} stuck transactions to PENDING "
-                                    f"(total this session: {total_reset})"
-                                )
-                                self.msg_handler.send_message(
-                                    LogEvent(
-                                        "consensus_event",
-                                        EventType.INFO,
-                                        EventScope.CONSENSUS,
-                                        f"Reset {reset_count} stuck transactions to PENDING",
-                                        {
-                                            "count": reset_count,
-                                            "total_reset": total_reset,
-                                        },
-                                    )
-                                )
+                            # if reset_count > 0:
+                            #     total_reset += reset_count
+                            #     logger.warning(
+                            #         f"[RECOVERY] Reset {reset_count} stuck transactions to PENDING "
+                            #         f"(total this session: {total_reset})"
+                            #     )
+                            #     self.msg_handler.send_message(
+                            #         LogEvent(
+                            #             "consensus_event",
+                            #             EventType.INFO,
+                            #             EventScope.CONSENSUS,
+                            #             f"Reset {reset_count} stuck transactions to PENDING",
+                            #             {
+                            #                 "count": reset_count,
+                            #                 "total_reset": total_reset,
+                            #             },
+                            #         )
+                            #     )
 
                             # Clean up orphaned entries in processing_transactions
                             # Check for transactions that are in terminal states but still tracked
