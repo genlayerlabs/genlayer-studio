@@ -42,13 +42,12 @@ services:
         max-size: "10m"
         max-file: "3"
     labels:
-      - "traefik.enable=true"
-      - "traefik.http.services.frontend.loadbalancer.server.port=8080"
-      - "traefik.http.routers.frontend.rule=PathPrefix(`/`)"
-      - "traefik.http.routers.frontend.entrypoints=websecure"
-      - "traefik.http.routers.frontend.tls=true"
-      - "traefik.http.routers.frontend-http.rule=PathPrefix(`/`)"
-      - "traefik.http.routers.frontend-http.entrypoints=web"
+      traefik.enable: true
+      traefik.http.routers.frontend.rule: Host(`${SERVER_NAME}`)
+      traefik.http.routers.frontend.entrypoints: websecure
+      traefik.http.routers.frontend.tls: true
+      traefik.http.routers.frontend-http.rule: Host(`${SERVER_NAME}`) && PathPrefix(`/`)
+      traefik.http.routers.frontend-http.entrypoints: web
 
   jsonrpc:
     build:
@@ -117,11 +116,10 @@ services:
           memory: ${COMPOSE_RPC_MEM_RESERVATION:-2g}
     labels:
       traefik.enable: true
-      traefik.http.services.jsonrpc.loadbalancer.server.port: ${RPCPORT}
-      traefik.http.routers.jsonrpc.rule: (PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/ws`) || PathPrefix(`/health`))
+      traefik.http.routers.jsonrpc.rule: Host(`${SERVER_NAME}`) && (PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/ws`) || PathPrefix(`/health`))
       traefik.http.routers.jsonrpc.entrypoints: websecure
       traefik.http.routers.jsonrpc.tls: true
-      traefik.http.routers.jsonrpc-http.rule: (PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/ws`) || PathPrefix(`/health`))
+      traefik.http.routers.jsonrpc-http.rule: Host(`${SERVER_NAME}`) && (PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/ws`) || PathPrefix(`/health`))
       traefik.http.routers.jsonrpc-http.entrypoints: web
 
   webdriver:
