@@ -1,19 +1,19 @@
 services:
   traefik:
     image: traefik:v3.3
-    # command:
-    #   # Core configuration
-    #   - "--providers.docker=true"
-    #   - "--providers.docker.exposedbydefault=false"
+    command:
+      # Core configuration
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
 
-    #   # Entrypoints for local development
-    #   - "--entrypoints.web.address=:80"
-    #   - "--entrypoints.websecure.address=:443"  # Needed for frontend/hardhat labels
-    #   - "--entrypoints.api.address=:4000"       # JSON-RPC API
+      # Entrypoints for local development
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"  # Needed for frontend/hardhat labels
+      # - "--entrypoints.api.address=:4000"       # JSON-RPC API
 
-    #   # API Dashboard (for local dev monitoring)
-    #   - "--api.dashboard=true"
-    #   - "--api.insecure=true"  # OK for local dev
+      # API Dashboard (for local dev monitoring)
+      - "--api.dashboard=true"
+      # - "--api.insecure=true"  # OK for local dev
     ports:
       - "80:80"
       - "443:443"
