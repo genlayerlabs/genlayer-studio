@@ -55,8 +55,15 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    # For local dev, frontend is accessed directly on port 8080
-    # Remove Traefik labels since we're exposing the port directly
+    labels:
+      # Enable Traefik for frontend
+      - "traefik.enable=true"
+      # Route all HTTP traffic (port 80) to frontend - low priority so API routes take precedence
+      - "traefik.http.routers.frontend.rule: Host(`${SERVER_NAME}`)"
+      - "traefik.http.routers.frontend.entrypoints: websecure"
+      - "traefik.http.routers.frontend.tls: true"
+      - "traefik.http.routers.frontend.priority=1"
+      #- "traefik.http.services.frontend.loadbalancer.server.port=8080"
 
   jsonrpc:
     build:
@@ -129,6 +136,7 @@ services:
       # HTTP router for API - expose on port 4000
       - "traefik.http.routers.jsonrpc.rule=(PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/health`) || PathPrefix(`/ws`))"
       - "traefik.http.routers.jsonrpc.entrypoints=api"
+      - "traefik.http.routers.jsonrpc.priority=10"
       # Service configuration with load balancing
       - "traefik.http.services.jsonrpc.loadbalancer.server.port=${RPCPORT}"
       - "traefik.http.services.jsonrpc.loadbalancer.sticky.cookie=true"
