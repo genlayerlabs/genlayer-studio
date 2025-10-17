@@ -195,9 +195,10 @@ class TransactionsProcessor:
             to_bytes(hexstr=to_address) if is_address(to_address) else b"\x00" * 20
         )
 
-        # Use current timestamp to mimic block.timestamp
-        timestamp = int(time.time())
-        timestamp_bytes = timestamp.to_bytes(32, byteorder="big", signed=False)
+        # Use current timestamp with microsecond precision to ensure uniqueness
+        timestamp = time.time()
+        timestamp_int = int(timestamp * 1_000_000)  # Convert to microseconds as integer
+        timestamp_bytes = timestamp_int.to_bytes(32, byteorder="big", signed=False)
 
         # Derive a deterministic pseudo-random seed from the recipient address
         seed_source = f"{to_address or '0x0'}:{timestamp}"
