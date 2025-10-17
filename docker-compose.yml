@@ -126,18 +126,10 @@ services:
           cpus: ${COMPOSE_RPC_CPU_RESERVATION:-1}
           memory: ${COMPOSE_RPC_MEM_RESERVATION:-2g}
     labels:
-      # Enable Traefik for this service
-      - "traefik.enable=true"
-      # HTTP router for API - expose on port 4000
-      - "traefik.http.routers.jsonrpc.rule=(PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/health`) || PathPrefix(`/ws`))"
-      - "traefik.http.routers.jsonrpc.entrypoints=api"
-      # Service configuration with load balancing
-      - "traefik.http.services.jsonrpc.loadbalancer.server.port=${RPCPORT}"
-      - "traefik.http.services.jsonrpc.loadbalancer.sticky.cookie=true"
-      - "traefik.http.services.jsonrpc.loadbalancer.sticky.cookie.name=jsonrpc"
-      # Health check for better load balancing
-      - "traefik.http.services.jsonrpc.loadbalancer.healthcheck.path=/health"
-      - "traefik.http.services.jsonrpc.loadbalancer.healthcheck.interval=10s"
+      traefik.enable: true
+      traefik.http.routers.jsonrpc.rule: Host(`${SERVER_NAME}`) && (PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/ws`) || PathPrefix(`/health`))
+      traefik.http.routers.jsonrpc.entrypoints: websecure
+      traefik.http.routers.jsonrpc.tls: true
 
   webdriver:
     image: yeagerai/genlayer-genvm-webdriver:0.0.7
