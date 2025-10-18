@@ -277,7 +277,7 @@ class ConsensusWorker:
         # Ensures only one transaction per contract is processed at a time
         query = text(
             """
-            WITH locked_transactions AS (
+            WITH candidate_transactions AS (
                 SELECT t.*
                 FROM transactions t
                 WHERE t.status IN ('PENDING', 'ACTIVATED')
@@ -294,19 +294,26 @@ class ConsensusWorker:
                 ORDER BY t.created_at ASC
                 FOR UPDATE SKIP LOCKED
             ),
-            available_transactions AS (
+            oldest_per_contract AS (
                 SELECT *, ROW_NUMBER() OVER (
                     PARTITION BY to_address
                     ORDER BY created_at ASC
                 ) as rn
-                FROM locked_transactions
+                FROM candidate_transactions
+            ),
+            single_transaction AS (
+                -- Select only ONE transaction (oldest across all contracts)
+                SELECT *
+                FROM oldest_per_contract
+                WHERE rn = 1
+                ORDER BY created_at ASC
+                LIMIT 1
             )
             UPDATE transactions
             SET blocked_at = NOW(),
                 worker_id = :worker_id
-            FROM available_transactions
-            WHERE transactions.hash = available_transactions.hash
-                AND available_transactions.rn = 1
+            FROM single_transaction
+            WHERE transactions.hash = single_transaction.hash
             RETURNING transactions.hash, transactions.from_address, transactions.to_address,
                       transactions.data, transactions.value, transactions.type, transactions.nonce,
                       transactions.gaslimit, transactions.r, transactions.s, transactions.v,
@@ -416,6 +423,8 @@ class ConsensusWorker:
             UPDATE transactions
             SET blocked_at = NULL,
                 worker_id = NULL,
+                consensus_data = NULL,
+                consensus_history = NULL,
                 status = 'PENDING'
             WHERE (
                 -- Case 1: Transactions with expired blocks

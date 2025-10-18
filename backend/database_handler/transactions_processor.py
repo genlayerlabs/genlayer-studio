@@ -291,7 +291,10 @@ class TransactionsProcessor:
     def _process_round_data(self, transaction_data: dict) -> dict:
         """Process round data and prepare transaction data."""
 
-        if "consensus_results" in transaction_data["consensus_history"]:
+        if (
+            transaction_data["consensus_history"] is not None
+            and "consensus_results" in transaction_data["consensus_history"]
+        ):
             transaction_data["num_of_rounds"] = str(
                 len(transaction_data["consensus_history"]["consensus_results"])
             )
@@ -302,7 +305,10 @@ class TransactionsProcessor:
         validator_votes = []
         validator_votes_hash = []
         round_validators = []
-        if "consensus_results" in transaction_data["consensus_history"]:
+        if (
+            transaction_data["consensus_history"] is not None
+            and "consensus_results" in transaction_data["consensus_history"]
+        ):
             round_number = str(
                 len(transaction_data["consensus_history"]["consensus_results"]) - 1
             )
@@ -381,7 +387,10 @@ class TransactionsProcessor:
             "processing_block": "0",
             "proposal_block": "0",
         }
-        if "consensus_results" in transaction_data["consensus_history"]:
+        if (
+            transaction_data["consensus_history"] is not None
+            and "consensus_results" in transaction_data["consensus_history"]
+        ):
             transaction_data["activator"] = transaction_data["consensus_history"][
                 "consensus_results"
             ][0]["leader_result"][0]["node_config"]["address"]
@@ -444,6 +453,7 @@ class TransactionsProcessor:
         eq_output = []
         if (
             "consensus_history" in transaction_data
+            and transaction_data["consensus_history"] is not None
             and "consensus_results" in transaction_data["consensus_history"]
         ):
             for consensus_round in transaction_data["consensus_history"][

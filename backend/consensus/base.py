@@ -1171,7 +1171,10 @@ class ConsensusAlgorithm:
                     break
                 elif next_state == ConsensusRound.ACCEPTED:
                     if (
-                        ("consensus_results" in context.transaction.consensus_history)
+                        (context.transaction.consensus_history is not None)
+                        and (
+                            "consensus_results" in context.transaction.consensus_history
+                        )
                         and (
                             len(
                                 context.transaction.consensus_history[
@@ -2219,7 +2222,7 @@ class ConsensusAlgorithm:
             set[str]: Set of used leader addresses.
         """
         used_leader_addresses = set()
-        if "consensus_results" in consensus_history:
+        if consensus_history is not None and "consensus_results" in consensus_history:
             for consensus_round in consensus_history["consensus_results"]:
                 leader_receipt = consensus_round["leader_result"]
                 if leader_receipt:
