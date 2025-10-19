@@ -2,6 +2,7 @@
 
 import os
 import asyncio
+import signal
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -38,6 +39,14 @@ async def lifespan(app: FastAPI):
     """Manage the worker lifecycle."""
     global worker, worker_task
 
+    # Set up signal handlers for graceful shutdown logging
+    def handle_signal(sig, frame):
+        logger.warning(f"Received signal {sig}, initiating graceful shutdown...")
+
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+
+    logger.info("Starting Consensus Worker Service...")
     print("Starting Consensus Worker Service...")
 
     # Database setup
@@ -112,8 +121,19 @@ async def lifespan(app: FastAPI):
         transaction_timeout_minutes=transaction_timeout,
     )
 
-    # Start the worker in a background task
-    worker_task = asyncio.create_task(worker.run())
+    # Start the worker in a background task with exception handling
+    async def run_worker_with_error_handling():
+        try:
+            await worker.run()
+        except Exception as e:
+            logger.critical(
+                f"FATAL: Worker {worker.worker_id} crashed with unhandled exception: {e}",
+                exc_info=True,
+            )
+            # Re-raise to let the container crash and restart
+            raise
+
+    worker_task = asyncio.create_task(run_worker_with_error_handling())
 
     print(f"Consensus Worker {worker.worker_id} started successfully")
 
@@ -153,10 +173,24 @@ app = FastAPI(title="Consensus Worker Service", version="1.0.0", lifespan=lifesp
 @app.get("/health")
 async def health_check():
     """Health check endpoint for the worker."""
-    global worker
+    global worker, worker_task
 
     if worker is None:
         return {"status": "initializing", "worker_id": None}
+
+    # Check if worker task has died
+    if worker_task and worker_task.done():
+        # Worker task finished unexpectedly - this is a failure
+        try:
+            # This will re-raise any exception from the task
+            worker_task.result()
+        except Exception as e:
+            logger.error(f"Worker task died with exception: {e}")
+        return {
+            "status": "failed",
+            "worker_id": worker.worker_id,
+            "error": "worker_task_died",
+        }
 
     return {
         "status": "healthy" if worker.running else "stopping",

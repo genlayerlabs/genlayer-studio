@@ -248,9 +248,10 @@ services:
     deploy:
       replicas: ${CONSENSUS_WORKERS:-1}  # Minimum 1 worker required for consensus processing
       restart_policy:
-        condition: on-failure
+        condition: any  # Restart on any exit (failure or success)
         delay: 5s
-        max_attempts: 3
+        max_attempts: 0  # Unlimited restart attempts
+        window: 120s
       resources:
         limits:
           cpus: '${COMPOSE_WORKER_CPU_LIMIT:-2}'
@@ -258,7 +259,7 @@ services:
         reservations:
           cpus: ${COMPOSE_WORKER_CPU_RESERVATION:-1}
           memory: ${COMPOSE_WORKER_MEM_RESERVATION:-2g}
-    restart: always
+    restart: unless-stopped
     security_opt:
       - "no-new-privileges=true"
     logging:
