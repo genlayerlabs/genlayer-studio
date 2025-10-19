@@ -49,6 +49,12 @@ async def lifespan(app: FastAPI):
     logger.info("Starting Consensus Worker Service...")
     print("Starting Consensus Worker Service...")
 
+    # CRITICAL: Kill any orphaned GenVM processes from previous crashes
+    # These zombie processes can consume gigabytes of memory outside Docker limits
+    logger.info("Cleaning up orphaned GenVM processes from previous crashes...")
+    os.system("pkill -9 -f 'genvm (llm|web)' 2>/dev/null || true")
+    logger.info("GenVM cleanup complete")
+
     # Database setup
     database_name = "genlayer"
     db_uri = f"postgresql+psycopg2://{os.environ.get('DBUSER')}:{os.environ.get('DBPASSWORD')}@{os.environ.get('DBHOST')}/{get_db_name(database_name)}"
@@ -106,9 +112,11 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(error_msg) from e
     consensus_service = ConsensusService()
 
-    # Initialize validators manager
+    # Initialize validators manager (MUST use global to prevent garbage collection)
+    global validators_manager  # Declare before assignment to use the global variable
     validators_manager = validators.Manager(SessionLocal())
     await validators_manager.restart()
+    logger.info("Validators manager initialized and restarted")
 
     # Create and start the worker
     worker = ConsensusWorker(
@@ -137,33 +145,48 @@ async def lifespan(app: FastAPI):
 
     print(f"Consensus Worker {worker.worker_id} started successfully")
 
-    yield
+    try:
+        yield
+    finally:
+        # CRITICAL: Always cleanup GenVM processes, even on crash
+        # This prevents memory leaks from orphaned genvm subprocesses
 
-    # Cleanup on shutdown
-    print("Shutting down Consensus Worker Service...")
+        # Cleanup on shutdown
+        logger.info("Shutting down Consensus Worker Service...")
+        print("Shutting down Consensus Worker Service...")
 
-    if worker:
-        worker.stop()
+        if worker:
+            worker.stop()
 
-    if worker_task:
-        worker_task.cancel()
-        try:
-            await worker_task
-        except asyncio.CancelledError:
-            pass
+        if worker_task:
+            worker_task.cancel()
+            try:
+                await worker_task
+            except asyncio.CancelledError:
+                pass
 
-    # Terminate validators manager to shut down background tasks
-    if validators_manager:
-        try:
-            await validators_manager.terminate()
-        except Exception as e:
-            logger.error(f"Error terminating validators manager: {e}")
+        # Terminate validators manager to shut down background tasks
+        if validators_manager:
+            try:
+                logger.info("Terminating validators manager and GenVM subprocesses...")
+                await validators_manager.terminate()
+                logger.info("Validators manager terminated successfully")
+            except Exception as e:
+                logger.error(f"Error terminating validators manager: {e}")
 
-    # Clean up message handler
-    if msg_handler:
-        await msg_handler.close()
+        # Clean up message handler
+        if msg_handler:
+            try:
+                await msg_handler.close()
+            except Exception as e:
+                logger.error(f"Error closing message handler: {e}")
 
-    print("Consensus Worker Service stopped")
+        # Final safety check: Kill any remaining genvm processes
+        logger.info("Final cleanup: killing any remaining GenVM processes...")
+        os.system("pkill -9 -f 'genvm (llm|web)' 2>/dev/null || true")
+        logger.info("GenVM cleanup complete")
+
+        print("Consensus Worker Service stopped")
 
 
 # Create FastAPI app

@@ -248,9 +248,9 @@ services:
     deploy:
       replicas: ${CONSENSUS_WORKERS:-1}  # Minimum 1 worker required for consensus processing
       restart_policy:
-        condition: any  # Restart on any exit (failure or success)
+        condition: on-failure  # Only restart on failure (not on clean exit)
         delay: 5s
-        max_attempts: 0  # Unlimited restart attempts
+        max_attempts: 5  # Limit to 5 attempts to prevent runaway loops
         window: 120s
       resources:
         limits:
