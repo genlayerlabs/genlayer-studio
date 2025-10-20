@@ -349,8 +349,8 @@ class TransactionsProcessor:
             "votes_revealed": str(len(validator_votes_name)),
             "appeal_bond": "0",
             "rotations_left": str(
-                transaction_data.get("config_rotation_rounds", 0)
-                - transaction_data.get("rotation_count", 0)
+                (transaction_data.get("config_rotation_rounds") or 0)
+                - (transaction_data.get("rotation_count") or 0)
             ),
             "result": last_round_result,
             "round_validators": round_validators,
