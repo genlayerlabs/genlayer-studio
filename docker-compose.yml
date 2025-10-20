@@ -216,6 +216,7 @@ services:
         required: false
 
   consensus-worker:
+    image: genlayer-studio-consensus-worker:latest
     build:
       context: ./
       dockerfile: ./docker/Dockerfile.consensus-worker
