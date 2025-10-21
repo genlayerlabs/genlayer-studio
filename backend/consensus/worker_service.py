@@ -3,6 +3,7 @@
 import os
 import asyncio
 import signal
+import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -191,12 +192,18 @@ async def lifespan(app: FastAPI):
 
 # Create FastAPI app
 app = FastAPI(title="Consensus Worker Service", version="1.0.0", lifespan=lifespan)
+start_time = time.time()
 
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint for the worker."""
+    import psutil
+    from datetime import datetime
+
     global worker, worker_task
+
+    endpoint_start = time.time()
 
     if worker is None:
         return {"status": "initializing", "worker_id": None}
@@ -215,9 +222,45 @@ async def health_check():
             "error": "worker_task_died",
         }
 
+    # Get basic metrics
+    metrics = {}
+    try:
+        process = psutil.Process()
+        metrics = {
+            "memory_mb": round(process.memory_info().rss / 1024 / 1024, 2),
+            "cpu_percent": round(process.cpu_percent(), 2),
+            "memory_percent": round(process.memory_percent(), 2),
+        }
+    except:
+        pass
+
+    # Get current transaction info with time calculation
+    current_tx = None
+    if worker.current_transaction:
+        tx = worker.current_transaction.copy()
+        if tx.get("blocked_at"):
+            try:
+                blocked_at = datetime.fromisoformat(
+                    tx["blocked_at"].replace("Z", "+00:00")
+                )
+                elapsed = datetime.utcnow() - blocked_at.replace(tzinfo=None)
+
+                # Format as human-readable time ago
+                minutes = int(elapsed.total_seconds() / 60)
+                if minutes < 60:
+                    tx["blocked_at"] = f"{minutes}m ago"
+                else:
+                    hours = minutes // 60
+                    tx["blocked_at"] = f"{hours}h ago"
+            except:
+                pass
+        current_tx = tx
+
     return {
         "status": "healthy" if worker.running else "stopping",
         "worker_id": worker.worker_id,
+        "current_transaction": current_tx,
+        **metrics,
     }
 
 

@@ -62,6 +62,7 @@ class ConsensusWorker:
         self.poll_interval = poll_interval
         self.transaction_timeout_minutes = transaction_timeout_minutes
         self.running = True
+        self.current_transaction = None  # Track currently processing transaction
 
         # Create a ConsensusAlgorithm instance to reuse its exec_transaction method
         self.consensus_algorithm = ConsensusAlgorithm(
@@ -468,6 +469,12 @@ class ConsensusWorker:
             session: Database session
         """
         try:
+            # Track current transaction for health monitoring
+            self.current_transaction = {
+                "hash": transaction_data.get("hash"),
+                "blocked_at": transaction_data.get("blocked_at"),
+            }
+
             # Convert to Transaction domain object
             transaction = Transaction.from_dict(transaction_data)
 
@@ -563,6 +570,8 @@ class ConsensusWorker:
             )
             session.rollback()
         finally:
+            # Clear current transaction tracking
+            self.current_transaction = None
             # Always release the transaction when done
             self.release_transaction(session, transaction_data["hash"])
 
