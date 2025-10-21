@@ -744,7 +744,13 @@ def get_transaction_by_hash(
     transaction_hash: str,
     sim_config: dict | None = None,
 ) -> dict | None:
-    return transactions_processor.get_transaction_by_hash(transaction_hash, sim_config)
+    transaction = transactions_processor.get_transaction_by_hash(
+        transaction_hash, sim_config
+    )
+
+    if transaction is None:
+        raise JSONRPCError(f"Transaction {transaction_hash} not found")
+    return transaction
 
 
 def get_studio_transaction_by_hash(
@@ -752,7 +758,13 @@ def get_studio_transaction_by_hash(
     transaction_hash: str,
     full: bool = True,
 ) -> dict | None:
-    return transactions_processor.get_studio_transaction_by_hash(transaction_hash, full)
+    transaction = transactions_processor.get_studio_transaction_by_hash(
+        transaction_hash, full
+    )
+
+    if transaction is None:
+        raise JSONRPCError(f"Transaction {transaction_hash} not found")
+    return transaction
 
 
 def get_transaction_status(
