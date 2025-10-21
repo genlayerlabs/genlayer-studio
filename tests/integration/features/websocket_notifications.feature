@@ -1,5 +1,5 @@
 Feature: WebSocket Notifications
-  
+
   Scenario: Client receives real-time status updates
     Given a client is connected via WebSocket
     And subscribed to transaction "tx_123"
