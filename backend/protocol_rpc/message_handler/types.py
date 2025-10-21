@@ -14,6 +14,7 @@ class EventScope(Enum):
     RPC = "RPC"
     GENVM = "GenVM"
     CONSENSUS = "Consensus"
+    TRANSACTION = "Transaction"
 
 
 @dataclass

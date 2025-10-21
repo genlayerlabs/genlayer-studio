@@ -7,6 +7,7 @@ from typing import Callable, Optional
 import typing
 import collections.abc
 import os
+import logging
 
 from backend.domain.types import Validator, Transaction, TransactionType
 from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope
@@ -32,6 +33,45 @@ def _parse_chain_id() -> int:
 
 
 SIMULATOR_CHAIN_ID: typing.Final[int] = _parse_chain_id()
+
+
+def _filter_genvm_log_by_level(genvm_log: list[dict]) -> list[dict]:
+    """
+    Filter genvm_log entries based on configured LOG_LEVEL.
+    Only includes log entries that meet or exceed the configured log level.
+    """
+    # Get configured log level from environment
+    configured_level = os.getenv("LOG_LEVEL", "INFO").upper()
+
+    # Map string levels to numeric values (matching Python's logging module)
+    level_map = {
+        "DEBUG": logging.DEBUG,  # 10
+        "INFO": logging.INFO,  # 20
+        "WARNING": logging.WARNING,  # 30
+        "WARN": logging.WARNING,  # 30 (alias)
+        "ERROR": logging.ERROR,  # 40
+        "CRITICAL": logging.CRITICAL,  # 50
+    }
+
+    # Get numeric threshold for configured level (default to INFO if unknown)
+    threshold = level_map.get(configured_level, logging.INFO)
+
+    # Filter log entries
+    filtered_logs = []
+    for log_entry in genvm_log:
+        if not isinstance(log_entry, dict):
+            # Keep non-dict entries as-is
+            filtered_logs.append(log_entry)
+            continue
+
+        entry_level = log_entry.get("level", "info").upper()
+        entry_numeric_level = level_map.get(entry_level, logging.INFO)
+
+        # Include if entry level >= threshold
+        if entry_numeric_level >= threshold:
+            filtered_logs.append(log_entry)
+
+    return filtered_logs
 
 
 class _SnapshotView(genvmbase.StateProxy):
@@ -217,10 +257,17 @@ class Node:
 
         return receipt
 
-    def _date_from_str(self, date: str | None) -> datetime.datetime | None:
+    def _date_from_str(
+        self, date: str | datetime.datetime | None
+    ) -> datetime.datetime | None:
         if date is None:
             return None
-        # Accept ISO‐8601 strings with a trailing ‘Z’ by normalizing to +00:00
+        # If already a datetime, ensure it's timezone-aware
+        if isinstance(date, datetime.datetime):
+            if date.tzinfo is None:
+                return date.replace(tzinfo=datetime.UTC)
+            return date
+        # Otherwise, parse from string; accept ISO-8601 with trailing 'Z'
         date_str = date.replace("Z", "+00:00")
         res = datetime.datetime.fromisoformat(date_str)
         if res.tzinfo is None:
@@ -305,6 +352,10 @@ class Node:
         if msg_handler is None:
             return
         is_error = isinstance(res.result, genvmbase.ExecutionError)
+
+        # Filter genvm_log based on configured log level
+        filtered_genvm_log = _filter_genvm_log_by_level(res.genvm_log)
+
         msg_handler.send_message(
             LogEvent(
                 name="execution_finished",
@@ -315,7 +366,7 @@ class Node:
                     "result": f"{res.result!r}",
                     "stdout": res.stdout if is_error else res.stdout[:500],
                     "stderr": res.stderr,
-                    "genvm_log": res.genvm_log,
+                    "genvm_log": filtered_genvm_log,
                 },
                 transaction_hash=transaction_hash_str,
             )
@@ -325,10 +376,14 @@ class Node:
         genvm = self._create_genvm()
         res = await genvm.get_contract_schema(code)
         await self._execution_finished(res, None)
+
+        # Filter genvm_log based on configured log level
+        filtered_genvm_log = _filter_genvm_log_by_level(res.genvm_log)
+
         err_data = {
             "stdout": res.stdout,
             "stderr": res.stderr,
-            "genvm_log": res.genvm_log,
+            "genvm_log": filtered_genvm_log,
             "result": f"{res.result!r}",
         }
         if not isinstance(res.result, genvmbase.ExecutionReturn):

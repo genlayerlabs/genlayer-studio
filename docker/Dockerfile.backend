@@ -40,54 +40,36 @@ ENV HUGGINGFACE_HUB_CACHE /home/backend-user/.cache/huggingface
 
 ENV RUST_BACKTRACE=1
 
-# Download and extract GenVM binaries (sequential for Docker compatibility)
+ADD \
+   https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-linux-amd64.tar.xz \
+   /genvm/genvm-linux-amd64.tar.xz
+
+ADD \
+   https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-linux-arm64.tar.xz \
+   /genvm/genvm-linux-arm64.tar.xz
+
+ADD \
+   https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-universal.tar.xz \
+   /genvm/genvm-universal.tar.xz
+
+# Extract and prepare GenVM binaries
 RUN cd /genvm \
-    && echo "=== Starting GenVM $GENVM_TAG download ===" \
-    && if [[ "$TARGETPLATFORM" == "linux/amd64" ]] || [[ -z "$TARGETPLATFORM" ]]; then \
-        ARCH_FILE="genvm-linux-amd64.tar.xz" ; \
-    elif [[ "$TARGETPLATFORM" == "linux/arm64" ]]; then \
-        ARCH_FILE="genvm-linux-arm64.tar.xz" ; \
-    else \
-        echo "ERROR: Unsupported platform $TARGETPLATFORM" ; exit 1 ; \
-    fi \
-    && echo "Platform: $TARGETPLATFORM -> Architecture file: $ARCH_FILE" \
-    && echo "Downloading $ARCH_FILE..." \
-    && curl -L --fail --retry 3 --retry-delay 2 \
-        --connect-timeout 10 --max-time 300 \
-        --progress-bar \
-        -o "$ARCH_FILE" \
-        "https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/$ARCH_FILE" \
-    && echo "✓ Downloaded $ARCH_FILE" \
-    && echo "Downloading genvm-universal.tar.xz..." \
-    && curl -L --fail --retry 3 --retry-delay 2 \
-        --connect-timeout 10 --max-time 300 \
-        --progress-bar \
-        -o "genvm-universal.tar.xz" \
-        "https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-universal.tar.xz" \
-    && echo "✓ Downloaded genvm-universal.tar.xz" \
-    && echo "Verifying downloads..." \
-    && ls -lah *.tar.xz \
-    && for f in *.tar.xz; do \
-        if [ ! -s "$f" ]; then \
-            echo "ERROR: $f is empty or missing" ; exit 1 ; \
-        fi ; \
-    done \
-    && echo "Extracting archives..." \
-    && tar -xf "$ARCH_FILE" \
-    && tar -xf "genvm-universal.tar.xz" \
+    && if [[ "$TARGETPLATFORM" == "linux/amd64" ]] ; \
+        then \
+            tar -xf genvm-linux-amd64.tar.xz ; \
+        elif [[ "$TARGETPLATFORM" == "linux/arm64" ]] ; \
+        then \
+            tar -xf genvm-linux-arm64.tar.xz ; \
+        else \
+            echo "Sorry, $TARGETPLATFORM is not supported yet" ; exit 1 ; \
+        fi \
+    && tar -xf genvm-universal.tar.xz \
     && rm *.tar.xz \
-    && echo "GenVM installed successfully:" \
-    && ls -la \
+    && ls -R . \
     && chown -R backend-user:backend-group /genvm \
-    && chmod +x /genvm/bin/* /genvm/executor/$GENVM_TAG/bin/* \
-    && echo "=== GenVM installation complete ===" \
-    && echo "Setting up musl loader for GenVM binaries..." \
-    && if [[ "$TARGETPLATFORM" == "linux/amd64" ]] || [[ -z "$TARGETPLATFORM" ]]; then \
-        ln -sf /lib/x86_64-linux-musl/libc.so /lib/ld-musl-x86_64.so.1 ; \
-    elif [[ "$TARGETPLATFORM" == "linux/arm64" ]]; then \
-        ln -sf /lib/aarch64-linux-musl/libc.so /lib/ld-musl-aarch64.so.1 ; \
-    fi \
-    && echo "Musl loader configured"
+    && su - backend-user -c "/genvm/executor/$GENVM_TAG/bin/post-install.py" \
+    && cd "$path" \
+    && true
 
 # Set GenVM environment variables (GENVM_TAG is already set as ENV earlier)
 ENV GENVMROOT=/genvm
