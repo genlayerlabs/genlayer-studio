@@ -758,7 +758,10 @@ def get_studio_transaction_by_hash(
 def get_transaction_status(
     transactions_processor: TransactionsProcessor, transaction_hash: str
 ) -> str | None:
-    return transactions_processor.get_transaction_status(transaction_hash)
+    status = transactions_processor.get_transaction_status(transaction_hash)
+    if status is None:
+        raise JSONRPCError(f"Transaction {transaction_hash} not found")
+    return status
 
 
 async def eth_call(
