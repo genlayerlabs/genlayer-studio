@@ -101,6 +101,15 @@ async def lifespan(app: FastAPI):
     validators_manager = validators.Manager(SessionLocal())
     await validators_manager.restart()
 
+    # Subscribe to validator change events
+    async def handle_validator_change(event_data):
+        """Reload validators when notified of changes."""
+        logger.info(f"Received validator change event: {event_data}")
+        await validators_manager.restart()
+
+    # Subscribe to validator events channel
+    await msg_handler.subscribe_to_validator_events(handle_validator_change)
+
     # Create and start the worker
     worker = ConsensusWorker(
         get_session=get_session,

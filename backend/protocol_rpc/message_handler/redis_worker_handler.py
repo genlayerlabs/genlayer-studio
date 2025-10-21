@@ -25,6 +25,7 @@ class RedisWorkerMessageHandler(MessageHandler):
     CONSENSUS_CHANNEL = "consensus:events"
     TRANSACTION_CHANNEL = "transaction:events"
     GENERAL_CHANNEL = "general:events"
+    VALIDATOR_CHANNEL = "validator:events"
 
     def __init__(
         self,
@@ -69,6 +70,51 @@ class RedisWorkerMessageHandler(MessageHandler):
             except Exception as e:
                 logger.error(f"Worker {self.worker_id} failed to connect to Redis: {e}")
                 raise
+
+    async def subscribe_to_validator_events(self, callback):
+        """
+        Subscribe to validator change events.
+        Used by consensus-worker to reload validators when they change.
+
+        Args:
+            callback: Async function to call when validator event received
+        """
+        if not self.redis_client:
+            await self.initialize()
+
+        if not self.redis_client:
+            logger.error(
+                "Cannot subscribe to validator events: Redis client not initialized"
+            )
+            return
+
+        redis_client = self.redis_client
+
+        async def listener():
+            """Listen for validator events and call callback."""
+            redis_pubsub = redis_client.pubsub()
+            await redis_pubsub.subscribe(self.VALIDATOR_CHANNEL)
+            logger.info(
+                f"Worker {self.worker_id} subscribed to {self.VALIDATOR_CHANNEL}"
+            )
+
+            try:
+                async for message in redis_pubsub.listen():
+                    if message["type"] == "message":
+                        try:
+                            event_data = json.loads(message["data"])
+                            await callback(event_data)
+                        except Exception as e:
+                            logger.error(f"Error processing validator event: {e}")
+            except asyncio.CancelledError:
+                logger.info(
+                    f"Worker {self.worker_id} validator event listener cancelled"
+                )
+                await redis_pubsub.unsubscribe(self.VALIDATOR_CHANNEL)
+                await redis_pubsub.close()
+
+        # Start listener in background
+        asyncio.create_task(listener())
 
     def _get_channel_for_event(self, log_event: LogEvent) -> str:
         """
