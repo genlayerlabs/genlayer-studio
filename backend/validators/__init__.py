@@ -355,12 +355,14 @@ class Manager:
                 }
             )
 
-            # Publish to validator events channel
-            await redis_client.publish("validator:events", message)
+            # Publish to validator events channel for consensus-worker
+            subscribers = await redis_client.publish("validator:events", message)
 
             # Close the client
             await redis_client.close()
 
-            logger.info(f"Published validator change event: {event_type}")
+            logger.info(
+                f"Published validator change event: {event_type} to {subscribers} subscribers"
+            )
         except Exception as e:
             logger.error(f"Failed to publish validator change event: {e}")

@@ -316,6 +316,20 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
         )
         await redis_subscriber.connect()
         await redis_subscriber.start()
+
+        # Register handler for validator change events
+        async def handle_validator_change(event_data):
+            """Reload validators when they change."""
+            logger.info(f"RPC worker reloading validators due to change event")
+            await validators_manager.restart()
+
+        redis_subscriber.register_handler("validator_created", handle_validator_change)
+        redis_subscriber.register_handler("validator_updated", handle_validator_change)
+        redis_subscriber.register_handler("validator_deleted", handle_validator_change)
+        redis_subscriber.register_handler(
+            "all_validators_deleted", handle_validator_change
+        )
+
         logger.info(
             f"[STARTUP] Redis subscriber connected at {redis_url} for worker event broadcasting"
         )

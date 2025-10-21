@@ -20,7 +20,12 @@ class RedisEventSubscriber:
     """
 
     # Redis channels to subscribe to
-    CHANNELS = ["consensus:events", "transaction:events", "general:events"]
+    CHANNELS = [
+        "consensus:events",
+        "transaction:events",
+        "general:events",
+        "validator:events",
+    ]
 
     def __init__(
         self,
