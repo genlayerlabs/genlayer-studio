@@ -14,7 +14,7 @@ call_contract_function_response = {
                 "mode": str,
                 "node_config": {
                     "address": str,
-                    "private_key": str,
+                    "private_key": Optional[str],
                     "stake": int,
                     "primary_model": {
                         "config": dict,
@@ -22,7 +22,7 @@ call_contract_function_response = {
                         "provider": str,
                         "plugin": str,
                         "plugin_config": dict,
-                        "fallback_validator": str,
+                        "fallback_validator": Optional[str],
                     },
                     "secondary_model": Optional[dict],
                 },
