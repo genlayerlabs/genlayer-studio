@@ -250,7 +250,7 @@ services:
       restart_policy:
         condition: on-failure  # Only restart on failure (not on clean exit)
         delay: 5s
-        max_attempts: 5  # Limit to 5 attempts to prevent runaway loops
+        max_attempts: 0  # Limit to 5 attempts to prevent runaway loops
         window: 120s
       resources:
         limits:
