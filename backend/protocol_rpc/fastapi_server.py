@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Request, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 
 from backend.protocol_rpc.app_lifespan import RPCAppSettings, rpc_app_lifespan
@@ -47,6 +48,17 @@ app.add_middleware(
 
 # Include health check endpoints
 app.include_router(health_router)
+
+# Mount static files for monitoring dashboard
+monitoring_dashboard_path = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "monitoring-dashboard"
+)
+if os.path.exists(monitoring_dashboard_path):
+    app.mount(
+        "/monitoring",
+        StaticFiles(directory=monitoring_dashboard_path, html=True),
+        name="monitoring",
+    )
 
 
 @app.get("/ready")
