@@ -1,5 +1,5 @@
 Feature: System Performance
-  
+
   Scenario: Sustained high load
     Given 100 clients are connected
     When each client submits 10 transactions per second
