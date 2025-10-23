@@ -71,10 +71,10 @@ jobs:
         with:
           files: |
             ./docker-compose.yml
-            ./docker-compose.production.yml
           targets: |
             database-migration
             jsonrpc
+            consensus-worker
           set: |
             *.cache-from=type=gha
             *.cache-to=type=gha,mode=max
@@ -82,7 +82,7 @@ jobs:
 
       # Start services without rebuilding images
       - name: Run Docker Compose
-        run: docker compose -f docker-compose.yml -f docker-compose.production.yml up -d --no-build jsonrpc
+        run: docker compose up -d --no-build jsonrpc consensus-worker
 
 
 
@@ -123,12 +123,12 @@ jobs:
         run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/ -svv
 
       - name: Dump Docker Compose logs
-        run: docker compose -f docker-compose.yml -f docker-compose.production.yml logs
+        run: docker compose logs
         if: failure()
 
       - name: Shutdown Docker Compose
         if: always()
-        run: docker compose -f docker-compose.yml -f docker-compose.production.yml down
+        run: docker compose down
 
   db-integration-test:
     needs: triggers

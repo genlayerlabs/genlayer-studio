@@ -109,6 +109,7 @@ def test_intelligent_oracle_factory_pattern(setup_validators):
             wait_transaction_status=TransactionStatus.FINALIZED,
             wait_triggered_transactions=True,
             wait_triggered_transactions_status=TransactionStatus.ACCEPTED,
+            wait_interval=5000,
         )
         assert tx_execution_succeeded(create_result)
 
@@ -151,7 +152,7 @@ def test_intelligent_oracle_factory_pattern(setup_validators):
     for i, market_contract in enumerate(created_market_contracts):
         resolve_result = market_contract.resolve(
             args=[markets_data[i]["evidence_urls"]],
-        ).transact()
+        ).transact(wait_interval=5000)
         assert tx_execution_succeeded(resolve_result)
 
         # Verify market was resolved and has the correct outcome
