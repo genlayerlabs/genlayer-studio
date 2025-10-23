@@ -1,13 +1,27 @@
 services:
   traefik:
-    profiles: ["studio"]
     image: traefik:v3.3
+    command:
+      # Core configuration
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+
+      # Entrypoints for local development
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"  # Needed for frontend/hardhat labels
+      - "--entrypoints.api.address=:4000"       # JSON-RPC API
+
+      # API Dashboard (for local dev monitoring)
+      - "--api.dashboard=true"
+      - "--api.insecure=true"  # OK for local dev
     ports:
       - "80:80"
       - "443:443"
+      - "4000:4000"  # API endpoint through Traefik
+      - "8081:8080"  # Traefik dashboard (8081 to avoid conflict with frontend on 8080)
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./traefik.yaml:/etc/traefik/traefik.yaml:ro
+      # Removed traefik.yaml - using CLI config only
     logging:
       driver: "json-file"
       options:
@@ -41,38 +55,45 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    labels:
-      traefik.enable: true
-      traefik.http.routers.frontend.rule: Host(`${SERVER_NAME}`)
-      traefik.http.routers.frontend.entrypoints: websecure
-      traefik.http.routers.frontend.tls: true
+    # For local dev, frontend is accessed directly on port 8080
+    # Remove Traefik labels since we're exposing the port directly
 
   jsonrpc:
+    image: genlayer-studio-jsonrpc:latest
     build:
       context: ./
       dockerfile: ./docker/Dockerfile.backend
-      target: ${BACKEND_BUILD_TARGET:-prod}
+      target: prod
     environment:
+      - FLASK_ENV=${FLASK_ENV:-production}
+      - FLASK_DEBUG=${FLASK_DEBUG:-0}
       - FLASK_SERVER_PORT=${RPCPORT}
-      # TODO: remove this in production
       - PYTHONUNBUFFERED=1
-      - RPCDEBUGPORT=${RPCDEBUGPORT}
       - WEBDRIVERHOST=${WEBDRIVERHOST}
       - WEBDRIVERPORT=${WEBDRIVERPORT}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-4}
+      - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-20}
+      - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-10}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
       - GENVMROOT=/genvm
       - GENVM_TAG=v0.2.4
-    ports:
-      - "${RPCPORT}:${RPCPORT}"
-      - "${RPCDEBUGPORT}:${RPCDEBUGPORT}"
+    # No direct ports - Traefik handles load balancing
+    expose:
+      - "${RPCPORT}"  # Only expose internally for Traefik
     volumes:
       - ./.env:/app/.env
       - ./backend:/app/backend
       # - hardhat_artifacts:/app/hardhat/artifacts
       # - hardhat_deployments:/app/hardhat/deployments
     depends_on:
+      traefik:
+        condition: service_started
       database-migration:
         condition: service_completed_successfully
       webdriver:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       # hardhat:
       #   condition: service_healthy
@@ -80,14 +101,12 @@ services:
       ollama:
         condition: service_started
         required: false
-    expose:
-      - "${RPCPORT}"
     healthcheck:
-      test: ["CMD", "python3", "backend/healthcheck.py", "--port", "${RPCPORT}"]
+      test: ["CMD", "curl", "-f", "http://localhost:${RPCPORT}/health"]
       interval: 30s
       timeout: 10s
-      retries: 10
-      start_period: 30s
+      retries: 3
+      start_period: 40s
     restart: always
     security_opt:
       - "no-new-privileges=true"
@@ -97,12 +116,27 @@ services:
         max-size: "10m"
         max-file: "3"
     deploy:
-      replicas: ${JSONRPC_REPLICAS:-1}
+      replicas: ${JSONRPC_REPLICAS:-3}
+      resources:
+        limits:
+          cpus: '${COMPOSE_RPC_CPU_LIMIT:-2}'
+          memory: ${COMPOSE_RPC_MEM_LIMIT:-8g}
+        reservations:
+          cpus: ${COMPOSE_RPC_CPU_RESERVATION:-1}
+          memory: ${COMPOSE_RPC_MEM_RESERVATION:-2g}
     labels:
-      traefik.enable: true
-      traefik.http.routers.jsonrpc.rule: Host(`${SERVER_NAME}`) && (PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/ws`) || PathPrefix(`/health`))
-      traefik.http.routers.jsonrpc.entrypoints: websecure
-      traefik.http.routers.jsonrpc.tls: true
+      # Enable Traefik for this service
+      - "traefik.enable=true"
+      # HTTP router for API - expose on port 4000
+      - "traefik.http.routers.jsonrpc.rule=(PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/health`) || PathPrefix(`/ws`))"
+      - "traefik.http.routers.jsonrpc.entrypoints=api"
+      # Service configuration with load balancing
+      - "traefik.http.services.jsonrpc.loadbalancer.server.port=${RPCPORT}"
+      - "traefik.http.services.jsonrpc.loadbalancer.sticky.cookie=true"
+      - "traefik.http.services.jsonrpc.loadbalancer.sticky.cookie.name=jsonrpc"
+      # Health check for better load balancing
+      - "traefik.http.services.jsonrpc.loadbalancer.healthcheck.path=/health"
+      - "traefik.http.services.jsonrpc.loadbalancer.healthcheck.interval=10s"
 
   webdriver:
     image: yeagerai/genlayer-genvm-webdriver:0.0.7
@@ -166,15 +200,81 @@ services:
       - postgres_data:/var/lib/postgresql/data
 
   database-migration:
+    image: genlayer-studio-database-migration:latest
     build:
       context: .
       dockerfile: docker/Dockerfile.database-migration
     environment:
-      - DB_URL=postgresql://${DBUSER}:${DBPASSWORD}@${DBHOST}:${DBPORT}/${DBNAME}
+      - DBUSER=${DBUSER}
+      - DBPASSWORD=${DBPASSWORD}
+      - DBHOST=${DBHOST}
+      - DBPORT=${DBPORT}
+      - DBNAME=${DBNAME}
     depends_on:
       postgres:
         condition: service_healthy
         required: false
+
+  consensus-worker:
+    image: genlayer-studio-consensus-worker:latest
+    build:
+      context: ./
+      dockerfile: ./docker/Dockerfile.consensus-worker
+      target: ${CONSENSUS_BUILD_TARGET:-base}
+    environment:
+      - DBUSER=${DBUSER}
+      - DBPASSWORD=${DBPASSWORD}
+      - DBHOST=${DBHOST}
+      - DBNAME=${DBNAME}
+      - WORKER_PORT=4001
+      - WORKER_POLL_INTERVAL=${WORKER_POLL_INTERVAL:-5}
+      - TRANSACTION_TIMEOUT_MINUTES=${TRANSACTION_TIMEOUT_MINUTES:-30}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - WEBDRIVERHOST=${WEBDRIVERHOST}
+      - WEBDRIVERPORT=${WEBDRIVERPORT}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+    volumes:
+      - ./.env:/app/.env
+      - ./backend:/app/backend
+    depends_on:
+      database-migration:
+        condition: service_completed_successfully
+      webdriver:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+        required: false
+      jsonrpc:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      replicas: ${CONSENSUS_WORKERS:-1}  # Minimum 1 worker required for consensus processing
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      resources:
+        limits:
+          cpus: '${COMPOSE_WORKER_CPU_LIMIT:-2}'
+          memory: ${COMPOSE_WORKER_MEM_LIMIT:-8g}
+        reservations:
+          cpus: ${COMPOSE_WORKER_CPU_RESERVATION:-1}
+          memory: ${COMPOSE_WORKER_MEM_RESERVATION:-2g}
+    restart: always
+    security_opt:
+      - "no-new-privileges=true"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # hardhat:
   #   profiles: ["hardhat"]
@@ -197,14 +297,30 @@ services:
   #     options:
   #       max-size: "50m"
   #       max-file: "10"
-  #   labels:
-  #     traefik.enable: true
-  #     traefik.http.routers.hardhat.rule: Host(`${SERVER_NAME}`) && PathPrefix(`/hardhat`)
-  #     traefik.http.routers.hardhat.entrypoints: websecure
-  #     traefik.http.routers.hardhat.tls: true
+  #   # For local dev, hardhat is accessed directly on its port
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: always
+    security_opt:
+      - "no-new-privileges=true"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   vector:
-    profiles: ["studio"]
+    profiles: ["monitoring"]  # Only run when monitoring is needed
     image: timberio/vector:0.42.0-alpine
     container_name: vector
     environment:
@@ -234,3 +350,4 @@ volumes:
   ignition_deployments:
   # hardhat_snapshots:
   postgres_data:
+  redis_data:

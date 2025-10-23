@@ -30,7 +30,6 @@ async def health_check() -> dict:
             from sqlalchemy import text
 
             conn.execute(text("SELECT 1"))
-            conn.commit()
         db_status = "healthy"
     except Exception:
         logging.exception("Database health check failed.")
@@ -84,7 +83,7 @@ async def readiness_check():
 
 
 def create_readiness_check_with_state(
-    source: Union[FastAPI, Optional[FastAPIRPCRouter]]
+    source: Union[FastAPI, Optional[FastAPIRPCRouter]],
 ):
     """Create a readiness check function that evaluates RPC router availability."""
 
@@ -215,7 +214,6 @@ async def health_database() -> Dict[str, Any]:
             start = time.time()
             with db_manager.engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
-                conn.commit()
             query_time_ms = (time.time() - start) * 1000
             db_healthy = True
         except Exception as e:

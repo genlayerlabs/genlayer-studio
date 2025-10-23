@@ -55,6 +55,31 @@ def extract_error_message(stdout: str) -> str:
         return stdout
 
 
+def extract_error_message(stdout: str) -> str:
+    """Extract relevant error message from GenVM stdout."""
+    try:
+        # Look for JSON-like error structure in the output
+        # Pattern to match: "code": Str("error_code"), "message": Str("error message")
+        pattern = r'"code":\s*Str\("([^"]+)"\),\s*"message":\s*Str\("([^"]*(?:[^"\\]|\\.)*?)"\)'
+        match = re.search(pattern, stdout)
+
+        if match:
+            error_code = match.group(1)
+            error_message = match.group(2)
+            return f'code: "{error_code}", message: "{error_message}"'
+
+        # Fallback: if no structured error found, return a truncated version
+        if len(stdout) > 500:
+            return stdout[:500] + "... [truncated]"
+        return stdout
+
+    except Exception:
+        # If parsing fails, return truncated version
+        if len(stdout) > 500:
+            return stdout[:500] + "... [truncated]"
+        return stdout
+
+
 @dataclasses.dataclass
 class SimulatorProvider:
     id: str

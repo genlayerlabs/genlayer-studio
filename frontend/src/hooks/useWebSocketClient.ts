@@ -23,12 +23,10 @@ class NativeWebSocketClient {
   constructor(url: string) {
     // Convert HTTP URL to WebSocket URL
     this.url = url.replace('http://', 'ws://').replace('https://', 'wss://');
-
     // Append /ws endpoint for FastAPI
     if (!this.url.endsWith('/ws')) {
       this.url = this.url.replace(/\/$/, '') + '/ws';
     }
-
     this.connect();
   }
 
@@ -195,7 +193,6 @@ export function useWebSocketClient(): NativeWebSocketClient {
   if (!webSocketClient && !isInitializing) {
     isInitializing = true;
     const wsUrl = import.meta.env.VITE_WS_SERVER_URL || 'ws://localhost:4000';
-
     webSocketClient = new NativeWebSocketClient(wsUrl);
 
     // Reset initialization flag when connection completes (success or failure)

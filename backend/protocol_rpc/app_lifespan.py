@@ -32,6 +32,7 @@ from backend.protocol_rpc.validators_init import initialize_validators
 from backend.protocol_rpc.websocket import create_emit_event_function
 from backend.protocol_rpc.broadcast import Broadcast
 from backend.rollup.consensus_service import ConsensusService
+from backend.protocol_rpc.redis_subscriber import RedisEventSubscriber
 import backend.validators as validators
 
 
@@ -125,13 +126,16 @@ def _verify_database_ready(db_manager: DatabaseSessionManager) -> None:
 async def _initialise_validators(
     validators_config_json: Optional[str],
     db_manager: DatabaseSessionManager,
+    validators_manager: validators.Manager,
 ) -> None:
     if not validators_config_json:
         return
 
     init_session = db_manager.open_session()
     try:
-        await initialize_validators(validators_config_json, init_session)
+        await initialize_validators(
+            validators_config_json, init_session, validators_manager
+        )
         init_session.commit()
     finally:
         init_session.close()
@@ -200,7 +204,9 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
     # Delete all validators from the database and create new ones based on env.VAlIDATORS_CONFIG_JSON
     if settings.validators_config_json:
         logger.info("[STARTUP] Initializing validators from config")
-        await _initialise_validators(settings.validators_config_json, db_manager)
+        await _initialise_validators(
+            settings.validators_config_json, db_manager, validators_manager
+        )
 
     # Restart web and llm modules, created the validators Snapshot, and registers providers and models to the LLM module
     logger.info("[STARTUP] Restarting validators and creating snapshot")
@@ -214,7 +220,9 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
     def get_session() -> Session:
         return db_manager.open_session()
 
-    logger.info("[STARTUP] Creating consensus algorithm")
+    # Create consensus algorithm instance (for RPC endpoint use, not for background processing)
+    # Background consensus loops are handled by separate worker processes
+    logger.info("[STARTUP] Creating consensus algorithm (for RPC endpoints only)")
     consensus = ConsensusAlgorithm(
         get_session,
         msg_handler,
@@ -222,16 +230,12 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
         validators_manager,
     )
 
+    # No background consensus tasks in RPC process - handled by separate worker services
     stop_event = threading.Event()
-    logger.info("[STARTUP] Starting background consensus tasks")
-    background_tasks = [
-        asyncio.create_task(consensus.run_crawl_snapshot_loop(stop_event=stop_event)),
-        asyncio.create_task(
-            consensus.run_process_pending_transactions_loop(stop_event=stop_event)
-        ),
-        asyncio.create_task(consensus.run_appeal_window_loop(stop_event=stop_event)),
-    ]
-    logger.info(f"[STARTUP] Started {len(background_tasks)} background consensus tasks")
+    background_tasks = []
+    logger.info(
+        "[STARTUP] RPC process will not run consensus loops (handled by worker services)"
+    )
 
     sql_db = _SQLAlchemyDBWrapper(db_manager)
 
@@ -292,9 +296,60 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
         monitor_task = asyncio.create_task(periodic_status_logger(interval=300))
         resources.background_tasks.append(monitor_task)
 
+    # Initialize Redis subscriber - REQUIRED for distributed worker architecture
+    redis_url = os.environ.get("REDIS_URL")
+    if not redis_url:
+        error_msg = (
+            "FATAL: REDIS_URL environment variable is required. "
+            "GenLayer Studio uses a distributed worker architecture where consensus workers "
+            "publish events to Redis, and RPC instances subscribe to receive them. "
+            "Please set REDIS_URL in your environment (e.g., redis://redis:6379/0)."
+        )
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
+
+    try:
+        redis_subscriber = RedisEventSubscriber(
+            redis_url=redis_url,
+            broadcast=broadcast,
+            instance_id=f"rpc-{os.getpid()}",
+        )
+        await redis_subscriber.connect()
+        await redis_subscriber.start()
+
+        # Register handler for validator change events
+        async def handle_validator_change(event_data):
+            """Reload validators when they change."""
+            logger.info(f"RPC worker reloading validators due to change event")
+            await validators_manager.restart()
+
+        redis_subscriber.register_handler("validator_created", handle_validator_change)
+        redis_subscriber.register_handler("validator_updated", handle_validator_change)
+        redis_subscriber.register_handler("validator_deleted", handle_validator_change)
+        redis_subscriber.register_handler(
+            "all_validators_deleted", handle_validator_change
+        )
+
+        logger.info(
+            f"[STARTUP] Redis subscriber connected at {redis_url} for worker event broadcasting"
+        )
+    except Exception as e:
+        error_msg = (
+            f"FATAL: Failed to connect to Redis at {redis_url}. "
+            f"Redis is required for receiving events from consensus workers. "
+            f"Ensure Redis is running and accessible. Error: {e}"
+        )
+        logger.error(error_msg)
+        raise RuntimeError(error_msg) from e
+
     try:
         yield app_state
+
     finally:
+        if redis_subscriber:
+            await redis_subscriber.stop()
+            logger.info("[SHUTDOWN] Redis subscriber stopped")
+
         logger.info("[SHUTDOWN] Beginning graceful shutdown sequence")
         shutdown_start = time.time()
 
