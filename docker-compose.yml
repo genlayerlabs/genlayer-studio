@@ -123,7 +123,7 @@ services:
         max-file: "3"
     mem_limit:  ${COMPOSE_RPC_MEM_LIMIT:-8g}
     mem_reservation: ${COMPOSE_RPC_MEM_RESERVATION:-2g}
-    memswap_limit: 8g          # no extra swap beyond 8 GiB
+    memswap_limit: ${COMPOSE_RPC_MEM_SWAP_LIMIT:-8g}
     oom_kill_disable: false
     deploy:
       replicas: ${JSONRPC_REPLICAS:-3}
@@ -256,7 +256,7 @@ services:
       start_period: 40s
     mem_limit:  ${COMPOSE_WORKER_MEM_LIMIT:-8g}
     mem_reservation: ${COMPOSE_WORKER_MEM_RESERVATION:-2g}
-    memswap_limit: 10g          # no extra swap beyond 8 GiB
+    memswap_limit: ${COMPOSE_WORKER_MEM_SWAP_LIMIT:-8g}
     oom_kill_disable: false
     deploy:
       replicas: ${CONSENSUS_WORKERS:-1}  # Minimum 1 worker required for consensus processing
