@@ -5,9 +5,10 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Request, WebSocket
+from fastapi import Depends, FastAPI, Request, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.requests import ClientDisconnect
 
 from backend.protocol_rpc.app_lifespan import RPCAppSettings, rpc_app_lifespan
 from backend.protocol_rpc.dependencies import (
@@ -72,7 +73,10 @@ async def jsonrpc_endpoint(
         )
         return JSONResponse(content=response.model_dump(exclude_none=True))
 
-    return await rpc_router.handle_http_request(request)
+    try:
+        return await rpc_router.handle_http_request(request)
+    except ClientDisconnect:
+        return Response(status_code=204)
 
 
 # WebSocket endpoint with native WebSocket support

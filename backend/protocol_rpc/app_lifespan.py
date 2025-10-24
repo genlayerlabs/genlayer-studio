@@ -32,6 +32,7 @@ from backend.protocol_rpc.validators_init import initialize_validators
 from backend.protocol_rpc.websocket import create_emit_event_function
 from backend.protocol_rpc.broadcast import Broadcast
 from backend.rollup.consensus_service import ConsensusService
+from backend.protocol_rpc.redis_subscriber import RedisEventSubscriber
 import backend.validators as validators
 
 
@@ -125,13 +126,16 @@ def _verify_database_ready(db_manager: DatabaseSessionManager) -> None:
 async def _initialise_validators(
     validators_config_json: Optional[str],
     db_manager: DatabaseSessionManager,
+    validators_manager: validators.Manager,
 ) -> None:
     if not validators_config_json:
         return
 
     init_session = db_manager.open_session()
     try:
-        await initialize_validators(validators_config_json, init_session)
+        await initialize_validators(
+            validators_config_json, init_session, validators_manager
+        )
         init_session.commit()
     finally:
         init_session.close()
@@ -158,19 +162,33 @@ class _SQLAlchemyDBWrapper:
 @asynccontextmanager
 async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAppState]:
     """Prepare RPC services and ensure graceful shutdown."""
+    from loguru import logger
+    import time
+
+    startup_time = time.time()
+    logger.info("[STARTUP] Beginning application startup sequence")
 
     setup_loguru_config()
+    logger.info("[STARTUP] Logging configured")
 
+    logger.info(
+        f"[STARTUP] Initializing database connection: {settings.database_url.split('@')[1] if '@' in settings.database_url else 'local'}"
+    )
     db_manager = DatabaseSessionManager(settings.database_url)
     set_database_manager(db_manager)
 
+    logger.info("[STARTUP] Verifying database readiness and migrations")
     _verify_database_ready(db_manager)
+
+    logger.info("[STARTUP] Seeding LLM providers")
     _seed_llm_providers(db_manager)
 
     broadcast_backend = os.environ.get("WEBSOCKET_BROADCAST_BACKEND", "memory://")
+    logger.info(f"[STARTUP] Connecting to broadcast backend: {broadcast_backend}")
     broadcast = Broadcast(broadcast_backend)
     await broadcast.connect()
 
+    logger.info("[STARTUP] Initializing message handler and consensus services")
     msg_handler = MessageHandler(broadcast, config=GlobalConfiguration())
     consensus_service = ConsensusService()
     transactions_parser = TransactionParser(consensus_service)
@@ -180,19 +198,31 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
     # Manages the validators registry with locking for concurrent access
     # Handles LLM and web modules and configuration file changes
     # Loads GenVM configuration
+    logger.info("[STARTUP] Initializing validators manager")
     validators_manager = validators.Manager(validators_session)
 
     # Delete all validators from the database and create new ones based on env.VAlIDATORS_CONFIG_JSON
-    await _initialise_validators(settings.validators_config_json, db_manager)
+    if settings.validators_config_json:
+        logger.info("[STARTUP] Initializing validators from config")
+        await _initialise_validators(
+            settings.validators_config_json, db_manager, validators_manager
+        )
 
     # Restart web and llm modules, created the validators Snapshot, and registers providers and models to the LLM module
+    logger.info("[STARTUP] Restarting validators and creating snapshot")
     await validators_manager.restart()
 
     validators_registry = validators_manager.registry
+    logger.info(
+        f"[STARTUP] Validators registry initialized with {len(validators_registry.nodes if hasattr(validators_registry, 'nodes') else [])} validators"
+    )
 
     def get_session() -> Session:
         return db_manager.open_session()
 
+    # Create consensus algorithm instance (for RPC endpoint use, not for background processing)
+    # Background consensus loops are handled by separate worker processes
+    logger.info("[STARTUP] Creating consensus algorithm (for RPC endpoints only)")
     consensus = ConsensusAlgorithm(
         get_session,
         msg_handler,
@@ -200,30 +230,34 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
         validators_manager,
     )
 
+    # No background consensus tasks in RPC process - handled by separate worker services
     stop_event = threading.Event()
-    background_tasks = [
-        asyncio.create_task(consensus.run_crawl_snapshot_loop(stop_event=stop_event)),
-        asyncio.create_task(
-            consensus.run_process_pending_transactions_loop(stop_event=stop_event)
-        ),
-        asyncio.create_task(consensus.run_appeal_window_loop(stop_event=stop_event)),
-    ]
+    background_tasks = []
+    logger.info(
+        "[STARTUP] RPC process will not run consensus loops (handled by worker services)"
+    )
 
     sql_db = _SQLAlchemyDBWrapper(db_manager)
 
     # Registers the RPC methods via decorators, injects dependencies, and orchestrates the invokes with logging for execution
+    logger.info("[STARTUP] Setting up RPC endpoint manager")
     endpoint_manager = RPCEndpointManager(
         logger=msg_handler,
         dependency_overrides_provider=app,
     )
 
     # Import registers RPC methods via decorators (module import has side effects).
+    logger.info("[STARTUP] Registering RPC methods")
     from backend.protocol_rpc import rpc_methods
 
+    rpc_method_count = 0
     for definition in rpc.to_list():
         endpoint_manager.register(definition)
+        rpc_method_count += 1
+    logger.info(f"[STARTUP] Registered {rpc_method_count} RPC methods")
 
     # Creates the RPC router with the endpoint manager to handle the HTTP requests
+    logger.info("[STARTUP] Creating RPC router")
     rpc_router = FastAPIRPCRouter(endpoint_manager=endpoint_manager)
 
     app_state = RPCAppState(
@@ -249,12 +283,109 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
         broadcast=broadcast,
     )
 
+    startup_duration = time.time() - startup_time
+    logger.info(
+        f"[STARTUP] Application startup completed in {startup_duration:.2f} seconds"
+    )
+
+    # Start a periodic status logger if in debug mode
+    if os.environ.get("LOG_LEVEL", "INFO").upper() == "DEBUG":
+        from backend.consensus.monitoring import periodic_status_logger, get_monitor
+
+        logger.info("[STARTUP] Starting periodic monitoring status logger")
+        monitor_task = asyncio.create_task(periodic_status_logger(interval=300))
+        resources.background_tasks.append(monitor_task)
+
+    # Initialize Redis subscriber - REQUIRED for distributed worker architecture
+    redis_url = os.environ.get("REDIS_URL")
+    if not redis_url:
+        error_msg = (
+            "FATAL: REDIS_URL environment variable is required. "
+            "GenLayer Studio uses a distributed worker architecture where consensus workers "
+            "publish events to Redis, and RPC instances subscribe to receive them. "
+            "Please set REDIS_URL in your environment (e.g., redis://redis:6379/0)."
+        )
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
+
+    try:
+        redis_subscriber = RedisEventSubscriber(
+            redis_url=redis_url,
+            broadcast=broadcast,
+            instance_id=f"rpc-{os.getpid()}",
+        )
+        await redis_subscriber.connect()
+        await redis_subscriber.start()
+
+        # Register handler for validator change events
+        async def handle_validator_change(event_data):
+            """Reload validators when they change."""
+            logger.info(f"RPC worker reloading validators due to change event")
+            await validators_manager.restart()
+
+        redis_subscriber.register_handler("validator_created", handle_validator_change)
+        redis_subscriber.register_handler("validator_updated", handle_validator_change)
+        redis_subscriber.register_handler("validator_deleted", handle_validator_change)
+        redis_subscriber.register_handler(
+            "all_validators_deleted", handle_validator_change
+        )
+
+        logger.info(
+            f"[STARTUP] Redis subscriber connected at {redis_url} for worker event broadcasting"
+        )
+    except Exception as e:
+        error_msg = (
+            f"FATAL: Failed to connect to Redis at {redis_url}. "
+            f"Redis is required for receiving events from consensus workers. "
+            f"Ensure Redis is running and accessible. Error: {e}"
+        )
+        logger.error(error_msg)
+        raise RuntimeError(error_msg) from e
+
     try:
         yield app_state
+
     finally:
+        if redis_subscriber:
+            await redis_subscriber.stop()
+            logger.info("[SHUTDOWN] Redis subscriber stopped")
+
+        logger.info("[SHUTDOWN] Beginning graceful shutdown sequence")
+        shutdown_start = time.time()
+
+        logger.info("[SHUTDOWN] Signaling consensus tasks to stop")
         resources.consensus_stop_event.set()
+
+        logger.info(
+            f"[SHUTDOWN] Cancelling {len(resources.background_tasks)} background tasks"
+        )
         for task in resources.background_tasks:
             task.cancel()
+
+        logger.info("[SHUTDOWN] Waiting for tasks to complete")
         await asyncio.gather(*resources.background_tasks, return_exceptions=True)
+
+        logger.info("[SHUTDOWN] Closing validators session")
         resources.validators_session.close()
+
+        logger.info("[SHUTDOWN] Disconnecting broadcast backend")
         await resources.broadcast.disconnect()
+
+        # Log final monitoring status if available
+        try:
+            from backend.consensus.monitoring import get_monitor
+
+            monitor = get_monitor()
+            status = monitor.get_status()
+            logger.info(
+                f"[SHUTDOWN] Final monitoring status - "
+                f"Tasks processed: {status.get('active_tasks', 0)}, "
+                f"Memory usage: {status.get('memory_usage_mb', 0):.1f}MB"
+            )
+        except Exception:
+            pass
+
+        shutdown_duration = time.time() - shutdown_start
+        logger.info(
+            f"[SHUTDOWN] Graceful shutdown completed in {shutdown_duration:.2f} seconds"
+        )

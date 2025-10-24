@@ -349,8 +349,8 @@ class TransactionsProcessor:
             "votes_revealed": str(len(validator_votes_name)),
             "appeal_bond": "0",
             "rotations_left": str(
-                transaction_data.get("config_rotation_rounds", 0)
-                - transaction_data.get("rotation_count", 0)
+                (transaction_data.get("config_rotation_rounds") or 0)
+                - (transaction_data.get("rotation_count") or 0)
             ),
             "result": last_round_result,
             "round_validators": round_validators,
@@ -594,6 +594,80 @@ class TransactionsProcessor:
         transaction_data = self._process_queue(transaction_data)
         transaction_data = self._process_round_data(transaction_data)
         return transaction_data
+
+    def get_studio_transaction_by_hash(
+        self, transaction_hash: str, full: bool
+    ) -> dict | None:
+        transaction = (
+            self.session.query(Transactions)
+            .filter_by(hash=transaction_hash)
+            .one_or_none()
+        )
+
+        if transaction is None:
+            return None
+
+        transaction_data = self._parse_transaction_data(transaction)
+
+        # Transform studio fields to testnet fields
+        transaction_data["tx_id"] = transaction_data.pop("hash", None)
+        transaction_data["sender"] = transaction_data.pop("from_address", None)
+        transaction_data["recipient"] = transaction_data.pop("to_address", None)
+        transaction_data["initial_rotations"] = transaction_data.pop(
+            "config_rotation_rounds", None
+        )
+        transaction_data["created_timestamp"] = str(
+            int(
+                datetime.fromisoformat(
+                    transaction_data.pop("created_at", "0")
+                ).timestamp()
+            )
+        )
+        transaction_data["last_vote_timestamp"] = str(
+            transaction_data.pop("last_vote_timestamp", 0)
+        )
+
+        if not full:
+            # Remove validators info and encoded data
+            for key in [
+                "data",
+                "consensus_data",
+                "consensus_history",
+                "contract_snapshot",
+                "leader_timeout_validators",
+                "sim_config",
+            ]:
+                transaction_data.pop(key, None)
+
+        return transaction_data
+
+    def get_activated_transactions_older_than(self, seconds: int) -> list[dict]:
+        """
+        Get ACTIVATED transactions that have been stuck for more than the specified seconds.
+
+        Args:
+            seconds: Number of seconds a transaction must be ACTIVATED to be considered stuck
+
+        Returns:
+            List of transaction data dictionaries for stuck transactions
+        """
+        from datetime import datetime, timedelta
+
+        cutoff_time = datetime.now() - timedelta(seconds=seconds)
+        stuck_transactions = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.status == TransactionStatus.ACTIVATED,
+                Transactions.created_at < cutoff_time,
+            )
+            .order_by(Transactions.created_at)
+            .all()
+        )
+
+        return [
+            self._parse_transaction_data(transaction)
+            for transaction in stuck_transactions
+        ]
 
     def update_transaction_status(
         self,
@@ -1113,4 +1187,131 @@ class TransactionsProcessor:
             )
             .count()
         )
+        return count
+
+    def get_transaction_status(self, transaction_hash: str) -> str | None:
+        transaction = (
+            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
+        )
+        if not transaction:
+            return None
+        transaction_status = transaction.status
+        return transaction_status.value
+
+    def get_processing_transaction_for_contract(
+        self, contract_address: str
+    ) -> dict | None:
+        """
+        Check if there's a transaction currently being processed for a contract.
+
+        Args:
+            contract_address: The contract address to check
+
+        Returns:
+            Transaction data if processing, None otherwise
+        """
+        processing_tx = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.to_address == contract_address,
+                Transactions.status.in_(
+                    [
+                        TransactionStatus.ACTIVATED,
+                        TransactionStatus.PROPOSING,
+                        TransactionStatus.COMMITTING,
+                        TransactionStatus.REVEALING,
+                    ]
+                ),
+            )
+            .first()
+        )
+
+        return self._parse_transaction_data(processing_tx) if processing_tx else None
+
+    def get_oldest_pending_for_contract(self, contract_address: str) -> dict | None:
+        """
+        Get the oldest pending transaction for a specific contract.
+
+        Args:
+            contract_address: The contract address
+
+        Returns:
+            Oldest pending transaction data or None
+        """
+        pending_tx = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.to_address == contract_address,
+                Transactions.status == TransactionStatus.PENDING,
+            )
+            .order_by(Transactions.created_at)
+            .first()
+        )
+
+        return self._parse_transaction_data(pending_tx) if pending_tx else None
+
+    def get_contracts_with_pending(self) -> list[str]:
+        """
+        Get all distinct contract addresses that have pending transactions.
+        Also includes a special marker for None addresses (burn transactions).
+
+        Returns:
+            List of contract addresses with pending transactions (may include special marker)
+        """
+        results = (
+            self.session.query(Transactions.to_address)
+            .filter(Transactions.status == TransactionStatus.PENDING)
+            .distinct()
+            .all()
+        )
+
+        # Convert None addresses to a special marker
+        addresses = []
+        for (addr,) in results:
+            if addr is None:
+                addresses.append(
+                    "__zero_address__"
+                )  # Special marker for burn transactions
+            else:
+                addresses.append(addr)
+        return addresses
+
+    def reset_stuck_transactions(self, timeout_seconds: int = 900) -> int:
+        """
+        Reset transactions that have been stuck in processing states.
+
+        Args:
+            timeout_seconds: How long a transaction must be in processing state to be considered stuck
+
+        Returns:
+            Number of transactions reset
+        """
+        from datetime import datetime, timedelta, timezone
+
+        cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)
+
+        stuck_transactions = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.status.in_(
+                    [
+                        TransactionStatus.ACTIVATED,
+                        TransactionStatus.PROPOSING,
+                        TransactionStatus.COMMITTING,
+                        TransactionStatus.REVEALING,
+                    ]
+                ),
+                Transactions.created_at < cutoff_time,
+            )
+            .all()
+        )
+
+        count = 0
+        for tx in stuck_transactions:
+            tx.status = TransactionStatus.PENDING
+            count += 1
+
+        if count > 0:
+            self.session.commit()
+
         return count

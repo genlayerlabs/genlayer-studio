@@ -3,7 +3,7 @@ from functools import partial
 from backend.database_handler.models import TransactionStatus
 from backend.node.types import Vote
 from backend.consensus.base import DEFAULT_VALIDATORS_COUNT, ConsensusRound
-from tests.unit.consensus.test_helpers import (
+from tests.integration.infrastructure.consensus.test_helpers import (
     TransactionsProcessorMock,
     ContractDB,
     transaction_to_dict,
@@ -559,6 +559,7 @@ async def test_validator_appeal_success_rotations_undetermined(
             transactions_processor,
             transaction,
             [TransactionStatus.PENDING.value, TransactionStatus.ACTIVATED.value],
+            interval=0.01,
         )
 
         transaction_status_history = [

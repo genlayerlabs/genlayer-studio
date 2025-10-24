@@ -23,6 +23,7 @@ export default defineConfig(({ mode }) => {
       allowedHosts: [
         '.genlayer.com', // match all genlayer.com sub-domains
         '.genlayerlabs.com', // match all genlayerlabs.com sub-domains
+        '.genlayer.org', // match all genlayer.org sub-domains
       ],
     },
     server: {

@@ -108,9 +108,11 @@ async def create_validator(
     plugin: str | None = None,
     plugin_config: dict | None = None,
     session: Session = Depends(get_db_session),
+    validators_manager=Depends(get_validators_manager),
 ) -> dict:
     return await impl.create_validator(
         session=session,
+        validators_manager=validators_manager,
         stake=stake,
         provider=provider,
         model=model,
@@ -163,9 +165,11 @@ async def update_validator(
     plugin: str | None = None,
     plugin_config: dict | None = None,
     session: Session = Depends(get_db_session),
+    validators_manager=Depends(get_validators_manager),
 ) -> dict:
     return await impl.update_validator(
         session=session,
+        validators_manager=validators_manager,
         validator_address=validator_address,
         stake=stake,
         provider=provider,
@@ -178,19 +182,19 @@ async def update_validator(
 @rpc.method("sim_deleteValidator")
 async def delete_validator(
     validator_address: str,
-    session: Session = Depends(get_db_session),
+    validators_manager=Depends(get_validators_manager),
 ) -> str:
     return await impl.delete_validator(
-        session=session,
+        validators_manager=validators_manager,
         validator_address=validator_address,
     )
 
 
 @rpc.method("sim_deleteAllValidators")
 async def delete_all_validators(
-    session: Session = Depends(get_db_session),
+    validators_manager=Depends(get_validators_manager),
 ) -> list[dict]:
-    return await impl.delete_all_validators(session=session)
+    return await impl.delete_all_validators(validators_manager=validators_manager)
 
 
 @rpc.method("sim_getAllValidators")
@@ -221,9 +225,14 @@ def count_validators(
 @rpc.method("sim_getTransactionsForAddress")
 def get_transactions_for_address(
     address: str,
-    session: Session = Depends(get_db_session),
+    transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
+    accounts_manager: AccountsManager = Depends(get_accounts_manager),
 ) -> list[dict]:
-    return impl.get_transactions_for_address(session=session, address=address)
+    return impl.get_transactions_for_address(
+        transactions_processor=transactions_processor,
+        accounts_manager=accounts_manager,
+        address=address,
+    )
 
 
 @rpc.method("sim_setFinalityWindowTime")
@@ -376,6 +385,30 @@ def eth_get_transaction_by_hash(
         transactions_processor=transactions_processor,
         transaction_hash=transaction_hash,
         sim_config=sim_config,
+    )
+
+
+@rpc.method("gen_getStudioTransactionByHash")
+def get_studio_transaction_by_hash(
+    transaction_hash: str,
+    full: bool = True,
+    transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
+) -> dict | None:
+    return impl.get_studio_transaction_by_hash(
+        transactions_processor=transactions_processor,
+        transaction_hash=transaction_hash,
+        full=full,
+    )
+
+
+@rpc.method("gen_getTransactionStatus")
+def get_transaction_status(
+    transaction_hash: str,
+    transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
+) -> str | None:
+    return impl.get_transaction_status(
+        transactions_processor=transactions_processor,
+        transaction_hash=transaction_hash,
     )
 
 

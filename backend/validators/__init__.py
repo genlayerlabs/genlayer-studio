@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .llm import LLMModule, SimulatorProvider
 from .web import WebModule
-from .base import ChangedConfigFile
+import backend.validators.base as base
 
 import backend.database_handler.validators_registry as vr
 from sqlalchemy.orm import Session
@@ -96,6 +96,7 @@ class ModifiableValidatorsRegistryInterceptor(vr.ModifiableValidatorsRegistry):
         async with self._parent.do_write():
             res = await super().create_validator(validator)
             self.session.commit()
+            await self._parent._notify_validator_change("validator_created", res)
             return res
 
     async def update_validator(
@@ -105,18 +106,23 @@ class ModifiableValidatorsRegistryInterceptor(vr.ModifiableValidatorsRegistry):
         async with self._parent.do_write():
             res = await super().update_validator(new_validator)
             self.session.commit()
+            await self._parent._notify_validator_change("validator_updated", res)
             return res
 
     async def delete_validator(self, validator_address):
         async with self._parent.do_write():
             res = await super().delete_validator(validator_address)
             self.session.commit()
+            await self._parent._notify_validator_change(
+                "validator_deleted", {"address": validator_address}
+            )
             return res
 
     async def delete_all_validators(self):
         async with self._parent.do_write():
             res = await super().delete_all_validators()
             self.session.commit()
+            await self._parent._notify_validator_change("all_validators_deleted", {})
             return res
 
 
@@ -151,7 +157,7 @@ class Manager:
         self.llm_module = LLMModule()
         self.web_module = WebModule()
 
-        self._genvm_config = ChangedConfigFile("genvm.yaml")
+        self._genvm_config = base.ChangedConfigFile(base.GENVM_CONFIG_PATH)
         with self._genvm_config.change_default() as config:
             config["modules"]["llm"]["address"] = "ws://" + self.llm_module.address
             config["modules"]["web"]["address"] = "ws://" + self.web_module.address
@@ -214,7 +220,10 @@ class Manager:
         has_multiple_validators = len(validators) > 1
 
         for val in validators:
-            host_data = {"studio_llm_id": f"node-{val.address}"}
+            host_data = {
+                "studio_llm_id": f"node-{val.address}",
+                "node_address": val.address,
+            }
             if (
                 "mock_response" in val.llmprovider.plugin_config
                 and len(val.llmprovider.plugin_config["mock_response"]) > 0
@@ -319,3 +328,41 @@ class Manager:
             await self._change_providers_from_snapshot(new_validators)
         finally:
             self.lock.writer.release()
+
+    async def _notify_validator_change(self, event_type: str, data: dict):
+        """
+        Notify other services about validator changes via Redis.
+        This is only called by RPC service (not consensus-worker).
+        """
+        import json
+        import os
+        import redis.asyncio as aioredis
+
+        # Get Redis URL from environment
+        redis_url = os.environ.get("REDIS_URL", "redis://redis:6379/0")
+
+        try:
+            # Create Redis client for publishing
+            redis_client = aioredis.from_url(
+                redis_url, encoding="utf-8", decode_responses=True
+            )
+
+            # Prepare message
+            message = json.dumps(
+                {
+                    "event": event_type,
+                    "data": data,
+                }
+            )
+
+            # Publish to validator events channel for consensus-worker
+            subscribers = await redis_client.publish("validator:events", message)
+
+            # Close the client
+            await redis_client.close()
+
+            logger.info(
+                f"Published validator change event: {event_type} to {subscribers} subscribers"
+            )
+        except Exception as e:
+            logger.error(f"Failed to publish validator change event: {e}")

@@ -44,9 +44,13 @@ class ValidatorsRegistry:
         return validator_data
 
     def count_validators(self) -> int:
+        # Expire all objects to ensure we get fresh data from the database
+        self.session.expire_all()
         return self.session.query(Validators).count()
 
     def get_all_validators(self, include_private_key: bool = True) -> List[dict]:
+        # Expire all objects to ensure we get fresh data from the database
+        self.session.expire_all()
         validators_data = self.session.query(Validators).all()
         return [
             to_dict(validator, include_private_key) for validator in validators_data
@@ -55,6 +59,8 @@ class ValidatorsRegistry:
     def get_validator(
         self, validator_address: str, include_private_key: bool = True
     ) -> dict:
+        # Expire all objects to ensure we get fresh data from the database
+        self.session.expire_all()
         return to_dict(
             self._get_validator_or_fail(validator_address), include_private_key
         )

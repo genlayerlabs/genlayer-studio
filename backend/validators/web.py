@@ -6,8 +6,12 @@ import signal
 
 from pathlib import Path
 
-from .base import ChangedConfigFile
+from dotenv import load_dotenv
 
+import backend.validators.base as base
+
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -22,31 +26,28 @@ class WebModule:
 
         self._process = None
 
-        genvm_bin = os.getenv("GENVM_BIN")
-        if not genvm_bin:  # pragma: no cover - startup validation
-            logger.error("GENVM_BIN environment variable must be set")
-            raise RuntimeError("GENVM_BIN environment variable must be set")
-
-        protocol = os.getenv("WEBDRIVERPROTOCOL", "http")
-        try:
-            webdriver_host = os.environ["WEBDRIVERHOST"]
-            webdriver_port = os.environ["WEBDRIVERPORT"]
-        except KeyError as exc:  # pragma: no cover - startup validation
-            missing = exc.args[0]
-            raise RuntimeError(f"{missing} environment variable must be set") from exc
-
-        self._config = ChangedConfigFile("genvm-module-web.yaml")
+        self._config = base.ChangedConfigFile(base.WEB_CONFIG_PATH)
 
         web_script_path = Path(__file__).parent.joinpath("web.lua")
 
+        # Resolve webdriver endpoint from environment (defaults align with docker-compose)
+        webdriver_host = os.getenv("WEBDRIVERHOST", "webdriver")
+        webdriver_port = os.getenv("WEBDRIVERPORT", "5001")
+        webdriver_protocol = os.getenv("WEBDRIVERPROTOCOL") or os.getenv(
+            "RPCPROTOCOL", "http"
+        )
+
         with self._config.change_default() as conf:
-            conf["webdriver_host"] = f"{protocol}://{webdriver_host}:{webdriver_port}"
+            conf["webdriver_host"] = (
+                f"{webdriver_protocol}://{webdriver_host}:{webdriver_port}"
+            )
             conf["bind_address"] = self.address
             conf["lua_script_path"] = str(web_script_path)
 
         self._config.write_default()
 
-        self._genvm_bin = genvm_bin
+        # Keep reference to the GenVM binary root for consistency with LLM module
+        self._genvm_bin = base.GENVM_BINARY
 
     async def terminate(self) -> None:
         if self._terminated:
@@ -65,17 +66,18 @@ class WebModule:
     async def restart(self) -> None:
         await self.stop()
 
-        exe_path = Path(self._genvm_bin).joinpath("genvm-modules")
+        debug_enabled = os.getenv("GENVM_WEB_DEBUG") == "1"
+        stream_target = None if debug_enabled else asyncio.subprocess.DEVNULL
 
         self._process = await asyncio.subprocess.create_subprocess_exec(
-            exe_path,
+            base.MODULES_BINARY,
             "web",
             "--config",
             self._config.new_path,
             "--die-with-parent",
             stdin=None,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stdout=stream_target,
+            stderr=stream_target,
         )
 
     async def stop(self) -> None:

@@ -1,6 +1,44 @@
 local lib = require("lib-genvm")
 local llm = require("lib-llm")
 
+llm.exec_prompt_template_transform = function(args)
+	lib.log{level = "debug", message = "exec_prompt_template_transform", args = args}
+
+	my_data = {
+		EqComparative = { template_id = "eq_comparative", format = "bool" },
+		EqNonComparativeValidator = { template_id = "eq_non_comparative_validator", format = "bool" },
+		EqNonComparativeLeader = { template_id = "eq_non_comparative_leader", format = "text" },
+	}
+
+	my_data = my_data[args.template]
+	local my_template = llm.rs.templates[my_data.template_id]
+
+	args.template = nil
+	local vars = args
+
+	local as_user_text = my_template.user
+	for key, val in pairs(vars) do
+		local val_escaped = string.gsub(val, "%%", "%%%%")
+		as_user_text = string.gsub(as_user_text, "#{" .. key .. "}", val_escaped)
+	end
+
+	local format = my_data.format
+
+	local mapped_prompt = {
+		system_message = my_template.system,
+		user_message = as_user_text,
+		temperature = 0.7,
+		images = {},
+		max_tokens = 1000,
+		use_max_completion_tokens = false,
+	}
+
+	return {
+		prompt = mapped_prompt,
+		format = format
+	}
+end
+
 -- check https://github.com/genlayerlabs/genvm/blob/v0.1.2/executor/modules/implementation/scripting/llm-default.lua
 
 -- Used to look up mock responses for testing
@@ -98,6 +136,12 @@ local function try_provider(ctx, args, mapped_prompt, provider_id)
 				request
 			)
 		end)
+
+		if success then
+			result.consumed_gen = 0
+
+			return result
+		end
 	end
 
 	lib.log{level = "debug", message = "executed with", success = success, type = type(result), res = result}
@@ -125,19 +169,33 @@ local function just_in_backend(ctx, args, mapped_prompt)
 
 	-- Return mock response if it exists
 	if ctx.host_data.mock_response then
-		local result
+		local mock_data
 
 		if args.template == "EqComparative" then
 			-- Return the matching response to gl.eq_principle_prompt_comparative request which contains a principle key in the payload
-			result = get_mock_response_from_table(ctx.host_data.mock_response.eq_principle_prompt_comparative, mapped_prompt.prompt.user_message)
+			mock_data = get_mock_response_from_table(ctx.host_data.mock_response.eq_principle_prompt_comparative, mapped_prompt.prompt.user_message)
 		elseif args.template == "EqNonComparativeValidator" then
 			-- Return the matching response to gl.eq_principle_prompt_non_comparative request which contains an output key in the payload
-			result = get_mock_response_from_table(ctx.host_data.mock_response.eq_principle_prompt_non_comparative, mapped_prompt.prompt.user_message)
+			mock_data = get_mock_response_from_table(ctx.host_data.mock_response.eq_principle_prompt_non_comparative, mapped_prompt.prompt.user_message)
 		else
 			-- Return the matching response to gl.exec_prompt request which does not contain any specific key in the payload
 			-- EqNonComparativeLeader is essentially just exec_prompt
-			result = get_mock_response_from_table(ctx.host_data.mock_response.response, mapped_prompt.prompt.user_message)
+			mock_data = get_mock_response_from_table(ctx.host_data.mock_response.response, mapped_prompt.prompt.user_message)
 		end
+
+		-- Wrap mock response in the same format as exec_prompt_in_provider returns
+		-- Convert to JSON string if it's a table, otherwise use as-is
+		local data_value
+		if type(mock_data) == "table" then
+			data_value = lib.rs.json_stringify(mock_data)
+		else
+			data_value = mock_data
+		end
+
+		local result = {
+			data = data_value,
+			consumed_gen = 0
+		}
 		lib.log{level = "debug", message = "executed with", type = type(result), res = result}
 		return result
 	end
@@ -171,7 +229,7 @@ local function just_in_backend(ctx, args, mapped_prompt)
 	})
 end
 
-function ExecPrompt(ctx, args)
+function ExecPrompt(ctx, args, remaining_gen)
 	---@cast args LLMExecPromptPayload
 
 	local mapped = llm.exec_prompt_transform(args)
@@ -179,7 +237,7 @@ function ExecPrompt(ctx, args)
 	return just_in_backend(ctx, args, mapped)
 end
 
-function ExecPromptTemplate(ctx, args)
+function ExecPromptTemplate(ctx, args, remaining_gen)
 	---@cast args LLMExecPromptTemplatePayload
 
 	local template = args.template -- workaround by kp2pml30 (Kira) GVM-86

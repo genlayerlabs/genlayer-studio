@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from .base import *
+import backend.validators.base as base
 
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,31 @@ def extract_error_message(stdout: str) -> str:
         # Look for JSON-like error structure in the output
         # Pattern to match: "code": Str("error_code"), "message": Str("error message")
         match = ERROR_RE.search(stdout)
+
+        if match:
+            error_code = match.group(1)
+            error_message = match.group(2)
+            return f'code: "{error_code}", message: "{error_message}"'
+
+        # Fallback: if no structured error found, return a truncated version
+        if len(stdout) > 500:
+            return stdout[:500] + "... [truncated]"
+        return stdout
+
+    except Exception:
+        # If parsing fails, return truncated version
+        if len(stdout) > 500:
+            return stdout[:500] + "... [truncated]"
+        return stdout
+
+
+def extract_error_message(stdout: str) -> str:
+    """Extract relevant error message from GenVM stdout."""
+    try:
+        # Look for JSON-like error structure in the output
+        # Pattern to match: "code": Str("error_code"), "message": Str("error message")
+        pattern = r'"code":\s*Str\("([^"]+)"\),\s*"message":\s*Str\("([^"]*(?:[^"\\]|\\.)*?)"\)'
+        match = re.search(pattern, stdout)
 
         if match:
             error_code = match.group(1)
@@ -77,7 +102,7 @@ class LLMModule:
 
         greyboxing_path = Path(__file__).parent.joinpath("greyboxing.lua")
 
-        self._config = ChangedConfigFile("genvm-module-llm.yaml")
+        self._config = base.ChangedConfigFile(base.LLM_CONFIG_PATH)
 
         with self._config.change_default() as conf:
             conf["lua_script_path"] = str(greyboxing_path)
@@ -146,17 +171,11 @@ class LLMModule:
     async def _restart_locked(self) -> None:
         await self.stop(locked=True)
 
-        genvm_bin = os.getenv("GENVM_BIN")
-        if genvm_bin is None:
-            raise RuntimeError("GENVM_BIN env var is not set")
-
-        exe_path = Path(genvm_bin).joinpath("genvm-modules")
-
         debug_enabled = os.getenv("GENVM_LLM_DEBUG") == "1"
         stream_target = None if debug_enabled else asyncio.subprocess.DEVNULL
 
         self._process = await asyncio.subprocess.create_subprocess_exec(
-            exe_path,
+            base.MODULES_BINARY,
             "llm",
             "--config",
             self._config.new_path,
@@ -205,18 +224,9 @@ class LLMModule:
         if plugin == "custom":
             return await self.call_custom_model(model, url, key_env)
 
-        genvm_bin = os.getenv("GENVM_BIN")
-        if not genvm_bin:
-            logger.error(
-                "GENVM_BIN env var is not set; cannot validate provider %s", model
-            )
-            return False
-
-        exe_path = Path(genvm_bin).joinpath("genvm-modules")
-
         try:
             proc = await asyncio.subprocess.create_subprocess_exec(
-                exe_path,
+                base.MODULES_BINARY,
                 "llm-check",
                 "--provider",
                 plugin,

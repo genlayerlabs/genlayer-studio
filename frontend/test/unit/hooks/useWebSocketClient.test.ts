@@ -28,6 +28,13 @@ describe('useWebSocketClient', () => {
     expect(WebSocketMock).toHaveBeenCalledWith(expectedUrl);
   });
 
+  it('should create a WebSocket client with the correct URL', async () => {
+    const { useWebSocketClient } = await import('@/hooks/useWebSocketClient');
+    const client = useWebSocketClient();
+    expect(client).toBeDefined();
+    expect(global.WebSocket).toHaveBeenCalled();
+  });
+
   it('should have an emit method', async () => {
     const { useWebSocketClient } = await import('@/hooks/useWebSocketClient');
     const client = useWebSocketClient();

@@ -9,16 +9,22 @@ def _check_one(check: Path) -> bool:
         return False
 
 
-def _find_exe(name: str) -> Path:
+def _find_exe(name: str, *, env_name: str | None = None) -> Path:
+    if env_name is None:
+        env_name = name.upper()
     checked = []
-    for env_var in [f"{name.upper()}PATH", f"{name.upper()}_BIN"]:
+    for env_var in [env_name, f"{env_name}PATH", f"{env_name}BIN", f"{env_name}ROOT"]:
         var = os.getenv(env_var)
         if var is None:
             continue
-        for check in [Path(var), Path(var).joinpath(name)]:
-            checked.append(check)
-            if _check_one(check):
-                return check
+        subpaths = [["bin"], ["executor", os.getenv("GENVM_TAG", "."), "bin"]]
+        for subpath_check in subpaths:
+            for prefix in range(len(subpath_check) + 1):
+                sub = subpath_check[:prefix]
+                check = Path(var).joinpath(*sub, name)
+                checked.append(check)
+                if _check_one(check):
+                    return check
     for p in os.getenv("PATH", "").split(":"):
         check = Path(p).joinpath(name)
         checked.append(check)

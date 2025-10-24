@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
+from starlette.requests import ClientDisconnect
 from pydantic import ValidationError
 
 from backend.protocol_rpc.exceptions import (
@@ -37,6 +38,9 @@ class FastAPIRPCRouter:
     async def handle_http_request(self, request: Request) -> Response:
         try:
             payload = await request.json()
+        except ClientDisconnect:
+            logger.debug("Client disconnected before request body was read")
+            return Response(status_code=204)
         except json.JSONDecodeError:
             # Malformed JSON payload. Always include id: null per JSON-RPC 2.0.
             error = ParseError().to_dict()
