@@ -1,10 +1,17 @@
 import pytest
 import os
 import json
+import sys
+from pathlib import Path
 from dotenv import load_dotenv
 
 from tests.common.request import payload, post_request_localhost
 from tests.common.response import has_success_status
+
+# Add schemas to path
+schemas_path = Path(__file__).parent / "schemas"
+if str(schemas_path) not in sys.path:
+    sys.path.insert(0, str(schemas_path))
 
 
 @pytest.fixture

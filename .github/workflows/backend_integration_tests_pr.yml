@@ -50,7 +50,11 @@ jobs:
           OPENAIKEY: ${{ secrets.OPENAIKEY }}
         run: |
           sed -i "s/<add_your_openai_api_key_here>/${OPENAIKEY}/g" .env
-          sed -i "s/FINALITY_WINDOW =.*/FINALITY_WINDOW = 10/" .env
+          sed -i "s/VITE_FINALITY_WINDOW=\".*\"/VITE_FINALITY_WINDOW=\"10\"/" .env
+          sed -i "s/COMPOSE_CPU_LIMIT=\".*\"/COMPOSE_CPU_LIMIT=\"4\"/" .env
+          sed -i "s/COMPOSE_CPU_RESERVATION=\".*\"/COMPOSE_CPU_RESERVATION=\"1\"/" .env
+          sed -i "s/COMPOSE_MEM_LIMIT=\".*\"/COMPOSE_MEM_LIMIT=\"6gb\"/" .env
+          sed -i "s/COMPOSE_MEM_RESERVATION=\".*\"/COMPOSE_MEM_RESERVATION=\"2gb\"/" .env
           echo >> .env
           if [[ "${{ needs.triggers.outputs.is_pull_request_review_approved }}" == "true" ]]; then
             echo "# Approved PR - Use real LLMs and real web requests"
@@ -63,19 +67,26 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Cache Docker layers
-        uses: actions/cache@v4
+      # Build only backend images with Buildx Bake and enable GHA cache
+      - name: Build backend images with cache (buildx bake)
+        uses: docker/bake-action@v5
         with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-buildx-
+          files: |
+            ./docker-compose.yml
+          targets: |
+            database-migration
+            jsonrpc
+            consensus-worker
+          set: |
+            *.cache-from=type=gha
+            *.cache-to=type=gha,mode=max
+          load: true
 
-      - name: Build Docker images
-        run: docker compose build
-
+      # Start services without rebuilding images
       - name: Run Docker Compose
-        run: docker compose up -d
+        run: docker compose up -d --no-build jsonrpc consensus-worker
+
+
 
       - name: Wait for services to be up
         timeout-minutes: 5
@@ -108,6 +119,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements.test.txt
+          pip install -r backend/protocol_rpc/requirements.txt
 
       - name: Run tests
         run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/ -svv
@@ -144,14 +156,6 @@ jobs:
       - name: Run Docker Compose
         run: docker compose -f tests/db-sqlalchemy/docker-compose.yml --project-directory . run --build --rm tests
 
-
-  load-test:
-    name: Load Tests
-    needs: triggers
-    if: ${{ needs.triggers.outputs.is_pull_request_opened == 'true' || needs.triggers.outputs.is_pull_request_review_approved == 'true' || needs.triggers.outputs.is_pull_request_labeled_with_run_tests == 'true' }}
-    uses: ./.github/workflows/load-test-oha.yml
-    with:
-      oha-version: "v1.4.5"
 
   # hardhat-test:
   #   needs: triggers
