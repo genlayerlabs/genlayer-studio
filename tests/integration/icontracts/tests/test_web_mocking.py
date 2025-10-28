@@ -55,7 +55,7 @@ def test_web_mock_with_custom_responses(setup_validators):
     )
 
     # Verify validators were created with mock responses
-    result = post_request_localhost(payload("sim_getValidators")).json()
+    result = post_request_localhost(payload("sim_getAllValidators")).json()
     assert has_success_status(result)
     assert len(result["result"]) == 5  # We created 5 validators
 
@@ -80,7 +80,7 @@ def test_error_web_mock(setup_validators):
     setup_validators(mock_web_responses=mock_web_responses)
 
     # Test that validators can handle mock error responses
-    result = post_request_localhost(payload("sim_getValidators")).json()
+    result = post_request_localhost(payload("sim_getAllValidators")).json()
     assert has_success_status(result)
 
 
@@ -94,6 +94,6 @@ def test_default_mock_responses_loading(setup_validators):
 
     # The default responses should be loaded from example_responses.json
     # This test verifies the infrastructure is working
-    result = post_request_localhost(payload("sim_getValidators")).json()
+    result = post_request_localhost(payload("sim_getAllValidators")).json()
     assert has_success_status(result)
     assert len(result["result"]) == 5
