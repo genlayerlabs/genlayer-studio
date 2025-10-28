@@ -1,7 +1,7 @@
 import pytest
 import json
 from gltest import get_contract_factory
-from tests.integration.icontracts.conftest import mock_web_requests
+from tests.integration.fixtures.conftest import mock_web_requests
 from tests.common.request import payload, post_request_localhost
 from tests.common.response import has_success_status
 

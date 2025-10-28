@@ -5,9 +5,10 @@ This test file specifically tests the ErrorWebContract which makes web requests.
 
 import pytest
 import json
-from gltest import get_contract_factory, Contract
+from gltest import get_contract_factory
+from gltest.contracts.contract import Contract
 from gltest.exceptions import DeploymentError
-from tests.integration.icontracts.conftest import mock_web_requests, mock_llms
+from tests.integration.fixtures.conftest import mock_web_requests, mock_llms
 
 pytestmark = pytest.mark.web_mocking
 
