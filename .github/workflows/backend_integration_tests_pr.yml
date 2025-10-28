@@ -122,7 +122,7 @@ jobs:
           pip install -r backend/protocol_rpc/requirements.txt
 
       - name: Run tests
-        run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/contracts/oracle/test_intelligent_oracle_factory_pattern.py::test_intelligent_oracle_factory_pattern -svv
+        run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/ -svv
 
       - name: Dump Docker Compose logs
         run: docker compose logs
