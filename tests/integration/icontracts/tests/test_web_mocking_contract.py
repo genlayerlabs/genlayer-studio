@@ -30,7 +30,7 @@ def test_error_web_with_mocking(setup_validators):
             "example.com": {
                 "text": "MOCK: Example Domain - This domain is for use in illustrative examples."
             },
-            "this-domain-definitely-does-not-exist": {
+            "this-domain-definitely-does-not-exist-12345.com": {
                 "text": "MOCK: Simulated error for non-existent domain"
             },
         },
