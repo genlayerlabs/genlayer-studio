@@ -66,8 +66,6 @@ services:
       context: ./
       dockerfile: ./docker/Dockerfile.backend
       target: prod
-      args:
-        - DOCKER_GID=${DOCKER_GID:-999}
     environment:
       - FLASK_ENV=${FLASK_ENV:-production}
       - FLASK_DEBUG=${FLASK_DEBUG:-0}
@@ -89,11 +87,8 @@ services:
     volumes:
       - ./.env:/app/.env
       - ./backend:/app/backend
-      - /var/run/docker.sock:/var/run/docker.sock:ro
       # - hardhat_artifacts:/app/hardhat/artifacts
       # - hardhat_deployments:/app/hardhat/deployments
-    group_add:
-      - "0"  # Add to root group for Docker socket access (read-only)
     depends_on:
       traefik:
         condition: service_started
