@@ -75,6 +75,26 @@ def _filter_genvm_log_by_level(genvm_log: list[dict]) -> list[dict]:
     return filtered_logs
 
 
+def _repr_result_with_capped_data(
+    result: genvmbase.ExecutionReturn | genvmbase.ExecutionError, cap: int = 1000
+) -> str:
+    """
+    Return a JSON string representation of result with the 'data' field capped.
+    Falls back to the default repr if parsing fails or no 'data' field exists.
+    """
+    try:
+        as_str = f"{result!r}"
+        parsed = json.loads(as_str)
+        if isinstance(parsed, dict):
+            data_value = parsed.get("data")
+            if isinstance(data_value, str) and len(data_value) > cap:
+                parsed["data"] = data_value[:cap]
+                return json.dumps(parsed)
+        return as_str
+    except Exception:
+        return f"{result!r}"
+
+
 class _SnapshotView(genvmbase.StateProxy):
     def __init__(
         self,
@@ -364,7 +384,7 @@ class Node:
                 scope=EventScope.GENVM,
                 message="execution finished",
                 data={
-                    "result": f"{res.result!r}",
+                    "result": _repr_result_with_capped_data(res.result),
                     "stdout": res.stdout if is_error else res.stdout[:500],
                     "stderr": res.stderr,
                     "genvm_log": filtered_genvm_log,
@@ -385,7 +405,7 @@ class Node:
             "stdout": res.stdout,
             "stderr": res.stderr,
             "genvm_log": filtered_genvm_log,
-            "result": f"{res.result!r}",
+            "result": _repr_result_with_capped_data(res.result),
         }
         if not isinstance(res.result, genvmbase.ExecutionReturn):
             raise Exception("execution failed", err_data)
