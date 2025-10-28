@@ -49,17 +49,6 @@ app.add_middleware(
 # Include health check endpoints
 app.include_router(health_router)
 
-# Mount static files for monitoring dashboard
-monitoring_dashboard_path = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "monitoring-dashboard"
-)
-if os.path.exists(monitoring_dashboard_path):
-    app.mount(
-        "/monitoring",
-        StaticFiles(directory=monitoring_dashboard_path, html=True),
-        name="monitoring",
-    )
-
 
 @app.get("/ready")
 async def readiness_check_with_app_state(
