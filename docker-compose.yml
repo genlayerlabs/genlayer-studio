@@ -12,6 +12,7 @@ services:
       - "--entrypoints.websecure.address=:443"  # Needed for frontend/hardhat labels
       # API Dashboard (for local dev monitoring)
       - "--api.dashboard=true"
+      # Extended timeouts for large contract state loading (especially on x86_64)
       - "--entryPoints.web.transport.respondingTimeouts.readTimeout=600s"
       - "--entryPoints.web.transport.respondingTimeouts.writeTimeout=600s"
       - "--entryPoints.web.transport.respondingTimeouts.idleTimeout=600s"
@@ -139,8 +140,6 @@ services:
       traefik.enable: true
       # Define service with port
       traefik.http.services.jsonrpc.loadbalancer.server.port: ${RPCPORT}
-      # Extended timeouts for large contract state loading (especially on x86_64)
-      traefik.http.services.jsonrpc.loadbalancer.responsetimeout: 12m
       # HTTPS router for main API
       traefik.http.routers.jsonrpc.rule: Host(`${SERVER_NAME}`) && (PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/ws`) || PathPrefix(`/monitoring`))
       traefik.http.routers.jsonrpc.entrypoints: websecure
