@@ -715,7 +715,8 @@ async def _gen_call_with_validator(
     # Return the result of the write method
     if receipt.execution_result != ExecutionResultStatus.SUCCESS:
         raise JSONRPCError(
-            message="running contract failed", data={"receipt": receipt.to_dict()}
+            message="running contract failed",
+            data={"receipt": receipt.to_dict(), "params": params},
         )
 
     return receipt
