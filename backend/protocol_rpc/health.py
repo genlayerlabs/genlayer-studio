@@ -88,8 +88,10 @@ async def health_check(
             "services": {
                 "database": {
                     "status": db_status,
-                    "pool_size": db_health.get("pool", {}).get("size"),
-                    "checked_out": db_health.get("pool", {}).get("checked_out"),
+                    "pool_size": db_health.get("connection_pool", {}).get("size"),
+                    "checked_out": db_health.get("connection_pool", {}).get(
+                        "checked_out"
+                    ),
                 },
                 "redis": redis_status,
                 "consensus": consensus_summary,
@@ -351,17 +353,6 @@ async def health_consensus(
         db_manager = get_database_manager()
         with db_manager.engine.connect() as conn:
             now = datetime.now(timezone.utc)
-
-            # Define processing statuses
-            processing_statuses = [
-                TransactionStatus.PENDING,
-                TransactionStatus.ACTIVATED,
-                TransactionStatus.PROPOSING,
-                TransactionStatus.COMMITTING,
-                TransactionStatus.REVEALING,
-                TransactionStatus.ACCEPTED,
-                TransactionStatus.UNDETERMINED,
-            ]
 
             # Get contract-level statistics
             from sqlalchemy import select, text
