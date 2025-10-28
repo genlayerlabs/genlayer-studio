@@ -19,11 +19,9 @@ services:
       - "--entryPoints.websecure.transport.respondingTimeouts.readTimeout=1200s"
       - "--entryPoints.websecure.transport.respondingTimeouts.writeTimeout=1200s"
       - "--entryPoints.websecure.transport.respondingTimeouts.idleTimeout=1200s"
-      # Forwarding timeouts (backend -> upstream)
-      - "--entryPoints.web.transport.forwardingTimeouts.dialTimeout=30s"
-      - "--entryPoints.web.transport.forwardingTimeouts.responseHeaderTimeout=1200s"
-      - "--entryPoints.websecure.transport.forwardingTimeouts.dialTimeout=30s"
-      - "--entryPoints.websecure.transport.forwardingTimeouts.responseHeaderTimeout=1200s"
+      # Server transport with extended forwarding timeouts
+      - "--serversTransport.forwardingTimeouts.responseHeaderTimeout=1200s"
+      - "--serversTransport.forwardingTimeouts.idleConnTimeout=1200s"
     ports:
       - "80:80"
       - "443:443"
@@ -143,9 +141,8 @@ services:
           memory: ${COMPOSE_RPC_MEM_RESERVATION:-2g}
     labels:
       traefik.enable: true
-      # Define service with port and timeouts
+      # Define service with port
       traefik.http.services.jsonrpc.loadbalancer.server.port: ${RPCPORT}
-      traefik.http.services.jsonrpc.loadbalancer.responsetimeout: 20m
       # HTTPS router for main API
       traefik.http.routers.jsonrpc.rule: Host(`${SERVER_NAME}`) && (PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/ws`) || PathPrefix(`/monitoring`))
       traefik.http.routers.jsonrpc.entrypoints: websecure
