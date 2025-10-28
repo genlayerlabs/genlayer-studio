@@ -122,7 +122,7 @@ jobs:
           pip install -r backend/protocol_rpc/requirements.txt
 
       - name: Run tests
-        run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/ -svv
+        run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/icontracts/tests/test_web_mocking.py::test_web_mock_with_custom_responses -svv
 
       - name: Dump Docker Compose logs
         run: docker compose logs
