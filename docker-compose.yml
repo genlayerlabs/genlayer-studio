@@ -143,6 +143,9 @@ services:
       # HTTP router for health endpoints (no TLS required)
       traefik.http.routers.jsonrpc-health.rule: PathPrefix(`/health`) || PathPrefix(`/ready`)
       traefik.http.routers.jsonrpc-health.entrypoints: web
+      # Extended timeouts for large contract state loading (especially on x86_64)
+      traefik.http.services.jsonrpc.loadbalancer.responsetimeout: 12m
+      traefik.http.services.jsonrpc.loadbalancer.idletimeout: 12m
 
   webdriver:
     image: yeagerai/genlayer-genvm-webdriver:0.0.7
