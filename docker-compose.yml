@@ -14,7 +14,10 @@ services:
       - "--api.dashboard=true"
       - "--entryPoints.web.transport.respondingTimeouts.readTimeout=600s"
       - "--entryPoints.web.transport.respondingTimeouts.writeTimeout=600s"
-      - "--entryPoints.web.transport.respondingTimeouts.idleTimeout=90s"
+      - "--entryPoints.web.transport.respondingTimeouts.idleTimeout=600s"
+      - "--entryPoints.websecure.transport.respondingTimeouts.readTimeout=600s"
+      - "--entryPoints.websecure.transport.respondingTimeouts.writeTimeout=600s"
+      - "--entryPoints.websecure.transport.respondingTimeouts.idleTimeout=600s"
     ports:
       - "80:80"
       - "443:443"
@@ -134,13 +137,19 @@ services:
           memory: ${COMPOSE_RPC_MEM_RESERVATION:-2g}
     labels:
       traefik.enable: true
+      # Define service with port
+      traefik.http.services.jsonrpc.loadbalancer.server.port: ${RPCPORT}
+      # Extended timeouts for large contract state loading (especially on x86_64)
+      traefik.http.services.jsonrpc.loadbalancer.responsetimeout: 12m
       # HTTPS router for main API
       traefik.http.routers.jsonrpc.rule: Host(`${SERVER_NAME}`) && (PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/ws`) || PathPrefix(`/monitoring`))
       traefik.http.routers.jsonrpc.entrypoints: websecure
       traefik.http.routers.jsonrpc.tls: true
+      traefik.http.routers.jsonrpc.service: jsonrpc
       # HTTP router for health endpoints (no TLS required)
-      traefik.http.routers.jsonrpc-health.rule: PathPrefix(`/health`) || PathPrefix(`/ready`)
+      traefik.http.routers.jsonrpc-health.rule: Host(`${SERVER_NAME}`) && (PathPrefix(`/health`) || PathPrefix(`/ready`))
       traefik.http.routers.jsonrpc-health.entrypoints: web
+      traefik.http.routers.jsonrpc-health.service: jsonrpc
 
   webdriver:
     image: yeagerai/genlayer-genvm-webdriver:0.0.7
