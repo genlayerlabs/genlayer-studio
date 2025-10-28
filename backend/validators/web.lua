@@ -8,7 +8,7 @@ local function get_mock_web_response_from_table(table, url)
         return nil
     end
     for pattern, response in pairs(table) do
-        if string.find(url, pattern) then
+        if string.find(url, pattern, 1, true) then
             return response
         end
     end
