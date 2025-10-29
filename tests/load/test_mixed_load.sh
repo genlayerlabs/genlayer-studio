@@ -79,8 +79,6 @@ fi
 
 echo ""
 echo "=== Phase 2: Deploying 5 Contracts ==="
-echo "Waiting 10 seconds for validators to stabilize..."
-sleep 10
 
 CONTRACT_ADDRESSES=()
 DEPLOY_SUCCESS=0
@@ -91,7 +89,14 @@ for i in {1..5}; do
     echo "[Deploy $i/5] Starting deployment..."
 
     if [ -f deploy_contract/wizard_deploy.py ]; then
-        result=$(python3 deploy_contract/wizard_deploy.py 2>&1) || true
+        # Try to run the deployment script
+        result=$(python3 deploy_contract/wizard_deploy.py "$API_URL" 2>&1) || true
+
+        # Debug: show first few lines of output
+        echo "[Deploy $i/5] Output preview:"
+        echo "$result" | head -5
+
+        # Extract contract address
         addr=$(echo "$result" | grep -oE "0x[a-fA-F0-9]{40}" | tail -n 1)
 
         if [ -n "$addr" ]; then
@@ -105,6 +110,8 @@ for i in {1..5}; do
             fi
         else
             echo "[Deploy $i/5] ❌ Failed - no address returned"
+            echo "[Deploy $i/5] Full output:"
+            echo "$result"
             ((DEPLOY_FAIL++))
 
             if [ $i -lt 5 ]; then

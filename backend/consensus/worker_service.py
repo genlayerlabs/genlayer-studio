@@ -2,6 +2,8 @@
 
 import os
 import asyncio
+import signal
+import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -38,7 +40,21 @@ async def lifespan(app: FastAPI):
     """Manage the worker lifecycle."""
     global worker, worker_task
 
+    # Set up signal handlers for graceful shutdown logging
+    def handle_signal(sig, frame):
+        logger.warning(f"Received signal {sig}, initiating graceful shutdown...")
+
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+
+    logger.info("Starting Consensus Worker Service...")
     print("Starting Consensus Worker Service...")
+
+    # CRITICAL: Kill any orphaned GenVM processes from previous crashes
+    # These zombie processes can consume gigabytes of memory outside Docker limits
+    logger.info("Cleaning up orphaned GenVM processes from previous crashes...")
+    os.system("pkill -9 -f 'genvm (llm|web)' 2>/dev/null || true")
+    logger.info("GenVM cleanup complete")
 
     # Database setup
     database_name = "genlayer"
@@ -97,9 +113,11 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(error_msg) from e
     consensus_service = ConsensusService()
 
-    # Initialize validators manager
+    # Initialize validators manager (MUST use global to prevent garbage collection)
+    global validators_manager  # Declare before assignment to use the global variable
     validators_manager = validators.Manager(SessionLocal())
     await validators_manager.restart()
+    logger.info("Validators manager initialized and restarted")
 
     # Create and start the worker
     worker = ConsensusWorker(
@@ -112,55 +130,137 @@ async def lifespan(app: FastAPI):
         transaction_timeout_minutes=transaction_timeout,
     )
 
-    # Start the worker in a background task
-    worker_task = asyncio.create_task(worker.run())
+    # Start the worker in a background task with exception handling
+    async def run_worker_with_error_handling():
+        try:
+            await worker.run()
+        except Exception as e:
+            logger.critical(
+                f"FATAL: Worker {worker.worker_id} crashed with unhandled exception: {e}",
+                exc_info=True,
+            )
+            # Re-raise to let the container crash and restart
+            raise
+
+    worker_task = asyncio.create_task(run_worker_with_error_handling())
 
     print(f"Consensus Worker {worker.worker_id} started successfully")
 
-    yield
+    try:
+        yield
+    finally:
+        # CRITICAL: Always cleanup GenVM processes, even on crash
+        # This prevents memory leaks from orphaned genvm subprocesses
 
-    # Cleanup on shutdown
-    print("Shutting down Consensus Worker Service...")
+        # Cleanup on shutdown
+        logger.info("Shutting down Consensus Worker Service...")
+        print("Shutting down Consensus Worker Service...")
 
-    if worker:
-        worker.stop()
+        if worker:
+            worker.stop()
 
-    if worker_task:
-        worker_task.cancel()
-        try:
-            await worker_task
-        except asyncio.CancelledError:
-            pass
+        if worker_task:
+            worker_task.cancel()
+            try:
+                await worker_task
+            except asyncio.CancelledError:
+                pass
 
-    # Terminate validators manager to shut down background tasks
-    if validators_manager:
-        try:
-            await validators_manager.terminate()
-        except Exception as e:
-            logger.error(f"Error terminating validators manager: {e}")
+        # Terminate validators manager to shut down background tasks
+        if validators_manager:
+            try:
+                logger.info("Terminating validators manager and GenVM subprocesses...")
+                await validators_manager.terminate()
+                logger.info("Validators manager terminated successfully")
+            except Exception as e:
+                logger.error(f"Error terminating validators manager: {e}")
 
-    # Clean up message handler
-    if msg_handler:
-        await msg_handler.close()
+        # Clean up message handler
+        if msg_handler:
+            try:
+                await msg_handler.close()
+            except Exception as e:
+                logger.error(f"Error closing message handler: {e}")
 
-    print("Consensus Worker Service stopped")
+        # Final safety check: Kill any remaining genvm processes
+        logger.info("Final cleanup: killing any remaining GenVM processes...")
+        os.system("pkill -9 -f 'genvm (llm|web)' 2>/dev/null || true")
+        logger.info("GenVM cleanup complete")
+
+        print("Consensus Worker Service stopped")
 
 
 # Create FastAPI app
 app = FastAPI(title="Consensus Worker Service", version="1.0.0", lifespan=lifespan)
+start_time = time.time()
 
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint for the worker."""
-    global worker
+    import psutil
+    from datetime import datetime
+
+    global worker, worker_task
+
+    endpoint_start = time.time()
 
     if worker is None:
         return {"status": "initializing", "worker_id": None}
 
+    # Check if worker task has died
+    if worker_task and worker_task.done():
+        # Worker task finished unexpectedly - this is a failure
+        try:
+            # This will re-raise any exception from the task
+            worker_task.result()
+        except Exception as e:
+            logger.error(f"Worker task died with exception: {e}")
+        return {
+            "status": "failed",
+            "worker_id": worker.worker_id,
+            "error": "worker_task_died",
+        }
+
+    # Get basic metrics
+    metrics = {}
+    try:
+        process = psutil.Process()
+        metrics = {
+            "memory_mb": round(process.memory_info().rss / 1024 / 1024, 2),
+            "cpu_percent": round(process.cpu_percent(), 2),
+            "memory_percent": round(process.memory_percent(), 2),
+        }
+    except:
+        pass
+
+    # Get current transaction info with time calculation
+    current_tx = None
+    if worker.current_transaction:
+        tx = worker.current_transaction.copy()
+        if tx.get("blocked_at"):
+            try:
+                blocked_at = datetime.fromisoformat(
+                    tx["blocked_at"].replace("Z", "+00:00")
+                )
+                elapsed = datetime.utcnow() - blocked_at.replace(tzinfo=None)
+
+                # Format as human-readable time ago
+                minutes = int(elapsed.total_seconds() / 60)
+                if minutes < 60:
+                    tx["blocked_at"] = f"{minutes}m ago"
+                else:
+                    hours = minutes // 60
+                    tx["blocked_at"] = f"{hours}h ago"
+            except:
+                pass
+        current_tx = tx
+
     return {
         "status": "healthy" if worker.running else "stopping",
         "worker_id": worker.worker_id,
+        "current_transaction": current_tx,
+        **metrics,
     }
 
 

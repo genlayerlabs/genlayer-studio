@@ -133,7 +133,7 @@ class RPCEndpointManager:
                         type=EventType.SUCCESS,
                         scope=EventScope.RPC,
                         message=f"RPC method completed: {request.method}",
-                        data={"method": request.method},
+                        data={"method": request.method, "params": request.params},
                     )
                 )
             return response
