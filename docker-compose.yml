@@ -6,6 +6,8 @@ services:
       # Core configuration
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
+      - "--providers.file.filename=/etc/traefik/tls.yml"
+      - "--providers.file.watch=true"
 
       # Entrypoints for local development
       - "--entrypoints.web.address=:80"
@@ -29,7 +31,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /opt/genlayer-studio/nginx/ssl/:/etc/ssl/traefik:ro
-      # Removed traefik.yaml - using CLI config only
+      - ./traefik/tls.yml:/etc/traefik/tls.yml:ro
     logging:
       driver: "json-file"
       options:
