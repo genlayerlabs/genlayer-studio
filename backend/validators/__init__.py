@@ -191,7 +191,10 @@ class Manager:
 
     def __del__(self):
         if not self._terminated:
-            raise Exception("service was not terminated")
+            logger.error(
+                "ValidatorsManager was garbage collected without being terminated properly. "
+                "This may indicate a reference leak or improper cleanup."
+            )
 
     async def _get_snap_from_registry(self) -> Snapshot:
         cur_validators_as_dict = self.registry.get_all_validators()
