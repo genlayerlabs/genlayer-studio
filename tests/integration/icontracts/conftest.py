@@ -42,7 +42,7 @@ def setup_validators():
 
 
 def mock_llms():
-    env_var = os.getenv("TEST_WITH_MOCK_LLMS", "false")  # default no mocking
+    env_var = os.getenv("TEST_WITH_MOCKS", "false")  # default no mocking
     if env_var == "true":
         return True
     return False

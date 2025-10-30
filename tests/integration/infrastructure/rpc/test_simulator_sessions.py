@@ -176,7 +176,6 @@ async def test_create_validator_uses_request_scoped_session(monkeypatch):
     registry_instance = SimpleNamespace(
         create_validator=AsyncMock(return_value={"address": account.address})
     )
-
     validators_manager = SimpleNamespace(registry=registry_instance)
 
     monkeypatch.setattr(endpoints, "validate_provider", lambda _provider: None)
@@ -232,8 +231,6 @@ async def test_create_random_validators_use_request_session(monkeypatch):
         )
     )
 
-    validators_manager = SimpleNamespace(registry=registry_instance)
-
     class FakeLLMRegistry:
         def __init__(self, session_arg):
             assert session_arg is session
@@ -265,18 +262,13 @@ async def test_create_random_validators_use_request_session(monkeypatch):
         assert s is session
         return accounts_manager_instance
 
-    # Mock check_provider_is_available to just return True
-    async def fake_check_provider_is_available(provider, model):
-        return True
-
     monkeypatch.setattr(endpoints, "AccountsManager", accounts_manager_factory)
     monkeypatch.setattr(endpoints, "LLMProviderRegistry", FakeLLMRegistry)
     monkeypatch.setattr(
         endpoints, "random_validator_config", fake_random_validator_config
     )
-    monkeypatch.setattr(
-        endpoints, "check_provider_is_available", fake_check_provider_is_available
-    )
+
+    validators_manager = SimpleNamespace(registry=registry_instance)
 
     response = await endpoints.create_random_validators(
         session,
@@ -297,7 +289,6 @@ async def test_update_validator_uses_request_session(monkeypatch):
     registry_instance = SimpleNamespace(
         update_validator=AsyncMock(return_value={"address": "0xabc"})
     )
-
     validators_manager = SimpleNamespace(registry=registry_instance)
 
     monkeypatch.setattr(endpoints, "validate_provider", lambda _provider: None)
@@ -332,7 +323,6 @@ async def test_update_validator_uses_request_session(monkeypatch):
 @pytest.mark.asyncio
 async def test_delete_validator_uses_request_session(monkeypatch):
     registry_instance = SimpleNamespace(delete_validator=AsyncMock())
-
     validators_manager = SimpleNamespace(registry=registry_instance)
 
     result = await endpoints.delete_validator(validators_manager, "0xabc")
@@ -347,7 +337,6 @@ async def test_delete_all_validators_uses_request_session(monkeypatch):
         delete_all_validators=AsyncMock(),
         get_all_validators=MagicMock(return_value=[]),
     )
-
     validators_manager = SimpleNamespace(registry=registry_instance)
 
     result = await endpoints.delete_all_validators(validators_manager)
