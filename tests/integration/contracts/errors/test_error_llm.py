@@ -2,7 +2,7 @@ from gltest import get_contract_factory
 from tests.common.request import payload, post_request_localhost
 from tests.common.response import has_success_status
 from gltest.exceptions import DeploymentError
-from tests.integration.icontracts.tests.test_error_execution import (
+from tests.integration.contracts.errors.test_error_execution import (
     _deployment_error_to_tx_receipt,
     _check_result,
     _check_last_round,

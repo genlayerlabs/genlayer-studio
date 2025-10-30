@@ -27,13 +27,13 @@ from copy import deepcopy
 DEFAULT_FINALITY_WINDOW = 5
 # Reduce sleep time for faster tests when using mocks
 DEFAULT_CONSENSUS_SLEEP_TIME = (
-    0.1 if os.getenv("TEST_WITH_MOCK_LLMS", "true").lower() == "true" else 2
+    0.1 if os.getenv("TEST_WITH_MOCKS", "true").lower() == "true" else 2
 )
 DEFAULT_EXEC_RESULT = b"\x00\x00"  # success(null)
 TIMEOUT_EXEC_RESULT = b"\x02timeout"
 
 # Configuration for LLM mocking
-USE_MOCK_LLMS = os.getenv("TEST_WITH_MOCK_LLMS", "true").lower() == "true"
+USE_MOCK_LLMS = os.getenv("TEST_WITH_MOCKS", "true").lower() == "true"
 
 
 class AccountsManagerMock:
@@ -875,7 +875,7 @@ def assert_transaction_status_match(
     transactions_processor: TransactionsProcessorMock,
     transaction: Transaction,
     expected_statuses: list[TransactionStatus],
-    timeout: int = None,
+    timeout: int | None = None,
     interval: float = 0.1,
 ) -> TransactionStatus:
     # Use adaptive timeout based on LLM mode
@@ -887,12 +887,6 @@ def assert_transaction_status_match(
     last_status = None
     start_time = time.time()
 
-    # Log mode if using real LLMs
-    if not USE_MOCK_LLMS:
-        print(
-            f"[LLM Mode: REAL] Waiting for status {expected_statuses} with timeout {timeout}s"
-        )
-
     while time.time() - start_time < timeout:
         current_status = transactions_processor.get_transaction_by_hash(
             transaction.hash
@@ -903,8 +897,6 @@ def assert_transaction_status_match(
 
         if current_status != last_status:
             last_status = current_status
-            if not USE_MOCK_LLMS:
-                print(f"[LLM Mode: REAL] Status changed to: {current_status}")
 
         # Wait for next status change
         transactions_processor.wait_for_status_change(interval)

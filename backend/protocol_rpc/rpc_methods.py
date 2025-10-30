@@ -108,9 +108,11 @@ async def create_validator(
     plugin: str | None = None,
     plugin_config: dict | None = None,
     session: Session = Depends(get_db_session),
+    validators_manager=Depends(get_validators_manager),
 ) -> dict:
     return await impl.create_validator(
         session=session,
+        validators_manager=validators_manager,
         stake=stake,
         provider=provider,
         model=model,
@@ -163,9 +165,11 @@ async def update_validator(
     plugin: str | None = None,
     plugin_config: dict | None = None,
     session: Session = Depends(get_db_session),
+    validators_manager=Depends(get_validators_manager),
 ) -> dict:
     return await impl.update_validator(
         session=session,
+        validators_manager=validators_manager,
         validator_address=validator_address,
         stake=stake,
         provider=provider,
@@ -178,19 +182,19 @@ async def update_validator(
 @rpc.method("sim_deleteValidator")
 async def delete_validator(
     validator_address: str,
-    session: Session = Depends(get_db_session),
+    validators_manager=Depends(get_validators_manager),
 ) -> str:
     return await impl.delete_validator(
-        session=session,
+        validators_manager=validators_manager,
         validator_address=validator_address,
     )
 
 
 @rpc.method("sim_deleteAllValidators")
 async def delete_all_validators(
-    session: Session = Depends(get_db_session),
+    validators_manager=Depends(get_validators_manager),
 ) -> list[dict]:
-    return await impl.delete_all_validators(session=session)
+    return await impl.delete_all_validators(validators_manager=validators_manager)
 
 
 @rpc.method("sim_getAllValidators")

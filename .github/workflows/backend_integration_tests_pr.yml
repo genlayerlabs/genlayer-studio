@@ -45,17 +45,23 @@ jobs:
 
       # TODO: we should also add also heuristai and anthropic keys to the e2e tests and test all providers
 
-      - name: Set OPENAIKEY in the .env file so it can be loaded from the environment
+      - name: Set mocking environment variables in .env file
         env:
           OPENAIKEY: ${{ secrets.OPENAIKEY }}
         run: |
           sed -i "s/<add_your_openai_api_key_here>/${OPENAIKEY}/g" .env
-          sed -i "s/FINALITY_WINDOW =.*/FINALITY_WINDOW = 10/" .env
+          sed -i "s/VITE_FINALITY_WINDOW=\".*\"/VITE_FINALITY_WINDOW=\"10\"/" .env
+          sed -i "s/COMPOSE_CPU_LIMIT=\".*\"/COMPOSE_CPU_LIMIT=\"4\"/" .env
+          sed -i "s/COMPOSE_CPU_RESERVATION=\".*\"/COMPOSE_CPU_RESERVATION=\"1\"/" .env
+          sed -i "s/COMPOSE_MEM_LIMIT=\".*\"/COMPOSE_MEM_LIMIT=\"6gb\"/" .env
+          sed -i "s/COMPOSE_MEM_RESERVATION=\".*\"/COMPOSE_MEM_RESERVATION=\"2gb\"/" .env
           echo >> .env
           if [[ "${{ needs.triggers.outputs.is_pull_request_review_approved }}" == "true" ]]; then
-            echo "TEST_WITH_MOCK_LLMS=false" >> .env
+            echo "# Approved PR - Use real LLMs and real web requests"
+            echo "TEST_WITH_MOCKS=false" >> .env
           else
-            echo "TEST_WITH_MOCK_LLMS=true" >> .env
+            echo "# Regular PR - Mock both LLMs and web requests"
+            echo "TEST_WITH_MOCKS=true" >> .env
           fi
 
       - name: Set up Docker Buildx
@@ -67,10 +73,10 @@ jobs:
         with:
           files: |
             ./docker-compose.yml
-            ./docker-compose.production.yml
           targets: |
             database-migration
             jsonrpc
+            consensus-worker
           set: |
             *.cache-from=type=gha
             *.cache-to=type=gha,mode=max
@@ -78,7 +84,7 @@ jobs:
 
       # Start services without rebuilding images
       - name: Run Docker Compose
-        run: docker compose up -d --no-build
+        run: docker compose up -d --no-build jsonrpc consensus-worker
 
 
 

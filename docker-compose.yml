@@ -72,6 +72,7 @@ services:
       traefik.http.routers.frontend.tls: true
 
   jsonrpc:
+    image: genlayer-studio-jsonrpc:latest
     build:
       context: ./
       dockerfile: ./docker/Dockerfile.backend
@@ -218,6 +219,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
 
   database-migration:
+    image: genlayer-studio-database-migration:latest
     build:
       context: .
       dockerfile: docker/Dockerfile.database-migration
@@ -233,6 +235,7 @@ services:
         required: false
 
   consensus-worker:
+    image: genlayer-studio-consensus-worker:latest
     build:
       context: ./
       dockerfile: ./docker/Dockerfile.consensus-worker

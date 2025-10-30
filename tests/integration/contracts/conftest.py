@@ -1,5 +1,5 @@
 """
-Configuration for intelligent contract integration tests
+Configuration for contract integration tests
 """
 
 import sys
