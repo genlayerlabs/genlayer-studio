@@ -6,6 +6,7 @@ class EventType(Enum):
     DEBUG = "debug"
     INFO = "info"
     SUCCESS = "success"
+    WARNING = "warning"
     ERROR = "error"
 
 
@@ -13,6 +14,7 @@ class EventScope(Enum):
     RPC = "RPC"
     GENVM = "GenVM"
     CONSENSUS = "Consensus"
+    TRANSACTION = "Transaction"
 
 
 @dataclass

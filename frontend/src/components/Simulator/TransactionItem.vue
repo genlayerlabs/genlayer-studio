@@ -55,7 +55,7 @@ const leaderReceipt = computed(() => {
 const eqOutputs = computed(() => {
   const outputs = leaderReceipt.value?.eq_outputs || {};
   return Object.entries(outputs).map(([key, value]: [string, unknown]) => {
-    const decodedResult = resultToUserFriendlyJson(String(value));
+    const decodedResult = resultToUserFriendlyJson(value);
     const parsedValue = decodedResult?.payload?.readable ?? value;
     try {
       if (typeof parsedValue === 'string') {
@@ -127,12 +127,9 @@ function prettifyTxData(x: any): any {
     return x;
   }
   try {
-    const new_eq_outputs = Object.fromEntries(
+    const newEqOutputs = Object.fromEntries(
       Object.entries(oldEqOutputs).map(([k, v]) => {
-        const arrayBuffer = b64ToArray(String(v));
-        const val = resultToUserFriendlyJson(
-          new TextDecoder().decode(arrayBuffer),
-        );
+        const val = resultToUserFriendlyJson(v);
         return [k, val];
       }),
     );
@@ -143,7 +140,7 @@ function prettifyTxData(x: any): any {
         leader_receipt: [
           {
             ...x.consensus_data.leader_receipt[0],
-            eq_outputs: new_eq_outputs,
+            eq_outputs: newEqOutputs,
           },
           x.consensus_data.leader_receipt[1],
         ],
@@ -155,6 +152,21 @@ function prettifyTxData(x: any): any {
     return x;
   }
 }
+
+const badgeColorClass = computed(() => {
+  if (props.transaction.statusName !== 'FINALIZED') {
+    return '';
+  } else {
+    if (
+      props.transaction.data?.last_round?.result === 6 &&
+      leaderReceipt.value?.execution_result !== 'ERROR'
+    ) {
+      return '!bg-green-500';
+    } else {
+      return '!bg-red-500';
+    }
+  }
+});
 </script>
 
 <template>
@@ -235,10 +247,7 @@ function prettifyTxData(x: any): any {
       </div>
 
       <TransactionStatusBadge
-        :class="[
-          'px-[4px] py-[1px] text-[9px]',
-          transaction.statusName === 'FINALIZED' ? '!bg-green-500' : '',
-        ]"
+        :class="['px-[4px] py-[1px] text-[9px]', badgeColorClass]"
       >
         {{ transaction.statusName }}
       </TransactionStatusBadge>
@@ -290,10 +299,7 @@ function prettifyTxData(x: any): any {
               "
             />
             <TransactionStatusBadge
-              :class="[
-                'px-[4px] py-[1px] text-[9px]',
-                transaction.statusName === 'FINALIZED' ? '!bg-green-500' : '',
-              ]"
+              :class="['px-[4px] py-[1px] text-[9px]', badgeColorClass]"
             >
               {{ transaction.statusName }}
             </TransactionStatusBadge>
@@ -330,13 +336,26 @@ function prettifyTxData(x: any): any {
             </div>
 
             <div>
+              <div class="mb-1 font-medium">LLM-0:</div>
               <div>
                 <span class="font-medium">Model:</span>
-                {{ leaderReceipt.node_config.model }}
+                {{ leaderReceipt.node_config.primary_model?.model }}
               </div>
               <div>
                 <span class="font-medium">Provider:</span>
-                {{ leaderReceipt.node_config.provider }}
+                {{ leaderReceipt.node_config.primary_model?.provider }}
+              </div>
+            </div>
+
+            <div v-if="leaderReceipt.node_config.secondary_model">
+              <div class="mb-1 font-medium">LLM-1:</div>
+              <div>
+                <span class="font-medium">Model:</span>
+                {{ leaderReceipt.node_config.secondary_model.model }}
+              </div>
+              <div>
+                <span class="font-medium">Provider:</span>
+                {{ leaderReceipt.node_config.secondary_model.provider }}
               </div>
             </div>
           </div>

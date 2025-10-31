@@ -9,33 +9,7 @@ import re
 from backend.rollup.default_contracts.consensus_main import (
     get_default_consensus_main_contract,
 )
-
-
-# Custom exception classes for nonce errors
-class NonceError(Exception):
-    """Base exception for nonce-related errors"""
-
-    pass
-
-
-class NonceTooLowError(NonceError):
-    """Exception raised when transaction nonce is too low"""
-
-    def __init__(self, expected_nonce: int, actual_nonce: int, *args, **kwargs):
-        self.expected_nonce = expected_nonce
-        self.actual_nonce = actual_nonce
-        message = f"Nonce too low: expected {expected_nonce}, got {actual_nonce}"
-        super().__init__(message, *args, **kwargs)
-
-
-class NonceTooHighError(NonceError):
-    """Exception raised when transaction nonce is too high"""
-
-    def __init__(self, expected_nonce: int, actual_nonce: int, *args, **kwargs):
-        self.expected_nonce = expected_nonce
-        self.actual_nonce = actual_nonce
-        message = f"Nonce too high: expected {expected_nonce}, got {actual_nonce}"
-        super().__init__(message, *args, **kwargs)
+from backend.rollup.web3_pool import Web3ConnectionPool
 
 
 class ConsensusService:
@@ -43,13 +17,8 @@ class ConsensusService:
         """
         Initialize the ConsensusService class
         """
-        # Connect to Hardhat Network
-        port = os.environ.get("HARDHAT_PORT")
-        url = os.environ.get("HARDHAT_URL")
-        hardhat_url = f"{url}:{port}"
-        self.web3 = Web3(Web3.HTTPProvider(hardhat_url))
-
-        self.web3_connected = self.web3.is_connected()
+        # Use singleton Web3 connection pool
+        self.web3 = Web3ConnectionPool.get()
 
     def _get_contract(self, contract_name: str):
         """
@@ -64,6 +33,17 @@ class ConsensusService:
         # Load deployment data
         deployment_data = self._load_deployment_data(contract_name)
         if not deployment_data:
+            # For ConsensusMain, we'll use the default contract if deployment not found
+            if contract_name == "ConsensusMain":
+                default_contract = get_default_consensus_main_contract()
+                if (
+                    default_contract
+                    and "address" in default_contract
+                    and "abi" in default_contract
+                ):
+                    return self.web3.eth.contract(
+                        address=default_contract["address"], abi=default_contract["abi"]
+                    )
             raise Exception(f"Failed to load {contract_name} deployment data")
 
         # Verify contract exists on chain
@@ -105,7 +85,7 @@ class ConsensusService:
             if contract_name == "ConsensusMain":
                 default_contract = get_default_consensus_main_contract()
                 print(
-                    f"[CONSENSUS_SERVICE]: Error loading contract from netowrk, retrieving default contract: {str(e)}"
+                    f"[CONSENSUS_SERVICE]: Error loading contract from network, retrieving default contract: {str(e)}"
                 )
                 return default_contract
             else:
@@ -186,9 +166,9 @@ class ConsensusService:
         Forward a transaction to the consensus rollup and wait for NewTransaction event
         """
         if not self.web3.is_connected():
-            print(
-                "[CONSENSUS_SERVICE]: Not connected to Hardhat node, skipping transaction forwarding"
-            )
+            # print(
+            #     "[CONSENSUS_SERVICE]: Not connected to Hardhat node, skipping transaction forwarding"
+            # )
             return None
 
         try:
@@ -197,43 +177,38 @@ class ConsensusService:
 
         except Exception as e:
             error_str = str(e)
-
-            # Check for nonce errors and raise specific exceptions
-            if "nonce too high" in error_str.lower():
+            error_type = (
+                "nonce_too_high"
+                if "nonce too high" in error_str.lower()
+                else "nonce_too_low" if "nonce too low" in error_str.lower() else None
+            )
+            if error_type:
+                # Extract expected and current nonce from error message
                 match = re.search(
                     r"Expected nonce to be (\d+) but got (\d+)", error_str
                 )
                 if match:
-                    expected_nonce = int(match.group(1))
                     current_nonce = int(match.group(2))
-                    print(
-                        f"[CONSENSUS_SERVICE]: Nonce too high - expected {expected_nonce}, got {current_nonce}. "
-                        f"Transaction needs to be re-signed with correct nonce."
-                    )
-                    raise NonceTooHighError(expected_nonce, current_nonce) from e
-                else:
-                    # If we can't parse the nonces, still raise typed exception
-                    raise NonceTooHighError(0, 0) from e
 
-            elif "nonce too low" in error_str.lower():
-                match = re.search(
-                    r"Expected nonce to be (\d+) but got (\d+)", error_str
-                )
-                if match:
-                    expected_nonce = int(match.group(1))
-                    current_nonce = int(match.group(2))
+                    # Set the nonce to the expected value
                     print(
-                        f"[CONSENSUS_SERVICE]: Nonce too low - expected {expected_nonce}, got {current_nonce}. "
-                        f"Transaction needs to be re-signed with correct nonce."
+                        f"[CONSENSUS_SERVICE]: Setting nonce for {from_address} to {current_nonce}"
                     )
-                    raise NonceTooLowError(expected_nonce, current_nonce) from e
+                    self.web3.provider.make_request(
+                        "hardhat_setNonce", [from_address, hex(current_nonce)]
+                    )
+
+                    if retry:
+                        return self.add_transaction(
+                            transaction, from_address, retry=False
+                        )
                 else:
-                    # If we can't parse the nonces, still raise typed exception
-                    raise NonceTooLowError(0, 0) from e
+                    print(
+                        f"[CONSENSUS_SERVICE]: Could not parse nonce from error message: {error_str}"
+                    )
 
             print(f"[CONSENSUS_SERVICE]: Error forwarding transaction: {error_str}")
-            # Re-raise with chaining to preserve the original traceback
-            raise Exception(f"Transaction failed: {error_str}") from e
+            return None
 
     def emit_transaction_event(self, event_name: str, account: dict, *args):
         """
@@ -245,9 +220,9 @@ class ConsensusService:
             *args: Arguments to pass to the event function
         """
         if not self.web3.is_connected():
-            print(
-                "[CONSENSUS_SERVICE]: Not connected to Hardhat node, skipping transaction forwarding"
-            )
+            # print(
+            #     "[CONSENSUS_SERVICE]: Not connected to Hardhat node, skipping transaction forwarding"
+            # )
             return None
 
         if account.get("private_key") is not None:
@@ -269,7 +244,7 @@ class ConsensusService:
             tx = event_function(*args).build_transaction(
                 {
                     "from": account_address,
-                    "gas": 0xFFFFFFFF,  # 2^32 - 1 (4,294,967,295) - zkSync Era limit
+                    "gas": 50000000,
                     "gasPrice": 0,
                     "nonce": self.web3.eth.get_transaction_count(account_address),
                 }

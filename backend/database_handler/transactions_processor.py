@@ -3,6 +3,7 @@ from datetime import datetime
 from enum import Enum
 import rlp
 import re
+import random
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, desc, and_, JSON, type_coerce, text
 from sqlalchemy.orm.attributes import flag_modified
@@ -18,6 +19,7 @@ from web3 import Web3
 import os
 from backend.consensus.types import ConsensusRound
 from backend.consensus.utils import determine_consensus_from_votes
+from backend.rollup.web3_pool import Web3ConnectionPool
 
 
 class TransactionAddressFilter(Enum):
@@ -69,11 +71,8 @@ class TransactionsProcessor:
     ):
         self.session = session
 
-        # Connect to Hardhat Network
-        port = os.environ.get("HARDHAT_PORT")
-        url = os.environ.get("HARDHAT_URL")
-        hardhat_url = f"{url}:{port}"
-        self.web3 = Web3(Web3.HTTPProvider(hardhat_url))
+        # Use singleton Web3 connection pool
+        self.web3 = Web3ConnectionPool.get()
 
     @staticmethod
     def _parse_transaction_data(transaction_data: Transactions) -> dict:
@@ -126,6 +125,7 @@ class TransactionsProcessor:
             "appeal_leader_timeout": transaction_data.appeal_leader_timeout,
             "leader_timeout_validators": transaction_data.leader_timeout_validators,
             "appeal_validators_timeout": transaction_data.appeal_validators_timeout,
+            "sim_config": transaction_data.sim_config,
         }
 
     @staticmethod
@@ -188,31 +188,28 @@ class TransactionsProcessor:
         type: int,
         nonce: int,
     ) -> str:
-        from_address_bytes = (
-            to_bytes(hexstr=from_address) if is_address(from_address) else None
+        """Generate a fallback transaction hash similar to ConsensusMain._generateTx."""
+
+        # Prepare recipient bytes as the solidity address encoding (20 bytes)
+        recipient_bytes = (
+            to_bytes(hexstr=to_address) if is_address(to_address) else b"\x00" * 20
         )
-        to_address_bytes = (
-            to_bytes(hexstr=to_address) if is_address(to_address) else None
+
+        # Use current timestamp with microsecond precision to ensure uniqueness
+        timestamp = time.time()
+        timestamp_int = int(timestamp * 1_000_000)  # Convert to microseconds as integer
+        timestamp_bytes = timestamp_int.to_bytes(32, byteorder="big", signed=False)
+
+        # Derive a deterministic pseudo-random seed from the recipient address
+        seed_source = f"{to_address or '0x0'}:{timestamp}"
+        rng = random.Random(seed_source)
+        random_hex = "".join(rng.choice("0123456789abcdef") for _ in range(64))
+        random_seed_bytes = bytes.fromhex(random_hex)
+
+        tx_hash = (
+            "0x" + keccak(recipient_bytes + timestamp_bytes + random_seed_bytes).hex()
         )
-
-        data_bytes = to_bytes(text=TransactionsProcessor._transaction_data_to_str(data))
-
-        tx_elements = [
-            from_address_bytes,
-            to_address_bytes,
-            to_bytes(hexstr=hex(int(value))),
-            data_bytes,
-            to_bytes(hexstr=hex(type)),
-            to_bytes(hexstr=hex(nonce)),
-            to_bytes(hexstr=hex(0)),  # gas price (placeholder)
-            to_bytes(hexstr=hex(0)),  # gas limit (placeholder)
-        ]
-
-        # Filter out None values
-        tx_elements = [elem for elem in tx_elements if elem is not None]
-        rlp_encoded = rlp.encode(tx_elements)
-        hash = "0x" + keccak(rlp_encoded).hex()
-        return hash
+        return tx_hash
 
     def insert_transaction(
         self,
@@ -229,15 +226,15 @@ class TransactionsProcessor:
         ) = None,  # If filled, the transaction must be present in the database (committed)
         transaction_hash: str | None = None,
         num_of_initial_validators: int | None = None,
+        sim_config: dict | None = None,
     ) -> str:
-        current_nonce = self.get_transaction_count(from_address)
-
         # Follow up: https://github.com/MetaMask/metamask-extension/issues/29787
         # to uncomment this check
         # if nonce != current_nonce:
         #     raise Exception(
         #         f"Unexpected nonce. Provided: {nonce}, expected: {current_nonce}"
         #     )
+        current_nonce = self.get_transaction_count(from_address)
 
         if transaction_hash is None:
             transaction_hash = self._generate_transaction_hash(
@@ -281,18 +278,23 @@ class TransactionsProcessor:
             appeal_leader_timeout=False,
             leader_timeout_validators=None,
             appeal_validators_timeout=False,
+            sim_config=sim_config,
         )
 
         self.session.add(new_transaction)
 
         self.session.flush()  # So that `created_at` gets set
+        self.session.commit()  # Persist the transaction to the database
 
         return new_transaction.hash
 
     def _process_round_data(self, transaction_data: dict) -> dict:
         """Process round data and prepare transaction data."""
 
-        if "consensus_results" in transaction_data["consensus_history"]:
+        if (
+            transaction_data["consensus_history"] is not None
+            and "consensus_results" in transaction_data["consensus_history"]
+        ):
             transaction_data["num_of_rounds"] = str(
                 len(transaction_data["consensus_history"]["consensus_results"])
             )
@@ -303,12 +305,19 @@ class TransactionsProcessor:
         validator_votes = []
         validator_votes_hash = []
         round_validators = []
-        if "consensus_results" in transaction_data["consensus_history"]:
+        if (
+            transaction_data["consensus_history"] is not None
+            and "consensus_results" in transaction_data["consensus_history"]
+        ):
             round_number = str(
                 len(transaction_data["consensus_history"]["consensus_results"]) - 1
             )
             last_round = transaction_data["consensus_history"]["consensus_results"][-1]
-            if "leader_result" in last_round and len(last_round["leader_result"]) > 1:
+            if (
+                "leader_result" in last_round
+                and last_round["leader_result"] is not None
+                and len(last_round["leader_result"]) > 1
+            ):
                 leader = last_round["leader_result"][1]
                 validator_votes_name.append(leader["vote"].upper())
                 vote_number = int(Vote.from_string(leader["vote"]))
@@ -347,8 +356,8 @@ class TransactionsProcessor:
             "votes_revealed": str(len(validator_votes_name)),
             "appeal_bond": "0",
             "rotations_left": str(
-                transaction_data.get("config_rotation_rounds", 0)
-                - transaction_data.get("rotation_count", 0)
+                (transaction_data.get("config_rotation_rounds") or 0)
+                - (transaction_data.get("rotation_count") or 0)
             ),
             "result": last_round_result,
             "round_validators": round_validators,
@@ -378,7 +387,10 @@ class TransactionsProcessor:
             "processing_block": "0",
             "proposal_block": "0",
         }
-        if "consensus_results" in transaction_data["consensus_history"]:
+        if (
+            transaction_data["consensus_history"] is not None
+            and "consensus_results" in transaction_data["consensus_history"]
+        ):
             transaction_data["activator"] = transaction_data["consensus_history"][
                 "consensus_results"
             ][0]["leader_result"][0]["node_config"]["address"]
@@ -441,6 +453,7 @@ class TransactionsProcessor:
         eq_output = []
         if (
             "consensus_history" in transaction_data
+            and transaction_data["consensus_history"] is not None
             and "consensus_results" in transaction_data["consensus_history"]
         ):
             for consensus_round in transaction_data["consensus_history"][
@@ -547,7 +560,9 @@ class TransactionsProcessor:
         transaction_data["result_name"] = consensus_result.value
         return transaction_data
 
-    def get_transaction_by_hash(self, transaction_hash: str) -> dict | None:
+    def get_transaction_by_hash(
+        self, transaction_hash: str, sim_config: dict | None = None
+    ) -> dict | None:
         transaction = (
             self.session.query(Transactions)
             .filter_by(hash=transaction_hash)
@@ -559,6 +574,28 @@ class TransactionsProcessor:
 
         transaction_data = self._parse_transaction_data(transaction)
 
+        # Handle contract_state based on sim_config
+        include_contract_state = sim_config and sim_config.get(
+            "include_contract_state", False
+        )
+
+        # Remove contract_state from consensus_data by default (unless explicitly requested)
+        if (
+            transaction_data.get("consensus_data")
+            and "leader_receipt" in transaction_data["consensus_data"]
+        ):
+            leader_receipt = transaction_data["consensus_data"]["leader_receipt"]
+
+            if isinstance(leader_receipt, dict):
+                if not include_contract_state and "contract_state" in leader_receipt:
+                    del leader_receipt["contract_state"]
+
+            elif isinstance(leader_receipt, list):
+                for receipt in leader_receipt:
+                    if isinstance(receipt, dict):
+                        if not include_contract_state and "contract_state" in receipt:
+                            del receipt["contract_state"]
+
         # Process for testnet
         transaction_data = self._prepare_basic_transaction_data(transaction_data)
         transaction_data = self._process_result(transaction_data)
@@ -568,6 +605,80 @@ class TransactionsProcessor:
         transaction_data = self._process_queue(transaction_data)
         transaction_data = self._process_round_data(transaction_data)
         return transaction_data
+
+    def get_studio_transaction_by_hash(
+        self, transaction_hash: str, full: bool
+    ) -> dict | None:
+        transaction = (
+            self.session.query(Transactions)
+            .filter_by(hash=transaction_hash)
+            .one_or_none()
+        )
+
+        if transaction is None:
+            return None
+
+        transaction_data = self._parse_transaction_data(transaction)
+
+        # Transform studio fields to testnet fields
+        transaction_data["tx_id"] = transaction_data.pop("hash", None)
+        transaction_data["sender"] = transaction_data.pop("from_address", None)
+        transaction_data["recipient"] = transaction_data.pop("to_address", None)
+        transaction_data["initial_rotations"] = transaction_data.pop(
+            "config_rotation_rounds", None
+        )
+        transaction_data["created_timestamp"] = str(
+            int(
+                datetime.fromisoformat(
+                    transaction_data.pop("created_at", "0")
+                ).timestamp()
+            )
+        )
+        transaction_data["last_vote_timestamp"] = str(
+            transaction_data.pop("last_vote_timestamp", 0)
+        )
+
+        if not full:
+            # Remove validators info and encoded data
+            for key in [
+                "data",
+                "consensus_data",
+                "consensus_history",
+                "contract_snapshot",
+                "leader_timeout_validators",
+                "sim_config",
+            ]:
+                transaction_data.pop(key, None)
+
+        return transaction_data
+
+    def get_activated_transactions_older_than(self, seconds: int) -> list[dict]:
+        """
+        Get ACTIVATED transactions that have been stuck for more than the specified seconds.
+
+        Args:
+            seconds: Number of seconds a transaction must be ACTIVATED to be considered stuck
+
+        Returns:
+            List of transaction data dictionaries for stuck transactions
+        """
+        from datetime import datetime, timedelta
+
+        cutoff_time = datetime.now() - timedelta(seconds=seconds)
+        stuck_transactions = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.status == TransactionStatus.ACTIVATED,
+                Transactions.created_at < cutoff_time,
+            )
+            .order_by(Transactions.created_at)
+            .all()
+        )
+
+        return [
+            self._parse_transaction_data(transaction)
+            for transaction in stuck_transactions
+        ]
 
     def update_transaction_status(
         self,
@@ -629,26 +740,8 @@ class TransactionsProcessor:
         except:
             checksum_address = address
 
-        # Get the actual nonce from Hardhat instead of counting DB transactions
-        # This ensures we're always in sync with the blockchain's nonce tracking
-        try:
-            # Check connection - handle both is_connected and isConnected
-            is_connected = False
-            if hasattr(self.web3, "is_connected"):
-                is_connected = self.web3.is_connected()
-            elif hasattr(self.web3, "isConnected"):  # older web3 version
-                is_connected = self.web3.isConnected()
-
-            if is_connected:
-                # Pass 'pending' to include pending transactions for accuracy
-                return self.web3.eth.get_transaction_count(checksum_address, "pending")
-        except Exception as e:
-            # Log the error and fall back to database count
-            print(
-                f"[TRANSACTIONS_PROCESSOR]: Error getting transaction count from RPC: {e}"
-            )
-
-        # Fallback to counting transactions from database
+        # Always use database count as source of truth
+        # Our transactions are stored in PostgreSQL, not on Hardhat blockchain
         count = (
             self.session.query(Transactions)
             .filter(Transactions.from_address == checksum_address)
@@ -1079,3 +1172,157 @@ class TransactionsProcessor:
         transaction.appeal_validators_timeout = appeal_validators_timeout
         self.session.commit()
         return appeal_validators_timeout
+
+    def get_pending_transaction_count_for_address(self, address: str) -> int:
+        """
+        Get the count of pending transactions for a given recipient address.
+
+        Args:
+            address: The recipient address to count pending transactions for
+
+        Returns:
+            int: The number of pending transactions for the address
+        """
+        try:
+            # Normalize address to checksum format
+            checksum_address = self.web3.to_checksum_address(address)
+        except ValueError:
+            # If address normalization fails, use as-is
+            checksum_address = address
+
+        count = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.to_address == checksum_address,
+                Transactions.status == TransactionStatus.PENDING,
+            )
+            .count()
+        )
+        return count
+
+    def get_transaction_status(self, transaction_hash: str) -> str | None:
+        transaction = (
+            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
+        )
+        if not transaction:
+            return None
+        transaction_status = transaction.status
+        return transaction_status.value
+
+    def get_processing_transaction_for_contract(
+        self, contract_address: str
+    ) -> dict | None:
+        """
+        Check if there's a transaction currently being processed for a contract.
+
+        Args:
+            contract_address: The contract address to check
+
+        Returns:
+            Transaction data if processing, None otherwise
+        """
+        processing_tx = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.to_address == contract_address,
+                Transactions.status.in_(
+                    [
+                        TransactionStatus.ACTIVATED,
+                        TransactionStatus.PROPOSING,
+                        TransactionStatus.COMMITTING,
+                        TransactionStatus.REVEALING,
+                    ]
+                ),
+            )
+            .first()
+        )
+
+        return self._parse_transaction_data(processing_tx) if processing_tx else None
+
+    def get_oldest_pending_for_contract(self, contract_address: str) -> dict | None:
+        """
+        Get the oldest pending transaction for a specific contract.
+
+        Args:
+            contract_address: The contract address
+
+        Returns:
+            Oldest pending transaction data or None
+        """
+        pending_tx = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.to_address == contract_address,
+                Transactions.status == TransactionStatus.PENDING,
+            )
+            .order_by(Transactions.created_at)
+            .first()
+        )
+
+        return self._parse_transaction_data(pending_tx) if pending_tx else None
+
+    def get_contracts_with_pending(self) -> list[str]:
+        """
+        Get all distinct contract addresses that have pending transactions.
+        Also includes a special marker for None addresses (burn transactions).
+
+        Returns:
+            List of contract addresses with pending transactions (may include special marker)
+        """
+        results = (
+            self.session.query(Transactions.to_address)
+            .filter(Transactions.status == TransactionStatus.PENDING)
+            .distinct()
+            .all()
+        )
+
+        # Convert None addresses to a special marker
+        addresses = []
+        for (addr,) in results:
+            if addr is None:
+                addresses.append(
+                    "__zero_address__"
+                )  # Special marker for burn transactions
+            else:
+                addresses.append(addr)
+        return addresses
+
+    def reset_stuck_transactions(self, timeout_seconds: int = 900) -> int:
+        """
+        Reset transactions that have been stuck in processing states.
+
+        Args:
+            timeout_seconds: How long a transaction must be in processing state to be considered stuck
+
+        Returns:
+            Number of transactions reset
+        """
+        from datetime import datetime, timedelta, timezone
+
+        cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)
+
+        stuck_transactions = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.status.in_(
+                    [
+                        TransactionStatus.ACTIVATED,
+                        TransactionStatus.PROPOSING,
+                        TransactionStatus.COMMITTING,
+                        TransactionStatus.REVEALING,
+                    ]
+                ),
+                Transactions.created_at < cutoff_time,
+            )
+            .all()
+        )
+
+        count = 0
+        for tx in stuck_transactions:
+            tx.status = TransactionStatus.PENDING
+            count += 1
+
+        if count > 0:
+            self.session.commit()
+
+        return count

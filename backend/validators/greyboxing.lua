@@ -1,6 +1,44 @@
 local lib = require("lib-genvm")
 local llm = require("lib-llm")
 
+llm.exec_prompt_template_transform = function(args)
+	lib.log{level = "debug", message = "exec_prompt_template_transform", args = args}
+
+	my_data = {
+		EqComparative = { template_id = "eq_comparative", format = "bool" },
+		EqNonComparativeValidator = { template_id = "eq_non_comparative_validator", format = "bool" },
+		EqNonComparativeLeader = { template_id = "eq_non_comparative_leader", format = "text" },
+	}
+
+	my_data = my_data[args.template]
+	local my_template = llm.rs.templates[my_data.template_id]
+
+	args.template = nil
+	local vars = args
+
+	local as_user_text = my_template.user
+	for key, val in pairs(vars) do
+		local val_escaped = string.gsub(val, "%%", "%%%%")
+		as_user_text = string.gsub(as_user_text, "#{" .. key .. "}", val_escaped)
+	end
+
+	local format = my_data.format
+
+	local mapped_prompt = {
+		system_message = my_template.system,
+		user_message = as_user_text,
+		temperature = 0.7,
+		images = {},
+		max_tokens = 1000,
+		use_max_completion_tokens = false,
+	}
+
+	return {
+		prompt = mapped_prompt,
+		format = format
+	}
+end
+
 -- check https://github.com/genlayerlabs/genvm/blob/v0.1.2/executor/modules/implementation/scripting/llm-default.lua
 
 -- Used to look up mock responses for testing
@@ -73,6 +111,58 @@ local function handle_custom_plugin(ctx, args, mapped_prompt)
 	return true, result
 end
 
+local function try_provider(ctx, args, mapped_prompt, provider_id)
+	if not provider_id then
+		return nil
+	end
+
+	local model = lib.get_first_from_table(llm.providers[provider_id].models).key
+
+	local success, result
+	local request
+	if ctx.host_data.custom_plugin_data then
+		success, result = handle_custom_plugin(ctx, args, mapped_prompt)
+	else
+		request = {
+			provider = provider_id,
+			model = model,
+			prompt = mapped_prompt.prompt,
+			format = mapped_prompt.format,
+		}
+
+		success, result = pcall(function ()
+			return llm.rs.exec_prompt_in_provider(
+				ctx,
+				request
+			)
+		end)
+
+		if success then
+			result.consumed_gen = 0
+
+			return result
+		end
+	end
+
+	lib.log{level = "debug", message = "executed with", success = success, type = type(result), res = result}
+	if success and result then
+		return result
+	end
+
+	local as_user_error = lib.rs.as_user_error(result)
+	if as_user_error == nil then
+		error(result)
+	end
+
+	if llm.overloaded_statuses[as_user_error.ctx.status] then
+		lib.log{level = "warning", message = "service is overloaded", error = as_user_error, request = request}
+	else
+		lib.log{level = "warning", message = "provider failed", error = as_user_error, request = request}
+	end
+
+	return nil
+end
+
 local function just_in_backend(ctx, args, mapped_prompt)
 	---@cast mapped_prompt MappedPrompt
 	---@cast args LLMExecPromptPayload | LLMExecPromptTemplatePayload
@@ -96,53 +186,23 @@ local function just_in_backend(ctx, args, mapped_prompt)
 		return result
 	end
 
-	local provider_id = ctx.host_data.studio_llm_id
-	local model = lib.get_first_from_table(llm.providers[provider_id].models).key
-
 	mapped_prompt.prompt.use_max_completion_tokens = false
 
-	for i = 1,3 do
-		local success, result
-		if ctx.host_data.custom_plugin_data then
-			success, result = handle_custom_plugin(ctx, args, mapped_prompt)
-		else
-			local request = {
-				provider = provider_id,
-				model = model,
-				prompt = mapped_prompt.prompt,
-				format = mapped_prompt.format,
-			}
+	-- First: Try primary model (1 attempts)
+	local primary_provider_id = ctx.host_data.studio_llm_id
+	local primary_result = try_provider(ctx, args, mapped_prompt, primary_provider_id)
+	if primary_result then
+		return primary_result
+	end
 
-			success, result = pcall(function ()
-				return llm.rs.exec_prompt_in_provider(
-					ctx,
-					request
-				)
-			end)
+	-- Second: Try fallback model (3 attempts) if available
+	local fallback_provider_id = ctx.host_data.fallback_llm_id
+	if fallback_provider_id then
+		lib.log{level = "warning", message = "switching to fallback model"}
+		local fallback_result = try_provider(ctx, args, mapped_prompt, fallback_provider_id)
+		if fallback_result then
+			return fallback_result
 		end
-
-		lib.log{level = "debug", message = "executed with", success = success, type = type(result), res = result}
-		if success then
-			return result
-		end
-
-		local as_user_error = lib.rs.as_user_error(result)
-		if as_user_error == nil then
-			error(result)
-		end
-
-		if llm.overloaded_statuses[as_user_error.ctx.status] then
-			lib.log{level = "warning", message = "service is overloaded", error = as_user_error, request = request}
-		else
-			lib.log{level = "error", message = "provider failed", error = as_user_error, request = request}
-			as_user_error.fatal = true
-
-			lib.rs.user_error(as_user_error)
-		end
-
-		lib.log{level = "warning", message = "sleeping before retry"}
-
-		lib.rs.sleep_seconds(1.5)
 	end
 
 	lib.rs.user_error({
@@ -155,7 +215,7 @@ local function just_in_backend(ctx, args, mapped_prompt)
 	})
 end
 
-function ExecPrompt(ctx, args)
+function ExecPrompt(ctx, args, remaining_gen)
 	---@cast args LLMExecPromptPayload
 
 	local mapped = llm.exec_prompt_transform(args)
@@ -163,7 +223,7 @@ function ExecPrompt(ctx, args)
 	return just_in_backend(ctx, args, mapped)
 end
 
-function ExecPromptTemplate(ctx, args)
+function ExecPromptTemplate(ctx, args, remaining_gen)
 	---@cast args LLMExecPromptTemplatePayload
 
 	local template = args.template -- workaround by kp2pml30 (Kira) GVM-86

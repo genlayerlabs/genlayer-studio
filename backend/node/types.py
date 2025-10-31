@@ -192,6 +192,8 @@ class Receipt:
     vote: Optional[Vote] = None
     pending_transactions: Iterable[PendingTransaction] = ()
     genvm_result: dict[str, str] | None = None
+    processing_time: Optional[int] = None
+    nondet_disagree: int | None = None
 
     def to_dict(self):
         """Convert Receipt to dict."""
@@ -213,6 +215,8 @@ class Receipt:
                 for pending_transaction in self.pending_transactions
             ],
             "genvm_result": self.genvm_result,
+            "processing_time": self.processing_time,
+            "nondet_disagree": self.nondet_disagree,
         }
 
     @classmethod
@@ -235,6 +239,8 @@ class Receipt:
                     for pending_transaction in input.get("pending_transactions", [])
                 ],
                 genvm_result=input.get("genvm_result"),
+                processing_time=input.get("processing_time"),
+                nondet_disagree=input.get("nondet_disagree"),
             )
         else:
             return None

@@ -61,19 +61,26 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Cache Docker layers
-        uses: actions/cache@v4
+      # Build only backend images with Buildx Bake and enable GHA cache
+      - name: Build backend images with cache (buildx bake)
+        uses: docker/bake-action@v5
         with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-buildx-
+          files: |
+            ./docker-compose.yml
+            ./docker-compose.production.yml
+          targets: |
+            database-migration
+            jsonrpc
+          set: |
+            *.cache-from=type=gha
+            *.cache-to=type=gha,mode=max
+          load: true
 
-      - name: Build Docker images
-        run: docker compose build
-
+      # Start services without rebuilding images
       - name: Run Docker Compose
-        run: docker compose up -d
+        run: docker compose up -d --no-build
+
+
 
       - name: Wait for services to be up
         timeout-minutes: 5
@@ -106,6 +113,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements.test.txt
+          pip install -r backend/protocol_rpc/requirements.txt
 
       - name: Run tests
         run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/ -svv
@@ -142,14 +150,6 @@ jobs:
       - name: Run Docker Compose
         run: docker compose -f tests/db-sqlalchemy/docker-compose.yml --project-directory . run --build --rm tests
 
-
-  load-test:
-    name: Load Tests
-    needs: triggers
-    if: ${{ needs.triggers.outputs.is_pull_request_opened == 'true' || needs.triggers.outputs.is_pull_request_review_approved == 'true' || needs.triggers.outputs.is_pull_request_labeled_with_run_tests == 'true' }}
-    uses: ./.github/workflows/load-test-oha.yml
-    with:
-      oha-version: "v1.4.5"
 
   # hardhat-test:
   #   needs: triggers

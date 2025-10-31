@@ -9,15 +9,33 @@ export const useConsensusStore = defineStore('consensusStore', () => {
   const isLoading = ref<boolean>(true); // Needed for the delay between creating the variable and fetching the initial value
   const maxRotations = ref(Number(import.meta.env.VITE_MAX_ROTATIONS));
 
-  if (!webSocketClient.connected) webSocketClient.connect();
+  type FinalityWindowPayload = {
+    data: {
+      time: number;
+    };
+  };
+
+  // Track initialization state to prevent duplicate loading state changes
+  let hasInitialized = false;
+
+  // Get the value when the frontend or backend is reloaded
+  const handleConnect = () => {
+    void fetchFinalityWindowTime();
+  };
 
   async function fetchFinalityWindowTime() {
     try {
       finalityWindow.value = await rpcClient.getFinalityWindowTime(); // Assume this RPC method exists
+      if (!hasInitialized) {
+        isLoading.value = false;
+        hasInitialized = true;
+      }
     } catch (error) {
       console.error('Failed to fetch initial finality window time: ', error);
-    } finally {
-      isLoading.value = false;
+      if (!hasInitialized) {
+        isLoading.value = false;
+        hasInitialized = true;
+      }
     }
   }
 
@@ -51,6 +69,20 @@ export const useConsensusStore = defineStore('consensusStore', () => {
 
   function setMaxRotations(rotations: number) {
     maxRotations.value = rotations;
+  }
+
+  function disposeListeners() {
+    webSocketClient.off('connect', handleConnect);
+    webSocketClient.off(
+      'finality_window_time_updated',
+      handleFinalityWindowTimeUpdate,
+    );
+  }
+
+  if (import.meta.hot) {
+    import.meta.hot.dispose(() => {
+      disposeListeners();
+    });
   }
 
   return {

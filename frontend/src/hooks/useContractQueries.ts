@@ -77,20 +77,9 @@ export function useContractQueries() {
       schema.value = result;
       return schema.value;
     } catch (error: any) {
-      const errorMessage = extractErrorMessage(error);
-      throw new Error(errorMessage);
+      throw new Error(error.details);
     }
   }
-
-  const extractErrorMessage = (error: any) => {
-    try {
-      const details = JSON.parse(error.details);
-      const message = details.data.error.args[1].stderr;
-      return message;
-    } catch (err) {
-      return error.details;
-    }
-  };
 
   const isDeploying = ref(false);
 
@@ -252,6 +241,54 @@ export function useContractQueries() {
     }
   }
 
+  async function simulateWriteMethod({
+    method,
+    args,
+    consensusMaxRotations,
+  }: {
+    method: string;
+    args: {
+      args: CalldataEncodable[];
+      kwargs: { [key: string]: CalldataEncodable };
+    };
+    leaderOnly: boolean;
+    consensusMaxRotations?: number;
+  }) {
+    try {
+      const result = await genlayerClient.value?.simulateWriteContract({
+        address: address.value as Address,
+        functionName: method,
+        args: args.args,
+      });
+
+      return result;
+    } catch (error) {
+      console.error(error);
+      throw new Error('Error simulating write method');
+    }
+  }
+
+  async function fetchContractCode(contractAddress: string): Promise<string> {
+    try {
+      if (!genlayerClient.value) {
+        throw new Error('Genlayer client not initialized');
+      }
+
+      const code = await genlayerClient.value.getContractCode(
+        contractAddress as Address,
+      );
+
+      if (!code || !code.trim()) {
+        throw new Error('Contract code not found');
+      }
+
+      return code;
+    } catch (error) {
+      console.error('Error fetching contract code:', error);
+      throw error;
+    }
+  }
+
   return {
     contractSchemaQuery,
     contractAbiQuery,
@@ -263,6 +300,8 @@ export function useContractQueries() {
     deployContract,
     callReadMethod,
     callWriteMethod,
+    simulateWriteMethod,
+    fetchContractCode,
 
     mockContractSchema,
     isMock,

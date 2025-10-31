@@ -108,6 +108,9 @@ class Transactions(Base):
     last_vote_timestamp: Mapped[Optional[int]] = mapped_column(BigInteger)
     rotation_count: Mapped[Optional[int]] = mapped_column(Integer)
     leader_timeout_validators: Mapped[Optional[list]] = mapped_column(JSONB)
+    sim_config: Mapped[Optional[dict]] = mapped_column(
+        JSONB, nullable=True, default=None
+    )
 
     # Relationship for triggered transactions
     triggered_by_hash: Mapped[Optional[str]] = mapped_column(
@@ -133,6 +136,12 @@ class Transactions(Base):
     appeal_validators_timeout: Mapped[bool] = mapped_column(Boolean, default=False)
     timestamp_awaiting_finalization: Mapped[Optional[int]] = mapped_column(
         BigInteger, default=None
+    )
+    blocked_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), nullable=True, default=None
+    )
+    worker_id: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True, default=None
     )
 
 

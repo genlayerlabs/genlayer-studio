@@ -3,8 +3,7 @@ import { ref, computed } from 'vue';
 import type { TransactionItem } from '@/types';
 import type { TransactionHash } from 'genlayer-js/types';
 import { TransactionStatus } from 'genlayer-js/types';
-import { useDb, useGenlayer, useWebSocketClient, useRpcClient } from '@/hooks';
-import { useContractsStore } from '@/stores';
+import { useDb, useGenlayer, useWebSocketClient } from '@/hooks';
 
 export const useTransactionsStore = defineStore('transactionsStore', () => {
   const genlayer = useGenlayer();
@@ -13,7 +12,6 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
   const transactions = ref<TransactionItem[]>([]);
   const subscriptions = new Set();
   const db = useDb();
-  const rpcClient = useRpcClient();
 
   // Named handler for WebSocket reconnection
   const handleReconnection = () => {
