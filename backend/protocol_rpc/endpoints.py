@@ -435,9 +435,16 @@ async def get_contract_schema_for_code(
         msg_handler=msg_handler.with_client_session(get_client_session_id()),
         contract_snapshot_factory=None,
     )
-    schema = await node.get_contract_schema(
-        eth_utils.hexadecimal.decode_hex(contract_code_hex)
-    )
+    # Contract code is expected to be a hex string, but it can be a plain UTF-8 string
+    # When hex decoding fails, fall back to UTF-8 encoding
+    try:
+        contract_code = eth_utils.hexadecimal.decode_hex(contract_code_hex)
+    except ValueError:
+        logger.debug(
+            "Contract code is not hex-encoded, treating as UTF-8 string",
+        )
+        contract_code = contract_code_hex.encode("utf-8")
+    schema = await node.get_contract_schema(contract_code)
     return json.loads(schema)
 
 
