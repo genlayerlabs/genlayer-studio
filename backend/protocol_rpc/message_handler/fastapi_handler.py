@@ -85,14 +85,35 @@ class MessageHandler:
         loop.create_task(self.broadcast.publish(channel=channel, message=message))
 
     def _socket_emit(self, log_event: LogEvent) -> None:
-        """Emit a log event via broadcast channels."""
+        """Emit a log event via broadcast channels.
+
+        Preference order:
+        1) transaction_hash channel (most specific)
+        2) account_address channel (per-account logs)
+        3) client_session_id channel (per-session logs)
+        4) GLOBAL channel (fallback only)
+        """
 
         payload = {"event": log_event.name, "data": log_event.to_dict()}
 
         if log_event.transaction_hash:
             self._publish(log_event.transaction_hash, payload)
-        else:
-            self._publish(GLOBAL_CHANNEL, payload)
+            return
+
+        if getattr(log_event, "account_address", None):
+            self._publish(log_event.account_address, payload)
+            return
+
+        if getattr(log_event, "client_session_id", None) or getattr(
+            self, "client_session_id", None
+        ):
+            channel = log_event.client_session_id or self.client_session_id  # type: ignore[attr-defined]
+            if channel:
+                self._publish(channel, payload)
+                return
+
+        # Fallback
+        self._publish(GLOBAL_CHANNEL, payload)
 
     def _log_event(self, log_event: LogEvent):
         """Log an event to the appropriate channels."""
