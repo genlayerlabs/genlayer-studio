@@ -2,7 +2,7 @@ FROM ubuntu:24.04 AS base
 
 ARG TARGETPLATFORM
 ARG TARGETARCH
-ARG DOCKER_GID=999
+
 
 ARG GENVM_TAG=v0.2.4
 
@@ -15,7 +15,7 @@ SHELL ["/bin/bash", "-x", "-c"]
 RUN apt-get update -y \
     && DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install -y --no-install-recommends \
         curl unzip xz-utils ca-certificates python3.12 python3.12-venv python3-dev gcc libssl3 \
-        musl musl-dev docker.io \
+        musl musl-dev \
     && mkdir -p "$HOME/.config/pip/" \
     && printf "[global]\nbreak-system-packages = true\n" >> "$HOME/.config/pip/pip.conf" \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2 \
@@ -33,9 +33,7 @@ RUN groupadd -r backend-group \
     && mkdir -p /home/backend-user/.cache/huggingface \
     && chown -R backend-user:backend-group /home/backend-user \
     && chown -R backend-user:backend-group $path \
-    && mkdir -p /genvm \
-    && (getent group ${DOCKER_GID} || groupadd -g ${DOCKER_GID} docker) \
-    && usermod -aG ${DOCKER_GID} backend-user
+    && mkdir -p /genvm
 
 ENV PYTHONPATH "${PYTHONPATH}:/${path}"
 ENV HUGGINGFACE_HUB_CACHE /home/backend-user/.cache/huggingface
