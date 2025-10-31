@@ -978,10 +978,10 @@ def send_raw_transaction(
             transaction_data = {"calldata": genlayer_transaction.data.calldata}
 
         # Obtain transaction hash from new transaction event
-        if rollup_transaction_details and "tx_id_hex" in rollup_transaction_details:
-            transaction_hash = rollup_transaction_details["tx_id_hex"]
-        else:
-            transaction_hash = None
+        # if rollup_transaction_details and "tx_id_hex" in rollup_transaction_details:
+        #     transaction_hash = rollup_transaction_details["tx_id_hex"]
+        # else:
+        #     transaction_hash = None
 
         # Insert transaction into the database
         transaction_hash = transactions_processor.insert_transaction(
@@ -994,7 +994,7 @@ def send_raw_transaction(
             leader_only,
             genlayer_transaction.max_rotations,
             None,
-            transaction_hash,
+            None,
             genlayer_transaction.num_of_initial_validators,
             sim_config,
         )

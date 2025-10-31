@@ -22,6 +22,10 @@ from backend.protocol_rpc.exceptions import (
 )
 from backend.protocol_rpc.message_handler.fastapi_handler import MessageHandler
 from backend.protocol_rpc.message_handler.types import EventScope, EventType, LogEvent
+from backend.protocol_rpc.message_handler.method_utils import (
+    extract_account_address_from_rpc,
+    extract_transaction_hash_from_rpc,
+)
 
 
 @dataclass(slots=True)
@@ -111,6 +115,15 @@ class RPCEndpointManager:
         definition = registered.definition
         should_log = self._should_log(request.method, definition.log_policy)
 
+        # Attempt to extract context for routing logs
+        account_address = extract_account_address_from_rpc(
+            request.method, request.params
+        )
+        transaction_hash = extract_transaction_hash_from_rpc(
+            request.method, request.params
+        )
+        client_session_id = fastapi_request.headers.get("x-session-id", "") or None
+
         if should_log and definition.log_policy.log_request:
             self._logger.send_message(
                 LogEvent(
@@ -119,6 +132,9 @@ class RPCEndpointManager:
                     scope=EventScope.RPC,
                     message=f"RPC method called: {request.method}",
                     data={"method": request.method, "params": request.params},
+                    account_address=account_address,
+                    client_session_id=client_session_id,
+                    transaction_hash=transaction_hash,
                 )
             )
 
@@ -133,7 +149,14 @@ class RPCEndpointManager:
                         type=EventType.SUCCESS,
                         scope=EventScope.RPC,
                         message=f"RPC method completed: {request.method}",
-                        data={"method": request.method, "params": request.params},
+                        data={
+                            "method": request.method,
+                            "params": request.params,
+                            "result": result,
+                        },
+                        account_address=account_address,
+                        client_session_id=client_session_id,
+                        transaction_hash=transaction_hash,
                     )
                 )
             return response
@@ -152,6 +175,9 @@ class RPCEndpointManager:
                             "error_data": getattr(exc, "data", None),
                             "traceback": stack_trace,
                         },
+                        account_address=account_address,
+                        client_session_id=client_session_id,
+                        transaction_hash=transaction_hash,
                     )
                 )
             return JSONRPCResponse(jsonrpc="2.0", error=exc.to_dict(), id=request.id)
@@ -166,6 +192,9 @@ class RPCEndpointManager:
                         scope=EventScope.RPC,
                         message=f"Unexpected error in {request.method}: {exc}",
                         data={"method": request.method, "traceback": stack_trace},
+                        account_address=account_address,
+                        client_session_id=client_session_id,
+                        transaction_hash=transaction_hash,
                     )
                 )
             internal = InternalError(message=str(exc))
@@ -192,6 +221,11 @@ class RPCEndpointManager:
                         "method": request.method,
                         "params": request.params,
                     },
+                    account_address=extract_account_address_from_rpc(
+                        request.method, request.params
+                    ),
+                    client_session_id=fastapi_request.headers.get("x-session-id", "")
+                    or None,
                 )
             )
             raise
@@ -241,6 +275,13 @@ class RPCEndpointManager:
                             "errors": filtered_errors,
                             "params": request.params,
                         },
+                        account_address=extract_account_address_from_rpc(
+                            request.method, request.params
+                        ),
+                        client_session_id=fastapi_request.headers.get(
+                            "x-session-id", ""
+                        )
+                        or None,
                     )
                 )
                 raise InvalidParams(message=str(filtered_errors))
