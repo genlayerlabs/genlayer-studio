@@ -31,7 +31,6 @@ RUN groupadd -r backend-group \
     && mkdir -p /genvm
 
 ENV PYTHONPATH "${PYTHONPATH}:/${path}"
-ENV FLASK_APP backend/protocol_rpc/server.py
 ENV HUGGINGFACE_HUB_CACHE /home/backend-user/.cache/huggingface
 
 ENV RUST_BACKTRACE=1
