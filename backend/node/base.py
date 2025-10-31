@@ -400,9 +400,8 @@ class Node:
     async def get_contract_schema(self, code: bytes) -> str:
         genvm = self._create_genvm()
         res = await genvm.get_contract_schema(code)
-        await self._execution_finished(res, None)
+        await self._execution_finished(res, None, None)
 
-        # Filter genvm_log based on configured log level
         filtered_genvm_log = _filter_genvm_log_by_level(res.genvm_log)
 
         err_data = {
