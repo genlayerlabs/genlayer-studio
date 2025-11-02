@@ -2,6 +2,7 @@
 # { "Depends": "py-genlayer:latest" }
 
 from genlayer import *
+import json
 
 # gl.api is automatically injected by GenLayer Studio
 # You can use gl.api functions without any setup or API keys!
@@ -41,7 +42,6 @@ class WeatherOracle(gl.Contract):
             temp_celsius = int(weather.get("temperature", 0.0) * 100)
             self.temperature_data[city] = u256(temp_celsius)
             # Store weather data as JSON string
-            import json
             self.weather_data[city] = json.dumps(weather)
     
     @gl.public.write
@@ -94,7 +94,6 @@ class PriceOracle(gl.Contract):
             price_wei = int(price_usd * 1e18)
             self.price_data[symbol] = u256(price_wei)
             # Store price history as JSON string
-            import json
             self.price_history[symbol] = json.dumps(price_info)
     
     @gl.public.write
@@ -141,9 +140,10 @@ class NewsOracle(gl.Contract):
         news = gl.api.get_news(category, limit=5)
         if news:
             # Store news as JSON string
-            import json
             self.news_cache[category] = json.dumps(news)
-            self.last_updated[category] = gl.api.get_current_date()
+            # Fetch and cache current date
+            current_date = gl.api.get_current_date()
+            self.last_updated[category] = current_date
     
     @gl.public.write
     def search_news(self, query: str) -> None:
@@ -155,9 +155,10 @@ class NewsOracle(gl.Contract):
         news = gl.api.get_news_by_query(query, limit=5)
         if news:
             # Store news as JSON string
-            import json
             self.news_cache[f"query_{query}"] = json.dumps(news)
-            self.last_updated[f"query_{query}"] = gl.api.get_current_date()
+            # Fetch and cache current date
+            current_date = gl.api.get_current_date()
+            self.last_updated[f"query_{query}"] = current_date
     
     @gl.public.view
     def get_news(self, key: str) -> str:
@@ -207,6 +208,8 @@ class CombinedOracle(gl.Contract):
     """Example contract using multiple gl.api functions together."""
     
     data: TreeMap[str, str]
+    cached_date: str
+    cached_time: TreeMap[str, str]
     
     def __init__(self):
         pass
@@ -215,14 +218,12 @@ class CombinedOracle(gl.Contract):
     def update_city_weather(self, city: str) -> None:
         """Update weather for a city."""
         weather = gl.api.get_weather(city)
-        import json
         self.data[f"weather_{city}"] = json.dumps(weather)
     
     @gl.public.write
     def update_coin_price(self, symbol: str) -> None:
         """Update price for a coin."""
         price = gl.api.get_price(symbol)
-        import json
         self.data[f"price_{symbol}"] = json.dumps(price)
     
     @gl.public.write
@@ -230,14 +231,12 @@ class CombinedOracle(gl.Contract):
         """Update exchange rate."""
         rate = gl.api.get_exchange_rate(from_curr, to_curr)
         if "error" not in rate:
-            import json
             self.data[f"rate_{from_curr}_{to_curr}"] = json.dumps(rate)
     
     @gl.public.write
     def update_news_category(self, category: str) -> None:
         """Update news for a category."""
         news = gl.api.get_news(category, limit=3)
-        import json
         result = {"articles": news, "count": len(news)}
         self.data[f"news_{category}"] = json.dumps(result)
     
@@ -246,8 +245,18 @@ class CombinedOracle(gl.Contract):
         """Update stock price."""
         stock = gl.api.get_stock_price(symbol)
         if "error" not in stock:
-            import json
             self.data[f"stock_{symbol}"] = json.dumps(stock)
+    
+    @gl.public.write
+    def update_current_date(self) -> None:
+        """Fetch and cache current date using gl.api."""
+        self.cached_date = gl.api.get_current_date()
+    
+    @gl.public.write
+    def update_current_time(self, timezone: str = "UTC") -> None:
+        """Fetch and cache current time for a timezone using gl.api."""
+        time_data = gl.api.get_current_time(timezone)
+        self.cached_time[timezone] = json.dumps(time_data)
     
     @gl.public.view
     def get_data(self, key: str) -> str:
@@ -256,15 +265,13 @@ class CombinedOracle(gl.Contract):
     
     @gl.public.view
     def get_current_date(self) -> str:
-        """Get current date using gl.api."""
-        return gl.api.get_current_date()
+        """Get cached current date."""
+        return self.cached_date
     
     @gl.public.view
     def get_current_time(self, timezone: str = "UTC") -> str:
-        """Get current time for a timezone as JSON string."""
-        time_data = gl.api.get_current_time(timezone)
-        import json
-        return json.dumps(time_data)
+        """Get cached current time for a timezone as JSON string."""
+        return self.cached_time.get(timezone, "{}")
 
 
 # ===== STOCK PRICE ORACLE =====
@@ -285,7 +292,6 @@ class StockOracle(gl.Contract):
         """
         stock_info = gl.api.get_stock_price(symbol)
         if "error" not in stock_info:
-            import json
             self.stock_data[symbol] = json.dumps(stock_info)
     
     @gl.public.view
@@ -299,6 +305,7 @@ class TimeOracle(gl.Contract):
     """Example contract using gl.api for time/date information."""
     
     timezone_data: TreeMap[str, str]
+    cached_date: str
     
     def __init__(self):
         pass
@@ -313,8 +320,12 @@ class TimeOracle(gl.Contract):
         """
         time_data = gl.api.get_current_time(timezone)
         if "error" not in time_data:
-            import json
             self.timezone_data[timezone] = json.dumps(time_data)
+    
+    @gl.public.write
+    def update_current_date(self) -> None:
+        """Fetch and cache current date using gl.api."""
+        self.cached_date = gl.api.get_current_date()
     
     @gl.public.view
     def get_timezone(self, timezone: str) -> str:
@@ -323,6 +334,6 @@ class TimeOracle(gl.Contract):
     
     @gl.public.view
     def get_current_date(self) -> str:
-        """Get current date."""
-        return gl.api.get_current_date()
+        """Get cached current date."""
+        return self.cached_date
 
