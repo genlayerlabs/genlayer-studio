@@ -4,7 +4,14 @@ External API helpers module for GenLayer contracts.
 This module provides helper functions that are automatically injected into
 contract code to enable easy access to external APIs without requiring API keys.
 Contracts can use gl.api.get_weather(), gl.api.get_price(), etc.
+
+Environment Variables:
+    NEWSDATA_API_KEY: API key for NewsData.io service (required for news APIs).
+                      Free tier has rate limits: 200 requests/day.
+                      Get your key at https://newsdata.io/
 """
+import os
+import re
 
 API_HELPERS_CODE = """
 # ===== INJECTED: External API Module =====
@@ -491,6 +498,12 @@ class APIModule:
         except (ValueError, TypeError):
             limit = 5
         
+        # Get API key from environment
+        api_key = os.environ.get("NEWSDATA_API_KEY")
+        if not api_key:
+            # Return empty list if API key is missing
+            return []
+        
         # URL encode category
         try:
             from urllib.parse import quote
@@ -498,7 +511,7 @@ class APIModule:
         except Exception:
             return []
         
-        url = f"https://newsdata.io/api/1/news?apikey=pub_00000000000000000000000000&category={category_encoded}&language=en"
+        url = f"https://newsdata.io/api/1/news?apikey={api_key}&category={category_encoded}&language=en"
         data = APIModule._fetch_json(url)
         
         if "error" in data:
@@ -569,6 +582,12 @@ class APIModule:
         except (ValueError, TypeError):
             limit = 5
         
+        # Get API key from environment
+        api_key = os.environ.get("NEWSDATA_API_KEY")
+        if not api_key:
+            # Return empty list if API key is missing
+            return []
+        
         # URL encode query
         try:
             from urllib.parse import quote
@@ -576,7 +595,7 @@ class APIModule:
         except Exception:
             return []
         
-        url = f"https://newsdata.io/api/1/news?apikey=pub_00000000000000000000000000&q={query_encoded}&language=en"
+        url = f"https://newsdata.io/api/1/news?apikey={api_key}&q={query_encoded}&language=en"
         data = APIModule._fetch_json(url)
         
         if "error" in data:
@@ -591,10 +610,19 @@ class APIModule:
                 if not isinstance(article, dict):
                     continue
                 
+                # Sanitize and limit string fields (same as get_news)
                 title = str(article.get("title", ""))[:500] if article.get("title") else ""
                 description = str(article.get("description", ""))[:1000] if article.get("description") else ""
                 link = str(article.get("link", ""))[:500] if article.get("link") else ""
                 pubDate = str(article.get("pubDate", ""))[:50] if article.get("pubDate") else ""
+                
+                # Remove dangerous characters from each field (same as get_news)
+                dangerous_chars = ["<", ">", "{", "}"]
+                for char in dangerous_chars:
+                    title = title.replace(char, "")
+                    description = description.replace(char, "")
+                    link = link.replace(char, "")
+                    pubDate = pubDate.replace(char, "")
                 
                 sanitized_articles.append({
                     "title": title.replace("\x00", ""),
@@ -968,11 +996,18 @@ def inject_api_module(contract_code: bytes) -> bytes:
     if "gl.api = APIModule()" in code_str:
         return contract_code
     
-    # Inject after "from genlayer import *"
-    code_str = code_str.replace(
-        "from genlayer import *",
-        f"from genlayer import *\n\n{API_HELPERS_CODE}"
-    )
+    # Inject after first occurrence of "from genlayer import *" only
+    # Use regex to find first occurrence and ensure single injection
+    pattern = r"from genlayer import \*"
+    first_match = re.search(pattern, code_str)
+    if first_match:
+        # Insert after the first match only
+        insertion_point = first_match.end()
+        code_str = (
+            code_str[:insertion_point]
+            + f"\n\n{API_HELPERS_CODE}"
+            + code_str[insertion_point:]
+        )
     
     return code_str.encode('utf-8')
 
