@@ -26,6 +26,7 @@ import backend.node.genvm.origin.calldata as calldata
 from dataclasses import dataclass
 
 from backend.node.genvm.config import get_genvm_path
+from backend.node.api_helpers import inject_api_module
 from .origin.result_codes import *
 from .origin.host_fns import Errors
 
@@ -200,6 +201,9 @@ class GenVMHost(IGenVM):
         return result
 
     async def get_contract_schema(self, contract_code: bytes) -> ExecutionResult:
+        # Inject API helpers into contract code for schema generation
+        contract_code = inject_api_module(contract_code)
+        
         NO_ADDR = str(base64.b64encode(b"\x00" * 20), encoding="ascii")
         message = {
             "is_init": False,

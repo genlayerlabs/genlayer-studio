@@ -20,6 +20,7 @@ from backend.protocol_rpc.message_handler.base import MessageHandler
 from backend.node.genvm.origin.result_codes import ResultCode
 
 from .types import Address
+from backend.node.api_helpers import inject_api_module
 
 
 def _parse_chain_id() -> int:
@@ -307,6 +308,9 @@ class Node:
 
         from .genvm.origin import base_host
 
+        # Inject API helpers into contract code
+        code_to_deploy = inject_api_module(code_to_deploy)
+
         def no_factory(*args, **kwargs):
             raise Exception("factory is forbidden for code deployment")
 
@@ -394,6 +398,8 @@ class Node:
         )
 
     async def get_contract_schema(self, code: bytes) -> str:
+        # Inject API helpers into contract code for schema generation
+        code = inject_api_module(code)
         genvm = self._create_genvm()
         res = await genvm.get_contract_schema(code)
         await self._execution_finished(res, None)
