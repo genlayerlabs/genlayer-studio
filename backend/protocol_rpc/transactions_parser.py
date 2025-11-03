@@ -186,9 +186,10 @@ class TransactionParser:
                         # Use eth_utils.keccak if web3 is not available, otherwise use web3.keccak
                         if self.web3 is None:
                             # Fallback to eth_utils.keccak when Hardhat is not available
+                            # Pass raw string via text= so eth_utils handles encoding
                             from eth_utils.crypto import keccak
                             calculated_selector = keccak(
-                                text=function_signature.encode("utf-8")
+                                text=function_signature
                             )[:4].hex()
                         else:
                             calculated_selector = self.web3.keccak(text=function_signature)[

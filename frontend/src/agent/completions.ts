@@ -53,14 +53,14 @@ export function registerAIAgentProviders(monaco: Monaco) {
         if (isTop) {
           add(snippet(
               'contract:header+import',
-              `# v0.1.0\n# { "Depends": "py-genlayer:test" }\n\nfrom genlayer import *\n`,
+              `# v0.1.0\n# { "Depends": "py-genlayer:latest" }\n\nfrom genlayer import *\n`,
               'Insert GenLayer version header and import',
               DOC_FIRST_CONTRACT,
             ));
           // Also provide independent header/import pieces
           add(snippet(
             'contract:header only',
-            `# v0.1.0\n# { "Depends": "py-genlayer:test" }\n`,
+            `# v0.1.0\n# { "Depends": "py-genlayer:latest" }\n`,
             'Insert only the version + Depends header',
             DOC_FIRST_CONTRACT,
           ));
@@ -87,7 +87,7 @@ export function registerAIAgentProviders(monaco: Monaco) {
         // "Your First Contract" example (Hello contract)
         add(snippet(
           'first-contract: hello example',
-          `# v0.1.0\n# { "Depends": "py-genlayer:test" }\n\nfrom genlayer import *\n\nclass Hello(gl.Contract):\n    name: str\n\n    def __init__(self, name: str):\n        self.name = name\n\n    @gl.public.view\n    def run(self) -> str:\n        return f'Hello, {self.name}'\n\n    @gl.public.write\n    def set_name(self, name: str):\n        # debug prints are allowed; included in execution log\n        print(f'debug old name: {self.name}')\n        self.name = name\n`,
+          `# v0.1.0\n# { "Depends": "py-genlayer:latest" }\n\nfrom genlayer import *\n\nclass Hello(gl.Contract):\n    name: str\n\n    def __init__(self, name: str):\n        self.name = name\n\n    @gl.public.view\n    def run(self) -> str:\n        return f'Hello, {self.name}'\n\n    @gl.public.write\n    def set_name(self, name: str):\n        # debug prints are allowed; included in execution log\n        print(f'debug old name: {self.name}')\n        self.name = name\n`,
           'Hello contract from First Contract docs',
           DOC_FIRST_CONTRACT,
         ));

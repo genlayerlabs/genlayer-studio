@@ -57,8 +57,6 @@ function initEditor() {
       /^def$/i.test(line) ||
       line.endsWith('@');
     if (shouldTrigger) {
-      // eslint-disable-next-line no-console
-      console.info('[AI Agent] trigger suggest after', JSON.stringify({ text, line }));
       editorRef.value?.trigger('ai-agent', 'editor.action.triggerSuggest', {});
     }
   });
@@ -66,19 +64,12 @@ function initEditor() {
   // Initialize AI Agent for auto scaffold and determinism linting (safe)
   try {
     if (editorRef.value) {
-      // eslint-disable-next-line no-console
-      console.info('[AI Agent] calling initAIAgent');
       initAIAgent({ editor: editorRef.value, monaco, autoScaffold: false });
-      // eslint-disable-next-line no-console
-      console.info('[AI Agent] initAIAgent called');
       // Register completions & hovers once per mount
-      // eslint-disable-next-line no-console
-      console.info('[AI Agent] register providers');
       registerAIAgentProviders(monaco);
     }
   } catch (e) {
-    // eslint-disable-next-line no-console
-    console.warn('[AI Agent] init failed:', e);
+    // swallow init errors
   }
 }
 
