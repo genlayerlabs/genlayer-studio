@@ -184,7 +184,7 @@ export function registerAIAgentProviders(monaco: Monaco) {
         ));
         add(snippet(
             'Storage: TreeMap[K,V]',
-          `from genlayer import *\nclass ${'${1:MapOps}'}(gl.Contract):\n    balances: TreeMap[Address, u256]\n\n    def __init__(self):\n        pass\n\n    @gl.public.write\n    def set_balance(self, account_hex: str, amount: u256):\n        account = Address(account_hex)\n        self.balances[account] = amount\n\n    @gl.public.view\n    def get_balance(self, account_hex: str) -> u256:\n        account = Address(account_hex)\n        return self.balances.get(account, u256(0))\n`,
+          `from genlayer import *\nclass ${'${1:MapOps}'}(gl.Contract):\n    balances: TreeMap[Address, u256]\n\n    def __init__(self):\n        self.balances = TreeMap[Address, u256]()\n\n    @gl.public.write\n    def set_balance(self, account_hex: str, amount: u256):\n        account = Address(account_hex)\n        self.balances[account] = amount\n\n    @gl.public.view\n    def get_balance(self, account_hex: str) -> u256:\n        account = Address(account_hex)\n        return self.balances.get(account, u256(0))\n`,
           'TreeMap storage pattern with set/get',
             DOC_COLLECTIONS,
         ));
@@ -231,7 +231,7 @@ export function registerAIAgentProviders(monaco: Monaco) {
         }
         if (/^DynArray\b/.test(trimmed) || /^TreeMap\b/.test(trimmed)) {
           add(snippet('Storage: DynArray[T]', `from genlayer import *\nclass ${'${1:ArrayOps}'}(gl.Contract):\n    items: DynArray[u256]\n\n    def __init__(self):\n        self.items = DynArray[u256]()\n`, 'DynArray storage pattern', DOC_COLLECTIONS));
-          add(snippet('Storage: TreeMap[K,V]', `from genlayer import *\nclass ${'${1:MapOps}'}(gl.Contract):\n    balances: TreeMap[Address, u256]\n\n    def __init__(self):\n        pass\n`, 'TreeMap storage pattern', DOC_COLLECTIONS));
+          add(snippet('Storage: TreeMap[K,V]', `from genlayer import *\nclass ${'${1:MapOps}'}(gl.Contract):\n    balances: TreeMap[Address, u256]\n\n    def __init__(self):\n        self.balances = TreeMap[Address, u256]()\n`, 'TreeMap storage pattern', DOC_COLLECTIONS));
         }
         if (/^class\s*$/i.test(trimmed)) {
           add(snippet('contract:class', `class ${'${1:MyContract}'}(gl.Contract):\n    ${'${2:value}'}: u256\n\n    def __init__(self, ${'${3:initial}'}: u256):\n        self.${'${2:value}'} = ${'${3:initial}'}\n`, 'Create contract class skeleton', DOC_FIRST_CONTRACT));
