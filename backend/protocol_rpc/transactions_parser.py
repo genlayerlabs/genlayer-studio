@@ -183,34 +183,58 @@ class TransactionParser:
                     if abi_entry["type"] == "function":
                         # Calculate function selector from ABI
                         function_signature = f"{abi_entry['name']}({','.join([input['type'] for input in abi_entry['inputs']])})"
-                        calculated_selector = self.web3.keccak(text=function_signature)[
-                            :4
-                        ].hex()
+                        # Use eth_utils.keccak if web3 is not available, otherwise use web3.keccak
+                        if self.web3 is None:
+                            # Fallback to eth_utils.keccak when Hardhat is not available
+                            from eth_utils.crypto import keccak
+                            calculated_selector = keccak(
+                                text=function_signature.encode("utf-8")
+                            )[:4].hex()
+                        else:
+                            calculated_selector = self.web3.keccak(text=function_signature)[
+                                :4
+                            ].hex()
 
                         if calculated_selector == function_selector:
                             # Decode parameters using the input types from ABI
                             input_types = [
                                 input["type"] for input in abi_entry["inputs"]
                             ]
-                            decoded_params = self.web3.codec.decode(
-                                input_types, bytes.fromhex(parameters)
-                            )
-                            # Create a dictionary mapping parameter names to values
-                            decoded_data = {
-                                "function": abi_entry["name"],
-                                "params": dict(
-                                    zip(
-                                        [
-                                            input["name"]
-                                            for input in abi_entry["inputs"]
-                                        ],
-                                        decoded_params,
-                                    )
-                                ),
-                            }
+                            if self.web3 is None:
+                                # Skip parameter decoding if web3 is not available
+                                # This is acceptable for simulator mode where we don't need full ABI decoding
+                                # Create empty params dict with parameter names as keys
+                                param_names = [input["name"] for input in abi_entry["inputs"]]
+                                decoded_data = {
+                                    "function": abi_entry["name"],
+                                    "params": {name: None for name in param_names},
+                                }
+                            else:
+                                decoded_params = self.web3.codec.decode(
+                                    input_types, bytes.fromhex(parameters)
+                                )
+                                # Create a dictionary mapping parameter names to values
+                                decoded_data = {
+                                    "function": abi_entry["name"],
+                                    "params": dict(
+                                        zip(
+                                            [
+                                                input["name"]
+                                                for input in abi_entry["inputs"]
+                                            ],
+                                            decoded_params,
+                                        )
+                                    ),
+                                }
                             # Convert the decoded data into proper dataclasses
                             if decoded_data["function"] == "addTransaction":
                                 params = decoded_data["params"]
+                                # If web3 is None, we can't decode parameters, so skip ABI-based decoding
+                                # and rely on RLP decoding which happens elsewhere
+                                if self.web3 is None or any(v is None for v in params.values()):
+                                    # Skip ABI-based decoding, will use raw RLP data instead
+                                    decoded_data = None
+                                    break
                                 decoded_data = DecodedRollupTransactionData(
                                     function_name=decoded_data["function"],
                                     args=DecodedRollupTransactionDataArgs(
@@ -227,6 +251,10 @@ class TransactionParser:
                                 )
                             elif decoded_data["function"] == "submitAppeal":
                                 params = decoded_data["params"]
+                                # If web3 is None, we can't decode parameters
+                                if self.web3 is None or params.get("_txId") is None:
+                                    decoded_data = None
+                                    break
                                 decoded_data = DecodedsubmitAppealDataArgs(
                                     tx_id=params["_txId"],
                                 )
@@ -381,8 +409,16 @@ class TransactionParser:
 
     def _get_contract_abi(self) -> list:
         # Get contract ABI from consensus service
-        contract_data = self.consensus_service.load_contract("ConsensusMain")
-        return contract_data["abi"] if contract_data else []
+        # Return empty list if web3 is not available (Hardhat not running)
+        if self.web3 is None:
+            return []
+        try:
+            contract_data = self.consensus_service.load_contract("ConsensusMain")
+            return contract_data["abi"] if contract_data else []
+        except Exception:
+            # If contract cannot be loaded, return empty list
+            # This allows transaction decoding to proceed without ABI-based decoding
+            return []
 
 
 class DeploymentContractTransactionPayload(rlp.Serializable):
