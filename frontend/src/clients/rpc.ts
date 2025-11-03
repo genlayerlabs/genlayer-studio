@@ -31,6 +31,13 @@ export class RpcClient implements IRpcClient {
       params,
       id: requestId,
     };
+    // Check if URL is configured
+    if (!JSON_RPC_SERVER_URL) {
+      throw new Error(
+        'VITE_JSON_RPC_SERVER_URL is not configured. Please check your .env file.',
+      );
+    }
+
     const response = await fetch(JSON_RPC_SERVER_URL, {
       method: 'POST',
       headers: {
@@ -39,6 +46,28 @@ export class RpcClient implements IRpcClient {
       },
       body: JSON.stringify(data),
     });
-    return response.json() as Promise<JsonRPCResponse<T>>;
+
+    // Check response status
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => response.statusText);
+      throw new Error(
+        `RPC request failed: ${response.status} ${errorText || response.statusText}`,
+      );
+    }
+
+    // Get response text first to check if it's empty
+    const responseText = await response.text();
+    if (!responseText || !responseText.trim()) {
+      throw new Error('Empty response from RPC server');
+    }
+
+    // Parse JSON with error handling
+    try {
+      return JSON.parse(responseText) as JsonRPCResponse<T>;
+    } catch (parseError) {
+      throw new Error(
+        `Failed to parse JSON response: ${parseError instanceof Error ? parseError.message : String(parseError)}. Response: ${responseText.substring(0, 200)}`,
+      );
+    }
   }
 }
