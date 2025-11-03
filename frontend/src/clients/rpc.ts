@@ -1,4 +1,5 @@
-const JSON_RPC_SERVER_URL = import.meta.env.VITE_JSON_RPC_SERVER_URL;
+const JSON_RPC_SERVER_URL =
+  import.meta.env.VITE_JSON_RPC_SERVER_URL || 'http://localhost:4000/api';
 import type { JsonRPCRequest, JsonRPCResponse } from '@/types';
 import { v4 as uuidv4 } from 'uuid';
 import { useWebSocketClient } from '@/hooks';
@@ -31,13 +32,6 @@ export class RpcClient implements IRpcClient {
       params,
       id: requestId,
     };
-    // Check if URL is configured
-    if (!JSON_RPC_SERVER_URL) {
-      throw new Error(
-        'VITE_JSON_RPC_SERVER_URL is not configured. Please check your .env file.',
-      );
-    }
-
     const response = await fetch(JSON_RPC_SERVER_URL, {
       method: 'POST',
       headers: {
