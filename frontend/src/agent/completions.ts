@@ -24,8 +24,9 @@ function snippet(label: string, insertText: string, detail: string, documentatio
 export function registerAIAgentProviders(monaco: Monaco) {
   if (!monaco?.languages) return { dispose() {} };
   // Prevent double registration if component remounts
-  if ((monaco as any).__glAgentRegistered) return { dispose() {} };
-  (monaco as any).__glAgentRegistered = true;
+  const key = '__glAgentRegistered';
+  if ((monaco as any)[key]) return { dispose() {} };
+  (monaco as any)[key] = true;
 
   const disposables: any[] = [];
 
@@ -283,6 +284,11 @@ export function registerAIAgentProviders(monaco: Monaco) {
   return {
     dispose() {
       disposables.forEach((d) => d?.dispose?.());
+      try {
+        delete (monaco as any)[key];
+      } catch (_) {
+        (monaco as any)[key] = false;
+      }
     },
   };
 }
