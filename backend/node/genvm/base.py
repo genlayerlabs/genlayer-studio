@@ -534,6 +534,7 @@ async def _run_genvm_host(
                     return result
 
                 except Exception as e:
+                    print(f"Error: {e}")
                     last_error = str(e)
 
                     # Check if llm failed, immediately return timeout error
