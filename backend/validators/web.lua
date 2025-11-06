@@ -1,119 +1,52 @@
 local lib = require('lib-genvm')
 local web = require('lib-web')
 
-local function render_screenshot(ctx)
-    local success, result = pcall(function()
-        local result = lib.rs.request(ctx, {
-            method = 'GET',
-            url = web.rs.config.webdriver_host .. '/session/' .. ctx.session .. '/screenshot',
-            headers = {},
-            error_on_status = true,
-            json = true,
-        })
-
-        return {
-            image = lib.rs.base64_decode(result.body.value)
-        }
-    end)
-
-    if not success and ctx.session ~= nil then
-        -- Session might have expired, try to get a new one
-        ctx.session = web.rs.get_webdriver_session(ctx)
-        return render_screenshot(ctx)
-    end
-
-    return result
-end
-
-local function is_error_page(text)
-    -- Check for common error indicators
-    if text:match("timeout occurred") or
-       text:match("Error code 524") or
-       text:match("The origin web server timed out") then
-        return true
-    end
-    return false
+local function status_is_good(status)
+	return status >= 200 and status < 300 or status == 304
 end
 
 function Render(ctx, payload)
     ---@cast payload WebRenderPayload
     web.check_url(payload.url)
 
-    if ctx.session == nil then
-        ctx.session = web.rs.get_webdriver_session(ctx)
+    local url_params = '?url=' .. lib.rs.url_encode(payload.url) ..
+        '&mode=' .. payload.mode ..
+        '&waitAfterLoaded=' .. tostring(payload.wait_after_loaded or 0)
+
+    local result = lib.rs.request(ctx, {
+        method = 'GET',
+        url = web.rs.config.webdriver_host .. '/render' .. url_params,
+        headers = {},
+        error_on_status = true,
+    })
+
+    lib.log({
+        result = result,
+    })
+
+    local status = tonumber(result.headers['resulting-status'])
+
+    if not status_is_good(status) then
+        lib.rs.user_error({
+            causes = {"WEBPAGE_LOAD_FAILED"},
+            fatal = false,
+            ctx = {
+                url = payload.url,
+                status = status,
+                body = result.body,
+            }
+        })
     end
 
-    local function try_request()
-        local url_request = lib.rs.request(ctx, {
-            method = 'POST',
-            url = web.rs.config.webdriver_host .. '/session/' .. ctx.session .. '/url',
-            headers = {
-                ['Content-Type'] = 'application/json; charset=utf-8',
-            },
-            body = lib.rs.json_stringify({
-                url = payload.url
-            }),
-        })
-
-        if url_request.status ~= 200 then
-            lib.rs.user_error({
-                causes = {"WEBPAGE_LOAD_FAILED"},
-                fatal = false,
-                ctx = {
-                    url = payload.url,
-                    status = url_request.status,
-                    body = url_request.body,
-                }
-            })
-        end
-
-        if payload.wait_after_loaded > 0 then
-            lib.rs.sleep_seconds(payload.wait_after_loaded)
-        end
-
-        if payload.mode == "screenshot" then
-            return render_screenshot(ctx)
-        end
-
-        local script
-        if payload.mode == "html" then
-            script = '{ "script": "return document.body.innerHTML.trim()", "args": [] }'
-        else
-            script = '{ "script": "return document.body.innerText.replace(/[\\\\s\\\\n]+/g, \\" \\").trim()", "args": [] }'
-        end
-
-        local result = lib.rs.request(ctx, {
-            method = 'POST',
-            url = web.rs.config.webdriver_host .. '/session/' .. ctx.session .. '/execute/sync',
-            headers = {
-                ['Content-Type'] = 'application/json; charset=utf-8',
-            },
-            body = script,
-            json = true,
-            error_on_status = true,
-        })
-
-        local text_result = {
-            text = result.body.value,
+    if payload.mode == "screenshot" then
+        return {
+            image = result.body
         }
-
-        -- Check if we got an error page
-        if is_error_page(text_result.text) then
-            error("Timeout or error page detected: " .. text_result.text)
-        end
-
-        return text_result
+    else
+        return {
+            text = result.body,
+        }
     end
-
-    local success, result = pcall(try_request)
-
-    if not success then
-        -- Session might have expired, try to get a new one
-        ctx.session = web.rs.get_webdriver_session(ctx)
-        return try_request()
-    end
-
-    return result
 end
 
 function Request(ctx, payload)
@@ -137,33 +70,17 @@ function Request(ctx, payload)
         }
     end
 
-    local function try_request()
-        local success, result = pcall(lib.rs.request, ctx, {
-            method = payload.method,
-            url = payload.url,
-            headers = payload.headers,
-            body = payload.body,
-            sign = payload.sign,
-        })
+    local success, result = pcall(lib.rs.request, ctx, {
+        method = payload.method,
+        url = payload.url,
+        headers = payload.headers,
+        body = payload.body,
+        sign = payload.sign,
+    })
 
-        if success then
-            -- Check if we got an error page
-            if type(result.body) == "string" and is_error_page(result.body) then
-                error("Timeout or error page detected: " .. result.body)
-            end
-            return result
-        end
-
-        lib.reraise_with_fatality(result, false)
+    if success then
+        return result
     end
 
-    local success, result = pcall(try_request)
-
-    if not success and ctx.session ~= nil then
-        -- Session might have expired, try to get a new one
-        ctx.session = web.rs.get_webdriver_session(ctx)
-        return try_request()
-    end
-
-    return result
+    lib.reraise_with_fatality(result, false)
 end

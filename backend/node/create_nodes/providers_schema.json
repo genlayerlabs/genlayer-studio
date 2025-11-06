@@ -454,8 +454,7 @@
                 },
                 "default": []
               }
-            },
-            "required": ["max_tokens"]
+            }
           }
         }
       }
