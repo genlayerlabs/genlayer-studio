@@ -22,11 +22,19 @@ class NativeWebSocketClient {
 
   constructor(url: string) {
     // Convert HTTP URL to WebSocket URL
-    this.url = url.replace('http://', 'ws://').replace('https://', 'wss://');
-    // Append /ws endpoint for FastAPI
-    if (!this.url.endsWith('/ws')) {
-      this.url = this.url.replace(/\/$/, '') + '/ws';
+    let normalized = url.replace('http://', 'ws://').replace('https://', 'wss://');
+    // If caller targets Socket.IO-compatible path, use it as-is
+    // Otherwise, ensure FastAPI native /ws endpoint
+    const isSocketIo = /\/socket\.io\/?$/.test(normalized);
+    if (!isSocketIo) {
+      if (!normalized.endsWith('/ws')) {
+        normalized = normalized.replace(/\/$/, '') + '/ws';
+      }
+    } else {
+      // Remove trailing slash for consistency
+      normalized = normalized.replace(/\/$/, '');
     }
+    this.url = normalized;
     this.connect();
   }
 
