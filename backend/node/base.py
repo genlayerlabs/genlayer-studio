@@ -367,7 +367,10 @@ class Node:
         )
 
     async def _execution_finished(
-        self, res: genvmbase.ExecutionResult, transaction_hash_str: str | None
+        self,
+        res: genvmbase.ExecutionResult,
+        transaction_hash_str: str | None,
+        from_address: str | None,
     ):
         msg_handler = self.msg_handler
         if msg_handler is None:
@@ -390,15 +393,16 @@ class Node:
                     "genvm_log": filtered_genvm_log,
                 },
                 transaction_hash=transaction_hash_str,
+                account_address=from_address,
+                client_session_id=getattr(msg_handler, "client_session_id", None),
             )
         )
 
     async def get_contract_schema(self, code: bytes) -> str:
         genvm = self._create_genvm()
         res = await genvm.get_contract_schema(code)
-        await self._execution_finished(res, None)
+        await self._execution_finished(res, None, None)
 
-        # Filter genvm_log based on configured log level
         filtered_genvm_log = _filter_genvm_log_by_level(res.genvm_log)
 
         err_data = {
@@ -471,7 +475,7 @@ class Node:
             host_data=host_data,
         )
 
-        await self._execution_finished(res, transaction_hash)
+        await self._execution_finished(res, transaction_hash, from_address)
 
         result_exec_code = (
             ExecutionResultStatus.SUCCESS

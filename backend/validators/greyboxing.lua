@@ -210,7 +210,10 @@ local function just_in_backend(ctx, args, mapped_prompt)
 	-- Second: Try fallback model (3 attempts) if available
 	local fallback_provider_id = ctx.host_data.fallback_llm_id
 	if fallback_provider_id then
-		lib.log{level = "warning", message = "switching to fallback model"}
+		local primary_model = lib.get_first_from_table(llm.providers[primary_provider_id].models).key
+		local fallback_model = lib.get_first_from_table(llm.providers[fallback_provider_id].models).key
+
+		lib.log{level = "warning", message = "switching from primary model " .. primary_model .. " to fallback model " .. fallback_model}
 		local fallback_result = try_provider(ctx, args, mapped_prompt, fallback_provider_id)
 		if fallback_result then
 			return fallback_result
