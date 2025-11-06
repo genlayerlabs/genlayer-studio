@@ -2,13 +2,7 @@
   "provider": "anthropic",
   "plugin": "anthropic",
   "model": "claude-3-5-haiku-20241022",
-  "config": {
-    "temperature": 0.75,
-    "max_tokens": 500,
-    "top_k": 40,
-    "top_p": 0.9,
-    "timeout": 10
-  },
+  "config": {},
   "plugin_config": {
     "api_key_env_var": "ANTHROPIC_API_KEY",
     "api_url": "https://api.anthropic.com"
