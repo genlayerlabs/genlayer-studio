@@ -394,6 +394,7 @@ class Node:
                 },
                 transaction_hash=transaction_hash_str,
                 account_address=from_address,
+                client_session_id=getattr(msg_handler, "client_session_id", None),
             )
         )
 

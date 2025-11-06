@@ -3,6 +3,7 @@ import json
 import copy
 from functools import wraps
 import traceback
+from contextvars import ContextVar
 
 from flask import request
 from eth_utils.address import to_checksum_address
@@ -11,17 +12,23 @@ from backend.protocol_rpc.exceptions import JSONRPCError
 from loguru import logger
 import sys
 
-from backend.protocol_rpc.message_handler.types import LogEvent
 from flask_socketio import SocketIO
 
 from backend.protocol_rpc.configuration import GlobalConfiguration
 from backend.protocol_rpc.message_handler.types import EventScope, EventType, LogEvent
+
+
+CLIENT_SESSION_ID_CTX: ContextVar[str] = ContextVar("client_session_id", default="")
 
 MAX_LOG_MESSAGE_LENGTH = 3000
 
 
 # TODO: this should probably live in another module
 def get_client_session_id() -> str:
+    session_id = CLIENT_SESSION_ID_CTX.get()
+    if session_id:
+        return session_id
+
     try:
         return request.headers.get("x-session-id", "")
     except RuntimeError:  # when this is called outside of a request

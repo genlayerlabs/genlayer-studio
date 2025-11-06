@@ -924,11 +924,17 @@ class TransactionsProcessor:
         current_consensus_results = {
             "consensus_round": consensus_round.value,
             "leader_result": (
-                [receipt.to_dict() for receipt in leader_result]
+                [
+                    receipt.to_dict(strip_contract_state=True)
+                    for receipt in leader_result
+                ]
                 if leader_result
                 else None
             ),
-            "validator_results": [receipt.to_dict() for receipt in validator_results],
+            "validator_results": [
+                receipt.to_dict(strip_contract_state=True)
+                for receipt in validator_results
+            ],
             "status_changes": status_changes_to_use,
         }
 

@@ -999,6 +999,39 @@ def send_raw_transaction(
             sim_config,
         )
 
+        # Post-insert verification: ensure the transaction is visible immediately
+        try:
+            verified_status = transactions_processor.get_transaction_status(
+                transaction_hash
+            )
+            if verified_status is None:
+                logger.error(
+                    "Post-insert verification failed: transaction not found after commit",
+                    extra={"hash": transaction_hash},
+                )
+                msg_handler.send_message(
+                    log_event=LogEvent(
+                        "transaction_post_insert_verification_failed",
+                        EventType.ERROR,
+                        EventScope.RPC,
+                        "Inserted transaction not found immediately after commit",
+                        {"hash": transaction_hash},
+                    ),
+                    log_to_terminal=False,
+                )
+        except Exception as e:
+            logger.exception("Post-insert verification threw an exception")
+            msg_handler.send_message(
+                log_event=LogEvent(
+                    "transaction_post_insert_verification_exception",
+                    EventType.ERROR,
+                    EventScope.RPC,
+                    f"Exception during post-insert verification: {str(e)}",
+                    {"hash": transaction_hash},
+                ),
+                log_to_terminal=False,
+            )
+
         return transaction_hash
 
 
