@@ -53,9 +53,12 @@ function Request(ctx, payload)
     ---@cast payload WebRequestPayload
 
     web.check_url(payload.url)
+    
+    -- Return mock response if it exists and matches
     if ctx.host_data.mock_web_response then
         for url, mock_response_data in pairs(ctx.host_data.mock_web_response.nondet_web_request) do
             if url == payload.url and payload.method == mock_response_data.method then
+                lib.log{level = "debug", message = "executed with mock web response", url = url}
                 return {
                     body = mock_response_data.body,
                     status = mock_response_data.status,
@@ -63,11 +66,8 @@ function Request(ctx, payload)
                 }
             end
         end
-        return {
-            body = "no mock response found",
-            status = 404,
-            headers = {},
-        }
+        -- Only log if no match was found, then fall through to real request
+        lib.log{level = "debug", message = "no mock web response match found, falling through to real request"}
     end
 
     local success, result = pcall(lib.rs.request, ctx, {
