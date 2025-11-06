@@ -27,9 +27,12 @@ export function useGenlayer(): UseGenlayerReturn {
         ? createAccount(accountsStore.selectedAccount?.privateKey)
         : accountsStore.selectedAccount?.address;
 
+    const endpoint =
+      import.meta.env.VITE_JSON_RPC_SERVER_URL || 'http://localhost:4000/api';
+
     client.value = createClient({
       chain: localnet,
-      endpoint: import.meta.env.VITE_JSON_RPC_SERVER_URL,
+      endpoint,
       account: clientAccount,
     });
   }

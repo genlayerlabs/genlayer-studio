@@ -9,5 +9,6 @@
   "sonarlint.connectedMode.project": {
     "connectionId": "YeagerAI",
     "projectKey": "yeagerai_genlayer-simulator"
-  }
+  },
+  "cursorpyright.analysis.typeCheckingMode": "standard"
 }

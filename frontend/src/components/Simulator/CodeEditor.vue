@@ -1,9 +1,14 @@
 <script setup lang="ts">
 import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
+// Ensure suggest/snippet features and commands are registered in ESM build
+import 'monaco-editor/esm/vs/editor/contrib/suggest/browser/suggestController';
+import 'monaco-editor/esm/vs/editor/contrib/snippet/browser/snippetController2';
 import { ref, shallowRef, watch, computed, onMounted } from 'vue';
 import { useContractsStore, useUIStore } from '@/stores';
 import { type ContractFile } from '@/types';
 import pythonSyntax from '@/constants/pythonSyntax';
+import { initAIAgent } from '@/agent/auto';
+import { registerAIAgentProviders } from '@/agent';
 
 const uiStore = useUIStore();
 const contractStore = useContractsStore();
@@ -27,6 +32,8 @@ function initEditor() {
     automaticLayout: true,
     formatOnPaste: true,
     formatOnType: true,
+    quickSuggestions: { other: true, comments: true, strings: true },
+    suggestOnTriggerCharacters: true,
   });
   editorRef.value.onDidChangeModelContent(() => {
     contractStore.updateContractFile(props.contract.id!, {
@@ -34,6 +41,36 @@ function initEditor() {
       updatedAt: new Date().toISOString(),
     });
   });
+
+  // Trigger suggestions when typing '#'
+  editorRef.value.onDidType?.((text) => {
+    const model = editorRef.value?.getModel();
+    const pos = editorRef.value?.getPosition();
+    if (!model || !pos) return;
+    const line = model.getLineContent(pos.lineNumber).slice(0, pos.column - 1).trim();
+    const shouldTrigger =
+      text === '#' ||
+      (text === '.' && /@gl$/.test(line)) ||
+      /^from$/i.test(line) ||
+      /^import$/i.test(line) ||
+      /^class$/i.test(line) ||
+      /^def$/i.test(line) ||
+      line.endsWith('@');
+    if (shouldTrigger) {
+      editorRef.value?.trigger('ai-agent', 'editor.action.triggerSuggest', {});
+    }
+  });
+
+  // Initialize AI Agent for auto scaffold and determinism linting (safe)
+  try {
+    if (editorRef.value) {
+      initAIAgent({ editor: editorRef.value, monaco, autoScaffold: false });
+      // Register completions & hovers once per mount
+      registerAIAgentProviders(monaco);
+    }
+  } catch (e) {
+    // swallow init errors
+  }
 }
 
 onMounted(() => {
