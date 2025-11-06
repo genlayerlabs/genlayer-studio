@@ -120,7 +120,10 @@ class LLMModule:
 
     def __del__(self):
         if not self._terminated:
-            raise Exception("service was not terminated")
+            logger.error(
+                "LLMModule was garbage collected without being terminated properly. "
+                "This may indicate a reference leak or improper cleanup."
+            )
 
     async def stop(self, *, locked: bool = False) -> None:
         if not locked:

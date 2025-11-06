@@ -1,27 +1,37 @@
 services:
   traefik:
+    profiles: ["studio"]
     image: traefik:v3.3
     command:
       # Core configuration
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
+      - "--providers.file.filename=/etc/traefik/tls.yml"
+      - "--providers.file.watch=true"
 
       # Entrypoints for local development
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"  # Needed for frontend/hardhat labels
-      - "--entrypoints.api.address=:4000"       # JSON-RPC API
-
       # API Dashboard (for local dev monitoring)
       - "--api.dashboard=true"
-      - "--api.insecure=true"  # OK for local dev
+      # Extended timeouts for large contract state loading (20 minutes to match GenVM timeout)
+      - "--entryPoints.web.transport.respondingTimeouts.readTimeout=1200s"
+      - "--entryPoints.web.transport.respondingTimeouts.writeTimeout=1200s"
+      - "--entryPoints.web.transport.respondingTimeouts.idleTimeout=1200s"
+      - "--entryPoints.websecure.transport.respondingTimeouts.readTimeout=1200s"
+      - "--entryPoints.websecure.transport.respondingTimeouts.writeTimeout=1200s"
+      - "--entryPoints.websecure.transport.respondingTimeouts.idleTimeout=1200s"
+      # Server transport with extended forwarding timeouts
+      - "--serversTransport.forwardingTimeouts.responseHeaderTimeout=1200s"
+      - "--serversTransport.forwardingTimeouts.idleConnTimeout=1200s"
     ports:
       - "80:80"
       - "443:443"
-      - "4000:4000"  # API endpoint through Traefik
       - "8081:8080"  # Traefik dashboard (8081 to avoid conflict with frontend on 8080)
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # Removed traefik.yaml - using CLI config only
+      - /opt/genlayer-studio/nginx/ssl/:/etc/ssl/traefik:ro
+      - ./traefik/tls.yml:/etc/traefik/tls.yml:ro
     logging:
       driver: "json-file"
       options:
@@ -55,8 +65,11 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    # For local dev, frontend is accessed directly on port 8080
-    # Remove Traefik labels since we're exposing the port directly
+    labels:
+      traefik.enable: true
+      traefik.http.routers.frontend.rule: Host(`${SERVER_NAME}`)
+      traefik.http.routers.frontend.entrypoints: websecure
+      traefik.http.routers.frontend.tls: true
 
   jsonrpc:
     build:
@@ -77,9 +90,10 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - GENVMROOT=/genvm
       - GENVM_TAG=v0.2.4
-    # No direct ports - Traefik handles load balancing
+    ports:
+      - "${RPCPORT}:${RPCPORT}"
     expose:
-      - "${RPCPORT}"  # Only expose internally for Traefik
+      - "${RPCPORT}"
     volumes:
       - ./.env:/app/.env
       - ./backend:/app/backend
@@ -88,6 +102,7 @@ services:
     depends_on:
       traefik:
         condition: service_started
+        required: false
       database-migration:
         condition: service_completed_successfully
       webdriver:
@@ -114,6 +129,10 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    mem_limit:  ${COMPOSE_RPC_MEM_LIMIT:-8g}
+    mem_reservation: ${COMPOSE_RPC_MEM_RESERVATION:-2g}
+    memswap_limit: ${COMPOSE_RPC_MEM_SWAP_LIMIT:-8g}
+    oom_kill_disable: false
     deploy:
       replicas: ${JSONRPC_REPLICAS:-3}
       resources:
@@ -124,21 +143,21 @@ services:
           cpus: ${COMPOSE_RPC_CPU_RESERVATION:-1}
           memory: ${COMPOSE_RPC_MEM_RESERVATION:-2g}
     labels:
-      # Enable Traefik for this service
-      - "traefik.enable=true"
-      # HTTP router for API - expose on port 4000
-      - "traefik.http.routers.jsonrpc.rule=(PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/health`) || PathPrefix(`/ws`))"
-      - "traefik.http.routers.jsonrpc.entrypoints=api"
-      # Service configuration with load balancing
-      - "traefik.http.services.jsonrpc.loadbalancer.server.port=${RPCPORT}"
-      - "traefik.http.services.jsonrpc.loadbalancer.sticky.cookie=true"
-      - "traefik.http.services.jsonrpc.loadbalancer.sticky.cookie.name=jsonrpc"
-      # Health check for better load balancing
-      - "traefik.http.services.jsonrpc.loadbalancer.healthcheck.path=/health"
-      - "traefik.http.services.jsonrpc.loadbalancer.healthcheck.interval=10s"
+      traefik.enable: true
+      # Define service with port
+      traefik.http.services.jsonrpc.loadbalancer.server.port: ${RPCPORT}
+      # HTTPS router for main API
+      traefik.http.routers.jsonrpc.rule: Host(`${SERVER_NAME}`) && (PathPrefix(`/api`) || PathPrefix(`/socket.io`) || PathPrefix(`/ws`) || PathPrefix(`/monitoring`))
+      traefik.http.routers.jsonrpc.entrypoints: websecure
+      traefik.http.routers.jsonrpc.tls: true
+      traefik.http.routers.jsonrpc.service: jsonrpc
+      # HTTP router for health endpoints (no TLS required)
+      traefik.http.routers.jsonrpc-health.rule: Host(`${SERVER_NAME}`) && (PathPrefix(`/health`) || PathPrefix(`/ready`))
+      traefik.http.routers.jsonrpc-health.entrypoints: web
+      traefik.http.routers.jsonrpc-health.service: jsonrpc
 
   webdriver:
-    image: yeagerai/genlayer-genvm-webdriver:0.0.7
+    image: yeagerai/genlayer-genvm-webdriver:0.0.8
     shm_size: 2gb
     environment:
       - PORT=${WEBDRIVERPORT:-4444}
@@ -152,6 +171,18 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    mem_limit:  16g
+    mem_reservation: 2g
+    memswap_limit: 24g
+    oom_kill_disable: false
+    deploy:
+      resources:
+        limits:
+          cpus: 2
+          memory: 16g
+        reservations:
+          cpus: 1
+          memory: 2g
 
   ollama:
     profiles: ["ollama"]
@@ -251,12 +282,17 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+    mem_limit:  ${COMPOSE_WORKER_MEM_LIMIT:-8g}
+    mem_reservation: ${COMPOSE_WORKER_MEM_RESERVATION:-2g}
+    memswap_limit: ${COMPOSE_WORKER_MEM_SWAP_LIMIT:-8g}
+    oom_kill_disable: false
     deploy:
       replicas: ${CONSENSUS_WORKERS:-1}  # Minimum 1 worker required for consensus processing
       restart_policy:
-        condition: on-failure
+        condition: on-failure  # Only restart on failure (not on clean exit)
         delay: 5s
-        max_attempts: 3
+        max_attempts: 0
+        window: 120s
       resources:
         limits:
           cpus: '${COMPOSE_WORKER_CPU_LIMIT:-2}'
@@ -264,7 +300,7 @@ services:
         reservations:
           cpus: ${COMPOSE_WORKER_CPU_RESERVATION:-1}
           memory: ${COMPOSE_WORKER_MEM_RESERVATION:-2g}
-    restart: always
+    restart: unless-stopped
     security_opt:
       - "no-new-privileges=true"
     logging:

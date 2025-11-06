@@ -13,6 +13,19 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
   const subscriptions = new Set();
   const db = useDb();
 
+  // Named handler for WebSocket reconnection
+  const handleReconnection = () => {
+    // Resubscribe to all transaction topics after reconnect/restart
+    if (subscriptions.size > 0) {
+      webSocketClient.emit('subscribe', Array.from(subscriptions));
+    }
+  };
+
+  // Handle WebSocket reconnection to restore transaction subscriptions
+  // Use off/on pattern to prevent duplicate listeners during HMR/re-inits
+  webSocketClient.off('connect', handleReconnection);
+  webSocketClient.on('connect', handleReconnection);
+
   function addTransaction(tx: TransactionItem) {
     transactions.value.unshift(tx); // Push on top in case there's no date property yet
     subscribe([tx.hash]);

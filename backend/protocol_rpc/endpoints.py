@@ -435,9 +435,16 @@ async def get_contract_schema_for_code(
         msg_handler=msg_handler.with_client_session(get_client_session_id()),
         contract_snapshot_factory=None,
     )
-    schema = await node.get_contract_schema(
-        eth_utils.hexadecimal.decode_hex(contract_code_hex)
-    )
+    # Contract code is expected to be a hex string, but it can be a plain UTF-8 string
+    # When hex decoding fails, fall back to UTF-8 encoding
+    try:
+        contract_code = eth_utils.hexadecimal.decode_hex(contract_code_hex)
+    except ValueError:
+        logger.debug(
+            "Contract code is not hex-encoded, treating as UTF-8 string",
+        )
+        contract_code = contract_code_hex.encode("utf-8")
+    schema = await node.get_contract_schema(contract_code)
     return json.loads(schema)
 
 
@@ -715,7 +722,8 @@ async def _gen_call_with_validator(
     # Return the result of the write method
     if receipt.execution_result != ExecutionResultStatus.SUCCESS:
         raise JSONRPCError(
-            message="running contract failed", data={"receipt": receipt.to_dict()}
+            message="running contract failed",
+            data={"receipt": receipt.to_dict(), "params": params},
         )
 
     return receipt
@@ -743,22 +751,49 @@ def get_transaction_by_hash(
     transactions_processor: TransactionsProcessor,
     transaction_hash: str,
     sim_config: dict | None = None,
-) -> dict | None:
-    return transactions_processor.get_transaction_by_hash(transaction_hash, sim_config)
+) -> dict:
+    transaction = transactions_processor.get_transaction_by_hash(
+        transaction_hash, sim_config
+    )
+
+    if transaction is None:
+        raise JSONRPCError(
+            code=-32000,
+            message=f"Transaction {transaction_hash} not found",
+            data={"hash": transaction_hash},
+        )
+    return transaction
 
 
 def get_studio_transaction_by_hash(
     transactions_processor: TransactionsProcessor,
     transaction_hash: str,
     full: bool = True,
-) -> dict | None:
-    return transactions_processor.get_studio_transaction_by_hash(transaction_hash, full)
+) -> dict:
+    transaction = transactions_processor.get_studio_transaction_by_hash(
+        transaction_hash, full
+    )
+
+    if transaction is None:
+        raise JSONRPCError(
+            code=-32000,
+            message=f"Transaction {transaction_hash} not found",
+            data={"hash": transaction_hash},
+        )
+    return transaction
 
 
 def get_transaction_status(
     transactions_processor: TransactionsProcessor, transaction_hash: str
-) -> str | None:
-    return transactions_processor.get_transaction_status(transaction_hash)
+) -> str:
+    status = transactions_processor.get_transaction_status(transaction_hash)
+    if status is None:
+        raise JSONRPCError(
+            code=-32000,
+            message=f"Transaction {transaction_hash} not found",
+            data={"hash": transaction_hash},
+        )
+    return status
 
 
 async def eth_call(
@@ -950,10 +985,10 @@ def send_raw_transaction(
             transaction_data = {"calldata": genlayer_transaction.data.calldata}
 
         # Obtain transaction hash from new transaction event
-        if rollup_transaction_details and "tx_id_hex" in rollup_transaction_details:
-            transaction_hash = rollup_transaction_details["tx_id_hex"]
-        else:
-            transaction_hash = None
+        # if rollup_transaction_details and "tx_id_hex" in rollup_transaction_details:
+        #     transaction_hash = rollup_transaction_details["tx_id_hex"]
+        # else:
+        #     transaction_hash = None
 
         # Insert transaction into the database
         transaction_hash = transactions_processor.insert_transaction(
@@ -966,10 +1001,43 @@ def send_raw_transaction(
             leader_only,
             genlayer_transaction.max_rotations,
             None,
-            transaction_hash,
+            None,
             genlayer_transaction.num_of_initial_validators,
             sim_config,
         )
+
+        # Post-insert verification: ensure the transaction is visible immediately
+        try:
+            verified_status = transactions_processor.get_transaction_status(
+                transaction_hash
+            )
+            if verified_status is None:
+                logger.error(
+                    "Post-insert verification failed: transaction not found after commit",
+                    extra={"hash": transaction_hash},
+                )
+                msg_handler.send_message(
+                    log_event=LogEvent(
+                        "transaction_post_insert_verification_failed",
+                        EventType.ERROR,
+                        EventScope.RPC,
+                        "Inserted transaction not found immediately after commit",
+                        {"hash": transaction_hash},
+                    ),
+                    log_to_terminal=False,
+                )
+        except Exception as e:
+            logger.exception("Post-insert verification threw an exception")
+            msg_handler.send_message(
+                log_event=LogEvent(
+                    "transaction_post_insert_verification_exception",
+                    EventType.ERROR,
+                    EventScope.RPC,
+                    f"Exception during post-insert verification: {str(e)}",
+                    {"hash": transaction_hash},
+                ),
+                log_to_terminal=False,
+            )
 
         return transaction_hash
 

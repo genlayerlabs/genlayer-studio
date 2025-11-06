@@ -1171,7 +1171,10 @@ class ConsensusAlgorithm:
                     break
                 elif next_state == ConsensusRound.ACCEPTED:
                     if (
-                        ("consensus_results" in context.transaction.consensus_history)
+                        (context.transaction.consensus_history is not None)
+                        and (
+                            "consensus_results" in context.transaction.consensus_history
+                        )
                         and (
                             len(
                                 context.transaction.consensus_history[
@@ -2219,7 +2222,7 @@ class ConsensusAlgorithm:
             set[str]: Set of used leader addresses.
         """
         used_leader_addresses = set()
-        if "consensus_results" in consensus_history:
+        if consensus_history is not None and "consensus_results" in consensus_history:
             for consensus_round in consensus_history["consensus_results"]:
                 leader_receipt = consensus_round["leader_result"]
                 if leader_receipt:
@@ -2531,7 +2534,8 @@ class ProposingState(TransactionState):
         context.votes = {}
         context.consensus_data.validators = []
         context.transactions_processor.set_transaction_result(
-            context.transaction.hash, context.consensus_data.to_dict()
+            context.transaction.hash,
+            context.consensus_data.to_dict(strip_contract_state=True),
         )
 
         # Set the validators and other context attributes
@@ -2769,7 +2773,8 @@ class RevealingState(TransactionState):
             else:
                 # Appeal succeeded, set the status to PENDING and reset the appeal_failed counter
                 context.transactions_processor.set_transaction_result(
-                    context.transaction.hash, context.consensus_data.to_dict()
+                    context.transaction.hash,
+                    context.consensus_data.to_dict(strip_contract_state=True),
                 )
 
                 context.transactions_processor.set_transaction_appeal_failed(
@@ -2963,7 +2968,8 @@ class AcceptedState(TransactionState):
 
         # Set the transaction result
         context.transactions_processor.set_transaction_result(
-            context.transaction.hash, context.consensus_data.to_dict()
+            context.transaction.hash,
+            context.consensus_data.to_dict(strip_contract_state=True),
         )
 
         context.transactions_processor.update_consensus_history(
@@ -3007,6 +3013,10 @@ class AcceptedState(TransactionState):
         # Retrieve the leader's receipt from the consensus data
         leader_receipt = context.consensus_data.leader_receipt[0]
 
+        # Extract contract_state before it gets stripped from receipts for database storage
+        # This is needed to update the CurrentState table (source of truth for contract state)
+        accepted_contract_state = leader_receipt.contract_state
+
         # Do not deploy or update the contract if validator appeal failed
         if not context.transaction.appealed:
             # Set the contract snapshot for the transaction for a future rollback
@@ -3024,9 +3034,9 @@ class AcceptedState(TransactionState):
                         "id": context.transaction.data["contract_address"],
                         "data": {
                             "state": {
-                                "accepted": leader_receipt.contract_state,
+                                "accepted": accepted_contract_state,
                                 "finalized": {
-                                    code_slot_b64: leader_receipt.contract_state.get(
+                                    code_slot_b64: accepted_contract_state.get(
                                         code_slot_b64, b""
                                     )
                                 },
@@ -3066,7 +3076,7 @@ class AcceptedState(TransactionState):
                 else:
                     context.contract_processor.update_contract_state(
                         context.transaction.to_address,
-                        accepted_state=leader_receipt.contract_state,
+                        accepted_state=accepted_contract_state,
                     )
 
                 internal_messages_data, insert_transactions_data = _get_messages_data(
@@ -3175,7 +3185,7 @@ class UndeterminedState(TransactionState):
         # Set the transaction result with the current consensus data
         context.transactions_processor.set_transaction_result(
             context.transaction.hash,
-            context.consensus_data.to_dict(),
+            context.consensus_data.to_dict(strip_contract_state=True),
         )
 
         # Increment the appeal processing time when the transaction was appealed
@@ -3338,7 +3348,8 @@ class ValidatorsTimeoutState(TransactionState):
 
         # Set the transaction result
         context.transactions_processor.set_transaction_result(
-            context.transaction.hash, context.consensus_data.to_dict()
+            context.transaction.hash,
+            context.consensus_data.to_dict(strip_contract_state=True),
         )
 
         context.transactions_processor.update_consensus_history(
@@ -3399,10 +3410,21 @@ class FinalizingState(TransactionState):
         if (context.transaction.status == TransactionStatus.ACCEPTED) and (
             leader_receipt.execution_result == ExecutionResultStatus.SUCCESS
         ):
-            # Update contract state
+            snapshot = context.contract_snapshot_factory(context.transaction.to_address)
+            if snapshot is None:
+                raise RuntimeError(
+                    "Missing contract snapshot while finalizing a transaction"
+                )
+
+            accepted_state = snapshot.states.get("accepted")
+            if not accepted_state:
+                raise RuntimeError(
+                    "Missing accepted contract state prior to finalization"
+                )
+
             context.contract_processor.update_contract_state(
                 context.transaction.to_address,
-                finalized_state=leader_receipt.contract_state,
+                finalized_state=accepted_state,
             )
 
             # Insert pending transactions generated by contract-to-contract calls

@@ -195,9 +195,10 @@ class TransactionsProcessor:
             to_bytes(hexstr=to_address) if is_address(to_address) else b"\x00" * 20
         )
 
-        # Use current timestamp to mimic block.timestamp
-        timestamp = int(time.time())
-        timestamp_bytes = timestamp.to_bytes(32, byteorder="big", signed=False)
+        # Use current timestamp with microsecond precision to ensure uniqueness
+        timestamp = time.time()
+        timestamp_int = int(timestamp * 1_000_000)  # Convert to microseconds as integer
+        timestamp_bytes = timestamp_int.to_bytes(32, byteorder="big", signed=False)
 
         # Derive a deterministic pseudo-random seed from the recipient address
         seed_source = f"{to_address or '0x0'}:{timestamp}"
@@ -290,7 +291,10 @@ class TransactionsProcessor:
     def _process_round_data(self, transaction_data: dict) -> dict:
         """Process round data and prepare transaction data."""
 
-        if "consensus_results" in transaction_data["consensus_history"]:
+        if (
+            transaction_data["consensus_history"] is not None
+            and "consensus_results" in transaction_data["consensus_history"]
+        ):
             transaction_data["num_of_rounds"] = str(
                 len(transaction_data["consensus_history"]["consensus_results"])
             )
@@ -301,7 +305,10 @@ class TransactionsProcessor:
         validator_votes = []
         validator_votes_hash = []
         round_validators = []
-        if "consensus_results" in transaction_data["consensus_history"]:
+        if (
+            transaction_data["consensus_history"] is not None
+            and "consensus_results" in transaction_data["consensus_history"]
+        ):
             round_number = str(
                 len(transaction_data["consensus_history"]["consensus_results"]) - 1
             )
@@ -380,7 +387,10 @@ class TransactionsProcessor:
             "processing_block": "0",
             "proposal_block": "0",
         }
-        if "consensus_results" in transaction_data["consensus_history"]:
+        if (
+            transaction_data["consensus_history"] is not None
+            and "consensus_results" in transaction_data["consensus_history"]
+        ):
             transaction_data["activator"] = transaction_data["consensus_history"][
                 "consensus_results"
             ][0]["leader_result"][0]["node_config"]["address"]
@@ -443,6 +453,7 @@ class TransactionsProcessor:
         eq_output = []
         if (
             "consensus_history" in transaction_data
+            and transaction_data["consensus_history"] is not None
             and "consensus_results" in transaction_data["consensus_history"]
         ):
             for consensus_round in transaction_data["consensus_history"][
@@ -913,11 +924,17 @@ class TransactionsProcessor:
         current_consensus_results = {
             "consensus_round": consensus_round.value,
             "leader_result": (
-                [receipt.to_dict() for receipt in leader_result]
+                [
+                    receipt.to_dict(strip_contract_state=True)
+                    for receipt in leader_result
+                ]
                 if leader_result
                 else None
             ),
-            "validator_results": [receipt.to_dict() for receipt in validator_results],
+            "validator_results": [
+                receipt.to_dict(strip_contract_state=True)
+                for receipt in validator_results
+            ],
             "status_changes": status_changes_to_use,
         }
 
