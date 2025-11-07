@@ -219,11 +219,17 @@ class TransactionsProcessorMock:
         current_consensus_results = {
             "consensus_round": consensus_round.value,
             "leader_result": (
-                [receipt.to_dict() for receipt in leader_result]
+                [
+                    receipt.to_dict(strip_contract_state=True)
+                    for receipt in leader_result
+                ]
                 if leader_result
                 else None
             ),
-            "validator_results": [receipt.to_dict() for receipt in validator_results],
+            "validator_results": [
+                receipt.to_dict(strip_contract_state=True)
+                for receipt in validator_results
+            ],
             "status_changes": status_changes_to_use,
         }
         if "consensus_results" in transaction["consensus_history"]:
@@ -593,6 +599,8 @@ def node_factory(
 
         accepted_state = contract_snapshot.states["accepted"]
         set_value = transaction.hash[-1]
+        if not isinstance(set_value, str) or not set_value.isdigit():
+            set_value = "1"
         if len(accepted_state) == 0:
             contract_state = {"state_var": set_value}
         else:
@@ -960,7 +968,15 @@ def check_contract_state_with_timeout(
     start_time = time.time()
     while time.time() - start_time < timeout:
         if contract_db.wait_for_status_change(interval):
-            check_contract_state(contract_db, to_address, accepted, finalized)
-            return
+            try:
+                check_contract_state(contract_db, to_address, accepted, finalized)
+                return
+            except AssertionError:
+                # State has not yet reached the expected values; keep waiting
+                continue
 
-    raise AssertionError(f"Contract state did not change within {timeout} seconds")
+    # One final check before failing to surface the latest state in the assertion error
+    check_contract_state(contract_db, to_address, accepted, finalized)
+    raise AssertionError(
+        f"Contract state did not reach expected values within {timeout} seconds"
+    )

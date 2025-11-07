@@ -985,10 +985,10 @@ def send_raw_transaction(
             transaction_data = {"calldata": genlayer_transaction.data.calldata}
 
         # Obtain transaction hash from new transaction event
-        if rollup_transaction_details and "tx_id_hex" in rollup_transaction_details:
-            transaction_hash = rollup_transaction_details["tx_id_hex"]
-        else:
-            transaction_hash = None
+        # if rollup_transaction_details and "tx_id_hex" in rollup_transaction_details:
+        #     transaction_hash = rollup_transaction_details["tx_id_hex"]
+        # else:
+        #     transaction_hash = None
 
         # Insert transaction into the database
         transaction_hash = transactions_processor.insert_transaction(
@@ -1001,10 +1001,43 @@ def send_raw_transaction(
             leader_only,
             genlayer_transaction.max_rotations,
             None,
-            transaction_hash,
+            None,
             genlayer_transaction.num_of_initial_validators,
             sim_config,
         )
+
+        # Post-insert verification: ensure the transaction is visible immediately
+        try:
+            verified_status = transactions_processor.get_transaction_status(
+                transaction_hash
+            )
+            if verified_status is None:
+                logger.error(
+                    "Post-insert verification failed: transaction not found after commit",
+                    extra={"hash": transaction_hash},
+                )
+                msg_handler.send_message(
+                    log_event=LogEvent(
+                        "transaction_post_insert_verification_failed",
+                        EventType.ERROR,
+                        EventScope.RPC,
+                        "Inserted transaction not found immediately after commit",
+                        {"hash": transaction_hash},
+                    ),
+                    log_to_terminal=False,
+                )
+        except Exception as e:
+            logger.exception("Post-insert verification threw an exception")
+            msg_handler.send_message(
+                log_event=LogEvent(
+                    "transaction_post_insert_verification_exception",
+                    EventType.ERROR,
+                    EventScope.RPC,
+                    f"Exception during post-insert verification: {str(e)}",
+                    {"hash": transaction_hash},
+                ),
+                log_to_terminal=False,
+            )
 
         return transaction_hash
 

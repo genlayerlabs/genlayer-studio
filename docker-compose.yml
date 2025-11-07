@@ -171,6 +171,18 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    mem_limit:  16g
+    mem_reservation: 2g
+    memswap_limit: 24g
+    oom_kill_disable: false
+    deploy:
+      resources:
+        limits:
+          cpus: 2
+          memory: 16g
+        reservations:
+          cpus: 1
+          memory: 2g
 
   ollama:
     profiles: ["ollama"]
