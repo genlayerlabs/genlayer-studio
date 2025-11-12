@@ -94,7 +94,6 @@ Intelligent contracts are Python classes inheriting from `gl.Contract`:
 Key environment variables (see `.env.example`):
 - `POSTGRES_*`: Database connection
 - `PROVIDERS_*`: LLM provider API keys
-- `ENABLE_DEBUG_ENDPOINTS`: Development features
 - `DEFAULT_VALIDATORS_COUNT`: Consensus participants
 
 ### Testing Approach

@@ -1,19 +1,16 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { useRpcClient, useWebSocketClient } from '@/hooks';
+import { getRuntimeConfigNumber } from '@/utils/runtimeConfig';
 
 export const useConsensusStore = defineStore('consensusStore', () => {
   const rpcClient = useRpcClient();
   const webSocketClient = useWebSocketClient();
-  const finalityWindow = ref(Number(import.meta.env.VITE_FINALITY_WINDOW));
+  const finalityWindow = ref(
+    getRuntimeConfigNumber('VITE_FINALITY_WINDOW', 10),
+  );
   const isLoading = ref<boolean>(true); // Needed for the delay between creating the variable and fetching the initial value
-  const maxRotations = ref(Number(import.meta.env.VITE_MAX_ROTATIONS));
-
-  type FinalityWindowPayload = {
-    data: {
-      time: number;
-    };
-  };
+  const maxRotations = ref(getRuntimeConfigNumber('VITE_MAX_ROTATIONS', 3));
 
   // Track initialization state to prevent duplicate loading state changes
   let hasInitialized = false;

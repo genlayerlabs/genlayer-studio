@@ -3,6 +3,8 @@
  * Replaces Socket.IO with standard WebSockets for FastAPI compatibility
  */
 
+import { getRuntimeConfig } from '@/utils/runtimeConfig';
+
 interface WebSocketMessage {
   event: string;
   data?: any;
@@ -192,7 +194,7 @@ export function useWebSocketClient(): NativeWebSocketClient {
   // Create new client if none exists
   if (!webSocketClient && !isInitializing) {
     isInitializing = true;
-    const wsUrl = import.meta.env.VITE_WS_SERVER_URL || 'ws://localhost:4000';
+    const wsUrl = getRuntimeConfig('VITE_WS_SERVER_URL', 'ws://localhost:4000');
     webSocketClient = new NativeWebSocketClient(wsUrl);
 
     // Reset initialization flag when connection completes (success or failure)

@@ -43,8 +43,6 @@ services:
       context: ./
       dockerfile: ./docker/Dockerfile.frontend
       target: ${FRONTEND_BUILD_TARGET:-final}
-      args:
-        - VITE_*
     ports:
       - "${FRONTEND_PORT}:8080"
     volumes:
@@ -56,7 +54,13 @@ services:
     expose:
       - "${FRONTEND_PORT}"
     environment:
-      - VITE_*
+      - VITE_JSON_RPC_SERVER_URL=${VITE_JSON_RPC_SERVER_URL}
+      - VITE_WS_SERVER_URL=${VITE_WS_SERVER_URL}
+      - VITE_IS_HOSTED=${VITE_IS_HOSTED}
+      - VITE_FINALITY_WINDOW=${VITE_FINALITY_WINDOW}
+      - VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION=${VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION}
+      - VITE_MAX_ROTATIONS=${VITE_MAX_ROTATIONS}
+      - VITE_PLAUSIBLE_DOMAIN=${VITE_PLAUSIBLE_DOMAIN}
     restart: always
     security_opt:
       - "no-new-privileges=true"
@@ -77,14 +81,11 @@ services:
       dockerfile: ./docker/Dockerfile.backend
       target: prod
     environment:
-      - FLASK_ENV=${FLASK_ENV:-production}
-      - FLASK_DEBUG=${FLASK_DEBUG:-0}
-      - FLASK_SERVER_PORT=${RPCPORT}
       - PYTHONUNBUFFERED=1
       - WEBDRIVERHOST=${WEBDRIVERHOST}
       - WEBDRIVERPORT=${WEBDRIVERPORT}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-4}
+      - WEB_CONCURRENCY=${WEB_CONCURRENCY:-1}
       - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-20}
       - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-10}
       - LOG_LEVEL=${LOG_LEVEL:-info}
@@ -335,7 +336,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:

@@ -166,7 +166,7 @@ class RPCEndpointManager:
                             data={
                                 "method": request.method,
                                 "params": request.params,
-                                "result": result,
+                                "result": str(result)[:2000],
                             },
                             account_address=account_address,
                             client_session_id=client_session_id,

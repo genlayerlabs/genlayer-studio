@@ -6,12 +6,12 @@ RUN --mount=type=cache,target=/root/.npm npm ci
 COPY ./frontend .
 COPY ./examples src/assets/examples
 
-COPY ./.env ./.env
 COPY ../backend/node/create_nodes/providers_schema.json /app/src/assets/schemas/providers_schema.json
 
-
 FROM base AS dev
-ENTRYPOINT ["npm", "run", "dev"]
+COPY docker/entrypoint-frontend.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
 
 FROM base AS builder
 RUN npm run build
@@ -22,6 +22,8 @@ RUN apk add --no-cache nodejs npm && \
     mkdir /app && chown -R frontend-user:frontend-user /app
 WORKDIR /app
 COPY --from=builder --chown=frontend-user:frontend-user /app /app
+COPY docker/entrypoint-frontend.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 USER frontend-user
 EXPOSE 8080
-CMD [ "npm", "run", "preview" ]
+ENTRYPOINT ["/entrypoint.sh"]
