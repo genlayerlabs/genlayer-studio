@@ -98,9 +98,12 @@ def fund_account(
     if not accounts_manager.is_valid_address(account_address):
         raise InvalidAddressError(account_address)
 
+    import secrets
+
     nonce = transactions_processor.get_transaction_count(None)
-    transaction_hash = transactions_processor.insert_transaction(
-        None, account_address, None, amount, 0, nonce, False, 0
+    transaction_hash = "0x" + secrets.token_hex(32)
+    transactions_processor.insert_transaction(
+        None, account_address, None, amount, 0, nonce, False, 0, None, transaction_hash
     )
     return transaction_hash
 
