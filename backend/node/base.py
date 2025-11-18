@@ -424,7 +424,7 @@ class Node:
                     "result": _repr_result_with_capped_data(res.result),
                     "stdout": res.stdout if is_error else capped_stdout,
                     "stderr": res.stderr,
-                    "genvm_log": res.genvm_log,  # filtered_genvm_log,
+                    "genvm_log": filtered_genvm_log,
                 },
                 transaction_hash=transaction_hash_str,
                 account_address=from_address,
