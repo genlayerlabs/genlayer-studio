@@ -164,6 +164,7 @@ class Node:
         leader_receipt: Optional[Receipt] = None,
         msg_handler: MessageHandler | None = None,
         validators_snapshot: validators.Snapshot | None = None,
+        timing_callback: Optional[Callable[[str], None]] = None,
     ):
         self.contract_snapshot = contract_snapshot
         self.validator_mode = validator_mode
@@ -173,11 +174,15 @@ class Node:
         self.msg_handler = msg_handler
         self.contract_snapshot_factory = contract_snapshot_factory
         self.validators_snapshot = validators_snapshot
+        self.timing_callback = timing_callback
 
     def _create_genvm(self) -> genvmbase.IGenVM:
         return genvmbase.GenVMHost()
 
     async def exec_transaction(self, transaction: Transaction) -> Receipt:
+        if self.timing_callback:
+            self.timing_callback("EXEC_START")
+
         assert transaction.data is not None
         transaction_data = transaction.data
         assert transaction.from_address is not None
@@ -189,8 +194,15 @@ class Node:
             transaction_created_at = sim_config.genvm_datetime
 
         if transaction.type == TransactionType.DEPLOY_CONTRACT:
+            if self.timing_callback:
+                self.timing_callback("DEPLOY_START")
+
             code = base64.b64decode(transaction_data["contract_code"])
             calldata = base64.b64decode(transaction_data["calldata"])
+
+            if self.timing_callback:
+                self.timing_callback("DECODE_COMPLETE")
+
             receipt = await self.deploy_contract(
                 transaction.from_address,
                 code,
@@ -198,16 +210,33 @@ class Node:
                 transaction.hash,
                 transaction_created_at,
             )
+
+            if self.timing_callback:
+                self.timing_callback("DEPLOY_END")
         elif transaction.type == TransactionType.RUN_CONTRACT:
+            if self.timing_callback:
+                self.timing_callback("RUN_START")
+
             calldata = base64.b64decode(transaction_data["calldata"])
+
+            if self.timing_callback:
+                self.timing_callback("DECODE_COMPLETE")
+
             receipt = await self.run_contract(
                 transaction.from_address,
                 calldata,
                 transaction.hash,
                 transaction_created_at,
             )
+
+            if self.timing_callback:
+                self.timing_callback("RUN_END")
         else:
             raise Exception(f"unknown transaction type {transaction.type}")
+
+        if self.timing_callback:
+            self.timing_callback("RECEIPT_CREATED")
+
         return receipt
 
     def _create_enhanced_node_config(self, host_data: dict | None) -> dict:
@@ -395,7 +424,7 @@ class Node:
                     "result": _repr_result_with_capped_data(res.result),
                     "stdout": res.stdout if is_error else capped_stdout,
                     "stderr": res.stderr,
-                    "genvm_log": filtered_genvm_log,
+                    "genvm_log": res.genvm_log,  # filtered_genvm_log,
                 },
                 transaction_hash=transaction_hash_str,
                 account_address=from_address,
@@ -440,6 +469,9 @@ class Node:
         transaction_datetime: datetime.datetime | None,
         state_status: str | None = None,
     ) -> Receipt:
+        if self.timing_callback:
+            self.timing_callback("GENVM_PREPARATION_START")
+
         genvm = self._create_genvm()
         leader_res: None | dict[int, bytes]
         if self.leader_receipt is None:
@@ -451,12 +483,19 @@ class Node:
             }
         assert self.contract_snapshot is not None
         assert self.contract_snapshot_factory is not None
+
+        if self.timing_callback:
+            self.timing_callback("SNAPSHOT_CREATION_START")
+
         snapshot_view = _SnapshotView(
             self.contract_snapshot,
             self.contract_snapshot_factory,
             readonly,
             state_status,
         )
+
+        if self.timing_callback:
+            self.timing_callback("SNAPSHOT_CREATION_END")
 
         config_path = None
         host_data = None
@@ -465,6 +504,10 @@ class Node:
             for n in self.validators_snapshot.nodes:
                 if n.validator.address == self.validator.address:
                     host_data = n.genvm_host_data
+
+        if self.timing_callback:
+            self.timing_callback("GENVM_EXECUTION_START")
+
         result_exec_code: ExecutionResultStatus
         res = await genvm.run_contract(
             snapshot_view,
@@ -480,7 +523,13 @@ class Node:
             host_data=host_data,
         )
 
+        if self.timing_callback:
+            self.timing_callback("GENVM_EXECUTION_END")
+
         await self._execution_finished(res, transaction_hash, from_address)
+
+        if self.timing_callback:
+            self.timing_callback("EXECUTION_FINISHED")
 
         result_exec_code = (
             ExecutionResultStatus.SUCCESS
