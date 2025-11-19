@@ -228,6 +228,13 @@ class TransactionsProcessor:
         num_of_initial_validators: int | None = None,
         sim_config: dict | None = None,
     ) -> None:
+
+        if transaction_hash is None:
+            current_nonce = self.get_transaction_count(from_address)
+            transaction_hash = self._generate_transaction_hash(
+                from_address, to_address, data, value, type, current_nonce
+            )
+
         new_transaction = Transactions(
             hash=transaction_hash,
             from_address=from_address,
