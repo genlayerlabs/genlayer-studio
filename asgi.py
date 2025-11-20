@@ -7,7 +7,6 @@ import os
 import sys
 
 # Set production environment
-os.environ.setdefault("FLASK_ENV", "production")
 os.environ.setdefault("UVICORN_WORKER", "true")
 
 # Import FastAPI app

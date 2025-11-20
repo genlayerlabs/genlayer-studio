@@ -408,6 +408,11 @@ class Node:
 
         # Filter genvm_log based on configured log level
         filtered_genvm_log = _filter_genvm_log_by_level(res.genvm_log)
+        capped_stdout = (
+            res.stdout[:500] + res.stdout[-500:]
+            if len(res.stdout) > 1000
+            else res.stdout
+        )
 
         msg_handler.send_message(
             LogEvent(
@@ -417,7 +422,7 @@ class Node:
                 message="execution finished",
                 data={
                     "result": _repr_result_with_capped_data(res.result),
-                    "stdout": res.stdout if is_error else res.stdout[:500],
+                    "stdout": res.stdout if is_error else capped_stdout,
                     "stderr": res.stderr,
                     "genvm_log": filtered_genvm_log,
                 },

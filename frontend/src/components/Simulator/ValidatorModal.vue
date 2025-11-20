@@ -145,8 +145,7 @@ const handleChangeProvider = () => {
     .filter((p: any) => p.provider === newValidatorData.value.provider)
     .map((p: any) => p.model);
 
-  newValidatorData.value.model =
-    allModels.length > 0 ? allModels[0] : '';
+  newValidatorData.value.model = allModels.length > 0 ? allModels[0] : '';
   adaptValues();
 };
 
@@ -213,7 +212,7 @@ watch(
       tryInitValues();
     }
   },
-  { immediate: true }
+  { immediate: true },
 );
 </script>
 

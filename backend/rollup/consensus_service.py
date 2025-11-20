@@ -1,6 +1,7 @@
 import json
 import os
 from web3 import Web3
+from eth_utils import keccak, to_bytes, to_hex
 from typing import Optional, Dict, Any
 from pathlib import Path
 from hexbytes import HexBytes
@@ -56,6 +57,12 @@ class ConsensusService:
         return self.web3.eth.contract(
             address=deployment_data["address"], abi=deployment_data["abi"]
         )
+
+    def generate_transaction_hash(self, raw_transaction: str) -> str:
+        """
+        Generate a transaction hash
+        """
+        return to_hex(keccak(to_bytes(hexstr=raw_transaction)))
 
     def load_contract(self, contract_name: str):
         """
