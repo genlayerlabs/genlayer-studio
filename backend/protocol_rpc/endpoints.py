@@ -592,7 +592,7 @@ async def gen_call(
     return eth_utils.hexadecimal.encode_hex(receipt.result[1:])[2:]
 
 
-def sim_lintContract(source_code: str, filename: str = "contract.py") -> dict:
+def sim_lint_contract(source_code: str, filename: str = "contract.py") -> dict:
     """Lint GenVM contract source code.
 
     Args:
