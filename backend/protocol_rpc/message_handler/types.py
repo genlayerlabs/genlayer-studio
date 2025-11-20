@@ -6,6 +6,7 @@ class EventType(Enum):
     DEBUG = "debug"
     INFO = "info"
     SUCCESS = "success"
+    WARNING = "warning"
     ERROR = "error"
 
 
@@ -13,6 +14,7 @@ class EventScope(Enum):
     RPC = "RPC"
     GENVM = "GenVM"
     CONSENSUS = "Consensus"
+    TRANSACTION = "Transaction"
 
 
 @dataclass
@@ -24,6 +26,7 @@ class LogEvent:
     data: dict | None = None
     transaction_hash: str | None = None
     client_session_id: str | None = None
+    account_address: str | None = None
 
     def to_dict(self):
         return {
@@ -34,4 +37,5 @@ class LogEvent:
             "data": self.data,
             "transaction_hash": self.transaction_hash,
             "client_id": self.client_session_id,
+            "account_address": self.account_address,
         }

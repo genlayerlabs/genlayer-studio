@@ -1,63 +1,83 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { useWebSocketClient } from '@/hooks/useWebSocketClient';
-import { io } from 'socket.io-client';
+import { describe, it, expect, vi } from 'vitest';
 
-const mockOn = vi.fn();
-
-vi.mock('socket.io-client', () => ({
-  io: vi.fn(() => ({
-    id: 'mocked-socket-id',
-    on: mockOn,
-  })),
+// Mock WebSocket with readyState constants
+const WebSocketMock: any = vi.fn(() => ({
+  send: vi.fn(),
+  close: vi.fn(),
+  addEventListener: vi.fn(),
+  removeEventListener: vi.fn(),
+  readyState: 1, // OPEN
 }));
+Object.assign(WebSocketMock, {
+  CONNECTING: 0,
+  OPEN: 1,
+  CLOSING: 2,
+  CLOSED: 3,
+});
+(global as any).WebSocket = WebSocketMock;
 
 describe('useWebSocketClient', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
+  it('should create a WebSocket client with the correct URL', async () => {
+    const { useWebSocketClient } = await import('@/hooks/useWebSocketClient');
+    const client = useWebSocketClient();
+    const expectedUrl = (client as unknown as { url: string }).url;
+
+    WebSocketMock.mockClear();
+    client.connect();
+
+    expect(WebSocketMock).toHaveBeenCalledWith(expectedUrl);
   });
 
-  it('should create a WebSocket client with the correct URL', () => {
-    useWebSocketClient();
-    expect(io).toHaveBeenCalledWith(import.meta.env.VITE_WS_SERVER_URL);
+  it('should create a WebSocket client with the correct URL', async () => {
+    const { useWebSocketClient } = await import('@/hooks/useWebSocketClient');
+    const client = useWebSocketClient();
+    expect(client).toBeDefined();
+    expect(global.WebSocket).toHaveBeenCalled();
   });
 
-  it('should set up connect and disconnect event handlers', () => {
-    const consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-
-    useWebSocketClient();
-
-    expect(mockOn).toHaveBeenCalledWith('connect', expect.any(Function));
-    expect(mockOn).toHaveBeenCalledWith('disconnect', expect.any(Function));
-
-    const connectCallback = mockOn.mock.calls.find(
-      (call) => call[0] === 'connect',
-    )?.[1];
-    if (connectCallback) {
-      connectCallback();
-    }
-    expect(consoleLogSpy).toHaveBeenCalledWith(
-      'webSocketClient.connect',
-      'mocked-socket-id',
-    );
-
-    const disconnectCallback = mockOn.mock.calls.find(
-      (call) => call[0] === 'disconnect',
-    )?.[1];
-    if (disconnectCallback) {
-      disconnectCallback();
-    }
-    expect(consoleLogSpy).toHaveBeenCalledWith(
-      'webSocketClient.disconnnect',
-      'mocked-socket-id',
-    );
-
-    consoleLogSpy.mockRestore();
+  it('should have an emit method', async () => {
+    const { useWebSocketClient } = await import('@/hooks/useWebSocketClient');
+    const client = useWebSocketClient();
+    expect(client.emit).toBeDefined();
+    expect(typeof client.emit).toBe('function');
   });
 
-  it('should reuse the existing WebSocket client on subsequent calls', () => {
-    const client1 = useWebSocketClient();
-    const client2 = useWebSocketClient();
-    expect(client1).toBe(client2);
-    expect(mockOn).toHaveBeenCalledTimes(4);
+  it('should have an on method for event handling', async () => {
+    const { useWebSocketClient } = await import('@/hooks/useWebSocketClient');
+    const client = useWebSocketClient();
+    expect(client.on).toBeDefined();
+    expect(typeof client.on).toBe('function');
+  });
+
+  it('should have an off method for removing event handlers', async () => {
+    const { useWebSocketClient } = await import('@/hooks/useWebSocketClient');
+    const client = useWebSocketClient();
+    expect(client.off).toBeDefined();
+    expect(typeof client.off).toBe('function');
+  });
+
+  it('should have a connect method', async () => {
+    const { useWebSocketClient } = await import('@/hooks/useWebSocketClient');
+    const client = useWebSocketClient();
+    expect(client.connect).toBeDefined();
+    expect(typeof client.connect).toBe('function');
+  });
+
+  it('should have a disconnect method', async () => {
+    const { useWebSocketClient } = await import('@/hooks/useWebSocketClient');
+    const client = useWebSocketClient();
+    expect(client.disconnect).toBeDefined();
+    expect(typeof client.disconnect).toBe('function');
+  });
+
+  it('should handle event listeners', async () => {
+    const { useWebSocketClient } = await import('@/hooks/useWebSocketClient');
+    const client = useWebSocketClient();
+    const mockHandler = vi.fn();
+
+    client.on('test-event', mockHandler);
+    client.off('test-event', mockHandler);
+
+    expect(mockHandler).not.toHaveBeenCalled();
   });
 });

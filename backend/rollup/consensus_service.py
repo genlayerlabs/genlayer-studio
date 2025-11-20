@@ -1,6 +1,7 @@
 import json
 import os
 from web3 import Web3
+from eth_utils import keccak, to_bytes, to_hex
 from typing import Optional, Dict, Any
 from pathlib import Path
 from hexbytes import HexBytes
@@ -33,6 +34,17 @@ class ConsensusService:
         # Load deployment data
         deployment_data = self._load_deployment_data(contract_name)
         if not deployment_data:
+            # For ConsensusMain, we'll use the default contract if deployment not found
+            if contract_name == "ConsensusMain":
+                default_contract = get_default_consensus_main_contract()
+                if (
+                    default_contract
+                    and "address" in default_contract
+                    and "abi" in default_contract
+                ):
+                    return self.web3.eth.contract(
+                        address=default_contract["address"], abi=default_contract["abi"]
+                    )
             raise Exception(f"Failed to load {contract_name} deployment data")
 
         # Verify contract exists on chain
@@ -45,6 +57,12 @@ class ConsensusService:
         return self.web3.eth.contract(
             address=deployment_data["address"], abi=deployment_data["abi"]
         )
+
+    def generate_transaction_hash(self, raw_transaction: str) -> str:
+        """
+        Generate a transaction hash
+        """
+        return to_hex(keccak(to_bytes(hexstr=raw_transaction)))
 
     def load_contract(self, contract_name: str):
         """
@@ -74,7 +92,7 @@ class ConsensusService:
             if contract_name == "ConsensusMain":
                 default_contract = get_default_consensus_main_contract()
                 print(
-                    f"[CONSENSUS_SERVICE]: Error loading contract from netowrk, retrieving default contract: {str(e)}"
+                    f"[CONSENSUS_SERVICE]: Error loading contract from network, retrieving default contract: {str(e)}"
                 )
                 return default_contract
             else:
@@ -155,9 +173,9 @@ class ConsensusService:
         Forward a transaction to the consensus rollup and wait for NewTransaction event
         """
         if not self.web3.is_connected():
-            print(
-                "[CONSENSUS_SERVICE]: Not connected to Hardhat node, skipping transaction forwarding"
-            )
+            # print(
+            #     "[CONSENSUS_SERVICE]: Not connected to Hardhat node, skipping transaction forwarding"
+            # )
             return None
 
         try:
@@ -209,9 +227,9 @@ class ConsensusService:
             *args: Arguments to pass to the event function
         """
         if not self.web3.is_connected():
-            print(
-                "[CONSENSUS_SERVICE]: Not connected to Hardhat node, skipping transaction forwarding"
-            )
+            # print(
+            #     "[CONSENSUS_SERVICE]: Not connected to Hardhat node, skipping transaction forwarding"
+            # )
             return None
 
         if account.get("private_key") is not None:
