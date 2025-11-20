@@ -28,6 +28,10 @@ ADD backend/protocol_rpc/requirements.txt backend/protocol_rpc/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --cache-dir=/root/.cache/pip -r backend/protocol_rpc/requirements.txt
 
+# Install genvm-linter package from PyPI (includes mypy as dependency)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --cache-dir=/root/.cache/pip genvm-linter==0.1.0
+
 RUN groupadd -r backend-group \
     && useradd -r -g backend-group backend-user \
     && mkdir -p /home/backend-user/.cache/huggingface \

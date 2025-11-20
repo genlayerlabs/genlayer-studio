@@ -67,7 +67,6 @@ jobs:
         with:
           files: |
             ./docker-compose.yml
-            ./docker-compose.production.yml
           targets: |
             database-migration
             jsonrpc
