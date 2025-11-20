@@ -86,9 +86,7 @@ jobs:
 
       # Start services without rebuilding images
       - name: Run Docker Compose
-        run: docker compose up -d --no-build jsonrpc consensus-worker
-
-
+        run: docker compose up -d --no-build database-migration jsonrpc consensus-worker
 
       - name: Wait for services to be up
         timeout-minutes: 5
