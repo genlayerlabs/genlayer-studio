@@ -278,6 +278,14 @@ def delete_all_snapshots(
     return impl.delete_all_snapshots(snapshot_manager=snapshot_manager)
 
 
+@rpc.method("sim_lintContract")
+def lint_contract(
+    source_code: str,
+    filename: str = "contract.py",
+) -> dict:
+    return impl.sim_lint_contract(source_code=source_code, filename=filename)
+
+
 # ---------------------------------------------------------------------------
 # GenLayer endpoints
 # ---------------------------------------------------------------------------
