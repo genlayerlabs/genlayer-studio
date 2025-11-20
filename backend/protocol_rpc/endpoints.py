@@ -98,9 +98,12 @@ def fund_account(
     if not accounts_manager.is_valid_address(account_address):
         raise InvalidAddressError(account_address)
 
+    import secrets
+
     nonce = transactions_processor.get_transaction_count(None)
-    transaction_hash = transactions_processor.insert_transaction(
-        None, account_address, None, amount, 0, nonce, False, 0
+    transaction_hash = "0x" + secrets.token_hex(32)
+    transactions_processor.insert_transaction(
+        None, account_address, None, amount, 0, nonce, False, 0, None, transaction_hash
     )
     return transaction_hash
 
@@ -917,6 +920,9 @@ def send_raw_transaction(
         )
         return tx_id_hex
     else:
+        transaction_hash = consensus_service.generate_transaction_hash(
+            signed_rollup_transaction
+        )
         to_address = decoded_rollup_transaction.to_address
         nonce = decoded_rollup_transaction.nonce
         value = decoded_rollup_transaction.value
@@ -984,14 +990,8 @@ def send_raw_transaction(
 
             transaction_data = {"calldata": genlayer_transaction.data.calldata}
 
-        # Obtain transaction hash from new transaction event
-        # if rollup_transaction_details and "tx_id_hex" in rollup_transaction_details:
-        #     transaction_hash = rollup_transaction_details["tx_id_hex"]
-        # else:
-        #     transaction_hash = None
-
         # Insert transaction into the database
-        transaction_hash = transactions_processor.insert_transaction(
+        transactions_processor.insert_transaction(
             genlayer_transaction.from_address,
             to_address,
             transaction_data,
@@ -1001,7 +1001,7 @@ def send_raw_transaction(
             leader_only,
             genlayer_transaction.max_rotations,
             None,
-            None,
+            transaction_hash,
             genlayer_transaction.num_of_initial_validators,
             sim_config,
         )

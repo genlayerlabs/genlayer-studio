@@ -39,7 +39,7 @@ def post_request(
         else os.environ.get("JSONRPC_SERVER_URL", "http://localhost:4000")
     )
     return requests.post(
-        jsonrpc_url + "/api",
+        jsonrpc_url,
         data=json.dumps(payload),
         headers={"Content-Type": "application/json"},
     )

@@ -227,16 +227,10 @@ class TransactionsProcessor:
         transaction_hash: str | None = None,
         num_of_initial_validators: int | None = None,
         sim_config: dict | None = None,
-    ) -> str:
-        # Follow up: https://github.com/MetaMask/metamask-extension/issues/29787
-        # to uncomment this check
-        # if nonce != current_nonce:
-        #     raise Exception(
-        #         f"Unexpected nonce. Provided: {nonce}, expected: {current_nonce}"
-        #     )
-        current_nonce = self.get_transaction_count(from_address)
+    ) -> None:
 
         if transaction_hash is None:
+            current_nonce = self.get_transaction_count(from_address)
             transaction_hash = self._generate_transaction_hash(
                 from_address, to_address, data, value, type, current_nonce
             )
@@ -285,8 +279,6 @@ class TransactionsProcessor:
 
         self.session.flush()  # So that `created_at` gets set
         self.session.commit()  # Persist the transaction to the database
-
-        return new_transaction.hash
 
     def _process_round_data(self, transaction_data: dict) -> dict:
         """Process round data and prepare transaction data."""
@@ -716,6 +708,39 @@ class TransactionsProcessor:
 
         self.session.commit()
 
+    def add_state_timestamp(self, transaction_hash: str, state_name: str):
+        """
+        Add a timestamp for when a consensus state is entered.
+
+        Args:
+            transaction_hash (str): Hash of the transaction.
+            state_name (str): Name of the state (e.g., "PENDING", "PROPOSING").
+        """
+        transaction = (
+            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
+        )
+
+        # If transaction doesn't exist (e.g., after snapshot restore), skip update
+        if not transaction:
+            print(
+                f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping monitoring update"
+            )
+            return
+
+        if not transaction.consensus_history:
+            transaction.consensus_history = {}
+
+        if "current_monitoring" not in transaction.consensus_history:
+            transaction.consensus_history["current_monitoring"] = {}
+
+        # Store timestamp (in seconds with millisecond precision)
+        import time
+
+        transaction.consensus_history["current_monitoring"][state_name] = time.time()
+
+        flag_modified(transaction, "consensus_history")
+        self.session.commit()
+
     def set_transaction_result(
         self, transaction_hash: str, consensus_data: dict | None
     ):
@@ -921,6 +946,8 @@ class TransactionsProcessor:
         if extra_status_change:
             status_changes_to_use.append(extra_status_change.value)
 
+        monitoring_to_use = transaction.consensus_history.get("current_monitoring", {})
+
         current_consensus_results = {
             "consensus_round": consensus_round.value,
             "leader_result": (
@@ -936,6 +963,7 @@ class TransactionsProcessor:
                 for receipt in validator_results
             ],
             "status_changes": status_changes_to_use,
+            "monitoring": monitoring_to_use,
         }
 
         if "consensus_results" in transaction.consensus_history:
@@ -948,6 +976,7 @@ class TransactionsProcessor:
             ]
 
         transaction.consensus_history["current_status_changes"] = []
+        transaction.consensus_history["current_monitoring"] = {}
 
         flag_modified(transaction, "consensus_history")
         self.session.commit()

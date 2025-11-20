@@ -158,7 +158,7 @@ services:
       traefik.http.routers.jsonrpc-health.service: jsonrpc
 
   webdriver:
-    image: yeagerai/genlayer-genvm-webdriver:0.0.8
+    image: yeagerai/genlayer-genvm-webdriver:0.0.9
     shm_size: 2gb
     environment:
       - PORT=${WEBDRIVERPORT:-4444}
