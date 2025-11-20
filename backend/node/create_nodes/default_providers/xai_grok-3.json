@@ -2,10 +2,7 @@
   "provider": "xai",
   "plugin": "openai-compatible",
   "model": "grok-3",
-  "config": {
-    "temperature": 0.75,
-    "max_tokens": 500
-  },
+  "config": {},
   "plugin_config": {
     "api_key_env_var": "XAI_API_KEY",
     "api_url": "https://api.x.ai"

@@ -68,32 +68,32 @@ const consensusMaxRotations = computed(() => consensusStore.maxRotations);
         class="p-2"
       />
 
-      <div v-if="isLoading">Loading finality window...</div>
-      <div v-else>
-        <div v-if="canUpdateFinalityWindow" class="p-2">
-          <div class="flex flex-wrap items-center gap-2">
-            <label for="finalityWindow" class="text-xs"
-              >Finality Window (seconds)</label
-            >
-            <NumberInput
-              id="finalityWindow"
-              name="finalityWindow"
-              :min="0"
-              :step="1"
-              v-model.number="finalityWindow"
-              required
-              testId="input-finalityWindow"
-              :disabled="false"
-              class="w-20"
-              tiny
-            />
-          </div>
-
-          <FieldError v-if="!isFinalityWindowValid"
-            >Please enter a positive integer.</FieldError
-          >
-        </div>
-      </div>
+      <!-- Temporary disabled finality window settings -->
+      <!--      <div v-if="isLoading">Loading finality window...</div> -->
+      <!--      <div v-else> -->
+      <!--        <div v-if="canUpdateFinalityWindow" class="p-2"> -->
+      <!--          <div class="flex flex-wrap items-center gap-2"> -->
+      <!--            <label for="finalityWindow" class="text-xs"> -->
+      <!--              Finality Window (seconds)</label -->
+      <!--            > -->
+      <!--            <NumberInput -->
+      <!--              id="finalityWindow" -->
+      <!--              name="finalityWindow" -->
+      <!--              :min="0" -->
+      <!--              :step="1" -->
+      <!--              v-model.number="finalityWindow" -->
+      <!--              required -->
+      <!--              testId="input-finalityWindow" -->
+      <!--              :disabled="false" -->
+      <!--              class="w-20" -->
+      <!--              tiny -->
+      <!--            /> -->
+      <!--          </div> -->
+      <!--          <FieldError v-if="!isFinalityWindowValid" -->
+      <!--            >Please enter a positive integer.</FieldError -->
+      <!--          > -->
+      <!--        </div> -->
+      <!--      </div> -->
 
       <ContractInfo
         :showNewDeploymentButton="!isDeploymentOpen"
