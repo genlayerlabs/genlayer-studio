@@ -400,6 +400,27 @@ class TransactionsProcessorMock:
 
         return reset_count
 
+    def add_state_timestamp(self, transaction_hash: str, state_name: str):
+        """
+        Add a timestamp for when a consensus state is entered.
+
+        Args:
+            transaction_hash (str): Hash of the transaction.
+            state_name (str): Name of the state (e.g., "PENDING", "PROPOSING").
+        """
+        transaction = self.get_transaction_by_hash(transaction_hash)
+
+        if not transaction.get("consensus_history"):
+            transaction["consensus_history"] = {}
+
+        if "current_monitoring" not in transaction["consensus_history"]:
+            transaction["consensus_history"]["current_monitoring"] = {}
+
+        # Store timestamp (in seconds with millisecond precision)
+        transaction["consensus_history"]["current_monitoring"][state_name] = time.time()
+
+        self.commit(transaction)
+
 
 class SnapshotMock:
     def __init__(self, transactions_processor: TransactionsProcessorMock):
@@ -589,6 +610,7 @@ def node_factory(
     msg_handler: MessageHandler,
     contract_snapshot_factory: Callable[[str], ContractSnapshot],
     snap: validators.Snapshot,
+    timing_callback: Optional[Callable[[str], None]],
     vote: Vote,
     timeout: bool,
 ):

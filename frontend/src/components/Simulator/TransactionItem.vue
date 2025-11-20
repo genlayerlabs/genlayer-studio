@@ -18,6 +18,7 @@ import {
   b64ToArray,
   calldataToUserFriendlyJson,
 } from '@/calldata/jsonifier';
+import { getRuntimeConfigNumber } from '@/utils/runtimeConfig';
 
 const uiStore = useUIStore();
 const nodeStore = useNodeStore();
@@ -29,7 +30,7 @@ const props = defineProps<{
 }>();
 
 const finalityWindowAppealFailedReduction = ref(
-  Number(import.meta.env.VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION),
+  getRuntimeConfigNumber('VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION', 0.2),
 );
 
 const isDetailsModalOpen = ref(false);

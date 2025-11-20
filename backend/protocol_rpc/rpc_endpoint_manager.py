@@ -29,6 +29,32 @@ from backend.protocol_rpc.message_handler.method_utils import (
 )
 
 
+def _truncate_params_for_log(params: Any) -> Any:
+    """
+    Truncate long parameter values for logging.
+
+    If params string representation is longer than 1000 characters,
+    only keep the first and last 500 characters.
+    """
+    params_str = str(params)
+    if len(params_str) > 1000:
+        return params_str[:500] + "..." + params_str[-500:]
+    return params
+
+
+def _truncate_result_for_log(result: Any) -> Any:
+    """
+    Truncate long result values for logging.
+
+    If result string representation is longer than 1000 characters,
+    only keep the first and last 500 characters.
+    """
+    result_str = str(result)
+    if len(result_str) > 1000:
+        return result_str[:500] + "..." + result_str[-500:]
+    return result
+
+
 @dataclass(slots=True)
 class LogPolicy:
     log_request: bool = True
@@ -138,8 +164,11 @@ class RPCEndpointManager:
                         name="endpoint_call",
                         type=EventType.INFO,
                         scope=EventScope.RPC,
-                        message=f"RPC method called: {request.method}",
-                        data={"method": request.method, "params": request.params},
+                        message=f"EM-RPC method called: {request.method}",
+                        data={
+                            "method": request.method,
+                            "params": _truncate_params_for_log(request.params),
+                        },
                         account_address=account_address,
                         client_session_id=client_session_id,
                         transaction_hash=transaction_hash,
@@ -162,11 +191,11 @@ class RPCEndpointManager:
                             name="endpoint_success",
                             type=EventType.SUCCESS,
                             scope=EventScope.RPC,
-                            message=f"RPC method completed: {request.method}",
+                            message=f"EM-RPC method completed: {request.method}",
                             data={
                                 "method": request.method,
-                                "params": request.params,
-                                "result": result,
+                                "params": _truncate_params_for_log(request.params),
+                                "result": _truncate_result_for_log(result),
                             },
                             account_address=account_address,
                             client_session_id=client_session_id,
