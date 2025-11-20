@@ -303,7 +303,13 @@
                 "$comment": "URL of the API endpoint. Leave empty to use the official OpenAI API endpoint."
               },
               "mock_response": {
-                "type": "object"
+                "type": "object",
+                "$comment": "Mock LLM responses"
+
+              },
+              "mock_web_response": {
+                "type": "object",
+                "$comment": "Mock web responses"
               }
             },
             "required": ["api_key_env_var", "api_url"]
