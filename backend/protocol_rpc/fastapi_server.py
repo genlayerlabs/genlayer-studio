@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Request, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 
 from backend.protocol_rpc.app_lifespan import RPCAppSettings, rpc_app_lifespan
@@ -77,6 +78,14 @@ async def jsonrpc_endpoint(
         return await rpc_router.handle_http_request(request)
     except ClientDisconnect:
         return Response(status_code=204)
+    except Exception as exc:
+        # Ensure JSON-RPC compliant error response instead of framework HTML pages
+        error = {
+            "code": -32603,
+            "message": "Internal error",
+            "data": {"detail": str(exc)},
+        }
+        return JSONResponse(content={"jsonrpc": "2.0", "error": error, "id": None})
 
 
 # WebSocket endpoint with native WebSocket support

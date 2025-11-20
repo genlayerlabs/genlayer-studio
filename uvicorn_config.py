@@ -11,7 +11,7 @@ host = "0.0.0.0"
 port = int(os.getenv("RPCPORT", "4000"))
 
 # Worker processes
-workers = int(os.getenv("WEB_CONCURRENCY", multiprocessing.cpu_count()))
+workers = int(os.getenv("WEB_CONCURRENCY", 1))
 
 # Worker class - use uvloop for better async performance
 worker_class = "uvicorn.workers.UvicornWorker"

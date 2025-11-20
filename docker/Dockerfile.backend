@@ -24,9 +24,9 @@ RUN apt-get update -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-ADD backend/protocol_rpc/requirements.txt backend/protocol_rpc/requirements.txt
+ADD backend/requirements.txt backend/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --cache-dir=/root/.cache/pip -r backend/protocol_rpc/requirements.txt
+    pip install --cache-dir=/root/.cache/pip -r backend/requirements.txt
 
 RUN groupadd -r backend-group \
     && useradd -r -g backend-group backend-user \
@@ -76,7 +76,6 @@ ENV GENVMROOT=/genvm
 ENV PATH="/genvm/bin:/genvm/executor/${GENVM_TAG}/bin:${PATH}"
 ENV LD_LIBRARY_PATH="/genvm/lib:/genvm/executor/${GENVM_TAG}/lib:${LD_LIBRARY_PATH}"
 
-COPY ../.env .
 COPY backend $path/backend
 COPY asgi.py $path/asgi.py
 COPY uvicorn_config.py $path/uvicorn_config.py

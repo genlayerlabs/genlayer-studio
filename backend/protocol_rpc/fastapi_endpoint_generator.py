@@ -14,6 +14,10 @@ from typing import Callable, Dict, Any, Optional
 
 from backend.protocol_rpc.message_handler.fastapi_handler import MessageHandler
 from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope
+from backend.protocol_rpc.message_handler.method_utils import (
+    extract_account_address_from_rpc,
+    extract_transaction_hash_from_rpc,
+)
 
 
 def get_json_rpc_method_name(function: Callable, method_name: str | None = None):
@@ -136,6 +140,10 @@ class FastAPIEndpointRegistry:
         disabled_endpoints = GlobalConfiguration.get_disabled_info_logs_endpoints()
         should_log = method_name not in disabled_endpoints
 
+        # Try to extract routing context
+        account_address = extract_account_address_from_rpc(method_name, params)
+        transaction_hash = extract_transaction_hash_from_rpc(method_name, params)
+
         if should_log:
             # Log the RPC method call as endpoint_call event
             self.msg_handler.send_message(
@@ -143,8 +151,10 @@ class FastAPIEndpointRegistry:
                     name="endpoint_call",
                     type=EventType.INFO,
                     scope=EventScope.RPC,
-                    message=f"RPC method called: {method_name}",
+                    message=f"ER-RPC method called : {method_name}",
                     data={"method": method_name, "params": params},
+                    account_address=account_address,
+                    transaction_hash=transaction_hash,
                 )
             )
 
@@ -258,8 +268,10 @@ class FastAPIEndpointRegistry:
                         name="endpoint_success",
                         type=EventType.SUCCESS,
                         scope=EventScope.RPC,
-                        message=f"RPC method completed: {method_name}",
+                        message=f"ER-RPC method completed: {method_name}",
                         data={"method": method_name},
+                        account_address=account_address,
+                        transaction_hash=transaction_hash,
                     )
                 )
 
@@ -288,6 +300,8 @@ class FastAPIEndpointRegistry:
                         "error": str(e),
                         "error_type": type(e).__name__,
                     },
+                    account_address=account_address,
+                    transaction_hash=transaction_hash,
                 )
             )
 

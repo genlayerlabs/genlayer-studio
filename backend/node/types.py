@@ -195,8 +195,13 @@ class Receipt:
     processing_time: Optional[int] = None
     nondet_disagree: int | None = None
 
-    def to_dict(self):
-        """Convert Receipt to dict."""
+    def to_dict(self, strip_contract_state: bool = False):
+        """Convert Receipt to dict.
+
+        Args:
+            strip_contract_state: If True, replaces contract_state with empty dict to save storage.
+                                 Contract state is always available from CurrentState table.
+        """
         result = base64.b64encode(self.result).decode("ascii")
         calldata = str(base64.b64encode(self.calldata), encoding="ascii")
 
@@ -207,7 +212,7 @@ class Receipt:
             "calldata": calldata,
             "gas_used": self.gas_used,
             "mode": self.mode.value,
-            "contract_state": self.contract_state,
+            "contract_state": {} if strip_contract_state else self.contract_state,
             "node_config": self.node_config,
             "eq_outputs": self.eq_outputs,
             "pending_transactions": [

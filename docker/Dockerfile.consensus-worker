@@ -23,9 +23,9 @@ RUN apt-get update -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-ADD backend/protocol_rpc/requirements.txt backend/protocol_rpc/requirements.txt
+ADD backend/requirements.txt backend/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --cache-dir=/root/.cache/pip -r backend/protocol_rpc/requirements.txt \
+    pip install --cache-dir=/root/.cache/pip -r backend/requirements.txt \
     && pip install --cache-dir=/root/.cache/pip uvicorn[standard] fastapi
 
 # Create user and directories
@@ -110,6 +110,7 @@ HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=40s \
 USER worker-user
 
 # Run the consensus worker service
+WORKDIR /app
 CMD ["python3", "-m", "uvicorn", "backend.consensus.worker_service:app", \
      "--host", "0.0.0.0", \
      "--port", "4001", \

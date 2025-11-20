@@ -16,7 +16,13 @@ def test_fund_account_uses_request_scoped_session(monkeypatch):
 
     transactions_processor_instance = MagicMock()
     transactions_processor_instance.get_transaction_count.return_value = 12
-    transactions_processor_instance.insert_transaction.return_value = "0xabc"
+    transactions_processor_instance.insert_transaction.return_value = None
+
+    # Mock secrets.token_hex to return a predictable hash
+    def mock_token_hex(n):
+        return "abc" if n == 32 else "xxx"
+
+    monkeypatch.setattr("secrets.token_hex", mock_token_hex)
 
     monkeypatch.setattr(
         endpoints,
@@ -35,7 +41,7 @@ def test_fund_account_uses_request_scoped_session(monkeypatch):
     accounts_manager_instance.is_valid_address.assert_called_once_with("0x" + "1" * 40)
     transactions_processor_instance.get_transaction_count.assert_called_once_with(None)
     transactions_processor_instance.insert_transaction.assert_called_once_with(
-        None, "0x" + "1" * 40, None, 25, 0, 12, False, 0
+        None, "0x" + "1" * 40, None, 25, 0, 12, False, 0, None, "0xabc"
     )
 
 
@@ -362,7 +368,7 @@ def test_send_raw_transaction_uses_request_session(monkeypatch):
     accounts_manager = MagicMock()
     accounts_manager.is_valid_address.return_value = True
     transactions_processor = MagicMock()
-    transactions_processor.insert_transaction.return_value = "0xhash"
+    transactions_processor.insert_transaction.return_value = None
 
     constructed = []
 
@@ -403,6 +409,7 @@ def test_send_raw_transaction_uses_request_session(monkeypatch):
 
     msg_handler = MagicMock()
     consensus_service = MagicMock()
+    consensus_service.generate_transaction_hash.return_value = "0xhash"
 
     result = endpoints.send_raw_transaction(
         session,
@@ -415,6 +422,7 @@ def test_send_raw_transaction_uses_request_session(monkeypatch):
     assert result == "0xhash"
     assert constructed == ["accounts_manager", "transactions_processor"]
     transactions_processor.insert_transaction.assert_called_once()
+    consensus_service.generate_transaction_hash.assert_called_once_with("0xdead")
 
 
 def test_update_transaction_status_uses_request_session(monkeypatch):

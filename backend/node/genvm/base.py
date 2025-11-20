@@ -459,7 +459,7 @@ async def _run_genvm_host(
 ) -> ExecutionResult:
     tmpdir = Path(tempfile.mkdtemp())
     try:
-        timeout = 600  # seconds
+        timeout = 1800  # seconds
         base_delay = 5  # seconds
         start_time = time.time()
         retry_count = 0
@@ -534,6 +534,7 @@ async def _run_genvm_host(
                     return result
 
                 except Exception as e:
+                    print(f"Error: {e}")
                     last_error = str(e)
 
                     # Check if llm failed, immediately return timeout error

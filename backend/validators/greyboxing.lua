@@ -46,10 +46,16 @@ end
 local function get_mock_response_from_table(table, message)
 	for key, value in pairs(table) do
 		if string.find(message, key) then
-			return value
+			return {
+				data = value,
+				consumed_gen = 0
+			}
 		end
 	end
-	return "no match"
+	return {
+		data = "no match",
+		consumed_gen = 0
+	}
 end
 
 local function handle_custom_plugin(ctx, args, mapped_prompt)
@@ -167,7 +173,7 @@ local function just_in_backend(ctx, args, mapped_prompt)
 	---@cast mapped_prompt MappedPrompt
 	---@cast args LLMExecPromptPayload | LLMExecPromptTemplatePayload
 
-	-- Return mock response if it exists
+	-- Return mock response if it exists and matches
 	if ctx.host_data.mock_response then
 		local mock_data
 
@@ -183,21 +189,28 @@ local function just_in_backend(ctx, args, mapped_prompt)
 			mock_data = get_mock_response_from_table(ctx.host_data.mock_response.response, mapped_prompt.prompt.user_message)
 		end
 
-		-- Wrap mock response in the same format as exec_prompt_in_provider returns
-		-- Convert to JSON string if it's a table, otherwise use as-is
-		local data_value
-		if type(mock_data) == "table" then
-			data_value = lib.rs.json_stringify(mock_data)
-		else
-			data_value = mock_data
-		end
+		-- Only return mock response if a match was found, otherwise fall through to real provider
+		if mock_data.data ~= "no match" then
+			lib.log{level = "debug", message = "executed with mock response", type = type(mock_data), res = mock_data}
 
-		local result = {
-			data = data_value,
-			consumed_gen = 0
-		}
-		lib.log{level = "debug", message = "executed with", type = type(result), res = result}
-		return result
+			-- Wrap mock response in the same format as exec_prompt_in_provider returns
+			-- Convert to JSON string if it's a table, otherwise use as-is
+			local data_value
+			if type(mock_data.data) == "table" then
+				data_value = lib.rs.json_stringify(mock_data.data)
+			else
+				data_value = mock_data.data
+			end
+
+			local result = {
+				data = data_value,
+				consumed_gen = mock_data.consumed_gen
+			}
+			lib.log{level = "debug", message = "executed with", type = type(result), res = result}
+			return result
+		else
+			lib.log{level = "debug", message = "no mock match found, falling through to real provider"}
+		end
 	end
 
 	mapped_prompt.prompt.use_max_completion_tokens = false
@@ -209,10 +222,14 @@ local function just_in_backend(ctx, args, mapped_prompt)
 		return primary_result
 	end
 
+	local primary_model = lib.get_first_from_table(llm.providers[primary_provider_id].models).key
+	local fallback_model = nil
 	-- Second: Try fallback model (3 attempts) if available
 	local fallback_provider_id = ctx.host_data.fallback_llm_id
 	if fallback_provider_id then
-		lib.log{level = "warning", message = "switching to fallback model"}
+		fallback_model = lib.get_first_from_table(llm.providers[fallback_provider_id].models).key
+
+		lib.log{level = "warning", message = "switching from primary model " .. primary_model .. " to fallback model " .. fallback_model}
 		local fallback_result = try_provider(ctx, args, mapped_prompt, fallback_provider_id)
 		if fallback_result then
 			return fallback_result
@@ -225,6 +242,8 @@ local function just_in_backend(ctx, args, mapped_prompt)
 		ctx = {
 			prompt = mapped_prompt,
 			host_data = ctx.host_data,
+			primary_model = primary_model,
+			fallback_model = fallback_model,
 		}
 	})
 end

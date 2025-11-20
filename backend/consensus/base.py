@@ -69,6 +69,7 @@ type NodeFactory = Callable[
         MessageHandler,
         Callable[[str], ContractSnapshot],
         validators.Snapshot,
+        Callable[[str], None] | None,
     ],
     Node,
 ]
@@ -137,6 +138,70 @@ def _redact_receipt_data(receipt: dict) -> None:
         if "stderr" not in genvm_result or not genvm_result.get("stderr"):
             genvm_result.pop("stdout", None)
 
+    # Handle calldata
+    if isinstance(receipt.get("calldata"), str):
+        receipt["calldata"] = f"<truncated {len(receipt['calldata'])} characters>"
+
+    # Handle pending transactions - truncate code field
+    pending_transactions = receipt.get("pending_transactions")
+    if isinstance(pending_transactions, list):
+        for pending_tx in pending_transactions:
+            if isinstance(pending_tx, dict) and "code" in pending_tx:
+                code = pending_tx["code"]
+                if code is not None:
+                    pending_tx["code"] = f"<truncated {len(str(code))} characters>"
+
+
+def _redact_transaction_for_log(transaction_dict: dict) -> dict:
+    """
+    Return a redacted copy of the transaction data suitable for logging.
+
+    Replaces contract_code from data with truncation message to reduce log verbosity.
+    """
+    try:
+        redacted = deepcopy(transaction_dict)
+    except Exception:
+        # In case deepcopy fails for any reason, avoid breaking logging
+        return {"error": "failed_to_copy_transaction_for_log"}
+
+    # Replace data.contract_code with truncation message if present
+    data = redacted.get("data")
+    if isinstance(data, dict):
+        contract_code = data.get("contract_code")
+        if contract_code is not None:
+            data["contract_code"] = f"<truncated {len(str(contract_code))} characters>"
+
+    return redacted
+
+
+def _redact_contract_for_log(contract_dict: dict) -> dict:
+    """
+    Return a redacted copy of the contract data suitable for logging.
+
+    Removes data.state and truncates data.code to reduce log verbosity.
+    """
+    try:
+        redacted = deepcopy(contract_dict)
+    except Exception:
+        # In case deepcopy fails for any reason, avoid breaking logging
+        return {"error": "failed_to_copy_contract_for_log"}
+
+    # Remove data.state and truncate data.code if present
+    data = redacted.get("data")
+    if isinstance(data, dict):
+        # Remove state entirely
+        data.pop("state", None)
+
+        # Truncate code to first 100 chars with indicator
+        if "code" in data and isinstance(data["code"], str):
+            code_len = len(data["code"])
+            if code_len > 100:
+                data["code"] = (
+                    f"{data['code'][:100]}... [truncated, total length: {code_len}]"
+                )
+
+    return redacted
+
 
 def node_factory(
     validator: dict,
@@ -146,6 +211,7 @@ def node_factory(
     msg_handler: MessageHandler,
     contract_snapshot_factory: Callable[[str], ContractSnapshot],
     validators_manager_snapshot: validators.Snapshot,
+    timing_callback: Callable[[str], None] | None = None,
 ) -> Node:
     """
     Factory function to create a Node instance.
@@ -157,6 +223,7 @@ def node_factory(
         leader_receipt (Receipt | None): Receipt of the leader node.
         msg_handler (MessageHandler): Handler for messaging.
         contract_snapshot_factory (Callable[[str], ContractSnapshot]): Factory function to create contract snapshots.
+        timing_callback (Callable[[str], None] | None): Optional callback for timing measurements.
 
     Returns:
         Node: A new Node instance.
@@ -182,6 +249,7 @@ def node_factory(
         ),
         contract_snapshot_factory=contract_snapshot_factory,
         validators_snapshot=validators_manager_snapshot,
+        timing_callback=timing_callback,
     )
 
 
@@ -1171,7 +1239,10 @@ class ConsensusAlgorithm:
                     break
                 elif next_state == ConsensusRound.ACCEPTED:
                     if (
-                        ("consensus_results" in context.transaction.consensus_history)
+                        (context.transaction.consensus_history is not None)
+                        and (
+                            "consensus_results" in context.transaction.consensus_history
+                        )
                         and (
                             len(
                                 context.transaction.consensus_history[
@@ -2219,7 +2290,7 @@ class ConsensusAlgorithm:
             set[str]: Set of used leader addresses.
         """
         used_leader_addresses = set()
-        if "consensus_results" in consensus_history:
+        if consensus_history is not None and "consensus_results" in consensus_history:
             for consensus_round in consensus_history["consensus_results"]:
                 leader_receipt = consensus_round["leader_result"]
                 if leader_receipt:
@@ -2290,6 +2361,11 @@ class PendingState(TransactionState):
         Returns:
             TransactionState | None: The ProposingState or None if the transaction is already in process, when it is a transaction or when there are no validators.
         """
+        # Record timestamp for entering PENDING state
+        context.transactions_processor.add_state_timestamp(
+            context.transaction.hash, "PENDING"
+        )
+
         context.transactions_processor.reset_transaction_rotation_count(
             context.transaction.hash
         )
@@ -2313,7 +2389,9 @@ class PendingState(TransactionState):
                     "Executing transaction",
                     {
                         "transaction_hash": context.transaction.hash,
-                        "transaction": context.transaction.to_dict(),
+                        "transaction": _redact_transaction_for_log(
+                            context.transaction.to_dict()
+                        ),
                     },
                     transaction_hash=context.transaction.hash,
                 )
@@ -2480,6 +2558,11 @@ class ProposingState(TransactionState):
         Returns:
             TransactionState: The CommittingState or UndeterminedState if all rotations are done.
         """
+        # Record timestamp for entering PROPOSING state
+        context.transactions_processor.add_state_timestamp(
+            context.transaction.hash, "PROPOSING"
+        )
+
         # Dispatch a transaction status update to PROPOSING
         await ConsensusAlgorithm.dispatch_transaction_status_update(
             context.transactions_processor,
@@ -2494,6 +2577,9 @@ class ProposingState(TransactionState):
         # Unpack the leader and validators
         [context.leader, *context.remaining_validators] = context.involved_validators
 
+        context.transactions_processor.add_state_timestamp(
+            context.transaction.hash, "PROPOSING.VALIDATORS_SELECTED"
+        )
         # If the transaction is leader-only, clear the validators
         if context.transaction.leader_only:
             context.remaining_validators = []
@@ -2510,6 +2596,13 @@ class ProposingState(TransactionState):
             )
 
         assert context.validators_snapshot is not None
+
+        # Create timing callback for leader execution
+        def leader_timing_callback(step_name: str):
+            context.transactions_processor.add_state_timestamp(
+                context.transaction.hash, f"PROPOSING.LEADER.{step_name}"
+            )
+
         # Create a leader node for executing the transaction
         leader_node = context.node_factory(
             context.leader,
@@ -2519,19 +2612,27 @@ class ProposingState(TransactionState):
             context.msg_handler,
             context.contract_snapshot_factory,
             context.validators_snapshot,
+            leader_timing_callback,
         )
 
+        context.transactions_processor.add_state_timestamp(
+            context.transaction.hash, "PROPOSING.LEADER_NODE_CREATED"
+        )
         # Execute the transaction and obtain the leader receipt
         context.consensus_data.leader_receipt = [
             await leader_node.exec_transaction(context.transaction)
         ]
 
+        context.transactions_processor.add_state_timestamp(
+            context.transaction.hash, "PROPOSING.TRANSACTION_EXECUTED"
+        )
         # Update the consensus data with the leader's vote and receipt
         context.consensus_data.votes = {}
         context.votes = {}
         context.consensus_data.validators = []
         context.transactions_processor.set_transaction_result(
-            context.transaction.hash, context.consensus_data.to_dict()
+            context.transaction.hash,
+            context.consensus_data.to_dict(strip_contract_state=True),
         )
 
         # Set the validators and other context attributes
@@ -2586,9 +2687,23 @@ class CommittingState(TransactionState):
         Returns:
             TransactionState: The RevealingState.
         """
+        # Record timestamp for entering COMMITTING state
+        context.transactions_processor.add_state_timestamp(
+            context.transaction.hash, "COMMITTING"
+        )
 
-        def create_validator_node(context: TransactionContext, validator: dict):
+        def create_validator_node(
+            context: TransactionContext, validator: dict, validator_index: int
+        ):
             assert context.validators_snapshot is not None
+
+            # Create timing callback for this validator
+            def validator_timing_callback(step_name: str):
+                context.transactions_processor.add_state_timestamp(
+                    context.transaction.hash,
+                    f"COMMITTING.VALIDATOR_{validator_index}.{step_name}",
+                )
+
             return context.node_factory(
                 validator,
                 ExecutionMode.VALIDATOR,
@@ -2601,6 +2716,7 @@ class CommittingState(TransactionState):
                 context.msg_handler,
                 context.contract_snapshot_factory,
                 context.validators_snapshot,
+                validator_timing_callback,
             )
 
         # Dispatch a transaction status update to COMMITTING
@@ -2614,9 +2730,16 @@ class CommittingState(TransactionState):
         # Execute the transaction with a semaphore to limit the number of concurrent validators
         sem = asyncio.Semaphore(8)
 
-        async def run_single_validator(validator: Node) -> Receipt:
+        async def run_single_validator(validator: Node, index: int) -> Receipt:
             async with sem:
-                return await validator.exec_transaction(context.transaction)
+                context.transactions_processor.add_state_timestamp(
+                    context.transaction.hash, f"COMMITTING.VALIDATOR_{index}_START"
+                )
+                result = await validator.exec_transaction(context.transaction)
+                context.transactions_processor.add_state_timestamp(
+                    context.transaction.hash, f"COMMITTING.VALIDATOR_{index}_END"
+                )
+                return result
 
         # Leader evaluates validation function
         validation_by_leader = (
@@ -2626,23 +2749,44 @@ class CommittingState(TransactionState):
 
         # Create validator node for the leader
         if validation_by_leader:
-            context.validator_nodes = [create_validator_node(context, context.leader)]
+            context.validator_nodes = [
+                create_validator_node(context, context.leader, 0)
+            ]
         else:
             context.validator_nodes = []
 
+        context.transactions_processor.add_state_timestamp(
+            context.transaction.hash, "COMMITTING.LEADER_NODE_CREATED"
+        )
         # Create validator nodes for each validator
+        start_index = 1 if validation_by_leader else 0
         context.validator_nodes.extend(
             [
-                create_validator_node(context, validator)
-                for validator in context.remaining_validators
+                create_validator_node(context, validator, start_index + index)
+                for index, validator in enumerate(context.remaining_validators)
             ]
+        )
+        context.transactions_processor.add_state_timestamp(
+            context.transaction.hash, "COMMITTING.VALIDATOR_NODES_CREATED"
         )
 
         # Execute the transaction on each validator node and gather the results
+        context.transactions_processor.add_state_timestamp(
+            context.transaction.hash, "COMMITTING.VALIDATORS_EXECUTION_START"
+        )
+
         validation_tasks = [
-            run_single_validator(validator) for validator in context.validator_nodes
+            run_single_validator(validator, index)
+            for index, validator in enumerate(context.validator_nodes)
         ]
         context.validation_results = await asyncio.gather(*validation_tasks)
+
+        context.transactions_processor.add_state_timestamp(
+            context.transaction.hash, "COMMITTING.VALIDATORS_EXECUTION_END"
+        )
+        context.transactions_processor.add_state_timestamp(
+            context.transaction.hash, "COMMITTING.VALIDATION_RESULTS_GATHERED"
+        )
 
         # Send events in rollup to communicate the votes are committed
         if validation_by_leader:
@@ -2680,6 +2824,11 @@ class RevealingState(TransactionState):
         Returns:
             TransactionState | None: The AcceptedState or ProposingState or None if the transaction is successfully appealed.
         """
+        # Record timestamp for entering REVEALING state
+        context.transactions_processor.add_state_timestamp(
+            context.transaction.hash, "REVEALING"
+        )
+
         # Update the transaction status to REVEALING and await Redis publish completion
         await ConsensusAlgorithm.dispatch_transaction_status_update(
             context.transactions_processor,
@@ -2769,7 +2918,8 @@ class RevealingState(TransactionState):
             else:
                 # Appeal succeeded, set the status to PENDING and reset the appeal_failed counter
                 context.transactions_processor.set_transaction_result(
-                    context.transaction.hash, context.consensus_data.to_dict()
+                    context.transaction.hash,
+                    context.consensus_data.to_dict(strip_contract_state=True),
                 )
 
                 context.transactions_processor.set_transaction_appeal_failed(
@@ -2921,6 +3071,11 @@ class AcceptedState(TransactionState):
         Returns:
             None: The transaction is accepted.
         """
+        # Record timestamp for entering ACCEPTED state
+        context.transactions_processor.add_state_timestamp(
+            context.transaction.hash, "ACCEPTED"
+        )
+
         # When appeal fails, the appeal window is not reset
         if context.transaction.appeal_undetermined:
             consensus_round = ConsensusRound.LEADER_APPEAL_SUCCESSFUL
@@ -2963,7 +3118,8 @@ class AcceptedState(TransactionState):
 
         # Set the transaction result
         context.transactions_processor.set_transaction_result(
-            context.transaction.hash, context.consensus_data.to_dict()
+            context.transaction.hash,
+            context.consensus_data.to_dict(strip_contract_state=True),
         )
 
         context.transactions_processor.update_consensus_history(
@@ -3007,6 +3163,10 @@ class AcceptedState(TransactionState):
         # Retrieve the leader's receipt from the consensus data
         leader_receipt = context.consensus_data.leader_receipt[0]
 
+        # Extract contract_state before it gets stripped from receipts for database storage
+        # This is needed to update the CurrentState table (source of truth for contract state)
+        accepted_contract_state = leader_receipt.contract_state
+
         # Do not deploy or update the contract if validator appeal failed
         if not context.transaction.appealed:
             # Set the contract snapshot for the transaction for a future rollback
@@ -3024,9 +3184,9 @@ class AcceptedState(TransactionState):
                         "id": context.transaction.data["contract_address"],
                         "data": {
                             "state": {
-                                "accepted": leader_receipt.contract_state,
+                                "accepted": accepted_contract_state,
                                 "finalized": {
-                                    code_slot_b64: leader_receipt.contract_state.get(
+                                    code_slot_b64: accepted_contract_state.get(
                                         code_slot_b64, b""
                                     )
                                 },
@@ -3044,7 +3204,7 @@ class AcceptedState(TransactionState):
                                 EventType.SUCCESS,
                                 EventScope.GENVM,
                                 "Contract deployed",
-                                new_contract,
+                                _redact_contract_for_log(new_contract),
                                 transaction_hash=context.transaction.hash,
                             )
                         )
@@ -3058,6 +3218,7 @@ class AcceptedState(TransactionState):
                                 "Failed to register contract",
                                 {
                                     "transaction_hash": context.transaction.hash,
+                                    "error": str(e),
                                 },
                                 transaction_hash=context.transaction.hash,
                             )
@@ -3066,7 +3227,7 @@ class AcceptedState(TransactionState):
                 else:
                     context.contract_processor.update_contract_state(
                         context.transaction.to_address,
-                        accepted_state=leader_receipt.contract_state,
+                        accepted_state=accepted_contract_state,
                     )
 
                 internal_messages_data, insert_transactions_data = _get_messages_data(
@@ -3129,6 +3290,11 @@ class UndeterminedState(TransactionState):
         Returns:
             None: The transaction remains in an undetermined state.
         """
+        # Record timestamp for entering UNDETERMINED state
+        context.transactions_processor.add_state_timestamp(
+            context.transaction.hash, "UNDETERMINED"
+        )
+
         # Send a message indicating consensus failure
         context.msg_handler.send_message(
             LogEvent(
@@ -3175,7 +3341,7 @@ class UndeterminedState(TransactionState):
         # Set the transaction result with the current consensus data
         context.transactions_processor.set_transaction_result(
             context.transaction.hash,
-            context.consensus_data.to_dict(),
+            context.consensus_data.to_dict(strip_contract_state=True),
         )
 
         # Increment the appeal processing time when the transaction was appealed
@@ -3219,6 +3385,11 @@ class LeaderTimeoutState(TransactionState):
         Returns:
             None: The transaction is in a leader timeout state.
         """
+        # Record timestamp for entering LEADER_TIMEOUT state
+        context.transactions_processor.add_state_timestamp(
+            context.transaction.hash, "LEADER_TIMEOUT"
+        )
+
         # Save the contract snapshot for potential future appeals
         if not context.transaction.contract_snapshot:
             context.transactions_processor.set_transaction_contract_snapshot(
@@ -3295,6 +3466,11 @@ class ValidatorsTimeoutState(TransactionState):
         Returns:
             None: The transaction is in a validators timeout state.
         """
+        # Record timestamp for entering VALIDATORS_TIMEOUT state
+        context.transactions_processor.add_state_timestamp(
+            context.transaction.hash, "VALIDATORS_TIMEOUT"
+        )
+
         if context.transaction.appeal_undetermined:
             consensus_round = ConsensusRound.LEADER_APPEAL_SUCCESSFUL
             context.transactions_processor.set_transaction_timestamp_awaiting_finalization(
@@ -3338,7 +3514,8 @@ class ValidatorsTimeoutState(TransactionState):
 
         # Set the transaction result
         context.transactions_processor.set_transaction_result(
-            context.transaction.hash, context.consensus_data.to_dict()
+            context.transaction.hash,
+            context.consensus_data.to_dict(strip_contract_state=True),
         )
 
         context.transactions_processor.update_consensus_history(
@@ -3385,6 +3562,11 @@ class FinalizingState(TransactionState):
         Returns:
             None: The transaction is finalized.
         """
+        # Record timestamp for entering FINALIZED state
+        context.transactions_processor.add_state_timestamp(
+            context.transaction.hash, "FINALIZED"
+        )
+
         # Update the transaction status to FINALIZED
         await ConsensusAlgorithm.dispatch_transaction_status_update(
             context.transactions_processor,
@@ -3399,10 +3581,21 @@ class FinalizingState(TransactionState):
         if (context.transaction.status == TransactionStatus.ACCEPTED) and (
             leader_receipt.execution_result == ExecutionResultStatus.SUCCESS
         ):
-            # Update contract state
+            snapshot = context.contract_snapshot_factory(context.transaction.to_address)
+            if snapshot is None:
+                raise RuntimeError(
+                    "Missing contract snapshot while finalizing a transaction"
+                )
+
+            accepted_state = snapshot.states.get("accepted")
+            if not accepted_state:
+                raise RuntimeError(
+                    "Missing accepted contract state prior to finalization"
+                )
+
             context.contract_processor.update_contract_state(
                 context.transaction.to_address,
-                finalized_state=leader_receipt.contract_state,
+                finalized_state=accepted_state,
             )
 
             # Insert pending transactions generated by contract-to-contract calls

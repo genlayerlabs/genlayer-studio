@@ -2,10 +2,7 @@
   "provider": "google",
   "plugin": "google",
   "model": "gemini-2.5-flash",
-  "config": {
-    "temperature": 0.75,
-    "max_tokens": 500
-  },
+  "config": {},
   "plugin_config": {
     "api_key_env_var": "GEMINI_API_KEY",
     "api_url": "https://generativelanguage.googleapis.com"
