@@ -2,7 +2,7 @@ FROM ubuntu:24.04 AS base
 
 ARG TARGETPLATFORM
 
-ARG GENVM_TAG=v0.1.3
+ARG GENVM_TAG=v0.2.4
 
 ARG path=/app
 WORKDIR $path
