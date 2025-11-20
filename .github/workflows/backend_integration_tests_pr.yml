@@ -82,6 +82,9 @@ jobs:
           set: |
             *.cache-from=type=gha
             *.cache-to=type=gha,mode=max
+            database-migration.tags=genlayer-studio-database-migration:latest
+            jsonrpc.tags=genlayer-studio-jsonrpc:latest
+            consensus-worker.tags=genlayer-studio-consensus-worker:latest
           load: true
 
       # Start services without rebuilding images
