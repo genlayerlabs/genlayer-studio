@@ -56,33 +56,23 @@ describe('useConsensusStore', () => {
   });
 
   it('should initialize with default values from environment variables', () => {
-    // Since import.meta.env.VITE_FINALITY_WINDOW will be undefined in tests, expect NaN
-    expect(consensusStore.finalityWindow).toBeNaN();
+    // getRuntimeConfigNumber provides fallback values (10 for finality window, 3 for max rotations)
+    expect(consensusStore.finalityWindow).toBe(10);
     expect(consensusStore.isLoading).toBe(true); // Loading starts as true
-    expect(consensusStore.maxRotations).toBeNaN(); // Also NaN from undefined env var
+    expect(consensusStore.maxRotations).toBe(3); // Fallback from getRuntimeConfigNumber
   });
 
-  it('should connect WebSocket if not connected', () => {
-    // Update the global mock to have connected = false
-    mockWebSocketClientGlobal.connected = false;
-    mockWebSocketClientGlobal.connect.mockClear();
-
-    // Create a new pinia instance and re-initialize store to trigger connection logic
-    setActivePinia(createPinia());
-    const newConsensusStore = useConsensusStore();
-
-    expect(mockWebSocketClientGlobal.connect).toHaveBeenCalled();
-  });
-
-  it('should not connect WebSocket if already connected', () => {
-    mockWebSocketClient.connected = true;
-    mockWebSocketClient.connect.mockClear();
-
-    // Re-initialize store (new instance triggers init path)
-    setActivePinia(createPinia());
-    const newConsensusStore = useConsensusStore();
-
-    expect(mockWebSocketClient.connect).not.toHaveBeenCalled();
+  it('should set up event listeners on initialization', () => {
+    // The consensus store sets up WebSocket listeners but doesn't call connect()
+    // Verify that event listeners were set up (tested in WebSocket event handlers section)
+    expect(mockWebSocketClient.on).toHaveBeenCalledWith(
+      'finality_window_time_updated',
+      expect.any(Function),
+    );
+    expect(mockWebSocketClient.off).toHaveBeenCalledWith(
+      'finality_window_time_updated',
+      expect.any(Function),
+    );
   });
 
   describe('fetchFinalityWindowTime', () => {
