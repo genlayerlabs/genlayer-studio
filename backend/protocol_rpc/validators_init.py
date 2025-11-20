@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass
 from sqlalchemy.orm import Session
-from backend.database_handler.validators_registry import ModifiableValidatorsRegistry
+import backend.validators as validators
 
 
 @dataclass
@@ -18,7 +18,7 @@ class ValidatorConfig:
 async def initialize_validators(
     validators_json: str,
     db_session: Session,
-    validator_creator=None,
+    validators_manager: validators.Manager,
 ):
     """
     Idempotently initialize validators from a JSON string by deleting all existing validators and creating new ones.
@@ -26,18 +26,12 @@ async def initialize_validators(
     Args:
         validators_json: JSON string containing validator configurations
         db_session: Session to store validator information
-        validator_creator: Function to create validators (defaults to endpoints.create_validator)
+        validators_manager: ValidatorsManager instance (required for snapshot updates)
     """
 
     if not validators_json:
         print("No validators to initialize")
         return
-
-    # If no validator_creator is provided, import the default one
-    if validator_creator is None:
-        from backend.protocol_rpc.endpoints import create_validator
-
-        validator_creator = create_validator
 
     try:
         validators_data = json.loads(validators_json)
@@ -47,24 +41,51 @@ async def initialize_validators(
     if not isinstance(validators_data, list):
         raise ValueError("validators_json must contain a JSON array")
 
-    # Delete all existing validators
-    validators_registry = ModifiableValidatorsRegistry(db_session)
-    await validators_registry.delete_all_validators()
+    # Delete all existing validators using the manager's registry (triggers snapshot update)
+    await validators_manager.registry.delete_all_validators()
+
+    # Import necessary dependencies for validator creation
+    from backend.database_handler.accounts_manager import AccountsManager
+    from backend.domain.types import Validator, LLMProvider
+    from backend.node.create_nodes.providers import get_default_provider_for
+
+    accounts_manager = AccountsManager(db_session)
 
     # Create new validators
     for validator_data in validators_data:
         try:
-            validator = ValidatorConfig(**validator_data)
+            validator_config = ValidatorConfig(**validator_data)
 
-            for _ in range(validator.amount):
-                await validator_creator(
-                    db_session,
-                    validator.stake,
-                    validator.provider,
-                    validator.model,
-                    validator.config,
-                    validator.plugin,
-                    validator.plugin_config,
+            for _ in range(validator_config.amount):
+                # Prepare LLM provider
+                if (
+                    validator_config.config is None
+                    or validator_config.plugin is None
+                    or validator_config.plugin_config is None
+                ):
+                    llm_provider = get_default_provider_for(
+                        validator_config.provider, validator_config.model
+                    )
+                else:
+                    llm_provider = LLMProvider(
+                        provider=validator_config.provider,
+                        model=validator_config.model,
+                        config=validator_config.config,
+                        plugin=validator_config.plugin,
+                        plugin_config=validator_config.plugin_config,
+                    )
+
+                # Create account
+                account = accounts_manager.create_new_account()
+
+                # Create validator using manager's registry (triggers snapshot update)
+                await validators_manager.registry.create_validator(
+                    Validator(
+                        address=account.address,
+                        private_key=account.key,
+                        stake=validator_config.stake,
+                        llmprovider=llm_provider,
+                    )
                 )
 
         except Exception as e:

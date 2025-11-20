@@ -126,13 +126,16 @@ def _verify_database_ready(db_manager: DatabaseSessionManager) -> None:
 async def _initialise_validators(
     validators_config_json: Optional[str],
     db_manager: DatabaseSessionManager,
+    validators_manager: validators.Manager,
 ) -> None:
     if not validators_config_json:
         return
 
     init_session = db_manager.open_session()
     try:
-        await initialize_validators(validators_config_json, init_session)
+        await initialize_validators(
+            validators_config_json, init_session, validators_manager
+        )
         init_session.commit()
     finally:
         init_session.close()
@@ -201,7 +204,9 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
     # Delete all validators from the database and create new ones based on env.VAlIDATORS_CONFIG_JSON
     if settings.validators_config_json:
         logger.info("[STARTUP] Initializing validators from config")
-        await _initialise_validators(settings.validators_config_json, db_manager)
+        await _initialise_validators(
+            settings.validators_config_json, db_manager, validators_manager
+        )
 
     # Restart web and llm modules, created the validators Snapshot, and registers providers and models to the LLM module
     logger.info("[STARTUP] Restarting validators and creating snapshot")
@@ -311,6 +316,20 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
         )
         await redis_subscriber.connect()
         await redis_subscriber.start()
+
+        # Register handler for validator change events
+        async def handle_validator_change(event_data):
+            """Reload validators when they change."""
+            logger.info(f"RPC worker reloading validators due to change event")
+            await validators_manager.restart()
+
+        redis_subscriber.register_handler("validator_created", handle_validator_change)
+        redis_subscriber.register_handler("validator_updated", handle_validator_change)
+        redis_subscriber.register_handler("validator_deleted", handle_validator_change)
+        redis_subscriber.register_handler(
+            "all_validators_deleted", handle_validator_change
+        )
+
         logger.info(
             f"[STARTUP] Redis subscriber connected at {redis_url} for worker event broadcasting"
         )

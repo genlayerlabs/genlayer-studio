@@ -175,23 +175,38 @@ local function just_in_backend(ctx, args, mapped_prompt)
 
 	-- Return mock response if it exists and matches
 	if ctx.host_data.mock_response then
-		local result
+		local mock_data
 
 		if args.template == "EqComparative" then
 			-- Return the matching response to gl.eq_principle_prompt_comparative request which contains a principle key in the payload
-			result = get_mock_response_from_table(ctx.host_data.mock_response.eq_principle_prompt_comparative, mapped_prompt.prompt.user_message)
+			mock_data = get_mock_response_from_table(ctx.host_data.mock_response.eq_principle_prompt_comparative, mapped_prompt.prompt.user_message)
 		elseif args.template == "EqNonComparativeValidator" then
 			-- Return the matching response to gl.eq_principle_prompt_non_comparative request which contains an output key in the payload
-			result = get_mock_response_from_table(ctx.host_data.mock_response.eq_principle_prompt_non_comparative, mapped_prompt.prompt.user_message)
+			mock_data = get_mock_response_from_table(ctx.host_data.mock_response.eq_principle_prompt_non_comparative, mapped_prompt.prompt.user_message)
 		else
 			-- Return the matching response to gl.exec_prompt request which does not contain any specific key in the payload
 			-- EqNonComparativeLeader is essentially just exec_prompt
-			result = get_mock_response_from_table(ctx.host_data.mock_response.response, mapped_prompt.prompt.user_message)
+			mock_data = get_mock_response_from_table(ctx.host_data.mock_response.response, mapped_prompt.prompt.user_message)
 		end
 
 		-- Only return mock response if a match was found, otherwise fall through to real provider
-		if result.data ~= "no match" then
-			lib.log{level = "debug", message = "executed with mock response", type = type(result), res = result}
+		if mock_data.data ~= "no match" then
+			lib.log{level = "debug", message = "executed with mock response", type = type(mock_data), res = mock_data}
+
+			-- Wrap mock response in the same format as exec_prompt_in_provider returns
+			-- Convert to JSON string if it's a table, otherwise use as-is
+			local data_value
+			if type(mock_data.data) == "table" then
+				data_value = lib.rs.json_stringify(mock_data.data)
+			else
+				data_value = mock_data.data
+			end
+
+			local result = {
+				data = data_value,
+				consumed_gen = mock_data.consumed_gen
+			}
+			lib.log{level = "debug", message = "executed with", type = type(result), res = result}
 			return result
 		else
 			lib.log{level = "debug", message = "no mock match found, falling through to real provider"}

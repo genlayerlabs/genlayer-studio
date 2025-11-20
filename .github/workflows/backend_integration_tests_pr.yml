@@ -50,7 +50,15 @@ jobs:
           OPENAIKEY: ${{ secrets.OPENAIKEY }}
         run: |
           sed -i "s/<add_your_openai_api_key_here>/${OPENAIKEY}/g" .env
-          sed -i "s/FINALITY_WINDOW =.*/FINALITY_WINDOW = 10/" .env
+          sed -i "s/VITE_FINALITY_WINDOW=\".*\"/VITE_FINALITY_WINDOW=\"10\"/" .env
+          sed -i "s/COMPOSE_RPC_CPU_LIMIT=\".*\"/COMPOSE_RPC_CPU_LIMIT=\"4\"/" .env
+          sed -i "s/COMPOSE_WORKER_CPU_LIMIT=\".*\"/COMPOSE_WORKER_CPU_LIMIT=\"4\"/" .env
+          sed -i "s/COMPOSE_RPC_MEM_RESERVATION=\".*\"/COMPOSE_RPC_MEM_RESERVATION=\"1\"/" .env
+          sed -i "s/COMPOSE_WORKER_MEM_RESERVATION=\".*\"/COMPOSE_WORKER_MEM_RESERVATION=\"1\"/" .env
+          sed -i "s/COMPOSE_RPC_MEM_LIMIT=\".*\"/COMPOSE_RPC_MEM_LIMIT=\"6gb\"/" .env
+          sed -i "s/COMPOSE_WORKER_MEM_LIMIT=\".*\"/COMPOSE_WORKER_MEM_LIMIT=\"6gb\"/" .env
+          sed -i "s/COMPOSE_RPC_MEM_RESERVATION=\".*\"/COMPOSE_RPC_MEM_RESERVATION=\"2gb\"/" .env
+          sed -i "s/COMPOSE_WORKER_MEM_RESERVATION=\".*\"/COMPOSE_WORKER_MEM_RESERVATION=\"2gb\"/" .env
           echo >> .env
           if [[ "${{ needs.triggers.outputs.is_pull_request_review_approved }}" == "true" ]]; then
             echo "TEST_WITH_MOCK_LLMS=false" >> .env
@@ -70,16 +78,18 @@ jobs:
           targets: |
             database-migration
             jsonrpc
+            consensus-worker
           set: |
             *.cache-from=type=gha
             *.cache-to=type=gha,mode=max
+            database-migration.tags=genlayer-studio-database-migration:latest
+            jsonrpc.tags=genlayer-studio-jsonrpc:latest
+            consensus-worker.tags=genlayer-studio-consensus-worker:latest
           load: true
 
       # Start services without rebuilding images
       - name: Run Docker Compose
-        run: docker compose up -d --no-build
-
-
+        run: docker compose up -d --no-build database-migration jsonrpc consensus-worker
 
       - name: Wait for services to be up
         timeout-minutes: 5

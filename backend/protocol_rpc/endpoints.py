@@ -195,6 +195,7 @@ def delete_provider(session: Session, id: int) -> None:
 
 async def create_validator(
     session: Session,
+    validators_manager: validators.Manager,
     stake: int,
     provider: str,
     model: str,
@@ -218,11 +219,10 @@ async def create_validator(
         validate_provider(llm_provider)
 
     accounts_manager = AccountsManager(session)
-    validators_registry = ModifiableValidatorsRegistry(session)
 
     account = accounts_manager.create_new_account()
 
-    return await validators_registry.create_validator(
+    return await validators_manager.registry.create_validator(
         Validator(
             address=account.address,
             private_key=account.key,
@@ -260,7 +260,6 @@ async def create_random_validators(
     limit_models: list[str] = None,
 ) -> list[dict]:
     accounts_manager = AccountsManager(session)
-    validators_registry = ModifiableValidatorsRegistry(session)
     llm_provider_registry = LLMProviderRegistry(session)
 
     limit_providers = limit_providers or []
@@ -279,7 +278,7 @@ async def create_random_validators(
         stake = random.randint(min_stake, max_stake)
         validator_account = accounts_manager.create_new_account()
 
-        validator = await validators_registry.create_validator(
+        validator = await validators_manager.registry.create_validator(
             Validator(
                 address=validator_account.address,
                 private_key=validator_account.key,
@@ -295,6 +294,7 @@ async def create_random_validators(
 @check_forbidden_method_in_hosted_studio
 async def update_validator(
     session: Session,
+    validators_manager: validators.Manager,
     validator_address: str,
     stake: int,
     provider: str,
@@ -324,38 +324,33 @@ async def update_validator(
         )
         validate_provider(llm_provider)
 
-    validators_registry = ModifiableValidatorsRegistry(session)
-
     validator = Validator(
         address=validator_address,
         stake=stake,
         llmprovider=llm_provider,
     )
-    return await validators_registry.update_validator(validator)
+    return await validators_manager.registry.update_validator(validator)
 
 
 @check_forbidden_method_in_hosted_studio
 async def delete_validator(
-    session: Session,
+    validators_manager: validators.Manager,
     validator_address: str,
 ) -> str:
     # Remove validation while adding migration to update the db address
     # if not accounts_manager.is_valid_address(validator_address):
     #     raise InvalidAddressError(validator_address)
 
-    validators_registry = ModifiableValidatorsRegistry(session)
-
-    await validators_registry.delete_validator(validator_address)
+    await validators_manager.registry.delete_validator(validator_address)
     return validator_address
 
 
 @check_forbidden_method_in_hosted_studio
 async def delete_all_validators(
-    session: Session,
+    validators_manager: validators.Manager,
 ) -> list:
-    validators_registry = ModifiableValidatorsRegistry(session)
-    await validators_registry.delete_all_validators()
-    return validators_registry.get_all_validators()
+    await validators_manager.registry.delete_all_validators()
+    return validators_manager.registry.get_all_validators()
 
 
 def get_all_validators(validators_registry: ValidatorsRegistry) -> list:

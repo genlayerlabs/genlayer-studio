@@ -227,7 +227,7 @@ class TransactionsProcessor:
         transaction_hash: str | None = None,
         num_of_initial_validators: int | None = None,
         sim_config: dict | None = None,
-    ) -> None:
+    ) -> str:
 
         if transaction_hash is None:
             current_nonce = self.get_transaction_count(from_address)
@@ -279,6 +279,8 @@ class TransactionsProcessor:
 
         self.session.flush()  # So that `created_at` gets set
         self.session.commit()  # Persist the transaction to the database
+
+        return transaction_hash
 
     def _process_round_data(self, transaction_data: dict) -> dict:
         """Process round data and prepare transaction data."""

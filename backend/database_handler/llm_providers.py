@@ -2,6 +2,7 @@ from backend.domain.types import LLMProvider
 from backend.node.create_nodes.providers import get_default_providers
 from .models import LLMProviderDBModel
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 
 class LLMProviderRegistry:
@@ -18,7 +19,11 @@ class LLMProviderRegistry:
         for provider in providers:
             self.session.add(_to_db_model(provider, is_default=True))
 
-        self.session.commit()
+        try:
+            self.session.commit()
+        except IntegrityError:
+            # Another instance already seeded the providers, rollback and continue
+            self.session.rollback()
 
     def update_defaults(self):
         """Update default providers while preserving custom ones."""
@@ -62,7 +67,11 @@ class LLMProviderRegistry:
                     }
                 )
 
-        self.session.commit()
+        try:
+            self.session.commit()
+        except IntegrityError:
+            # Another instance already seeded the providers, rollback and continue
+            self.session.rollback()
 
     def get_all(self) -> list[LLMProvider]:
         return [
