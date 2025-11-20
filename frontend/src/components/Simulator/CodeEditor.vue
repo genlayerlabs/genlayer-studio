@@ -37,20 +37,18 @@ const editorRef = shallowRef<monaco.editor.IStandaloneCodeEditor | null>(null);
 const theme = computed(() => (uiStore.mode === 'light' ? 'vs' : 'vs-dark'));
 let stopLinting: (() => void) | null = null;
 
-// Track global provider registration to avoid duplicates
-let globalAutocompleteRegistered = false;
+// Track global language registration to avoid duplicates (using window object for true global state)
+const PYTHON_REGISTERED_KEY = '__monaco_python_lang_registered__';
 
 function initEditor() {
   containerElement.value = editorElement.value?.parentElement;
 
-  // Register Python language first
-  monaco.languages.register({ id: 'python' });
-  monaco.languages.setMonarchTokensProvider('python', pythonSyntax);
-
-  // Setup GenVM autocomplete BEFORE creating the editor (only once globally)
-  if (!globalAutocompleteRegistered) {
+  // Register Python language and autocomplete only once globally across all editor instances
+  if (!(window as any)[PYTHON_REGISTERED_KEY]) {
+    monaco.languages.register({ id: 'python' });
+    monaco.languages.setMonarchTokensProvider('python', pythonSyntax);
     setupGenVMAutocomplete(monaco);
-    globalAutocompleteRegistered = true;
+    (window as any)[PYTHON_REGISTERED_KEY] = true;
   }
 
   // Now create the editor
