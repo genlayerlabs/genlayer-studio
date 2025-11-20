@@ -22,7 +22,7 @@ class LLMProviderRegistry:
         try:
             self.session.commit()
         except IntegrityError:
-            # Another worker already seeded the providers, rollback and continue
+            # Another instance already seeded the providers, rollback and continue
             self.session.rollback()
 
     def update_defaults(self):
@@ -70,7 +70,7 @@ class LLMProviderRegistry:
         try:
             self.session.commit()
         except IntegrityError:
-            # Another worker already seeded the providers, rollback and continue
+            # Another instance already seeded the providers, rollback and continue
             self.session.rollback()
 
     def get_all(self) -> list[LLMProvider]:
