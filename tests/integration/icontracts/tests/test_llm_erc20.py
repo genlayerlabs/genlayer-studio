@@ -1,5 +1,5 @@
 # tests/e2e/test_storage.py
-from gltest import get_contract_factory, default_account, create_account
+from gltest import get_contract_factory, create_account
 from gltest.assertions import tx_execution_succeeded
 import json
 
@@ -7,7 +7,7 @@ TOKEN_TOTAL_SUPPLY = 1000
 TRANSFER_AMOUNT = 100
 
 
-def test_llm_erc20(setup_validators):
+def test_llm_erc20(setup_validators, default_account):
     # Account Setup
     from_account_a = default_account
     from_account_b = create_account()
@@ -36,7 +36,7 @@ def test_llm_erc20(setup_validators):
     ########################################
     ######### GET Initial State ############
     ########################################
-    contract_state_1 = contract.get_balances(args=[])
+    contract_state_1 = contract.get_balances(args=[]).call()
     assert contract_state_1[from_account_a.address] == TOKEN_TOTAL_SUPPLY
 
     ########################################
@@ -44,15 +44,11 @@ def test_llm_erc20(setup_validators):
     ########################################
     transaction_response_call_1 = contract.transfer(
         args=[TRANSFER_AMOUNT, from_account_b.address]
-    )
+    ).transact()
     assert tx_execution_succeeded(transaction_response_call_1)
 
-    # Assert response format
-    # FIXME: error decoding https://linear.app/genlayer-labs/issue/DXP-233/error-in-decoding-function-genlayer-js-and-genlayer-py
-    # assert_dict_struct(transaction_response_call_1, call_contract_function_response)
-
     # Get Updated State
-    contract_state_2_1 = contract.get_balances(args=[])
+    contract_state_2_1 = contract.get_balances(args=[]).call()
     assert (
         contract_state_2_1[from_account_a.address]
         == TOKEN_TOTAL_SUPPLY - TRANSFER_AMOUNT
@@ -60,9 +56,9 @@ def test_llm_erc20(setup_validators):
     assert contract_state_2_1[from_account_b.address] == TRANSFER_AMOUNT
 
     # Get Updated State
-    contract_state_2_2 = contract.get_balance_of(args=[from_account_a.address])
+    contract_state_2_2 = contract.get_balance_of(args=[from_account_a.address]).call()
     assert contract_state_2_2 == TOKEN_TOTAL_SUPPLY - TRANSFER_AMOUNT
 
     # Get Updated State
-    contract_state_2_3 = contract.get_balance_of(args=[from_account_b.address])
+    contract_state_2_3 = contract.get_balance_of(args=[from_account_b.address]).call()
     assert contract_state_2_3 == TRANSFER_AMOUNT

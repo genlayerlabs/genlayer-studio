@@ -1,0 +1,117 @@
+# Consensus worker Dockerfile - based on Ubuntu for compatibility
+FROM ubuntu:24.04 AS base
+
+ARG TARGETPLATFORM
+ARG TARGETARCH
+
+ARG GENVM_TAG=v0.2.4
+ENV GENVM_TAG=$GENVM_TAG
+
+ARG path=/app
+WORKDIR $path
+
+SHELL ["/bin/bash", "-x", "-c"]
+RUN apt-get update -y \
+    && DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install -y --no-install-recommends \
+        curl unzip xz-utils ca-certificates python3.12 python3.12-dev libssl3 gcc musl \
+    && mkdir -p "$HOME/.config/pip/" \
+    && printf "[global]\nbreak-system-packages = true\n" >> "$HOME/.config/pip/pip.conf" \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2 \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12 \
+    && python3.12 -m pip --version \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+ADD backend/requirements.txt backend/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --cache-dir=/root/.cache/pip -r backend/requirements.txt \
+    && pip install --cache-dir=/root/.cache/pip uvicorn[standard] fastapi
+
+# Create user and directories
+RUN groupadd -r worker-group \
+    && useradd -r -g worker-group worker-user \
+    && mkdir -p /home/worker-user/.cache/huggingface \
+    && chown -R worker-user:worker-group /home/worker-user \
+    && chown -R worker-user:worker-group $path \
+    && mkdir -p /genvm
+
+ENV PYTHONPATH "${PYTHONPATH}:/${path}"
+ENV HUGGINGFACE_HUB_CACHE /home/worker-user/.cache/huggingface
+ENV RUST_BACKTRACE=1
+
+
+# Download and extract GenVM binaries (sequential for Docker compatibility)
+RUN cd /genvm \
+    && echo "=== Starting GenVM $GENVM_TAG download ===" \
+    && if [[ "$TARGETPLATFORM" == "linux/amd64" ]] || [[ -z "$TARGETPLATFORM" ]]; then \
+        ARCH_FILE="genvm-linux-amd64.tar.xz" ; \
+    elif [[ "$TARGETPLATFORM" == "linux/arm64" ]]; then \
+        ARCH_FILE="genvm-linux-arm64.tar.xz" ; \
+    else \
+        echo "ERROR: Unsupported platform $TARGETPLATFORM" ; exit 1 ; \
+    fi \
+    && echo "Platform: $TARGETPLATFORM -> Architecture file: $ARCH_FILE" \
+    && echo "Downloading $ARCH_FILE..." \
+    && curl -L --fail --retry 3 --retry-delay 2 \
+        --connect-timeout 10 --max-time 300 \
+        --progress-bar \
+        -o "$ARCH_FILE" \
+        "https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/$ARCH_FILE" \
+    && echo "✓ Downloaded $ARCH_FILE" \
+    && echo "Downloading genvm-universal.tar.xz..." \
+    && curl -L --fail --retry 3 --retry-delay 2 \
+        --connect-timeout 10 --max-time 300 \
+        --progress-bar \
+        -o "genvm-universal.tar.xz" \
+        "https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-universal.tar.xz" \
+    && echo "✓ Downloaded genvm-universal.tar.xz" \
+    && echo "Verifying downloads..." \
+    && ls -lah *.tar.xz \
+    && for f in *.tar.xz; do \
+        if [ ! -s "$f" ]; then \
+            echo "ERROR: $f is empty or missing" ; exit 1 ; \
+        fi ; \
+    done \
+    && echo "Extracting archives..." \
+    && tar -xf "$ARCH_FILE" \
+    && tar -xf "genvm-universal.tar.xz" \
+    && rm *.tar.xz \
+    && echo "GenVM installed successfully:" \
+    && ls -la \
+    && chown -R worker-user:worker-group /genvm \
+    && chmod +x /genvm/bin/* /genvm/executor/$GENVM_TAG/bin/* \
+    && echo "=== GenVM installation complete ===" \
+    && echo "Setting up musl loader for GenVM binaries..." \
+    && if [[ "$TARGETPLATFORM" == "linux/amd64" ]] || [[ -z "$TARGETPLATFORM" ]]; then \
+        ln -sf /lib/x86_64-linux-musl/libc.so /lib/ld-musl-x86_64.so.1 ; \
+    elif [[ "$TARGETPLATFORM" == "linux/arm64" ]]; then \
+        ln -sf /lib/aarch64-linux-musl/libc.so /lib/ld-musl-aarch64.so.1 ; \
+    fi \
+    && echo "Musl loader configured"
+
+# Set GenVM environment variables (GENVM_TAG is already set as ENV earlier)
+ENV GENVMROOT=/genvm
+ENV PATH="/genvm/bin:/genvm/executor/${GENVM_TAG}/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/genvm/lib:/genvm/executor/${GENVM_TAG}/lib:${LD_LIBRARY_PATH}"
+
+# Copy necessary files
+COPY ../.env .
+COPY backend $path/backend
+
+# Change ownership of app files
+RUN chown -R worker-user:worker-group $path
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=40s \
+    CMD curl -f http://localhost:${WORKER_PORT:-4001}/health || exit 1
+
+# Switch to non-root user
+USER worker-user
+
+# Run the consensus worker service
+WORKDIR /app
+CMD ["python3", "-m", "uvicorn", "backend.consensus.worker_service:app", \
+     "--host", "0.0.0.0", \
+     "--port", "4001", \
+     "--log-level", "info"]

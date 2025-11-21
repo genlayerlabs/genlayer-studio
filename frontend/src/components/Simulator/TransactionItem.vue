@@ -18,6 +18,7 @@ import {
   b64ToArray,
   calldataToUserFriendlyJson,
 } from '@/calldata/jsonifier';
+import { getRuntimeConfigNumber } from '@/utils/runtimeConfig';
 
 const uiStore = useUIStore();
 const nodeStore = useNodeStore();
@@ -29,7 +30,7 @@ const props = defineProps<{
 }>();
 
 const finalityWindowAppealFailedReduction = ref(
-  Number(import.meta.env.VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION),
+  getRuntimeConfigNumber('VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION', 0.2),
 );
 
 const isDetailsModalOpen = ref(false);
@@ -55,7 +56,7 @@ const leaderReceipt = computed(() => {
 const eqOutputs = computed(() => {
   const outputs = leaderReceipt.value?.eq_outputs || {};
   return Object.entries(outputs).map(([key, value]: [string, unknown]) => {
-    const decodedResult = resultToUserFriendlyJson(String(value));
+    const decodedResult = resultToUserFriendlyJson(value);
     const parsedValue = decodedResult?.payload?.readable ?? value;
     try {
       if (typeof parsedValue === 'string') {
@@ -127,12 +128,9 @@ function prettifyTxData(x: any): any {
     return x;
   }
   try {
-    const new_eq_outputs = Object.fromEntries(
+    const newEqOutputs = Object.fromEntries(
       Object.entries(oldEqOutputs).map(([k, v]) => {
-        const arrayBuffer = b64ToArray(String(v));
-        const val = resultToUserFriendlyJson(
-          new TextDecoder().decode(arrayBuffer),
-        );
+        const val = resultToUserFriendlyJson(v);
         return [k, val];
       }),
     );
@@ -143,7 +141,7 @@ function prettifyTxData(x: any): any {
         leader_receipt: [
           {
             ...x.consensus_data.leader_receipt[0],
-            eq_outputs: new_eq_outputs,
+            eq_outputs: newEqOutputs,
           },
           x.consensus_data.leader_receipt[1],
         ],
@@ -155,6 +153,21 @@ function prettifyTxData(x: any): any {
     return x;
   }
 }
+
+const badgeColorClass = computed(() => {
+  if (props.transaction.statusName !== 'FINALIZED') {
+    return '';
+  } else {
+    if (
+      props.transaction.data?.last_round?.result === 6 &&
+      leaderReceipt.value?.execution_result !== 'ERROR'
+    ) {
+      return '!bg-green-500';
+    } else {
+      return '!bg-red-500';
+    }
+  }
+});
 </script>
 
 <template>
@@ -200,7 +213,8 @@ function prettifyTxData(x: any): any {
           transaction.statusName !== 'FINALIZED' &&
           transaction.statusName !== 'ACCEPTED' &&
           transaction.statusName !== 'UNDETERMINED' &&
-          transaction.statusName !== 'LEADER_TIMEOUT'
+          transaction.statusName !== 'LEADER_TIMEOUT' &&
+          transaction.statusName !== 'VALIDATORS_TIMEOUT'
         "
       />
 
@@ -210,7 +224,8 @@ function prettifyTxData(x: any): any {
             transaction.data.leader_only == false &&
             (transaction.statusName == 'ACCEPTED' ||
               transaction.statusName == 'UNDETERMINED' ||
-              transaction.statusName == 'LEADER_TIMEOUT') &&
+              transaction.statusName == 'LEADER_TIMEOUT' ||
+              transaction.statusName == 'VALIDATORS_TIMEOUT') &&
             Date.now() / 1000 -
               transaction.data.timestamp_awaiting_finalization -
               transaction.data.appeal_processing_time <=
@@ -233,10 +248,7 @@ function prettifyTxData(x: any): any {
       </div>
 
       <TransactionStatusBadge
-        :class="[
-          'px-[4px] py-[1px] text-[9px]',
-          transaction.statusName === 'FINALIZED' ? '!bg-green-500' : '',
-        ]"
+        :class="['px-[4px] py-[1px] text-[9px]', badgeColorClass]"
       >
         {{ transaction.statusName }}
       </TransactionStatusBadge>
@@ -283,14 +295,12 @@ function prettifyTxData(x: any): any {
                 transaction.statusName !== 'FINALIZED' &&
                 transaction.statusName !== 'ACCEPTED' &&
                 transaction.statusName !== 'UNDETERMINED' &&
-                transaction.statusName !== 'LEADER_TIMEOUT'
+                transaction.statusName !== 'LEADER_TIMEOUT' &&
+                transaction.statusName !== 'VALIDATORS_TIMEOUT'
               "
             />
             <TransactionStatusBadge
-              :class="[
-                'px-[4px] py-[1px] text-[9px]',
-                transaction.statusName === 'FINALIZED' ? '!bg-green-500' : '',
-              ]"
+              :class="['px-[4px] py-[1px] text-[9px]', badgeColorClass]"
             >
               {{ transaction.statusName }}
             </TransactionStatusBadge>
@@ -327,13 +337,26 @@ function prettifyTxData(x: any): any {
             </div>
 
             <div>
+              <div class="mb-1 font-medium">LLM-0:</div>
               <div>
                 <span class="font-medium">Model:</span>
-                {{ leaderReceipt.node_config.model }}
+                {{ leaderReceipt.node_config.primary_model?.model }}
               </div>
               <div>
                 <span class="font-medium">Provider:</span>
-                {{ leaderReceipt.node_config.provider }}
+                {{ leaderReceipt.node_config.primary_model?.provider }}
+              </div>
+            </div>
+
+            <div v-if="leaderReceipt.node_config.secondary_model">
+              <div class="mb-1 font-medium">LLM-1:</div>
+              <div>
+                <span class="font-medium">Model:</span>
+                {{ leaderReceipt.node_config.secondary_model.model }}
+              </div>
+              <div>
+                <span class="font-medium">Provider:</span>
+                {{ leaderReceipt.node_config.secondary_model.provider }}
               </div>
             </div>
           </div>
@@ -446,6 +469,14 @@ function prettifyTxData(x: any): any {
                       <XCircleIcon class="h-4 w-4 text-red-500" />
                       Disagree
                     </template>
+                    <template
+                      v-if="history.leader_result[1].vote === 'timeout'"
+                    >
+                      <EllipsisHorizontalCircleIcon
+                        class="h-4 w-4 text-yellow-500"
+                      />
+                      Timeout
+                    </template>
                   </template>
                 </div>
               </div>
@@ -469,6 +500,12 @@ function prettifyTxData(x: any): any {
                   <template v-if="validator.vote === 'disagree'">
                     <XCircleIcon class="h-4 w-4 text-red-500" />
                     Disagree
+                  </template>
+                  <template v-if="validator.vote === 'timeout'">
+                    <EllipsisHorizontalCircleIcon
+                      class="h-4 w-4 text-yellow-500"
+                    />
+                    Timeout
                   </template>
                 </div>
               </div>

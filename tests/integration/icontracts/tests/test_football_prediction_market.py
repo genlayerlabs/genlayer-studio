@@ -28,15 +28,11 @@ def test_football_prediction_market(setup_validators):
     ########################################
     ############# RESOLVE match ############
     ########################################
-    transaction_response_call_1 = contract.resolve(args=[])
+    transaction_response_call_1 = contract.resolve(args=[]).transact()
     assert tx_execution_succeeded(transaction_response_call_1)
 
-    # Assert response format
-    # FIXME: error decoding https://linear.app/genlayer-labs/issue/DXP-233/error-in-decoding-function-genlayer-js-and-genlayer-py
-    # assert_dict_struct(transaction_response_call_1, call_contract_function_response)
-
     # Get Updated State
-    contract_state_2 = contract.get_resolution_data(args=[])
+    contract_state_2 = contract.get_resolution_data(args=[]).call()
 
     assert contract_state_2["winner"] == winner
     assert contract_state_2["score"] == score

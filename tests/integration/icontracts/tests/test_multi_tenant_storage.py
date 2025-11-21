@@ -21,7 +21,9 @@ def test_multi_tenant_storage(setup_validators):
     user_account_b = create_account()
 
     # Storage Contracts
-    storage_factory = get_contract_factory("Storage")
+    storage_factory = get_contract_factory(
+        contract_file_path="examples/contracts/storage.py"
+    )
 
     ## Deploy first Storage Contract
     first_storage_contract = storage_factory.deploy(args=["initial_storage_a"])
@@ -40,25 +42,31 @@ def test_multi_tenant_storage(setup_validators):
         ]
     )
     # update storage for first contract
-    transaction_response_call = multi_tenant_storage_contract.connect(
-        account=user_account_a,
-    ).update_storage(
-        args=["user_a_storage"],
-        wait_triggered_transactions_status=TransactionStatus.FINALIZED,
+    transaction_response_call = (
+        multi_tenant_storage_contract.connect(user_account_a)
+        .update_storage(args=["user_a_storage"])
+        .transact(
+            wait_transaction_status=TransactionStatus.FINALIZED,
+            wait_triggered_transactions=True,
+            wait_triggered_transactions_status=TransactionStatus.ACCEPTED,
+        )
     )
     assert tx_execution_succeeded(transaction_response_call)
 
     # update storage for second contract
-    transaction_response_call = multi_tenant_storage_contract.connect(
-        account=user_account_b,
-    ).update_storage(
-        args=["user_b_storage"],
-        wait_triggered_transactions_status=TransactionStatus.FINALIZED,
+    transaction_response_call = (
+        multi_tenant_storage_contract.connect(user_account_b)
+        .update_storage(args=["user_b_storage"])
+        .transact(
+            wait_transaction_status=TransactionStatus.FINALIZED,
+            wait_triggered_transactions=True,
+            wait_triggered_transactions_status=TransactionStatus.ACCEPTED,
+        )
     )
     assert tx_execution_succeeded(transaction_response_call)
 
     # get all storages
-    storages = multi_tenant_storage_contract.get_all_storages(args=[])
+    storages = multi_tenant_storage_contract.get_all_storages(args=[]).call()
 
     assert storages == {
         second_storage_contract.address: "user_a_storage",

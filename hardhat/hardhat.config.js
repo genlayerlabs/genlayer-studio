@@ -24,6 +24,7 @@ module.exports = {
   },
   networks: {
     hardhat: {
+      // gas: 0xffffffff, // Removed to eliminate gas floor issue
       mining: {
         auto: true,
         interval: 0,
@@ -38,6 +39,7 @@ module.exports = {
     },
     genlayer_network: {
       url: "http://localhost:8545",
+      // gas: 0xffffffff, // Removed to eliminate gas floor issue
       mining: {
         auto: true,
         interval: 0,

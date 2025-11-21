@@ -1,0 +1,10 @@
+{
+  "provider": "xai",
+  "plugin": "openai-compatible",
+  "model": "grok-3",
+  "config": {},
+  "plugin_config": {
+    "api_key_env_var": "XAI_API_KEY",
+    "api_url": "https://api.x.ai"
+  }
+}

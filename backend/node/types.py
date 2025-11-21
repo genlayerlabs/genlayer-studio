@@ -84,8 +84,11 @@ class Address:
 
 
 class Vote(Enum):
+    NOT_VOTED = "not_voted"
     AGREE = "agree"
     DISAGREE = "disagree"
+    TIMEOUT = "timeout"
+    DETERMINISTIC_VIOLATION = "deterministic_violation"
 
     @classmethod
     def from_string(cls, value: str) -> "Vote":
@@ -93,6 +96,16 @@ class Vote(Enum):
             return cls(value.lower())
         except ValueError:
             raise ValueError(f"Invalid vote value: {value}")
+
+    def __int__(self) -> int:
+        values = {
+            Vote.NOT_VOTED: 0,
+            Vote.AGREE: 1,
+            Vote.DISAGREE: 2,
+            Vote.TIMEOUT: 3,
+            Vote.DETERMINISTIC_VIOLATION: 4,
+        }
+        return values[self]
 
 
 class ExecutionMode(Enum):
@@ -172,23 +185,34 @@ class Receipt:
     calldata: bytes
     gas_used: int
     mode: ExecutionMode
-    contract_state: dict[str, dict[str, str]]
+    contract_state: dict[str, str]
     node_config: dict
     eq_outputs: dict[int, str]
     execution_result: ExecutionResultStatus
     vote: Optional[Vote] = None
     pending_transactions: Iterable[PendingTransaction] = ()
     genvm_result: dict[str, str] | None = None
+    processing_time: Optional[int] = None
+    nondet_disagree: int | None = None
 
-    def to_dict(self):
+    def to_dict(self, strip_contract_state: bool = False):
+        """Convert Receipt to dict.
+
+        Args:
+            strip_contract_state: If True, replaces contract_state with empty dict to save storage.
+                                 Contract state is always available from CurrentState table.
+        """
+        result = base64.b64encode(self.result).decode("ascii")
+        calldata = str(base64.b64encode(self.calldata), encoding="ascii")
+
         return {
             "vote": self.vote.value if self.vote else None,
             "execution_result": self.execution_result.value,
-            "result": base64.b64encode(self.result).decode("ascii"),
-            "calldata": str(base64.b64encode(self.calldata), encoding="ascii"),
+            "result": result,
+            "calldata": calldata,
             "gas_used": self.gas_used,
             "mode": self.mode.value,
-            "contract_state": self.contract_state,
+            "contract_state": {} if strip_contract_state else self.contract_state,
             "node_config": self.node_config,
             "eq_outputs": self.eq_outputs,
             "pending_transactions": [
@@ -196,6 +220,8 @@ class Receipt:
                 for pending_transaction in self.pending_transactions
             ],
             "genvm_result": self.genvm_result,
+            "processing_time": self.processing_time,
+            "nondet_disagree": self.nondet_disagree,
         }
 
     @classmethod
@@ -218,6 +244,8 @@ class Receipt:
                     for pending_transaction in input.get("pending_transactions", [])
                 ],
                 genvm_result=input.get("genvm_result"),
+                processing_time=input.get("processing_time"),
+                nondet_disagree=input.get("nondet_disagree"),
             )
         else:
             return None

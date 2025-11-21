@@ -7,6 +7,7 @@ from typing import Callable, Optional
 import typing
 import collections.abc
 import os
+import logging
 
 from backend.domain.types import Validator, Transaction, TransactionType
 from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope
@@ -16,6 +17,7 @@ import backend.node.genvm.origin.calldata as calldata
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.node.types import Receipt, ExecutionMode, Vote, ExecutionResultStatus
 from backend.protocol_rpc.message_handler.base import MessageHandler
+from backend.node.genvm.origin.result_codes import ResultCode
 
 from .types import Address
 
@@ -31,6 +33,66 @@ def _parse_chain_id() -> int:
 
 
 SIMULATOR_CHAIN_ID: typing.Final[int] = _parse_chain_id()
+
+
+def _filter_genvm_log_by_level(genvm_log: list[dict]) -> list[dict]:
+    """
+    Filter genvm_log entries based on configured LOG_LEVEL with a minimum of WARNING.
+    Only includes log entries that meet or exceed the effective threshold.
+    """
+    # Get configured log level from environment
+    configured_level = os.getenv("LOG_LEVEL", "INFO").upper()
+
+    # Map string levels to numeric values (matching Python's logging module)
+    level_map = {
+        "DEBUG": logging.DEBUG,  # 10
+        "INFO": logging.INFO,  # 20
+        "WARNING": logging.WARNING,  # 30
+        "WARN": logging.WARNING,  # 30 (alias)
+        "ERROR": logging.ERROR,  # 40
+        "CRITICAL": logging.CRITICAL,  # 50
+    }
+
+    # Get numeric threshold for configured level (default to INFO if unknown)
+    # Enforce minimum WARNING level regardless of configuration
+    threshold = max(level_map.get(configured_level, logging.INFO), logging.WARNING)
+
+    # Filter log entries
+    filtered_logs = []
+    for log_entry in genvm_log:
+        if not isinstance(log_entry, dict):
+            # Keep non-dict entries as-is
+            filtered_logs.append(log_entry)
+            continue
+
+        entry_level = log_entry.get("level", "info").upper()
+        entry_numeric_level = level_map.get(entry_level, logging.INFO)
+
+        # Include if entry level >= threshold
+        if entry_numeric_level >= threshold:
+            filtered_logs.append(log_entry)
+
+    return filtered_logs
+
+
+def _repr_result_with_capped_data(
+    result: genvmbase.ExecutionReturn | genvmbase.ExecutionError, cap: int = 1000
+) -> str:
+    """
+    Return a JSON string representation of result with the 'data' field capped.
+    Falls back to the default repr if parsing fails or no 'data' field exists.
+    """
+    try:
+        as_str = f"{result!r}"
+        parsed = json.loads(as_str)
+        if isinstance(parsed, dict):
+            data_value = parsed.get("data")
+            if isinstance(data_value, str) and len(data_value) > cap:
+                parsed["data"] = data_value[:cap]
+                return json.dumps(parsed)
+        return as_str
+    except Exception:
+        return f"{result!r}"
 
 
 class _SnapshotView(genvmbase.StateProxy):
@@ -70,15 +132,13 @@ class _SnapshotView(genvmbase.StateProxy):
 
     def storage_write(
         self,
-        account: Address,
         slot: bytes,
         index: int,
         got: collections.abc.Buffer,
         /,
     ) -> None:
-        assert account == self.contract_address
         assert not self.readonly
-        snap = self._get_snapshot(account)
+        snap = self._get_snapshot(self.contract_address)
         slot_id = base64.b64encode(slot).decode("ascii")
         for_slot = snap.states[self.state_status].setdefault(slot_id, "")
         data = bytearray(base64.b64decode(for_slot))
@@ -104,6 +164,7 @@ class Node:
         leader_receipt: Optional[Receipt] = None,
         msg_handler: MessageHandler | None = None,
         validators_snapshot: validators.Snapshot | None = None,
+        timing_callback: Optional[Callable[[str], None]] = None,
     ):
         self.contract_snapshot = contract_snapshot
         self.validator_mode = validator_mode
@@ -113,37 +174,123 @@ class Node:
         self.msg_handler = msg_handler
         self.contract_snapshot_factory = contract_snapshot_factory
         self.validators_snapshot = validators_snapshot
+        self.timing_callback = timing_callback
 
     def _create_genvm(self) -> genvmbase.IGenVM:
         return genvmbase.GenVMHost()
 
     async def exec_transaction(self, transaction: Transaction) -> Receipt:
+        if self.timing_callback:
+            self.timing_callback("EXEC_START")
+
         assert transaction.data is not None
         transaction_data = transaction.data
         assert transaction.from_address is not None
+
+        # Override transaction timestamp
+        sim_config = transaction.sim_config
+        transaction_created_at = transaction.created_at
+        if sim_config is not None and sim_config.genvm_datetime is not None:
+            transaction_created_at = sim_config.genvm_datetime
+
         if transaction.type == TransactionType.DEPLOY_CONTRACT:
+            if self.timing_callback:
+                self.timing_callback("DEPLOY_START")
+
             code = base64.b64decode(transaction_data["contract_code"])
             calldata = base64.b64decode(transaction_data["calldata"])
+
+            if self.timing_callback:
+                self.timing_callback("DECODE_COMPLETE")
+
             receipt = await self.deploy_contract(
                 transaction.from_address,
                 code,
                 calldata,
                 transaction.hash,
-                transaction.created_at,
+                transaction_created_at,
             )
+
+            if self.timing_callback:
+                self.timing_callback("DEPLOY_END")
         elif transaction.type == TransactionType.RUN_CONTRACT:
+            if self.timing_callback:
+                self.timing_callback("RUN_START")
+
             calldata = base64.b64decode(transaction_data["calldata"])
+
+            if self.timing_callback:
+                self.timing_callback("DECODE_COMPLETE")
+
             receipt = await self.run_contract(
                 transaction.from_address,
                 calldata,
                 transaction.hash,
-                transaction.created_at,
+                transaction_created_at,
             )
+
+            if self.timing_callback:
+                self.timing_callback("RUN_END")
         else:
             raise Exception(f"unknown transaction type {transaction.type}")
+
+        if self.timing_callback:
+            self.timing_callback("RECEIPT_CREATED")
+
         return receipt
 
+    def _create_enhanced_node_config(self, host_data: dict | None) -> dict:
+        """
+        Create enhanced node_config that includes both primary and fallback provider info.
+
+        Args:
+            host_data: The host_data dict containing primary and fallback provider IDs
+
+        Returns:
+            Enhanced node_config dict with fallback information
+        """
+        node_config = self.validator.to_dict()
+        enhanced_node_config = {
+            "address": node_config["address"],
+            "private_key": node_config["private_key"],
+            "stake": node_config["stake"],
+            "primary_model": {
+                k: v
+                for k, v in node_config.items()
+                if k not in ["address", "private_key", "stake"]
+            },
+            "secondary_model": None,
+        }
+
+        if host_data is None:
+            return enhanced_node_config
+
+        fallback_llm_id = host_data.get("fallback_llm_id")
+        if fallback_llm_id and self.validators_snapshot:
+            fallback_validator = None
+            for node in self.validators_snapshot.nodes:
+                if f"node-{node.validator.address}" == fallback_llm_id:
+                    fallback_validator = node.validator
+                    break
+
+            if fallback_validator:
+                enhanced_node_config["secondary_model"] = {
+                    "provider": fallback_validator.llmprovider.provider,
+                    "model": fallback_validator.llmprovider.model,
+                    "plugin": fallback_validator.llmprovider.plugin,
+                    "plugin_config": fallback_validator.llmprovider.plugin_config,
+                    "config": fallback_validator.llmprovider.config,
+                }
+
+        return enhanced_node_config
+
     def _set_vote(self, receipt: Receipt) -> Receipt:
+        if (receipt.result[0] == ResultCode.VM_ERROR) and (
+            receipt.result[1:] == b"timeout"
+        ):
+            receipt.vote = Vote.TIMEOUT
+            return receipt
+
         leader_receipt = self.leader_receipt
         if (
             leader_receipt.execution_result == receipt.execution_result
@@ -151,16 +298,28 @@ class Node:
             and leader_receipt.contract_state == receipt.contract_state
             and leader_receipt.pending_transactions == receipt.pending_transactions
         ):
-            receipt.vote = Vote.AGREE
+            if receipt.nondet_disagree is not None:
+                receipt.vote = Vote.DISAGREE
+            else:
+                receipt.vote = Vote.AGREE
         else:
-            receipt.vote = Vote.DISAGREE
+            receipt.vote = Vote.DETERMINISTIC_VIOLATION
 
         return receipt
 
-    def _date_from_str(self, date: str | None) -> datetime.datetime | None:
+    def _date_from_str(
+        self, date: str | datetime.datetime | None
+    ) -> datetime.datetime | None:
         if date is None:
             return None
-        res = datetime.datetime.fromisoformat(date)
+        # If already a datetime, ensure it's timezone-aware
+        if isinstance(date, datetime.datetime):
+            if date.tzinfo is None:
+                return date.replace(tzinfo=datetime.UTC)
+            return date
+        # Otherwise, parse from string; accept ISO-8601 with trailing 'Z'
+        date_str = date.replace("Z", "+00:00")
+        res = datetime.datetime.fromisoformat(date_str)
         if res.tzinfo is None:
             res = res.replace(tzinfo=datetime.UTC)
         return res
@@ -188,11 +347,7 @@ class Node:
         )
 
         base_host.save_code_callback(
-            Address(self.contract_snapshot.contract_address).as_bytes,
-            code_to_deploy,
-            lambda addr, *rest: snapshot_view_for_code.storage_write(
-                Address(addr), *rest
-            ),
+            code_to_deploy, snapshot_view_for_code.storage_write
         )
 
         return await self._run_genvm(
@@ -225,51 +380,70 @@ class Node:
         from_address: str,
         calldata: bytes,
         state_status: str | None = None,
+        transaction_datetime: datetime.datetime | None = None,
     ) -> Receipt:
         return await self._run_genvm(
             from_address,
             calldata,
             readonly=True,
             is_init=False,
-            transaction_datetime=datetime.datetime.now().astimezone(datetime.UTC),
+            transaction_datetime=(
+                transaction_datetime
+                if transaction_datetime is not None
+                else datetime.datetime.now().astimezone(datetime.UTC)
+            ),
             state_status=state_status,
         )
 
     async def _execution_finished(
-        self, res: genvmbase.ExecutionResult, transaction_hash_str: str | None
+        self,
+        res: genvmbase.ExecutionResult,
+        transaction_hash_str: str | None,
+        from_address: str | None,
     ):
         msg_handler = self.msg_handler
         if msg_handler is None:
             return
+        is_error = isinstance(res.result, genvmbase.ExecutionError)
+
+        # Filter genvm_log based on configured log level
+        filtered_genvm_log = _filter_genvm_log_by_level(res.genvm_log)
+        capped_stdout = (
+            res.stdout[:500] + res.stdout[-500:]
+            if len(res.stdout) > 1000
+            else res.stdout
+        )
+
         msg_handler.send_message(
             LogEvent(
                 name="execution_finished",
-                type=(
-                    EventType.INFO
-                    if isinstance(res.result, genvmbase.ExecutionReturn)
-                    else EventType.ERROR
-                ),
+                type=(EventType.INFO if not is_error else EventType.ERROR),
                 scope=EventScope.GENVM,
                 message="execution finished",
                 data={
-                    "result": f"{res.result!r}",
-                    "stdout": res.stdout,
+                    "result": _repr_result_with_capped_data(res.result),
+                    "stdout": res.stdout if is_error else capped_stdout,
                     "stderr": res.stderr,
-                    "genvm_log": res.genvm_log,
+                    "genvm_log": filtered_genvm_log,
                 },
                 transaction_hash=transaction_hash_str,
+                account_address=from_address,
+                client_session_id=getattr(msg_handler, "client_session_id", None),
             )
         )
 
     async def get_contract_schema(self, code: bytes) -> str:
         genvm = self._create_genvm()
         res = await genvm.get_contract_schema(code)
-        await self._execution_finished(res, None)
+        await self._execution_finished(res, None, None)
+
+        filtered_genvm_log = _filter_genvm_log_by_level(res.genvm_log)
+
         err_data = {
             "stdout": res.stdout,
             "stderr": res.stderr,
-            "genvm_log": res.genvm_log,
-            "result": f"{res.result!r}",
+            "genvm_log": filtered_genvm_log,
+            "result": _repr_result_with_capped_data(res.result),
         }
         if not isinstance(res.result, genvmbase.ExecutionReturn):
             raise Exception("execution failed", err_data)
@@ -295,6 +469,9 @@ class Node:
         transaction_datetime: datetime.datetime | None,
         state_status: str | None = None,
     ) -> Receipt:
+        if self.timing_callback:
+            self.timing_callback("GENVM_PREPARATION_START")
+
         genvm = self._create_genvm()
         leader_res: None | dict[int, bytes]
         if self.leader_receipt is None:
@@ -306,6 +483,10 @@ class Node:
             }
         assert self.contract_snapshot is not None
         assert self.contract_snapshot_factory is not None
+
+        if self.timing_callback:
+            self.timing_callback("SNAPSHOT_CREATION_START")
+
         snapshot_view = _SnapshotView(
             self.contract_snapshot,
             self.contract_snapshot_factory,
@@ -313,13 +494,20 @@ class Node:
             state_status,
         )
 
+        if self.timing_callback:
+            self.timing_callback("SNAPSHOT_CREATION_END")
+
         config_path = None
         host_data = None
         if self.validators_snapshot is not None:
             config_path = self.validators_snapshot.genvm_config_path
             for n in self.validators_snapshot.nodes:
                 if n.validator.address == self.validator.address:
-                    host_data = n.genvm_host_arg
+                    host_data = n.genvm_host_data
+
+        if self.timing_callback:
+            self.timing_callback("GENVM_EXECUTION_START")
+
         result_exec_code: ExecutionResultStatus
         res = await genvm.run_contract(
             snapshot_view,
@@ -335,7 +523,13 @@ class Node:
             host_data=host_data,
         )
 
-        await self._execution_finished(res, transaction_hash)
+        if self.timing_callback:
+            self.timing_callback("GENVM_EXECUTION_END")
+
+        await self._execution_finished(res, transaction_hash, from_address)
+
+        if self.timing_callback:
+            self.timing_callback("EXECUTION_FINISHED")
 
         result_exec_code = (
             ExecutionResultStatus.SUCCESS
@@ -353,14 +547,18 @@ class Node:
             pending_transactions=res.pending_transactions,
             vote=None,
             execution_result=result_exec_code,
-            contract_state=self.contract_snapshot.states["accepted"],
+            contract_state=typing.cast(_SnapshotView, res.state).snapshot.states[
+                "accepted"
+            ],
             calldata=calldata,
             mode=self.validator_mode,
-            node_config=self.validator.to_dict(),
+            node_config=self._create_enhanced_node_config(host_data),
             genvm_result={
-                "stdout": res.stdout,
+                "stdout": res.stdout[:5000],
                 "stderr": res.stderr,
             },
+            processing_time=res.processing_time,
+            nondet_disagree=res.nondet_disagree,
         )
 
         if self.validator_mode == ExecutionMode.LEADER:

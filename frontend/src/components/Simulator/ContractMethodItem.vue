@@ -10,7 +10,8 @@ import { useEventTracking, useContractQueries } from '@/hooks';
 import { unfoldArgsData, type ArgData } from './ContractParams';
 import ContractParams from './ContractParams.vue';
 
-const { callWriteMethod, callReadMethod, contract } = useContractQueries();
+const { callWriteMethod, callReadMethod, simulateWriteMethod, contract } =
+  useContractQueries();
 const { trackEvent } = useEventTracking();
 
 const props = defineProps<{
@@ -19,6 +20,7 @@ const props = defineProps<{
   methodType: 'read' | 'write';
   leaderOnly: boolean;
   consensusMaxRotations?: number;
+  simulationMode?: boolean;
 }>();
 
 const isExpanded = ref(false);
@@ -29,6 +31,9 @@ const responseMessageFinalized = ref('');
 const calldataArguments = ref<ArgData>({ args: [], kwargs: {} });
 
 const formatResponseIfNeeded = (response: string): string => {
+  if (!response) {
+    return '';
+  }
   // Check if the string looks like a malformed JSON (starts with { and ends with })
   if (response.startsWith('{') && response.endsWith('}')) {
     try {
@@ -45,6 +50,10 @@ const formatResponseIfNeeded = (response: string): string => {
         return response;
       }
     }
+  }
+  // Remove quotes if the response is just a quoted empty string
+  if (response === '""') {
+    return '';
   }
   return response;
 };
@@ -68,16 +77,14 @@ const handleCallReadMethod = async () => {
       ),
     ]);
 
-    console.log('handleCallReadMethod', acceptedMsg, finalizedMsg);
-
     responseMessageAccepted.value =
       acceptedMsg.status === 'fulfilled' && acceptedMsg.value !== undefined
         ? formatResponseIfNeeded(abi.calldata.toString(acceptedMsg.value))
-        : `failed: ${acceptedMsg}`;
+        : '';
     responseMessageFinalized.value =
       finalizedMsg.status === 'fulfilled' && finalizedMsg.value !== undefined
         ? formatResponseIfNeeded(abi.calldata.toString(finalizedMsg.value))
-        : `failed: ${finalizedMsg}`;
+        : '';
 
     trackEvent('called_read_method', {
       contract_name: contract.value?.name || '',
@@ -98,25 +105,56 @@ const handleCallWriteMethod = async () => {
   isCalling.value = true;
 
   try {
-    await callWriteMethod({
-      method: props.name,
-      leaderOnly: props.leaderOnly,
-      consensusMaxRotations: props.consensusMaxRotations,
-      args: unfoldArgsData({
-        args: calldataArguments.value.args,
-        kwargs: calldataArguments.value.kwargs,
-      }),
-    });
+    if (props.simulationMode) {
+      // Simulation mode - call simulateWriteMethod
+      responseMessageAccepted.value = '';
+      responseMessageFinalized.value = '';
 
-    notify({
-      text: 'Write method called',
-      type: 'success',
-    });
+      const result = await simulateWriteMethod({
+        method: props.name,
+        leaderOnly: props.leaderOnly,
+        consensusMaxRotations: props.consensusMaxRotations,
+        args: unfoldArgsData({
+          args: calldataArguments.value.args,
+          kwargs: calldataArguments.value.kwargs,
+        }),
+      });
 
-    trackEvent('called_write_method', {
-      contract_name: contract.value?.name || '',
-      method_name: props.name,
-    });
+      responseMessageAccepted.value = formatResponseIfNeeded(
+        typeof result === 'string' ? result : JSON.stringify(result, null, 2),
+      );
+
+      notify({
+        text: 'Simulation completed',
+        type: 'success',
+      });
+
+      trackEvent('simulated_write_method', {
+        contract_name: contract.value?.name || '',
+        method_name: props.name,
+      });
+    } else {
+      // Real transaction mode
+      await callWriteMethod({
+        method: props.name,
+        leaderOnly: props.leaderOnly,
+        consensusMaxRotations: props.consensusMaxRotations,
+        args: unfoldArgsData({
+          args: calldataArguments.value.args,
+          kwargs: calldataArguments.value.kwargs,
+        }),
+      });
+
+      notify({
+        text: 'Write method called',
+        type: 'success',
+      });
+
+      trackEvent('called_write_method', {
+        contract_name: contract.value?.name || '',
+        method_name: props.name,
+      });
+    }
   } catch (error) {
     notify({
       title: 'Error',
@@ -177,34 +215,48 @@ const handleCallWriteMethod = async () => {
             :data-testid="`write-method-btn-${name}`"
             :loading="isCalling"
             :disabled="isCalling"
-            >{{ isCalling ? 'Sending...' : 'Send Transaction' }}</Btn
+            >{{
+              isCalling
+                ? simulationMode
+                  ? 'Simulating...'
+                  : 'Sending...'
+                : simulationMode
+                  ? 'Simulate'
+                  : 'Send Transaction'
+            }}</Btn
           >
         </div>
 
         <div
-          v-if="responseMessageAccepted || responseMessageFinalized"
+          v-if="
+            (responseMessageAccepted && responseMessageAccepted !== '') ||
+            (responseMessageFinalized && responseMessageFinalized !== '')
+          "
           class="w-full break-all text-sm"
         >
-          <div v-if="responseMessageAccepted" class="mb-1 text-xs font-medium">
-            Response Accepted:
+          <div v-if="responseMessageAccepted !== ''">
+            <div class="mb-1 text-xs font-medium">
+              {{
+                methodType === 'write' && simulationMode
+                  ? 'Simulation Result:'
+                  : 'Response Accepted:'
+              }}
+            </div>
+            <div
+              :data-testid="`method-response-${name}`"
+              class="w-full whitespace-pre-wrap rounded bg-white p-1 font-mono text-xs dark:bg-slate-600"
+            >
+              {{ responseMessageAccepted }}
+            </div>
           </div>
-          <div
-            :data-testid="`method-response-${name}`"
-            class="w-full whitespace-pre-wrap rounded bg-white p-1 font-mono text-xs dark:bg-slate-600"
-          >
-            {{ responseMessageAccepted }}
-          </div>
-          <div
-            v-if="responseMessageFinalized"
-            class="mb-1 mt-4 text-xs font-medium"
-          >
-            Response Finalized:
-          </div>
-          <div
-            :data-testid="`method-response-${name}`"
-            class="w-full whitespace-pre-wrap rounded bg-white p-1 font-mono text-xs dark:bg-slate-600"
-          >
-            {{ responseMessageFinalized }}
+          <div v-if="responseMessageFinalized !== ''">
+            <div class="mb-1 mt-4 text-xs font-medium">Response Finalized:</div>
+            <div
+              :data-testid="`method-response-${name}`"
+              class="w-full whitespace-pre-wrap rounded bg-white p-1 font-mono text-xs dark:bg-slate-600"
+            >
+              {{ responseMessageFinalized }}
+            </div>
           </div>
         </div>
       </div>

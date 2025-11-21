@@ -76,6 +76,7 @@ class SnapshotManager:
                 "rotation_count": tx.rotation_count,
                 "appeal_leader_timeout": tx.appeal_leader_timeout,
                 "leader_timeout_validators": tx.leader_timeout_validators,
+                "appeal_validators_timeout": tx.appeal_validators_timeout,
             }
             for tx in transactions
         }
@@ -150,6 +151,8 @@ class SnapshotManager:
                 rotation_count=tx_info["rotation_count"],
                 appeal_leader_timeout=tx_info["appeal_leader_timeout"],
                 leader_timeout_validators=tx_info["leader_timeout_validators"],
+                appeal_validators_timeout=tx_info["appeal_validators_timeout"],
+                sim_config=tx_info.get("sim_config"),
             )
             if tx_info["created_at"]:
                 new_tx.created_at = datetime.fromisoformat(tx_info["created_at"])

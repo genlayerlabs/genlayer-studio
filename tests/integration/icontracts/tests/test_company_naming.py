@@ -25,10 +25,10 @@ def test_company_naming(setup_validators):
     description = "Al-native trust layer and synthetic jurisdiction on-chain. Validators running diverse language models act as a decentralized digital court, resolving disputes and enforcing contracts. Intelligent Contracts interpret language, process unstructured data, and pull live web inputs, enabling autonomous systems to transact, govern, and settle decisions at machine speed."
     transaction_response_call_1 = contract.score_alignment(
         args=[company_name, description]
-    )
+    ).transact()
     assert tx_execution_succeeded(transaction_response_call_1)
 
-    score = contract.get_score(args=[company_name])
+    score = contract.get_score(args=[company_name]).call()
 
     assert (
         score != 0

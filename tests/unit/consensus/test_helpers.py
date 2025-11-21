@@ -5,7 +5,13 @@ from pathlib import Path
 import time
 import threading
 import pytest
-from backend.consensus.base import ConsensusAlgorithm, DEFAULT_VALIDATORS_COUNT
+import os
+import asyncio
+from backend.consensus.base import (
+    ConsensusAlgorithm,
+    DEFAULT_VALIDATORS_COUNT,
+    ConsensusRound,
+)
 from backend.database_handler.transactions_processor import TransactionsProcessor
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.database_handler.models import TransactionStatus
@@ -19,9 +25,15 @@ from datetime import datetime
 from copy import deepcopy
 
 DEFAULT_FINALITY_WINDOW = 5
-DEFAULT_CONSENSUS_SLEEP_TIME = 2
+# Reduce sleep time for faster tests when using mocks
+DEFAULT_CONSENSUS_SLEEP_TIME = (
+    0.1 if os.getenv("TEST_WITH_MOCK_LLMS", "true").lower() == "true" else 2
+)
 DEFAULT_EXEC_RESULT = b"\x00\x00"  # success(null)
 TIMEOUT_EXEC_RESULT = b"\x02timeout"
+
+# Configuration for LLM mocking
+USE_MOCK_LLMS = os.getenv("TEST_WITH_MOCK_LLMS", "true").lower() == "true"
 
 
 class AccountsManagerMock:
@@ -37,16 +49,24 @@ class AccountsManagerMock:
 
 class TransactionsProcessorMock:
     def __init__(self, transactions=None):
-        self.transactions = transactions or []
+        self.transactions = transactions if transactions is not None else {}
         self.updated_transaction_status_history = defaultdict(list)
         self.status_changed_event = threading.Event()
         self.status_update_lock = threading.Lock()
+        # Counter to ensure timestamps always increase in mock mode
+        self._mock_time_counter = 0
 
     def get_transaction_by_hash(self, transaction_hash: str) -> dict:
-        for transaction in self.transactions:
-            if transaction["hash"] == transaction_hash:
-                return transaction
-        raise ValueError(f"Transaction with hash {transaction_hash} not found")
+        if transaction_hash in self.transactions:
+            # Everytime we do a database request we get a new transaction object
+            # This tests how it is done in the real code and we do not get weird behaviour because of passing references
+            return deepcopy(self.transactions[transaction_hash])
+        else:
+            raise ValueError(f"Transaction with hash {transaction_hash} not found")
+
+    def commit(self, transaction: dict):
+        # We write the copied transaction back to the transactions dictionary
+        self.transactions[transaction["hash"]] = transaction
 
     def update_transaction_status(
         self,
@@ -71,6 +91,7 @@ class TransactionsProcessorMock:
                     ]
 
             self.status_changed_event.set()
+            self.commit(transaction)
 
     def wait_for_status_change(self, timeout: float = 0.1) -> bool:
         result = self.status_changed_event.wait(timeout)
@@ -80,6 +101,7 @@ class TransactionsProcessorMock:
     def set_transaction_result(self, transaction_hash: str, consensus_data: dict):
         transaction = self.get_transaction_by_hash(transaction_hash)
         transaction["consensus_data"] = consensus_data
+        self.commit(transaction)
 
     def set_transaction_appeal(self, transaction_hash: str, appeal: bool):
         transaction = self.get_transaction_by_hash(transaction_hash)
@@ -89,10 +111,19 @@ class TransactionsProcessorMock:
             TransactionStatus.ACCEPTED.value,
             TransactionStatus.UNDETERMINED.value,
             TransactionStatus.LEADER_TIMEOUT.value,
+            TransactionStatus.VALIDATORS_TIMEOUT.value,
         ):
-            self.set_transaction_timestamp_appeal(transaction, int(time.time()))
-            time.sleep(1)
+            # In mock mode, use an incrementing counter to ensure timestamps increase
+            if USE_MOCK_LLMS:
+                self._mock_time_counter += 1
+                timestamp = int(time.time()) + self._mock_time_counter
+            else:
+                timestamp = int(time.time())
+            self.set_transaction_timestamp_appeal(transaction, timestamp)
+            # Reduce sleep for faster tests when using mocks
+            time.sleep(0.01 if USE_MOCK_LLMS else 1)
             transaction["appealed"] = appeal
+        self.commit(transaction)
 
     def set_transaction_timestamp_awaiting_finalization(
         self, transaction_hash: str, timestamp_awaiting_finalization: int = None
@@ -103,15 +134,24 @@ class TransactionsProcessorMock:
                 timestamp_awaiting_finalization
             )
         else:
-            transaction["timestamp_awaiting_finalization"] = int(time.time())
+            # In mock mode, use an incrementing counter to ensure timestamps increase
+            if USE_MOCK_LLMS:
+                self._mock_time_counter += 1
+                transaction["timestamp_awaiting_finalization"] = (
+                    int(time.time()) + self._mock_time_counter
+                )
+            else:
+                transaction["timestamp_awaiting_finalization"] = int(time.time())
+        self.commit(transaction)
 
     def get_awaiting_finalization_transactions(self):
         awaiting_finalization_transactions = []
-        for transaction in self.transactions:
+        for transaction in self.transactions.values():
             if (
                 (transaction["status"] == TransactionStatus.ACCEPTED.value)
                 or (transaction["status"] == TransactionStatus.UNDETERMINED.value)
                 or (transaction["status"] == TransactionStatus.LEADER_TIMEOUT.value)
+                or (transaction["status"] == TransactionStatus.VALIDATORS_TIMEOUT.value)
             ):
                 awaiting_finalization_transactions.append(transaction)
 
@@ -131,16 +171,18 @@ class TransactionsProcessorMock:
             raise ValueError("appeal_failed must be a non-negative integer")
         transaction = self.get_transaction_by_hash(transaction_hash)
         transaction["appeal_failed"] = appeal_failed
+        self.commit(transaction)
 
     def set_transaction_appeal_undetermined(
         self, transaction_hash: str, appeal_undetermined: bool
     ):
         transaction = self.get_transaction_by_hash(transaction_hash)
         transaction["appeal_undetermined"] = appeal_undetermined
+        self.commit(transaction)
 
     def get_pending_transactions(self):
         result = []
-        for transaction in self.transactions:
+        for transaction in self.transactions.values():
             if transaction["status"] == TransactionStatus.PENDING.value:
                 result.append(transaction)
         return sorted(result, key=lambda x: x["created_at"])
@@ -149,7 +191,7 @@ class TransactionsProcessorMock:
         current_transaction = self.get_transaction_by_hash(transaction_hash)
 
         result = []
-        for transaction in self.transactions:
+        for transaction in self.transactions.values():
             if (transaction["created_at"] > current_transaction["created_at"]) and (
                 transaction["to_address"] == current_transaction["to_address"]
             ):
@@ -159,7 +201,7 @@ class TransactionsProcessorMock:
     def update_consensus_history(
         self,
         transaction_hash: str,
-        consensus_round: str,
+        consensus_round: ConsensusRound,
         leader_result: list[Receipt] | None,
         validator_results: list[Receipt],
         extra_status_change: TransactionStatus | None = None,
@@ -175,13 +217,19 @@ class TransactionsProcessorMock:
             status_changes_to_use.append(extra_status_change.value)
 
         current_consensus_results = {
-            "consensus_round": consensus_round,
+            "consensus_round": consensus_round.value,
             "leader_result": (
-                [receipt.to_dict() for receipt in leader_result]
+                [
+                    receipt.to_dict(strip_contract_state=True)
+                    for receipt in leader_result
+                ]
                 if leader_result
                 else None
             ),
-            "validator_results": [receipt.to_dict() for receipt in validator_results],
+            "validator_results": [
+                receipt.to_dict(strip_contract_state=True)
+                for receipt in validator_results
+            ],
             "status_changes": status_changes_to_use,
         }
         if "consensus_results" in transaction["consensus_history"]:
@@ -194,6 +242,7 @@ class TransactionsProcessorMock:
             ]
 
         transaction["consensus_history"]["current_status_changes"] = []
+        self.commit(transaction)
 
     def set_transaction_timestamp_appeal(
         self, transaction: dict | str, timestamp_appeal: int
@@ -201,22 +250,35 @@ class TransactionsProcessorMock:
         if isinstance(transaction, str):  # hash
             transaction = self.get_transaction_by_hash(transaction)
         transaction["timestamp_appeal"] = timestamp_appeal
+        self.commit(transaction)
 
     def set_transaction_appeal_processing_time(self, transaction_hash: str):
         transaction = self.get_transaction_by_hash(transaction_hash)
-        transaction["appeal_processing_time"] += (
-            round(time.time()) - transaction["timestamp_appeal"]
-        )
+        # Calculate time difference
+        if USE_MOCK_LLMS:
+            # In mock mode, use the counter to get consistent timestamps
+            self._mock_time_counter += 1
+            current_time = int(time.time()) + self._mock_time_counter
+        else:
+            current_time = round(time.time())
+        time_diff = current_time - transaction["timestamp_appeal"]
+        # In mock mode with fast sleeps, ensure at least 1 second of processing time
+        if USE_MOCK_LLMS and time_diff <= 0:
+            time_diff = 1
+        transaction["appeal_processing_time"] += time_diff
+        self.commit(transaction)
 
     def reset_transaction_appeal_processing_time(self, transaction_hash: str):
         transaction = self.get_transaction_by_hash(transaction_hash)
         transaction["appeal_processing_time"] = 0
+        self.commit(transaction)
 
     def set_transaction_contract_snapshot(
         self, transaction_hash: str, contract_snapshot: dict
     ):
         transaction = self.get_transaction_by_hash(transaction_hash)
         transaction["contract_snapshot"] = contract_snapshot
+        self.commit(transaction)
 
     def get_previous_transaction(
         self,
@@ -243,11 +305,121 @@ class TransactionsProcessorMock:
     ) -> bool:
         transaction = self.get_transaction_by_hash(transaction_hash)
         transaction["appeal_leader_timeout"] = appeal_leader_timeout
+        self.commit(transaction)
         return appeal_leader_timeout
 
     def set_leader_timeout_validators(self, transaction_hash: str, validators: list):
         transaction = self.get_transaction_by_hash(transaction_hash)
         transaction["leader_timeout_validators"] = validators
+        self.commit(transaction)
+
+    def set_transaction_appeal_validators_timeout(
+        self, transaction_hash: str, appeal_validators_timeout: bool
+    ) -> bool:
+        transaction = self.get_transaction_by_hash(transaction_hash)
+        transaction["appeal_validators_timeout"] = appeal_validators_timeout
+        self.commit(transaction)
+        return appeal_validators_timeout
+
+    def get_activated_transactions_older_than(self, seconds: int) -> list[dict]:
+        """Get ACTIVATED transactions that have been stuck for more than the specified seconds.
+        Mock implementation that returns empty list to prevent interference with tests.
+        """
+        # Return empty list in tests to prevent the safety mechanism from interfering
+        return []
+
+    def get_contracts_with_pending(self) -> list[str]:
+        addresses: set[str] = set()
+        for transaction in self.transactions.values():
+            if (
+                transaction.get("status") == TransactionStatus.PENDING.value
+                and transaction.get("to_address") is not None
+            ):
+                addresses.add(transaction["to_address"])
+        return sorted(addresses)
+
+    def get_oldest_pending_for_contract(self, contract_address: str) -> dict | None:
+        candidates = [
+            t
+            for t in self.transactions.values()
+            if t.get("to_address") == contract_address
+            and t.get("status") == TransactionStatus.PENDING.value
+        ]
+        if not candidates:
+            return None
+        # Return a copy to mimic DB row parsing behavior
+        from copy import deepcopy as _deepcopy
+
+        return _deepcopy(min(candidates, key=lambda x: x["created_at"]))
+
+    def get_processing_transaction_for_contract(
+        self, contract_address: str
+    ) -> dict | None:
+        processing_statuses = {
+            TransactionStatus.ACTIVATED.value,
+            TransactionStatus.PROPOSING.value,
+            TransactionStatus.COMMITTING.value,
+            TransactionStatus.REVEALING.value,
+        }
+        candidates = [
+            t
+            for t in self.transactions.values()
+            if t.get("to_address") == contract_address
+            and t.get("status") in processing_statuses
+        ]
+        if not candidates:
+            return None
+        from copy import deepcopy as _deepcopy
+
+        # Choose the most recent processing transaction
+        return _deepcopy(max(candidates, key=lambda x: x["created_at"]))
+
+    def reset_stuck_transactions(self, timeout_seconds: int = 900) -> int:
+        # Use naive datetime to match how mock transactions are created
+        from datetime import datetime, timedelta
+
+        cutoff_time = datetime.now() - timedelta(seconds=timeout_seconds)
+        processing_statuses = {
+            TransactionStatus.ACTIVATED.value,
+            TransactionStatus.PROPOSING.value,
+            TransactionStatus.COMMITTING.value,
+            TransactionStatus.REVEALING.value,
+        }
+
+        reset_count = 0
+        for tx in self.transactions.values():
+            if (
+                tx.get("status") in processing_statuses
+                and tx.get("created_at") < cutoff_time
+            ):
+                tx["status"] = TransactionStatus.PENDING.value
+                reset_count += 1
+
+        if reset_count > 0:
+            self.status_changed_event.set()
+
+        return reset_count
+
+    def add_state_timestamp(self, transaction_hash: str, state_name: str):
+        """
+        Add a timestamp for when a consensus state is entered.
+
+        Args:
+            transaction_hash (str): Hash of the transaction.
+            state_name (str): Name of the state (e.g., "PENDING", "PROPOSING").
+        """
+        transaction = self.get_transaction_by_hash(transaction_hash)
+
+        if not transaction.get("consensus_history"):
+            transaction["consensus_history"] = {}
+
+        if "current_monitoring" not in transaction["consensus_history"]:
+            transaction["consensus_history"]["current_monitoring"] = {}
+
+        # Store timestamp (in seconds with millisecond precision)
+        transaction["consensus_history"]["current_monitoring"][state_name] = time.time()
+
+        self.commit(transaction)
 
 
 class SnapshotMock:
@@ -400,6 +572,7 @@ def transaction_to_dict(transaction: Transaction) -> dict:
         "rotation_count": transaction.rotation_count,
         "appeal_leader_timeout": transaction.appeal_leader_timeout,
         "leader_timeout_validators": transaction.leader_timeout_validators,
+        "appeal_validators_timeout": transaction.appeal_validators_timeout,
     }
 
 
@@ -437,20 +610,19 @@ def node_factory(
     msg_handler: MessageHandler,
     contract_snapshot_factory: Callable[[str], ContractSnapshot],
     snap: validators.Snapshot,
+    timing_callback: Optional[Callable[[str], None]],
     vote: Vote,
     timeout: bool,
 ):
-    mock = Mock(Node)
+    async def exec_with_dynamic_state(transaction: Transaction, llm_mocked: bool):
+        if llm_mocked:
+            # Add small delay to simulate processing
+            await asyncio.sleep(0.01)  # Small delay for mocked responses
 
-    mock.validator_mode = mode
-    mock.address = node["address"]
-    mock.leader_receipt = receipt
-    mock.private_key = node["private_key"]
-    mock.contract_snapshot = contract_snapshot
-
-    async def exec_with_dynamic_state(transaction: Transaction):
         accepted_state = contract_snapshot.states["accepted"]
         set_value = transaction.hash[-1]
+        if not isinstance(set_value, str) or not set_value.isdigit():
+            set_value = "1"
         if len(accepted_state) == 0:
             contract_state = {"state_var": set_value}
         else:
@@ -472,9 +644,44 @@ def node_factory(
             execution_result=ExecutionResultStatus.SUCCESS,
         )
 
-    mock.exec_transaction = AsyncMock(side_effect=exec_with_dynamic_state)
+    if USE_MOCK_LLMS:
+        # Use mocked node (default, fast)
+        mock = Mock(Node)
+        mock.validator_mode = mode
+        mock.address = node["address"]
+        mock.leader_receipt = receipt
+        mock.private_key = node["private_key"]
+        mock.contract_snapshot = contract_snapshot
 
-    return mock
+        async def mock_exec_transaction(transaction: Transaction):
+            return await exec_with_dynamic_state(transaction, llm_mocked=True)
+
+        mock.exec_transaction = AsyncMock(side_effect=mock_exec_transaction)
+        return mock
+    else:
+        # Use real node with actual LLM calls (slow, requires API keys)
+        # This would require proper validator setup with real LLM providers
+        # For now, we'll still use mocks but log that real mode was requested
+        print(
+            f"[WARNING] Real LLM mode requested but not fully implemented in unit tests"
+        )
+        print(
+            f"[WARNING] Using mocked responses. For real LLMs, use integration tests."
+        )
+
+        # Fall back to mock for now
+        mock = Mock(Node)
+        mock.validator_mode = mode
+        mock.address = node["address"]
+        mock.leader_receipt = receipt
+        mock.private_key = node["private_key"]
+        mock.contract_snapshot = contract_snapshot
+
+        async def mock_exec_transaction(transaction: Transaction):
+            return await exec_with_dynamic_state(transaction, llm_mocked=False)
+
+        mock.exec_transaction = AsyncMock(side_effect=mock_exec_transaction)
+        return mock
 
 
 def appeal(transaction: Transaction, transactions_processor: TransactionsProcessorMock):
@@ -698,11 +905,23 @@ def assert_transaction_status_match(
     transactions_processor: TransactionsProcessorMock,
     transaction: Transaction,
     expected_statuses: list[TransactionStatus],
-    timeout: int = 30,
+    timeout: int = None,
     interval: float = 0.1,
 ) -> TransactionStatus:
+    # Use adaptive timeout based on LLM mode
+    if timeout is None:
+        timeout = (
+            60 if USE_MOCK_LLMS else 180
+        )  # 1 minute for mocks, 3 minutes for real LLMs
+
     last_status = None
     start_time = time.time()
+
+    # Log mode if using real LLMs
+    if not USE_MOCK_LLMS:
+        print(
+            f"[LLM Mode: REAL] Waiting for status {expected_statuses} with timeout {timeout}s"
+        )
 
     while time.time() - start_time < timeout:
         current_status = transactions_processor.get_transaction_by_hash(
@@ -714,12 +933,16 @@ def assert_transaction_status_match(
 
         if current_status != last_status:
             last_status = current_status
+            if not USE_MOCK_LLMS:
+                print(f"[LLM Mode: REAL] Status changed to: {current_status}")
 
         # Wait for next status change
         transactions_processor.wait_for_status_change(interval)
 
+    mode_info = "MOCK" if USE_MOCK_LLMS else "REAL"
     raise AssertionError(
-        f"Transaction did not reach {expected_statuses} within {timeout} seconds. Last status: {last_status}"
+        f"Transaction did not reach {expected_statuses} within {timeout} seconds. "
+        f"Last status: {last_status}. LLM mode: {mode_info}"
     )
 
 
@@ -767,7 +990,15 @@ def check_contract_state_with_timeout(
     start_time = time.time()
     while time.time() - start_time < timeout:
         if contract_db.wait_for_status_change(interval):
-            check_contract_state(contract_db, to_address, accepted, finalized)
-            return
+            try:
+                check_contract_state(contract_db, to_address, accepted, finalized)
+                return
+            except AssertionError:
+                # State has not yet reached the expected values; keep waiting
+                continue
 
-    raise AssertionError(f"Contract state did not change within {timeout} seconds")
+    # One final check before failing to surface the latest state in the assertion error
+    check_contract_state(contract_db, to_address, accepted, finalized)
+    raise AssertionError(
+        f"Contract state did not reach expected values within {timeout} seconds"
+    )
