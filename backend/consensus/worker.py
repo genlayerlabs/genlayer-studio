@@ -23,6 +23,7 @@ from backend.protocol_rpc.message_handler.base import MessageHandler
 from backend.rollup.consensus_service import ConsensusService
 import backend.validators as validators
 from loguru import logger
+from backend.node.base import Manager as GenVMManager
 
 
 class ConsensusWorker:
@@ -38,6 +39,7 @@ class ConsensusWorker:
         msg_handler: MessageHandler,
         consensus_service: ConsensusService,
         validators_manager: validators.Manager,
+        genvm_manager: GenVMManager,
         worker_id: str = None,
         poll_interval: int = 5,
         transaction_timeout_minutes: int = 30,
@@ -70,6 +72,7 @@ class ConsensusWorker:
             msg_handler,
             consensus_service,
             validators_manager,
+            genvm_manager,
         )
 
     async def claim_next_finalization(self, session: Session) -> Optional[dict]:

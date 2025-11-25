@@ -22,6 +22,8 @@ import backend.validators as validators
 from backend.database_handler.models import Base
 from loguru import logger
 
+from backend.protocol_rpc.app_lifespan import create_genvm_manager
+
 # Load environment variables
 load_dotenv()
 
@@ -113,9 +115,11 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(error_msg) from e
     consensus_service = ConsensusService()
 
+    genvm_manager = await create_genvm_manager()
+
     # Initialize validators manager (MUST use global to prevent garbage collection)
     global validators_manager  # Declare before assignment to use the global variable
-    validators_manager = validators.Manager(SessionLocal())
+    validators_manager = validators.Manager(SessionLocal(), genvm_manager)
     await validators_manager.restart()
     logger.info("Validators manager initialized and restarted")
 
@@ -134,6 +138,7 @@ async def lifespan(app: FastAPI):
         msg_handler=msg_handler,
         consensus_service=consensus_service,
         validators_manager=validators_manager,
+        genvm_manager=genvm_manager,
         worker_id=worker_id,
         poll_interval=poll_interval,
         transaction_timeout_minutes=transaction_timeout,
@@ -197,6 +202,8 @@ async def lifespan(app: FastAPI):
         logger.info("GenVM cleanup complete")
 
         print("Consensus Worker Service stopped")
+
+        await genvm_manager.close()
 
 
 # Create FastAPI app

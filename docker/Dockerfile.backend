@@ -3,8 +3,7 @@ FROM ubuntu:24.04 AS base
 ARG TARGETPLATFORM
 ARG TARGETARCH
 
-
-ARG GENVM_TAG=v0.2.4
+ARG GENVM_TAG=v0.2.7
 
 ENV GENVM_TAG=$GENVM_TAG
 
@@ -67,14 +66,13 @@ RUN cd /genvm \
     && rm *.tar.xz \
     && ls -R . \
     && chown -R backend-user:backend-group /genvm \
-    && su - backend-user -c "/genvm/executor/$GENVM_TAG/bin/post-install.py" \
+    && su - backend-user -c "/genvm/bin/post-install.py" \
     && cd "$path" \
     && true
 
 # Set GenVM environment variables (GENVM_TAG is already set as ENV earlier)
 ENV GENVMROOT=/genvm
-ENV PATH="/genvm/bin:/genvm/executor/${GENVM_TAG}/bin:${PATH}"
-ENV LD_LIBRARY_PATH="/genvm/lib:/genvm/executor/${GENVM_TAG}/lib:${LD_LIBRARY_PATH}"
+ENV PATH="/genvm/bin:${PATH}"
 
 COPY backend $path/backend
 COPY asgi.py $path/asgi.py

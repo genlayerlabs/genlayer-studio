@@ -20,7 +20,7 @@ from backend.node.create_nodes.providers import (
     validate_provider,
 )
 from backend.protocol_rpc.message_handler.base import (
-    MessageHandler,
+    IMessageHandler,
     get_client_session_id,
 )
 from backend.database_handler.accounts_manager import AccountsManager
@@ -53,6 +53,7 @@ import os
 from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope
 from backend.protocol_rpc.types import DecodedsubmitAppealDataArgs
 from backend.database_handler.snapshot_manager import SnapshotManager
+from backend.node.base import Manager as GenVMManager
 import asyncio
 
 
@@ -114,37 +115,71 @@ def reset_defaults_llm_providers(llm_provider_registry: LLMProviderRegistry) -> 
 
 
 async def check_provider_is_available(
-    validators_manager: validators.Manager, provider: LLMProvider | dict
+    genvm_manager: GenVMManager, provider: LLMProvider | dict
 ) -> bool:
-    return await validators_manager.llm_module.provider_available(
-        provider.model if isinstance(provider, LLMProvider) else provider["model"],
-        (
-            provider.plugin_config["api_url"]
-            if isinstance(provider, LLMProvider)
-            else provider["plugin_config"]["api_url"]
-        ),
-        provider.plugin if isinstance(provider, LLMProvider) else provider["plugin"],
-        (
-            provider.plugin_config["api_key_env_var"]
-            if isinstance(provider, LLMProvider)
-            else provider["plugin_config"]["api_key_env_var"]
-        ),
+    if isinstance(provider, LLMProvider):
+        model = provider.model
+        url = provider.plugin_config["api_url"]
+        plugin = provider.plugin
+        key = provider.plugin_config["api_key_env_var"]
+    else:
+        model = provider["model"]
+        url = provider["plugin_config"]["api_url"]
+        plugin = provider["plugin"]
+        key = provider["plugin_config"]["api_key_env_var"]
+    key = f"${{ENV[{key}]}}"
+    res = await genvm_manager.try_llms(
+        [
+            {
+                "host": url,
+                "model": model,
+                "provider": plugin,
+                "key": key,
+            }
+        ],
+        prompt={
+            "system_message": "",
+            "user_message": "respond with two letters 'ok' and nothing else. No quotes, no repetition",
+            "temperature": 1,
+            "max_tokens": 500,
+            "use_max_completion_tokens": False,
+            "images": [],
+        },
     )
+    if len(res) != 1:
+        genvm_manager.logger.error(
+            f"LLM provider check failed", provider=provider, result=res
+        )
+        return False
+    res = res[0]
+    if (text_response := res.get("response")) is None:
+        genvm_manager.logger.error(
+            f"LLM provider check failed", provider=provider, result=res
+        )
+        return False
+
+    what_returned = text_response.strip().lower()
+    if what_returned != "ok":
+        genvm_manager.logger.error(
+            f"LLM provider check failed", provider=provider, text_response=text_response
+        )
+        return False
+    return True
 
 
 async def get_providers_and_models(
     llm_provider_registry: LLMProviderRegistry,
-    validators_manager: validators.Manager,
+    genvm_manager: GenVMManager,
 ) -> list[dict]:
     providers = await llm_provider_registry.get_all_dict()
     sem = asyncio.Semaphore(8)
 
-    async def check_with_semaphore(validators_manager, provider):
+    async def check_with_semaphore(genvm_manager, provider):
         async with sem:
-            return await check_provider_is_available(validators_manager, provider)
+            return await check_provider_is_available(genvm_manager, provider)
 
     availability = await asyncio.gather(
-        *(check_with_semaphore(validators_manager, p) for p in providers)
+        *(check_with_semaphore(genvm_manager, p) for p in providers)
     )
     for provider, is_available in zip(providers, availability):
         provider["is_model_available"] = is_available
@@ -236,12 +271,14 @@ async def create_validator(
 async def create_random_validator(
     session: Session,
     validators_manager: validators.Manager,
+    genvm_manager: GenVMManager,
     stake: int,
 ) -> dict:
     return (
         await create_random_validators(
             session,
             validators_manager,
+            genvm_manager,
             1,
             stake,
             stake,
@@ -253,6 +290,7 @@ async def create_random_validator(
 async def create_random_validators(
     session: Session,
     validators_manager: validators.Manager,
+    genvm_manager: GenVMManager,
     count: int,
     min_stake: int,
     max_stake: int,
@@ -267,7 +305,7 @@ async def create_random_validators(
 
     details = await random_validator_config(
         llm_provider_registry.get_all,
-        partial(check_provider_is_available, validators_manager),
+        partial(check_provider_is_available, genvm_manager),
         set(limit_providers),
         set(limit_models),
         count,
@@ -372,7 +410,8 @@ def count_validators(validators_registry: ValidatorsRegistry) -> int:
 ####### GEN ENDPOINTS #######
 async def get_contract_schema(
     accounts_manager: AccountsManager,
-    msg_handler: MessageHandler,
+    genvm_manager: GenVMManager,
+    msg_handler: IMessageHandler,
     contract_address: str,
 ) -> dict:
     if not accounts_manager.is_valid_address(contract_address):
@@ -405,6 +444,7 @@ async def get_contract_schema(
         leader_receipt=None,
         msg_handler=msg_handler.with_client_session(get_client_session_id()),
         contract_snapshot_factory=None,
+        manager=genvm_manager,
     )
     schema = await node.get_contract_schema(
         base64.b64decode(contract_account["data"]["code"])
@@ -413,7 +453,7 @@ async def get_contract_schema(
 
 
 async def get_contract_schema_for_code(
-    msg_handler: MessageHandler, contract_code_hex: str
+    genvm_manager: GenVMManager, msg_handler: IMessageHandler, contract_code_hex: str
 ) -> dict:
     node = Node(  # Mock node just to get the data from the GenVM
         contract_snapshot=None,
@@ -432,6 +472,7 @@ async def get_contract_schema_for_code(
         leader_receipt=None,
         msg_handler=msg_handler.with_client_session(get_client_session_id()),
         contract_snapshot_factory=None,
+        manager=genvm_manager,
     )
     # Contract code is expected to be a hex string, but it can be a plain UTF-8 string
     # When hex decoding fails, fall back to UTF-8 encoding
@@ -460,9 +501,10 @@ def get_contract_code(session: Session, contract_address: str) -> str:
 async def _execute_call_with_snapshot(
     session: Session,
     accounts_manager: AccountsManager,
-    msg_handler: MessageHandler,
+    msg_handler: IMessageHandler,
     transactions_parser: TransactionParser,
     validators_manager: validators.Manager,
+    genvm_manager: GenVMManager,
     params: dict,
 ):
     """Common logic for gen_call and sim_call"""
@@ -560,6 +602,7 @@ async def _execute_call_with_snapshot(
         receipt = await _gen_call_with_validator(
             session,
             accounts_manager,
+            genvm_manager,
             msg_handler,
             transactions_parser,
             snapshot,
@@ -571,9 +614,10 @@ async def _execute_call_with_snapshot(
 async def gen_call(
     session: Session,
     accounts_manager: AccountsManager,
-    msg_handler: MessageHandler,
+    msg_handler: IMessageHandler,
     transactions_parser: TransactionParser,
     validators_manager: validators.Manager,
+    genvm_manager: GenVMManager,
     params: dict,
 ) -> str:
     receipt = await _execute_call_with_snapshot(
@@ -582,6 +626,7 @@ async def gen_call(
         msg_handler,
         transactions_parser,
         validators_manager,
+        genvm_manager,
         params,
     )
     return eth_utils.hexadecimal.encode_hex(receipt.result[1:])[2:]
@@ -606,9 +651,10 @@ def sim_lint_contract(source_code: str, filename: str = "contract.py") -> dict:
 async def sim_call(
     session: Session,
     accounts_manager: AccountsManager,
-    msg_handler: MessageHandler,
+    msg_handler: IMessageHandler,
     transactions_parser: TransactionParser,
     validators_manager: validators.Manager,
+    genvm_manager: GenVMManager,
     params: dict,
 ) -> dict:
     receipt = await _execute_call_with_snapshot(
@@ -617,6 +663,7 @@ async def sim_call(
         msg_handler,
         transactions_parser,
         validators_manager,
+        genvm_manager,
         params,
     )
     return receipt.to_dict()
@@ -625,7 +672,8 @@ async def sim_call(
 async def _gen_call_with_validator(
     session: Session,
     accounts_manager: AccountsManager,
-    msg_handler: MessageHandler,
+    genvm_manager: GenVMManager,
+    msg_handler: IMessageHandler,
     transactions_parser: TransactionParser,
     validators_snapshot: validators.Snapshot,
     params: dict,
@@ -666,6 +714,7 @@ async def _gen_call_with_validator(
         leader_receipt=None,
         msg_handler=msg_handler.with_client_session(get_client_session_id()),
         validators_snapshot=validators_snapshot,
+        manager=genvm_manager,
     )
 
     sc_raw = params.get("sim_config")
@@ -813,9 +862,10 @@ def get_transaction_status(
 async def eth_call(
     session: Session,
     accounts_manager: AccountsManager,
-    msg_handler: MessageHandler,
+    msg_handler: IMessageHandler,
     transactions_parser: TransactionParser,
     validators_manager: validators.Manager,
+    genvm_manager: GenVMManager,
     transactions_processor: TransactionsProcessor,
     params: dict,
     block_tag: str = "latest",
@@ -848,6 +898,7 @@ async def eth_call(
     decoded_data = transactions_parser.decode_method_call_data(data)
 
     async with validators_manager.snapshot() as snapshot:
+        print(snapshot.nodes)
         if len(snapshot.nodes) == 0:
             raise JSONRPCError(
                 code=-32000,
@@ -863,6 +914,7 @@ async def eth_call(
             leader_receipt=None,
             msg_handler=msg_handler.with_client_session(get_client_session_id()),
             validators_snapshot=snapshot,
+            manager=genvm_manager,
         )
 
         receipt = await node.get_contract_data(
@@ -879,7 +931,7 @@ async def eth_call(
 
 def send_raw_transaction(
     session: Session,
-    msg_handler: MessageHandler,
+    msg_handler: IMessageHandler,
     transactions_parser: TransactionParser,
     consensus_service: ConsensusService,
     signed_rollup_transaction: str,

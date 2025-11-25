@@ -55,10 +55,11 @@ from backend.rollup.consensus_service import ConsensusService
 
 import backend.validators as validators
 from backend.database_handler.validators_registry import ValidatorsRegistry
-from backend.node.genvm.origin.result_codes import ResultCode
+from backend.node.genvm.origin.public_abi import ResultCode
 from backend.consensus.types import ConsensusResult, ConsensusRound
 from backend.consensus.utils import determine_consensus_from_votes
-from backend.node.genvm.origin.base_host import get_code_slot
+from backend.node.genvm import get_code_slot
+from backend.node.base import Manager as GenVMManager
 
 type NodeFactory = Callable[
     [
@@ -70,6 +71,7 @@ type NodeFactory = Callable[
         Callable[[str], ContractSnapshot],
         validators.Snapshot,
         Callable[[str], None] | None,
+        GenVMManager,
     ],
     Node,
 ]
@@ -211,7 +213,8 @@ def node_factory(
     msg_handler: MessageHandler,
     contract_snapshot_factory: Callable[[str], ContractSnapshot],
     validators_manager_snapshot: validators.Snapshot,
-    timing_callback: Callable[[str], None] | None = None,
+    timing_callback: Callable[[str], None] | None,
+    genvm_manager: GenVMManager,
 ) -> Node:
     """
     Factory function to create a Node instance.
@@ -250,6 +253,7 @@ def node_factory(
         contract_snapshot_factory=contract_snapshot_factory,
         validators_snapshot=validators_manager_snapshot,
         timing_callback=timing_callback,
+        manager=genvm_manager,
     )
 
 
@@ -369,6 +373,7 @@ class TransactionContext:
         msg_handler: MessageHandler,
         consensus_service: ConsensusService,
         validators_snapshot: validators.Snapshot | None,
+        genvm_manager: GenVMManager,
     ):
         """
         Initialize the TransactionContext.
@@ -390,6 +395,7 @@ class TransactionContext:
         self.contract_snapshot_factory = contract_snapshot_factory
         self.contract_processor = contract_processor
         self.node_factory = node_factory
+        self.genvm_manager = genvm_manager
         self.msg_handler = msg_handler
         self.consensus_data = ConsensusData(
             votes={}, leader_receipt=None, validators=[]
@@ -433,6 +439,7 @@ class ConsensusAlgorithm:
         msg_handler: MessageHandler,
         consensus_service: ConsensusService,
         validators_manager: validators.Manager,
+        genvm_manager: GenVMManager,
     ):
         """
         Initialize the ConsensusAlgorithm.
@@ -453,6 +460,7 @@ class ConsensusAlgorithm:
         # Simple tracking of what's currently being processed per contract
         self.processing_transactions: dict[str, str] = {}  # {contract_address: tx_hash}
         self.validators_manager = validators_manager
+        self.genvm_manager = genvm_manager
 
     async def run_crawl_snapshot_loop(
         self,
@@ -1208,6 +1216,7 @@ class ConsensusAlgorithm:
             msg_handler=self.msg_handler,
             consensus_service=self.consensus_service,
             validators_snapshot=validators_snapshot,
+            genvm_manager=self.genvm_manager,
         )
 
         previous_transaction = transactions_processor.get_previous_transaction(
@@ -1723,6 +1732,7 @@ class ConsensusAlgorithm:
             msg_handler=self.msg_handler,
             consensus_service=self.consensus_service,
             validators_snapshot=None,
+            genvm_manager=self.genvm_manager,
         )
 
         # Transition to the FinalizingState
@@ -1763,6 +1773,7 @@ class ConsensusAlgorithm:
             msg_handler=self.msg_handler,
             validators_snapshot=validators_snapshot,
             consensus_service=self.consensus_service,
+            genvm_manager=self.genvm_manager,
         )
 
         transactions_processor.set_transaction_appeal(transaction.hash, False)
@@ -1859,6 +1870,7 @@ class ConsensusAlgorithm:
             msg_handler=self.msg_handler,
             validators_snapshot=validators_snapshot,
             consensus_service=self.consensus_service,
+            genvm_manager=self.genvm_manager,
         )
 
         transactions_processor.set_transaction_appeal(transaction.hash, False)
@@ -1960,6 +1972,7 @@ class ConsensusAlgorithm:
             msg_handler=self.msg_handler,
             consensus_service=self.consensus_service,
             validators_snapshot=validators_snapshot,
+            genvm_manager=self.genvm_manager,
         )
 
         # Set the leader receipt in the context
@@ -2613,6 +2626,7 @@ class ProposingState(TransactionState):
             context.contract_snapshot_factory,
             context.validators_snapshot,
             leader_timing_callback,
+            context.genvm_manager,
         )
 
         context.transactions_processor.add_state_timestamp(
@@ -2717,6 +2731,7 @@ class CommittingState(TransactionState):
                 context.contract_snapshot_factory,
                 context.validators_snapshot,
                 validator_timing_callback,
+                context.genvm_manager,
             )
 
         # Dispatch a transaction status update to COMMITTING

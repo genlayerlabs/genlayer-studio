@@ -21,8 +21,10 @@ from backend.protocol_rpc.websocket import GLOBAL_CHANNEL
 
 MAX_LOG_MESSAGE_LENGTH = 3000
 
+from .base import IMessageHandler
 
-class MessageHandler:
+
+class MessageHandler(IMessageHandler):
     """FastAPI-compatible MessageHandler backed by Starlette Broadcast."""
 
     def __init__(self, broadcast: Broadcast, config: GlobalConfiguration):

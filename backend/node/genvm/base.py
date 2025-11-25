@@ -1,7 +1,15 @@
 # backend/node/genvm/base.py
 
-__all__ = ("IGenVM", "GenVMHost")
+__all__ = (
+    "run_genvm_host",
+    "Host",
+    "StateProxy",
+    "ExecutionError",
+    "ExecutionReturn",
+    "ExecutionResult",
+)
 
+import math
 import typing
 import tempfile
 from pathlib import Path
@@ -25,9 +33,10 @@ from backend.node.types import (
 import backend.node.genvm.origin.calldata as calldata
 from dataclasses import dataclass
 
-from backend.node.genvm.config import get_genvm_path
-from .origin.result_codes import *
+from .origin.public_abi import *
 from .origin.host_fns import Errors
+from .origin import base_host
+from .origin import logger as genvm_logger
 
 
 @dataclass
@@ -88,168 +97,11 @@ class ExecutionResult:
     nondet_disagree: int | None
 
 
-# GenVM protocol just in case it is needed for mocks or bringing back the old one
-class IGenVM(typing.Protocol):
-    async def run_contract(
-        self,
-        state: StateProxy,
-        *,
-        from_address: Address,
-        contract_address: Address,
-        calldata_raw: bytes,
-        is_init: bool = False,
-        leader_results: None | dict[int, bytes],
-        date: datetime.datetime | None,
-        chain_id: int,
-        host_data: typing.Any,
-        readonly: bool,
-        config_path: Path | None,
-    ) -> ExecutionResult: ...
+class Host(genvmhost.IHost):
+    """
+    Handles all genvm host methods and accumulates results
+    """
 
-    async def get_contract_schema(self, contract_code: bytes) -> ExecutionResult: ...
-
-
-# state proxy that always fails and can give code only for address from a constructor
-# useful for get_schema
-class _StateProxyNone(StateProxy):
-    data: dict[bytes, bytearray]
-
-    def __init__(self, my_address: Address):
-        self.my_address = my_address
-        self.data = {}
-
-    def storage_read(
-        self, account: Address, slot: bytes, index: int, le: int, /
-    ) -> bytes:
-        assert account == self.my_address
-        res = self.data.setdefault(slot, bytearray())
-        return res[index : index + le] + b"\x00" * (le - max(0, len(res) - index))
-
-    def storage_write(
-        self,
-        slot: bytes,
-        index: int,
-        got: collections.abc.Buffer,
-        /,
-    ) -> None:
-        res = self.data.setdefault(slot, bytearray())
-        what = memoryview(got)
-        res.extend(b"\x00" * (index + len(what) - len(res)))
-        memoryview(res)[index : index + len(what)] = what
-
-    def get_balance(self, addr: Address) -> int:
-        return 0
-
-
-# Actual genvm wrapper that will start process and handle all communication
-class GenVMHost(IGenVM):
-    async def run_contract(
-        self,
-        state: StateProxy,
-        *,
-        from_address: Address,
-        contract_address: Address,
-        calldata_raw: bytes,
-        is_init: bool = False,
-        readonly: bool,
-        leader_results: None | dict[int, bytes],
-        date: datetime.datetime | None,
-        chain_id: int,
-        host_data: typing.Any,
-        config_path: Path | None,
-    ) -> ExecutionResult:
-        if "tx_id" not in host_data:
-            host_data["tx_id"] = "0x"
-        message = {
-            "is_init": is_init,
-            "contract_address": contract_address.as_b64,
-            "sender_address": from_address.as_b64,
-            "origin_address": from_address.as_b64,  # FIXME: no origin in simulator #751
-            "value": None,
-            "chain_id": str(
-                chain_id
-            ),  # NOTE: it can overflow u64 so better to wrap it into a string
-        }
-        if date is not None:
-            assert date.tzinfo is not None
-            message["datetime"] = date.isoformat()
-        perms = "rcn"  # read/call/spawn nondet
-        if not readonly:
-            perms += "ws"  # write/send
-
-        start_time = time.time()
-        result = await _run_genvm_host(
-            functools.partial(
-                _Host,
-                calldata_bytes=calldata_raw,
-                state_proxy=state,
-                leader_results=leader_results,
-            ),
-            [
-                "--message",
-                json.dumps(message),
-                "--permissions",
-                perms,
-                "--host-data",
-                json.dumps(host_data),
-                "--debug-mode",
-            ],
-            config_path,
-        )
-        result.processing_time = int((time.time() - start_time) * 1000)
-        return result
-
-    async def get_contract_schema(self, contract_code: bytes) -> ExecutionResult:
-        NO_ADDR = str(base64.b64encode(b"\x00" * 20), encoding="ascii")
-        message = {
-            "is_init": False,
-            "contract_address": NO_ADDR,
-            "sender_address": NO_ADDR,
-            "origin_address": NO_ADDR,
-            "value": None,
-            "chain_id": "0",
-        }
-        state_proxy = _StateProxyNone(Address(NO_ADDR))
-        genvmhost.save_code_callback(
-            contract_code,
-            state_proxy.storage_write,
-        )
-        # state_proxy.storage_write()
-        start_time = time.time()
-        result = await _run_genvm_host(
-            functools.partial(
-                _Host,
-                calldata_bytes=calldata.encode({"method": "#get-schema"}),
-                state_proxy=state_proxy,
-                leader_results=None,
-            ),
-            [
-                "--message",
-                json.dumps(message),
-                "--permissions",
-                "",
-                "--debug-mode",
-                "--host-data",
-                '{"node_address":"0x", "tx_id":"0x"}',
-            ],
-            None,
-        )
-        result.processing_time = int((time.time() - start_time) * 1000)
-        return result
-
-
-def _decode_genvm_log(log: str) -> list:
-    decoded: list = []
-    for log_line in log.splitlines():
-        try:
-            decoded.append(json.loads(log_line))
-        except Exception:
-            decoded.append(log_line)
-    return decoded
-
-
-# Class that has logic for handling all genvm host methods and accumulating results
-class _Host(genvmhost.IHost):
     _result: ExecutionReturn | ExecutionError | None
     _eq_outputs: dict[int, bytes]
     _pending_transactions: list[PendingTransaction]
@@ -282,7 +134,7 @@ class _Host(genvmhost.IHost):
             pending_transactions=self._pending_transactions,
             stdout=res.stdout,
             stderr=res.stderr,
-            genvm_log=_decode_genvm_log(res.genvm_log),
+            genvm_log=res.genvm_log,
             result=self._result,
             state=state,
             processing_time=0,
@@ -437,14 +289,20 @@ async def _copy_state_proxy(state_proxy) -> StateProxy:
 
 
 def _create_timeout_result(
-    last_error: str, state_proxy: StateProxy, processing_time: int
+    last_error: Exception | None, state_proxy: StateProxy, processing_time: int
 ) -> ExecutionResult:
+    if last_error is not None:
+        import traceback
+
+        error_str = "\n".join(traceback.format_exception(last_error))
+    else:
+        error_str = ""
     return ExecutionResult(
         result=ExecutionError(message="timeout", kind=ResultCode.VM_ERROR),
         eq_outputs={},
         pending_transactions=[],
         stdout="",
-        stderr=last_error,
+        stderr=error_str,
         genvm_log=[],
         state=state_proxy,
         processing_time=processing_time,
@@ -452,18 +310,27 @@ def _create_timeout_result(
     )
 
 
-async def _run_genvm_host(
-    host_supplier: typing.Callable[[socket.socket], _Host],
-    args: list[Path | str],
-    config_path: Path | None,
+async def run_genvm_host(
+    host_supplier: typing.Callable[[socket.socket], Host],
+    *,
+    timeout: float,
+    manager_uri: str = "http://127.0.0.1:3999",
+    logger: genvm_logger.Logger | None = None,
+    is_sync: bool,
+    capture_output: bool = True,
+    message: typing.Any,
+    host_data: str = "",
+    extra_args: list[str] = [],
+    permissions: str = "rwscn",
 ) -> ExecutionResult:
+    if logger is None:
+        logger = genvm_logger.NoLogger()
     tmpdir = Path(tempfile.mkdtemp())
     try:
-        timeout = 1800  # seconds
         base_delay = 5  # seconds
         start_time = time.time()
         retry_count = 0
-        last_error = ""
+        last_error: Exception | None = None
 
         # Extract the original arguments from the partial function
         host_args = (
@@ -480,7 +347,7 @@ async def _run_genvm_host(
                 return _create_timeout_result(
                     last_error,
                     fresh_args.get("state_proxy", host_args.get("state_proxy")),
-                    timeout * 1000,
+                    int(timeout * 1000),
                 )
 
             # Create fresh copies of the arguments for each attempt
@@ -497,21 +364,6 @@ async def _run_genvm_host(
                 sock_listener.bind(str(sock_path))
                 sock_listener.listen(1)
 
-                new_args: list[str | Path] = [
-                    get_genvm_path(),
-                ]
-                if config_path is not None:
-                    new_args.extend(["--config", config_path])
-                new_args.extend(
-                    [
-                        "run",
-                        "--host",
-                        f"unix://{sock_path}",
-                    ]
-                )
-
-                new_args.extend(args)
-
                 fresh_host_supplier = functools.partial(
                     (
                         host_supplier.func
@@ -520,25 +372,42 @@ async def _run_genvm_host(
                     ),
                     **fresh_args,
                 )
-                host: _Host = fresh_host_supplier(sock_listener)
+                host: Host = fresh_host_supplier(sock_listener)
 
                 try:
-                    result = host.provide_result(
-                        await genvmhost.run_host_and_program(
-                            host, new_args, deadline=remaining_time
-                        ),
-                        state=fresh_args.get(
-                            "state_proxy", host_args.get("state_proxy")
-                        ),
+                    res = await base_host.run_genvm(
+                        host,
+                        manager_uri=manager_uri,
+                        message=message,
+                        timeout=timeout,
+                        capture_output=capture_output,
+                        is_sync=is_sync,
+                        host_data=host_data,
+                        logger=logger,
+                        host=f"unix://{sock_path}",
+                        extra_args=extra_args,
                     )
-                    return result
 
+                    execution_result = host.provide_result(
+                        res,
+                        fresh_args.get("state_proxy", host_args.get("state_proxy")),
+                    )
+
+                    execution_result.processing_time = math.ceil(
+                        (time.time() - start_time) * 1000
+                    )
+
+                    return execution_result
                 except Exception as e:
-                    print(f"Error: {e}")
-                    last_error = str(e)
+                    logger.error(
+                        f"GenVM execution attempt failed",
+                        error=e,
+                        retry_count=retry_count,
+                    )
+                    last_error = e
 
                     # Check if llm failed, immediately return timeout error
-                    if "fatal: true" in last_error:
+                    if "fatal: true" in str(last_error):
                         return _create_timeout_result(
                             last_error,
                             fresh_args.get("state_proxy", host_args.get("state_proxy")),
@@ -553,9 +422,6 @@ async def _run_genvm_host(
                 finally:
                     if host.sock is not None:
                         host.sock.close()
-                    try:
-                        sock_path.unlink()
-                    except FileNotFoundError:
-                        pass
+                    sock_path.unlink(missing_ok=True)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

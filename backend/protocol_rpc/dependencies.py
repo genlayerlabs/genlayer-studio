@@ -126,6 +126,14 @@ def get_validators_manager(request: Request):
     )
 
 
+def get_genvm_manager(request: Request):
+    return _require_state_attr(
+        _get_app_state(request),
+        "genvm_manager",
+        "GenVM manager not initialized",
+    )
+
+
 def get_validators_registry(request: Request):
     state = _get_app_state(request)
     manager = _peek_state_attr(state, "validators_manager")

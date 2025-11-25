@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ from backend.protocol_rpc.broadcast import Broadcast
 from backend.rollup.consensus_service import ConsensusService
 from backend.protocol_rpc.redis_subscriber import RedisEventSubscriber
 import backend.validators as validators
+from backend.node.base import Manager as GenVMManager
 
 
 @dataclass(frozen=True)
@@ -79,6 +81,7 @@ class RPCAppState:
     background_tasks: list[asyncio.Task]
     sqlalchemy_db: Any
     rpc_router: FastAPIRPCRouter
+    genvm_manager: GenVMManager
 
     def apply_to_app(self, app) -> None:
         """Populate FastAPI state with the configured services."""
@@ -98,6 +101,7 @@ class RPCAppState:
         state.db_manager = self.db_manager
         state.rpc_router = self.rpc_router
         state.rpc_context = state
+        state.genvm_manager = self.genvm_manager
 
 
 @dataclass
@@ -159,6 +163,45 @@ class _SQLAlchemyDBWrapper:
         return self._db_manager.engine
 
 
+async def create_genvm_manager() -> GenVMManager:
+    genvm_manager = await GenVMManager.create()
+
+    genvm_manager.llm_config_base["backends"] = {}
+    genvm_manager.llm_config_base["lua_script_path"] = str(
+        Path(__file__).parent.parent.joinpath("node", "llm.lua").resolve()
+    )
+
+    webdriver_host = os.getenv("WEBDRIVERHOST", "webdriver")
+    webdriver_port = os.getenv("WEBDRIVERPORT", "5001")
+    webdriver_protocol = os.getenv("WEBDRIVERPROTOCOL") or os.getenv(
+        "RPCPROTOCOL", "http"
+    )
+    genvm_manager.web_config_base["webdriver_host"] = (
+        f"{webdriver_protocol}://{webdriver_host}:{webdriver_port}"
+    )
+    genvm_manager.web_config_base["lua_script_path"] = str(
+        Path(__file__).parent.parent.joinpath("node", "web.lua").resolve()
+    )
+
+    error: Exception | None = None
+    for _retries in range(5):
+        try:
+            await genvm_manager.start_module("web", genvm_manager.web_config_base)
+        except Exception as e:
+            error = e
+            await asyncio.sleep(5)
+        else:
+            error = None
+            break
+    if error is not None:
+        raise error
+    await genvm_manager.start_module(
+        "llm", genvm_manager.llm_config_base, {"allow_empty_backends": True}
+    )
+
+    return genvm_manager
+
+
 @asynccontextmanager
 async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAppState]:
     """Prepare RPC services and ensure graceful shutdown."""
@@ -194,12 +237,14 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
     transactions_parser = TransactionParser(consensus_service)
     emit_event = create_emit_event_function(broadcast)
 
+    genvm_manager = await create_genvm_manager()
+
     validators_session = db_manager.open_session()
     # Manages the validators registry with locking for concurrent access
     # Handles LLM and web modules and configuration file changes
     # Loads GenVM configuration
     logger.info("[STARTUP] Initializing validators manager")
-    validators_manager = validators.Manager(validators_session)
+    validators_manager = validators.Manager(validators_session, genvm_manager)
 
     # Delete all validators from the database and create new ones based on env.VAlIDATORS_CONFIG_JSON
     if settings.validators_config_json:
@@ -228,6 +273,7 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
         msg_handler,
         consensus_service,
         validators_manager,
+        genvm_manager,
     )
 
     # No background consensus tasks in RPC process - handled by separate worker services
@@ -274,6 +320,7 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
         background_tasks=background_tasks,
         sqlalchemy_db=sql_db,
         rpc_router=rpc_router,
+        genvm_manager=genvm_manager,
     )
 
     resources = _RPCAppResources(
@@ -370,6 +417,8 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
 
         logger.info("[SHUTDOWN] Disconnecting broadcast backend")
         await resources.broadcast.disconnect()
+
+        await genvm_manager.close()
 
         # Log final monitoring status if available
         try:

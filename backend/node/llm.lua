@@ -122,6 +122,9 @@ local function try_provider(ctx, args, mapped_prompt, provider_id)
 		return nil
 	end
 
+	if llm.providers[provider_id] == nil then
+		lib.log{ level = "error", message = "provider does not exist", provider_id = provider_id }
+	end
 	local model = lib.get_first_from_table(llm.providers[provider_id].models).key
 
 	local success, result

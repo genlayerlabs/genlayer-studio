@@ -84,7 +84,7 @@ class ContractSnapshot:
         if missing/invalid.
         """
         # Import here to avoid circular dependencies at module import time
-        from backend.node.genvm.origin.base_host import get_code_slot
+        from backend.node.genvm import get_code_slot
 
         accepted = self.states.get("accepted") or {}
 
