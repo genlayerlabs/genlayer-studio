@@ -263,6 +263,9 @@ class Manager:
                 "models": {
                     i.validator.llmprovider.model: {
                         "supports_json": True,
+                        "meta": {
+                            "config": i.validator.llmprovider.config,
+                        },
                     }
                 },
                 "enabled": True,

@@ -122,11 +122,19 @@ async def check_provider_is_available(
         url = provider.plugin_config["api_url"]
         plugin = provider.plugin
         key = provider.plugin_config["api_key_env_var"]
+        temperature = provider.config.get("temperature", 1)
+        use_max_completion_tokens = provider.config.get(
+            "use_max_completion_tokens", False
+        )
     else:
         model = provider["model"]
         url = provider["plugin_config"]["api_url"]
         plugin = provider["plugin"]
         key = provider["plugin_config"]["api_key_env_var"]
+        temperature = provider["config"].get("temperature", 1)
+        use_max_completion_tokens = provider["config"].get(
+            "use_max_completion_tokens", False
+        )
     key = f"${{ENV[{key}]}}"
     res = await genvm_manager.try_llms(
         [
@@ -140,9 +148,9 @@ async def check_provider_is_available(
         prompt={
             "system_message": "",
             "user_message": "respond with two letters 'ok' and nothing else. No quotes, no repetition",
-            "temperature": 1,
+            "temperature": temperature,
             "max_tokens": 500,
-            "use_max_completion_tokens": False,
+            "use_max_completion_tokens": use_max_completion_tokens,
             "images": [],
         },
     )
