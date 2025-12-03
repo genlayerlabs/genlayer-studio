@@ -117,13 +117,20 @@ class ConsensusWorker:
                     ORDER BY created_at ASC
                 ) as rn
                 FROM locked_finalizations
+            ),
+            single_finalization AS (
+                -- FIXED: Limit update to exactly ONE transaction
+                SELECT *
+                FROM ready_for_finalization
+                WHERE rn = 1
+                ORDER BY created_at ASC
+                LIMIT 1
             )
             UPDATE transactions
             SET blocked_at = NOW(),
                 worker_id = :worker_id
-            FROM ready_for_finalization
-            WHERE transactions.hash = ready_for_finalization.hash
-                AND ready_for_finalization.rn = 1
+            FROM single_finalization
+            WHERE transactions.hash = single_finalization.hash
             RETURNING transactions.hash, transactions.from_address, transactions.to_address,
                       transactions.data, transactions.value, transactions.type, transactions.nonce,
                       transactions.gaslimit, transactions.r, transactions.s, transactions.v,
@@ -211,13 +218,20 @@ class ConsensusWorker:
                     ORDER BY created_at ASC
                 ) as rn
                 FROM locked_appeals
+            ),
+            single_appeal AS (
+                -- FIXED: Limit update to exactly ONE transaction
+                SELECT *
+                FROM available_appeals
+                WHERE rn = 1
+                ORDER BY created_at ASC
+                LIMIT 1
             )
             UPDATE transactions
             SET blocked_at = NOW(),
                 worker_id = :worker_id
-            FROM available_appeals
-            WHERE transactions.hash = available_appeals.hash
-                AND available_appeals.rn = 1
+            FROM single_appeal
+            WHERE transactions.hash = single_appeal.hash
             RETURNING transactions.hash, transactions.from_address, transactions.to_address,
                       transactions.data, transactions.value, transactions.type, transactions.nonce,
                       transactions.gaslimit, transactions.r, transactions.s, transactions.v,
@@ -367,7 +381,7 @@ class ConsensusWorker:
         Release a transaction by clearing its blocked_at and worker_id.
 
         Args:
-            session: Database session
+            session: Database session (should be a fresh, valid session)
             transaction_hash: Hash of the transaction to release
         """
         update_query = text(
@@ -376,12 +390,17 @@ class ConsensusWorker:
             SET blocked_at = NULL,
                 worker_id = NULL
             WHERE hash = :hash
+              AND worker_id = :worker_id
             RETURNING hash, status, blocked_at, worker_id
         """
         )
 
         try:
-            result = session.execute(update_query, {"hash": transaction_hash})
+
+            result = session.execute(
+                update_query,
+                {"hash": transaction_hash, "worker_id": self.worker_id},
+            )
             row = result.first()
             session.commit()
 
@@ -391,27 +410,21 @@ class ConsensusWorker:
                 )
             else:
                 logger.warning(
-                    f"[Worker {self.worker_id}] Transaction {transaction_hash} not found when releasing"
+                    f"[Worker {self.worker_id}] Transaction {transaction_hash} not found or owned by another worker when releasing"
                 )
         except Exception as e:
             logger.error(
                 f"[Worker {self.worker_id}] Failed to release transaction {transaction_hash}: {e}",
                 exc_info=True,
             )
-            # Try to rollback and commit again in a new transaction
             try:
                 session.rollback()
-                result = session.execute(update_query, {"hash": transaction_hash})
-                row = result.first()
-                session.commit()
-                logger.info(
-                    f"[Worker {self.worker_id}] Successfully released transaction {transaction_hash} on retry"
-                )
-            except Exception as retry_error:
+            except Exception as rollback_error:
                 logger.error(
-                    f"[Worker {self.worker_id}] Failed to release transaction {transaction_hash} on retry: {retry_error}",
+                    f"[Worker {self.worker_id}] Rollback failed while releasing {transaction_hash}: {rollback_error}",
                     exc_info=True,
                 )
+            raise
 
     async def recover_stuck_transactions(self, session: Session) -> int:
         """
@@ -575,8 +588,15 @@ class ConsensusWorker:
         finally:
             # Clear current transaction tracking
             self.current_transaction = None
-            # Always release the transaction when done
-            self.release_transaction(session, transaction_data["hash"])
+            # Always release the transaction when done - use fresh session since current one may be closed
+            try:
+                with self.get_session() as release_session:
+                    self.release_transaction(release_session, transaction_data["hash"])
+            except Exception as release_error:
+                logger.error(
+                    f"[Worker {self.worker_id}] Failed to release transaction {transaction_data['hash']} in finally block: {release_error}",
+                    exc_info=True,
+                )
 
     async def process_finalization(self, finalization_data: dict, session: Session):
         """
@@ -642,8 +662,15 @@ class ConsensusWorker:
             )
             session.rollback()
         finally:
-            # Always release the transaction when done
-            self.release_transaction(session, finalization_data["hash"])
+            # Always release the transaction when done - use fresh session since current one may be closed
+            try:
+                with self.get_session() as release_session:
+                    self.release_transaction(release_session, finalization_data["hash"])
+            except Exception as release_error:
+                logger.error(
+                    f"[Worker {self.worker_id}] Failed to release finalization {finalization_data['hash']} in finally block: {release_error}",
+                    exc_info=True,
+                )
 
     async def process_appeal(self, appeal_data: dict, session: Session):
         """
@@ -731,8 +758,15 @@ class ConsensusWorker:
             )
             session.rollback()
         finally:
-            # Always release the transaction when done
-            self.release_transaction(session, appeal_data["hash"])
+            # Always release the transaction when done - use fresh session since current one may be closed
+            try:
+                with self.get_session() as release_session:
+                    self.release_transaction(release_session, appeal_data["hash"])
+            except Exception as release_error:
+                logger.error(
+                    f"[Worker {self.worker_id}] Failed to release appeal {appeal_data['hash']} in finally block: {release_error}",
+                    exc_info=True,
+                )
 
     async def run(self):
         """
