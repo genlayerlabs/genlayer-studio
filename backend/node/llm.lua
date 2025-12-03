@@ -125,13 +125,12 @@ local function try_provider(ctx, args, mapped_prompt, provider_id)
 	if llm.providers[provider_id] == nil then
 		lib.log{ level = "error", message = "provider does not exist", provider_id = provider_id }
 	end
-	local model_data = lib.get_first_from_table(llm.providers[provider_id].models).key
+	local model_data = lib.get_first_from_table(llm.providers[provider_id].models)
 	local model = model_data.key
 
-	if model_data.value.use_max_completion_tokens then
-		mapped_prompt.use_max_completion_tokens = true
-	else
-		mapped_prompt.use_max_completion_tokens = false
+	mapped_prompt.prompt.use_max_completion_tokens = model_data.value.use_max_completion_tokens
+	if model_data.value.meta.config ~= nil and model_data.value.meta.config.temperature ~= nil then
+		mapped_prompt.prompt.temperature = model_data.value.meta.config.temperature
 	end
 
 	local success, result

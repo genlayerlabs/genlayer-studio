@@ -2,6 +2,7 @@ import json
 from dataclasses import dataclass
 from sqlalchemy.orm import Session
 import backend.validators as validators
+from loguru import logger
 
 
 @dataclass
@@ -58,22 +59,15 @@ async def initialize_validators(
 
             for _ in range(validator_config.amount):
                 # Prepare LLM provider
-                if (
-                    validator_config.config is None
-                    or validator_config.plugin is None
-                    or validator_config.plugin_config is None
-                ):
-                    llm_provider = get_default_provider_for(
-                        validator_config.provider, validator_config.model
-                    )
-                else:
-                    llm_provider = LLMProvider(
-                        provider=validator_config.provider,
-                        model=validator_config.model,
-                        config=validator_config.config,
-                        plugin=validator_config.plugin,
-                        plugin_config=validator_config.plugin_config,
-                    )
+                llm_provider = get_default_provider_for(
+                    validator_config.provider, validator_config.model
+                )
+                if validator_config.config is not None:
+                    llm_provider.config = validator_config.config
+                if validator_config.plugin is not None:
+                    llm_provider.plugin = validator_config.plugin
+                if validator_config.plugin_config is not None:
+                    llm_provider.plugin_config = validator_config.plugin_config
 
                 # Create account
                 account = accounts_manager.create_new_account()

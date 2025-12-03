@@ -15,6 +15,7 @@ import backend.database_handler.validators_registry as vr
 from sqlalchemy.orm import Session
 
 import backend.domain.types as domain
+from loguru import logger
 
 
 @dataclasses.dataclass
@@ -74,9 +75,6 @@ def select_random_different_validator(
 
     # No suitable fallback found
     return None
-
-
-logger = logging.getLogger(__name__)
 
 
 class ModifiableValidatorsRegistryInterceptor(vr.ModifiableValidatorsRegistry):
@@ -159,14 +157,12 @@ class Manager:
     async def _get_snap_from_registry(self) -> Snapshot:
         cur_validators_as_dict = self.registry.get_all_validators()
         logger.info(
-            "ValidatorManager retrieved %d validators from registry",
-            len(cur_validators_as_dict),
+            f"ValidatorManager retrieved {len(cur_validators_as_dict)} validators from registry",
         )
         validators = [domain.Validator.from_dict(i) for i in cur_validators_as_dict]
         snapshot = await self._get_snap_from_validators(validators)
         logger.info(
-            "ValidatorManager created snapshot with %d validator nodes",
-            len(snapshot.nodes),
+            f"ValidatorManager created snapshot with {len(snapshot.nodes)} validator nodes",
         )
         return snapshot
 
@@ -254,11 +250,17 @@ class Manager:
 
         new_providers: dict[str, LLMConfig] = {}
 
-        all_validators = [node.validator for node in snap.nodes]
-        has_multiple_validators = len(all_validators) > 1
-
         for i in snap.nodes:
             key_env = i.validator.llmprovider.plugin_config["api_key_env_var"]
+
+            logger.info(
+                f"Configuring validator {i.validator.llmprovider} with LLM provider:"
+            )
+
+            use_max_completion_tokens = i.validator.llmprovider.config.get(
+                "use_max_completion_tokens", False
+            )
+
             new_providers[f"node-{i.validator.address}"] = {
                 "models": {
                     i.validator.llmprovider.model: {
@@ -266,6 +268,7 @@ class Manager:
                         "meta": {
                             "config": i.validator.llmprovider.config,
                         },
+                        "use_max_completion_tokens": use_max_completion_tokens,
                     }
                 },
                 "enabled": True,
