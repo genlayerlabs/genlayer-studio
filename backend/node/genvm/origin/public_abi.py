@@ -1,3 +1,5 @@
+# This file is auto-generated. Do not edit!
+
 from enum import IntEnum, StrEnum
 import typing
 
@@ -24,6 +26,7 @@ class EntryKind(IntEnum):
 class MemoryLimiterConsts(IntEnum):
     TABLE_ENTRY = 64
     FILE_MAPPING = 256
+    FD_ALLOCATION = 96
 
 
 class SpecialMethod(StrEnum):
@@ -31,7 +34,19 @@ class SpecialMethod(StrEnum):
     ERRORED_MESSAGE = "#error"
 
 
+class VmError(StrEnum):
+    TIMEOUT = "timeout"
+    EXIT_CODE = "exit_code"
+    VALIDATOR_DISAGREES = "validator_disagrees"
+    VERSION_TOO_BIG = "version_too_big"
+    OOM = "OOM"
+    INVALID_CONTRACT = "invalid_contract"
+
+
 EVENT_MAX_TOPICS: typing.Final[int] = 4
 
 
 ABSENT_VERSION: typing.Final[str] = "v0.1.0"
+
+
+CODE_SLOT_OFFSET: typing.Final[int] = 1

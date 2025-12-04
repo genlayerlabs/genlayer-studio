@@ -49,6 +49,7 @@ class RPCHandler:
         # Get all required dependencies from app_state
         self.registry = register_endpoints_for_fastapi(
             msg_handler=self.app_state.get("msg_handler"),
+            genvm_manager=self.app_state.get("genvm_manager"),
             request_session=None,  # Will be injected per request
             accounts_manager=self.app_state.get("accounts_manager"),
             transactions_processor=self.app_state.get("transactions_processor"),

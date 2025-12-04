@@ -122,7 +122,16 @@ local function try_provider(ctx, args, mapped_prompt, provider_id)
 		return nil
 	end
 
-	local model = lib.get_first_from_table(llm.providers[provider_id].models).key
+	if llm.providers[provider_id] == nil then
+		lib.log{ level = "error", message = "provider does not exist", provider_id = provider_id }
+	end
+	local model_data = lib.get_first_from_table(llm.providers[provider_id].models)
+	local model = model_data.key
+
+	mapped_prompt.prompt.use_max_completion_tokens = model_data.value.use_max_completion_tokens
+	if model_data.value.meta.config ~= nil and model_data.value.meta.config.temperature ~= nil then
+		mapped_prompt.prompt.temperature = model_data.value.meta.config.temperature
+	end
 
 	local success, result
 	local request
@@ -212,8 +221,6 @@ local function just_in_backend(ctx, args, mapped_prompt)
 			lib.log{level = "debug", message = "no mock match found, falling through to real provider"}
 		end
 	end
-
-	mapped_prompt.prompt.use_max_completion_tokens = false
 
 	-- First: Try primary model (1 attempts)
 	local primary_provider_id = ctx.host_data.studio_llm_id

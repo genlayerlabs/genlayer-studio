@@ -3,6 +3,7 @@ import json
 import copy
 from functools import wraps
 import traceback
+import typing
 from contextvars import ContextVar
 
 from flask import request
@@ -35,7 +36,13 @@ def get_client_session_id() -> str:
         return ""
 
 
-class MessageHandler:
+class IMessageHandler(typing.Protocol):
+    def with_client_session(self, client_session_id: str) -> "IMessageHandler": ...
+
+    def log_endpoint_info(self, func) -> typing.Any: ...
+
+
+class MessageHandler(IMessageHandler):
     def __init__(self, socketio: SocketIO, config: GlobalConfiguration):
         self.socketio = socketio
         self.config = config

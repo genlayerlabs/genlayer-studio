@@ -1,5 +1,6 @@
 __all__ = ("Manager", "with_lock", "select_random_different_validator")
 
+import asyncio
 import typing
 import contextlib
 import dataclasses
@@ -10,14 +11,20 @@ import random
 from copy import deepcopy
 from pathlib import Path
 
-from .llm import LLMModule, SimulatorProvider
-from .web import WebModule
-import backend.validators.base as base
-
 import backend.database_handler.validators_registry as vr
 from sqlalchemy.orm import Session
 
 import backend.domain.types as domain
+from loguru import logger
+
+
+@dataclasses.dataclass
+class SimulatorProvider:
+    id: str
+    model: str
+    url: str
+    plugin: str
+    key_env: str
 
 
 def select_random_different_validator(
@@ -70,23 +77,6 @@ def select_random_different_validator(
     return None
 
 
-logger = logging.getLogger(__name__)
-
-
-class ILock(typing.Protocol):
-    async def acquire(self) -> None: ...
-    def release(self) -> None: ...
-
-
-@contextlib.asynccontextmanager
-async def with_lock(lock: ILock):
-    await lock.acquire()
-    try:
-        yield
-    finally:
-        lock.release()
-
-
 class ModifiableValidatorsRegistryInterceptor(vr.ModifiableValidatorsRegistry):
     def __init__(self, parent: "Manager", *args, **kwargs):
         self._parent = parent
@@ -136,83 +126,43 @@ class SingleValidatorSnapshot:
 class Snapshot:
     nodes: list[SingleValidatorSnapshot]
 
-    genvm_config_path: Path
+
+from backend.node.base import LLMConfig, Manager as GenVMManager
 
 
 class Manager:
     registry: vr.ModifiableValidatorsRegistry
 
-    def __init__(self, validators_registry_session: Session):
-        self._terminated = False
-        from aiorwlock import RWLock
-
-        self.lock = RWLock()
+    def __init__(
+        self, validators_registry_session: Session, genvm_manager: GenVMManager
+    ):
+        self.genvm_manager = genvm_manager
 
         self._cached_snapshot = None
 
         self.registry = ModifiableValidatorsRegistryInterceptor(
             self, validators_registry_session
         )
-
-        self.llm_module = LLMModule()
-        self.web_module = WebModule()
-
-        self._genvm_config = base.ChangedConfigFile(base.GENVM_CONFIG_PATH)
-        with self._genvm_config.change_default() as config:
-            config["modules"]["llm"]["address"] = "ws://" + self.llm_module.address
-            config["modules"]["web"]["address"] = "ws://" + self.web_module.address
-
-        self._genvm_config.write_default()
+        self._restart_llm_lock = asyncio.Lock()
 
     async def restart(self):
-        await self.lock.writer.acquire()
-        try:
-            # Restart both LLM and web modules to ensure clean state
-            await self.llm_module.restart()
-            await self.web_module.restart()
-
-            # Fetches the validators from the database
-            # creates the general Snapshot with:
-            # - SingleValidatorSnapshot (validator, genvm_host_data)
-            # - the genvm_config_path
-            new_validators = await self._get_snap_from_registry()
-            # Registers all the validators providers and models to the LLM module
-            await self._change_providers_from_snapshot(new_validators)
-        finally:
-            self.lock.writer.release()
-
-    async def terminate(self):
-        if self._terminated:
-            return
-        self._terminated = True
-
-        await self.lock.writer.acquire()
-        try:
-            await self.llm_module.terminate()
-            await self.web_module.terminate()
-
-            self._genvm_config.terminate()
-        finally:
-            self.lock.writer.release()
-
-    def __del__(self):
-        if not self._terminated:
-            logger.error(
-                "ValidatorsManager was garbage collected without being terminated properly. "
-                "This may indicate a reference leak or improper cleanup."
-            )
+        # Fetches the validators from the database
+        # creates the general Snapshot with:
+        # - SingleValidatorSnapshot (validator, genvm_host_data)
+        # - the genvm_config_path
+        new_validators = await self._get_snap_from_registry()
+        # Registers all the validators providers and models to the LLM module
+        await self._change_providers_from_snapshot(new_validators)
 
     async def _get_snap_from_registry(self) -> Snapshot:
         cur_validators_as_dict = self.registry.get_all_validators()
         logger.info(
-            "ValidatorManager retrieved %d validators from registry",
-            len(cur_validators_as_dict),
+            f"ValidatorManager retrieved {len(cur_validators_as_dict)} validators from registry",
         )
         validators = [domain.Validator.from_dict(i) for i in cur_validators_as_dict]
         snapshot = await self._get_snap_from_validators(validators)
         logger.info(
-            "ValidatorManager created snapshot with %d validator nodes",
-            len(snapshot.nodes),
+            f"ValidatorManager created snapshot with {len(snapshot.nodes)} validator nodes",
         )
         return snapshot
 
@@ -223,7 +173,7 @@ class Manager:
         has_multiple_validators = len(validators) > 1
 
         for val in validators:
-            host_data = {
+            host_data: dict[str, typing.Any] = {
                 "studio_llm_id": f"node-{val.address}",
                 "node_address": val.address,
             }
@@ -268,76 +218,80 @@ class Manager:
 
             current_validators.append(SingleValidatorSnapshot(val, host_data))
         return Snapshot(
-            nodes=current_validators, genvm_config_path=self._genvm_config.new_path
+            nodes=current_validators,
         )
 
     @contextlib.asynccontextmanager
     async def snapshot(self):
-        await self.lock.reader.acquire()
-        try:
-            await self.llm_module.verify_for_read()
-            await self.web_module.verify_for_read()
+        assert self._cached_snapshot is not None
 
-            assert self._cached_snapshot is not None
-
-            snap = deepcopy(self._cached_snapshot)
-            yield snap
-        finally:
-            self.lock.reader.release()
+        snap = deepcopy(self._cached_snapshot)
+        yield snap
 
     @contextlib.asynccontextmanager
     async def temporal_snapshot(self, validators: list[domain.Validator]):
-        await self.lock.writer.acquire()
+        original_snapshot = deepcopy(self._cached_snapshot)
+
+        temp_snapshot = await self._get_snap_from_validators(validators)
+        await self._change_providers_from_snapshot(temp_snapshot)
+
         try:
-            await self.llm_module.verify_for_read()
-            await self.web_module.verify_for_read()
-
-            original_snapshot = deepcopy(self._cached_snapshot)
-
-            temp_snapshot = await self._get_snap_from_validators(validators)
-            await self._change_providers_from_snapshot(temp_snapshot)
-
-            try:
-                yield deepcopy(temp_snapshot)
-            finally:
-                if original_snapshot is not None:
-                    await self._change_providers_from_snapshot(original_snapshot)
+            yield deepcopy(temp_snapshot)
         finally:
-            self.lock.writer.release()
+            if original_snapshot is not None:
+                await self._change_providers_from_snapshot(original_snapshot)
 
     async def _change_providers_from_snapshot(self, snap: Snapshot):
+        async with self._restart_llm_lock:
+            await self._change_providers_from_snapshot_locked(snap)
+
+    async def _change_providers_from_snapshot_locked(self, snap: Snapshot):
         self._cached_snapshot = None
 
-        new_providers: list[SimulatorProvider] = []
-
-        all_validators = [node.validator for node in snap.nodes]
-        has_multiple_validators = len(all_validators) > 1
+        new_providers: dict[str, LLMConfig] = {}
 
         for i in snap.nodes:
-            new_providers.append(
-                SimulatorProvider(
-                    id=f"node-{i.validator.address}",
-                    model=i.validator.llmprovider.model,
-                    url=i.validator.llmprovider.plugin_config["api_url"],
-                    plugin=i.validator.llmprovider.plugin,
-                    key_env=i.validator.llmprovider.plugin_config["api_key_env_var"],
-                )
+            key_env = i.validator.llmprovider.plugin_config["api_key_env_var"]
+
+            logger.info(
+                f"Configuring validator {i.validator.llmprovider} with LLM provider:"
             )
 
-        await self.llm_module.change_config(new_providers)
+            use_max_completion_tokens = i.validator.llmprovider.config.get(
+                "use_max_completion_tokens", False
+            )
+
+            new_providers[f"node-{i.validator.address}"] = {
+                "models": {
+                    i.validator.llmprovider.model: {
+                        "supports_json": True,
+                        "meta": {
+                            "config": i.validator.llmprovider.config,
+                        },
+                        "use_max_completion_tokens": use_max_completion_tokens,
+                    }
+                },
+                "enabled": True,
+                "host": i.validator.llmprovider.plugin_config["api_url"],
+                "provider": i.validator.llmprovider.plugin,
+                "key": f"${{ENV[{key_env}]}}",
+            }
+
+        await self.genvm_manager.stop_module("llm")
+        new_llm_config = deepcopy(self.genvm_manager.llm_config_base)
+        new_llm_config["backends"] = new_providers
+        await self.genvm_manager.start_module(
+            "llm", new_llm_config, {"allow_empty_backends": True}
+        )
 
         self._cached_snapshot = snap
 
     @contextlib.asynccontextmanager
     async def do_write(self):
-        await self.lock.writer.acquire()
-        try:
-            yield
+        yield
 
-            new_validators = await self._get_snap_from_registry()
-            await self._change_providers_from_snapshot(new_validators)
-        finally:
-            self.lock.writer.release()
+        new_validators = await self._get_snap_from_registry()
+        await self._change_providers_from_snapshot(new_validators)
 
     async def _notify_validator_change(self, event_type: str, data: dict):
         """

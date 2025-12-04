@@ -284,9 +284,12 @@ async def test_create_random_validators_use_request_session(monkeypatch):
         endpoints, "check_provider_is_available", fake_check_provider_is_available
     )
 
+    genvm_manager = MagicMock()
+
     response = await endpoints.create_random_validators(
         session,
         validators_manager,
+        genvm_manager,
         count=2,
         min_stake=5,
         max_stake=5,

@@ -20,6 +20,7 @@ from backend.protocol_rpc.dependencies import (
     get_transactions_parser,
     get_transactions_processor,
     get_validators_manager,
+    get_genvm_manager,
     get_validators_registry,
 )
 from backend.protocol_rpc.rpc_decorators import rpc
@@ -56,12 +57,12 @@ def fund_account(
 
 @rpc.method("sim_getProvidersAndModels")
 async def get_providers_and_models(
-    validators_manager=Depends(get_validators_manager),
+    genvm_manager=Depends(get_genvm_manager),
     llm_provider_registry=Depends(get_llm_provider_registry),
 ) -> list[dict]:
     return await impl.get_providers_and_models(
         llm_provider_registry=llm_provider_registry,
-        validators_manager=validators_manager,
+        genvm_manager=genvm_manager,
     )
 
 
@@ -127,10 +128,12 @@ async def create_random_validator(
     stake: int,
     session: Session = Depends(get_db_session),
     validators_manager=Depends(get_validators_manager),
+    genvm_manager=Depends(get_genvm_manager),
 ) -> dict:
     return await impl.create_random_validator(
         session=session,
         validators_manager=validators_manager,
+        genvm_manager=genvm_manager,
         stake=stake,
     )
 
@@ -144,10 +147,12 @@ async def create_random_validators(
     limit_models: list[str] | None = None,
     session: Session = Depends(get_db_session),
     validators_manager=Depends(get_validators_manager),
+    genvm_manager=Depends(get_genvm_manager),
 ) -> list[dict]:
     return await impl.create_random_validators(
         session=session,
         validators_manager=validators_manager,
+        genvm_manager=genvm_manager,
         count=count,
         min_stake=min_stake,
         max_stake=max_stake,
@@ -300,9 +305,11 @@ async def get_contract_schema(
     contract_address: str,
     accounts_manager: AccountsManager = Depends(get_accounts_manager),
     msg_handler=Depends(get_message_handler),
+    genvm_manager=Depends(get_genvm_manager),
 ) -> dict:
     return await impl.get_contract_schema(
         accounts_manager=accounts_manager,
+        genvm_manager=genvm_manager,
         msg_handler=msg_handler,
         contract_address=contract_address,
     )
@@ -312,8 +319,10 @@ async def get_contract_schema(
 async def get_contract_schema_for_code(
     contract_code_hex: str,
     msg_handler=Depends(get_message_handler),
+    genvm_manager=Depends(get_genvm_manager),
 ) -> dict:
     return await impl.get_contract_schema_for_code(
+        genvm_manager=genvm_manager,
         msg_handler=msg_handler,
         contract_code_hex=contract_code_hex,
     )
@@ -335,6 +344,7 @@ async def gen_call(
     msg_handler=Depends(get_message_handler),
     transactions_parser=Depends(get_transactions_parser),
     validators_manager=Depends(get_validators_manager),
+    genvm_manager=Depends(get_genvm_manager),
 ) -> str:
     return await impl.gen_call(
         session=session,
@@ -342,6 +352,7 @@ async def gen_call(
         msg_handler=msg_handler,
         transactions_parser=transactions_parser,
         validators_manager=validators_manager,
+        genvm_manager=genvm_manager,
         params=params,
     )
 
@@ -354,6 +365,7 @@ async def sim_call(
     msg_handler=Depends(get_message_handler),
     transactions_parser=Depends(get_transactions_parser),
     validators_manager=Depends(get_validators_manager),
+    genvm_manager=Depends(get_genvm_manager),
 ) -> dict:
     return await impl.sim_call(
         session=session,
@@ -361,6 +373,7 @@ async def sim_call(
         msg_handler=msg_handler,
         transactions_parser=transactions_parser,
         validators_manager=validators_manager,
+        genvm_manager=genvm_manager,
         params=params,
     )
 
@@ -428,6 +441,7 @@ async def eth_call(
     msg_handler=Depends(get_message_handler),
     transactions_parser=Depends(get_transactions_parser),
     validators_manager=Depends(get_validators_manager),
+    genvm_manager=Depends(get_genvm_manager),
     transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
     block_tag: str = "latest",
 ) -> str:
@@ -437,6 +451,7 @@ async def eth_call(
         msg_handler=msg_handler,
         transactions_parser=transactions_parser,
         validators_manager=validators_manager,
+        genvm_manager=genvm_manager,
         transactions_processor=transactions_processor,
         params=params,
         block_tag=block_tag,
