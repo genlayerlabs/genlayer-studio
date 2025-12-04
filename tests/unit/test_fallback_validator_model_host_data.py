@@ -1,3 +1,4 @@
+import asyncio
 import typing
 from backend.node.base import LLMConfig
 import pytest
@@ -60,10 +61,15 @@ class TestValidatorsManagerHostData:
         class MockManager:
             def __init__(self):
                 self.genvm_manager = MockGenVMManager()
+                self._cached_snapshot = None
+                self._restart_llm_lock = asyncio.Lock()
 
-                actual_method = Manager._change_providers_from_snapshot
+                # Bind both methods from the actual Manager class
                 self._change_providers_from_snapshot = types.MethodType(
-                    actual_method, self
+                    Manager._change_providers_from_snapshot, self
+                )
+                self._change_providers_from_snapshot_locked = types.MethodType(
+                    Manager._change_providers_from_snapshot_locked, self
                 )
 
         mock_manager = MockManager()
