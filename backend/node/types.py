@@ -149,12 +149,16 @@ class PendingTransaction:
             return {
                 "address": self.address,
                 "calldata": str(base64.b64encode(self.calldata), encoding="ascii"),
+                "on": self.on,
+                "value": self.value,
             }
         else:
             return {
                 "code": str(base64.b64encode(self.code), encoding="ascii"),
                 "calldata": str(base64.b64encode(self.calldata), encoding="ascii"),
                 "salt_nonce": self.salt_nonce,
+                "on": self.on,
+                "value": self.value,
             }
 
     @classmethod
