@@ -800,7 +800,7 @@ class ConsensusWorker:
     def _log_query_result(
         self,
         query_name: str,
-        result: dict,
+        result: Optional[Any],
         duration_seconds: float,
     ) -> None:
         """
