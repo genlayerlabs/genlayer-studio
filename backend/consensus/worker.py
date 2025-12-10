@@ -66,6 +66,26 @@ class ConsensusWorker:
         self.running = True
         self.current_transaction = None  # Track currently processing transaction
 
+        now_monotonic = time.monotonic()
+        self._query_log_interval = 60.0  # seconds
+        self._query_log_state = {
+            "appeal": {
+                "label": "Appeal claim",
+                "last_log": now_monotonic,
+                "polls": 0,
+            },
+            "finalization": {
+                "label": "Finalization claim",
+                "last_log": now_monotonic,
+                "polls": 0,
+            },
+            "transaction": {
+                "label": "Transaction claim",
+                "last_log": now_monotonic,
+                "polls": 0,
+            },
+        }
+
         # Create a ConsensusAlgorithm instance to reuse its exec_transaction method
         self.consensus_algorithm = ConsensusAlgorithm(
             get_session,
@@ -84,6 +104,7 @@ class ConsensusWorker:
         """
         # Query for transactions that are ready for finalization
         # They must be in ACCEPTED/UNDETERMINED/TIMEOUT states and appeal window must have passed
+        start_time = time.perf_counter()
         query = text(
             """
             WITH locked_finalizations AS (
@@ -150,6 +171,8 @@ class ConsensusWorker:
                 "appeal_failed_reduction": self.consensus_algorithm.finality_window_appeal_failed_reduction,
             },
         ).first()
+        duration = time.perf_counter() - start_time
+        self._log_query_result("finalization", result, duration)
 
         if result:
             logger.info(
@@ -191,6 +214,7 @@ class ConsensusWorker:
             Transaction data dict if claimed, None otherwise
         """
         # Query to atomically claim an appealed transaction
+        start_time = time.perf_counter()
         query = text(
             """
             WITH locked_appeals AS (
@@ -250,6 +274,8 @@ class ConsensusWorker:
                 "timeout": f"{self.transaction_timeout_minutes} minutes",
             },
         ).first()
+        duration = time.perf_counter() - start_time
+        self._log_query_result("appeal", result, duration)
 
         if result:
             session.commit()
@@ -293,6 +319,7 @@ class ConsensusWorker:
         """
         # Query to atomically claim a transaction
         # Ensures only one transaction per contract is processed at a time
+        start_time = time.perf_counter()
         query = text(
             """
             WITH candidate_transactions AS (
@@ -348,6 +375,8 @@ class ConsensusWorker:
                 "timeout": f"{self.transaction_timeout_minutes} minutes",
             },
         ).first()
+        duration = time.perf_counter() - start_time
+        self._log_query_result("transaction", result, duration)
 
         if result:
             logger.info(f"[Worker {self.worker_id}] Claimed transaction {result.hash}")
@@ -767,6 +796,32 @@ class ConsensusWorker:
                     f"[Worker {self.worker_id}] Failed to release appeal {appeal_data['hash']} in finally block: {release_error}",
                     exc_info=True,
                 )
+
+    def _log_query_result(
+        self,
+        query_name: str,
+        result: dict,
+        duration_seconds: float,
+    ) -> None:
+        """
+        Emit a low-frequency log with query duration and outcome.
+        """
+        state = self._query_log_state.get(query_name)
+        if state is None:
+            return
+
+        state["polls"] += 1
+        now_monotonic = time.monotonic()
+        if now_monotonic - state["last_log"] < self._query_log_interval:
+            return
+
+        result_text = "returned a row" if result is not None else "returned no rows"
+        logger.info(
+            f"[Worker {self.worker_id}] {state['label']} query {result_text}: {result!r} "
+            f"in {duration_seconds:.3f}s (polls since last log: {state['polls']})"
+        )
+        state["last_log"] = now_monotonic
+        state["polls"] = 0
 
     async def run(self):
         """
