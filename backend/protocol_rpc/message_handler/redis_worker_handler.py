@@ -52,6 +52,7 @@ class RedisWorkerMessageHandler(MessageHandler):
             "REDIS_URL", "redis://redis:6379/0"
         )
         self.redis_client: Optional[aioredis.Redis] = None
+        self._listener_task: Optional[asyncio.Task] = None
 
         logger.info(f"Worker {self.worker_id} initialized with Redis pub/sub")
 
@@ -113,8 +114,8 @@ class RedisWorkerMessageHandler(MessageHandler):
                 await redis_pubsub.unsubscribe(self.VALIDATOR_CHANNEL)
                 await redis_pubsub.close()
 
-        # Start listener in background
-        asyncio.create_task(listener())
+        # Start listener in background and store reference for cleanup
+        self._listener_task = asyncio.create_task(listener())
 
     def _get_channel_for_event(self, log_event: LogEvent) -> str:
         """
@@ -233,6 +234,15 @@ class RedisWorkerMessageHandler(MessageHandler):
 
     async def close(self):
         """Clean up resources."""
+        # Cancel listener task first
+        if self._listener_task is not None and not self._listener_task.done():
+            self._listener_task.cancel()
+            try:
+                await self._listener_task
+            except asyncio.CancelledError:
+                pass
+            self._listener_task = None
+
         if self.redis_client:
             await self.redis_client.close()
             self.redis_client = None

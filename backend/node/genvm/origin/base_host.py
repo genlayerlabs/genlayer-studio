@@ -401,6 +401,7 @@ async def run_genvm(
 
     genvm_id_cell: list[str | None] = [None]
     status_cell: list[dict | Exception | None] = [None]
+    timeout_task_cell: list[asyncio.Task | None] = [None]
     cancellation_event = asyncio.Event()
 
     async def wrap_proc():
@@ -444,7 +445,7 @@ async def run_genvm(
                         "genvm manager /genvm", genvm_id=genvm_id, status=resp.status
                     )
                     genvm_id_cell[0] = genvm_id
-                    asyncio.ensure_future(wrap_timeout(genvm_id))
+                    timeout_task_cell[0] = asyncio.ensure_future(wrap_timeout(genvm_id))
         finally:
             logger.debug("proc started", genvm_id=genvm_id_cell[0])
 
@@ -485,13 +486,22 @@ async def run_genvm(
             return new_res
 
     async def prob_died():
-        await asyncio.wait(
-            [
-                asyncio.ensure_future(asyncio.sleep(1)),
-                asyncio.ensure_future(cancellation_event.wait()),
-            ],
+        sleep_task = asyncio.ensure_future(asyncio.sleep(1))
+        wait_task = asyncio.ensure_future(cancellation_event.wait())
+
+        done, pending = await asyncio.wait(
+            [sleep_task, wait_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
+
+        # Cancel pending tasks to prevent leaks
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
         genvm_id = genvm_id_cell[0]
         if genvm_id is None:
             return
@@ -504,7 +514,26 @@ async def run_genvm(
 
     fut_host = asyncio.ensure_future(wrap_host())
     fut_proc = asyncio.ensure_future(wrap_proc())
-    await asyncio.wait([fut_host, fut_proc, asyncio.ensure_future(prob_died())])
+    fut_prob = asyncio.ensure_future(prob_died())
+
+    done, pending = await asyncio.wait([fut_host, fut_proc, fut_prob])
+
+    # Cancel any pending tasks to prevent leaks
+    for task in pending:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    # Cancel the timeout task if it's still pending
+    timeout_task = timeout_task_cell[0]
+    if timeout_task is not None and not timeout_task.done():
+        timeout_task.cancel()
+        try:
+            await timeout_task
+        except asyncio.CancelledError:
+            pass
 
     exceptions: list[Exception] = []
     try:
