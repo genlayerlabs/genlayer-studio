@@ -36,6 +36,11 @@ def get_db_name(database: str) -> str:
 worker: Optional[ConsensusWorker] = None
 worker_task: Optional[asyncio.Task] = None
 
+# Restart tracking
+worker_restart_count: int = 0
+worker_last_crash_time: Optional[float] = None
+worker_permanently_failed: bool = False
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -144,19 +149,81 @@ async def lifespan(app: FastAPI):
         transaction_timeout_minutes=transaction_timeout,
     )
 
-    # Start the worker in a background task with exception handling
-    async def run_worker_with_error_handling():
-        try:
-            await worker.run()
-        except Exception as e:
-            logger.critical(
-                f"FATAL: Worker {worker.worker_id} crashed with unhandled exception: {e}",
-                exc_info=True,
-            )
-            # Re-raise to let the container crash and restart
-            raise
+    # Get restart configuration from environment
+    max_restarts = int(os.environ.get("WORKER_MAX_RESTARTS", "5"))
+    restart_window_seconds = int(os.environ.get("WORKER_RESTART_WINDOW_SECONDS", "300"))
+    base_backoff_seconds = float(os.environ.get("WORKER_RESTART_BACKOFF_SECONDS", "5"))
 
-    worker_task = asyncio.create_task(run_worker_with_error_handling())
+    # Start the worker in a background task with automatic restart on crash
+    async def run_worker_with_auto_restart():
+        global worker_restart_count, worker_last_crash_time, worker_permanently_failed
+
+        while True:
+            try:
+                # Reset the running flag in case this is a restart
+                worker.running = True
+                logger.info(
+                    f"Worker {worker.worker_id} starting (restart count: {worker_restart_count})"
+                )
+                await worker.run()
+
+                # If run() exits normally (worker.stop() was called), break the loop
+                if not worker.running:
+                    logger.info(f"Worker {worker.worker_id} stopped gracefully")
+                    break
+
+            except asyncio.CancelledError:
+                # Task was cancelled externally (shutdown), don't restart
+                logger.info(
+                    f"Worker {worker.worker_id} task cancelled, exiting restart loop"
+                )
+                raise
+
+            except Exception as e:
+                current_time = time.time()
+
+                # Check if we should reset the restart counter (outside restart window)
+                if (
+                    worker_last_crash_time is not None
+                    and current_time - worker_last_crash_time > restart_window_seconds
+                ):
+                    logger.info(
+                        f"Worker {worker.worker_id} crash outside restart window "
+                        f"({restart_window_seconds}s), resetting restart counter"
+                    )
+                    worker_restart_count = 0
+
+                worker_restart_count += 1
+                worker_last_crash_time = current_time
+
+                logger.error(
+                    f"Worker {worker.worker_id} crashed with exception: {e}",
+                    exc_info=True,
+                )
+
+                if worker_restart_count > max_restarts:
+                    logger.critical(
+                        f"Worker {worker.worker_id} exceeded max restarts ({max_restarts}) "
+                        f"within {restart_window_seconds}s window. Marking as permanently failed."
+                    )
+                    worker_permanently_failed = True
+                    # Don't re-raise, just exit the loop - health check will report failure
+                    break
+
+                # Calculate backoff with exponential increase, capped at 60 seconds
+                backoff = min(
+                    base_backoff_seconds * (2 ** (worker_restart_count - 1)), 60
+                )
+                logger.warning(
+                    f"Worker {worker.worker_id} will restart in {backoff:.1f}s "
+                    f"(attempt {worker_restart_count}/{max_restarts})"
+                )
+
+                await asyncio.sleep(backoff)
+
+                logger.info(f"Restarting worker {worker.worker_id}...")
+
+    worker_task = asyncio.create_task(run_worker_with_auto_restart())
 
     print(f"Consensus Worker {worker.worker_id} started successfully")
 
@@ -216,15 +283,28 @@ async def health_check():
     """Health check endpoint for the worker."""
     import psutil
     from datetime import datetime
+    from fastapi.responses import JSONResponse
 
-    global worker, worker_task
+    global worker, worker_task, worker_restart_count, worker_permanently_failed
 
     endpoint_start = time.time()
 
     if worker is None:
         return {"status": "initializing", "worker_id": None}
 
-    # Check if worker task has died
+    # Check if worker has permanently failed (exceeded max restarts)
+    if worker_permanently_failed:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "failed",
+                "worker_id": worker.worker_id,
+                "error": "max_restarts_exceeded",
+                "restart_count": worker_restart_count,
+            },
+        )
+
+    # Check if worker task has died and isn't restarting
     if worker_task and worker_task.done():
         # Worker task finished unexpectedly - this is a failure
         try:
@@ -232,11 +312,15 @@ async def health_check():
             worker_task.result()
         except Exception as e:
             logger.error(f"Worker task died with exception: {e}")
-        return {
-            "status": "failed",
-            "worker_id": worker.worker_id,
-            "error": "worker_task_died",
-        }
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "failed",
+                "worker_id": worker.worker_id,
+                "error": "worker_task_died",
+                "restart_count": worker_restart_count,
+            },
+        )
 
     # Get basic metrics
     metrics = {}
@@ -276,6 +360,7 @@ async def health_check():
         "status": "healthy" if worker.running else "stopping",
         "worker_id": worker.worker_id,
         "current_transaction": current_tx,
+        "restart_count": worker_restart_count,
         **metrics,
     }
 
@@ -283,7 +368,7 @@ async def health_check():
 @app.get("/status")
 async def worker_status():
     """Get detailed status of the worker."""
-    global worker
+    global worker, worker_restart_count, worker_last_crash_time, worker_permanently_failed
 
     if worker is None:
         return {"error": "Worker not initialized"}
@@ -293,6 +378,9 @@ async def worker_status():
         "running": worker.running,
         "poll_interval": worker.poll_interval,
         "transaction_timeout_minutes": worker.transaction_timeout_minutes,
+        "restart_count": worker_restart_count,
+        "last_crash_time": worker_last_crash_time,
+        "permanently_failed": worker_permanently_failed,
     }
 
 
