@@ -117,7 +117,7 @@ class GenLayerClient:
             ),  # ConsensusMain
             "value": 0,
             "data": tx_data,
-            "chainId": 61999,  # GenLayer chain ID
+            "chainId": 61127,  # GenLayer Studio Localnet Chain ID
         }
 
         signed_tx = self.account.sign_transaction(transaction)
@@ -387,7 +387,7 @@ def deploy_and_get_raw_tx():
         "to": to_checksum_address("0xb7278a61aa25c888815afc32ad3cc52ff24fe575"),
         "value": 0,
         "data": tx_data,
-        "chainId": 61999,
+        "chainId": 61127,
     }
 
     signed_tx = account.sign_transaction(transaction)
