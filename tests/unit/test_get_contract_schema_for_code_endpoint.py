@@ -55,6 +55,7 @@ class SimpleContract:
             return_value=json.dumps(self.mock_schema)
         )
         self.mock_node_class.return_value = self.mock_node_instance
+        self.genvm_manager = AsyncMock()
 
     def teardown_method(self):
         """Clean up patches."""
@@ -67,7 +68,9 @@ class SimpleContract:
         contract_bytes = self.simple_contract.encode("utf-8")
         contract_hex = "0x" + contract_bytes.hex()
 
-        result = await get_contract_schema_for_code(self.msg_handler, contract_hex)
+        result = await get_contract_schema_for_code(
+            self.genvm_manager, self.msg_handler, contract_hex
+        )
 
         assert result == self.mock_schema
         # Verify the node was called with decoded bytes
@@ -82,7 +85,9 @@ class SimpleContract:
         contract_bytes = self.simple_contract.encode("utf-8")
         contract_hex = contract_bytes.hex()
 
-        result = await get_contract_schema_for_code(self.msg_handler, contract_hex)
+        result = await get_contract_schema_for_code(
+            self.genvm_manager, self.msg_handler, contract_hex
+        )
 
         assert result == self.mock_schema
         # Verify the node was called with decoded bytes
@@ -95,7 +100,7 @@ class SimpleContract:
         """Test fallback to UTF-8 encoding when contract code is not hex."""
         # Pass plain contract code (not hex-encoded)
         result = await get_contract_schema_for_code(
-            self.msg_handler, self.simple_contract
+            self.genvm_manager, self.msg_handler, self.simple_contract
         )
 
         assert result == self.mock_schema
@@ -118,7 +123,7 @@ class UnicodeContract:
 """
 
         result = await get_contract_schema_for_code(
-            self.msg_handler, contract_with_unicode
+            self.genvm_manager, self.msg_handler, contract_with_unicode
         )
 
         assert result == self.mock_schema
@@ -130,7 +135,9 @@ class UnicodeContract:
     @pytest.mark.asyncio
     async def test_empty_string(self):
         """Test handling of empty string."""
-        result = await get_contract_schema_for_code(self.msg_handler, "")
+        result = await get_contract_schema_for_code(
+            self.genvm_manager, self.msg_handler, ""
+        )
 
         assert result == self.mock_schema
         self.mock_node_instance.get_contract_schema.assert_called_once()
@@ -142,7 +149,9 @@ class UnicodeContract:
         """Test handling of short hex strings."""
         short_hex = "0x1234"
 
-        result = await get_contract_schema_for_code(self.msg_handler, short_hex)
+        result = await get_contract_schema_for_code(
+            self.genvm_manager, self.msg_handler, short_hex
+        )
 
         assert result == self.mock_schema
         # Should decode the hex successfully
@@ -159,7 +168,9 @@ class UnicodeContract:
             for i, c in enumerate(contract_bytes.hex())
         )
 
-        result = await get_contract_schema_for_code(self.msg_handler, mixed_case_hex)
+        result = await get_contract_schema_for_code(
+            self.genvm_manager, self.msg_handler, mixed_case_hex
+        )
 
         assert result == self.mock_schema
         self.mock_node_instance.get_contract_schema.assert_called_once()
@@ -175,7 +186,9 @@ class UnicodeContract:
         )
 
         with pytest.raises(json.JSONDecodeError):
-            await get_contract_schema_for_code(self.msg_handler, self.simple_contract)
+            await get_contract_schema_for_code(
+                self.genvm_manager, self.msg_handler, self.simple_contract
+            )
 
     @pytest.mark.asyncio
     async def test_logging_on_utf8_fallback(self, caplog):
@@ -183,7 +196,9 @@ class UnicodeContract:
         import logging
 
         with caplog.at_level(logging.DEBUG):
-            await get_contract_schema_for_code(self.msg_handler, self.simple_contract)
+            await get_contract_schema_for_code(
+                self.genvm_manager, self.msg_handler, self.simple_contract
+            )
 
         # Check that a debug log was created
         assert any(
@@ -199,7 +214,9 @@ class UnicodeContract:
         contract_bytes = long_contract.encode("utf-8")
         contract_hex = "0x" + contract_bytes.hex()
 
-        result = await get_contract_schema_for_code(self.msg_handler, contract_hex)
+        result = await get_contract_schema_for_code(
+            self.genvm_manager, self.msg_handler, contract_hex
+        )
 
         assert result == self.mock_schema
         self.mock_node_instance.get_contract_schema.assert_called_once()
@@ -212,7 +229,9 @@ class UnicodeContract:
         # Create a long contract (simulate a real-world contract)
         long_contract = self.simple_contract * 10  # Repeat to make it longer
 
-        result = await get_contract_schema_for_code(self.msg_handler, long_contract)
+        result = await get_contract_schema_for_code(
+            self.genvm_manager, self.msg_handler, long_contract
+        )
 
         assert result == self.mock_schema
         self.mock_node_instance.get_contract_schema.assert_called_once()
@@ -226,7 +245,9 @@ class UnicodeContract:
         odd_hex = "0x123"  # 3 hex chars is odd
 
         # This should fall back to UTF-8 encoding since it's invalid hex
-        result = await get_contract_schema_for_code(self.msg_handler, odd_hex)
+        result = await get_contract_schema_for_code(
+            self.genvm_manager, self.msg_handler, odd_hex
+        )
 
         assert result == self.mock_schema
         self.mock_node_instance.get_contract_schema.assert_called_once()
@@ -240,7 +261,7 @@ class UnicodeContract:
         contract_with_whitespace = f"\n\n{self.simple_contract}\n\n"
 
         result = await get_contract_schema_for_code(
-            self.msg_handler, contract_with_whitespace
+            self.genvm_manager, self.msg_handler, contract_with_whitespace
         )
 
         assert result == self.mock_schema
@@ -259,7 +280,9 @@ class UnicodeContract:
 
         for pattern in patterns:
             self.mock_node_instance.reset_mock()
-            result = await get_contract_schema_for_code(self.msg_handler, pattern)
+            result = await get_contract_schema_for_code(
+                self.genvm_manager, self.msg_handler, pattern
+            )
 
             assert result == self.mock_schema
             self.mock_node_instance.get_contract_schema.assert_called_once()

@@ -1,5 +1,8 @@
+import asyncio
+import typing
+from backend.node.base import LLMConfig
 import pytest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from pathlib import Path
 import types
 
@@ -45,17 +48,31 @@ class TestValidatorsManagerHostData:
     def create_mock_manager(self):
         """Create a minimal mock manager to test _change_providers_from_snapshot"""
 
+        class MockGenVMManager:
+            def __init__(self):
+                self.stop_module = AsyncMock()
+                self.start_module = AsyncMock()
+                self.try_llms = AsyncMock()
+
+                self.url = Mock()
+                self.llm_config_base = {}
+                self.web_config_base = {}
+
         class MockManager:
             def __init__(self):
-                self.llm_module = AsyncMock()
-                self.llm_module.change_config = AsyncMock()
+                self.genvm_manager = MockGenVMManager()
                 self._cached_snapshot = None
+                self._restart_llm_lock = asyncio.Lock()
+
+                # Bind both methods from the actual Manager class
+                self._change_providers_from_snapshot = types.MethodType(
+                    Manager._change_providers_from_snapshot, self
+                )
+                self._change_providers_from_snapshot_locked = types.MethodType(
+                    Manager._change_providers_from_snapshot_locked, self
+                )
 
         mock_manager = MockManager()
-        actual_method = Manager._change_providers_from_snapshot
-        mock_manager._change_providers_from_snapshot = types.MethodType(
-            actual_method, mock_manager
-        )
         return mock_manager
 
     @pytest.mark.asyncio
@@ -69,7 +86,6 @@ class TestValidatorsManagerHostData:
         host_data = {"studio_llm_id": "node-addr1"}
         snapshot = Snapshot(
             nodes=[SingleValidatorSnapshot(validator, host_data)],
-            genvm_config_path=Path("/mock/path"),
         )
 
         # Call the actual method
@@ -79,11 +95,12 @@ class TestValidatorsManagerHostData:
         assert "fallback_llm_id" not in snapshot.nodes[0].genvm_host_data
 
         # Verify llm_module.change_config was called with only 1 provider
-        mock_manager.llm_module.change_config.assert_called_once()
-        providers = mock_manager.llm_module.change_config.call_args[0][0]
+        mock_manager.genvm_manager.start_module.assert_awaited()
+        providers = mock_manager.genvm_manager.start_module.await_args[0][1]["backends"]
+        providers = typing.cast(dict[str, LLMConfig], providers)
 
         assert len(providers) == 1
-        assert providers[0].id == "node-addr1"
+        assert list(providers.keys()) == ["node-addr1"]
 
     @pytest.mark.asyncio
     async def test_multiple_validators_fallback_llm_config(self):
@@ -118,35 +135,34 @@ class TestValidatorsManagerHostData:
                 SingleValidatorSnapshot(validator1, host_data1),
                 SingleValidatorSnapshot(validator2, host_data2),
             ],
-            genvm_config_path=Path("/mock/path"),
         )
 
         # Call the actual method
         await mock_manager._change_providers_from_snapshot(snapshot)
 
         # Verify llm_module.change_config was called with providers for the two validators
-        mock_manager.llm_module.change_config.assert_called_once()
-        providers = mock_manager.llm_module.change_config.call_args[0][0]
+        mock_manager.genvm_manager.start_module.assert_awaited()
+        providers = mock_manager.genvm_manager.start_module.await_args[0][1]["backends"]
+        providers = typing.cast(dict[str, LLMConfig], providers)
 
         # Only primary providers are registered (no fallbacks created by this method)
         assert len(providers) == 2
-        providers_by_id = {p.id: p for p in providers}
 
         # Validate providers match original validator configurations
-        openai_provider = providers_by_id["node-test-addr-123"]
-        anthropic_provider = providers_by_id["node-another-addr-456"]
+        openai_provider = providers["node-test-addr-123"]
+        anthropic_provider = providers["node-another-addr-456"]
 
         # Provider for validator1 should have validator1's configuration
-        assert openai_provider.model == "gpt-4o"
-        assert openai_provider.url == "open_ai_url"
-        assert openai_provider.plugin == "openai"
-        assert openai_provider.key_env == "OPENAI_API_KEY"
+        assert list(openai_provider["models"].keys()) == ["gpt-4o"]
+        assert openai_provider["host"] == "open_ai_url"
+        assert openai_provider["provider"] == "openai"
+        assert openai_provider["key"] == "${ENV[OPENAI_API_KEY]}"
 
         # Provider for validator2 should have validator2's configuration
-        assert anthropic_provider.model == "claude-3-5-sonnet"
-        assert anthropic_provider.url == "anthropic_url"
-        assert anthropic_provider.plugin == "anthropic"
-        assert anthropic_provider.key_env == "ANTHROPIC_API_KEY"
+        assert list(anthropic_provider["models"].keys()) == ["claude-3-5-sonnet"]
+        assert anthropic_provider["host"] == "anthropic_url"
+        assert anthropic_provider["provider"] == "anthropic"
+        assert anthropic_provider["key"] == "${ENV[ANTHROPIC_API_KEY]}"
 
     @pytest.mark.asyncio
     async def test_identical_validators_no_fallback_llm_config(self):
@@ -167,7 +183,6 @@ class TestValidatorsManagerHostData:
                 SingleValidatorSnapshot(validator1, host_data1),
                 SingleValidatorSnapshot(validator2, host_data2),
             ],
-            genvm_config_path=Path("/mock/path"),
         )
 
         # Call the actual method
@@ -178,12 +193,8 @@ class TestValidatorsManagerHostData:
         assert "fallback_llm_id" not in snapshot.nodes[1].genvm_host_data
 
         # Verify only 2 providers were created (no fallbacks)
-        mock_manager.llm_module.change_config.assert_called_once()
-        providers = mock_manager.llm_module.change_config.call_args[0][0]
+        mock_manager.genvm_manager.start_module.assert_awaited()
+        providers = mock_manager.genvm_manager.start_module.await_args[0][1]["backends"]
+        providers = typing.cast(dict[str, LLMConfig], providers)
 
-        assert len(providers) == 2
-        provider_ids = [p.id for p in providers]
-        assert "node-addr1" in provider_ids
-        assert "node-addr2" in provider_ids
-        assert "node-addr1-1" not in provider_ids
-        assert "node-addr2-1" not in provider_ids
+        assert set(providers.keys()) == {"node-addr1", "node-addr2"}

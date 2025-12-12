@@ -23,6 +23,7 @@ import backend.validators as validators
 from typing import Optional
 from datetime import datetime
 from copy import deepcopy
+from backend.node.base import Manager as GenVMManager
 
 DEFAULT_FINALITY_WINDOW = 5
 # Reduce sleep time for faster tests when using mocks
@@ -611,6 +612,7 @@ def node_factory(
     contract_snapshot_factory: Callable[[str], ContractSnapshot],
     snap: validators.Snapshot,
     timing_callback: Optional[Callable[[str], None]],
+    manager: GenVMManager,
     vote: Vote,
     timeout: bool,
 ):
@@ -760,11 +762,14 @@ def consensus_algorithm() -> ConsensusAlgorithm:
     mock_msg_handler = MessageHandlerMock()
     mock_validators_manager = AsyncMock()
 
+    mock_genvm_manager = MagicMock()
+
     consensus_algorithm = ConsensusAlgorithm(
         get_session=lambda: mock_session,
         msg_handler=mock_msg_handler,
         consensus_service=MagicMock(),
         validators_manager=mock_validators_manager,
+        genvm_manager=mock_genvm_manager,
     )
     consensus_algorithm.finality_window_time = DEFAULT_FINALITY_WINDOW
     consensus_algorithm.consensus_sleep_time = DEFAULT_CONSENSUS_SLEEP_TIME
@@ -797,7 +802,7 @@ def setup_test_environment(
                     "",
                 )
             )
-        yield validators.Snapshot(snap_nodes, Path())
+        yield validators.Snapshot(snap_nodes)
 
     consensus_algorithm.validators_manager.snapshot = fake_snapshot
 

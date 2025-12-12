@@ -18,6 +18,8 @@ from backend.protocol_rpc.calls_intercept.get_latest_pending_tx_count import (
 from backend.errors.errors import InvalidAddressError
 from backend.protocol_rpc.exceptions import JSONRPCError
 from backend.node.types import ExecutionResultStatus
+import backend.validators as validators
+from backend.protocol_rpc.transactions_parser import TransactionParser
 
 
 class TestCallInterceptor:
@@ -44,7 +46,7 @@ class TestCallInterceptor:
     @pytest.fixture
     def mock_transactions_parser(self):
         """Mock transaction parser for decoding call data"""
-        parser = MagicMock()
+        parser = MagicMock(spec=TransactionParser)
         decoded_data = MagicMock()
         decoded_data.calldata = b"test_calldata"
         parser.decode_method_call_data.return_value = decoded_data
@@ -53,7 +55,7 @@ class TestCallInterceptor:
     @pytest.fixture
     def mock_validators_manager(self):
         """Mock validators manager with snapshot context manager"""
-        manager = MagicMock()
+        manager = MagicMock(spec=validators.Manager)
         snapshot = MagicMock()
         validator = MagicMock()
         validator.address = "0x123"
@@ -71,6 +73,11 @@ class TestCallInterceptor:
         processor = MagicMock()
         processor.get_pending_transaction_count_for_address.return_value = 5
         return processor
+
+    @pytest.fixture
+    def mock_genvm_manager(self):
+        genvm_manager = MagicMock()
+        return genvm_manager
 
     @pytest.fixture
     def sample_call_data(self):
@@ -323,6 +330,7 @@ class TestCallInterceptor:
         mock_msg_handler,
         mock_transactions_parser,
         mock_validators_manager,
+        mock_genvm_manager,
         mock_transactions_processor,
         sample_call_data,
     ):
@@ -348,6 +356,7 @@ class TestCallInterceptor:
             mock_msg_handler,
             mock_transactions_parser,
             mock_validators_manager,
+            mock_genvm_manager,
             mock_transactions_processor,
             params,
         )
@@ -369,6 +378,7 @@ class TestCallInterceptor:
         mock_msg_handler,
         mock_transactions_parser,
         mock_validators_manager,
+        mock_genvm_manager,
         mock_transactions_processor,
     ):
         """
@@ -405,6 +415,7 @@ class TestCallInterceptor:
                         mock_msg_handler,
                         mock_transactions_parser,
                         mock_validators_manager,
+                        mock_genvm_manager,
                         mock_transactions_processor,
                         params,
                     )
@@ -428,6 +439,7 @@ class TestCallInterceptor:
         mock_msg_handler,
         mock_transactions_parser,
         mock_validators_manager,
+        mock_genvm_manager,
         mock_transactions_processor,
     ):
         """
@@ -452,6 +464,7 @@ class TestCallInterceptor:
                 mock_msg_handler,
                 mock_transactions_parser,
                 mock_validators_manager,
+                mock_genvm_manager,
                 mock_transactions_processor,
                 params,
             )
@@ -464,6 +477,7 @@ class TestCallInterceptor:
         mock_msg_handler,
         mock_transactions_parser,
         mock_validators_manager,
+        mock_genvm_manager,
         mock_transactions_processor,
     ):
         """
@@ -489,6 +503,7 @@ class TestCallInterceptor:
             mock_msg_handler,
             mock_transactions_parser,
             mock_validators_manager,
+            mock_genvm_manager,
             mock_transactions_processor,
             params,
         )

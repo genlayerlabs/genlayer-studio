@@ -19,6 +19,8 @@ from backend.protocol_rpc.message_handler.method_utils import (
     extract_transaction_hash_from_rpc,
 )
 
+from backend.node.base import Manager as GenVMManager
+
 
 def get_json_rpc_method_name(function: Callable, method_name: str | None = None):
     if method_name is None:
@@ -317,6 +319,7 @@ class FastAPIEndpointRegistry:
 
 def register_endpoints_for_fastapi(
     msg_handler: MessageHandler,
+    genvm_manager: GenVMManager,
     request_session,
     accounts_manager,
     transactions_processor,
@@ -389,9 +392,9 @@ def register_endpoints_for_fastapi(
                 if validators_manager
                 else modifiable_validators_registry
             ),
+            genvm_manager,
             accounts_manager,
             llm_provider_registry,
-            validators_manager,
         ),
         "sim_createRandomValidator",
     )
@@ -403,9 +406,9 @@ def register_endpoints_for_fastapi(
                 if validators_manager
                 else modifiable_validators_registry
             ),
+            genvm_manager,
             accounts_manager,
             llm_provider_registry,
-            validators_manager,
         ),
         "sim_createRandomValidators",
     )
@@ -503,11 +506,13 @@ def register_endpoints_for_fastapi(
 
     # GenLayer endpoints
     register(
-        partial(endpoints.get_contract_schema, accounts_manager, msg_handler),
+        partial(
+            endpoints.get_contract_schema, accounts_manager, genvm_manager, msg_handler
+        ),
         "gen_getContractSchema",
     )
     register(
-        partial(endpoints.get_contract_schema_for_code, msg_handler),
+        partial(endpoints.get_contract_schema_for_code, genvm_manager, msg_handler),
         "gen_getContractSchemaForCode",
     )
     register(
@@ -521,6 +526,7 @@ def register_endpoints_for_fastapi(
             msg_handler,
             transactions_parser,
             validators_manager,
+            genvm_manager,
         ),
         "gen_call",
     )
@@ -532,6 +538,7 @@ def register_endpoints_for_fastapi(
             msg_handler,
             transactions_parser,
             validators_manager,
+            genvm_manager,
         ),
         "sim_call",
     )
@@ -547,6 +554,7 @@ def register_endpoints_for_fastapi(
             endpoints.eth_call,
             request_session,
             accounts_manager,
+            genvm_manager,
             msg_handler,
             transactions_parser,
             validators_manager,
