@@ -1348,7 +1348,7 @@ The fixed transaction:
 - **Recipient**: `0x0000...0000` (indicates contract deployment)
 - **Gas**: 21000 (0x5208)
 - **Gas Price**: 0 (GenLayer uses zero gas price)
-- **Chain ID**: 61999 (0xf22f)
+- **Chain ID**: 61127 (0xeec7)
 
 ### Files Updated
 - `generate_raw_transaction.py` - Fixed calldata encoding and gas settings
@@ -1639,7 +1639,7 @@ The generated transactions have these characteristics:
 - **Type**: 0 (Legacy transaction - as expected by GenLayer)
 - **Gas Limit**: `0xffffffff` (4294967295 - max gas)
 - **Gas Price**: 0 (GenLayer uses zero gas)
-- **Chain ID**: 61999 (0xf22f)
+- **Chain ID**: 61127 (0xeec7)
 - **To Address**: ConsensusMain contract (`0xb7278a61aa25c888815afc32ad3cc52ff24fe575`)
 - **Method**: `addTransaction(address,address,uint8,uint8,bytes)`
 
