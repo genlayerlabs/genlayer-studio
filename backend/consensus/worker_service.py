@@ -340,25 +340,10 @@ async def health_check():
         tx = worker.current_transaction.copy()
         if tx.get("blocked_at"):
             try:
-                blocked_at = tx["blocked_at"]
-
-                # Handle both datetime objects and ISO strings
-                if isinstance(blocked_at, str):
-                    blocked_at = datetime.fromisoformat(
-                        blocked_at.replace("Z", "+00:00")
-                    )
-
-                # Convert to naive UTC datetime for comparison
-                if blocked_at.tzinfo is not None:
-                    blocked_at = blocked_at.replace(tzinfo=None)
-
-                elapsed = datetime.utcnow() - blocked_at
-
-                # Check if blocked for more than 20 minutes - pod is unhealthy
-                if elapsed.total_seconds() > 1200:  # 20 minutes = 1200 seconds
-                    return {
-                        "error": "Pod unhealthy: transaction blocked for more than 20 minutes"
-                    }, 500
+                blocked_at = datetime.fromisoformat(
+                    tx["blocked_at"].replace("Z", "+00:00")
+                )
+                elapsed = datetime.utcnow() - blocked_at.replace(tzinfo=None)
 
                 # Format as human-readable time ago
                 minutes = int(elapsed.total_seconds() / 60)
@@ -367,9 +352,7 @@ async def health_check():
                 else:
                     hours = minutes // 60
                     tx["blocked_at"] = f"{hours}h ago"
-            except Exception as e:
-                # Log the error but don't fail the health check
-                logger.error(f"Error parsing blocked_at timestamp: {e}")
+            except:
                 pass
         current_tx = tx
 
