@@ -356,7 +356,7 @@ async def health_check():
                 elapsed = datetime.utcnow() - blocked_at
 
                 # Check if blocked for more than 20 minutes - pod is unhealthy
-                if elapsed.total_seconds() > 1200:  # 20 minutes = 1200 seconds
+                if elapsed.total_seconds() > 600:  # 10 minutes = 600 seconds
                     return {
                         "error": "Pod unhealthy: transaction blocked for more than 20 minutes"
                     }, 500
