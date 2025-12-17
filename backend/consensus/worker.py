@@ -42,7 +42,7 @@ class ConsensusWorker:
         genvm_manager: GenVMManager,
         worker_id: str = None,
         poll_interval: int = 5,
-        transaction_timeout_minutes: int = 30,
+        transaction_timeout_minutes: int = 20,
     ):
         """
         Initialize the consensus worker.
