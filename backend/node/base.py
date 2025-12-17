@@ -29,6 +29,35 @@ from .genvm.origin import public_abi
 from .types import Address
 
 
+# region agent log
+def _agent_log(hypothesis_id: str, location: str, message: str, data: dict):
+    """Best-effort NDJSON log for debug mode; never raises. Avoid secrets."""
+    import json, os, time
+
+    payload = {
+        "sessionId": "debug-session",
+        "runId": os.getenv("AGENT_DEBUG_RUN_ID", "pre-fix"),
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(time.time() * 1000),
+    }
+    try:
+        with open(
+            "/Users/cristiamdasilva/genlayer/genlayer-studio/.cursor/debug.log", "a"
+        ) as f:
+            f.write(json.dumps(payload) + "\n")
+    except Exception:
+        try:
+            print("AGENT_DEBUG " + json.dumps(payload), flush=True)
+        except Exception:
+            pass
+
+
+# endregion
+
+
 def _parse_chain_id() -> int:
     raw = os.getenv("HARDHAT_CHAIN_ID", "61999")
     try:
@@ -220,6 +249,22 @@ class Manager:
     @staticmethod
     async def create() -> "Manager":
         genvm_root = Path(os.environ["GENVMROOT"])
+        _agent_log(
+            "H1",
+            "backend/node/base.py:Manager.create",
+            "creating genvm manager",
+            {
+                "GENVMROOT": os.getenv("GENVMROOT"),
+                "GENVM_TAG": os.getenv("GENVM_TAG"),
+                "genvm_root_exists": genvm_root.exists(),
+                "genvm_modules_exists": genvm_root.joinpath(
+                    "bin", "genvm-modules"
+                ).exists(),
+                "executor_dir_exists": genvm_root.joinpath(
+                    "executor", os.getenv("GENVM_TAG", "")
+                ).exists(),
+            },
+        )
 
         url = "http://127.0.0.1:3999"
 
@@ -692,7 +737,7 @@ class Node:
             capture_output=True,
             is_sync=False,
             logger=self.logger,
-            timeout=5,
+            timeout=30,
             manager_uri=self.manager.url,
         )
         result.processing_time = int((time.time() - start_time) * 1000)
@@ -753,6 +798,38 @@ class Node:
             readonly,
             state_status,
         )
+        try:
+            from backend.node.genvm import get_code_slot
+
+            code_slot_b64 = base64.b64encode(get_code_slot()).decode("ascii")
+            accepted_state = snapshot_view.snapshot.states.get("accepted") or {}
+            code_entry = accepted_state.get(code_slot_b64)
+            code_bytes_len = (
+                len(base64.b64decode(code_entry))
+                if isinstance(code_entry, str)
+                else None
+            )
+            _agent_log(
+                "H2",
+                "backend/node/base.py:Node._run_genvm",
+                "pre-exec snapshot code slot check",
+                {
+                    "is_init": bool(is_init),
+                    "readonly": bool(readonly),
+                    "state_status": state_status,
+                    "contract_address": str(self.contract_snapshot.contract_address),
+                    "has_code_slot": code_entry is not None,
+                    "code_bytes_len": code_bytes_len,
+                    "calldata_len": len(calldata) if calldata is not None else None,
+                },
+            )
+        except Exception as _e:
+            _agent_log(
+                "H2",
+                "backend/node/base.py:Node._run_genvm",
+                "pre-exec snapshot code slot check failed",
+                {"error": str(_e)},
+            )
 
         self.timing_callback("SNAPSHOT_CREATION_END")
 
