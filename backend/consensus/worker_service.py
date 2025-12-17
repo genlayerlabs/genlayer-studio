@@ -25,34 +25,6 @@ from loguru import logger
 from backend.protocol_rpc.app_lifespan import create_genvm_manager
 
 
-# region agent log
-def _agent_log(hypothesis_id: str, location: str, message: str, data: dict):
-    """Best-effort NDJSON log for debug mode; never raises. Avoid secrets."""
-    import json, os, time
-
-    payload = {
-        "sessionId": "debug-session",
-        "runId": os.getenv("AGENT_DEBUG_RUN_ID", "pre-fix"),
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": int(time.time() * 1000),
-    }
-    try:
-        with open(
-            "/Users/cristiamdasilva/genlayer/genlayer-studio/.cursor/debug.log", "a"
-        ) as f:
-            f.write(json.dumps(payload) + "\n")
-    except Exception:
-        try:
-            print("AGENT_DEBUG " + json.dumps(payload), flush=True)
-        except Exception:
-            pass
-
-
-# endregion
-
 # Load environment variables
 load_dotenv()
 
@@ -90,17 +62,6 @@ async def lifespan(app: FastAPI):
     # These zombie processes can consume gigabytes of memory outside Docker limits
     logger.info("Cleaning up orphaned GenVM processes from previous crashes...")
     _pkill_rc = os.system("pkill -9 -f 'genvm (llm|web)' 2>/dev/null || true")
-    _agent_log(
-        "H3",
-        "backend/consensus/worker_service.py:pkill_startup",
-        "pkill cleanup executed",
-        {
-            "rc": int(_pkill_rc),
-            "GENVMROOT": os.getenv("GENVMROOT"),
-            "GENVM_TAG": os.getenv("GENVM_TAG"),
-            "PATH_has_genvm": "/genvm/bin" in (os.getenv("PATH") or ""),
-        },
-    )
     logger.info("GenVM cleanup complete")
 
     # Database setup
@@ -161,28 +122,12 @@ async def lifespan(app: FastAPI):
     consensus_service = ConsensusService()
 
     genvm_manager = await create_genvm_manager()
-    _agent_log(
-        "H1",
-        "backend/consensus/worker_service.py:genvm_manager_ready",
-        "genvm_manager created",
-        {
-            "manager_url": getattr(genvm_manager, "url", None),
-            "GENVMROOT": os.getenv("GENVMROOT"),
-            "GENVM_TAG": os.getenv("GENVM_TAG"),
-        },
-    )
 
     # Initialize validators manager (MUST use global to prevent garbage collection)
     global validators_manager  # Declare before assignment to use the global variable
     validators_manager = validators.Manager(SessionLocal(), genvm_manager)
     await validators_manager.restart()
     logger.info("Validators manager initialized and restarted")
-    _agent_log(
-        "H4",
-        "backend/consensus/worker_service.py:validators_restarted",
-        "validators_manager.restart finished",
-        {"ok": True},
-    )
 
     # Subscribe to validator change events
     async def handle_validator_change(event_data):
