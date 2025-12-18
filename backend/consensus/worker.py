@@ -670,13 +670,24 @@ class ConsensusWorker:
                 session.query(CurrentState).filter_by(id=contract_address).one_or_none()
             )
             if not contract:
-                raise Exception(f"Contract {contract_address} not found")
+                raise ValueError(f"Contract {contract_address} not found")
+
+            # Validate contract has expected state structure
+            if (
+                not contract.data
+                or "state" not in contract.data
+                or "accepted" not in contract.data["state"]
+                or "finalized" not in contract.data["state"]
+            ):
+                raise ValueError(
+                    f"Contract {contract_address} has invalid state structure"
+                )
 
             # Validate Python syntax before proceeding
             try:
                 compile(new_code, "<upgrade>", "exec")
             except SyntaxError as e:
-                raise Exception(f"Invalid Python syntax: {e}")
+                raise ValueError(f"Invalid Python syntax: {e}") from e
 
             # Encode code for slot storage: base64(4-byte-len-prefix + code-bytes)
             code_bytes = new_code.encode("utf-8")
