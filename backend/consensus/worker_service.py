@@ -357,9 +357,15 @@ async def health_check():
 
                 # Check if blocked for more than 10 minutes - pod is unhealthy
                 if elapsed.total_seconds() > 600:  # 10 minutes = 600 seconds
-                    return {
-                        "error": "Pod unhealthy: transaction blocked for more than 20 minutes"
-                    }, 500
+                    return JSONResponse(
+                        status_code=500,
+                        content={
+                            "status": "unhealthy",
+                            "worker_id": worker.worker_id,
+                            "error": "Transaction blocked for more than 10 minutes",
+                            "blocked_duration_seconds": elapsed.total_seconds(),
+                        },
+                    )
 
                 # Format as human-readable time ago
                 minutes = int(elapsed.total_seconds() / 60)
