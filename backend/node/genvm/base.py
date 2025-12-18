@@ -39,6 +39,37 @@ from .origin import base_host
 from .origin import logger as genvm_logger
 
 
+# region agent log
+def _agent_log(hypothesis_id: str, location: str, message: str, data: dict):
+    """Best-effort NDJSON log for debug mode; never raises. Avoid secrets."""
+    import json as _json
+    import os as _os
+    import time as _time
+
+    payload = {
+        "sessionId": "debug-session",
+        "runId": _os.getenv("AGENT_DEBUG_RUN_ID", "pre-fix"),
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(_time.time() * 1000),
+    }
+    try:
+        with open(
+            "/Users/cristiamdasilva/genlayer/genlayer-studio/.cursor/debug.log", "a"
+        ) as f:
+            f.write(_json.dumps(payload) + "\n")
+    except Exception:
+        try:
+            print("AGENT_DEBUG " + _json.dumps(payload), flush=True)
+        except Exception:
+            pass
+
+
+# endregion
+
+
 @dataclass
 class ExecutionError:
     message: str
@@ -189,6 +220,16 @@ class Host(genvmhost.IHost):
             self._result = ExecutionReturn(ret=bytes(data))
         elif type == ResultCode.USER_ERROR or type == ResultCode.VM_ERROR:
             res = calldata.decode(data)
+            _agent_log(
+                "H4",
+                "backend/node/genvm/base.py:Host.consume_result",
+                "genvm result consumed",
+                {
+                    "result_code": getattr(type, "name", str(type)),
+                    "message": res.get("message") if isinstance(res, dict) else None,
+                    "res_type": type(res).__name__,
+                },
+            )
             self._result = ExecutionError(res["message"], type)
         elif type == ResultCode.INTERNAL_ERROR:
             raise Exception("GenVM internal error", str(data, encoding="utf-8"))

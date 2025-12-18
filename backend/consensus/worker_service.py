@@ -25,6 +25,37 @@ from loguru import logger
 from backend.protocol_rpc.app_lifespan import create_genvm_manager
 
 
+# region agent log
+def _agent_log(hypothesis_id: str, location: str, message: str, data: dict):
+    """Best-effort NDJSON log for debug mode; never raises. Avoid secrets."""
+    import json as _json
+    import os as _os
+    import time as _time
+
+    payload = {
+        "sessionId": "debug-session",
+        "runId": _os.getenv("AGENT_DEBUG_RUN_ID", "pre-fix"),
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(_time.time() * 1000),
+    }
+    try:
+        with open(
+            "/Users/cristiamdasilva/genlayer/genlayer-studio/.cursor/debug.log", "a"
+        ) as f:
+            f.write(_json.dumps(payload) + "\n")
+    except Exception:
+        try:
+            print("AGENT_DEBUG " + _json.dumps(payload), flush=True)
+        except Exception:
+            pass
+
+
+# endregion
+
+
 # Load environment variables
 load_dotenv()
 
@@ -36,6 +67,11 @@ def get_db_name(database: str) -> str:
 # Global variables for the worker
 worker: Optional[ConsensusWorker] = None
 worker_task: Optional[asyncio.Task] = None
+
+# GenVM manager health probe cache (avoid probing on every /health hit)
+_genvm_health_last_check: float = 0.0
+_genvm_health_last_ok: bool = True
+_genvm_health_last_error: str | None = None
 
 # Restart tracking
 worker_restart_count: int = 0
@@ -62,6 +98,17 @@ async def lifespan(app: FastAPI):
     # These zombie processes can consume gigabytes of memory outside Docker limits
     logger.info("Cleaning up orphaned GenVM processes from previous crashes...")
     _pkill_rc = os.system("pkill -9 -f 'genvm (llm|web)' 2>/dev/null || true")
+    _agent_log(
+        "H3",
+        "backend/consensus/worker_service.py:pkill_startup",
+        "pkill cleanup executed",
+        {
+            "rc": int(_pkill_rc),
+            "GENVMROOT": os.getenv("GENVMROOT"),
+            "GENVM_TAG": os.getenv("GENVM_TAG"),
+            "PATH_has_genvm": "/genvm/bin" in (os.getenv("PATH") or ""),
+        },
+    )
     logger.info("GenVM cleanup complete")
 
     # Database setup
@@ -122,12 +169,28 @@ async def lifespan(app: FastAPI):
     consensus_service = ConsensusService()
 
     genvm_manager = await create_genvm_manager()
+    _agent_log(
+        "H1",
+        "backend/consensus/worker_service.py:genvm_manager_ready",
+        "genvm_manager created",
+        {
+            "manager_url": getattr(genvm_manager, "url", None),
+            "GENVMROOT": os.getenv("GENVMROOT"),
+            "GENVM_TAG": os.getenv("GENVM_TAG"),
+        },
+    )
 
     # Initialize validators manager (MUST use global to prevent garbage collection)
     global validators_manager  # Declare before assignment to use the global variable
     validators_manager = validators.Manager(SessionLocal(), genvm_manager)
     await validators_manager.restart()
     logger.info("Validators manager initialized and restarted")
+    _agent_log(
+        "H4",
+        "backend/consensus/worker_service.py:validators_restarted",
+        "validators_manager.restart finished",
+        {"ok": True},
+    )
 
     # Subscribe to validator change events
     async def handle_validator_change(event_data):
@@ -285,8 +348,10 @@ async def health_check():
     import psutil
     from datetime import datetime
     from fastapi.responses import JSONResponse
+    import aiohttp
 
     global worker, worker_task, worker_restart_count, worker_permanently_failed
+    global _genvm_health_last_check, _genvm_health_last_ok, _genvm_health_last_error
 
     endpoint_start = time.time()
 
@@ -334,6 +399,65 @@ async def health_check():
         }
     except:
         pass
+
+    # Optional: probe local GenVM manager responsiveness.
+    # This catches the exact failure mode you described: /health looks fine, but GenVM's
+    # HTTP server (127.0.0.1:3999) is wedged and never responds, so consensus execution hangs.
+    #
+    try:
+        now = time.time()
+        probe_interval_s = float(
+            os.getenv("GENVM_MANAGER_HEALTH_PROBE_INTERVAL_SECONDS", "5")
+        )
+        if now - _genvm_health_last_check >= probe_interval_s:
+            _genvm_health_last_check = now
+            status_url = os.getenv(
+                "GENVM_MANAGER_STATUS_URL", "http://127.0.0.1:3999/status"
+            )
+            timeout_s = float(os.getenv("GENVM_MANAGER_HEALTH_TIMEOUT_SECONDS", "2"))
+            try:
+                async with aiohttp.request(
+                    "GET",
+                    status_url,
+                    timeout=aiohttp.ClientTimeout(total=timeout_s),
+                ) as resp:
+                    if resp.status != 200:
+                        _genvm_health_last_ok = False
+                        _genvm_health_last_error = (
+                            f"genvm_manager_status_http_{resp.status}"
+                        )
+                    else:
+                        _genvm_health_last_ok = True
+                        _genvm_health_last_error = None
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                _genvm_health_last_ok = False
+                _genvm_health_last_error = f"genvm_manager_status_error: {exc}"
+
+            _agent_log(
+                "H5",
+                "backend/consensus/worker_service.py:health_genvm_probe",
+                "genvm manager health probe executed",
+                {
+                    "status_url": status_url,
+                    "timeout_s": timeout_s,
+                    "ok": _genvm_health_last_ok,
+                    "error": _genvm_health_last_error,
+                },
+            )
+
+        if not _genvm_health_last_ok:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "unhealthy",
+                    "worker_id": worker.worker_id,
+                    "error": "genvm_manager_unresponsive",
+                    "detail": _genvm_health_last_error,
+                },
+            )
+    except Exception as e:
+        # Don't fail health checks due to probe implementation issues
+        logger.warning(f"GenVM health probe failed unexpectedly: {e}")
 
     # Get current transaction info with time calculation
     current_tx = None
