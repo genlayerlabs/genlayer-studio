@@ -182,10 +182,10 @@ def main():
         tx = wait_for_tx(args.rpc_url, tx_hash, timeout=args.timeout)
 
         if tx["status"] == "FINALIZED":
-            print(f"\n✓ Upgrade successful!")
+            print("\n✓ Upgrade successful!")
             print(f"  Transaction: {tx_hash}")
         elif tx["status"] == "CANCELED":
-            print(f"\n✗ Upgrade failed!")
+            print("\n✗ Upgrade failed!")
             print(f"  Transaction: {tx_hash}")
             if tx.get("consensus_data", {}).get("error"):
                 print(f"  Error: {tx['consensus_data']['error']}")

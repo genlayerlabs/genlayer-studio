@@ -32,6 +32,7 @@ def rpc_call(method: str, params: list = None):
             "params": params or [],
             "id": 1,
         },
+        timeout=30,
     )
     result = response.json()
     if "error" in result:
@@ -49,6 +50,7 @@ def rpc_call_raw(method: str, params: list = None):
             "params": params or [],
             "id": 1,
         },
+        timeout=30,
     )
     return response.json()
 
