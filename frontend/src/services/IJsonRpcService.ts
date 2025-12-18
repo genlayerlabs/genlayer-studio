@@ -38,4 +38,5 @@ export interface IJsonRpcService {
     newCode: string,
     signature?: string,
   ): Promise<{ transaction_hash: string; message: string }>;
+  getContractNonce(address: string): Promise<number>;
 }

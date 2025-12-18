@@ -28,7 +28,9 @@ except ImportError:
     sys.exit(1)
 
 
-def sign_upgrade_message(contract_address: str, new_code: str, private_key: str) -> str:
+def sign_upgrade_message(
+    contract_address: str, new_code: str, private_key: str, nonce: int
+) -> str:
     """Sign the upgrade message with the deployer's private key."""
     try:
         from eth_account import Account
@@ -38,9 +40,13 @@ def sign_upgrade_message(contract_address: str, new_code: str, private_key: str)
         print("Error: eth_account and web3 required for signing. Install with: pip install eth-account web3")
         sys.exit(1)
 
-    # Message: keccak256(address + keccak256(code))
+    # Message: keccak256(address + nonce_bytes32 + keccak256(code))
+    # Including nonce prevents replay attacks
+    nonce_bytes = nonce.to_bytes(32, byteorder="big")
     code_hash = Web3.keccak(text=new_code)
-    message_hash = Web3.keccak(Web3.to_bytes(hexstr=contract_address) + code_hash)
+    message_hash = Web3.keccak(
+        Web3.to_bytes(hexstr=contract_address) + nonce_bytes + code_hash
+    )
     message = encode_defunct(primitive=message_hash)
 
     # Sign with private key
@@ -131,7 +137,10 @@ def main():
     if args.private_key:
         print("\n2. Signing upgrade request...")
         try:
-            signature = sign_upgrade_message(args.contract_address, new_code, args.private_key)
+            # Fetch nonce for replay protection
+            nonce = rpc_call(args.rpc_url, "gen_getContractNonce", [args.contract_address])
+            print(f"   Contract nonce: {nonce}")
+            signature = sign_upgrade_message(args.contract_address, new_code, args.private_key, nonce)
             print(f"   Signature: {signature[:20]}...")
         except Exception as e:
             print(f"   Error signing: {e}")

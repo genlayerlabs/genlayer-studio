@@ -43,7 +43,7 @@ A compact, reusable briefing for agents working on the backend. It explains how 
 ### RPC Surface (Categories)
 Implemented in `endpoints.py`, registered in `rpc_methods.py` via `@rpc.method(...)`:
 - **Simulator (`sim_*`)**: DB reset, fund accounts, LLM provider CRUD, validator configuration, snapshot utilities, simulated calls.
-- **GenLayer (`gen_*`)**: contract schema/code helpers, `gen_call` (readonly run through VM).
+- **GenLayer (`gen_*`)**: contract schema/code helpers, `gen_call` (readonly run through VM), `gen_getContractNonce` (tx count to contract for upgrade signatures).
 - **Ethereum‑compat**: `eth_getBalance`, `eth_getTransactionByHash`, `eth_call` (readonly execution), `eth_sendRawTransaction` (persist & queue), `eth_getTransactionCount`, chain/net info, block number.
 
 ### Admin Endpoints & Contract Upgrade
@@ -69,7 +69,10 @@ result = rpc.call("sim_upgradeContractCode", [contract_address, new_code])
 result = rpc.call("sim_upgradeContractCode", [contract_address, new_code, None, admin_key])
 
 # Hosted mode with deployer signature (own contracts)
-# Signature scheme: sign(keccak256(contract_address + keccak256(new_code)))
+# Step 1: Get contract nonce for replay protection
+nonce = rpc.call("gen_getContractNonce", [contract_address])
+# Step 2: Create signature with nonce
+# Signature scheme: sign(keccak256(contract_address + nonce_bytes32 + keccak256(new_code)))
 result = rpc.call("sim_upgradeContractCode", [contract_address, new_code, signature])
 
 # Returns: {"transaction_hash": "0x...", "message": "..."}
@@ -77,6 +80,8 @@ result = rpc.call("sim_upgradeContractCode", [contract_address, new_code, signat
 receipt = rpc.call("eth_getTransactionByHash", [result["transaction_hash"]])
 # receipt["status"] == "FINALIZED" means success
 ```
+
+**Replay protection**: The signature includes the contract nonce (tx count to contract). Each upgrade increments the nonce, invalidating old signatures. This prevents attackers from replaying old upgrade signatures to force-downgrade contracts.
 
 **How it works**:
 1. RPC validates auth (admin_key or deployer signature in hosted mode)

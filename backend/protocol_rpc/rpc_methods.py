@@ -353,6 +353,15 @@ def get_contract_code(
     return impl.get_contract_code(session=session, contract_address=contract_address)
 
 
+@rpc.method("gen_getContractNonce")
+def get_contract_nonce(
+    contract_address: str,
+    session: Session = Depends(get_db_session),
+) -> int:
+    """Get contract nonce (tx count TO contract) for upgrade signatures."""
+    return impl.get_contract_nonce(session=session, contract_address=contract_address)
+
+
 @rpc.method("gen_call")
 async def gen_call(
     params: dict,

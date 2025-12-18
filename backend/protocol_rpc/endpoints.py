@@ -464,6 +464,23 @@ def get_contract_deployer(session: Session, contract_address: str) -> str | None
     return deploy_tx.from_address if deploy_tx else None
 
 
+def get_contract_nonce(session: Session, contract_address: str) -> int:
+    """Get contract nonce (tx count TO this contract) for upgrade signatures."""
+    from backend.database_handler.models import Transactions
+
+    try:
+        checksum_address = eth_utils.to_checksum_address(contract_address)
+    except:
+        checksum_address = contract_address
+
+    count = (
+        session.query(Transactions)
+        .filter(Transactions.to_address == checksum_address)
+        .count()
+    )
+    return count
+
+
 def admin_upgrade_contract_code(
     session: Session,
     contract_address: str,
@@ -510,11 +527,23 @@ def admin_upgrade_contract_code(
         # Option 2: Signature from deployer grants access to own contracts
         elif signature:
             try:
+                # Get transaction count for contract to prevent replay attacks
+                # Each upgrade creates a new tx, so count always increases
+                tx_count = (
+                    session.query(Transactions)
+                    .filter(Transactions.to_address == contract_address)
+                    .count()
+                )
+
                 # Recover signer from signature
-                # Message: keccak256(contract_address + keccak256(new_code))
-                code_hash = Web3.keccak(text=new_code)
+                # Message: keccak256(contract_address + tx_count_bytes + keccak256(new_code))
+                # Including tx_count makes signatures single-use (count increments after each tx)
+                new_code_hash = Web3.keccak(text=new_code)
+                tx_count_bytes = tx_count.to_bytes(32, byteorder="big")
                 message_hash = Web3.keccak(
-                    Web3.to_bytes(hexstr=contract_address) + code_hash
+                    Web3.to_bytes(hexstr=contract_address)
+                    + tx_count_bytes
+                    + new_code_hash
                 )
                 message = encode_defunct(primitive=message_hash)
                 signer = Account.recover_message(message, signature=signature)
