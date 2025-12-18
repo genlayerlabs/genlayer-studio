@@ -148,6 +148,7 @@ class TransactionType(IntEnum):
     SEND = 0
     DEPLOY_CONTRACT = 1
     RUN_CONTRACT = 2
+    UPGRADE_CONTRACT = 3
 
 
 @dataclass

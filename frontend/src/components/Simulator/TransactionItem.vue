@@ -184,7 +184,9 @@ const badgeColorClass = computed(() => {
       {{
         transaction.type === 'method'
           ? transaction.decodedData?.functionName
-          : 'Deploy'
+          : transaction.type === 'upgrade'
+            ? 'Upgrade'
+            : 'Deploy'
       }}
     </div>
 
@@ -263,7 +265,9 @@ const badgeColorClass = computed(() => {
               {{
                 transaction.type === 'method'
                   ? 'Method Call'
-                  : 'Contract Deployment'
+                  : transaction.type === 'upgrade'
+                    ? 'Code Upgrade'
+                    : 'Contract Deployment'
               }}
             </span>
           </div>

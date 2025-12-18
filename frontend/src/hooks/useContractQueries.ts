@@ -289,6 +289,105 @@ export function useContractQueries() {
     }
   }
 
+  const isUpgrading = ref(false);
+
+  async function upgradeContract() {
+    if (!contract.value || !deployedContract.value) {
+      notify({
+        type: 'error',
+        title: 'Cannot upgrade: contract not deployed',
+      });
+      return;
+    }
+
+    const contractCode = contract.value.content;
+    const contractAddress = deployedContract.value.address;
+
+    if (!contractCode) {
+      notify({
+        type: 'error',
+        title: 'No contract code to upgrade',
+      });
+      return;
+    }
+
+    isUpgrading.value = true;
+
+    try {
+      // Sign the upgrade request
+      // Message: keccak256(contract_address + keccak256(new_code))
+      const { keccak256, toBytes, concat, toHex, stringToBytes } =
+        await import('viem');
+      const { privateKeyToAccount } = await import('viem/accounts');
+
+      const account = accountsStore.selectedAccount;
+      let signature: string | undefined;
+
+      if (account) {
+        // Create message hash matching backend: keccak256(address_bytes + keccak256(code_text))
+        const codeHash = keccak256(stringToBytes(contractCode));
+        const messageHash = keccak256(
+          concat([toBytes(contractAddress as `0x${string}`), codeHash]),
+        );
+
+        if (account.type === 'local' && account.privateKey) {
+          // Local account - sign directly with private key
+          const signer = privateKeyToAccount(
+            account.privateKey as `0x${string}`,
+          );
+          signature = await signer.signMessage({ message: { raw: messageHash } });
+        } else if (account.type === 'metamask' && window.ethereum) {
+          // MetaMask - request signature
+          signature = await window.ethereum.request({
+            method: 'personal_sign',
+            params: [toHex(messageHash), account.address],
+          });
+        }
+      }
+
+      // Use JsonRpcService to call the upgrade endpoint
+      const { useRpcClient } = await import('@/hooks/useRpcClient');
+      const rpcClient = useRpcClient();
+      const result = await rpcClient.upgradeContractCode(
+        contractAddress,
+        contractCode,
+        signature,
+      );
+
+      // Add to transaction store
+      const tx: TransactionItem = {
+        hash: result.transaction_hash as TransactionHash,
+        type: 'upgrade',
+        statusName: TransactionStatus.PENDING,
+        contractAddress: contractAddress,
+        localContractId: contract.value?.id ?? '',
+        data: { new_code: contractCode },
+      };
+      transactionsStore.addTransaction(tx);
+
+      notify({
+        title: 'Upgrade queued',
+        type: 'success',
+      });
+
+      trackEvent('upgraded_contract', {
+        contract_name: contract.value?.name || '',
+      });
+
+      return result.transaction_hash;
+    } catch (error: any) {
+      notify({
+        type: 'error',
+        title: 'Error upgrading contract',
+        text: error.message,
+      });
+      console.error('Error upgrading contract', error);
+      throw error;
+    } finally {
+      isUpgrading.value = false;
+    }
+  }
+
   return {
     contractSchemaQuery,
     contractAbiQuery,
@@ -302,6 +401,8 @@ export function useContractQueries() {
     callWriteMethod,
     simulateWriteMethod,
     fetchContractCode,
+    upgradeContract,
+    isUpgrading,
 
     mockContractSchema,
     isMock,

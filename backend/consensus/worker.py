@@ -520,6 +520,13 @@ class ConsensusWorker:
                 "blocked_at": transaction_data.get("blocked_at"),
             }
 
+            # Handle upgrade transactions specially (no consensus needed)
+            from backend.domain.types import TransactionType
+
+            if transaction_data.get("type") == TransactionType.UPGRADE_CONTRACT.value:
+                await self._process_upgrade_transaction(transaction_data, session)
+                return
+
             # Convert to Transaction domain object
             transaction = Transaction.from_dict(transaction_data)
 
@@ -624,6 +631,132 @@ class ConsensusWorker:
             except Exception as release_error:
                 logger.error(
                     f"[Worker {self.worker_id}] Failed to release transaction {transaction_data['hash']} in finally block: {release_error}",
+                    exc_info=True,
+                )
+
+    async def _process_upgrade_transaction(
+        self, transaction_data: dict, session: Session
+    ):
+        """
+        Process a contract upgrade transaction (type=3). No consensus needed.
+        Directly updates contract code in database.
+
+        Args:
+            transaction_data: Transaction data dictionary containing new_code
+            session: Database session
+        """
+        import base64
+        from backend.node.genvm import get_code_slot
+        from backend.database_handler.models import CurrentState, Transactions
+        from backend.database_handler.transactions_processor import TransactionsProcessor
+        from backend.database_handler.models import TransactionStatus
+
+        contract_address = transaction_data["to_address"]
+        new_code = transaction_data["data"]["new_code"]
+        tx_hash = transaction_data["hash"]
+
+        try:
+            logger.info(
+                f"[Worker {self.worker_id}] Processing upgrade transaction {tx_hash} for contract {contract_address}"
+            )
+
+            # Load contract
+            contract = (
+                session.query(CurrentState).filter_by(id=contract_address).one_or_none()
+            )
+            if not contract:
+                raise Exception(f"Contract {contract_address} not found")
+
+            # Validate Python syntax before proceeding
+            try:
+                compile(new_code, "<upgrade>", "exec")
+            except SyntaxError as e:
+                raise Exception(f"Invalid Python syntax: {e}")
+
+            # Encode code for slot storage: base64(4-byte-len-prefix + code-bytes)
+            code_bytes = new_code.encode("utf-8")
+            code_len_prefix = len(code_bytes).to_bytes(
+                4, byteorder="little", signed=False
+            )
+            code_slot_value = base64.b64encode(code_len_prefix + code_bytes).decode(
+                "ascii"
+            )
+            code_slot_key = base64.b64encode(get_code_slot()).decode("ascii")
+
+            # Update contract data - update BOTH accepted and finalized state
+            # Since upgrade transactions bypass consensus and go directly to FINALIZED,
+            # both state trees must be updated for reads to see the new code
+            # Note: data["code"] must be base64 encoded (matches deployment format in node/types.py)
+            contract.data = {
+                "code": base64.b64encode(code_bytes).decode("ascii"),
+                "state": {
+                    "accepted": {
+                        **contract.data["state"]["accepted"],
+                        code_slot_key: code_slot_value,
+                    },
+                    "finalized": {
+                        **contract.data["state"]["finalized"],
+                        code_slot_key: code_slot_value,
+                    },
+                },
+            }
+
+            # Store success in consensus_data for receipt
+            tx = session.query(Transactions).filter_by(hash=tx_hash).one()
+            tx.consensus_data = {
+                "upgrade_result": "success",
+                "contract_address": contract_address,
+            }
+            session.commit()
+
+            # Mark transaction as finalized and send WebSocket notification
+            transactions_processor = TransactionsProcessor(session)
+            await ConsensusAlgorithm.dispatch_transaction_status_update(
+                transactions_processor,
+                tx_hash,
+                TransactionStatus.FINALIZED,
+                self.msg_handler,
+            )
+
+            logger.info(
+                f"[Worker {self.worker_id}] Contract {contract_address} upgraded successfully via tx {tx_hash}"
+            )
+
+        except Exception as e:
+            logger.error(
+                f"[Worker {self.worker_id}] Contract upgrade failed for {tx_hash}: {e}",
+                exc_info=True,
+            )
+            session.rollback()
+
+            # Mark transaction as canceled on failure and send WebSocket notification
+            try:
+                tx = session.query(Transactions).filter_by(hash=tx_hash).one()
+                tx.consensus_data = {"upgrade_result": "failed", "error": str(e)}
+                session.commit()
+
+                transactions_processor = TransactionsProcessor(session)
+                await ConsensusAlgorithm.dispatch_transaction_status_update(
+                    transactions_processor,
+                    tx_hash,
+                    TransactionStatus.CANCELED,
+                    self.msg_handler,
+                )
+            except Exception as update_error:
+                logger.error(
+                    f"[Worker {self.worker_id}] Failed to update failed upgrade tx status: {update_error}"
+                )
+
+        finally:
+            # Clear current transaction tracking
+            self.current_transaction = None
+            # Release the transaction
+            try:
+                with self.get_session() as release_session:
+                    self.release_transaction(release_session, tx_hash)
+            except Exception as release_error:
+                logger.error(
+                    f"[Worker {self.worker_id}] Failed to release upgrade transaction {tx_hash}: {release_error}",
                     exc_info=True,
                 )
 

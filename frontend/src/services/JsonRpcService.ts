@@ -202,4 +202,16 @@ export class JsonRpcService implements IJsonRpcService {
       'Error getting finality window time',
     );
   }
+
+  async upgradeContractCode(
+    contractAddress: string,
+    newCode: string,
+    signature?: string,
+  ): Promise<{ transaction_hash: string; message: string }> {
+    return this.callRpcMethod<{ transaction_hash: string; message: string }>(
+      'sim_upgradeContractCode',
+      [contractAddress, newCode, signature],
+      'Error upgrading contract code',
+    ) as Promise<{ transaction_hash: string; message: string }>;
+  }
 }
