@@ -18,7 +18,7 @@ const CONTRACT_PATH = path.join(__dirname, '../../examples/contracts/wizard_of_c
 
 // GenLayer configuration
 const genlayerConfig = {
-  id: 61999,
+  id: 61127,
   name: 'GenLayer',
   rpcUrl: RPC_URL,
   consensusMainContract: {

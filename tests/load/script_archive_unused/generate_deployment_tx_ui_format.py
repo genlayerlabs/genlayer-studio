@@ -205,7 +205,7 @@ def main():
         "to": to_checksum_address(CONSENSUS_MAIN_ADDRESS),
         "value": 0,
         "data": tx_data,
-        "chainId": 61999,  # GenLayer chain ID
+        "chainId": 61127,  # GenLayer Studio Localnet Chain ID
     }
 
     # Sign the transaction

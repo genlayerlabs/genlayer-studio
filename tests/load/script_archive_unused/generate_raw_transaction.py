@@ -209,7 +209,7 @@ def main():
         ),  # Send to ConsensusMain, NOT zero address!
         # 'to': to_checksum_address(ZERO_ADDRESS),
         "data": tx_data,
-        "chainId": 61999,  # GenLayer chain ID
+        "chainId": 61127,  # GenLayer Studio Localnet Chain ID
     }
 
     # Sign the transaction (account already created above)
