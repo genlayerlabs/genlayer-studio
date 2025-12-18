@@ -692,7 +692,7 @@ class Node:
             capture_output=True,
             is_sync=False,
             logger=self.logger,
-            timeout=5,
+            timeout=30,
             manager_uri=self.manager.url,
         )
         result.processing_time = int((time.time() - start_time) * 1000)

@@ -42,7 +42,7 @@ class ConsensusWorker:
         genvm_manager: GenVMManager,
         worker_id: str = None,
         poll_interval: int = 5,
-        transaction_timeout_minutes: int = 30,
+        transaction_timeout_minutes: int = 20,
     ):
         """
         Initialize the consensus worker.
@@ -158,7 +158,7 @@ class ConsensusWorker:
                       transactions.leader_only, transactions.sim_config, transactions.contract_snapshot,
                       transactions.status, transactions.consensus_data, transactions.input_data,
                       transactions.created_at, transactions.timestamp_awaiting_finalization,
-                      transactions.appeal_failed;
+                      transactions.appeal_failed, transactions.blocked_at;
         """
         )
 
@@ -201,6 +201,7 @@ class ConsensusWorker:
                 "created_at": result.created_at,
                 "timestamp_awaiting_finalization": result.timestamp_awaiting_finalization,
                 "appeal_failed": result.appeal_failed,
+                "blocked_at": result.blocked_at,
             }
 
         return None
@@ -263,7 +264,8 @@ class ConsensusWorker:
                       transactions.status, transactions.consensus_data, transactions.input_data,
                       transactions.created_at, transactions.appealed, transactions.appeal_failed,
                       transactions.timestamp_appeal, transactions.appeal_undetermined,
-                      transactions.appeal_leader_timeout, transactions.appeal_validators_timeout;
+                      transactions.appeal_leader_timeout, transactions.appeal_validators_timeout,
+                      transactions.blocked_at;
         """
         )
 
@@ -305,6 +307,7 @@ class ConsensusWorker:
                 "appeal_undetermined": result.appeal_undetermined,
                 "appeal_leader_timeout": result.appeal_leader_timeout,
                 "appeal_validators_timeout": result.appeal_validators_timeout,
+                "blocked_at": result.blocked_at,
             }
 
         return None
@@ -364,7 +367,7 @@ class ConsensusWorker:
                       transactions.gaslimit, transactions.r, transactions.s, transactions.v,
                       transactions.leader_only, transactions.sim_config, transactions.contract_snapshot,
                       transactions.status, transactions.consensus_data, transactions.input_data,
-                      transactions.created_at;
+                      transactions.created_at, transactions.blocked_at;
         """
         )
 
@@ -401,6 +404,7 @@ class ConsensusWorker:
                 "consensus_data": result.consensus_data,
                 "input_data": result.input_data,
                 "created_at": result.created_at,
+                "blocked_at": result.blocked_at,
             }
 
         return None

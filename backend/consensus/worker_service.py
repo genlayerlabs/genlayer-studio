@@ -24,6 +24,7 @@ from loguru import logger
 
 from backend.protocol_rpc.app_lifespan import create_genvm_manager
 
+
 # Load environment variables
 load_dotenv()
 
@@ -60,7 +61,7 @@ async def lifespan(app: FastAPI):
     # CRITICAL: Kill any orphaned GenVM processes from previous crashes
     # These zombie processes can consume gigabytes of memory outside Docker limits
     logger.info("Cleaning up orphaned GenVM processes from previous crashes...")
-    os.system("pkill -9 -f 'genvm (llm|web)' 2>/dev/null || true")
+    _pkill_rc = os.system("pkill -9 -f 'genvm (llm|web)' 2>/dev/null || true")
     logger.info("GenVM cleanup complete")
 
     # Database setup
@@ -340,10 +341,31 @@ async def health_check():
         tx = worker.current_transaction.copy()
         if tx.get("blocked_at"):
             try:
-                blocked_at = datetime.fromisoformat(
-                    tx["blocked_at"].replace("Z", "+00:00")
-                )
-                elapsed = datetime.utcnow() - blocked_at.replace(tzinfo=None)
+                blocked_at = tx["blocked_at"]
+
+                # Handle both datetime objects and ISO strings
+                if isinstance(blocked_at, str):
+                    blocked_at = datetime.fromisoformat(
+                        blocked_at.replace("Z", "+00:00")
+                    )
+
+                # Convert to naive UTC datetime for comparison
+                if blocked_at.tzinfo is not None:
+                    blocked_at = blocked_at.replace(tzinfo=None)
+
+                elapsed = datetime.utcnow() - blocked_at
+
+                # Check if blocked for more than 10 minutes - pod is unhealthy
+                if elapsed.total_seconds() > 600:  # 10 minutes = 600 seconds
+                    return JSONResponse(
+                        status_code=500,
+                        content={
+                            "status": "unhealthy",
+                            "worker_id": worker.worker_id,
+                            "error": "Transaction blocked for more than 10 minutes",
+                            "blocked_duration_seconds": elapsed.total_seconds(),
+                        },
+                    )
 
                 # Format as human-readable time ago
                 minutes = int(elapsed.total_seconds() / 60)
@@ -352,7 +374,9 @@ async def health_check():
                 else:
                     hours = minutes // 60
                     tx["blocked_at"] = f"{hours}h ago"
-            except:
+            except Exception as e:
+                # Log the error but don't fail the health check
+                logger.error(f"Error parsing blocked_at timestamp: {e}")
                 pass
         current_tx = tx
 
