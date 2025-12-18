@@ -470,7 +470,7 @@ def get_contract_nonce(session: Session, contract_address: str) -> int:
 
     try:
         checksum_address = eth_utils.to_checksum_address(contract_address)
-    except:
+    except (ValueError, TypeError):
         checksum_address = contract_address
 
     count = (
@@ -506,7 +506,11 @@ def admin_upgrade_contract_code(
     Returns:
         dict with transaction_hash for polling status
     """
-    from backend.database_handler.models import CurrentState, Transactions, TransactionStatus
+    from backend.database_handler.models import (
+        CurrentState,
+        Transactions,
+        TransactionStatus,
+    )
     from backend.domain.types import TransactionType
     from eth_account.messages import encode_defunct
     from eth_account import Account

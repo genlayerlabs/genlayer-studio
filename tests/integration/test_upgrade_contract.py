@@ -81,23 +81,41 @@ def deploy_contract(code: str, args: list = None, timeout: int = 180) -> str:
     if tx["status"] not in ["FINALIZED", "ACCEPTED"]:
         pytest.fail(f"Deployment failed: {tx}")
 
-    address = tx.get("contract_address") or tx.get("contractAddress") or tx.get("to_address")
+    address = (
+        tx.get("contract_address") or tx.get("contractAddress") or tx.get("to_address")
+    )
     if not address or address == "0x0000000000000000000000000000000000000000":
         pytest.fail(f"No contract address in tx: {tx}")
 
     return address
 
 
-def call_contract_method(address: str, method: str, args: list = None, from_accepted: bool = False) -> any:
+def call_contract_method(
+    address: str, method: str, args: list = None, from_accepted: bool = False
+) -> any:
     """Call a contract read method and return the result."""
     from genlayer_py.types.transactions import TransactionHashVariant
-    variant = TransactionHashVariant.LATEST_NONFINAL if from_accepted else TransactionHashVariant.LATEST_FINAL
-    return CLIENT.read_contract(address=address, function_name=method, args=args or [], transaction_hash_variant=variant)
+
+    variant = (
+        TransactionHashVariant.LATEST_NONFINAL
+        if from_accepted
+        else TransactionHashVariant.LATEST_FINAL
+    )
+    return CLIENT.read_contract(
+        address=address,
+        function_name=method,
+        args=args or [],
+        transaction_hash_variant=variant,
+    )
 
 
-def write_contract_method(address: str, method: str, args: list = None, timeout: int = 180) -> dict:
+def write_contract_method(
+    address: str, method: str, args: list = None, timeout: int = 180
+) -> dict:
     """Call a contract write method and wait for finalization."""
-    tx_hash = CLIENT.write_contract(address=address, function_name=method, args=args or [])
+    tx_hash = CLIENT.write_contract(
+        address=address, function_name=method, args=args or []
+    )
     return wait_for_tx(tx_hash, timeout)
 
 
@@ -105,7 +123,7 @@ def write_contract_method(address: str, method: str, args: list = None, timeout:
 # Test Contracts
 # =============================================================================
 
-CONTRACT_V1 = '''# v0.1.0
+CONTRACT_V1 = """# v0.1.0
 # { "Depends": "py-genlayer:latest" }
 
 from genlayer import *
@@ -137,9 +155,9 @@ class UpgradeTest(gl.Contract):
     @gl.public.write
     def set_name(self, new_name: str) -> None:
         self.name = new_name
-'''
+"""
 
-CONTRACT_V2 = '''# v0.1.0
+CONTRACT_V2 = """# v0.1.0
 # { "Depends": "py-genlayer:latest" }
 
 from genlayer import *
@@ -175,9 +193,9 @@ class UpgradeTest(gl.Contract):
     @gl.public.view
     def new_method(self) -> str:
         return "new in v2"  # NEW METHOD
-'''
+"""
 
-CONTRACT_V3_WITH_NEW_STATE = '''# v0.1.0
+CONTRACT_V3_WITH_NEW_STATE = """# v0.1.0
 # { "Depends": "py-genlayer:latest" }
 
 from genlayer import *
@@ -215,9 +233,9 @@ class UpgradeTest(gl.Contract):
     @gl.public.write
     def set_name(self, new_name: str) -> None:
         self.name = new_name
-'''
+"""
 
-INVALID_CONTRACT = '''# v0.1.0
+INVALID_CONTRACT = """# v0.1.0
 # { "Depends": "py-genlayer:latest" }
 
 from genlayer import *
@@ -225,9 +243,9 @@ from genlayer import *
 class BrokenContract(gl.Contract):
     def __init__(self):
         this is not valid python syntax!!!
-'''
+"""
 
-SIMPLE_CONTRACT = '''# v0.1.0
+SIMPLE_CONTRACT = """# v0.1.0
 # { "Depends": "py-genlayer:latest" }
 
 from genlayer import *
@@ -241,12 +259,13 @@ class SimpleContract(gl.Contract):
     @gl.public.view
     def get_value(self) -> u64:
         return self.value
-'''
+"""
 
 
 # =============================================================================
 # Fixtures
 # =============================================================================
+
 
 @pytest.fixture
 def deployed_v1_contract():
@@ -290,12 +309,15 @@ def two_contracts():
 # Core Upgrade Tests
 # =============================================================================
 
+
 class TestUpgradeBasics:
     """Basic upgrade functionality tests."""
 
     def test_upgrade_returns_transaction_hash(self, deployed_v1_contract):
         """Upgrade should return a transaction hash."""
-        result = rpc_call("sim_upgradeContractCode", [deployed_v1_contract, CONTRACT_V2])
+        result = rpc_call(
+            "sim_upgradeContractCode", [deployed_v1_contract, CONTRACT_V2]
+        )
 
         assert "transaction_hash" in result, "Missing transaction_hash in response"
         assert result["transaction_hash"].startswith("0x"), "Invalid tx hash format"
@@ -303,7 +325,9 @@ class TestUpgradeBasics:
 
     def test_upgrade_transaction_finalizes(self, deployed_v1_contract):
         """Upgrade transaction should finalize successfully."""
-        result = rpc_call("sim_upgradeContractCode", [deployed_v1_contract, CONTRACT_V2])
+        result = rpc_call(
+            "sim_upgradeContractCode", [deployed_v1_contract, CONTRACT_V2]
+        )
         tx = wait_for_tx(result["transaction_hash"])
 
         assert tx["status"] == "FINALIZED", f"Upgrade failed: {tx}"
@@ -324,7 +348,9 @@ class TestCodeFormatAfterUpgrade:
     def test_schema_readable_after_upgrade(self, deployed_v1_contract):
         """gen_getContractSchema must work after upgrade (catches base64 encoding bugs)."""
         # Upgrade
-        result = rpc_call("sim_upgradeContractCode", [deployed_v1_contract, CONTRACT_V2])
+        result = rpc_call(
+            "sim_upgradeContractCode", [deployed_v1_contract, CONTRACT_V2]
+        )
         wait_for_tx(result["transaction_hash"])
 
         # This will fail if code is not properly base64 encoded
@@ -341,17 +367,23 @@ class TestCodeFormatAfterUpgrade:
         assert "new_method" not in schema_before["methods"]
 
         # Upgrade to V2
-        result = rpc_call("sim_upgradeContractCode", [deployed_v1_contract, CONTRACT_V2])
+        result = rpc_call(
+            "sim_upgradeContractCode", [deployed_v1_contract, CONTRACT_V2]
+        )
         wait_for_tx(result["transaction_hash"])
 
         # V2 has new_method
         schema_after = rpc_call("gen_getContractSchema", [deployed_v1_contract])
-        assert "new_method" in schema_after["methods"], "New method not in schema after upgrade"
+        assert (
+            "new_method" in schema_after["methods"]
+        ), "New method not in schema after upgrade"
 
     def test_code_is_base64_encoded_in_db(self, deployed_v1_contract):
         """Verify code is stored as base64 in database (internal format check)."""
         # Upgrade
-        result = rpc_call("sim_upgradeContractCode", [deployed_v1_contract, CONTRACT_V2])
+        result = rpc_call(
+            "sim_upgradeContractCode", [deployed_v1_contract, CONTRACT_V2]
+        )
         wait_for_tx(result["transaction_hash"])
 
         # The schema call succeeding is proof the code is properly encoded
@@ -370,7 +402,9 @@ class TestContractCallsAfterUpgrade:
         assert version_before == "v1", f"Expected v1, got {version_before}"
 
         # Upgrade
-        result = rpc_call("sim_upgradeContractCode", [deployed_v1_contract, CONTRACT_V2])
+        result = rpc_call(
+            "sim_upgradeContractCode", [deployed_v1_contract, CONTRACT_V2]
+        )
         wait_for_tx(result["transaction_hash"])
 
         # After upgrade
@@ -380,7 +414,9 @@ class TestContractCallsAfterUpgrade:
     def test_new_method_is_callable(self, deployed_v1_contract):
         """New methods added in upgrade should be callable."""
         # Upgrade to V2 which has new_method
-        result = rpc_call("sim_upgradeContractCode", [deployed_v1_contract, CONTRACT_V2])
+        result = rpc_call(
+            "sim_upgradeContractCode", [deployed_v1_contract, CONTRACT_V2]
+        )
         wait_for_tx(result["transaction_hash"])
 
         # Call new method
@@ -393,15 +429,19 @@ class TestContractCallsAfterUpgrade:
         counter_before = call_contract_method(deployed_v1_contract, "get_counter")
 
         # Upgrade (V2 increments by 2 instead of 1)
-        result = rpc_call("sim_upgradeContractCode", [deployed_v1_contract, CONTRACT_V2])
+        result = rpc_call(
+            "sim_upgradeContractCode", [deployed_v1_contract, CONTRACT_V2]
+        )
         wait_for_tx(result["transaction_hash"])
 
         # Call increment (should now add 2)
         increment_tx = write_contract_method(deployed_v1_contract, "increment")
 
         # Read from accepted state if tx is only ACCEPTED (not yet FINALIZED)
-        from_accepted = increment_tx['status'] == 'ACCEPTED'
-        counter_after = call_contract_method(deployed_v1_contract, "get_counter", from_accepted=from_accepted)
+        from_accepted = increment_tx["status"] == "ACCEPTED"
+        counter_after = call_contract_method(
+            deployed_v1_contract, "get_counter", from_accepted=from_accepted
+        )
         expected = int(counter_before) + 2
         assert counter_after == expected, f"Expected {expected}, got {counter_after}"
 
@@ -414,7 +454,9 @@ class TestStatePreservation:
         address = deployed_v1_with_state
 
         # Counter is 3 from fixture (read from accepted)
-        counter_before = call_contract_method(address, "get_counter", from_accepted=True)
+        counter_before = call_contract_method(
+            address, "get_counter", from_accepted=True
+        )
         assert counter_before == 3
 
         # Upgrade
@@ -473,7 +515,9 @@ class TestMultipleUpgrades:
         assert version == "v2"
 
         # Second upgrade: V2 -> V3
-        result2 = rpc_call("sim_upgradeContractCode", [address, CONTRACT_V3_WITH_NEW_STATE])
+        result2 = rpc_call(
+            "sim_upgradeContractCode", [address, CONTRACT_V3_WITH_NEW_STATE]
+        )
         wait_for_tx(result2["transaction_hash"])
 
         version = call_contract_method(address, "get_version")
@@ -498,7 +542,9 @@ class TestMultipleUpgrades:
         write_contract_method(address, "increment")  # counter = 3
 
         # Upgrade V2 -> V3
-        result2 = rpc_call("sim_upgradeContractCode", [address, CONTRACT_V3_WITH_NEW_STATE])
+        result2 = rpc_call(
+            "sim_upgradeContractCode", [address, CONTRACT_V3_WITH_NEW_STATE]
+        )
         wait_for_tx(result2["transaction_hash"])
 
         counter = call_contract_method(address, "get_counter", from_accepted=True)
@@ -559,7 +605,9 @@ class TestErrorHandling:
         assert version == "v1", "Contract corrupted after failed upgrade"
 
         schema = rpc_call("gen_getContractSchema", [address])
-        assert "get_version" in schema["methods"], "Schema corrupted after failed upgrade"
+        assert (
+            "get_version" in schema["methods"]
+        ), "Schema corrupted after failed upgrade"
 
     def test_upgrade_empty_code_fails(self, deployed_v1_contract):
         """Upgrade with empty code should fail."""
@@ -580,18 +628,24 @@ class TestTransactionBehavior:
 
     def test_upgrade_creates_type_3_transaction(self, deployed_v1_contract):
         """Upgrade should create a type=3 transaction."""
-        result = rpc_call("sim_upgradeContractCode", [deployed_v1_contract, CONTRACT_V2])
+        result = rpc_call(
+            "sim_upgradeContractCode", [deployed_v1_contract, CONTRACT_V2]
+        )
         tx = wait_for_tx(result["transaction_hash"])
 
         assert tx.get("type") == 3, f"Expected type=3, got {tx.get('type')}"
 
     def test_upgrade_transaction_has_correct_to_address(self, deployed_v1_contract):
         """Upgrade transaction should have contract as to_address."""
-        result = rpc_call("sim_upgradeContractCode", [deployed_v1_contract, CONTRACT_V2])
+        result = rpc_call(
+            "sim_upgradeContractCode", [deployed_v1_contract, CONTRACT_V2]
+        )
         tx = wait_for_tx(result["transaction_hash"])
 
         to_addr = tx.get("to_address") or tx.get("toAddress") or tx.get("to")
-        assert to_addr.lower() == deployed_v1_contract.lower(), f"Wrong to_address: {to_addr}"
+        assert (
+            to_addr.lower() == deployed_v1_contract.lower()
+        ), f"Wrong to_address: {to_addr}"
 
 
 class TestSignatureAuth:
@@ -610,7 +664,9 @@ class TestSignatureAuth:
 
         # Pass admin_key as 4th param (after signature which is None)
         # In local mode this is ignored, in prod mode it would be checked
-        result = rpc_call("sim_upgradeContractCode", [address, CONTRACT_V2, None, "test-admin-key"])
+        result = rpc_call(
+            "sim_upgradeContractCode", [address, CONTRACT_V2, None, "test-admin-key"]
+        )
         tx = wait_for_tx(result["transaction_hash"])
 
         assert tx["status"] == "FINALIZED"
@@ -639,7 +695,9 @@ class TestSignatureAuth:
         # Create signature: keccak256(address + nonce_bytes32 + keccak256(code))
         nonce_bytes = nonce.to_bytes(32, byteorder="big")
         code_hash = Web3.keccak(text=CONTRACT_V2)
-        message_hash = Web3.keccak(Web3.to_bytes(hexstr=address) + nonce_bytes + code_hash)
+        message_hash = Web3.keccak(
+            Web3.to_bytes(hexstr=address) + nonce_bytes + code_hash
+        )
         message = encode_defunct(primitive=message_hash)
 
         # Sign with deployer's private key
@@ -673,7 +731,9 @@ class TestSignatureAuth:
         # Create signature with wrong account (includes nonce)
         nonce_bytes = nonce.to_bytes(32, byteorder="big")
         code_hash = Web3.keccak(text=CONTRACT_V2)
-        message_hash = Web3.keccak(Web3.to_bytes(hexstr=address) + nonce_bytes + code_hash)
+        message_hash = Web3.keccak(
+            Web3.to_bytes(hexstr=address) + nonce_bytes + code_hash
+        )
         message = encode_defunct(primitive=message_hash)
         signature = Account.sign_message(message, other_account.key).signature.hex()
 
@@ -708,14 +768,18 @@ class TestSignatureAuth:
         nonce_bytes = nonce.to_bytes(32, byteorder="big")
 
         code_hash = Web3.keccak(text=CONTRACT_V2)
-        message_hash = Web3.keccak(Web3.to_bytes(hexstr=address) + nonce_bytes + code_hash)
+        message_hash = Web3.keccak(
+            Web3.to_bytes(hexstr=address) + nonce_bytes + code_hash
+        )
         message = encode_defunct(primitive=message_hash)
 
         # Signature as hex string (with 0x prefix)
         sig = Account.sign_message(message, ACCOUNT.key)
         signature_hex = "0x" + sig.signature.hex()
 
-        result = rpc_call("sim_upgradeContractCode", [address, CONTRACT_V2, signature_hex])
+        result = rpc_call(
+            "sim_upgradeContractCode", [address, CONTRACT_V2, signature_hex]
+        )
         tx = wait_for_tx(result["transaction_hash"])
         assert tx["status"] == "FINALIZED"
 
@@ -738,12 +802,18 @@ class TestSignatureAuth:
         # Create signature for V1 -> V2 upgrade
         nonce_bytes = nonce_before.to_bytes(32, byteorder="big")
         code_hash = Web3.keccak(text=CONTRACT_V2)
-        message_hash = Web3.keccak(Web3.to_bytes(hexstr=address) + nonce_bytes + code_hash)
+        message_hash = Web3.keccak(
+            Web3.to_bytes(hexstr=address) + nonce_bytes + code_hash
+        )
         message = encode_defunct(primitive=message_hash)
-        signature_v1_to_v2 = "0x" + Account.sign_message(message, ACCOUNT.key).signature.hex()
+        signature_v1_to_v2 = (
+            "0x" + Account.sign_message(message, ACCOUNT.key).signature.hex()
+        )
 
         # First upgrade V1 -> V2 (should succeed)
-        result = rpc_call("sim_upgradeContractCode", [address, CONTRACT_V2, signature_v1_to_v2])
+        result = rpc_call(
+            "sim_upgradeContractCode", [address, CONTRACT_V2, signature_v1_to_v2]
+        )
         tx = wait_for_tx(result["transaction_hash"])
         assert tx["status"] == "FINALIZED"
 
@@ -753,16 +823,25 @@ class TestSignatureAuth:
 
         # Nonce should have incremented
         nonce_after = rpc_call("gen_getContractNonce", [address])
-        assert nonce_after > nonce_before, f"Nonce should increment: {nonce_before} -> {nonce_after}"
+        assert (
+            nonce_after > nonce_before
+        ), f"Nonce should increment: {nonce_before} -> {nonce_after}"
 
         # Now upgrade to V3
         nonce_bytes_v3 = nonce_after.to_bytes(32, byteorder="big")
-        code_hash_v3 = Web3.keccak(text=CONTRACT_V3)
-        message_hash_v3 = Web3.keccak(Web3.to_bytes(hexstr=address) + nonce_bytes_v3 + code_hash_v3)
+        code_hash_v3 = Web3.keccak(text=CONTRACT_V3_WITH_NEW_STATE)
+        message_hash_v3 = Web3.keccak(
+            Web3.to_bytes(hexstr=address) + nonce_bytes_v3 + code_hash_v3
+        )
         message_v3 = encode_defunct(primitive=message_hash_v3)
-        signature_v2_to_v3 = "0x" + Account.sign_message(message_v3, ACCOUNT.key).signature.hex()
+        signature_v2_to_v3 = (
+            "0x" + Account.sign_message(message_v3, ACCOUNT.key).signature.hex()
+        )
 
-        result = rpc_call("sim_upgradeContractCode", [address, CONTRACT_V3, signature_v2_to_v3])
+        result = rpc_call(
+            "sim_upgradeContractCode",
+            [address, CONTRACT_V3_WITH_NEW_STATE, signature_v2_to_v3],
+        )
         tx = wait_for_tx(result["transaction_hash"])
         assert tx["status"] == "FINALIZED"
 
@@ -802,4 +881,6 @@ class TestSignatureAuth:
 # =============================================================================
 
 if __name__ == "__main__":
-    print("Run with: .venv/bin/gltest --contracts-dir . tests/integration/test_upgrade_contract.py -xvs")
+    print(
+        "Run with: .venv/bin/gltest --contracts-dir . tests/integration/test_upgrade_contract.py -xvs"
+    )

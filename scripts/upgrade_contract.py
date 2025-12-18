@@ -37,7 +37,9 @@ def sign_upgrade_message(
         from eth_account.messages import encode_defunct
         from web3 import Web3
     except ImportError:
-        print("Error: eth_account and web3 required for signing. Install with: pip install eth-account web3")
+        print(
+            "Error: eth_account and web3 required for signing. Install with: pip install eth-account web3"
+        )
         sys.exit(1)
 
     # Message: keccak256(address + nonce_bytes32 + keccak256(code))
@@ -90,18 +92,27 @@ def main():
     parser = argparse.ArgumentParser(
         description="Upgrade a deployed contract's code",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__
+        epilog=__doc__,
     )
     parser.add_argument("contract_address", help="Address of the deployed contract")
     parser.add_argument("code_file", help="Path to the new contract code file")
-    parser.add_argument("--rpc-url", default="http://localhost:4000/api",
-                        help="RPC endpoint URL (default: http://localhost:4000/api)")
-    parser.add_argument("--private-key",
-                        help="Private key of deployer (for signing in hosted mode)")
-    parser.add_argument("--admin-key",
-                        help="Admin API key (for upgrading any contract in hosted mode)")
-    parser.add_argument("--timeout", type=int, default=60,
-                        help="Timeout in seconds to wait for upgrade (default: 60)")
+    parser.add_argument(
+        "--rpc-url",
+        default="http://localhost:4000/api",
+        help="RPC endpoint URL (default: http://localhost:4000/api)",
+    )
+    parser.add_argument(
+        "--private-key", help="Private key of deployer (for signing in hosted mode)"
+    )
+    parser.add_argument(
+        "--admin-key", help="Admin API key (for upgrading any contract in hosted mode)"
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=60,
+        help="Timeout in seconds to wait for upgrade (default: 60)",
+    )
 
     args = parser.parse_args()
 
@@ -126,7 +137,9 @@ def main():
     # Verify contract exists
     print("1. Verifying contract exists...")
     try:
-        schema = rpc_call(args.rpc_url, "gen_getContractSchema", [args.contract_address])
+        schema = rpc_call(
+            args.rpc_url, "gen_getContractSchema", [args.contract_address]
+        )
         if schema:
             print(f"   Contract found with {len(schema.get('methods', []))} methods")
     except Exception as e:
@@ -138,9 +151,13 @@ def main():
         print("\n2. Signing upgrade request...")
         try:
             # Fetch nonce for replay protection
-            nonce = rpc_call(args.rpc_url, "gen_getContractNonce", [args.contract_address])
+            nonce = rpc_call(
+                args.rpc_url, "gen_getContractNonce", [args.contract_address]
+            )
             print(f"   Contract nonce: {nonce}")
-            signature = sign_upgrade_message(args.contract_address, new_code, args.private_key, nonce)
+            signature = sign_upgrade_message(
+                args.contract_address, new_code, args.private_key, nonce
+            )
             print(f"   Signature: {signature[:20]}...")
         except Exception as e:
             print(f"   Error signing: {e}")

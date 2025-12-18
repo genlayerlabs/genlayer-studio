@@ -347,7 +347,9 @@ export function useContractQueries() {
           const signer = privateKeyToAccount(
             account.privateKey as `0x${string}`,
           );
-          signature = await signer.signMessage({ message: { raw: messageHash } });
+          signature = await signer.signMessage({
+            message: { raw: messageHash },
+          });
         } else if (account.type === 'metamask' && window.ethereum) {
           // MetaMask - request signature
           signature = await window.ethereum.request({
