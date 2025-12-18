@@ -356,6 +356,10 @@ export function useContractQueries() {
             method: 'personal_sign',
             params: [toHex(messageHash), account.address],
           });
+        } else {
+          console.warn(
+            `Unsupported account type '${account.type}' for signing - upgrade will proceed without signature`,
+          );
         }
       }
 

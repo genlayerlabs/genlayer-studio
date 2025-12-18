@@ -653,11 +653,14 @@ class ConsensusWorker:
         from backend.node.genvm import get_code_slot
         from backend.database_handler.models import CurrentState
 
-        contract_address = transaction_data["to_address"]
-        new_code = transaction_data["data"]["new_code"]
         tx_hash = transaction_data["hash"]
 
         try:
+            contract_address = transaction_data["to_address"]
+            data = transaction_data.get("data") or {}
+            new_code = data.get("new_code")
+            if not new_code:
+                raise ValueError("Missing new_code in transaction data")
             logger.info(
                 f"[Worker {self.worker_id}] Processing upgrade transaction {tx_hash} for contract {contract_address}"
             )
