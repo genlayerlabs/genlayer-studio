@@ -90,7 +90,7 @@ services:
       - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-10}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - GENVMROOT=/genvm
-      - GENVM_TAG=v0.2.4
+      - GENVM_TAG=v0.2.7
     ports:
       - "${RPCPORT}:${RPCPORT}"
     expose:
