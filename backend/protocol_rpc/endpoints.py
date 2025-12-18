@@ -485,8 +485,8 @@ def admin_upgrade_contract_code(
     session: Session,
     contract_address: str,
     new_code: str,
-    signature: str = None,
-    admin_key: str = None,
+    signature: str | None = None,
+    admin_key: str | None = None,
 ) -> dict:
     """
     Queue a contract code upgrade. Returns immediately with tx hash.
@@ -568,9 +568,9 @@ def admin_upgrade_contract_code(
             except Exception as e:
                 raise JSONRPCError(
                     code=-32000,
-                    message=f"Invalid signature: {str(e)}",
+                    message=f"Invalid signature: {e!s}",
                     data={},
-                )
+                ) from e
 
         else:
             # No valid auth provided

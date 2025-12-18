@@ -647,9 +647,7 @@ class ConsensusWorker:
         """
         import base64
         from backend.node.genvm import get_code_slot
-        from backend.database_handler.models import CurrentState, Transactions
-        from backend.database_handler.transactions_processor import TransactionsProcessor
-        from backend.database_handler.models import TransactionStatus
+        from backend.database_handler.models import CurrentState
 
         contract_address = transaction_data["to_address"]
         new_code = transaction_data["data"]["new_code"]
