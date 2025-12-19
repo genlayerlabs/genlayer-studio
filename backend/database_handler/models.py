@@ -68,7 +68,9 @@ class CurrentState(Base):
 class Transactions(Base):
     __tablename__ = "transactions"
     __table_args__ = (
-        CheckConstraint("type = ANY (ARRAY[0, 1, 2])", name="transactions_type_check"),
+        CheckConstraint(
+            "type = ANY (ARRAY[0, 1, 2, 3])", name="transactions_type_check"
+        ),
         PrimaryKeyConstraint("hash", name="transactions_pkey"),
         CheckConstraint("value >= 0", name="value_unsigned_int"),
     )

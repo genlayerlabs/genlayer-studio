@@ -43,8 +43,56 @@ A compact, reusable briefing for agents working on the backend. It explains how 
 ### RPC Surface (Categories)
 Implemented in `endpoints.py`, registered in `rpc_methods.py` via `@rpc.method(...)`:
 - **Simulator (`sim_*`)**: DB reset, fund accounts, LLM provider CRUD, validator configuration, snapshot utilities, simulated calls.
-- **GenLayer (`gen_*`)**: contract schema/code helpers, `gen_call` (readonly run through VM).
+- **GenLayer (`gen_*`)**: contract schema/code helpers, `gen_call` (readonly run through VM), `gen_getContractNonce` (tx count to contract for upgrade signatures).
 - **Ethereum‑compat**: `eth_getBalance`, `eth_getTransactionByHash`, `eth_call` (readonly execution), `eth_sendRawTransaction` (persist & queue), `eth_getTransactionCount`, chain/net info, block number.
+
+### Admin Endpoints & Contract Upgrade
+Admin endpoints are protected by `@require_admin_access` decorator with access modes:
+- **Local dev** (no env vars): Open access
+- **With `ADMIN_API_KEY` set**: Requires matching `admin_key` parameter (works in all modes including hosted)
+- **Hosted cloud** (`VITE_IS_HOSTED=true`) without `ADMIN_API_KEY`: Blocked entirely
+
+**Contract Upgrade (`sim_upgradeContractCode`)**:
+Allows in-place upgrade of deployed contract code without losing state. Uses transaction type=3 (UPGRADE_CONTRACT).
+
+**Access control**:
+- **Local mode**: Open access (no auth required)
+- **Hosted/self-hosted**: Requires `admin_key` (any contract) OR `signature` from deployer (own contracts only)
+
+```python
+# RPC signature: sim_upgradeContractCode(contract_address, new_code, signature?, admin_key?)
+
+# Local mode (no auth)
+result = rpc.call("sim_upgradeContractCode", [contract_address, new_code])
+
+# Hosted mode with admin key (any contract)
+result = rpc.call("sim_upgradeContractCode", [contract_address, new_code, None, admin_key])
+
+# Hosted mode with deployer signature (own contracts)
+# Step 1: Get contract nonce for replay protection
+nonce = rpc.call("gen_getContractNonce", [contract_address])
+# Step 2: Create signature with nonce
+# Signature scheme: sign(keccak256(contract_address + nonce_bytes32 + keccak256(new_code)))
+result = rpc.call("sim_upgradeContractCode", [contract_address, new_code, signature])
+
+# Returns: {"transaction_hash": "0x...", "message": "..."}
+# Poll for completion
+receipt = rpc.call("eth_getTransactionByHash", [result["transaction_hash"]])
+# receipt["status"] == "FINALIZED" means success
+```
+
+**Replay protection**: The signature includes the contract nonce (tx count to contract). Each upgrade increments the nonce, invalidating old signatures. This prevents attackers from replaying old upgrade signatures to force-downgrade contracts.
+
+**How it works**:
+1. RPC validates auth (admin_key or deployer signature in hosted mode)
+2. Creates upgrade transaction (type=3) and returns immediately with tx hash
+3. Worker claims transaction naturally (queued behind any pending txs for that contract)
+4. Worker detects type=3, skips consensus, updates contract code directly
+5. Worker marks tx as FINALIZED and sends WebSocket notification
+
+**Frontend**: "Upgrade code" button in ContractInfo.vue signs the request with user's private key and upgrades using current editor code.
+
+**CLI script**: `scripts/upgrade_contract.py` supports `--private-key` (deployer signature) and `--admin-key` options.
 
 ### Execution Engine (Node/GenVM)
 - `node/base.py` `Node` orchestrates deploy and run:

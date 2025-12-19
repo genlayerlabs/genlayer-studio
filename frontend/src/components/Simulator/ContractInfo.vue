@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import PageSection from '@/components/Simulator/PageSection.vue';
 import { CheckCircleIcon } from '@heroicons/vue/24/outline';
+import { ArrowPathIcon } from '@heroicons/vue/20/solid';
 import EmptyListPlaceholder from '@/components/Simulator/EmptyListPlaceholder.vue';
 import { useNodeStore, useUIStore } from '@/stores';
 import { useContractQueries, useShortAddress } from '@/hooks';
@@ -14,8 +15,29 @@ defineProps<{
 }>();
 
 const emit = defineEmits(['openDeployment']);
-const { isDeployed, address, contract } = useContractQueries();
+const { isDeployed, address, contract, upgradeContract, isUpgrading } =
+  useContractQueries();
 const uiStore = useUIStore();
+
+const upgradeTooltip = `
+<div style="text-align: left; max-width: 240px;">
+  <div style="margin-bottom: 8px; opacity: 0.85;">
+    Replaces deployed code with current editor code.
+  </div>
+  <div style="display: flex; align-items: flex-start; gap: 6px; color: #6ee7b7; margin-bottom: 4px;">
+    <span>✓</span>
+    <span>Safe for logic changes</span>
+  </div>
+  <div style="display: flex; align-items: flex-start; gap: 6px; color: #fcd34d; margin-bottom: 4px;">
+    <span>⚠</span>
+    <span>Changing field names/types can corrupt or lose data</span>
+  </div>
+  <div style="display: flex; align-items: flex-start; gap: 6px; color: #f87171;">
+    <span>✕</span>
+    <span>Irreversible</span>
+  </div>
+</div>
+`;
 </script>
 
 <template>
@@ -61,15 +83,32 @@ const uiStore = useUIStore();
       >
     </Alert>
 
-    <Btn
-      secondary
-      tiny
-      class="inline-flex w-auto shrink grow-0"
+    <div
       v-else-if="showNewDeploymentButton"
-      @click="emit('openDeployment')"
-      :icon="UploadIcon"
+      class="flex flex-row flex-wrap items-center gap-2"
     >
-      Deploy new instance
-    </Btn>
+      <Btn
+        secondary
+        tiny
+        class="inline-flex w-auto shrink grow-0"
+        @click="emit('openDeployment')"
+        :icon="UploadIcon"
+      >
+        Deploy new instance
+      </Btn>
+
+      <Btn
+        v-if="isDeployed"
+        v-tooltip="{ content: upgradeTooltip, html: true }"
+        secondary
+        tiny
+        class="inline-flex w-auto shrink grow-0"
+        :disabled="isUpgrading"
+        @click="upgradeContract"
+        :icon="ArrowPathIcon"
+      >
+        {{ isUpgrading ? 'Upgrading...' : 'Upgrade code' }}
+      </Btn>
+    </div>
   </PageSection>
 </template>

@@ -14,6 +14,7 @@ def validators_registry(session: Session) -> Iterable[ModifiableValidatorsRegist
     yield ModifiableValidatorsRegistry(session)
 
 
+@pytest.mark.asyncio
 async def test_validators_registry(validators_registry: ModifiableValidatorsRegistry):
     stake = 1
     provider = "ollama"

@@ -33,4 +33,10 @@ export interface IJsonRpcService {
   getTransactionCount(address: GetTransactionCountRequest): Promise<number>;
   setFinalityWindowTime(time: number): Promise<any>;
   getFinalityWindowTime(): Promise<number>;
+  upgradeContractCode(
+    contractAddress: string,
+    newCode: string,
+    signature?: string,
+  ): Promise<{ transaction_hash: string; message: string }>;
+  getContractNonce(address: string): Promise<number>;
 }

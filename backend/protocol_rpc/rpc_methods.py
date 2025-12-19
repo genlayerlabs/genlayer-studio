@@ -227,6 +227,23 @@ def count_validators(
     return impl.count_validators(validators_registry=validators_registry)
 
 
+@rpc.method("sim_upgradeContractCode")
+def upgrade_contract_code(
+    contract_address: str,
+    new_code: str,
+    signature: str = None,
+    admin_key: str = None,
+    session: Session = Depends(get_db_session),
+) -> dict:
+    return impl.admin_upgrade_contract_code(
+        session=session,
+        contract_address=contract_address,
+        new_code=new_code,
+        signature=signature,
+        admin_key=admin_key,
+    )
+
+
 @rpc.method("sim_getTransactionsForAddress")
 def get_transactions_for_address(
     address: str,
@@ -334,6 +351,15 @@ def get_contract_code(
     session: Session = Depends(get_db_session),
 ) -> dict:
     return impl.get_contract_code(session=session, contract_address=contract_address)
+
+
+@rpc.method("gen_getContractNonce")
+def get_contract_nonce(
+    contract_address: str,
+    session: Session = Depends(get_db_session),
+) -> int:
+    """Get contract nonce (tx count TO contract) for upgrade signatures."""
+    return impl.get_contract_nonce(session=session, contract_address=contract_address)
 
 
 @rpc.method("gen_call")
