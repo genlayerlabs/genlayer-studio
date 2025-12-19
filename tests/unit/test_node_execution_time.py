@@ -86,7 +86,8 @@ class TestExecutionTimeEdgeCases(WithNode):
         mock_state = Mock()
 
         # Provide enough time.time() values for all calls in run_contract
-        with patch("time.time", side_effect=[5000.0, 5000.0, 5000.0]):
+        # Must patch backend.node.base.time.time since that module imports time directly
+        with patch("backend.node.base.time.time", side_effect=[5000.0, 5000.0, 5000.0]):
             with patch(
                 "backend.node.genvm.base.run_genvm_host", new_callable=AsyncMock
             ) as mock_run:
@@ -104,9 +105,10 @@ class TestExecutionTimeEdgeCases(WithNode):
     async def test_very_long_execution_time(self):
         """Test handling of very long execution times"""
         long_execution_time = 10.0  # seconds
-        # Provide enough time.time() values for all calls in get_contract_schema
+        # Provide enough time.time() values for all calls in _run_genvm
+        # Must patch backend.node.base.time.time since that module imports time directly
         with patch(
-            "time.time",
+            "backend.node.base.time.time",
             side_effect=[
                 6000.0,
                 6000.0 + long_execution_time,
