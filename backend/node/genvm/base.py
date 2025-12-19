@@ -56,9 +56,8 @@ def _agent_log(hypothesis_id: str, location: str, message: str, data: dict):
         "timestamp": int(_time.time() * 1000),
     }
     try:
-        with open(
-            "/Users/cristiamdasilva/genlayer/genlayer-studio/.cursor/debug.log", "a"
-        ) as f:
+        log_path = _os.getenv("AGENT_DEBUG_LOG_PATH", "/tmp/agent_debug.log")
+        with open(log_path, "a") as f:
             f.write(_json.dumps(payload) + "\n")
     except Exception:
         try:
@@ -227,7 +226,7 @@ class Host(genvmhost.IHost):
                 {
                     "result_code": getattr(type, "name", str(type)),
                     "message": res.get("message") if isinstance(res, dict) else None,
-                    "res_type": type(res).__name__,
+                    "res_type": res.__class__.__name__,
                 },
             )
             self._result = ExecutionError(res["message"], type)

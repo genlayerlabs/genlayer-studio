@@ -42,9 +42,8 @@ def _agent_log(hypothesis_id: str, location: str, message: str, data: dict):
         "timestamp": int(_time.time() * 1000),
     }
     try:
-        with open(
-            "/Users/cristiamdasilva/genlayer/genlayer-studio/.cursor/debug.log", "a"
-        ) as f:
+        log_path = _os.getenv("AGENT_DEBUG_LOG_PATH", "/tmp/agent_debug.log")
+        with open(log_path, "a") as f:
             f.write(_json.dumps(payload) + "\n")
     except Exception:
         try:
