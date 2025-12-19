@@ -479,14 +479,28 @@ async def health_check():
 
                 elapsed = datetime.utcnow() - blocked_at
 
-                # Check if blocked for more than 10 minutes - pod is unhealthy
-                if elapsed.total_seconds() > 600:  # 10 minutes = 600 seconds
+                # Check if blocked for too long - pod is unhealthy
+                # Env override: WORKER_BLOCKED_TX_UNHEALTHY_AFTER_MINUTES (default: 14 minutes)
+                try:
+                    blocked_tx_unhealthy_after_minutes = int(
+                        os.getenv("WORKER_BLOCKED_TX_UNHEALTHY_AFTER_MINUTES", "14")
+                    )
+                except ValueError:
+                    blocked_tx_unhealthy_after_minutes = 14
+                if blocked_tx_unhealthy_after_minutes <= 0:
+                    blocked_tx_unhealthy_after_minutes = 14
+
+                blocked_tx_unhealthy_after_seconds = (
+                    blocked_tx_unhealthy_after_minutes * 60
+                )
+
+                if elapsed.total_seconds() > blocked_tx_unhealthy_after_seconds:
                     return JSONResponse(
                         status_code=500,
                         content={
                             "status": "unhealthy",
                             "worker_id": worker.worker_id,
-                            "error": "Transaction blocked for more than 10 minutes",
+                            "error": f"Transaction blocked for more than {blocked_tx_unhealthy_after_minutes} minutes",
                             "blocked_duration_seconds": elapsed.total_seconds(),
                         },
                     )
