@@ -22,6 +22,34 @@ from genlayer_py import create_client, create_account, localnet
 RPC_URL = "http://localhost:4000/api"
 
 
+@pytest.fixture(scope="module", autouse=True)
+def ensure_validators_exist():
+    """Ensure validators exist before running tests in this module.
+
+    This is needed because other integration tests (e.g., icontracts/) may
+    delete all validators in their teardown, leaving no validators for
+    subsequent tests.
+    """
+    from tests.common.request import payload, post_request_localhost
+    from tests.common.response import has_success_status
+
+    # Check if validators exist
+    response = post_request_localhost(payload("sim_getAllValidators")).json()
+    validators = response.get("result", [])
+
+    if not validators:
+        # Create validators if none exist (using same approach as icontracts tests)
+        result = post_request_localhost(
+            payload("sim_createRandomValidators", 5, 8, 12, ["openai"], ["gpt-4o"])
+        ).json()
+        if not has_success_status(result):
+            pytest.fail(f"Failed to create validators: {result}")
+
+    yield
+
+    # No cleanup needed - other tests may need validators too
+
+
 def rpc_call(method: str, params: list = None):
     """Make a JSON-RPC call."""
     response = requests.post(
