@@ -95,6 +95,16 @@ class ConsensusWorker:
             genvm_manager,
         )
 
+        # Track retry counts for transactions that failed due to no validators
+        # Key: transaction_hash, Value: {"count": int, "last_attempt": float}
+        self._no_validators_retries: dict[str, dict] = {}
+        self._max_no_validators_retries = int(
+            os.environ.get("NO_VALIDATORS_MAX_RETRIES", "5")
+        )
+        self._no_validators_base_backoff = float(
+            os.environ.get("NO_VALIDATORS_BASE_BACKOFF_SECONDS", "30")
+        )
+
     async def claim_next_finalization(self, session: Session) -> Optional[dict]:
         """
         Claim the next transaction that needs finalization (appeal window expired).
@@ -517,6 +527,9 @@ class ConsensusWorker:
             transaction_data: Transaction data dictionary
             session: Database session
         """
+        # Import NoValidatorsAvailableError here to avoid circular imports
+        from backend.consensus.base import NoValidatorsAvailableError
+
         try:
             # Track current transaction for health monitoring
             self.current_transaction = {
@@ -620,6 +633,17 @@ class ConsensusWorker:
                 f"[Worker {self.worker_id}] Successfully processed transaction {transaction.hash}"
             )
 
+            # Clean up retry tracking on success
+            if transaction.hash in self._no_validators_retries:
+                del self._no_validators_retries[transaction.hash]
+
+        except NoValidatorsAvailableError:
+            # Handle no-validators case with retry logic and backoff
+            logger.warning(
+                f"[Worker {self.worker_id}] No validators available for transaction {transaction_data['hash']}"
+            )
+            await self._handle_no_validators_retry(transaction_data, session)
+
         except Exception as e:
             logger.exception(
                 f"[Worker {self.worker_id}] Error processing transaction {transaction_data['hash']}: {e}"
@@ -637,6 +661,62 @@ class ConsensusWorker:
                     f"[Worker {self.worker_id}] Failed to release transaction {transaction_data['hash']} in finally block: {release_error}",
                     exc_info=True,
                 )
+
+    async def _handle_no_validators_retry(
+        self, transaction_data: dict, session: Session
+    ):
+        """
+        Handle retry logic when no validators are available.
+        Implements exponential backoff and cancels after max retries.
+
+        Args:
+            transaction_data: Transaction data dictionary
+            session: Database session
+        """
+        tx_hash = transaction_data["hash"]
+        retry_info = self._no_validators_retries.get(
+            tx_hash, {"count": 0, "last_attempt": 0}
+        )
+        retry_info["count"] += 1
+        retry_info["last_attempt"] = time.time()
+        self._no_validators_retries[tx_hash] = retry_info
+
+        if retry_info["count"] >= self._max_no_validators_retries:
+            # Cancel the transaction after max retries
+            logger.error(
+                f"[Worker {self.worker_id}] Transaction {tx_hash} canceled after "
+                f"{retry_info['count']} retries - no validators available"
+            )
+            tx = session.query(Transactions).filter_by(hash=tx_hash).one()
+            tx.status = TransactionStatus.CANCELED
+            tx.consensus_data = {
+                "error": "no_validators_available",
+                "retries": retry_info["count"],
+            }
+            session.commit()
+
+            # Clean up retry tracking
+            del self._no_validators_retries[tx_hash]
+
+            # Send WebSocket notification
+            from backend.consensus.base import ConsensusAlgorithm
+
+            await ConsensusAlgorithm.dispatch_transaction_status_update(
+                TransactionsProcessor(session),
+                tx_hash,
+                TransactionStatus.CANCELED,
+                self.msg_handler,
+            )
+        else:
+            # Log retry attempt with backoff info
+            backoff = self._no_validators_base_backoff * (
+                2 ** (retry_info["count"] - 1)
+            )
+            logger.warning(
+                f"[Worker {self.worker_id}] No validators for {tx_hash}, "
+                f"retry {retry_info['count']}/{self._max_no_validators_retries}, "
+                f"next attempt in {backoff}s"
+            )
 
     async def _process_upgrade_transaction(
         self, transaction_data: dict, session: Session
@@ -1029,8 +1109,29 @@ class ConsensusWorker:
                             )
 
                             if transaction_data:
+                                tx_hash = transaction_data["hash"]
+
+                                # Check if transaction is in backoff due to no validators
+                                retry_info = self._no_validators_retries.get(tx_hash)
+                                if retry_info:
+                                    backoff = self._no_validators_base_backoff * (
+                                        2 ** (retry_info["count"] - 1)
+                                    )
+                                    time_since_last = (
+                                        time.time() - retry_info["last_attempt"]
+                                    )
+                                    if time_since_last < backoff:
+                                        # Still in backoff period, release and skip
+                                        logger.debug(
+                                            f"[Worker {self.worker_id}] Transaction {tx_hash} in backoff "
+                                            f"({time_since_last:.1f}s < {backoff}s), releasing"
+                                        )
+                                        self.release_transaction(session, tx_hash)
+                                        await asyncio.sleep(1)
+                                        continue
+
                                 logger.info(
-                                    f"[Worker {self.worker_id}] Claimed transaction {transaction_data['hash']}"
+                                    f"[Worker {self.worker_id}] Claimed transaction {tx_hash}"
                                 )
                                 # Process in a new session
                                 with self.get_session() as process_session:
