@@ -5,13 +5,20 @@ from typing import Optional, Union, Dict, Any
 import logging
 import asyncio
 
+import aiohttp
 from fastapi import APIRouter, FastAPI, Depends
+from fastapi.responses import JSONResponse
 from backend.database_handler.session_factory import get_database_manager
 from backend.protocol_rpc.fastapi_rpc_router import FastAPIRPCRouter
 from backend.protocol_rpc.dependencies import get_rpc_router_optional
 
 # Create FastAPI router for health endpoints
 health_router = APIRouter(tags=["health"])
+
+# GenVM manager health probe cache (avoid probing on every /health hit)
+_genvm_health_last_check: float = 0.0
+_genvm_health_last_ok: bool = True
+_genvm_health_last_error: str | None = None
 
 
 @health_router.get("/health")
@@ -80,6 +87,56 @@ async def health_check(
                     overall_status = "degraded"
                 issues.append("redis_unreachable")
 
+        # 6. Check GenVM manager health (with caching to avoid probing on every hit)
+        # Returns 503 to trigger container restart when GenVM is unresponsive
+        global _genvm_health_last_check, _genvm_health_last_ok, _genvm_health_last_error
+
+        try:
+            now = time.time()
+            probe_interval_s = float(
+                os.getenv("GENVM_MANAGER_HEALTH_PROBE_INTERVAL_SECONDS", "5")
+            )
+            if now - _genvm_health_last_check >= probe_interval_s:
+                _genvm_health_last_check = now
+                status_url = os.getenv(
+                    "GENVM_MANAGER_STATUS_URL", "http://127.0.0.1:3999/status"
+                )
+                timeout_s = float(
+                    os.getenv("GENVM_MANAGER_HEALTH_TIMEOUT_SECONDS", "2")
+                )
+                try:
+                    async with aiohttp.request(
+                        "GET",
+                        status_url,
+                        timeout=aiohttp.ClientTimeout(total=timeout_s),
+                    ) as resp:
+                        if resp.status != 200:
+                            _genvm_health_last_ok = False
+                            _genvm_health_last_error = (
+                                f"genvm_manager_status_http_{resp.status}"
+                            )
+                        else:
+                            _genvm_health_last_ok = True
+                            _genvm_health_last_error = None
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    _genvm_health_last_ok = False
+                    _genvm_health_last_error = f"genvm_manager_status_error: {exc}"
+
+            if not _genvm_health_last_ok:
+                # Return 503 to trigger Kubernetes/ArgoCD container restart
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "status": "unhealthy",
+                        "error": "genvm_manager_unresponsive",
+                        "detail": _genvm_health_last_error,
+                        "timestamp": time.time(),
+                    },
+                )
+        except Exception as e:
+            # Don't fail health checks due to probe implementation issues
+            logging.warning(f"GenVM health probe failed unexpectedly: {e}")
+
         return {
             "status": overall_status,
             "timestamp": time.time(),
@@ -99,6 +156,9 @@ async def health_check(
                     "status": memory_status,
                     "usage_mb": memory_health.get("memory_usage_mb"),
                     "percent": memory_health.get("memory_percent"),
+                },
+                "genvm": {
+                    "status": "healthy",
                 },
             },
             "meta": {

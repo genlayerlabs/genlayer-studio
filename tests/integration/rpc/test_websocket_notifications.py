@@ -10,7 +10,7 @@ from backend.protocol_rpc.websocket import (
 )
 
 
-class TestApplication:
+class WebSocketTestApp:
     """Helper wrapper to expose shared broadcast channel."""
 
     def __init__(self) -> None:
@@ -52,7 +52,7 @@ class TestApplication:
 
 
 def test_websocket_subscription_and_room_emit() -> None:
-    test_app = TestApplication()
+    test_app = WebSocketTestApp()
 
     with TestClient(test_app.app) as client:
         with client.websocket_connect("/ws") as websocket:
@@ -73,7 +73,7 @@ def test_websocket_subscription_and_room_emit() -> None:
 
 
 def test_websocket_broadcast_reaches_all_clients() -> None:
-    test_app = TestApplication()
+    test_app = WebSocketTestApp()
 
     with TestClient(test_app.app) as client:
         with client.websocket_connect("/ws") as first:
