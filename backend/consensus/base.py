@@ -3670,7 +3670,7 @@ def _get_messages_data(
             else:
                 from eth_utils.crypto import keccak
                 from backend.node.types import Address
-                from backend.node.base import SIMULATOR_CHAIN_ID
+                from backend.node.base import get_simulator_chain_id
 
                 arr = bytearray()
                 arr.append(1)
@@ -3678,7 +3678,7 @@ def _get_messages_data(
                 arr.extend(
                     pending_transaction.salt_nonce.to_bytes(32, "big", signed=False)
                 )
-                arr.extend(SIMULATOR_CHAIN_ID.to_bytes(32, "big", signed=False))
+                arr.extend(get_simulator_chain_id().to_bytes(32, "big", signed=False))
                 new_contract_address = Address(keccak(arr)[:20]).as_hex
                 context.accounts_manager.create_new_account_with_address(
                     new_contract_address

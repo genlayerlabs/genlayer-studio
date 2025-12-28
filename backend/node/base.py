@@ -29,6 +29,19 @@ from .genvm.origin import public_abi
 from .types import Address
 
 
+def _ensure_dotenv_loaded_for_chain_id() -> None:
+    if os.getenv("HARDHAT_CHAIN_ID") is not None:
+        return
+
+    try:
+        from dotenv import load_dotenv
+    except Exception:
+        return
+
+    dotenv_path = Path(__file__).resolve().parents[2] / ".env"
+    load_dotenv(dotenv_path=dotenv_path, override=False)
+
+
 # region agent log
 def _agent_log(hypothesis_id: str, location: str, message: str, data: dict):
     """Best-effort NDJSON log for debug mode; never raises. Avoid secrets."""
@@ -60,7 +73,8 @@ def _agent_log(hypothesis_id: str, location: str, message: str, data: dict):
 
 
 def _parse_chain_id() -> int:
-    raw = os.getenv("HARDHAT_CHAIN_ID", "61999")
+    _ensure_dotenv_loaded_for_chain_id()
+    raw = os.getenv("HARDHAT_CHAIN_ID", "61127")
     try:
         return int(raw)
     except ValueError as exc:
@@ -69,7 +83,9 @@ def _parse_chain_id() -> int:
         ) from exc
 
 
-SIMULATOR_CHAIN_ID: typing.Final[int] = _parse_chain_id()
+@functools.lru_cache(maxsize=1)
+def get_simulator_chain_id() -> int:
+    return _parse_chain_id()
 
 
 def _filter_genvm_log_by_level(genvm_log: list[dict]) -> list[dict]:
@@ -865,7 +881,7 @@ class Node:
             ).as_b64,  # FIXME: no origin in simulator #751
             "value": None,
             "chain_id": str(
-                SIMULATOR_CHAIN_ID
+                get_simulator_chain_id()
             ),  # NOTE: it can overflow u64 so better to wrap it into a string
         }
         if transaction_datetime is not None:

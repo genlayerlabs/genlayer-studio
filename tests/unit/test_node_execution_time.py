@@ -13,7 +13,7 @@ from backend.node.genvm.base import (
 )
 import backend.node.genvm.base as genvm_base
 import backend.node.base as node_base
-from backend.node.base import SIMULATOR_CHAIN_ID, Node
+from backend.node.base import Node
 from backend.domain.types import Validator, LLMProvider
 from backend.database_handler.contract_snapshot import ContractSnapshot
 

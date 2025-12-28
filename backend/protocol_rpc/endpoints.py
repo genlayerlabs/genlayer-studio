@@ -43,7 +43,7 @@ from backend.database_handler.transactions_processor import (
 
 
 logger = logging.getLogger(__name__)
-from backend.node.base import Node, SIMULATOR_CHAIN_ID
+from backend.node.base import Node, get_simulator_chain_id
 from backend.node.types import ExecutionMode, ExecutionResultStatus
 from backend.consensus.base import ConsensusAlgorithm
 from backend.protocol_rpc.call_interceptor import handle_consensus_data_call
@@ -1369,11 +1369,11 @@ def get_finality_window_time(consensus: ConsensusAlgorithm) -> int:
 
 
 def get_chain_id() -> str:
-    return hex(SIMULATOR_CHAIN_ID)
+    return hex(get_simulator_chain_id())
 
 
 def get_net_version() -> str:
-    return str(SIMULATOR_CHAIN_ID)
+    return str(get_simulator_chain_id())
 
 
 def get_block_number(transactions_processor: TransactionsProcessor) -> str:
