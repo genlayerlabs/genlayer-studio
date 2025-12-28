@@ -26,15 +26,19 @@ docker compose down -v  # Stop and clear data
 
 ### Testing
 ```bash
-# Backend tests (Python)
-pytest tests/unit/
-pytest tests/integration/
-pytest tests/e2e/
-pytest -xvs tests/unit/test_specific.py  # Run single test file
+# DB/SQLAlchemy tests (dockerized, self-contained - primary backend tests)
+docker compose -f tests/db-sqlalchemy/docker-compose.yml --project-directory . run --build --rm tests
+
+# Backend unit tests (requires local venv with deps installed)
+# python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+.venv/bin/pytest tests/unit/ -v --tb=short --ignore=tests/unit/test_rpc_endpoint_manager.py
+
+# Integration tests (requires venv + running containers via docker compose up)
+.venv/bin/gltest --contracts-dir . tests/integration/ -svv
 
 # Frontend tests
-cd frontend && npm run test  # Unit tests
-cd frontend && npm run test:e2e  # E2E tests
+cd frontend && npm run test      # Unit tests (Vitest)
+cd frontend && npm run test:e2e  # E2E tests (Mocha/Selenium)
 ```
 
 ### Database Operations

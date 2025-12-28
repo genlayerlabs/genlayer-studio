@@ -337,11 +337,26 @@ class TransactionsProcessor:
                 round_validators.append(validator_address)
         else:
             round_number = "0"
-        last_round_result = int(
-            determine_consensus_from_votes(
-                [vote.lower() for vote in validator_votes_name]
+
+        # Handle upgrade transactions specially - they bypass consensus
+        # and have upgrade_result instead of votes
+        if (
+            transaction_data.get("type") == TransactionType.UPGRADE_CONTRACT
+            and transaction_data.get("consensus_data") is not None
+            and "upgrade_result" in transaction_data["consensus_data"]
+        ):
+            from backend.consensus.types import ConsensusResult
+
+            if transaction_data["consensus_data"]["upgrade_result"] == "success":
+                last_round_result = int(ConsensusResult.MAJORITY_AGREE)
+            else:
+                last_round_result = int(ConsensusResult.MAJORITY_DISAGREE)
+        else:
+            last_round_result = int(
+                determine_consensus_from_votes(
+                    [vote.lower() for vote in validator_votes_name]
+                )
             )
-        )
 
         transaction_data["last_round"] = {
             "round": round_number,
@@ -543,6 +558,23 @@ class TransactionsProcessor:
         return transaction_data
 
     def _process_result(self, transaction_data: dict) -> dict:
+        # Handle upgrade transactions specially - they bypass consensus
+        # and have upgrade_result instead of votes
+        if (
+            transaction_data.get("type") == TransactionType.UPGRADE_CONTRACT
+            and transaction_data.get("consensus_data") is not None
+            and "upgrade_result" in transaction_data["consensus_data"]
+        ):
+            from backend.consensus.types import ConsensusResult
+
+            if transaction_data["consensus_data"]["upgrade_result"] == "success":
+                consensus_result = ConsensusResult.MAJORITY_AGREE
+            else:
+                consensus_result = ConsensusResult.MAJORITY_DISAGREE
+            transaction_data["result"] = int(consensus_result)
+            transaction_data["result_name"] = consensus_result.value
+            return transaction_data
+
         if (transaction_data["consensus_data"] is not None) and (
             "votes" in transaction_data["consensus_data"]
         ):

@@ -95,6 +95,16 @@ class ConsensusWorker:
             genvm_manager,
         )
 
+        # Track retry counts for transactions that failed due to no validators
+        # Key: transaction_hash, Value: {"count": int, "last_attempt": float}
+        self._no_validators_retries: dict[str, dict] = {}
+        self._max_no_validators_retries = int(
+            os.environ.get("NO_VALIDATORS_MAX_RETRIES", "5")
+        )
+        self._no_validators_base_backoff = float(
+            os.environ.get("NO_VALIDATORS_BASE_BACKOFF_SECONDS", "30")
+        )
+
     async def claim_next_finalization(self, session: Session) -> Optional[dict]:
         """
         Claim the next transaction that needs finalization (appeal window expired).
@@ -517,12 +527,22 @@ class ConsensusWorker:
             transaction_data: Transaction data dictionary
             session: Database session
         """
+        # Import NoValidatorsAvailableError here to avoid circular imports
+        from backend.consensus.base import NoValidatorsAvailableError
+
         try:
             # Track current transaction for health monitoring
             self.current_transaction = {
                 "hash": transaction_data.get("hash"),
                 "blocked_at": transaction_data.get("blocked_at"),
             }
+
+            # Handle upgrade transactions specially (no consensus needed)
+            from backend.domain.types import TransactionType
+
+            if transaction_data.get("type") == TransactionType.UPGRADE_CONTRACT.value:
+                await self._process_upgrade_transaction(transaction_data, session)
+                return
 
             # Convert to Transaction domain object
             transaction = Transaction.from_dict(transaction_data)
@@ -613,6 +633,17 @@ class ConsensusWorker:
                 f"[Worker {self.worker_id}] Successfully processed transaction {transaction.hash}"
             )
 
+            # Clean up retry tracking on success
+            if transaction.hash in self._no_validators_retries:
+                del self._no_validators_retries[transaction.hash]
+
+        except NoValidatorsAvailableError:
+            # Handle no-validators case with retry logic and backoff
+            logger.warning(
+                f"[Worker {self.worker_id}] No validators available for transaction {transaction_data['hash']}"
+            )
+            await self._handle_no_validators_retry(transaction_data, session)
+
         except Exception as e:
             logger.exception(
                 f"[Worker {self.worker_id}] Error processing transaction {transaction_data['hash']}: {e}"
@@ -628,6 +659,200 @@ class ConsensusWorker:
             except Exception as release_error:
                 logger.error(
                     f"[Worker {self.worker_id}] Failed to release transaction {transaction_data['hash']} in finally block: {release_error}",
+                    exc_info=True,
+                )
+
+    async def _handle_no_validators_retry(
+        self, transaction_data: dict, session: Session
+    ):
+        """
+        Handle retry logic when no validators are available.
+        Implements exponential backoff and cancels after max retries.
+
+        Args:
+            transaction_data: Transaction data dictionary
+            session: Database session
+        """
+        tx_hash = transaction_data["hash"]
+        retry_info = self._no_validators_retries.get(
+            tx_hash, {"count": 0, "last_attempt": 0}
+        )
+        retry_info["count"] += 1
+        retry_info["last_attempt"] = time.time()
+        self._no_validators_retries[tx_hash] = retry_info
+
+        if retry_info["count"] >= self._max_no_validators_retries:
+            # Cancel the transaction after max retries
+            logger.error(
+                f"[Worker {self.worker_id}] Transaction {tx_hash} canceled after "
+                f"{retry_info['count']} retries - no validators available"
+            )
+            tx = session.query(Transactions).filter_by(hash=tx_hash).one()
+            tx.status = TransactionStatus.CANCELED
+            tx.consensus_data = {
+                "error": "no_validators_available",
+                "retries": retry_info["count"],
+            }
+            session.commit()
+
+            # Clean up retry tracking
+            del self._no_validators_retries[tx_hash]
+
+            # Send WebSocket notification
+            from backend.consensus.base import ConsensusAlgorithm
+
+            await ConsensusAlgorithm.dispatch_transaction_status_update(
+                TransactionsProcessor(session),
+                tx_hash,
+                TransactionStatus.CANCELED,
+                self.msg_handler,
+            )
+        else:
+            # Log retry attempt with backoff info
+            backoff = self._no_validators_base_backoff * (
+                2 ** (retry_info["count"] - 1)
+            )
+            logger.warning(
+                f"[Worker {self.worker_id}] No validators for {tx_hash}, "
+                f"retry {retry_info['count']}/{self._max_no_validators_retries}, "
+                f"next attempt in {backoff}s"
+            )
+
+    async def _process_upgrade_transaction(
+        self, transaction_data: dict, session: Session
+    ):
+        """
+        Process a contract upgrade transaction (type=3). No consensus needed.
+        Directly updates contract code in database.
+
+        Args:
+            transaction_data: Transaction data dictionary containing new_code
+            session: Database session
+        """
+        import base64
+        from backend.node.genvm import get_code_slot
+        from backend.database_handler.models import CurrentState
+
+        tx_hash = transaction_data["hash"]
+
+        try:
+            contract_address = transaction_data["to_address"]
+            data = transaction_data.get("data") or {}
+            new_code = data.get("new_code")
+            if not new_code:
+                raise ValueError("Missing new_code in transaction data")
+            logger.info(
+                f"[Worker {self.worker_id}] Processing upgrade transaction {tx_hash} for contract {contract_address}"
+            )
+
+            # Load contract
+            contract = (
+                session.query(CurrentState).filter_by(id=contract_address).one_or_none()
+            )
+            if not contract:
+                raise ValueError(f"Contract {contract_address} not found")
+
+            # Validate contract has expected state structure
+            if (
+                not contract.data
+                or "state" not in contract.data
+                or "accepted" not in contract.data["state"]
+                or "finalized" not in contract.data["state"]
+            ):
+                raise ValueError(
+                    f"Contract {contract_address} has invalid state structure"
+                )
+
+            # Validate Python syntax before proceeding
+            try:
+                compile(new_code, "<upgrade>", "exec")
+            except SyntaxError as e:
+                raise ValueError(f"Invalid Python syntax: {e}") from e
+
+            # Encode code for slot storage: base64(4-byte-len-prefix + code-bytes)
+            code_bytes = new_code.encode("utf-8")
+            code_len_prefix = len(code_bytes).to_bytes(
+                4, byteorder="little", signed=False
+            )
+            code_slot_value = base64.b64encode(code_len_prefix + code_bytes).decode(
+                "ascii"
+            )
+            code_slot_key = base64.b64encode(get_code_slot()).decode("ascii")
+
+            # Update contract data - update BOTH accepted and finalized state
+            # Since upgrade transactions bypass consensus and go directly to FINALIZED,
+            # both state trees must be updated for reads to see the new code
+            # Note: data["code"] must be base64 encoded (matches deployment format in node/types.py)
+            contract.data = {
+                "code": base64.b64encode(code_bytes).decode("ascii"),
+                "state": {
+                    "accepted": {
+                        **contract.data["state"]["accepted"],
+                        code_slot_key: code_slot_value,
+                    },
+                    "finalized": {
+                        **contract.data["state"]["finalized"],
+                        code_slot_key: code_slot_value,
+                    },
+                },
+            }
+
+            # Store success in consensus_data for receipt
+            tx = session.query(Transactions).filter_by(hash=tx_hash).one()
+            tx.consensus_data = {
+                "upgrade_result": "success",
+                "contract_address": contract_address,
+            }
+            session.commit()
+
+            # Mark transaction as finalized and send WebSocket notification
+            transactions_processor = TransactionsProcessor(session)
+            await ConsensusAlgorithm.dispatch_transaction_status_update(
+                transactions_processor,
+                tx_hash,
+                TransactionStatus.FINALIZED,
+                self.msg_handler,
+            )
+
+            logger.info(
+                f"[Worker {self.worker_id}] Contract {contract_address} upgraded successfully via tx {tx_hash}"
+            )
+
+        except Exception as e:
+            logger.error(
+                f"[Worker {self.worker_id}] Contract upgrade failed for {tx_hash}: {e}",
+                exc_info=True,
+            )
+            session.rollback()
+
+            # Mark transaction as canceled on failure and send WebSocket notification
+            try:
+                tx = session.query(Transactions).filter_by(hash=tx_hash).one()
+                tx.consensus_data = {"upgrade_result": "failed", "error": str(e)}
+                session.commit()
+
+                transactions_processor = TransactionsProcessor(session)
+                await ConsensusAlgorithm.dispatch_transaction_status_update(
+                    transactions_processor,
+                    tx_hash,
+                    TransactionStatus.CANCELED,
+                    self.msg_handler,
+                )
+            except Exception as update_error:
+                logger.error(
+                    f"[Worker {self.worker_id}] Failed to update failed upgrade tx status: {update_error}"
+                )
+
+        finally:
+            # Clear current transaction tracking
+            self.current_transaction = None
+            # Release the transaction
+            try:
+                with self.get_session() as release_session:
+                    self.release_transaction(release_session, tx_hash)
+            except Exception as release_error:
+                logger.error(
+                    f"[Worker {self.worker_id}] Failed to release upgrade transaction {tx_hash}: {release_error}",
                     exc_info=True,
                 )
 
@@ -884,8 +1109,29 @@ class ConsensusWorker:
                             )
 
                             if transaction_data:
+                                tx_hash = transaction_data["hash"]
+
+                                # Check if transaction is in backoff due to no validators
+                                retry_info = self._no_validators_retries.get(tx_hash)
+                                if retry_info:
+                                    backoff = self._no_validators_base_backoff * (
+                                        2 ** (retry_info["count"] - 1)
+                                    )
+                                    time_since_last = (
+                                        time.time() - retry_info["last_attempt"]
+                                    )
+                                    if time_since_last < backoff:
+                                        # Still in backoff period, release and skip
+                                        logger.debug(
+                                            f"[Worker {self.worker_id}] Transaction {tx_hash} in backoff "
+                                            f"({time_since_last:.1f}s < {backoff}s), releasing"
+                                        )
+                                        self.release_transaction(session, tx_hash)
+                                        await asyncio.sleep(1)
+                                        continue
+
                                 logger.info(
-                                    f"[Worker {self.worker_id}] Claimed transaction {transaction_data['hash']}"
+                                    f"[Worker {self.worker_id}] Claimed transaction {tx_hash}"
                                 )
                                 # Process in a new session
                                 with self.get_session() as process_session:

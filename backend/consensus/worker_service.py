@@ -372,17 +372,29 @@ async def health_check():
     # Check if worker task has died and isn't restarting
     if worker_task and worker_task.done():
         # Worker task finished unexpectedly - this is a failure
+        error_type = "unknown"
+        error_message = ""
         try:
             # This will re-raise any exception from the task
             worker_task.result()
-        except Exception as e:
-            logger.error(f"Worker task died with exception: {e}")
+        except asyncio.CancelledError as e:
+            # CancelledError inherits from BaseException, not Exception
+            error_type = "CancelledError"
+            error_message = str(e) or "task was cancelled"
+            logger.error(f"Worker task was cancelled: {error_message}")
+        except BaseException as e:
+            # Catch all exceptions including SystemExit, KeyboardInterrupt
+            error_type = type(e).__name__
+            error_message = str(e)
+            logger.error(f"Worker task died with {error_type}: {error_message}")
         return JSONResponse(
             status_code=503,
             content={
                 "status": "failed",
                 "worker_id": worker.worker_id,
                 "error": "worker_task_died",
+                "error_type": error_type,
+                "error_message": error_message[:500] if error_message else "",
                 "restart_count": worker_restart_count,
             },
         )

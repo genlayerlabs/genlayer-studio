@@ -158,8 +158,10 @@ const badgeColorClass = computed(() => {
   if (props.transaction.statusName !== 'FINALIZED') {
     return '';
   } else {
+    const executionResult =
+      props.transaction.data?.last_round?.result || leaderReceipt.value?.result;
     if (
-      props.transaction.data?.last_round?.result === 6 &&
+      executionResult === 6 &&
       leaderReceipt.value?.execution_result !== 'ERROR'
     ) {
       return '!bg-green-500';
@@ -184,7 +186,9 @@ const badgeColorClass = computed(() => {
       {{
         transaction.type === 'method'
           ? transaction.decodedData?.functionName
-          : 'Deploy'
+          : transaction.type === 'upgrade'
+            ? 'Upgrade'
+            : 'Deploy'
       }}
     </div>
 
@@ -263,7 +267,9 @@ const badgeColorClass = computed(() => {
               {{
                 transaction.type === 'method'
                   ? 'Method Call'
-                  : 'Contract Deployment'
+                  : transaction.type === 'upgrade'
+                    ? 'Code Upgrade'
+                    : 'Contract Deployment'
               }}
             </span>
           </div>
@@ -362,7 +368,7 @@ const badgeColorClass = computed(() => {
           </div>
         </ModalSection>
 
-        <ModalSection v-if="transaction.data.data">
+        <ModalSection v-if="transaction.data.data?.calldata">
           <template #title>Input</template>
 
           <pre
@@ -377,7 +383,7 @@ const badgeColorClass = computed(() => {
           >
         </ModalSection>
 
-        <ModalSection v-if="transaction.data.data">
+        <ModalSection v-if="transaction.data.data?.calldata">
           <template #title>Output</template>
           <div>
             <pre

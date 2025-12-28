@@ -582,15 +582,41 @@ async def run_genvm(
     fut_proc = asyncio.ensure_future(wrap_proc())
     fut_prob = asyncio.ensure_future(prob_died())
 
+    # Map futures to names for debugging
+    task_names = {
+        id(fut_host): "host_loop",
+        id(fut_proc): "genvm_run",
+        id(fut_prob): "prob_died",
+    }
+
     # IMPORTANT: if proc setup fails (e.g., manager accepts TCP but never replies),
     # don't wait forever on host_loop.
     done, pending = await asyncio.wait(
         [fut_host, fut_proc, fut_prob], return_when=asyncio.FIRST_EXCEPTION
     )
 
+    # Log which tasks completed/failed for debugging
+    done_names = [task_names.get(id(t), "unknown") for t in done]
+    pending_names = [task_names.get(id(t), "unknown") for t in pending]
+    logger.debug(
+        "asyncio.wait returned",
+        done_tasks=done_names,
+        pending_tasks=pending_names,
+        genvm_id=genvm_id_cell[0],
+    )
+
     # If anything errored, stop the host loop.
     for task in done:
-        if task.exception() is not None:
+        exc = task.exception()
+        if exc is not None:
+            task_name = task_names.get(id(task), "unknown")
+            logger.error(
+                "task raised exception",
+                task_name=task_name,
+                exception_type=type(exc).__name__,
+                exception_msg=str(exc),
+                genvm_id=genvm_id_cell[0],
+            )
             cancellation_event.set()
 
     # Cancel any pending tasks to prevent leaks
@@ -610,18 +636,49 @@ async def run_genvm(
         except asyncio.CancelledError:
             pass
 
-    exceptions: list[Exception] = []
+    # Collect exceptions from all tasks, including CancelledError
+    # Note: CancelledError inherits from BaseException, not Exception
+    exceptions: list[BaseException] = []
+    cancelled_tasks: list[str] = []
+
     try:
         fut_host.result()
-    except Exception as e:
-        exceptions.append(e)
-    try:
-        fut_proc.result()
-    except Exception as e:
+    except asyncio.CancelledError:
+        cancelled_tasks.append("host_loop")
+    except BaseException as e:
         exceptions.append(e)
 
+    try:
+        fut_proc.result()
+    except asyncio.CancelledError:
+        cancelled_tasks.append("genvm_run")
+    except BaseException as e:
+        exceptions.append(e)
+
+    # Log if tasks were cancelled (helps debug root cause)
+    if cancelled_tasks:
+        logger.debug(
+            "tasks were cancelled",
+            cancelled_tasks=cancelled_tasks,
+            exception_count=len(exceptions),
+            genvm_id=genvm_id_cell[0],
+        )
+
     if len(exceptions) > 0:
-        raise Exception(*exceptions) from exceptions[0]
+        # Include cancelled tasks info in the exception message for debugging
+        error_details = {
+            "exceptions": [f"{type(e).__name__}: {e}" for e in exceptions],
+            "cancelled_tasks": cancelled_tasks,
+            "genvm_id": genvm_id_cell[0],
+        }
+        logger.error("genvm execution failed", **error_details)
+        raise Exception(f"genvm execution failed: {error_details}") from exceptions[0]
+
+    # If all tasks were cancelled but no exceptions, something went wrong
+    if cancelled_tasks and len(exceptions) == 0:
+        error_msg = f"all genvm tasks cancelled without error: cancelled={cancelled_tasks}, genvm_id={genvm_id_cell[0]}"
+        logger.error(error_msg)
+        raise Exception(error_msg)
 
     genvm_id = genvm_id_cell[0]
     if genvm_id is not None:

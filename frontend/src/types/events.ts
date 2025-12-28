@@ -23,6 +23,9 @@ export interface EventProperties {
     contract_name: string;
     method_name: string;
   };
+  upgraded_contract: {
+    contract_name: string;
+  };
 }
 
 export type EventName = keyof EventProperties;

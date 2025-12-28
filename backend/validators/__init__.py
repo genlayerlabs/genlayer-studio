@@ -223,14 +223,21 @@ class Manager:
 
     @contextlib.asynccontextmanager
     async def snapshot(self):
-        assert self._cached_snapshot is not None
-
-        snap = deepcopy(self._cached_snapshot)
+        # Acquire lock to ensure we don't read _cached_snapshot while it's being updated
+        async with self._restart_llm_lock:
+            if self._cached_snapshot is None:
+                raise RuntimeError(
+                    "Validators manager snapshot not initialized. "
+                    "Ensure restart() was called successfully."
+                )
+            snap = deepcopy(self._cached_snapshot)
         yield snap
 
     @contextlib.asynccontextmanager
     async def temporal_snapshot(self, validators: list[domain.Validator]):
-        original_snapshot = deepcopy(self._cached_snapshot)
+        # Capture original snapshot while holding lock to avoid race condition
+        async with self._restart_llm_lock:
+            original_snapshot = deepcopy(self._cached_snapshot)
 
         temp_snapshot = await self._get_snap_from_validators(validators)
         await self._change_providers_from_snapshot(temp_snapshot)

@@ -77,6 +77,12 @@ type NodeFactory = Callable[
 ]
 
 
+class NoValidatorsAvailableError(Exception):
+    """Raised when no validators are available to process a transaction."""
+
+    pass
+
+
 def _redact_consensus_data_for_log(consensus_data_dict: dict) -> dict:
     """
     Return a redacted copy of the consensus data suitable for logging.
@@ -2443,7 +2449,9 @@ class PendingState(TransactionState):
                     transaction_hash=context.transaction.hash,
                 )
             )
-            return None
+            raise NoValidatorsAvailableError(
+                f"No validators available for transaction {context.transaction.hash}"
+            )
 
         # Determine the involved validators based on whether the transaction is appealed
         if (
