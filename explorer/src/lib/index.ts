@@ -8,4 +8,4 @@ export * from './transactionUtils';
 export * from './constants';
 
 // Database
-export { pool } from './db';
+export { default as pool } from './db';
