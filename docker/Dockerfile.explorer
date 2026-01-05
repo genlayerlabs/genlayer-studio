@@ -11,9 +11,8 @@ CMD ["npm", "run", "dev"]
 FROM base AS builder
 RUN npm run build
 
-FROM alpine:3.20 AS final
-RUN apk add --no-cache nodejs~=22 npm~=10 && \
-    addgroup --system explorer-user && adduser --system --ingroup explorer-user explorer-user && \
+FROM node:22.14.0-alpine3.20 AS final
+RUN addgroup --system explorer-user && adduser --system --ingroup explorer-user explorer-user && \
     mkdir /app && chown -R explorer-user:explorer-user /app
 WORKDIR /app
 COPY --from=builder --chown=explorer-user:explorer-user /app/.next /app/.next
