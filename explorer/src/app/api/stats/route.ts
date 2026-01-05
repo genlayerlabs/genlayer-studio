@@ -37,12 +37,12 @@ export async function GET() {
       `);
 
       // Get transaction types breakdown (Deploy vs Call)
-      // Deploy: type 0 OR (type 1 with contract_code in contract_snapshot)
-      // Call: type 1 or 2 without contract_code
+      // Deploy: type 0 OR (type 1,2,3 with contract_code in contract_snapshot)
+      // Call: remaining transactions without contract_code
       const deployResult = await client.query(`
         SELECT COUNT(*) as count FROM transactions
         WHERE type = 0
-           OR (type = 1 AND (
+           OR (type IN (1, 2, 3) AND (
              contract_snapshot->>'contract_code' IS NOT NULL
              OR contract_snapshot->'states'->'finalized'->>'contract_code' IS NOT NULL
              OR contract_snapshot->'states'->'accepted'->>'contract_code' IS NOT NULL
