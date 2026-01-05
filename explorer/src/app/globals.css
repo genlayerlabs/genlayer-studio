@@ -80,8 +80,7 @@ tbody tr:hover {
 /* Focus styles */
 input:focus, select:focus, button:focus {
   outline: none;
-  ring: 2px;
-  ring-color: #3b82f6;
+  box-shadow: 0 0 0 2px #3b82f6;
 }
 
 /* Animation utilities */

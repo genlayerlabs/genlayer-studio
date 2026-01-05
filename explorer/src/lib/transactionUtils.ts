@@ -38,7 +38,7 @@ export function getTimeToAccepted(tx: Transaction): string | null {
 
   if (pendingTime === undefined || acceptedTime === undefined) return null;
 
-  return formatDuration(acceptedTime - pendingTime);
+  return formatDuration((acceptedTime - pendingTime) / 1000);
 }
 
 /**
@@ -57,7 +57,7 @@ export function getTimeToFinalized(tx: Transaction): string | null {
 
   if (pendingTime === undefined || finalizedTime === undefined) return null;
 
-  return formatDuration(finalizedTime - pendingTime);
+  return formatDuration((finalizedTime - pendingTime) / 1000);
 }
 
 /**

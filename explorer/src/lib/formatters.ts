@@ -20,10 +20,13 @@ export function formatTimestamp(ts: number): string {
 }
 
 /**
- * Get the duration between two timestamps (in seconds)
+ * Get the duration between two timestamps (auto-detects seconds vs milliseconds)
  */
 export function getDuration(start: number, end: number): string {
-  const durationMs = Math.abs(end - start) * 1000;
+  // Normalize to milliseconds (same logic as formatTimestamp)
+  const startMs = start < 1e12 ? start * 1000 : start;
+  const endMs = end < 1e12 ? end * 1000 : end;
+  const durationMs = Math.abs(endMs - startMs);
   if (durationMs < 1000) return `${durationMs.toFixed(0)}ms`;
   if (durationMs < 60000) return `${(durationMs / 1000).toFixed(2)}s`;
   return `${(durationMs / 60000).toFixed(2)}min`;
