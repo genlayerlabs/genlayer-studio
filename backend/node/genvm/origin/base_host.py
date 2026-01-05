@@ -22,6 +22,31 @@ SLOT_ID_SIZE = 32
 from .logger import Logger, NoLogger
 
 
+def _get_timeout_seconds(env_key: str, default: float) -> float:
+    raw = os.getenv(env_key)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _http_timeout(
+    *,
+    total_s: float,
+    connect_s: float | None = None,
+    sock_read_s: float | None = None,
+) -> aiohttp.ClientTimeout:
+    """
+    Explicit aiohttp timeout to avoid wedging consensus when the local GenVM manager
+    accepts a connection but never responds.
+    """
+    return aiohttp.ClientTimeout(
+        total=total_s, connect=connect_s, sock_read=sock_read_s
+    )
+
+
 class HostException(Exception):
     def __init__(self, error_code: host_fns.Errors, message: str = ""):
         if error_code == host_fns.Errors.OK:
@@ -126,6 +151,15 @@ async def get_pre_deployment_writes(
         },
         url=f"{manager_uri}/contract/pre-deploy-writes",
         data=code,
+        timeout=_http_timeout(
+            total_s=_get_timeout_seconds(
+                "GENVM_MANAGER_PREDEPLOY_HTTP_TIMEOUT_SECONDS", 10.0
+            ),
+            connect_s=3.0,
+            sock_read_s=_get_timeout_seconds(
+                "GENVM_MANAGER_PREDEPLOY_HTTP_TIMEOUT_SECONDS", 10.0
+            ),
+        ),
     ) as resp:
         if resp.status != 200:
             raise Exception(
@@ -371,6 +405,13 @@ async def _send_timeout(manager_uri: str, genvm_id: str, logger: Logger):
         async with aiohttp.request(
             "DELETE",
             f"{manager_uri}/genvm/{genvm_id}?wait_timeout_ms=20",
+            timeout=_http_timeout(
+                total_s=_get_timeout_seconds(
+                    "GENVM_MANAGER_DELETE_HTTP_TIMEOUT_SECONDS", 3.0
+                ),
+                connect_s=1.5,
+                sock_read_s=1.5,
+            ),
         ) as resp:
             logger.debug("delete /genvm", genvm_id=genvm_id, status=resp.status)
             if resp.status != 200:
@@ -401,7 +442,15 @@ async def run_genvm(
 
     genvm_id_cell: list[str | None] = [None]
     status_cell: list[dict | Exception | None] = [None]
+    timeout_task_cell: list[asyncio.Task | None] = [None]
     cancellation_event = asyncio.Event()
+
+    run_http_timeout_s = _get_timeout_seconds(
+        "GENVM_MANAGER_RUN_HTTP_TIMEOUT_SECONDS", 30.0
+    )
+    status_http_timeout_s = _get_timeout_seconds(
+        "GENVM_MANAGER_STATUS_HTTP_TIMEOUT_SECONDS", 10.0
+    )
 
     async def wrap_proc():
         try:
@@ -425,6 +474,11 @@ async def run_genvm(
                     "host": host,
                     "extra_args": extra_args,
                 },
+                timeout=_http_timeout(
+                    total_s=run_http_timeout_s,
+                    connect_s=min(5.0, run_http_timeout_s),
+                    sock_read_s=run_http_timeout_s,
+                ),
             ) as resp:
                 logger.debug("post /genvm/run", status=resp.status)
                 data = await resp.json()
@@ -444,7 +498,12 @@ async def run_genvm(
                         "genvm manager /genvm", genvm_id=genvm_id, status=resp.status
                     )
                     genvm_id_cell[0] = genvm_id
-                    asyncio.ensure_future(wrap_timeout(genvm_id))
+                    timeout_task_cell[0] = asyncio.ensure_future(wrap_timeout(genvm_id))
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            # If manager HTTP is wedged, stop the host loop too (otherwise run_genvm hangs).
+            logger.error("genvm manager request failed", error=str(exc))
+            cancellation_event.set()
+            raise
         finally:
             logger.debug("proc started", genvm_id=genvm_id_cell[0])
 
@@ -466,32 +525,49 @@ async def run_genvm(
             old_status = status_cell[0]
             if old_status is not None:
                 return old_status
-            async with aiohttp.request(
-                "GET",
-                f"{manager_uri}/genvm/{genvm_id}",
-            ) as resp:
-                logger.debug("get /genvm", genvm_id=genvm_id, status=resp.status)
-                body = await resp.json()
-                logger.trace("get /genvm", genvm_id=genvm_id, body=body)
-                if resp.status != 200:
-                    new_res = Exception(
-                        f"genvm manager /genvm failed: {resp.status} {body}"
-                    )
-                elif body["status"] is None:
-                    return None
-                else:
-                    new_res = typing.cast(dict, body["status"])
+            try:
+                async with aiohttp.request(
+                    "GET",
+                    f"{manager_uri}/genvm/{genvm_id}",
+                    timeout=_http_timeout(
+                        total_s=status_http_timeout_s,
+                        connect_s=min(3.0, status_http_timeout_s),
+                        sock_read_s=status_http_timeout_s,
+                    ),
+                ) as resp:
+                    logger.debug("get /genvm", genvm_id=genvm_id, status=resp.status)
+                    body = await resp.json()
+                    logger.trace("get /genvm", genvm_id=genvm_id, body=body)
+                    if resp.status != 200:
+                        new_res = Exception(
+                            f"genvm manager /genvm failed: {resp.status} {body}"
+                        )
+                    elif body["status"] is None:
+                        return None
+                    else:
+                        new_res = typing.cast(dict, body["status"])
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                new_res = Exception(f"genvm manager /genvm request failed: {exc}")
             status_cell[0] = new_res
             return new_res
 
     async def prob_died():
-        await asyncio.wait(
-            [
-                asyncio.ensure_future(asyncio.sleep(1)),
-                asyncio.ensure_future(cancellation_event.wait()),
-            ],
+        sleep_task = asyncio.ensure_future(asyncio.sleep(1))
+        wait_task = asyncio.ensure_future(cancellation_event.wait())
+
+        done, pending = await asyncio.wait(
+            [sleep_task, wait_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
+
+        # Cancel pending tasks to prevent leaks
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
         genvm_id = genvm_id_cell[0]
         if genvm_id is None:
             return
@@ -504,20 +580,105 @@ async def run_genvm(
 
     fut_host = asyncio.ensure_future(wrap_host())
     fut_proc = asyncio.ensure_future(wrap_proc())
-    await asyncio.wait([fut_host, fut_proc, asyncio.ensure_future(prob_died())])
+    fut_prob = asyncio.ensure_future(prob_died())
 
-    exceptions: list[Exception] = []
+    # Map futures to names for debugging
+    task_names = {
+        id(fut_host): "host_loop",
+        id(fut_proc): "genvm_run",
+        id(fut_prob): "prob_died",
+    }
+
+    # IMPORTANT: if proc setup fails (e.g., manager accepts TCP but never replies),
+    # don't wait forever on host_loop.
+    done, pending = await asyncio.wait(
+        [fut_host, fut_proc, fut_prob], return_when=asyncio.FIRST_EXCEPTION
+    )
+
+    # Log which tasks completed/failed for debugging
+    done_names = [task_names.get(id(t), "unknown") for t in done]
+    pending_names = [task_names.get(id(t), "unknown") for t in pending]
+    logger.debug(
+        "asyncio.wait returned",
+        done_tasks=done_names,
+        pending_tasks=pending_names,
+        genvm_id=genvm_id_cell[0],
+    )
+
+    # If anything errored, stop the host loop.
+    for task in done:
+        exc = task.exception()
+        if exc is not None:
+            task_name = task_names.get(id(task), "unknown")
+            logger.error(
+                "task raised exception",
+                task_name=task_name,
+                exception_type=type(exc).__name__,
+                exception_msg=str(exc),
+                genvm_id=genvm_id_cell[0],
+            )
+            cancellation_event.set()
+
+    # Cancel any pending tasks to prevent leaks
+    for task in pending:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    # Cancel the timeout task if it's still pending
+    timeout_task = timeout_task_cell[0]
+    if timeout_task is not None and not timeout_task.done():
+        timeout_task.cancel()
+        try:
+            await timeout_task
+        except asyncio.CancelledError:
+            pass
+
+    # Collect exceptions from all tasks, including CancelledError
+    # Note: CancelledError inherits from BaseException, not Exception
+    exceptions: list[BaseException] = []
+    cancelled_tasks: list[str] = []
+
     try:
         fut_host.result()
-    except Exception as e:
-        exceptions.append(e)
-    try:
-        fut_proc.result()
-    except Exception as e:
+    except asyncio.CancelledError:
+        cancelled_tasks.append("host_loop")
+    except BaseException as e:
         exceptions.append(e)
 
+    try:
+        fut_proc.result()
+    except asyncio.CancelledError:
+        cancelled_tasks.append("genvm_run")
+    except BaseException as e:
+        exceptions.append(e)
+
+    # Log if tasks were cancelled (helps debug root cause)
+    if cancelled_tasks:
+        logger.debug(
+            "tasks were cancelled",
+            cancelled_tasks=cancelled_tasks,
+            exception_count=len(exceptions),
+            genvm_id=genvm_id_cell[0],
+        )
+
     if len(exceptions) > 0:
-        raise Exception(*exceptions) from exceptions[0]
+        # Include cancelled tasks info in the exception message for debugging
+        error_details = {
+            "exceptions": [f"{type(e).__name__}: {e}" for e in exceptions],
+            "cancelled_tasks": cancelled_tasks,
+            "genvm_id": genvm_id_cell[0],
+        }
+        logger.error("genvm execution failed", **error_details)
+        raise Exception(f"genvm execution failed: {error_details}") from exceptions[0]
+
+    # If all tasks were cancelled but no exceptions, something went wrong
+    if cancelled_tasks and len(exceptions) == 0:
+        error_msg = f"all genvm tasks cancelled without error: cancelled={cancelled_tasks}, genvm_id={genvm_id_cell[0]}"
+        logger.error(error_msg)
+        raise Exception(error_msg)
 
     genvm_id = genvm_id_cell[0]
     if genvm_id is not None:

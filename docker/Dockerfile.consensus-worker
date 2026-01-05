@@ -77,6 +77,16 @@ RUN cd /genvm \
     && tar -xf "$ARCH_FILE" \
     && tar -xf "genvm-universal.tar.xz" \
     && rm *.tar.xz \
+    && echo "Configuring GenVM manager threads..." \
+    && CONFIG_FILE="/genvm/config/genvm-manager.yaml" \
+    && if [[ -f "$CONFIG_FILE" ]]; then \
+        sed -i 's/^threads:.*/threads: 8/' "$CONFIG_FILE" \
+        && sed -i 's/^blocking_threads:.*/blocking_threads: 48/' "$CONFIG_FILE" \
+        && echo "Updated $CONFIG_FILE with threads=8 and blocking_threads=48" \
+        && cat "$CONFIG_FILE" ; \
+      else \
+        echo "WARNING: $CONFIG_FILE not found; skipping GenVM manager thread configuration." ; \
+      fi \
     && echo "GenVM installed successfully:" \
     && ls -la \
     && chown -R worker-user:worker-group /genvm \

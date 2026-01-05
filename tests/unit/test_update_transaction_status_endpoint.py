@@ -196,7 +196,7 @@ class TestUpdateTransactionStatusEndpoint:
             )
 
         assert exc_info.value.code == -32000
-        assert exc_info.value.message == "Non-allowed operation"
+        assert exc_info.value.message == "Operation not available in hosted mode"
         assert isinstance(exc_info.value.data, dict)
         assert exc_info.value.data == {}
         self.mock_transactions_processor.update_transaction_status.assert_not_called()

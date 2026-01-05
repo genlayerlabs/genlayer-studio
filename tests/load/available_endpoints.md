@@ -27,6 +27,7 @@
 - `sim_setFinalityWindowTime` - Set finality window time
 - `sim_updateProvider` - Update LLM provider configuration
 - `sim_updateValidator` - Update validator details
+- `sim_upgradeContractCode` - Upgrade deployed contract code (admin only)
 
 ### GenLayer Methods (gen_*)
 - `gen_call` - Call a GenLayer contract

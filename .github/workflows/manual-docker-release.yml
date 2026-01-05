@@ -1,0 +1,84 @@
+name: Manual Docker Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build from'
+        required: true
+        type: string
+        default: 'main'
+      version:
+        description: 'Version tag (e.g., v0.81.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-push-images:
+    name: Build and Push Docker Images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate version format
+        run: |
+          if [[ ! "${{ github.event.inputs.version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9-]+)?$ ]]; then
+            echo "Error: Version must be in format v*.*.*[-suffix] (e.g., v0.81.0 or v0.81.0-beta)"
+            exit 1
+          fi
+      - name: Checkout specified branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+          fetch-depth: 0
+
+      - name: Create and push tag
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git tag -a ${{ github.event.inputs.version }} -m "Release ${{ github.event.inputs.version }} from branch ${{ github.event.inputs.branch }}"
+          git push origin ${{ github.event.inputs.version }}
+  jsonrpc:
+    needs: build-and-push-images
+    uses: ./.github/workflows/docker-build-and-push-image.yml
+    with:
+      docker_build_context: .
+      dockerfile: docker/Dockerfile.backend
+      dockerhub_repo: yeagerai/simulator-jsonrpc
+      dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
+    secrets:
+      dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
+
+  frontend:
+    needs: build-and-push-images
+    uses: ./.github/workflows/docker-build-and-push-image.yml
+    with:
+      docker_build_context: .
+      dockerfile: docker/Dockerfile.frontend
+      dockerhub_repo: yeagerai/simulator-frontend
+      dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
+    secrets:
+      dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
+
+  database-migration:
+    needs: build-and-push-images
+    uses: ./.github/workflows/docker-build-and-push-image.yml
+    with:
+      docker_build_context: .
+      dockerfile: docker/Dockerfile.database-migration
+      dockerhub_repo: yeagerai/simulator-database-migration
+      dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
+    secrets:
+      dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
+
+  consensus-worker:
+    needs: build-and-push-images
+    uses: ./.github/workflows/docker-build-and-push-image.yml
+    with:
+      docker_build_context: .
+      dockerfile: docker/Dockerfile.consensus-worker
+      dockerhub_repo: yeagerai/simulator-consensus-worker
+      dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
+    secrets:
+      dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}

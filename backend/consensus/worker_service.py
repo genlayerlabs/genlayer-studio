@@ -24,6 +24,37 @@ from loguru import logger
 
 from backend.protocol_rpc.app_lifespan import create_genvm_manager
 
+
+# region agent log
+def _agent_log(hypothesis_id: str, location: str, message: str, data: dict):
+    """Best-effort NDJSON log for debug mode; never raises. Avoid secrets."""
+    import json as _json
+    import os as _os
+    import time as _time
+
+    payload = {
+        "sessionId": "debug-session",
+        "runId": _os.getenv("AGENT_DEBUG_RUN_ID", "pre-fix"),
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": int(_time.time() * 1000),
+    }
+    try:
+        log_path = _os.getenv("AGENT_DEBUG_LOG_PATH", "/tmp/agent_debug.log")
+        with open(log_path, "a") as f:
+            f.write(_json.dumps(payload) + "\n")
+    except Exception:
+        try:
+            print("AGENT_DEBUG " + _json.dumps(payload), flush=True)
+        except Exception:
+            pass
+
+
+# endregion
+
+
 # Load environment variables
 load_dotenv()
 
@@ -35,6 +66,16 @@ def get_db_name(database: str) -> str:
 # Global variables for the worker
 worker: Optional[ConsensusWorker] = None
 worker_task: Optional[asyncio.Task] = None
+
+# GenVM manager health probe cache (avoid probing on every /health hit)
+_genvm_health_last_check: float = 0.0
+_genvm_health_last_ok: bool = True
+_genvm_health_last_error: str | None = None
+
+# Restart tracking
+worker_restart_count: int = 0
+worker_last_crash_time: Optional[float] = None
+worker_permanently_failed: bool = False
 
 
 @asynccontextmanager
@@ -55,7 +96,18 @@ async def lifespan(app: FastAPI):
     # CRITICAL: Kill any orphaned GenVM processes from previous crashes
     # These zombie processes can consume gigabytes of memory outside Docker limits
     logger.info("Cleaning up orphaned GenVM processes from previous crashes...")
-    os.system("pkill -9 -f 'genvm (llm|web)' 2>/dev/null || true")
+    _pkill_rc = os.system("pkill -9 -f 'genvm (llm|web)' 2>/dev/null || true")
+    _agent_log(
+        "H3",
+        "backend/consensus/worker_service.py:pkill_startup",
+        "pkill cleanup executed",
+        {
+            "rc": int(_pkill_rc),
+            "GENVMROOT": os.getenv("GENVMROOT"),
+            "GENVM_TAG": os.getenv("GENVM_TAG"),
+            "PATH_has_genvm": "/genvm/bin" in (os.getenv("PATH") or ""),
+        },
+    )
     logger.info("GenVM cleanup complete")
 
     # Database setup
@@ -116,12 +168,28 @@ async def lifespan(app: FastAPI):
     consensus_service = ConsensusService()
 
     genvm_manager = await create_genvm_manager()
+    _agent_log(
+        "H1",
+        "backend/consensus/worker_service.py:genvm_manager_ready",
+        "genvm_manager created",
+        {
+            "manager_url": getattr(genvm_manager, "url", None),
+            "GENVMROOT": os.getenv("GENVMROOT"),
+            "GENVM_TAG": os.getenv("GENVM_TAG"),
+        },
+    )
 
     # Initialize validators manager (MUST use global to prevent garbage collection)
     global validators_manager  # Declare before assignment to use the global variable
     validators_manager = validators.Manager(SessionLocal(), genvm_manager)
     await validators_manager.restart()
     logger.info("Validators manager initialized and restarted")
+    _agent_log(
+        "H4",
+        "backend/consensus/worker_service.py:validators_restarted",
+        "validators_manager.restart finished",
+        {"ok": True},
+    )
 
     # Subscribe to validator change events
     async def handle_validator_change(event_data):
@@ -144,19 +212,81 @@ async def lifespan(app: FastAPI):
         transaction_timeout_minutes=transaction_timeout,
     )
 
-    # Start the worker in a background task with exception handling
-    async def run_worker_with_error_handling():
-        try:
-            await worker.run()
-        except Exception as e:
-            logger.critical(
-                f"FATAL: Worker {worker.worker_id} crashed with unhandled exception: {e}",
-                exc_info=True,
-            )
-            # Re-raise to let the container crash and restart
-            raise
+    # Get restart configuration from environment
+    max_restarts = int(os.environ.get("WORKER_MAX_RESTARTS", "5"))
+    restart_window_seconds = int(os.environ.get("WORKER_RESTART_WINDOW_SECONDS", "300"))
+    base_backoff_seconds = float(os.environ.get("WORKER_RESTART_BACKOFF_SECONDS", "5"))
 
-    worker_task = asyncio.create_task(run_worker_with_error_handling())
+    # Start the worker in a background task with automatic restart on crash
+    async def run_worker_with_auto_restart():
+        global worker_restart_count, worker_last_crash_time, worker_permanently_failed
+
+        while True:
+            try:
+                # Reset the running flag in case this is a restart
+                worker.running = True
+                logger.info(
+                    f"Worker {worker.worker_id} starting (restart count: {worker_restart_count})"
+                )
+                await worker.run()
+
+                # If run() exits normally (worker.stop() was called), break the loop
+                if not worker.running:
+                    logger.info(f"Worker {worker.worker_id} stopped gracefully")
+                    break
+
+            except asyncio.CancelledError:
+                # Task was cancelled externally (shutdown), don't restart
+                logger.info(
+                    f"Worker {worker.worker_id} task cancelled, exiting restart loop"
+                )
+                raise
+
+            except Exception as e:
+                current_time = time.time()
+
+                # Check if we should reset the restart counter (outside restart window)
+                if (
+                    worker_last_crash_time is not None
+                    and current_time - worker_last_crash_time > restart_window_seconds
+                ):
+                    logger.info(
+                        f"Worker {worker.worker_id} crash outside restart window "
+                        f"({restart_window_seconds}s), resetting restart counter"
+                    )
+                    worker_restart_count = 0
+
+                worker_restart_count += 1
+                worker_last_crash_time = current_time
+
+                logger.error(
+                    f"Worker {worker.worker_id} crashed with exception: {e}",
+                    exc_info=True,
+                )
+
+                if worker_restart_count > max_restarts:
+                    logger.critical(
+                        f"Worker {worker.worker_id} exceeded max restarts ({max_restarts}) "
+                        f"within {restart_window_seconds}s window. Marking as permanently failed."
+                    )
+                    worker_permanently_failed = True
+                    # Don't re-raise, just exit the loop - health check will report failure
+                    break
+
+                # Calculate backoff with exponential increase, capped at 60 seconds
+                backoff = min(
+                    base_backoff_seconds * (2 ** (worker_restart_count - 1)), 60
+                )
+                logger.warning(
+                    f"Worker {worker.worker_id} will restart in {backoff:.1f}s "
+                    f"(attempt {worker_restart_count}/{max_restarts})"
+                )
+
+                await asyncio.sleep(backoff)
+
+                logger.info(f"Restarting worker {worker.worker_id}...")
+
+    worker_task = asyncio.create_task(run_worker_with_auto_restart())
 
     print(f"Consensus Worker {worker.worker_id} started successfully")
 
@@ -216,27 +346,58 @@ async def health_check():
     """Health check endpoint for the worker."""
     import psutil
     from datetime import datetime
+    from fastapi.responses import JSONResponse
+    import aiohttp
 
-    global worker, worker_task
+    global worker, worker_task, worker_restart_count, worker_permanently_failed
+    global _genvm_health_last_check, _genvm_health_last_ok, _genvm_health_last_error
 
     endpoint_start = time.time()
 
     if worker is None:
         return {"status": "initializing", "worker_id": None}
 
-    # Check if worker task has died
+    # Check if worker has permanently failed (exceeded max restarts)
+    if worker_permanently_failed:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "failed",
+                "worker_id": worker.worker_id,
+                "error": "max_restarts_exceeded",
+                "restart_count": worker_restart_count,
+            },
+        )
+
+    # Check if worker task has died and isn't restarting
     if worker_task and worker_task.done():
         # Worker task finished unexpectedly - this is a failure
+        error_type = "unknown"
+        error_message = ""
         try:
             # This will re-raise any exception from the task
             worker_task.result()
-        except Exception as e:
-            logger.error(f"Worker task died with exception: {e}")
-        return {
-            "status": "failed",
-            "worker_id": worker.worker_id,
-            "error": "worker_task_died",
-        }
+        except asyncio.CancelledError as e:
+            # CancelledError inherits from BaseException, not Exception
+            error_type = "CancelledError"
+            error_message = str(e) or "task was cancelled"
+            logger.error(f"Worker task was cancelled: {error_message}")
+        except BaseException as e:
+            # Catch all exceptions including SystemExit, KeyboardInterrupt
+            error_type = type(e).__name__
+            error_message = str(e)
+            logger.error(f"Worker task died with {error_type}: {error_message}")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "failed",
+                "worker_id": worker.worker_id,
+                "error": "worker_task_died",
+                "error_type": error_type,
+                "error_message": error_message[:500] if error_message else "",
+                "restart_count": worker_restart_count,
+            },
+        )
 
     # Get basic metrics
     metrics = {}
@@ -250,16 +411,110 @@ async def health_check():
     except:
         pass
 
+    # Optional: probe local GenVM manager responsiveness.
+    # This catches the exact failure mode you described: /health looks fine, but GenVM's
+    # HTTP server (127.0.0.1:3999) is wedged and never responds, so consensus execution hangs.
+    #
+    try:
+        now = time.time()
+        probe_interval_s = float(
+            os.getenv("GENVM_MANAGER_HEALTH_PROBE_INTERVAL_SECONDS", "5")
+        )
+        if now - _genvm_health_last_check >= probe_interval_s:
+            _genvm_health_last_check = now
+            status_url = os.getenv(
+                "GENVM_MANAGER_STATUS_URL", "http://127.0.0.1:3999/status"
+            )
+            timeout_s = float(os.getenv("GENVM_MANAGER_HEALTH_TIMEOUT_SECONDS", "2"))
+            try:
+                async with aiohttp.request(
+                    "GET",
+                    status_url,
+                    timeout=aiohttp.ClientTimeout(total=timeout_s),
+                ) as resp:
+                    if resp.status != 200:
+                        _genvm_health_last_ok = False
+                        _genvm_health_last_error = (
+                            f"genvm_manager_status_http_{resp.status}"
+                        )
+                    else:
+                        _genvm_health_last_ok = True
+                        _genvm_health_last_error = None
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                _genvm_health_last_ok = False
+                _genvm_health_last_error = f"genvm_manager_status_error: {exc}"
+
+            _agent_log(
+                "H5",
+                "backend/consensus/worker_service.py:health_genvm_probe",
+                "genvm manager health probe executed",
+                {
+                    "status_url": status_url,
+                    "timeout_s": timeout_s,
+                    "ok": _genvm_health_last_ok,
+                    "error": _genvm_health_last_error,
+                },
+            )
+
+        if not _genvm_health_last_ok:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "unhealthy",
+                    "worker_id": worker.worker_id,
+                    "error": "genvm_manager_unresponsive",
+                    "detail": _genvm_health_last_error,
+                },
+            )
+    except Exception as e:
+        # Don't fail health checks due to probe implementation issues
+        logger.warning(f"GenVM health probe failed unexpectedly: {e}")
+
     # Get current transaction info with time calculation
     current_tx = None
     if worker.current_transaction:
         tx = worker.current_transaction.copy()
         if tx.get("blocked_at"):
             try:
-                blocked_at = datetime.fromisoformat(
-                    tx["blocked_at"].replace("Z", "+00:00")
+                blocked_at = tx["blocked_at"]
+
+                # Handle both datetime objects and ISO strings
+                if isinstance(blocked_at, str):
+                    blocked_at = datetime.fromisoformat(
+                        blocked_at.replace("Z", "+00:00")
+                    )
+
+                # Convert to naive UTC datetime for comparison
+                if blocked_at.tzinfo is not None:
+                    blocked_at = blocked_at.replace(tzinfo=None)
+
+                elapsed = datetime.utcnow() - blocked_at
+
+                # Check if blocked for too long - pod is unhealthy
+                # Env override: WORKER_BLOCKED_TX_UNHEALTHY_AFTER_MINUTES (default: 14 minutes)
+                try:
+                    blocked_tx_unhealthy_after_minutes = int(
+                        os.getenv("WORKER_BLOCKED_TX_UNHEALTHY_AFTER_MINUTES", "14")
+                    )
+                except ValueError:
+                    blocked_tx_unhealthy_after_minutes = 14
+                if blocked_tx_unhealthy_after_minutes <= 0:
+                    blocked_tx_unhealthy_after_minutes = 14
+
+                blocked_tx_unhealthy_after_seconds = (
+                    blocked_tx_unhealthy_after_minutes * 60
                 )
-                elapsed = datetime.utcnow() - blocked_at.replace(tzinfo=None)
+
+                if elapsed.total_seconds() > blocked_tx_unhealthy_after_seconds:
+                    return JSONResponse(
+                        status_code=500,
+                        content={
+                            "status": "unhealthy",
+                            "worker_id": worker.worker_id,
+                            "error": f"Transaction blocked for more than {blocked_tx_unhealthy_after_minutes} minutes",
+                            "blocked_duration_seconds": elapsed.total_seconds(),
+                        },
+                    )
 
                 # Format as human-readable time ago
                 minutes = int(elapsed.total_seconds() / 60)
@@ -268,7 +523,9 @@ async def health_check():
                 else:
                     hours = minutes // 60
                     tx["blocked_at"] = f"{hours}h ago"
-            except:
+            except Exception as e:
+                # Log the error but don't fail the health check
+                logger.error(f"Error parsing blocked_at timestamp: {e}")
                 pass
         current_tx = tx
 
@@ -276,6 +533,7 @@ async def health_check():
         "status": "healthy" if worker.running else "stopping",
         "worker_id": worker.worker_id,
         "current_transaction": current_tx,
+        "restart_count": worker_restart_count,
         **metrics,
     }
 
@@ -283,7 +541,7 @@ async def health_check():
 @app.get("/status")
 async def worker_status():
     """Get detailed status of the worker."""
-    global worker
+    global worker, worker_restart_count, worker_last_crash_time, worker_permanently_failed
 
     if worker is None:
         return {"error": "Worker not initialized"}
@@ -293,6 +551,9 @@ async def worker_status():
         "running": worker.running,
         "poll_interval": worker.poll_interval,
         "transaction_timeout_minutes": worker.transaction_timeout_minutes,
+        "restart_count": worker_restart_count,
+        "last_crash_time": worker_last_crash_time,
+        "permanently_failed": worker_permanently_failed,
     }
 
 

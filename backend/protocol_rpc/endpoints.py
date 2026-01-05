@@ -43,7 +43,7 @@ from backend.database_handler.transactions_processor import (
 
 
 logger = logging.getLogger(__name__)
-from backend.node.base import Node, SIMULATOR_CHAIN_ID
+from backend.node.base import Node, get_simulator_chain_id
 from backend.node.types import ExecutionMode, ExecutionResultStatus
 from backend.consensus.base import ConsensusAlgorithm
 from backend.protocol_rpc.call_interceptor import handle_consensus_data_call
@@ -57,19 +57,50 @@ from backend.node.base import Manager as GenVMManager
 import asyncio
 
 
-####### WRAPPER TO BLOCK ENDPOINTS FOR HOSTED ENVIRONMENT #######
-def check_forbidden_method_in_hosted_studio(func):
+####### ADMIN ACCESS CONTROL #######
+def require_admin_access(func):
+    """
+    Admin access control decorator:
+    - ADMIN_API_KEY set → requires matching admin_key (works in all modes including hosted)
+    - VITE_IS_HOSTED=true without ADMIN_API_KEY → blocked entirely
+    - Neither set → open access (local dev)
+    """
+
     @wraps(func)
     def wrapper(*args, **kwargs):
-        if os.getenv("VITE_IS_HOSTED") == "true":
+        is_hosted = os.getenv("VITE_IS_HOSTED") == "true"
+        admin_api_key = os.getenv("ADMIN_API_KEY")
+
+        # If admin key is configured, check it (works in all modes including hosted)
+        if admin_api_key:
+            request_key = kwargs.get("admin_key")
+            if request_key == admin_api_key:
+                # Valid admin key - proceed
+                return func(*args, **kwargs)
+            # Invalid key in any mode
             raise JSONRPCError(
                 code=-32000,
-                message="Non-allowed operation",
+                message="Invalid or missing admin key",
                 data={},
             )
+
+        # No admin key configured
+        if is_hosted:
+            # Hosted without admin key = blocked
+            raise JSONRPCError(
+                code=-32000,
+                message="Operation not available in hosted mode",
+                data={},
+            )
+
+        # Local dev = open access
         return func(*args, **kwargs)
 
     return wrapper
+
+
+# Alias for backwards compatibility
+check_forbidden_method_in_hosted_studio = require_admin_access
 
 
 ####### HELPER ENDPOINTS #######
@@ -413,6 +444,201 @@ def get_validator(
 
 def count_validators(validators_registry: ValidatorsRegistry) -> int:
     return validators_registry.count_validators()
+
+
+####### CONTRACT UPGRADE ENDPOINTS #######
+def get_contract_deployer(session: Session, contract_address: str) -> str | None:
+    """Get the address that deployed a contract by looking up the deploy transaction."""
+    from backend.database_handler.models import Transactions
+
+    deploy_tx = (
+        session.query(Transactions)
+        .filter(
+            Transactions.to_address == contract_address,
+            Transactions.type == TransactionType.DEPLOY_CONTRACT.value,
+            Transactions.status == TransactionStatus.FINALIZED,
+        )
+        .first()
+    )
+
+    return deploy_tx.from_address if deploy_tx else None
+
+
+def get_contract_nonce(session: Session, contract_address: str) -> int:
+    """Get contract nonce (tx count TO this contract) for upgrade signatures."""
+    from backend.database_handler.models import Transactions
+
+    try:
+        checksum_address = eth_utils.to_checksum_address(contract_address)
+    except (ValueError, TypeError):
+        checksum_address = contract_address
+
+    count = (
+        session.query(Transactions)
+        .filter(Transactions.to_address == checksum_address)
+        .count()
+    )
+    return count
+
+
+def admin_upgrade_contract_code(
+    session: Session,
+    contract_address: str,
+    new_code: str,
+    signature: str | None = None,
+    admin_key: str | None = None,
+) -> dict:
+    """
+    Queue a contract code upgrade. Returns immediately with tx hash.
+    Upgrade executes when worker processes it (after any pending txs for this contract).
+
+    Access control:
+    - Local (no env vars): open access
+    - Hosted/Self-hosted: admin_key allows ANY contract, signature allows own contracts
+
+    Args:
+        session: Database session
+        contract_address: Address of contract to upgrade
+        new_code: New Python contract source code
+        signature: Hex-encoded signature from deployer (required in hosted mode unless admin_key)
+        admin_key: Admin API key for full access to any contract
+
+    Returns:
+        dict with transaction_hash for polling status
+    """
+    from backend.database_handler.models import (
+        CurrentState,
+        Transactions,
+        TransactionStatus,
+    )
+    from backend.domain.types import TransactionType
+    from eth_account.messages import encode_defunct
+    from eth_account import Account
+    from web3 import Web3
+    import secrets
+
+    is_hosted = os.getenv("VITE_IS_HOSTED") == "true"
+    admin_api_key = os.getenv("ADMIN_API_KEY")
+
+    # Check if authorization is needed (hosted or self-hosted with key configured)
+    needs_auth = is_hosted or admin_api_key
+
+    if needs_auth:
+        # Option 1: Admin key grants full access to ANY contract
+        if admin_api_key and admin_key == admin_api_key:
+            pass  # Authorized - proceed with upgrade
+
+        # Option 2: Signature from deployer grants access to own contracts
+        elif signature:
+            try:
+                # Get transaction count for contract to prevent replay attacks
+                # Each upgrade creates a new tx, so count always increases
+                tx_count = (
+                    session.query(Transactions)
+                    .filter(Transactions.to_address == contract_address)
+                    .count()
+                )
+
+                # Recover signer from signature
+                # Message: keccak256(contract_address + tx_count_bytes + keccak256(new_code))
+                # Including tx_count makes signatures single-use (count increments after each tx)
+                new_code_hash = Web3.keccak(text=new_code)
+                tx_count_bytes = tx_count.to_bytes(32, byteorder="big")
+                message_hash = Web3.keccak(
+                    Web3.to_bytes(hexstr=contract_address)
+                    + tx_count_bytes
+                    + new_code_hash
+                )
+                message = encode_defunct(primitive=message_hash)
+                signer = Account.recover_message(message, signature=signature)
+
+                # Verify signer is deployer
+                deployer = get_contract_deployer(session, contract_address)
+                if not deployer:
+                    raise JSONRPCError(
+                        code=-32000,
+                        message="Contract not found or deployer unknown",
+                        data={"contract_address": contract_address},
+                    )
+                if signer.lower() != deployer.lower():
+                    raise JSONRPCError(
+                        code=-32000,
+                        message="Only contract deployer can upgrade",
+                        data={"signer": signer, "deployer": deployer},
+                    )
+                # Authorized - proceed with upgrade
+            except JSONRPCError:
+                raise
+            except Exception as e:
+                raise JSONRPCError(
+                    code=-32000,
+                    message=f"Invalid signature: {e!s}",
+                    data={},
+                ) from e
+
+        else:
+            # No valid auth provided
+            raise JSONRPCError(
+                code=-32000,
+                message="Upgrade requires admin key or deployer signature",
+                data={},
+            )
+
+    # Local mode (no env vars): allow all - no auth check needed
+
+    # Validate new code is not empty
+    if not new_code or not new_code.strip():
+        raise JSONRPCError(
+            code=-32602,
+            message="Contract code cannot be empty",
+            data={},
+        )
+
+    # Validate contract exists and is deployed
+    contract = session.query(CurrentState).filter_by(id=contract_address).one_or_none()
+    if not contract or not contract.data or not contract.data.get("code"):
+        raise JSONRPCError(
+            code=-32000,
+            message="Contract not found or not deployed",
+            data={"contract_address": contract_address},
+        )
+
+    # Create upgrade transaction
+    tx_hash = "0x" + secrets.token_hex(32)
+    upgrade_tx = Transactions(
+        hash=tx_hash,
+        status=TransactionStatus.PENDING,
+        from_address=None,
+        to_address=contract_address,
+        input_data=None,
+        data={"new_code": new_code},
+        consensus_data=None,
+        nonce=None,
+        value=0,
+        type=TransactionType.UPGRADE_CONTRACT.value,
+        gaslimit=None,
+        leader_only=True,
+        r=None,
+        s=None,
+        v=None,
+        appeal_failed=None,
+        consensus_history=None,
+        timestamp_appeal=None,
+        appeal_processing_time=None,
+        contract_snapshot=None,
+        config_rotation_rounds=None,
+        num_of_initial_validators=None,
+        last_vote_timestamp=None,
+        rotation_count=None,
+        leader_timeout_validators=None,
+    )
+    session.add(upgrade_tx)
+    session.commit()
+
+    return {
+        "transaction_hash": tx_hash,
+        "message": "Upgrade queued. Poll eth_getTransactionReceipt for completion.",
+    }
 
 
 ####### GEN ENDPOINTS #######
@@ -1143,11 +1369,11 @@ def get_finality_window_time(consensus: ConsensusAlgorithm) -> int:
 
 
 def get_chain_id() -> str:
-    return hex(SIMULATOR_CHAIN_ID)
+    return hex(get_simulator_chain_id())
 
 
 def get_net_version() -> str:
-    return str(SIMULATOR_CHAIN_ID)
+    return str(get_simulator_chain_id())
 
 
 def get_block_number(transactions_processor: TransactionsProcessor) -> str:
