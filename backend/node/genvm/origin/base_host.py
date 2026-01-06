@@ -32,6 +32,31 @@ def _get_timeout_seconds(env_key: str, default: float) -> float:
         return default
 
 
+def _get_int(env_key: str, default: int) -> int:
+    raw = os.getenv(env_key)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+# Callbacks for tracking GenVM Manager failures (set by worker_service)
+_on_genvm_success: typing.Callable[[], None] | None = None
+_on_genvm_failure: typing.Callable[[], None] | None = None
+
+
+def set_genvm_callbacks(
+    on_success: typing.Callable[[], None] | None = None,
+    on_failure: typing.Callable[[], None] | None = None,
+):
+    """Set callbacks for GenVM Manager success/failure tracking."""
+    global _on_genvm_success, _on_genvm_failure
+    _on_genvm_success = on_success
+    _on_genvm_failure = on_failure
+
+
 def _http_timeout(
     *,
     total_s: float,
@@ -446,66 +471,109 @@ async def run_genvm(
     cancellation_event = asyncio.Event()
 
     run_http_timeout_s = _get_timeout_seconds(
-        "GENVM_MANAGER_RUN_HTTP_TIMEOUT_SECONDS", 30.0
+        "GENVM_MANAGER_RUN_HTTP_TIMEOUT_SECONDS",
+        10.0,  # Reduced from 30s for faster failure detection
     )
     status_http_timeout_s = _get_timeout_seconds(
         "GENVM_MANAGER_STATUS_HTTP_TIMEOUT_SECONDS", 10.0
     )
+    max_retries = _get_int("GENVM_MANAGER_RUN_RETRIES", 3)
+    retry_base_delay_s = _get_timeout_seconds(
+        "GENVM_MANAGER_RUN_RETRY_DELAY_SECONDS", 1.0
+    )
 
     async def wrap_proc():
-        try:
-            max_exec_mins = 20
-            if timeout is not None:
-                max_exec_mins = int(max(max_exec_mins, (timeout * 1.5 + 59) // 60))
+        last_exc: BaseException | None = None
 
-            timestamp = message.get("datetime", "2024-11-26T06:42:42.424242Z")
+        for attempt in range(max_retries):
+            try:
+                max_exec_mins = 20
+                if timeout is not None:
+                    max_exec_mins = int(max(max_exec_mins, (timeout * 1.5 + 59) // 60))
 
-            async with aiohttp.request(
-                "POST",
-                f"{manager_uri}/genvm/run",
-                json={
-                    "major": 0,  # FIXME
-                    "message": message,
-                    "is_sync": is_sync,
-                    "capture_output": capture_output,
-                    "host_data": host_data,
-                    "max_execution_minutes": max_exec_mins,  # this parameter is needed to prevent zombie genvms
-                    "timestamp": timestamp,
-                    "host": host,
-                    "extra_args": extra_args,
-                },
-                timeout=_http_timeout(
-                    total_s=run_http_timeout_s,
-                    connect_s=min(5.0, run_http_timeout_s),
-                    sock_read_s=run_http_timeout_s,
-                ),
-            ) as resp:
-                logger.debug("post /genvm/run", status=resp.status)
-                data = await resp.json()
-                logger.trace("post /genvm/run", body=data)
-                if resp.status != 200:
-                    logger.error(
-                        f"genvm manager /genvm/run failed",
-                        status=resp.status,
-                        body=data,
-                    )
-                    raise Exception(
-                        f"genvm manager /genvm/run failed: {resp.status} {data}"
-                    )
-                else:
-                    genvm_id = data["id"]
+                timestamp = message.get("datetime", "2024-11-26T06:42:42.424242Z")
+
+                async with aiohttp.request(
+                    "POST",
+                    f"{manager_uri}/genvm/run",
+                    json={
+                        "major": 0,  # FIXME
+                        "message": message,
+                        "is_sync": is_sync,
+                        "capture_output": capture_output,
+                        "host_data": host_data,
+                        "max_execution_minutes": max_exec_mins,  # this parameter is needed to prevent zombie genvms
+                        "timestamp": timestamp,
+                        "host": host,
+                        "extra_args": extra_args,
+                    },
+                    timeout=_http_timeout(
+                        total_s=run_http_timeout_s,
+                        connect_s=min(5.0, run_http_timeout_s),
+                        sock_read_s=run_http_timeout_s,
+                    ),
+                ) as resp:
                     logger.debug(
-                        "genvm manager /genvm", genvm_id=genvm_id, status=resp.status
+                        "post /genvm/run", status=resp.status, attempt=attempt + 1
                     )
-                    genvm_id_cell[0] = genvm_id
-                    timeout_task_cell[0] = asyncio.ensure_future(wrap_timeout(genvm_id))
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            # If manager HTTP is wedged, stop the host loop too (otherwise run_genvm hangs).
-            logger.error("genvm manager request failed", error=str(exc))
-            cancellation_event.set()
-            raise
-        finally:
-            logger.debug("proc started", genvm_id=genvm_id_cell[0])
+                    data = await resp.json()
+                    logger.trace("post /genvm/run", body=data)
+                    if resp.status != 200:
+                        logger.error(
+                            "genvm manager /genvm/run failed",
+                            status=resp.status,
+                            body=data,
+                        )
+                        raise Exception(
+                            f"genvm manager /genvm/run failed: {resp.status} {data}"
+                        )
+                    else:
+                        genvm_id = data["id"]
+                        logger.debug(
+                            "genvm manager /genvm",
+                            genvm_id=genvm_id,
+                            status=resp.status,
+                        )
+                        genvm_id_cell[0] = genvm_id
+                        timeout_task_cell[0] = asyncio.ensure_future(
+                            wrap_timeout(genvm_id)
+                        )
+                        # Success - reset failure counter
+                        if _on_genvm_success is not None:
+                            _on_genvm_success()
+                        return  # Success, exit retry loop
+
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                last_exc = exc
+                is_last_attempt = attempt >= max_retries - 1
+
+                if is_last_attempt:
+                    # All retries exhausted - track failure and propagate
+                    logger.error(
+                        "genvm manager request failed after all retries",
+                        error=str(exc),
+                        attempts=max_retries,
+                    )
+                    if _on_genvm_failure is not None:
+                        _on_genvm_failure()
+                    cancellation_event.set()
+                    raise
+                else:
+                    # Retry with exponential backoff
+                    delay = retry_base_delay_s * (2**attempt)
+                    logger.warning(
+                        "genvm manager request failed, retrying",
+                        error=str(exc),
+                        attempt=attempt + 1,
+                        max_retries=max_retries,
+                        retry_delay_s=delay,
+                    )
+                    await asyncio.sleep(delay)
+
+            finally:
+                # Only log when we have a valid genvm_id (successful start)
+                if genvm_id_cell[0] is not None:
+                    logger.debug("proc started", genvm_id=genvm_id_cell[0])
 
     async def wrap_host():
         await host_loop(handler, cancellation_event, logger=logger)

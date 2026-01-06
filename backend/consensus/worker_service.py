@@ -77,6 +77,36 @@ worker_restart_count: int = 0
 worker_last_crash_time: Optional[float] = None
 worker_permanently_failed: bool = False
 
+# GenVM Manager consecutive failure tracking
+_genvm_consecutive_failures: int = 0
+_genvm_failure_unhealthy_threshold: int = int(
+    os.environ.get("GENVM_FAILURE_UNHEALTHY_THRESHOLD", "3")
+)
+
+
+def increment_genvm_failure():
+    """Increment consecutive GenVM Manager failure counter."""
+    global _genvm_consecutive_failures
+    _genvm_consecutive_failures += 1
+    logger.warning(
+        f"GenVM Manager failure count: {_genvm_consecutive_failures}/{_genvm_failure_unhealthy_threshold}"
+    )
+
+
+def reset_genvm_failures():
+    """Reset consecutive GenVM Manager failure counter on success."""
+    global _genvm_consecutive_failures
+    if _genvm_consecutive_failures > 0:
+        logger.info(
+            f"GenVM Manager success - resetting failure count from {_genvm_consecutive_failures} to 0"
+        )
+        _genvm_consecutive_failures = 0
+
+
+def get_genvm_failure_count() -> int:
+    """Get current consecutive failure count (for testing)."""
+    return _genvm_consecutive_failures
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -168,6 +198,16 @@ async def lifespan(app: FastAPI):
     consensus_service = ConsensusService()
 
     genvm_manager = await create_genvm_manager()
+
+    # Wire up GenVM failure tracking callbacks
+    from backend.node.genvm.origin.base_host import set_genvm_callbacks
+
+    set_genvm_callbacks(
+        on_success=reset_genvm_failures,
+        on_failure=increment_genvm_failure,
+    )
+    logger.info("GenVM failure tracking callbacks configured")
+
     _agent_log(
         "H1",
         "backend/consensus/worker_service.py:genvm_manager_ready",
@@ -469,6 +509,19 @@ async def health_check():
     except Exception as e:
         # Don't fail health checks due to probe implementation issues
         logger.warning(f"GenVM health probe failed unexpectedly: {e}")
+
+    # Check consecutive GenVM execution failures (triggers pod restart)
+    if _genvm_consecutive_failures >= _genvm_failure_unhealthy_threshold:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "worker_id": worker.worker_id,
+                "error": "genvm_consecutive_failures",
+                "count": _genvm_consecutive_failures,
+                "threshold": _genvm_failure_unhealthy_threshold,
+            },
+        )
 
     # Get current transaction info with time calculation
     current_tx = None
