@@ -5,7 +5,7 @@ import eth_utils
 import logging
 from functools import partial, wraps
 from typing import Any
-from backend.protocol_rpc.exceptions import JSONRPCError
+from backend.protocol_rpc.exceptions import JSONRPCError, NotFoundError
 from sqlalchemy import Table
 from sqlalchemy.orm import Session
 import backend.validators as validators
@@ -1054,8 +1054,7 @@ def get_transaction_by_hash(
     )
 
     if transaction is None:
-        raise JSONRPCError(
-            code=-32000,
+        raise NotFoundError(
             message=f"Transaction {transaction_hash} not found",
             data={"hash": transaction_hash},
         )
@@ -1072,8 +1071,7 @@ def get_studio_transaction_by_hash(
     )
 
     if transaction is None:
-        raise JSONRPCError(
-            code=-32000,
+        raise NotFoundError(
             message=f"Transaction {transaction_hash} not found",
             data={"hash": transaction_hash},
         )
@@ -1085,8 +1083,7 @@ def get_transaction_status(
 ) -> str:
     status = transactions_processor.get_transaction_status(transaction_hash)
     if status is None:
-        raise JSONRPCError(
-            code=-32000,
+        raise NotFoundError(
             message=f"Transaction {transaction_hash} not found",
             data={"hash": transaction_hash},
         )
