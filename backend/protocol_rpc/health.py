@@ -383,7 +383,7 @@ async def ping():
     return {"status": "ok"}
 
 
-@health_router.get("/health")
+@health_router.get("/health", response_model=None)
 async def health_check() -> Union[dict, JSONResponse]:
     """
     Returns cached health check results from background task.
