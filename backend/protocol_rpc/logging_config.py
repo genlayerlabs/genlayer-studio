@@ -28,19 +28,6 @@ class HealthCheckFilter(logging.Filter):
         return True
 
 
-def configure_uvicorn_logging():
-    """Configure uvicorn access logging to filter health checks.
-
-    Call this before starting uvicorn to reduce log noise from
-    health check probes.
-    """
-    # Get the uvicorn access logger
-    access_logger = logging.getLogger("uvicorn.access")
-
-    # Add our filter to suppress health check logs
-    access_logger.addFilter(HealthCheckFilter())
-
-
 def get_uvicorn_log_config() -> dict:
     """Get a uvicorn-compatible logging configuration dict.
 
