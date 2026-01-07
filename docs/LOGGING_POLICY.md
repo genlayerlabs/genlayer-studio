@@ -101,9 +101,15 @@ State-changing operations (audit trail):
 - `sim_createValidator`
 - Contract deployments
 
-### Log errors at WARNING
+### Error Response Logging
 
-Any RPC method that returns an error response.
+| Error Type | Log Level | Example |
+|------------|-----------|---------|
+| `NotFoundError` | DEBUG | "Transaction not found" - expected response |
+| `JSONRPCError` | ERROR | System failures, unexpected errors |
+| Other exceptions | ERROR | Crashes, unhandled errors |
+
+**Important**: Use `NotFoundError` for "not found" responses. These are valid query outcomes, not system failures.
 
 ## Access Logs
 
