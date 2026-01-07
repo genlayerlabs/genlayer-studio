@@ -99,6 +99,17 @@ class ModifiableValidatorsRegistry(ValidatorsRegistry):
         self.session.query(Validators).delete(synchronize_session=False)
         self.session.flush()  # Ensure all validator deletions are persisted
 
+    async def batch_create_validators(self, validators: list[Validator]) -> list[dict]:
+        """Create multiple validators in a single batch without triggering restarts per-validator."""
+        results = []
+        for validator in validators:
+            db_validator = _to_db_model(validator)
+            self.session.add(db_validator)
+        self.session.flush()  # Persist all validators at once
+        for validator in validators:
+            results.append(self.get_validator(validator.address, False))
+        return results
+
 
 def _to_db_model(validator: Validator) -> Validators:
     return Validators(

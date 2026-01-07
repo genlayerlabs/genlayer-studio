@@ -52,7 +52,9 @@ async def initialize_validators(
 
     accounts_manager = AccountsManager(db_session)
 
-    # Create new validators
+    # Collect all validators to create in a batch
+    validators_to_create: list[Validator] = []
+
     for validator_data in validators_data:
         try:
             validator_config = ValidatorConfig(**validator_data)
@@ -72,8 +74,7 @@ async def initialize_validators(
                 # Create account
                 account = accounts_manager.create_new_account()
 
-                # Create validator using manager's registry (triggers snapshot update)
-                await validators_manager.registry.create_validator(
+                validators_to_create.append(
                     Validator(
                         address=account.address,
                         private_key=account.key,
@@ -84,3 +85,8 @@ async def initialize_validators(
 
         except Exception as e:
             raise ValueError(f"Failed to create validator `{validator_data}`: {str(e)}")
+
+    # Batch create all validators with a single restart at the end
+    if validators_to_create:
+        logger.info(f"Batch creating {len(validators_to_create)} validators")
+        await validators_manager.registry.batch_create_validators(validators_to_create)
