@@ -2458,12 +2458,19 @@ class PendingState(TransactionState):
             context.transaction.appealed
             or context.transaction.appeal_validators_timeout
         ):
-            # If the transaction is appealed, remove the old leader
-            context.involved_validators, _ = (
-                ConsensusAlgorithm.get_validators_from_consensus_data(
-                    all_validators, context.transaction.consensus_data, False
+            # If the transaction is appealed and has consensus_data, remove the old leader
+            if context.transaction.consensus_data is not None:
+                context.involved_validators, _ = (
+                    ConsensusAlgorithm.get_validators_from_consensus_data(
+                        all_validators, context.transaction.consensus_data, False
+                    )
                 )
-            )
+            else:
+                # Corrupted state (appealed but no consensus_data)
+                # Select new validators since we can't reuse old ones
+                context.involved_validators = get_validators_for_transaction(
+                    all_validators, context.transaction.num_of_initial_validators
+                )
 
             # Reset the transaction appeal status
             context.transactions_processor.set_transaction_appeal(
@@ -2476,26 +2483,37 @@ class PendingState(TransactionState):
             )
 
         elif context.transaction.appeal_undetermined:
-            # Add n+2 validators, remove the old leader
-            current_validators, extra_validators = (
-                ConsensusAlgorithm.get_extra_validators(
-                    all_validators,
-                    context.transaction.consensus_history,
-                    context.transaction.consensus_data,
-                    0,
+            # Guard against corrupted state
+            if context.transaction.consensus_data is None:
+                context.transactions_processor.set_transaction_appeal_undetermined(
+                    context.transaction.hash, False
                 )
-            )
-            context.involved_validators = current_validators + extra_validators
+                context.transaction.appeal_undetermined = False
+                # Select new validators since we can't reuse old ones
+                context.involved_validators = get_validators_for_transaction(
+                    all_validators, context.transaction.num_of_initial_validators
+                )
+            else:
+                # Add n+2 validators, remove the old leader
+                current_validators, extra_validators = (
+                    ConsensusAlgorithm.get_extra_validators(
+                        all_validators,
+                        context.transaction.consensus_history,
+                        context.transaction.consensus_data,
+                        0,
+                    )
+                )
+                context.involved_validators = current_validators + extra_validators
 
-            # Send events in rollup to communicate the appeal is started
-            context.consensus_service.emit_transaction_event(
-                "emitAppealStarted",
-                context.involved_validators[0],
-                context.transaction.hash,
-                context.involved_validators[0]["address"],
-                0,
-                [v["address"] for v in context.involved_validators],
-            )
+                # Send events in rollup to communicate the appeal is started
+                context.consensus_service.emit_transaction_event(
+                    "emitAppealStarted",
+                    context.involved_validators[0],
+                    context.transaction.hash,
+                    context.involved_validators[0]["address"],
+                    0,
+                    [v["address"] for v in context.involved_validators],
+                )
 
         elif context.transaction.appeal_leader_timeout:
             used_leader_addresses = (
