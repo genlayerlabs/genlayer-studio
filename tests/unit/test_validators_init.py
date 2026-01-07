@@ -14,7 +14,7 @@ async def test_initialize_validators_empty_json():
     await initialize_validators("", mock_db_session, validators_manager)
 
     mock_registry.delete_all_validators.assert_not_called()
-    mock_registry.create_validator.assert_not_called()
+    mock_registry.batch_create_validators.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -46,7 +46,7 @@ async def test_initialize_validators_success():
     """Test successful initialization of validators"""
     mock_db_session = Mock()
     mock_registry = AsyncMock()
-    mock_registry.create_validator = AsyncMock(return_value={"address": "0xtest"})
+    mock_registry.batch_create_validators = AsyncMock()
     validators_manager = SimpleNamespace(registry=mock_registry)
 
     validators_json = """[
@@ -96,8 +96,10 @@ async def test_initialize_validators_success():
             # Verify that existing validators were deleted
             mock_registry.delete_all_validators.assert_called_once()
 
-            # Verify that create_validator was called for each validator (3 total: 1 + 2)
-            assert mock_registry.create_validator.call_count == 3
+            # Verify that batch_create_validators was called once with 3 validators
+            mock_registry.batch_create_validators.assert_called_once()
+            validators_arg = mock_registry.batch_create_validators.call_args[0][0]
+            assert len(validators_arg) == 3
 
             # Verify AccountsManager was created with correct session
             mock_accounts_manager_class.assert_called_once_with(mock_db_session)
@@ -128,11 +130,13 @@ async def test_initialize_validators_invalid_config():
 
 
 @pytest.mark.asyncio
-async def test_initialize_validators_creator_error():
-    """Test that creator function errors are properly handled"""
+async def test_initialize_validators_batch_create_error():
+    """Test that batch_create_validators errors are properly propagated"""
     mock_db_session = Mock()
     mock_registry = AsyncMock()
-    mock_registry.create_validator = AsyncMock(side_effect=Exception("Creator error"))
+    mock_registry.batch_create_validators = AsyncMock(
+        side_effect=Exception("Batch create error")
+    )
     validators_manager = SimpleNamespace(registry=mock_registry)
 
     validators_json = """[
@@ -166,9 +170,7 @@ async def test_initialize_validators_creator_error():
                 plugin_config={},
             )
 
-            with pytest.raises(
-                ValueError, match=r"Failed to create validator.*Creator error"
-            ):
+            with pytest.raises(Exception, match="Batch create error"):
                 await initialize_validators(
                     validators_json, mock_db_session, validators_manager
                 )

@@ -115,6 +115,18 @@ class ModifiableValidatorsRegistryInterceptor(vr.ModifiableValidatorsRegistry):
             await self._parent._notify_validator_change("all_validators_deleted", {})
             return res
 
+    async def batch_create_validators(
+        self, validators: list[vr.Validator]
+    ) -> list[dict]:
+        """Create multiple validators in a batch with only one restart at the end."""
+        async with self._parent.do_write():
+            res = await super().batch_create_validators(validators)
+            self.session.commit()
+            await self._parent._notify_validator_change(
+                "validator_created", {"count": len(res)}
+            )
+            return res
+
 
 @dataclasses.dataclass
 class SingleValidatorSnapshot:
