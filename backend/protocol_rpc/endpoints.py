@@ -517,6 +517,13 @@ def admin_upgrade_contract_code(
     from web3 import Web3
     import secrets
 
+    # Normalize address to checksum format for consistent comparison
+    # This must match get_contract_nonce() which frontend calls for signing
+    try:
+        contract_address = eth_utils.to_checksum_address(contract_address)
+    except (ValueError, TypeError):
+        pass  # Keep original if invalid - will fail later validation
+
     is_hosted = os.getenv("VITE_IS_HOSTED") == "true"
     admin_api_key = os.getenv("ADMIN_API_KEY")
 
