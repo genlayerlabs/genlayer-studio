@@ -278,7 +278,11 @@ def log_endpoint_info_wrapper(msg_handler: MessageHandler, config: GlobalConfigu
                         {
                             "endpoint_name": func.__name__,
                             "error": str(e),
-                            "traceback": traceback.format_exc() if event_type == EventType.ERROR else None,
+                            "traceback": (
+                                traceback.format_exc()
+                                if event_type == EventType.ERROR
+                                else None
+                            ),
                             "jsonrpc_error": as_jsonrpc,
                         },
                         account_address=account_address,
