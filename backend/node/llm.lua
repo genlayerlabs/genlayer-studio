@@ -44,13 +44,24 @@ end
 -- Used to look up mock responses for testing
 -- It returns the response that is linked to a substring of the message
 local function get_mock_response_from_table(table, message)
+	local default_value = nil
 	for key, value in pairs(table) do
-		if string.find(message, key) then
+		if key == "" then
+			-- Save default for later, don't match it now
+			default_value = value
+		elseif string.find(message, key) then
 			return {
 				data = value,
 				consumed_gen = 0
 			}
 		end
+	end
+	-- No specific match found, use default if available
+	if default_value ~= nil then
+		return {
+			data = default_value,
+			consumed_gen = 0
+		}
 	end
 	return {
 		data = "no match",
