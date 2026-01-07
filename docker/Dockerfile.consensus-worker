@@ -110,9 +110,7 @@ HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=40s \
 # Switch to non-root user
 USER worker-user
 
-# Run the consensus worker service
+# Run the consensus worker service with proper logging configuration
 WORKDIR /app
-CMD ["python3", "-m", "uvicorn", "backend.consensus.worker_service:app", \
-     "--host", "0.0.0.0", \
-     "--port", "4001", \
-     "--log-level", "info"]
+# Use run_worker.py to configure uvicorn logging (filters health check access logs)
+CMD ["python3", "-m", "backend.consensus.run_worker"]

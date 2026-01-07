@@ -9,7 +9,7 @@ from contextvars import ContextVar
 from flask import request
 from eth_utils.address import to_checksum_address
 from eth_account import Account
-from backend.protocol_rpc.exceptions import JSONRPCError
+from backend.protocol_rpc.exceptions import JSONRPCError, NotFoundError
 from loguru import logger
 import sys
 
@@ -259,16 +259,30 @@ def log_endpoint_info_wrapper(msg_handler: MessageHandler, config: GlobalConfigu
                 as_jsonrpc = None
                 if isinstance(e, JSONRPCError):
                     as_jsonrpc = e.to_dict()
+
+                # NotFoundError is a "soft" error - expected response, not a system failure
+                # Log at DEBUG level to avoid noise from normal "not found" queries
+                if isinstance(e, NotFoundError):
+                    event_type = EventType.DEBUG
+                    event_name = "endpoint_not_found"
+                else:
+                    event_type = EventType.ERROR
+                    event_name = "endpoint_error"
+
                 msg_handler.send_message(
                     LogEvent(
-                        "endpoint_error",
-                        EventType.ERROR,
+                        event_name,
+                        event_type,
                         EventScope.RPC,
                         f"Error executing endpoint {func.__name__ }: {str(e)}",
                         {
                             "endpoint_name": func.__name__,
                             "error": str(e),
-                            "traceback": traceback.format_exc(),
+                            "traceback": (
+                                traceback.format_exc()
+                                if event_type == EventType.ERROR
+                                else None
+                            ),
                             "jsonrpc_error": as_jsonrpc,
                         },
                         account_address=account_address,

@@ -24,6 +24,7 @@ from backend.protocol_rpc.dependencies import (
     get_validators_registry,
 )
 from backend.protocol_rpc.rpc_decorators import rpc
+from backend.protocol_rpc.rpc_endpoint_manager import LogPolicy
 
 
 # ---------------------------------------------------------------------------
@@ -31,7 +32,7 @@ from backend.protocol_rpc.rpc_decorators import rpc
 # ---------------------------------------------------------------------------
 
 
-@rpc.method("ping")
+@rpc.method("ping", log_policy=LogPolicy.debug())
 def ping() -> str:
     return impl.ping()
 
@@ -244,7 +245,7 @@ def upgrade_contract_code(
     )
 
 
-@rpc.method("sim_getTransactionsForAddress")
+@rpc.method("sim_getTransactionsForAddress", log_policy=LogPolicy.debug())
 def get_transactions_for_address(
     address: str,
     transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
@@ -272,7 +273,7 @@ def get_finality_window_time(
     return impl.get_finality_window_time(consensus)
 
 
-@rpc.method("sim_getConsensusContract")
+@rpc.method("sim_getConsensusContract", log_policy=LogPolicy.debug())
 def get_consensus_contract(
     contract_name: str,
     consensus_service=Depends(get_consensus_service),
@@ -317,7 +318,7 @@ def lint_contract(
 # ---------------------------------------------------------------------------
 
 
-@rpc.method("gen_getContractSchema")
+@rpc.method("gen_getContractSchema", log_policy=LogPolicy.debug())
 async def get_contract_schema(
     contract_address: str,
     accounts_manager: AccountsManager = Depends(get_accounts_manager),
@@ -332,7 +333,7 @@ async def get_contract_schema(
     )
 
 
-@rpc.method("gen_getContractSchemaForCode")
+@rpc.method("gen_getContractSchemaForCode", log_policy=LogPolicy.debug())
 async def get_contract_schema_for_code(
     contract_code_hex: str,
     msg_handler=Depends(get_message_handler),
@@ -409,7 +410,7 @@ async def sim_call(
 # ---------------------------------------------------------------------------
 
 
-@rpc.method("eth_getBalance")
+@rpc.method("eth_getBalance", log_policy=LogPolicy.debug())
 def eth_get_balance(
     account_address: str,
     accounts_manager: AccountsManager = Depends(get_accounts_manager),
@@ -422,7 +423,7 @@ def eth_get_balance(
     )
 
 
-@rpc.method("eth_getTransactionByHash")
+@rpc.method("eth_getTransactionByHash", log_policy=LogPolicy.debug())
 def eth_get_transaction_by_hash(
     transaction_hash: str,
     transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
@@ -448,7 +449,7 @@ def get_studio_transaction_by_hash(
     )
 
 
-@rpc.method("gen_getTransactionStatus")
+@rpc.method("gen_getTransactionStatus", log_policy=LogPolicy.debug())
 def get_transaction_status(
     transaction_hash: str,
     transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
@@ -459,7 +460,7 @@ def get_transaction_status(
     )
 
 
-@rpc.method("eth_call")
+@rpc.method("eth_call", log_policy=LogPolicy.debug())
 async def eth_call(
     params: dict,
     session: Session = Depends(get_db_session),
@@ -503,7 +504,7 @@ def eth_send_raw_transaction(
     )
 
 
-@rpc.method("eth_getTransactionCount")
+@rpc.method("eth_getTransactionCount", log_policy=LogPolicy.debug())
 def eth_get_transaction_count(
     address: str,
     transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
@@ -516,12 +517,12 @@ def eth_get_transaction_count(
     )
 
 
-@rpc.method("eth_chainId")
+@rpc.method("eth_chainId", log_policy=LogPolicy.debug())
 def eth_chain_id() -> str:
     return impl.get_chain_id()
 
 
-@rpc.method("net_version")
+@rpc.method("net_version", log_policy=LogPolicy.debug())
 def net_version() -> str:
     return impl.get_net_version()
 
@@ -558,7 +559,7 @@ def eth_estimate_gas(
     return impl.get_gas_estimate(transaction)
 
 
-@rpc.method("eth_getTransactionReceipt")
+@rpc.method("eth_getTransactionReceipt", log_policy=LogPolicy.debug())
 def eth_get_transaction_receipt(
     transaction_hash: str,
     transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),

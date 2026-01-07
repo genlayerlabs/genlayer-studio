@@ -82,3 +82,16 @@ class ServerError(JSONRPCError):
 
     def __init__(self, message: str = "Server error", data: Optional[Any] = None):
         super().__init__(code=-32000, message=message, data=data)
+
+
+class NotFoundError(JSONRPCError):
+    """
+    Resource not found error.
+
+    This is a "soft" error - it's a valid response to a query, not a system failure.
+    Used for cases like "transaction not found" which are expected outcomes,
+    not errors that need investigation. Logged at DEBUG level, not ERROR.
+    """
+
+    def __init__(self, message: str = "Not found", data: Optional[Any] = None):
+        super().__init__(code=-32001, message=message, data=data)

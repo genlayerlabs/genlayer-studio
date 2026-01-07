@@ -13,7 +13,6 @@ from fastapi.dependencies.utils import get_dependant, solve_dependencies
 from fastapi.requests import Request
 from pydantic import BaseModel, ConfigDict
 
-from backend.protocol_rpc.configuration import GlobalConfiguration
 from backend.protocol_rpc.exceptions import (
     InternalError,
     InvalidParams,
@@ -57,9 +56,24 @@ def _truncate_result_for_log(result: Any) -> Any:
 
 @dataclass(slots=True)
 class LogPolicy:
+    """Policy for logging RPC endpoint calls.
+
+    Attributes:
+        log_request: Log when method is called
+        log_success: Log successful responses
+        log_failure: Log errors (always at ERROR level regardless of log_level)
+        log_level: Log level for request/success logs (INFO or DEBUG)
+    """
+
     log_request: bool = True
     log_success: bool = True
     log_failure: bool = True
+    log_level: EventType = EventType.INFO
+
+    @classmethod
+    def debug(cls) -> "LogPolicy":
+        """Create a policy that logs at DEBUG level (for high-frequency/polling methods)."""
+        return cls(log_level=EventType.DEBUG)
 
 
 @dataclass(slots=True)
@@ -162,9 +176,9 @@ class RPCEndpointManager:
                 session_logger.send_message(
                     LogEvent(
                         name="endpoint_call",
-                        type=EventType.INFO,
+                        type=definition.log_policy.log_level,
                         scope=EventScope.RPC,
-                        message=f"EM-RPC method called: {request.method}",
+                        message=f"RPC method called: {request.method}",
                         data={
                             "method": request.method,
                             "params": _truncate_params_for_log(request.params),
@@ -189,9 +203,9 @@ class RPCEndpointManager:
                     session_logger.send_message(
                         LogEvent(
                             name="endpoint_success",
-                            type=EventType.SUCCESS,
+                            type=definition.log_policy.log_level,
                             scope=EventScope.RPC,
-                            message=f"EM-RPC method completed: {request.method}",
+                            message=f"RPC method completed: {request.method}",
                             data={
                                 "method": request.method,
                                 "params": _truncate_params_for_log(request.params),
@@ -391,7 +405,5 @@ class RPCEndpointManager:
         return provided
 
     def _should_log(self, method: str, policy: LogPolicy) -> bool:
-        if not policy.log_request and not policy.log_success and not policy.log_failure:
-            return False
-        disabled = GlobalConfiguration.get_disabled_info_logs_endpoints()
-        return method not in disabled
+        """Check if logging is enabled for this method based on policy."""
+        return policy.log_request or policy.log_success or policy.log_failure

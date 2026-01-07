@@ -5,7 +5,7 @@ import eth_utils
 import logging
 from functools import partial, wraps
 from typing import Any
-from backend.protocol_rpc.exceptions import JSONRPCError
+from backend.protocol_rpc.exceptions import JSONRPCError, NotFoundError
 from sqlalchemy import Table
 from sqlalchemy.orm import Session
 import backend.validators as validators
@@ -555,9 +555,8 @@ def admin_upgrade_contract_code(
                 # Verify signer is deployer
                 deployer = get_contract_deployer(session, contract_address)
                 if not deployer:
-                    raise JSONRPCError(
-                        code=-32000,
-                        message="Contract not found or deployer unknown",
+                    raise NotFoundError(
+                        message="Contract not found",
                         data={"contract_address": contract_address},
                     )
                 if signer.lower() != deployer.lower():
@@ -597,9 +596,8 @@ def admin_upgrade_contract_code(
     # Validate contract exists and is deployed
     contract = session.query(CurrentState).filter_by(id=contract_address).one_or_none()
     if not contract or not contract.data or not contract.data.get("code"):
-        raise JSONRPCError(
-            code=-32000,
-            message="Contract not found or not deployed",
+        raise NotFoundError(
+            message="Contract not found",
             data={"contract_address": contract_address},
         )
 
@@ -1054,8 +1052,7 @@ def get_transaction_by_hash(
     )
 
     if transaction is None:
-        raise JSONRPCError(
-            code=-32000,
+        raise NotFoundError(
             message=f"Transaction {transaction_hash} not found",
             data={"hash": transaction_hash},
         )
@@ -1072,8 +1069,7 @@ def get_studio_transaction_by_hash(
     )
 
     if transaction is None:
-        raise JSONRPCError(
-            code=-32000,
+        raise NotFoundError(
             message=f"Transaction {transaction_hash} not found",
             data={"hash": transaction_hash},
         )
@@ -1085,8 +1081,7 @@ def get_transaction_status(
 ) -> str:
     status = transactions_processor.get_transaction_status(transaction_hash)
     if status is None:
-        raise JSONRPCError(
-            code=-32000,
+        raise NotFoundError(
             message=f"Transaction {transaction_hash} not found",
             data={"hash": transaction_hash},
         )
@@ -1283,7 +1278,10 @@ def send_raw_transaction(
                 )
 
             if accounts_manager.get_account(to_address) is None:
-                raise JSONRPCError(f"Contract address does not exist: {to_address}")
+                raise NotFoundError(
+                    message="Contract not found",
+                    data={"address": to_address},
+                )
 
             transaction_data = {"calldata": genlayer_transaction.data.calldata}
 
@@ -1400,7 +1398,10 @@ def get_block_by_number(
     )
 
     if not block_details:
-        raise JSONRPCError(f"Block not found for number: {block_number}")
+        raise NotFoundError(
+            message="Block not found",
+            data={"block_number": block_number},
+        )
 
     return block_details
 
@@ -1531,7 +1532,7 @@ def get_contract(consensus_service: ConsensusService, contract_name: str) -> dic
     contract = consensus_service.load_contract(contract_name)
 
     if contract is None:
-        raise JSONRPCError(
+        raise NotFoundError(
             message=f"Contract {contract_name} not found",
             data={"contract_name": contract_name},
         )

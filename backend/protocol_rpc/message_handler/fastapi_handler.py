@@ -136,6 +136,8 @@ class MessageHandler(IMessageHandler):
             logger.error(message)
         elif log_event.type == EventType.WARNING:
             logger.warning(message)
+        elif log_event.type == EventType.DEBUG:
+            logger.debug(message)
         else:
             logger.info(message)
 
