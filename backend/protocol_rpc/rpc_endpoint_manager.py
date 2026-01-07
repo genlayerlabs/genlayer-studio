@@ -162,7 +162,7 @@ class RPCEndpointManager:
                 session_logger.send_message(
                     LogEvent(
                         name="endpoint_call",
-                        type=EventType.INFO,
+                        type=self._get_log_event_type(request.method, EventType.INFO),
                         scope=EventScope.RPC,
                         message=f"EM-RPC method called: {request.method}",
                         data={
@@ -189,7 +189,7 @@ class RPCEndpointManager:
                     session_logger.send_message(
                         LogEvent(
                             name="endpoint_success",
-                            type=EventType.SUCCESS,
+                            type=self._get_log_event_type(request.method, EventType.SUCCESS),
                             scope=EventScope.RPC,
                             message=f"EM-RPC method completed: {request.method}",
                             data={
@@ -391,7 +391,15 @@ class RPCEndpointManager:
         return provided
 
     def _should_log(self, method: str, policy: LogPolicy) -> bool:
-        if not policy.log_request and not policy.log_success and not policy.log_failure:
-            return False
-        disabled = GlobalConfiguration.get_disabled_info_logs_endpoints()
-        return method not in disabled
+        """Check if logging is enabled for this method based on policy."""
+        return policy.log_request or policy.log_success or policy.log_failure
+
+    def _get_log_event_type(self, method: str, default_type: EventType) -> EventType:
+        """Get the appropriate log level for a method.
+
+        Methods in DISABLE_INFO_LOGS_ENDPOINTS are demoted to DEBUG level.
+        """
+        demoted_methods = GlobalConfiguration.get_disabled_info_logs_endpoints()
+        if method in demoted_methods:
+            return EventType.DEBUG
+        return default_type

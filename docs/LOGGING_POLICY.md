@@ -71,9 +71,9 @@ logger.debug("Spawning processor for contract {address}")
 
 ## RPC Method Logging
 
-### Filtered from INFO logs (`DISABLE_INFO_LOGS_ENDPOINTS`)
+### Demoted to DEBUG level (`DISABLE_INFO_LOGS_ENDPOINTS`)
 
-High-frequency polling/read methods that generate noise:
+High-frequency polling/read methods are logged at DEBUG level instead of INFO to reduce noise in production while remaining available for troubleshooting:
 
 ```python
 [
