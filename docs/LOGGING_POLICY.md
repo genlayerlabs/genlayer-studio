@@ -71,35 +71,33 @@ logger.debug("Spawning processor for contract {address}")
 
 ## RPC Method Logging
 
-### Demoted to DEBUG level (`DISABLE_INFO_LOGS_ENDPOINTS`)
+### Per-endpoint log level
 
-High-frequency polling/read methods are logged at DEBUG level instead of INFO to reduce noise in production while remaining available for troubleshooting:
+Each RPC endpoint defines its own log level via `LogPolicy`. High-frequency polling/read methods use `LogPolicy.debug()`:
 
 ```python
-[
-    "ping",
-    "gen_getTransactionStatus",      # Constant polling
-    "eth_getTransactionByHash",
-    "eth_getTransactionReceipt",
-    "eth_getTransactionCount",
-    "gen_getContractSchemaForCode",
-    "gen_getContractSchema",
-    "eth_getCode",
-    "eth_getBalance",
-    "eth_call",                      # View calls
-    "net_version",
-    "eth_chainId",
-    "sim_getTransactionsForAddress",
-    "sim_getConsensusContract",
-]
+# High-frequency methods - DEBUG level
+@rpc.method("eth_chainId", log_policy=LogPolicy.debug())
+@rpc.method("gen_getTransactionStatus", log_policy=LogPolicy.debug())
+@rpc.method("eth_call", log_policy=LogPolicy.debug())
+# ... etc
+
+# State-changing methods - INFO level (default)
+@rpc.method("eth_sendRawTransaction")  # Default INFO
+@rpc.method("sim_createValidator")     # Default INFO
 ```
 
-### Always log at INFO
+**DEBUG level methods** (polling/read operations):
+- `ping`, `eth_chainId`, `net_version`
+- `gen_getTransactionStatus`, `eth_getTransactionByHash`, `eth_getTransactionReceipt`
+- `eth_getBalance`, `eth_getTransactionCount`, `eth_call`
+- `gen_getContractSchema`, `gen_getContractSchemaForCode`
+- `sim_getTransactionsForAddress`, `sim_getConsensusContract`
 
-State-changing operations (audit trail):
-- `eth_sendTransaction`
-- `sim_createValidator`
-- Contract deployments
+**INFO level methods** (state changes, audit trail):
+- `eth_sendRawTransaction`
+- `sim_createValidator`, `sim_updateValidator`
+- Contract deployments and upgrades
 
 ### Error Response Logging
 
@@ -174,9 +172,9 @@ The consensus worker uses loguru with these patterns:
 - Processing completion: INFO
 - Errors: ERROR with full traceback
 
-### RPC Method Filtering
+### RPC Method Log Levels
 
-Configured via `DISABLE_INFO_LOGS_ENDPOINTS` environment variable. Methods in this list are logged at DEBUG level instead of INFO.
+Configured per-endpoint via `LogPolicy` in the endpoint definition (see `backend/protocol_rpc/rpc_methods.py`). Use `LogPolicy.debug()` for high-frequency/polling methods.
 
 ## Monitoring vs Logging
 
