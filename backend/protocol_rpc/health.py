@@ -344,8 +344,11 @@ async def _check_redis_health() -> str:
         import redis
 
         redis_client = redis.from_url(redis_url)
-        redis_client.ping()
-        return "healthy"
+        try:
+            redis_client.ping()
+            return "healthy"
+        finally:
+            redis_client.close()
     except Exception:
         return "unhealthy"
 
@@ -391,12 +394,12 @@ async def health_check() -> Union[dict, JSONResponse]:
     """
     # Check if GenVM is unhealthy - return 503 to trigger restart
     if not _health_cache.genvm_healthy:
+        # Note: genvm_error details logged server-side, not exposed to clients
         return JSONResponse(
             status_code=503,
             content={
                 "status": "unhealthy",
                 "error": "genvm_manager_unresponsive",
-                "detail": _health_cache.genvm_error,
                 "timestamp": time.time(),
             },
         )
@@ -414,7 +417,7 @@ async def health_check() -> Union[dict, JSONResponse]:
         "last_check_duration_ms": _health_cache.last_check_duration_ms,
         "issues": _health_cache.issues if _health_cache.issues else None,
         "services": _health_cache.services,
-        "error": _health_cache.error,
+        # Note: internal errors logged server-side, not exposed to clients
         "meta": {
             "pid": os.getpid(),
             "workers": os.getenv("WEB_CONCURRENCY", "1"),
