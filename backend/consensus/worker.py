@@ -185,7 +185,7 @@ class ConsensusWorker:
         self._log_query_result("finalization", result, duration)
 
         if result:
-            logger.info(
+            logger.debug(
                 f"[Worker {self.worker_id}] Claimed next finalization result {result.hash}"
             )
             session.commit()
@@ -392,7 +392,7 @@ class ConsensusWorker:
         self._log_query_result("transaction", result, duration)
 
         if result:
-            logger.info(f"[Worker {self.worker_id}] Claimed transaction {result.hash}")
+            logger.debug(f"[Worker {self.worker_id}] Claimed transaction {result.hash}")
             session.commit()
             # Convert result to dict
             return {
@@ -1034,6 +1034,7 @@ class ConsensusWorker:
     ) -> None:
         """
         Emit a low-frequency log with query duration and outcome.
+        Uses DEBUG level to reduce log noise - these are internal polling operations.
         """
         state = self._query_log_state.get(query_name)
         if state is None:
@@ -1045,7 +1046,7 @@ class ConsensusWorker:
             return
 
         result_text = "returned a row" if result is not None else "returned no rows"
-        logger.info(
+        logger.debug(
             f"[Worker {self.worker_id}] {state['label']} query {result_text}: {result!r} "
             f"in {duration_seconds:.3f}s (polls since last log: {state['polls']})"
         )
@@ -1079,7 +1080,7 @@ class ConsensusWorker:
                     appeal_data = await self.claim_next_appeal(session)
 
                     if appeal_data:
-                        logger.info(
+                        logger.debug(
                             f"[Worker {self.worker_id}] Claimed appeal for transaction {appeal_data['hash']}"
                         )
                         # Process in a new session
@@ -1130,7 +1131,7 @@ class ConsensusWorker:
                                         await asyncio.sleep(1)
                                         continue
 
-                                logger.info(
+                                logger.debug(
                                     f"[Worker {self.worker_id}] Claimed transaction {tx_hash}"
                                 )
                                 # Process in a new session

@@ -522,7 +522,7 @@ class ConsensusAlgorithm:
         from loguru import logger
 
         monitor = get_monitor()
-        logger.info("[CONSENSUS] Starting _crawl_snapshot recovery loop")
+        logger.debug("[CONSENSUS] Starting _crawl_snapshot recovery loop")
 
         async with monitored_task("crawl_snapshot_recovery") as task_id:
             iteration = 0
@@ -635,7 +635,7 @@ class ConsensusAlgorithm:
                                     )
 
                             if iteration % 10 == 0:  # Log summary every 10 iterations
-                                logger.info(
+                                logger.debug(
                                     f"[RECOVERY] Crawl snapshot summary - "
                                     f"Iteration: {iteration}, "
                                     f"Total reset: {total_reset}, "
@@ -654,7 +654,7 @@ class ConsensusAlgorithm:
                     self.consensus_sleep_time * 10
                 )  # Run recovery less frequently
 
-            logger.info(
+            logger.debug(
                 f"[RECOVERY] Crawl snapshot recovery loop stopped after {iteration} iterations"
             )
 
@@ -738,7 +738,7 @@ class ConsensusAlgorithm:
         from loguru import logger
 
         monitor = get_monitor()
-        logger.info("[CONSENSUS] Starting _process_pending_transactions loop")
+        logger.debug("[CONSENSUS] Starting _process_pending_transactions loop")
 
         # Track active processing tasks per contract
         contract_tasks = {}  # {contract_address: Task}
@@ -757,7 +757,7 @@ class ConsensusAlgorithm:
             async with monitored_task(
                 f"contract_processor", contract_address
             ) as task_id:
-                logger.info(
+                logger.debug(
                     f"[TX_PROCESSOR] Starting continuous processing for contract {contract_address}"
                 )
 
@@ -845,13 +845,13 @@ class ConsensusAlgorithm:
 
                             if not next_tx_data:
                                 # No more pending transactions for this contract
-                                logger.info(
+                                logger.debug(
                                     f"[TX_PROCESSOR] No more pending transactions for contract {contract_address}, stopping processor"
                                 )
                                 break
 
                             # Mark as ACTIVATED
-                            logger.info(
+                            logger.debug(
                                 f"[TX_PROCESSOR] Activating transaction {next_tx_data['hash']} for contract {contract_address}"
                             )
                             transactions_processor.update_transaction_status(
@@ -871,7 +871,7 @@ class ConsensusAlgorithm:
                         # Process the transaction
                         tx_count += 1
                         try:
-                            logger.info(
+                            logger.debug(
                                 f"[TX_PROCESSOR] Processing transaction {next_tx_data['hash']} (#{tx_count} for {contract_address})"
                             )
                             await self._process_single_transaction(
@@ -901,7 +901,7 @@ class ConsensusAlgorithm:
                     # Clean up when done
                     if contract_address in contract_tasks:
                         del contract_tasks[contract_address]
-                    logger.info(
+                    logger.debug(
                         f"[TX_PROCESSOR] Stopped continuous processing for contract {contract_address} after {tx_count} transactions"
                     )
 
@@ -930,7 +930,7 @@ class ConsensusAlgorithm:
 
                         # Log active tasks status periodically
                         if iteration % 20 == 0:  # Every 10 seconds (0.5s * 20)
-                            logger.info(
+                            logger.debug(
                                 f"[TX_MAIN] Status - Iteration: {iteration}, "
                                 f"Active tasks: {len(contract_tasks)}, "
                                 f"Total spawned: {total_spawned}, "
@@ -942,7 +942,7 @@ class ConsensusAlgorithm:
                             if contract_address not in contract_tasks:
                                 # Create a new continuous processing task for this contract
                                 total_spawned += 1
-                                logger.info(
+                                logger.debug(
                                     f"[TX_MAIN] Spawning processor #{total_spawned} for contract {contract_address} "
                                     f"(active tasks: {len(contract_tasks) + 1})"
                                 )
@@ -983,7 +983,7 @@ class ConsensusAlgorithm:
                 )  # Check every 0.5 seconds for new contracts to improve responsiveness
 
             # Clean up remaining tasks on shutdown
-            logger.info(
+            logger.debug(
                 f"[TX_MAIN] Shutting down, cancelling {len(contract_tasks)} active tasks"
             )
             for address, task in contract_tasks.items():
@@ -1026,7 +1026,7 @@ class ConsensusAlgorithm:
         tx_type = transaction.get("type", "unknown")
         start_time = time.time()
 
-        logger.info(
+        logger.debug(
             f"[TX_EXEC] Starting execution of transaction {tx_hash} (type: {tx_type}, address: {address})"
         )
 
@@ -1108,7 +1108,7 @@ class ConsensusAlgorithm:
 
                     # Get validators snapshot for consensus (virtual or regular)
                     async with snapshot_func(*args) as validators_snapshot:
-                        logger.info(
+                        logger.debug(
                             f"[TX_EXEC] Executing consensus for transaction {tx_hash}"
                         )
 
@@ -1465,7 +1465,7 @@ class ConsensusAlgorithm:
         from loguru import logger
 
         monitor = get_monitor()
-        logger.info("[CONSENSUS] Starting _appeal_window loop")
+        logger.debug("[CONSENSUS] Starting _appeal_window loop")
 
         async with monitored_task("appeal_window") as task_id:
             iteration = 0
@@ -1638,7 +1638,7 @@ class ConsensusAlgorithm:
 
                         # Log periodic summary
                     if iteration % 20 == 0:  # Every 100 seconds (5s * 20)
-                        logger.info(
+                        logger.debug(
                             f"[APPEAL] Summary - Iteration: {iteration}, "
                             f"Total appeals: {total_appeals}, "
                             f"Total finalizations: {total_finalizations}"
@@ -1651,7 +1651,7 @@ class ConsensusAlgorithm:
 
                 await asyncio.sleep(self.consensus_sleep_time)
 
-            logger.info(
+            logger.debug(
                 f"[APPEAL] Appeal window loop stopped after {iteration} iterations"
             )
 

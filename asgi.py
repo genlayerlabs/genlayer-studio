@@ -9,6 +9,9 @@ import sys
 # Set production environment
 os.environ.setdefault("UVICORN_WORKER", "true")
 
+# Configure logging before importing the app
+from backend.protocol_rpc.logging_config import get_uvicorn_log_config
+
 # Import FastAPI app
 from backend.protocol_rpc.fastapi_server import app
 
@@ -30,5 +33,5 @@ if __name__ == "__main__":
         log_level=os.getenv("LOG_LEVEL", "info").lower(),
         reload=is_debug,
         reload_dirs=["backend"] if is_debug else None,
-        access_log=True,
+        log_config=get_uvicorn_log_config(),
     )
