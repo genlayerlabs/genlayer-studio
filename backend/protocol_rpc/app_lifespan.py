@@ -34,6 +34,10 @@ from backend.protocol_rpc.websocket import create_emit_event_function
 from backend.protocol_rpc.broadcast import Broadcast
 from backend.rollup.consensus_service import ConsensusService
 from backend.protocol_rpc.redis_subscriber import RedisEventSubscriber
+from backend.protocol_rpc.health import (
+    start_background_health_checker,
+    stop_background_health_checker,
+)
 import backend.validators as validators
 from backend.node.base import Manager as GenVMManager
 
@@ -306,6 +310,10 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
     logger.info("[STARTUP] Creating RPC router")
     rpc_router = FastAPIRPCRouter(endpoint_manager=endpoint_manager)
 
+    # Start background health checker for fast /health endpoint responses
+    logger.info("[STARTUP] Starting background health checker")
+    start_background_health_checker(rpc_router)
+
     app_state = RPCAppState(
         db_manager=db_manager,
         broadcast=broadcast,
@@ -396,6 +404,10 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
         if redis_subscriber:
             await redis_subscriber.stop()
             logger.info("[SHUTDOWN] Redis subscriber stopped")
+
+        # Stop background health checker
+        stop_background_health_checker()
+        logger.info("[SHUTDOWN] Background health checker stopped")
 
         logger.info("[SHUTDOWN] Beginning graceful shutdown sequence")
         shutdown_start = time.time()

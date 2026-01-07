@@ -4,6 +4,7 @@ import os
 from typing import Optional, Union, Dict, Any
 import logging
 import asyncio
+from dataclasses import dataclass, field
 
 import aiohttp
 from fastapi import APIRouter, FastAPI, Depends
@@ -12,29 +13,60 @@ from backend.database_handler.session_factory import get_database_manager
 from backend.protocol_rpc.fastapi_rpc_router import FastAPIRPCRouter
 from backend.protocol_rpc.dependencies import get_rpc_router_optional
 
+logger = logging.getLogger(__name__)
+
 # Create FastAPI router for health endpoints
 health_router = APIRouter(tags=["health"])
 
-# GenVM manager health probe cache (avoid probing on every /health hit)
-_genvm_health_last_check: float = 0.0
-_genvm_health_last_ok: bool = True
-_genvm_health_last_error: str | None = None
+
+# =============================================================================
+# Background Health Check Cache
+# =============================================================================
 
 
-@health_router.get("/health")
-async def health_check(
-    rpc_router: Optional[FastAPIRPCRouter] = Depends(get_rpc_router_optional),
-) -> dict:
-    """Unified health check endpoint summarizing all system metrics by calling other endpoints."""
+@dataclass
+class HealthCache:
+    """Cached health check results updated by background task."""
+
+    last_check: float = 0.0
+    last_check_duration_ms: float = 0.0
+    status: str = "initializing"
+    issues: list = field(default_factory=list)
+    services: Dict[str, Any] = field(default_factory=dict)
+    error: Optional[str] = None
+    # GenVM-specific (triggers 503 on failure)
+    genvm_healthy: bool = True
+    genvm_error: Optional[str] = None
+
+
+_health_cache = HealthCache()
+_background_task: Optional[asyncio.Task] = None
+_rpc_router_ref: Optional[FastAPIRPCRouter] = None
+
+
+def get_health_check_interval() -> float:
+    """Get health check interval from env (default 10s)."""
+    return float(os.getenv("HEALTH_CHECK_INTERVAL_SECONDS", "10"))
+
+
+async def _run_health_checks() -> None:
+    """Run all expensive health checks and update cache."""
+    global _health_cache
+
     start = time.time()
     overall_status = "healthy"
     issues = []
+    services = {}
 
-    # Call existing health endpoints to reuse logic
     try:
         # 1. Database health
-        db_health = await health_database()
+        db_health = await _check_database_health()
         db_status = db_health.get("status", "unknown")
+        services["database"] = {
+            "status": db_status,
+            "pool_size": db_health.get("connection_pool", {}).get("size"),
+            "checked_out": db_health.get("connection_pool", {}).get("checked_out"),
+        }
         if db_status in ["unhealthy", "error"]:
             overall_status = "unhealthy"
             issues.append("database_issue")
@@ -42,10 +74,10 @@ async def health_check(
             if overall_status == "healthy":
                 overall_status = "degraded"
 
-        # 3. Consensus health
-        consensus_health = await health_consensus(rpc_router)
+        # 2. Consensus health
+        consensus_health = await _check_consensus_health()
         consensus_status = consensus_health.get("status", "unknown")
-        consensus_summary = {
+        services["consensus"] = {
             "processing_transactions": consensus_health.get(
                 "total_processing_transactions", 0
             ),
@@ -64,117 +96,331 @@ async def health_check(
                 overall_status = "degraded"
             issues.append("orphaned_transactions")
 
-        # 4. Memory health
-        memory_health = await health_memory()
+        # 3. Memory health
+        memory_health = await _check_memory_health()
         memory_status = memory_health.get("status", "unknown")
+        services["memory"] = {
+            "status": memory_status,
+            "usage_mb": memory_health.get("memory_usage_mb"),
+            "percent": memory_health.get("memory_percent"),
+        }
         if memory_status in ["unhealthy", "degraded"]:
             if overall_status == "healthy":
                 overall_status = "degraded"
             issues.append("memory_issue")
 
-        # 5. Check Redis (lightweight check not in other endpoints)
-        redis_status = "not_configured"
-        if os.getenv("REDIS_URL"):
-            try:
-                import redis
+        # 4. Redis health
+        redis_status = await _check_redis_health()
+        services["redis"] = redis_status
+        if redis_status == "unhealthy":
+            if overall_status == "healthy":
+                overall_status = "degraded"
+            issues.append("redis_unreachable")
 
-                redis_client = redis.from_url(os.getenv("REDIS_URL"))
-                redis_client.ping()
-                redis_status = "healthy"
-            except Exception:
-                redis_status = "unhealthy"
-                if overall_status == "healthy":
-                    overall_status = "degraded"
-                issues.append("redis_unreachable")
+        # 5. GenVM manager health
+        genvm_ok, genvm_error = await _check_genvm_health()
+        services["genvm"] = {"status": "healthy" if genvm_ok else "unhealthy"}
+        _health_cache.genvm_healthy = genvm_ok
+        _health_cache.genvm_error = genvm_error
 
-        # 6. Check GenVM manager health (with caching to avoid probing on every hit)
-        # Returns 503 to trigger container restart when GenVM is unresponsive
-        global _genvm_health_last_check, _genvm_health_last_ok, _genvm_health_last_error
-
-        try:
-            now = time.time()
-            probe_interval_s = float(
-                os.getenv("GENVM_MANAGER_HEALTH_PROBE_INTERVAL_SECONDS", "5")
-            )
-            if now - _genvm_health_last_check >= probe_interval_s:
-                _genvm_health_last_check = now
-                status_url = os.getenv(
-                    "GENVM_MANAGER_STATUS_URL", "http://127.0.0.1:3999/status"
-                )
-                timeout_s = float(
-                    os.getenv("GENVM_MANAGER_HEALTH_TIMEOUT_SECONDS", "2")
-                )
-                try:
-                    async with aiohttp.request(
-                        "GET",
-                        status_url,
-                        timeout=aiohttp.ClientTimeout(total=timeout_s),
-                    ) as resp:
-                        if resp.status != 200:
-                            _genvm_health_last_ok = False
-                            _genvm_health_last_error = (
-                                f"genvm_manager_status_http_{resp.status}"
-                            )
-                        else:
-                            _genvm_health_last_ok = True
-                            _genvm_health_last_error = None
-                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                    _genvm_health_last_ok = False
-                    _genvm_health_last_error = f"genvm_manager_status_error: {exc}"
-
-            if not _genvm_health_last_ok:
-                # Return 503 to trigger Kubernetes/ArgoCD container restart
-                return JSONResponse(
-                    status_code=503,
-                    content={
-                        "status": "unhealthy",
-                        "error": "genvm_manager_unresponsive",
-                        "detail": _genvm_health_last_error,
-                        "timestamp": time.time(),
-                    },
-                )
-        except Exception as e:
-            # Don't fail health checks due to probe implementation issues
-            logging.warning(f"GenVM health probe failed unexpectedly: {e}")
-
-        return {
-            "status": overall_status,
-            "timestamp": time.time(),
-            "response_time_ms": round((time.time() - start) * 1000, 2),
-            "issues": issues if issues else None,
-            "services": {
-                "database": {
-                    "status": db_status,
-                    "pool_size": db_health.get("connection_pool", {}).get("size"),
-                    "checked_out": db_health.get("connection_pool", {}).get(
-                        "checked_out"
-                    ),
-                },
-                "redis": redis_status,
-                "consensus": consensus_summary,
-                "memory": {
-                    "status": memory_status,
-                    "usage_mb": memory_health.get("memory_usage_mb"),
-                    "percent": memory_health.get("memory_percent"),
-                },
-                "genvm": {
-                    "status": "healthy",
-                },
-            },
-            "meta": {
-                "pid": os.getpid(),
-                "workers": os.getenv("WEB_CONCURRENCY", "1"),
-            },
-        }
+        # Update cache
+        _health_cache.last_check = time.time()
+        _health_cache.last_check_duration_ms = round((time.time() - start) * 1000, 2)
+        _health_cache.status = overall_status
+        _health_cache.issues = issues
+        _health_cache.services = services
+        _health_cache.error = None
 
     except Exception as e:
-        logging.exception("Health check failed")
+        logger.exception("Background health check failed")
+        _health_cache.last_check = time.time()
+        _health_cache.last_check_duration_ms = round((time.time() - start) * 1000, 2)
+        _health_cache.status = "error"
+        _health_cache.error = str(e)
+
+
+async def _background_health_loop() -> None:
+    """Background loop that periodically runs health checks."""
+    interval = get_health_check_interval()
+    logger.info(f"Starting background health checker (interval={interval}s)")
+
+    while True:
+        try:
+            await _run_health_checks()
+        except asyncio.CancelledError:
+            logger.info("Background health checker cancelled")
+            raise
+        except Exception as e:
+            logger.exception(f"Background health check error: {e}")
+
+        await asyncio.sleep(interval)
+
+
+def start_background_health_checker(
+    rpc_router: Optional[FastAPIRPCRouter] = None,
+) -> None:
+    """Start the background health checker task. Call from app startup."""
+    global _background_task, _rpc_router_ref
+
+    _rpc_router_ref = rpc_router
+
+    if _background_task is not None:
+        logger.warning("Background health checker already running")
+        return
+
+    loop = asyncio.get_event_loop()
+    _background_task = loop.create_task(_background_health_loop())
+    logger.info("Background health checker started")
+
+
+def stop_background_health_checker() -> None:
+    """Stop the background health checker task. Call from app shutdown."""
+    global _background_task
+
+    if _background_task is not None:
+        _background_task.cancel()
+        _background_task = None
+        logger.info("Background health checker stopped")
+
+
+# =============================================================================
+# Individual Health Check Functions (used by background task)
+# =============================================================================
+
+
+async def _check_database_health() -> Dict[str, Any]:
+    """Check database connectivity and pool stats."""
+    try:
+        from backend.consensus.monitoring import get_monitor
+        from sqlalchemy import text
+
+        monitor = get_monitor()
+        status = monitor.get_status()
+
+        db_manager = get_database_manager()
+        pool_status = {}
+
+        try:
+            pool = db_manager.engine.pool
+            pool_status = {"class": pool.__class__.__name__}
+
+            if hasattr(pool, "size"):
+                try:
+                    pool_status["size"] = pool.size()
+                except Exception:
+                    pass
+
+            if hasattr(pool, "checkedout"):
+                try:
+                    pool_status["checked_out"] = pool.checkedout()
+                except Exception:
+                    pass
+
+            if hasattr(pool, "overflow"):
+                try:
+                    pool_status["overflow"] = pool.overflow()
+                except Exception:
+                    pass
+
+        except Exception as e:
+            pool_status = {"class": "unknown", "error": str(e)}
+
+        # Test database connectivity
+        db_healthy = False
+        query_time_ms = 0
+        try:
+            start = time.time()
+            with db_manager.engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            query_time_ms = (time.time() - start) * 1000
+            db_healthy = True
+        except Exception as e:
+            logger.error(f"Database connectivity test failed: {e}")
+
         return {
-            "status": "error",
-            "timestamp": time.time(),
-            "response_time_ms": round((time.time() - start) * 1000, 2),
-            "error": str(e),
+            "status": "healthy" if db_healthy else "unhealthy",
+            "active_sessions": status.get("active_sessions", 0),
+            "connection_pool": pool_status,
+            "query_time_ms": query_time_ms,
         }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+async def _check_consensus_health() -> Dict[str, Any]:
+    """Check consensus system status."""
+    from datetime import datetime, timedelta, timezone
+    from backend.database_handler.models import Transactions
+    from backend.database_handler.session_factory import get_database_manager
+
+    try:
+        if not _rpc_router_ref:
+            return {"status": "not_initialized", "error": "RPC router not available"}
+
+        db_manager = get_database_manager()
+
+        # Get active worker IDs
+        with db_manager.engine.connect() as worker_conn:
+            now = datetime.now(timezone.utc)
+            recent_threshold = now - timedelta(hours=1)
+
+            from sqlalchemy import select, distinct, and_
+
+            worker_query = select(distinct(Transactions.worker_id)).where(
+                and_(
+                    Transactions.worker_id.isnot(None),
+                    Transactions.created_at > recent_threshold,
+                )
+            )
+            worker_result = worker_conn.execute(worker_query)
+            active_workers = {row[0] for row in worker_result if row[0]}
+
+        # Get transaction statistics
+        with db_manager.engine.connect() as conn:
+            from sqlalchemy import text
+
+            query = text(
+                """
+                SELECT
+                    COUNT(*) FILTER (WHERE status IN ('ACTIVATED', 'PROPOSING', 'COMMITTING', 'REVEALING', 'ACCEPTED', 'UNDETERMINED')) as processing_count,
+                    COUNT(*) FILTER (WHERE worker_id IS NOT NULL AND status IN ('PENDING', 'ACTIVATED', 'PROPOSING', 'COMMITTING', 'REVEALING', 'ACCEPTED', 'UNDETERMINED')) as blocked_count
+                FROM transactions
+                WHERE to_address IS NOT NULL
+            """
+            )
+            result = conn.execute(query)
+            row = result.fetchone()
+
+            total_processing = row.processing_count if row else 0
+            total_blocked = row.blocked_count if row else 0
+
+            # Simplified orphan detection
+            total_orphaned = 0
+            if total_blocked > 0 and len(active_workers) == 0:
+                total_orphaned = total_blocked
+
+            status = (
+                "healthy"
+                if total_processing < 100 and total_orphaned == 0
+                else "degraded"
+            )
+
+            return {
+                "status": status,
+                "total_processing_transactions": total_processing,
+                "total_orphaned_transactions": total_orphaned,
+                "active_workers": len(active_workers),
+            }
+
+    except Exception as e:
+        logger.exception("Consensus health check failed")
+        return {"status": "error", "error": str(e)}
+
+
+async def _check_memory_health() -> Dict[str, Any]:
+    """Check memory usage."""
+    try:
+        import psutil
+
+        process = psutil.Process()
+        memory_info = process.memory_info()
+
+        return {
+            "status": "healthy",
+            "memory_usage_mb": memory_info.rss / 1024 / 1024,
+            "memory_percent": process.memory_percent(),
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+async def _check_redis_health() -> str:
+    """Check Redis connectivity."""
+    redis_url = os.getenv("REDIS_URL")
+    if not redis_url:
+        return "not_configured"
+
+    try:
+        import redis
+
+        redis_client = redis.from_url(redis_url)
+        redis_client.ping()
+        return "healthy"
+    except Exception:
+        return "unhealthy"
+
+
+async def _check_genvm_health() -> tuple[bool, Optional[str]]:
+    """Check GenVM manager health."""
+    status_url = os.getenv("GENVM_MANAGER_STATUS_URL", "http://127.0.0.1:3999/status")
+    timeout_s = float(os.getenv("GENVM_MANAGER_HEALTH_TIMEOUT_SECONDS", "2"))
+
+    try:
+        async with aiohttp.request(
+            "GET",
+            status_url,
+            timeout=aiohttp.ClientTimeout(total=timeout_s),
+        ) as resp:
+            if resp.status != 200:
+                return False, f"genvm_manager_status_http_{resp.status}"
+            return True, None
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        return False, f"genvm_manager_status_error: {exc}"
+    except Exception as e:
+        # Don't fail on unexpected errors
+        logger.warning(f"GenVM health probe failed unexpectedly: {e}")
+        return True, None
+
+
+# =============================================================================
+# HTTP Endpoints
+# =============================================================================
+
+
+@health_router.get("/ping")
+async def ping():
+    """Ultra-lightweight health check for load balancers. No DB, no external calls."""
+    return {"status": "ok"}
+
+
+@health_router.get("/health")
+async def health_check() -> Union[dict, JSONResponse]:
+    """
+    Returns cached health check results from background task.
+    Fast response (~1ms) while still providing meaningful health status.
+    """
+    # Check if GenVM is unhealthy - return 503 to trigger restart
+    if not _health_cache.genvm_healthy:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "error": "genvm_manager_unresponsive",
+                "detail": _health_cache.genvm_error,
+                "timestamp": time.time(),
+            },
+        )
+
+    cache_age_ms = (
+        (time.time() - _health_cache.last_check) * 1000
+        if _health_cache.last_check > 0
+        else None
+    )
+
+    return {
+        "status": _health_cache.status,
+        "timestamp": time.time(),
+        "cache_age_ms": round(cache_age_ms, 2) if cache_age_ms else None,
+        "last_check_duration_ms": _health_cache.last_check_duration_ms,
+        "issues": _health_cache.issues if _health_cache.issues else None,
+        "services": _health_cache.services,
+        "error": _health_cache.error,
+        "meta": {
+            "pid": os.getpid(),
+            "workers": os.getenv("WEB_CONCURRENCY", "1"),
+            "check_interval_s": get_health_check_interval(),
+        },
+    }
 
 
 @health_router.get("/ready")
@@ -214,6 +460,11 @@ def create_readiness_check_with_state(
     return readiness_check_with_state
 
 
+# =============================================================================
+# Detailed Health Endpoints (for debugging - run checks synchronously)
+# =============================================================================
+
+
 @health_router.get("/health/db")
 async def health_database() -> Dict[str, Any]:
     """Show database connection pool statistics and session tracking."""
@@ -234,50 +485,45 @@ async def health_database() -> Dict[str, Any]:
 
             # Try to get pool statistics based on pool type
             if hasattr(pool, "status"):
-                # Some pools have a status() method
                 try:
                     pool_status["status"] = pool.status()
-                except:
+                except Exception:
                     pass
 
-            # Try common pool attributes
             if hasattr(pool, "size"):
                 try:
                     pool_status["size"] = pool.size()
-                except:
+                except Exception:
                     pass
 
             if hasattr(pool, "checkedout"):
                 try:
                     pool_status["checked_out"] = pool.checkedout()
-                except:
+                except Exception:
                     pass
 
             if hasattr(pool, "overflow"):
                 try:
                     pool_status["overflow"] = pool.overflow()
-                except:
+                except Exception:
                     pass
 
-            # Calculate total if we have the components
             if "checked_out" in pool_status and "overflow" in pool_status:
                 pool_status["total"] = (
                     pool_status["checked_out"] + pool_status["overflow"]
                 )
 
-            # For QueuePool specifically, try to get more info
             if pool.__class__.__name__ == "QueuePool":
                 if hasattr(pool, "_pool"):
-                    # Internal pool queue
                     try:
                         pool_status["available"] = (
                             pool._pool.qsize() if hasattr(pool._pool, "qsize") else None
                         )
-                    except:
+                    except Exception:
                         pass
 
         except Exception as e:
-            logging.debug(f"Could not get pool statistics: {e}")
+            logger.debug(f"Could not get pool statistics: {e}")
             pool_status = {"class": "unknown", "error": str(e)}
 
         # Test database connectivity
@@ -290,7 +536,7 @@ async def health_database() -> Dict[str, Any]:
             query_time_ms = (time.time() - start) * 1000
             db_healthy = True
         except Exception as e:
-            logging.error(f"Database connectivity test failed: {e}")
+            logger.error(f"Database connectivity test failed: {e}")
 
         return {
             "status": "healthy" if db_healthy else "unhealthy",
@@ -304,7 +550,7 @@ async def health_database() -> Dict[str, Any]:
             ),
         }
     except Exception as e:
-        logging.exception("Database health check failed")
+        logger.exception("Database health check failed")
         return {"status": "error", "error": str(e)}
 
 
@@ -318,7 +564,6 @@ async def health_memory() -> Dict[str, Any]:
         process = psutil.Process()
         memory_info = process.memory_info()
 
-        # Get garbage collection stats
         gc_stats = gc.get_stats()
 
         return {
@@ -337,7 +582,7 @@ async def health_memory() -> Dict[str, Any]:
             },
         }
     except Exception as e:
-        logging.exception("Memory health check failed")
+        logger.exception("Memory health check failed")
         return {"status": "error", "error": str(e)}
 
 
@@ -348,8 +593,6 @@ async def health_cpu() -> Dict[str, Any]:
         import psutil
 
         process = psutil.Process()
-
-        # Get CPU times
         cpu_times = process.cpu_times()
 
         return {
@@ -371,7 +614,7 @@ async def health_cpu() -> Dict[str, Any]:
             },
         }
     except Exception as e:
-        logging.exception("CPU health check failed")
+        logger.exception("CPU health check failed")
         return {"status": "error", "error": str(e)}
 
 
@@ -381,8 +624,7 @@ async def health_consensus(
 ) -> Dict[str, Any]:
     """Show consensus system status with detailed contract-level transaction metrics."""
     from datetime import datetime, timedelta, timezone
-    from sqlalchemy import func, and_, or_
-    from backend.database_handler.models import Transactions, TransactionStatus
+    from backend.database_handler.models import Transactions
     from backend.database_handler.session_factory import get_database_manager
 
     try:
@@ -392,12 +634,10 @@ async def health_consensus(
         # Get active worker IDs from recent transactions
         db_manager = get_database_manager()
         with db_manager.engine.connect() as worker_conn:
-            # Query distinct worker_ids from transactions in the last hour
-            # Workers that have processed transactions recently are considered active
             now = datetime.now(timezone.utc)
             recent_threshold = now - timedelta(hours=1)
 
-            from sqlalchemy import select, distinct
+            from sqlalchemy import select, distinct, and_
 
             worker_query = select(distinct(Transactions.worker_id)).where(
                 and_(
@@ -414,8 +654,7 @@ async def health_consensus(
         with db_manager.engine.connect() as conn:
             now = datetime.now(timezone.utc)
 
-            # Get contract-level statistics
-            from sqlalchemy import select, text
+            from sqlalchemy import text
 
             query = text(
                 """
@@ -467,7 +706,6 @@ async def health_consensus(
                     "created_last_1d": row.created_last_1d,
                 }
 
-                # Calculate elapsed time for oldest blocked transaction
                 if row.oldest_blocked_at:
                     elapsed = now - row.oldest_blocked_at
                     minutes = int(elapsed.total_seconds() / 60)
@@ -479,7 +717,6 @@ async def health_consensus(
                 else:
                     contract_data["oldest_transaction_elapsed"] = None
 
-                # Add oldest processing transaction created_at timestamp
                 if row.oldest_processing_created_at:
                     contract_data["oldest_processing_created_at"] = (
                         row.oldest_processing_created_at.isoformat()
@@ -495,7 +732,6 @@ async def health_consensus(
                     contract_data["oldest_processing_created_at"] = None
                     contract_data["oldest_processing_elapsed"] = None
 
-                # Detect orphaned transactions
                 orphaned_tx_hashes = []
                 if row.worker_transactions:
                     for tx_info in row.worker_transactions:
@@ -509,7 +745,6 @@ async def health_consensus(
 
                 contracts.append(contract_data)
 
-            # Overall status
             total_processing = sum(c["processing_count"] for c in contracts)
             status = (
                 "healthy"
@@ -526,5 +761,5 @@ async def health_consensus(
             }
 
     except Exception as e:
-        logging.exception("Consensus health check failed")
+        logger.exception("Consensus health check failed")
         return {"status": "error", "error": str(e)}
