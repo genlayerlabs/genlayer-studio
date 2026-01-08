@@ -71,6 +71,7 @@ jobs:
           tags: ${{ inputs.dockerhub_repo }}:${{ env.latest_tag }}-${{ matrix.arch }}
           cache-from: type=gha,scope=${{ inputs.dockerhub_repo }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ inputs.dockerhub_repo }}-${{ matrix.arch }}
+          provenance: false
 
   create-manifest:
     name: Create multi-arch manifest
