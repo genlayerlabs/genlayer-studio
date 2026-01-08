@@ -198,6 +198,7 @@ class Receipt:
     genvm_result: dict[str, str] | None = None
     processing_time: Optional[int] = None
     nondet_disagree: int | None = None
+    llm_usage: list[dict] | None = None  # LLM token usage data
 
     def to_dict(self, strip_contract_state: bool = False):
         """Convert Receipt to dict.
@@ -226,6 +227,7 @@ class Receipt:
             "genvm_result": self.genvm_result,
             "processing_time": self.processing_time,
             "nondet_disagree": self.nondet_disagree,
+            "llm_usage": self.llm_usage,
         }
 
     @classmethod
@@ -250,6 +252,7 @@ class Receipt:
                 genvm_result=input.get("genvm_result"),
                 processing_time=input.get("processing_time"),
                 nondet_disagree=input.get("nondet_disagree"),
+                llm_usage=input.get("llm_usage"),
             )
         else:
             return None

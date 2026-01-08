@@ -88,6 +88,35 @@ def get_simulator_chain_id() -> int:
     return _parse_chain_id()
 
 
+def _extract_llm_usage_from_genvm_log(genvm_log: list[dict]) -> list[dict]:
+    """
+    Extract LLM usage entries from genvm_log.
+
+    Args:
+        genvm_log: List of log entries from GenVM execution
+
+    Returns:
+        List of usage entries with provider, model, input_tokens, output_tokens
+    """
+    usage_entries = []
+    for entry in genvm_log:
+        if not isinstance(entry, dict):
+            continue
+
+        # Check for LLM usage log entries
+        if entry.get("llm_usage_type") == "llm_usage":
+            usage_entries.append(
+                {
+                    "provider": entry.get("provider", "unknown"),
+                    "model": entry.get("model", "unknown"),
+                    "input_tokens": entry.get("input_tokens", 0),
+                    "output_tokens": entry.get("output_tokens", 0),
+                }
+            )
+
+    return usage_entries
+
+
 def _filter_genvm_log_by_level(genvm_log: list[dict]) -> list[dict]:
     """
     Filter genvm_log entries based on configured LOG_LEVEL with a minimum of WARNING.
@@ -920,6 +949,9 @@ class Node:
             else ExecutionResultStatus.ERROR
         )
 
+        # Extract LLM usage from genvm_log before creating Receipt
+        llm_usage = _extract_llm_usage_from_genvm_log(result.genvm_log)
+
         result = Receipt(
             result=genvmbase.encode_result_to_bytes(result.result),
             gas_used=0,
@@ -942,6 +974,7 @@ class Node:
             },
             processing_time=result.processing_time,
             nondet_disagree=result.nondet_disagree,
+            llm_usage=llm_usage if llm_usage else None,
         )
 
         if self.validator_mode == ExecutionMode.LEADER:
