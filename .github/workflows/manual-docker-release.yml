@@ -91,5 +91,6 @@ jobs:
       dockerfile: docker/Dockerfile.explorer
       dockerhub_repo: yeagerai/simulator-explorer
       dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
+      build_args: NEXT_PUBLIC_BASE_PATH=/explorer
     secrets:
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
