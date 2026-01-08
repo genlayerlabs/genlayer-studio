@@ -82,3 +82,14 @@ jobs:
       dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
     secrets:
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
+
+  explorer:
+    needs: build-and-push-images
+    uses: ./.github/workflows/docker-build-and-push-image.yml
+    with:
+      docker_build_context: .
+      dockerfile: docker/Dockerfile.explorer
+      dockerhub_repo: yeagerai/simulator-explorer
+      dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
+    secrets:
+      dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
