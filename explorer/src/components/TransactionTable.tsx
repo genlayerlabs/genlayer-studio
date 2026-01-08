@@ -120,7 +120,7 @@ export function TransactionTable({
                     </td>
                   )}
                   <td className="px-4 py-3">
-                    <TransactionTypeLabel type={tx.type} contractSnapshot={tx.contract_snapshot} />
+                    <TransactionTypeLabel type={tx.type} />
                   </td>
                   <td className="px-4 py-3">
                     <StatusBadge status={tx.status} />

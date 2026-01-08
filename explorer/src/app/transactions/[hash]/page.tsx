@@ -112,7 +112,7 @@ export default function TransactionDetailPage({ params }: { params: Promise<{ ha
         </div>
         <div className="flex flex-col items-end gap-2">
           <StatusBadge status={tx.status} />
-          <TransactionTypeLabel type={tx.type} contractSnapshot={tx.contract_snapshot} />
+          <TransactionTypeLabel type={tx.type} />
         </div>
       </div>
 
