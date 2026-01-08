@@ -587,7 +587,7 @@ class TransactionsProcessor:
         return transaction_data
 
     def get_transaction_by_hash(
-        self, transaction_hash: str, sim_config: dict | None = None
+        self, transaction_hash: str, sim_config: dict | None = None, hide_fields: bool = False
     ) -> dict | None:
         transaction = (
             self.session.query(Transactions)
@@ -630,6 +630,23 @@ class TransactionsProcessor:
         transaction_data = self._process_messages(transaction_data)
         transaction_data = self._process_queue(transaction_data)
         transaction_data = self._process_round_data(transaction_data)
+
+        if hide_fields:
+            if transaction_data[
+                "type"
+            ] == TransactionType.DEPLOY_CONTRACT.value and not (
+                transaction_data["last_round"]["result"] == 6
+                and "leader_receipt" in transaction_data["consensus_data"]
+                and transaction_data["consensus_data"]["leader_receipt"] is not None
+                and len(transaction_data["consensus_data"]["leader_receipt"]) > 0
+                and transaction_data["consensus_data"]["leader_receipt"][0][
+                    "execution_result"
+                ]
+                == ExecutionResultStatus.SUCCESS.value
+            ):
+                transaction_data["data"]["contract_address"] = None
+                if "contract_snapshot" in transaction_data:
+                    del transaction_data["contract_snapshot"]
         return transaction_data
 
     def get_studio_transaction_by_hash(

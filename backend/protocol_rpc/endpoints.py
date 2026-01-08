@@ -1048,7 +1048,7 @@ def get_transaction_by_hash(
     sim_config: dict | None = None,
 ) -> dict:
     transaction = transactions_processor.get_transaction_by_hash(
-        transaction_hash, sim_config
+        transaction_hash, sim_config, True
     )
 
     if transaction is None:
@@ -1427,7 +1427,7 @@ def get_transaction_receipt(
     event_signature = "NewTransaction(bytes32,address,address)"
     event_signature_hash = eth_utils.keccak(text=event_signature).hex()
 
-    to_addr = transaction.get("to_address")
+    to_addr = transaction.get("to_address") if transaction.get("to_address") else None
     from_addr = transaction.get("from_address")
 
     logs = [
@@ -1457,6 +1457,19 @@ def get_transaction_receipt(
         }
     ]
 
+    if (
+        transaction["type"] == TransactionType.DEPLOY_CONTRACT.value
+        and transaction["last_round"]["result"] == 6
+        and "leader_receipt" in transaction["consensus_data"]
+        and transaction["consensus_data"]["leader_receipt"] is not None
+        and len(transaction["consensus_data"]["leader_receipt"]) > 0
+        and transaction["consensus_data"]["leader_receipt"][0]["execution_result"]
+        == ExecutionResultStatus.SUCCESS.value
+    ):
+        contract_address = transaction["to_address"]
+    else:
+        contract_address = None
+
     receipt = {
         "transactionHash": transaction_hash,
         "transactionIndex": hex(0),
@@ -1466,11 +1479,7 @@ def get_transaction_receipt(
         "to": to_addr,
         "cumulativeGasUsed": hex(transaction.get("gas_used", 8000000)),
         "gasUsed": hex(transaction.get("gas_used", 8000000)),
-        "contractAddress": (
-            transaction.get("contract_address")
-            if transaction.get("contract_address")
-            else None
-        ),
+        "contractAddress": contract_address,
         "logs": logs,
         "logsBloom": "0x" + "00" * 256,
         "status": hex(1 if transaction.get("status", True) else 0),
@@ -1485,7 +1494,7 @@ def get_block_by_hash(
     full_tx: bool = False,
 ) -> dict | None:
 
-    transaction = transactions_processor.get_transaction_by_hash(block_hash)
+    transaction = transactions_processor.get_transaction_by_hash(block_hash, True)
 
     if not transaction:
         return None
