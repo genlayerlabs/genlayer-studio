@@ -1,6 +1,7 @@
 # backend/protocol_rpc/health.py
 import time
 import os
+import math
 from typing import Optional, Union, Dict, Any
 import logging
 import asyncio
@@ -528,3 +529,40 @@ async def health_consensus(
     except Exception as e:
         logging.exception("Consensus health check failed")
         return {"status": "error", "error": str(e)}
+
+
+@health_router.get("/metrics")
+async def metrics() -> Dict[str, Any]:
+    """Return worker metrics for autoscaling purposes."""
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import select, distinct, and_
+    from backend.database_handler.models import Transactions
+    from backend.database_handler.session_factory import get_database_manager
+
+    try:
+        db_manager = get_database_manager()
+        with db_manager.engine.connect() as conn:
+            now = datetime.now(timezone.utc)
+            recent_threshold = now - timedelta(hours=1)
+
+            worker_query = select(distinct(Transactions.worker_id)).where(
+                and_(
+                    Transactions.worker_id.isnot(None),
+                    Transactions.created_at > recent_threshold,
+                )
+            )
+
+            worker_result = conn.execute(worker_query)
+            active_workers = len({row[0] for row in worker_result if row[0]})
+
+        # needed_workers = active_workers + ceil(active_workers * 0.1), minimum 1
+        needed_workers = max(1, active_workers + math.ceil(active_workers * 0.1))
+
+        return {
+            "active_workers": active_workers,
+            "needed_workers": needed_workers,
+        }
+
+    except Exception as e:
+        logging.exception("Metrics endpoint failed")
+        return {"error": str(e)}
