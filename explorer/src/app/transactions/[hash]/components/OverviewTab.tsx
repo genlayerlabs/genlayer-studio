@@ -21,7 +21,7 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
     <div className="space-y-1">
       <InfoRow label="Hash" value={tx.hash} copyable />
       <InfoRow label="Status" value={<StatusBadge status={tx.status} />} />
-      <InfoRow label="Type" value={<TransactionTypeLabel type={tx.type} contractSnapshot={tx.contract_snapshot} />} />
+      <InfoRow label="Type" value={<TransactionTypeLabel type={tx.type} />} />
       <InfoRow
         label="From"
         value={
