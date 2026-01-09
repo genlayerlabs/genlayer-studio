@@ -216,10 +216,10 @@ class UsageMetricsService:
     def _format_created_at(self, created_at) -> str:
         """Format created_at to ISO8601 string."""
         if created_at is None:
-            return datetime.utcnow().isoformat() + "Z"
+            return datetime.utcnow().isoformat()
 
         if isinstance(created_at, datetime):
-            return created_at.isoformat() + "Z"
+            return created_at.isoformat()
 
         # If it's already a string, return as-is
         return str(created_at)
