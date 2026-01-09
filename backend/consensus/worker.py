@@ -24,6 +24,7 @@ from backend.rollup.consensus_service import ConsensusService
 import backend.validators as validators
 from loguru import logger
 from backend.node.base import Manager as GenVMManager
+from backend.services.usage_metrics_service import UsageMetricsService
 
 
 class ConsensusWorker:
@@ -104,6 +105,9 @@ class ConsensusWorker:
         self._no_validators_base_backoff = float(
             os.environ.get("NO_VALIDATORS_BASE_BACKOFF_SECONDS", "30")
         )
+
+        # Initialize usage metrics service for reporting transaction metrics
+        self.usage_metrics_service = UsageMetricsService()
 
     async def claim_next_finalization(self, session: Session) -> Optional[dict]:
         """
@@ -908,6 +912,11 @@ class ConsensusWorker:
                 session.commit()
                 logger.info(
                     f"[Worker {self.worker_id}] Successfully finalized transaction {transaction.hash}"
+                )
+
+                # Send usage metrics to external API (non-blocking)
+                await self.usage_metrics_service.send_finalized_transaction_metrics(
+                    transaction, finalization_data
                 )
             else:
                 logger.debug(
