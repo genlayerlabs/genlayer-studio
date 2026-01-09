@@ -371,6 +371,16 @@ class Manager:
                 self.logger.error(
                     f"Failed to check llms", body=body, status=resp.status
                 )
+                # Return error response for each config when the check fails
+                return [
+                    {
+                        "config_index": i,
+                        "prompt_index": 0,
+                        "available": False,
+                        "error": body.get("error", "LLM check request failed"),
+                    }
+                    for i in range(len(configs))
+                ]
 
         body = typing.cast(list[dict], body)
         body.sort(key=lambda x: x["config_index"])
