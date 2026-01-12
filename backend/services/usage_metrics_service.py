@@ -149,8 +149,10 @@ class UsageMetricsService:
             # Calculate time difference in seconds, then convert to ms
             # timestamp_awaiting_finalization is already in seconds
             processing_seconds = float(timestamp_awaiting) - created_at_epoch
-            # appeal_processing_time is already in milliseconds
-            total_ms = int(processing_seconds * 1000) + int(appeal_processing_time)
+            # appeal_processing_time is in seconds, convert to milliseconds
+            total_ms = int(processing_seconds * 1000) + int(
+                appeal_processing_time * 1000
+            )
             return max(0, total_ms)  # Ensure non-negative
         except Exception as e:
             logger.warning(f"Failed to calculate processing time: {e}")
