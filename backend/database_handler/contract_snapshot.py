@@ -73,7 +73,9 @@ class ContractSnapshot:
             result.data = json.loads(result.data)
 
         if not result.data:
-            raise Exception(f"Contract {self.contract_address} not deployed")
+            raise ContractNotFoundError(
+                self.contract_address, f"Contract {self.contract_address} not deployed"
+            )
 
         return result
 
