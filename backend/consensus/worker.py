@@ -17,6 +17,7 @@ from backend.database_handler.chain_snapshot import ChainSnapshot
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.database_handler.contract_processor import ContractProcessor
 from backend.database_handler.accounts_manager import AccountsManager
+from backend.database_handler.errors import ContractNotFoundError
 from backend.domain.types import Transaction
 from backend.consensus.base import ConsensusAlgorithm
 from backend.protocol_rpc.message_handler.base import MessageHandler
@@ -648,6 +649,63 @@ class ConsensusWorker:
             )
             await self._handle_no_validators_retry(transaction_data, session)
 
+        except ContractNotFoundError as e:
+            # Handle contract not found - mark as ACCEPTED with ERROR execution result
+            # This allows the transaction to go through finalization properly
+            tx_hash = transaction_data["hash"]
+            logger.error(
+                f"[Worker {self.worker_id}] Contract not found for transaction {tx_hash}: {e}"
+            )
+            session.rollback()
+
+            # Import required types for creating error receipt
+            import base64
+            import time
+            from backend.node.types import ExecutionMode, ExecutionResultStatus
+
+            # Create a minimal error receipt for the consensus_data
+            error_result = f"Contract {e.address} not found".encode("utf-8")
+            error_receipt = {
+                "vote": None,
+                "execution_result": ExecutionResultStatus.ERROR.value,
+                "result": base64.b64encode(error_result).decode("ascii"),
+                "calldata": base64.b64encode(b"").decode("ascii"),
+                "gas_used": 0,
+                "mode": ExecutionMode.LEADER.value,
+                "contract_state": {},
+                "node_config": {"address": "contract_not_found_handler"},
+                "eq_outputs": {},
+                "pending_transactions": [],
+                "genvm_result": None,
+                "processing_time": 0,
+            }
+
+            # Mark transaction as ACCEPTED with error consensus_data
+            with self.get_session() as error_session:
+                tx = error_session.query(Transactions).filter_by(hash=tx_hash).one()
+                tx.status = TransactionStatus.ACCEPTED
+                tx.timestamp_awaiting_finalization = int(time.time())
+                tx.consensus_data = {
+                    "votes": {},
+                    "leader_receipt": [error_receipt],
+                    "validators": [],
+                }
+                error_session.commit()
+
+                # Send WebSocket notification
+                from backend.consensus.base import ConsensusAlgorithm
+
+                await ConsensusAlgorithm.dispatch_transaction_status_update(
+                    TransactionsProcessor(error_session),
+                    tx_hash,
+                    TransactionStatus.ACCEPTED,
+                    self.msg_handler,
+                )
+
+            logger.info(
+                f"[Worker {self.worker_id}] Transaction {tx_hash} marked as ACCEPTED (with ERROR result) due to contract not found"
+            )
+
         except Exception as e:
             logger.exception(
                 f"[Worker {self.worker_id}] Error processing transaction {transaction_data['hash']}: {e}"
@@ -922,6 +980,33 @@ class ConsensusWorker:
                 logger.debug(
                     f"[Worker {self.worker_id}] Transaction {transaction.hash} not ready for finalization yet (appeal window active)"
                 )
+
+        except ContractNotFoundError as e:
+            # Handle contract not found during finalization - mark as FINALIZED
+            # This prevents infinite retry loop for transactions targeting non-existent contracts
+            tx_hash = finalization_data["hash"]
+            logger.error(
+                f"[Worker {self.worker_id}] Contract not found during finalization {tx_hash}: {e}"
+            )
+            session.rollback()
+
+            # Mark transaction as FINALIZED since it can't be processed further
+            with self.get_session() as error_session:
+                transactions_processor = TransactionsProcessor(error_session)
+
+                # Send WebSocket notification to mark as FINALIZED
+                from backend.consensus.base import ConsensusAlgorithm
+
+                await ConsensusAlgorithm.dispatch_transaction_status_update(
+                    transactions_processor,
+                    tx_hash,
+                    TransactionStatus.FINALIZED,
+                    self.msg_handler,
+                )
+
+            logger.info(
+                f"[Worker {self.worker_id}] Transaction {tx_hash} marked as FINALIZED due to contract not found during finalization"
+            )
 
         except Exception as e:
             logger.exception(
