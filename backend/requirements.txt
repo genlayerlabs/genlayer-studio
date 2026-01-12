@@ -33,5 +33,5 @@ asgiref==3.8.1
 # Production dependencies
 setuptools==75.7.0
 redis==5.0.1
-prometheus-flask-exporter==0.23.0
+prometheus-client==0.21.0
 psutil==5.9.8

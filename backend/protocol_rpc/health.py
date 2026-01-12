@@ -536,7 +536,8 @@ async def metrics():
     """Return worker metrics for autoscaling in Prometheus format."""
     from datetime import datetime, timedelta, timezone
     from sqlalchemy import select, distinct, and_
-    from fastapi.responses import PlainTextResponse
+    from fastapi.responses import Response
+    from prometheus_client import CollectorRegistry, Gauge, generate_latest, CONTENT_TYPE_LATEST
     from backend.database_handler.models import Transactions
     from backend.database_handler.session_factory import get_database_manager
 
@@ -554,29 +555,35 @@ async def metrics():
             )
 
             worker_result = conn.execute(worker_query)
-            active_workers = len({row[0] for row in worker_result if row[0]})
+            active_workers_count = len({row[0] for row in worker_result if row[0]})
 
         # needed_workers = active_workers + ceil(active_workers * 0.1), minimum 1
-        needed_workers = max(1, active_workers + math.ceil(active_workers * 0.1))
+        needed_workers_count = max(1, active_workers_count + math.ceil(active_workers_count * 0.1))
 
-        # Return Prometheus text format
-        prometheus_output = """# HELP genlayer_active_workers Number of active workers processing transactions in the last hour
-# TYPE genlayer_active_workers gauge
-genlayer_active_workers {active_workers}
-# HELP genlayer_needed_workers Number of workers needed for autoscaling (active + 10% buffer, min 1)
-# TYPE genlayer_needed_workers gauge
-genlayer_needed_workers {needed_workers}
-""".format(active_workers=active_workers, needed_workers=needed_workers)
+        # Create a fresh registry for each request to avoid duplicate metrics
+        registry = CollectorRegistry()
+        active_workers = Gauge(
+            "genlayer_active_workers",
+            "Number of active workers processing transactions in the last hour",
+            registry=registry,
+        )
+        needed_workers = Gauge(
+            "genlayer_needed_workers",
+            "Number of workers needed for autoscaling (active + 10% buffer, min 1)",
+            registry=registry,
+        )
+        active_workers.set(active_workers_count)
+        needed_workers.set(needed_workers_count)
 
-        return PlainTextResponse(
-            content=prometheus_output,
-            media_type="text/plain; version=0.0.4; charset=utf-8",
+        return Response(
+            content=generate_latest(registry),
+            media_type=CONTENT_TYPE_LATEST,
         )
 
     except Exception as e:
         logging.exception("Metrics endpoint failed")
-        return PlainTextResponse(
-            content="# Metrics endpoint error\n",
+        return Response(
+            content=b"# Metrics endpoint error\n",
             status_code=500,
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
