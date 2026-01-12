@@ -580,10 +580,10 @@ async def metrics():
             media_type=CONTENT_TYPE_LATEST,
         )
 
-    except Exception as e:
+    except Exception:
         logging.exception("Metrics endpoint failed")
         return Response(
-            content=b"# Metrics endpoint error\n",
+            content=b"# HELP genlayer_metrics_error Indicates metrics collection failed\n# TYPE genlayer_metrics_error gauge\ngenlayer_metrics_error 1\n",
             status_code=500,
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )
