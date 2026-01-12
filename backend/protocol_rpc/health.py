@@ -532,10 +532,11 @@ async def health_consensus(
 
 
 @health_router.get("/metrics")
-async def metrics() -> Dict[str, Any]:
-    """Return worker metrics for autoscaling purposes."""
+async def metrics():
+    """Return worker metrics for autoscaling in Prometheus format."""
     from datetime import datetime, timedelta, timezone
     from sqlalchemy import select, distinct, and_
+    from fastapi.responses import PlainTextResponse
     from backend.database_handler.models import Transactions
     from backend.database_handler.session_factory import get_database_manager
 
@@ -558,11 +559,24 @@ async def metrics() -> Dict[str, Any]:
         # needed_workers = active_workers + ceil(active_workers * 0.1), minimum 1
         needed_workers = max(1, active_workers + math.ceil(active_workers * 0.1))
 
-        return {
-            "active_workers": active_workers,
-            "needed_workers": needed_workers,
-        }
+        # Return Prometheus text format
+        prometheus_output = """# HELP genlayer_active_workers Number of active workers processing transactions in the last hour
+# TYPE genlayer_active_workers gauge
+genlayer_active_workers {active_workers}
+# HELP genlayer_needed_workers Number of workers needed for autoscaling (active + 10% buffer, min 1)
+# TYPE genlayer_needed_workers gauge
+genlayer_needed_workers {needed_workers}
+""".format(active_workers=active_workers, needed_workers=needed_workers)
+
+        return PlainTextResponse(
+            content=prometheus_output,
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
 
     except Exception as e:
         logging.exception("Metrics endpoint failed")
-        return {"error": str(e)}
+        return PlainTextResponse(
+            content="# Metrics endpoint error\n",
+            status_code=500,
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
