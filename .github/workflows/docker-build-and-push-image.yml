@@ -17,6 +17,10 @@ on:
       dockerhub_username:
         required: true
         type: string
+      build_args:
+        required: false
+        type: string
+        default: ""
     secrets:
       dockerhub_token:
         required: true
@@ -71,6 +75,8 @@ jobs:
           tags: ${{ inputs.dockerhub_repo }}:${{ env.latest_tag }}-${{ matrix.arch }}
           cache-from: type=gha,scope=${{ inputs.dockerhub_repo }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ inputs.dockerhub_repo }}-${{ matrix.arch }}
+          provenance: false
+          build-args: ${{ inputs.build_args }}
 
   create-manifest:
     name: Create multi-arch manifest

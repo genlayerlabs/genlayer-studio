@@ -180,7 +180,7 @@ services:
       traefik.http.routers.jsonrpc.tls: true
       traefik.http.routers.jsonrpc.service: jsonrpc
       # HTTP router for health endpoints (no TLS required)
-      traefik.http.routers.jsonrpc-health.rule: Host(`${SERVER_NAME}`) && (PathPrefix(`/health`) || PathPrefix(`/ready`))
+      traefik.http.routers.jsonrpc-health.rule: Host(`${SERVER_NAME}`) && (PathPrefix(`/health`) || PathPrefix(`/ready`) || PathPrefix(`/metrics`))
       traefik.http.routers.jsonrpc-health.entrypoints: web
       traefik.http.routers.jsonrpc-health.service: jsonrpc
 
