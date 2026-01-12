@@ -1389,6 +1389,12 @@ class TransactionsProcessor:
         count = 0
         for tx in stuck_transactions:
             tx.status = TransactionStatus.PENDING
+            # Reset appeal flags if consensus_data is missing (can't process appeal without it)
+            if tx.consensus_data is None:
+                tx.appealed = False
+                tx.appeal_undetermined = False
+                tx.appeal_validators_timeout = False
+                tx.appeal_leader_timeout = False
             count += 1
 
         if count > 0:
