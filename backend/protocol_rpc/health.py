@@ -532,10 +532,17 @@ async def health_consensus(
 
 
 @health_router.get("/metrics")
-async def metrics() -> Dict[str, Any]:
-    """Return worker metrics for autoscaling purposes."""
+async def metrics():
+    """Return worker metrics for autoscaling in Prometheus format."""
     from datetime import datetime, timedelta, timezone
     from sqlalchemy import select, distinct, and_
+    from fastapi.responses import Response
+    from prometheus_client import (
+        CollectorRegistry,
+        Gauge,
+        generate_latest,
+        CONTENT_TYPE_LATEST,
+    )
     from backend.database_handler.models import Transactions
     from backend.database_handler.session_factory import get_database_manager
 
@@ -553,16 +560,37 @@ async def metrics() -> Dict[str, Any]:
             )
 
             worker_result = conn.execute(worker_query)
-            active_workers = len({row[0] for row in worker_result if row[0]})
+            active_workers_count = len({row[0] for row in worker_result if row[0]})
 
         # needed_workers = active_workers + ceil(active_workers * 0.1), minimum 1
-        needed_workers = max(1, active_workers + math.ceil(active_workers * 0.1))
+        needed_workers_count = max(
+            1, active_workers_count + math.ceil(active_workers_count * 0.1)
+        )
 
-        return {
-            "active_workers": active_workers,
-            "needed_workers": needed_workers,
-        }
+        # Create a fresh registry for each request to avoid duplicate metrics
+        registry = CollectorRegistry()
+        active_workers = Gauge(
+            "genlayer_active_workers",
+            "Number of active workers processing transactions in the last hour",
+            registry=registry,
+        )
+        needed_workers = Gauge(
+            "genlayer_needed_workers",
+            "Number of workers needed for autoscaling (active + 10% buffer, min 1)",
+            registry=registry,
+        )
+        active_workers.set(active_workers_count)
+        needed_workers.set(needed_workers_count)
 
-    except Exception as e:
+        return Response(
+            content=generate_latest(registry),
+            media_type=CONTENT_TYPE_LATEST,
+        )
+
+    except Exception:
         logging.exception("Metrics endpoint failed")
-        return {"error": str(e)}
+        return Response(
+            content=b"# HELP genlayer_metrics_error Indicates metrics collection failed\n# TYPE genlayer_metrics_error gauge\ngenlayer_metrics_error 1\n",
+            status_code=500,
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
