@@ -1,3 +1,8 @@
+---
+name: create-pr
+description: Create GitHub pull requests by analyzing branch diff and following the project template
+---
+
 # Create Pull Request Skill
 
 Create GitHub pull requests by analyzing branch diff and following the project template.

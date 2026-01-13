@@ -1,3 +1,8 @@
+---
+name: cloudflare-cli
+description: Debug and manage Cloudflare DNS, cache, and proxy settings using flarectl
+---
+
 # Cloudflare CLI Skill
 
 Debug and manage Cloudflare DNS, cache, and proxy settings using flarectl.

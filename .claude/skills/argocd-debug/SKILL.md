@@ -1,3 +1,8 @@
+---
+name: argocd-debug
+description: Debug GenLayer Studio deployments via ArgoCD CLI
+---
+
 # ArgoCD Debug Skill
 
 Debug GenLayer Studio deployments via ArgoCD CLI.
