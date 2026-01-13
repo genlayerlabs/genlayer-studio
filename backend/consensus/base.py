@@ -3759,7 +3759,9 @@ def _emit_messages(
             triggered_by_hash=context.transaction.hash,
             transaction_hash=transaction_hash,
             config_rotation_rounds=context.transaction.config_rotation_rounds,
-            sim_config=context.transaction.sim_config.to_dict()
-            if context.transaction.sim_config
-            else None,
+            sim_config=(
+                context.transaction.sim_config.to_dict()
+                if context.transaction.sim_config
+                else None
+            ),
         )
