@@ -537,7 +537,12 @@ async def metrics():
     from datetime import datetime, timedelta, timezone
     from sqlalchemy import select, distinct, and_
     from fastapi.responses import Response
-    from prometheus_client import CollectorRegistry, Gauge, generate_latest, CONTENT_TYPE_LATEST
+    from prometheus_client import (
+        CollectorRegistry,
+        Gauge,
+        generate_latest,
+        CONTENT_TYPE_LATEST,
+    )
     from backend.database_handler.models import Transactions
     from backend.database_handler.session_factory import get_database_manager
 
@@ -558,7 +563,9 @@ async def metrics():
             active_workers_count = len({row[0] for row in worker_result if row[0]})
 
         # needed_workers = active_workers + ceil(active_workers * 0.1), minimum 1
-        needed_workers_count = max(1, active_workers_count + math.ceil(active_workers_count * 0.1))
+        needed_workers_count = max(
+            1, active_workers_count + math.ceil(active_workers_count * 0.1)
+        )
 
         # Create a fresh registry for each request to avoid duplicate metrics
         registry = CollectorRegistry()
