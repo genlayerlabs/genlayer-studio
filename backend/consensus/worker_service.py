@@ -1,6 +1,7 @@
 # backend/consensus/worker_service.py
 
 import os
+import sys
 import asyncio
 import signal
 import time
@@ -23,6 +24,28 @@ from backend.database_handler.models import Base
 from loguru import logger
 
 from backend.protocol_rpc.app_lifespan import create_genvm_manager
+
+
+# Configure loguru to route logs correctly for GCP Cloud Logging
+# GCP determines severity by stream: stdout=INFO, stderr=ERROR
+# Route DEBUG/INFO/WARNING to stdout, ERROR/CRITICAL to stderr
+logger.remove()
+log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+log_format = "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}"
+
+# Non-error logs to stdout (GCP labels as INFO/default)
+logger.add(
+    sys.stdout,
+    format=log_format,
+    level=log_level,
+    filter=lambda record: record["level"].no < 40,  # Below ERROR (40)
+)
+# Error logs to stderr (GCP labels as ERROR)
+logger.add(
+    sys.stderr,
+    format=log_format,
+    level="ERROR",
+)
 
 
 # region agent log
