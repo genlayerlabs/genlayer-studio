@@ -2232,6 +2232,10 @@ class ConsensusAlgorithm:
             list: List of validators involved in the consensus process (can include the leader).
             dict: Dictionary mapping addresses to validators not used in the consensus process.
         """
+        # Handle corrupted state where consensus_data is None
+        if consensus_data is None:
+            return [], {}
+
         # Create a dictionary to map addresses to a validator
         validator_map = {
             validator["address"]: validator for validator in all_validators
