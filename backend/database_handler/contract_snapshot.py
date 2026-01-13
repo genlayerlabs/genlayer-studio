@@ -1,5 +1,6 @@
 # database_handler/contract_snapshot.py
 from .models import CurrentState
+from .errors import ContractNotFoundError
 from sqlalchemy.orm import Session
 from typing import Optional, Dict
 import base64
@@ -65,14 +66,16 @@ class ContractSnapshot:
         )
 
         if result is None:
-            raise Exception(f"Contract {self.contract_address} not found")
+            raise ContractNotFoundError(self.contract_address)
 
         # Handle legacy JSON string data and validate deployment
         if isinstance(result.data, str):
             result.data = json.loads(result.data)
 
         if not result.data:
-            raise Exception(f"Contract {self.contract_address} not deployed")
+            raise ContractNotFoundError(
+                self.contract_address, f"Contract {self.contract_address} not deployed"
+            )
 
         return result
 

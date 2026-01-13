@@ -1,6 +1,7 @@
 # backend/protocol_rpc/health.py
 import time
 import os
+import math
 from typing import Optional, Union, Dict, Any
 import logging
 import asyncio
@@ -766,3 +767,68 @@ async def health_consensus(
     except Exception as e:
         logger.exception("Consensus health check failed")
         return {"status": "error", "error": str(e)}
+
+
+@health_router.get("/metrics")
+async def metrics():
+    """Return worker metrics for autoscaling in Prometheus format."""
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import select, distinct, and_
+    from fastapi.responses import Response
+    from prometheus_client import (
+        CollectorRegistry,
+        Gauge,
+        generate_latest,
+        CONTENT_TYPE_LATEST,
+    )
+    from backend.database_handler.models import Transactions
+    from backend.database_handler.session_factory import get_database_manager
+
+    try:
+        db_manager = get_database_manager()
+        with db_manager.engine.connect() as conn:
+            now = datetime.now(timezone.utc)
+            recent_threshold = now - timedelta(hours=1)
+
+            worker_query = select(distinct(Transactions.worker_id)).where(
+                and_(
+                    Transactions.worker_id.isnot(None),
+                    Transactions.created_at > recent_threshold,
+                )
+            )
+
+            worker_result = conn.execute(worker_query)
+            active_workers_count = len({row[0] for row in worker_result if row[0]})
+
+        # needed_workers = active_workers + ceil(active_workers * 0.1), minimum 1
+        needed_workers_count = max(
+            1, active_workers_count + math.ceil(active_workers_count * 0.1)
+        )
+
+        # Create a fresh registry for each request to avoid duplicate metrics
+        registry = CollectorRegistry()
+        active_workers = Gauge(
+            "genlayer_active_workers",
+            "Number of active workers processing transactions in the last hour",
+            registry=registry,
+        )
+        needed_workers = Gauge(
+            "genlayer_needed_workers",
+            "Number of workers needed for autoscaling (active + 10% buffer, min 1)",
+            registry=registry,
+        )
+        active_workers.set(active_workers_count)
+        needed_workers.set(needed_workers_count)
+
+        return Response(
+            content=generate_latest(registry),
+            media_type=CONTENT_TYPE_LATEST,
+        )
+
+    except Exception:
+        logging.exception("Metrics endpoint failed")
+        return Response(
+            content=b"# HELP genlayer_metrics_error Indicates metrics collection failed\n# TYPE genlayer_metrics_error gauge\ngenlayer_metrics_error 1\n",
+            status_code=500,
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
