@@ -19,6 +19,8 @@ class NativeWebSocketClient {
   private reconnectAttempts: number = 0;
   private shouldReconnect: boolean = true;
   private subscribedTopics: Set<string> = new Set();
+  private pingInterval: ReturnType<typeof setInterval> | null = null;
+  private readonly PING_INTERVAL_MS: number = 30000; // 30 seconds
   public id: string | null = null;
   public connected: boolean = false;
 
@@ -41,6 +43,9 @@ class NativeWebSocketClient {
         this.connected = true;
         this.reconnectAttempts = 0;
         this.reconnectTimeout = 1000;
+
+        // Start ping/pong heartbeat to keep connection alive
+        this.startPingInterval();
 
         // Trigger connect event
         this.triggerEvent('connect', null);
@@ -67,6 +72,10 @@ class NativeWebSocketClient {
       this.ws.onclose = () => {
         this.id = null;
         this.connected = false;
+
+        // Stop ping/pong heartbeat
+        this.stopPingInterval();
+
         this.triggerEvent('disconnect', null);
 
         if (this.shouldReconnect) {
@@ -95,6 +104,22 @@ class NativeWebSocketClient {
         this.connect();
       }
     }, timeout);
+  }
+
+  private startPingInterval() {
+    this.stopPingInterval(); // Clear any existing interval
+    this.pingInterval = setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.emit('ping', { timestamp: Date.now() });
+      }
+    }, this.PING_INTERVAL_MS);
+  }
+
+  private stopPingInterval() {
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
   }
 
   private handleMessage(message: WebSocketMessage) {
@@ -167,6 +192,7 @@ class NativeWebSocketClient {
 
   public disconnect() {
     this.shouldReconnect = false;
+    this.stopPingInterval();
     if (this.ws) {
       this.ws.close();
       this.ws = null;

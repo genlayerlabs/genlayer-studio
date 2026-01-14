@@ -12,7 +12,7 @@ class HealthCheckFilter(logging.Filter):
     """Filter out health check requests from access logs."""
 
     # Endpoints to filter (no logging for these paths)
-    FILTERED_PATHS = {"/health", "/ready", "/status"}
+    FILTERED_PATHS = {"/health", "/ready", "/status", "/api"}
 
     def filter(self, record: logging.LogRecord) -> bool:
         """Return False to suppress the log record, True to allow it."""
