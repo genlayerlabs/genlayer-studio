@@ -4,15 +4,22 @@ import { useWebSocketClient } from '@/hooks';
 
 export const useConnectionStatusStore = defineStore('connectionStatus', () => {
   const webSocketClient = useWebSocketClient();
-  const isConnected = ref(webSocketClient.connected);
+  // Start as true to avoid showing banner during initial connection
+  // Only show "connection lost" after we've connected at least once
+  const isConnected = ref(true);
+  let hasConnectedOnce = false;
 
   // Named handlers for connection events
   const handleConnect = () => {
+    hasConnectedOnce = true;
     isConnected.value = true;
   };
 
   const handleDisconnect = () => {
-    isConnected.value = false;
+    // Only show disconnected state if we've successfully connected before
+    if (hasConnectedOnce) {
+      isConnected.value = false;
+    }
   };
 
   // Use off/on pattern to prevent duplicate listeners during HMR/re-inits

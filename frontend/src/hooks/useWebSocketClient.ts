@@ -20,7 +20,7 @@ class NativeWebSocketClient {
   private shouldReconnect: boolean = true;
   private subscribedTopics: Set<string> = new Set();
   private pingInterval: ReturnType<typeof setInterval> | null = null;
-  private readonly PING_INTERVAL_MS: number = 30000; // 30 seconds
+  private readonly PING_INTERVAL_MS: number = 15000; // 15 seconds - shorter than typical proxy timeouts
   public id: string | null = null;
   public connected: boolean = false;
 
@@ -108,6 +108,10 @@ class NativeWebSocketClient {
 
   private startPingInterval() {
     this.stopPingInterval(); // Clear any existing interval
+    // Send first ping immediately to establish heartbeat
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.emit('ping', { timestamp: Date.now() });
+    }
     this.pingInterval = setInterval(() => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.emit('ping', { timestamp: Date.now() });
