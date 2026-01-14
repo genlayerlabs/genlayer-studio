@@ -1,26 +1,6 @@
-import { Transaction, NewConsensusHistory } from './types';
+import { Transaction } from './types';
 import { isNewConsensusFormat } from './consensusUtils';
 import { formatDuration } from './formatters';
-
-/**
- * Check if a transaction is a contract deployment
- */
-export function isContractDeploy(contractSnapshot: Record<string, unknown> | null): boolean {
-  if (!contractSnapshot) return false;
-
-  // Check if contract_code exists in the snapshot (can be at root or nested in states)
-  if (contractSnapshot.contract_code) return true;
-
-  // Check in states.finalized or states.accepted
-  const states = contractSnapshot.states as Record<string, unknown> | undefined;
-  if (states) {
-    const finalized = states.finalized as Record<string, unknown> | undefined;
-    const accepted = states.accepted as Record<string, unknown> | undefined;
-    if (finalized?.contract_code || accepted?.contract_code) return true;
-  }
-
-  return false;
-}
 
 /**
  * Get the time from PENDING to ACCEPTED for a transaction (new consensus format only)

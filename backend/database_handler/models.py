@@ -113,6 +113,9 @@ class Transactions(Base):
     sim_config: Mapped[Optional[dict]] = mapped_column(
         JSONB, nullable=True, default=None
     )
+    triggered_on: Mapped[Optional[str]] = mapped_column(
+        String(20), nullable=True, default=None
+    )  # "accepted" or "finalized" - indicates when this triggered tx was created
 
     # Relationship for triggered transactions
     triggered_by_hash: Mapped[Optional[str]] = mapped_column(

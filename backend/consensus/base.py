@@ -3288,7 +3288,9 @@ class AcceptedState(TransactionState):
                     internal_messages_data,
                 )
 
-                _emit_messages(context, insert_transactions_data, rollup_receipt)
+                _emit_messages(
+                    context, insert_transactions_data, rollup_receipt, "accepted"
+                )
 
         else:
             context.transaction.appealed = False
@@ -3657,7 +3659,9 @@ class FinalizingState(TransactionState):
                 internal_messages_data,
             )
 
-            _emit_messages(context, insert_transactions_data, rollup_receipt)
+            _emit_messages(
+                context, insert_transactions_data, rollup_receipt, "finalized"
+            )
         else:
             # Send events in rollup to communicate the transaction is finalized
             context.consensus_service.emit_transaction_event(
@@ -3746,6 +3750,7 @@ def _emit_messages(
     context: TransactionContext,
     insert_transactions_data: list,
     receipt: dict,
+    triggered_on: Literal["accepted", "finalized"],
 ):
     for i, insert_transaction_data in enumerate(insert_transactions_data):
         transaction_hash = (
@@ -3763,4 +3768,10 @@ def _emit_messages(
             triggered_by_hash=context.transaction.hash,
             transaction_hash=transaction_hash,
             config_rotation_rounds=context.transaction.config_rotation_rounds,
+            sim_config=(
+                context.transaction.sim_config.to_dict()
+                if context.transaction.sim_config
+                else None
+            ),
+            triggered_on=triggered_on,
         )
