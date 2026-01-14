@@ -106,6 +106,7 @@ class TransactionsProcessor:
             "created_at": transaction_data.created_at.isoformat(),
             "leader_only": transaction_data.leader_only,
             "triggered_by": transaction_data.triggered_by_hash,
+            "triggered_on": transaction_data.triggered_on,
             "triggered_transactions": [
                 transaction.hash
                 for transaction in transaction_data.triggered_transactions
@@ -227,6 +228,7 @@ class TransactionsProcessor:
         transaction_hash: str | None = None,
         num_of_initial_validators: int | None = None,
         sim_config: dict | None = None,
+        triggered_on: str | None = None,  # "accepted" or "finalized"
     ) -> str:
 
         if transaction_hash is None:
@@ -273,6 +275,7 @@ class TransactionsProcessor:
             leader_timeout_validators=None,
             appeal_validators_timeout=False,
             sim_config=sim_config,
+            triggered_on=triggered_on,
         )
 
         self.session.add(new_transaction)
