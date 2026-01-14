@@ -44,13 +44,24 @@ end
 -- Used to look up mock responses for testing
 -- It returns the response that is linked to a substring of the message
 local function get_mock_response_from_table(table, message)
+	local default_value = nil
 	for key, value in pairs(table) do
-		if string.find(message, key) then
+		if key == "" then
+			-- Save default for later, don't match it now
+			default_value = value
+		elseif string.find(message, key) then
 			return {
 				data = value,
 				consumed_gen = 0
 			}
 		end
+	end
+	-- No specific match found, use default if available
+	if default_value ~= nil then
+		return {
+			data = default_value,
+			consumed_gen = 0
+		}
 	end
 	return {
 		data = "no match",
@@ -203,12 +214,23 @@ local function just_in_backend(ctx, args, mapped_prompt)
 			lib.log{level = "debug", message = "executed with mock response", type = type(mock_data), res = mock_data}
 
 			-- Wrap mock response in the same format as exec_prompt_in_provider returns
-			-- Convert to JSON string if it's a table, otherwise use as-is
+			-- If response_format is "json", keep tables as-is; otherwise stringify
 			local data_value
-			if type(mock_data.data) == "table" then
-				data_value = lib.rs.json_stringify(mock_data.data)
+			if mapped_prompt.format == "json" then
+				-- For JSON format, keep tables as tables, parse strings as JSON
+				if type(mock_data.data) == "table" then
+					data_value = mock_data.data
+				else
+					-- Try to parse string as JSON
+					data_value = lib.rs.json_parse(mock_data.data)
+				end
 			else
-				data_value = mock_data.data
+				-- For text format, convert tables to JSON string
+				if type(mock_data.data) == "table" then
+					data_value = lib.rs.json_stringify(mock_data.data)
+				else
+					data_value = mock_data.data
+				end
 			end
 
 			local result = {
