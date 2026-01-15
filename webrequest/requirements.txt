@@ -1,9 +1,0 @@
-Flask-JSONRPC==3.0.1
-Flask[async]==3.1.1
-python-dotenv==1.1.1
-aiohttp==3.13.3
-openai==1.97.1
-anthropic==0.58.2
-httpx==0.28.1
-requests==2.32.4
-

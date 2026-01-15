@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { useContractQueries } from '@/hooks';
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import PageSection from '@/components/Simulator/PageSection.vue';
 import ContractMethodItem from '@/components/Simulator/ContractMethodItem.vue';
 import EmptyListPlaceholder from '@/components/Simulator/EmptyListPlaceholder.vue';
 import type { ContractSchema } from 'genlayer-js/types';
 const props = defineProps<{
   leaderOnly: boolean;
+  consensusMaxRotations: number;
 }>();
 
 const { contractAbiQuery } = useContractQueries();
@@ -17,14 +18,25 @@ const writeMethods = computed(() => {
   const methods = (data.value as ContractSchema).methods;
   return Object.entries(methods).filter((x) => !x[1].readonly);
 });
+
+const simulationMode = ref(false);
 </script>
 
 <template>
   <PageSection>
-    <template #title
-      >Write Methods
-
-      <Loader v-if="isRefetching" :size="14" />
+    <template #title>
+      <span class="flex items-center gap-2">
+        Write Methods
+        <Loader v-if="isRefetching" :size="14" />
+      </span>
+    </template>
+    <template #actions>
+      <div class="flex items-center gap-2 text-xs">
+        <label class="flex cursor-pointer items-center gap-1">
+          <input type="checkbox" v-model="simulationMode" class="rounded" />
+          <span>Simulation Mode</span>
+        </label>
+      </div>
     </template>
 
     <ContentLoader v-if="isPending" />
@@ -41,6 +53,8 @@ const writeMethods = computed(() => {
         :method="method[1]"
         methodType="write"
         :leaderOnly="props.leaderOnly"
+        :consensusMaxRotations="consensusMaxRotations"
+        :simulationMode="simulationMode"
       />
 
       <EmptyListPlaceholder v-if="writeMethods.length === 0">

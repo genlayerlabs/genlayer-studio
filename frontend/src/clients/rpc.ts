@@ -1,7 +1,12 @@
-const JSON_RPC_SERVER_URL = import.meta.env.VITE_JSON_RPC_SERVER_URL;
 import type { JsonRPCRequest, JsonRPCResponse } from '@/types';
 import { v4 as uuidv4 } from 'uuid';
 import { useWebSocketClient } from '@/hooks';
+import { getRuntimeConfig } from '@/utils/runtimeConfig';
+
+const JSON_RPC_SERVER_URL = getRuntimeConfig(
+  'VITE_JSON_RPC_SERVER_URL',
+  'http://127.0.0.1:4000/api',
+);
 
 export interface IRpcClient {
   call<T>(request: JsonRPCRequest): Promise<JsonRPCResponse<T>>;

@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: 3.13.5
           cache: pip
-      - run: pip install -r backend/protocol_rpc/requirements.txt
+      - run: pip install -r backend/requirements.txt
       - run: pip install pytest-cov
       - run: pytest tests/unit --cov=backend --cov-report=xml --cov-branch
       - name: SonarCloud Scan

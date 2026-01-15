@@ -34,6 +34,7 @@ export interface ProviderModel {
   plugin_config: Record<string, any>;
   is_available: boolean;
   is_model_available: boolean;
+  is_default: boolean;
 }
 
 export interface NewProviderDataModel {

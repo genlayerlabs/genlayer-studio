@@ -1,6 +1,39 @@
 require("@nomicfoundation/hardhat-toolbox");
 require("hardhat-deploy");
 
+const fs = require("node:fs");
+const path = require("node:path");
+
+function readDotenvVariable(key) {
+  try {
+    const dotenvPath = path.resolve(__dirname, "..", ".env");
+    const contents = fs.readFileSync(dotenvPath, "utf8");
+    const match = contents.match(
+      new RegExp(
+        `^\\\\s*${key}\\\\s*=\\\\s*['\\"]?(\\\\d+)['\\"]?\\\\s*(?:#.*)?$`,
+        "m"
+      )
+    );
+    return match?.[1] ?? null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function getChainId() {
+  const raw =
+    process.env.HARDHAT_CHAIN_ID ?? readDotenvVariable("HARDHAT_CHAIN_ID") ?? "61127";
+  const chainId = Number.parseInt(raw, 10);
+  if (Number.isNaN(chainId)) {
+    throw new Error(
+      `Invalid HARDHAT_CHAIN_ID '${raw}'. Expected a base-10 integer.`
+    );
+  }
+  return chainId;
+}
+
+const CHAIN_ID = getChainId();
+
 module.exports = {
   solidity: {
     version: "0.8.24",
@@ -24,6 +57,7 @@ module.exports = {
   },
   networks: {
     hardhat: {
+      // gas: 0xffffffff, // Removed to eliminate gas floor issue
       mining: {
         auto: true,
         interval: 0,
@@ -31,13 +65,14 @@ module.exports = {
           order: "fifo"
         }
       },
-      chainId: 61_999,
+      chainId: CHAIN_ID,
       gasPrice: 0,
       initialBaseFeePerGas: 0,
       blockGasLimit: 20000000000,
     },
     genlayer_network: {
       url: "http://localhost:8545",
+      // gas: 0xffffffff, // Removed to eliminate gas floor issue
       mining: {
         auto: true,
         interval: 0,
@@ -45,7 +80,7 @@ module.exports = {
           order: "fifo"
         }
       },
-      chainId: 61_999,
+      chainId: CHAIN_ID,
       gasPrice: 0,
       initialBaseFeePerGas: 0,
       blockGasLimit: 20000000000,
@@ -71,4 +106,3 @@ module.exports = {
     cache: "cache",
   }
 };
-

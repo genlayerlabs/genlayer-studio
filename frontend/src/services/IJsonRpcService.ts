@@ -31,7 +31,12 @@ export interface IJsonRpcService {
   deleteValidator(request: DeleteValidatorRequest): Promise<any>;
   getTransactionByHash(hash: string): Promise<any>;
   getTransactionCount(address: GetTransactionCountRequest): Promise<number>;
-  setTransactionAppeal(tx_address: string): Promise<any>;
   setFinalityWindowTime(time: number): Promise<any>;
   getFinalityWindowTime(): Promise<number>;
+  upgradeContractCode(
+    contractAddress: string,
+    newCode: string,
+    signature?: string,
+  ): Promise<{ transaction_hash: string; message: string }>;
+  getContractNonce(address: string): Promise<number>;
 }

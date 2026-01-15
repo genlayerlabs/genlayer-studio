@@ -10,17 +10,18 @@ import {
   useGenlayer,
 } from '@/hooks';
 import { notify } from '@kyvg/vue3-notification';
+import type { Address } from 'genlayer-js/types';
 
 const testContract = {
   id: '03bf999b-9b2f-48f1-b1e8-52becccc6e87',
-  name: 'test.gpy',
+  name: 'test.py',
   content: 'print("hello")',
   example: true,
 };
 
 const testDeployedContract = {
   contractId: '03bf999b-9b2f-48f1-b1e8-52becccc6e87',
-  address: '0xBB3557F472b67BbBb8a138AaBbFE77bA1dFF909E',
+  address: '0xBB3557F472b67BbBb8a138AaBbFE77bA1dFF909E' as Address,
   defaultState: '{}',
 };
 
@@ -66,7 +67,13 @@ describe('useContractsStore', () => {
     (useFileName as Mock).mockReturnValue(mockFileName);
     (useSetupStores as Mock).mockReturnValue(mockSetupStores);
     (useRpcClient as Mock).mockReturnValue({});
-    (useWebSocketClient as Mock).mockReturnValue({});
+    (useWebSocketClient as Mock).mockReturnValue({
+      id: 'mocked-socket-id',
+      connected: true,
+      emit: vi.fn(),
+      on: vi.fn(),
+      off: vi.fn(),
+    });
     (useGenlayer as Mock).mockReturnValue({});
 
     contractsStore = useContractsStore();
@@ -107,7 +114,7 @@ describe('useContractsStore', () => {
   it('should add and remove deployed contracts', () => {
     const deployedContract = {
       contractId: '1',
-      address: '0x123',
+      address: '0x123' as Address,
       defaultState: {},
     };
 

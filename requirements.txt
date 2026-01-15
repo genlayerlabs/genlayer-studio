@@ -2,5 +2,5 @@ requests==2.32.4
 python-dotenv==1.1.1
 black==25.1.0
 pytest==8.4.1
-pytest-mock==3.14.1
 pre-commit==4.2.0
+aiohttp==3.11.16

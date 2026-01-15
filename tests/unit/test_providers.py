@@ -14,7 +14,7 @@ def test_default_providers_valid():
     [
         pytest.param(
             LLMProvider(
-                plugin="openai",
+                plugin="openai-compatible",
                 provider="custom provider",
                 model="custom model",
                 config={},
@@ -27,9 +27,9 @@ def test_default_providers_valid():
         ),
         pytest.param(
             LLMProvider(
-                plugin="openai",
+                plugin="openai-compatible",
                 provider="heuristai",
-                model="mistralai/mixtral-8x22b-instruct",
+                model="mistralai/mixtral-8x7b-instruct",
                 config={
                     "max_tokens": 100,
                     "temperature": 0.5,

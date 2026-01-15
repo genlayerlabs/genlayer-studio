@@ -1,4 +1,5 @@
-# { "Depends": "py-genlayer:test" }
+# v0.1.0
+# { "Depends": "py-genlayer:latest" }
 
 from genlayer import *
 
