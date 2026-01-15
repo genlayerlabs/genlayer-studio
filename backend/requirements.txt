@@ -9,14 +9,12 @@ pydantic==2.11.3
 numpy==1.26.4
 pytest==8.3.5
 pytest-asyncio==0.26.0
-colorama==0.4.6
 debugpy==1.8.14
 aiohttp==3.11.16
 SQLAlchemy[asyncio]==2.0.40
 alembic==1.15.2
 eth-account==0.13.6
 eth-utils==5.3.0
-jsf==0.11.2
 jsonschema==4.23.0
 loguru==0.7.3
 web3==7.10.0
@@ -27,8 +25,6 @@ genvm-linter==0.1.0
 fastapi==0.104.1
 uvicorn[standard]==0.30.6
 websockets==12.0
-hypercorn==0.17.3
-asgiref==3.8.1
 
 # Production dependencies
 setuptools==75.7.0
