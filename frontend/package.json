@@ -37,7 +37,7 @@
     "defu": "^6.1.4",
     "dexie": "^4.0.4",
     "floating-vue": "^5.2.2",
-    "genlayer-js": "^0.12.0",
+    "genlayer-js": "^0.18.2",
     "hash-sum": "^2.0.0",
     "jump.js": "^1.0.2",
     "lodash-es": "^4.17.21",
