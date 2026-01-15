@@ -1,5 +1,5 @@
 # base image mostly copied from Dockerfile.backend to reuse cache
-FROM python:3.13.3-slim AS base
+FROM python:3.13.5-slim AS base
 
 ARG path=/app
 WORKDIR $path
