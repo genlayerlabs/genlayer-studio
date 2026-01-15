@@ -244,45 +244,11 @@ const checkRules = () => {
       pluginConfigProperties.value =
         rule.then?.properties?.plugin_config?.properties || {};
 
-      if (newProviderData.plugin === 'openai') {
-        const openAIConfig = rule.then?.properties?.config?.properties;
-        if (openAIConfig) {
-          // Extract model lists from schema comments
-          const gpt4Models =
-            openAIConfig.max_tokens?.$comment?.split(', ') || [];
-          const o1Models =
-            openAIConfig.max_completion_tokens?.$comment?.split(', ') || [];
-
-          // Start with empty properties
-          const newConfigProperties: Record<string, SchemaProperty> = {};
-
-          // Add temperature only for GPT-4 models
-          if (gpt4Models.includes(newProviderData.model)) {
-            newConfigProperties.temperature =
-              openAIConfig.temperature as SchemaProperty;
-            newConfigProperties.max_tokens =
-              openAIConfig.max_tokens as SchemaProperty;
-          } else if (o1Models.includes(newProviderData.model)) {
-            newConfigProperties.max_completion_tokens =
-              openAIConfig.max_completion_tokens as SchemaProperty;
-          }
-
-          configProperties.value = newConfigProperties;
-
-          // Handle config values
-          const defaults = extractDefaults(newConfigProperties);
-          if (isCreateMode.value) {
-            newProviderData.config = { ...defaults };
-          }
-        }
-      } else {
-        // Handle other plugins normally
-        configProperties.value =
-          rule.then?.properties?.config?.properties || {};
-        if (isCreateMode.value) {
-          const config = extractDefaults(configProperties.value);
-          newProviderData.config = config ? { ...config } : {};
-        }
+      // Handle other plugins normally
+      configProperties.value = rule.then?.properties?.config?.properties || {};
+      if (isCreateMode.value) {
+        const config = extractDefaults(configProperties.value);
+        newProviderData.config = config ? { ...config } : {};
       }
 
       if (isCreateMode.value) {

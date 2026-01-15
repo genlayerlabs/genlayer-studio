@@ -1,0 +1,10 @@
+{
+  "provider": "openai",
+  "plugin": "openai-compatible",
+  "model": "gpt-4.1-mini",
+  "config": {},
+  "plugin_config": {
+    "api_key_env_var": "OPENAIKEY",
+    "api_url": "https://api.openai.com"
+  }
+}

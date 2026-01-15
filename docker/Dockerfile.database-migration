@@ -9,9 +9,9 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-COPY backend/protocol_rpc/requirements.txt backend/protocol_rpc/requirements.txt
+COPY backend/requirements.txt backend/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --cache-dir=/root/.cache/pip -r backend/protocol_rpc/requirements.txt
+    pip install --cache-dir=/root/.cache/pip -r backend/requirements.txt
 
 COPY ../.env .
 COPY backend $path/backend

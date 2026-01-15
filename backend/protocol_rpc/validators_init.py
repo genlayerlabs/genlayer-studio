@@ -1,7 +1,8 @@
 import json
 from dataclasses import dataclass
-from backend.database_handler.accounts_manager import AccountsManager
-from backend.database_handler.validators_registry import ValidatorsRegistry
+from sqlalchemy.orm import Session
+import backend.validators as validators
+from loguru import logger
 
 
 @dataclass
@@ -15,31 +16,23 @@ class ValidatorConfig:
     amount: int = 1
 
 
-def initialize_validators(
+async def initialize_validators(
     validators_json: str,
-    validators_registry: ValidatorsRegistry,
-    accounts_manager: AccountsManager,
-    validator_creator=None,
+    db_session: Session,
+    validators_manager: validators.Manager,
 ):
     """
     Idempotently initialize validators from a JSON string by deleting all existing validators and creating new ones.
 
     Args:
         validators_json: JSON string containing validator configurations
-        validators_registry: Registry to store validator information
-        accounts_manager: AccountsManager to create validator accounts
-        validator_creator: Function to create validators (defaults to endpoints.create_validator)
+        db_session: Session to store validator information
+        validators_manager: ValidatorsManager instance (required for snapshot updates)
     """
 
     if not validators_json:
         print("No validators to initialize")
         return
-
-    # If no validator_creator is provided, import the default one
-    if validator_creator is None:
-        from backend.protocol_rpc.endpoints import create_validator
-
-        validator_creator = create_validator
 
     try:
         validators_data = json.loads(validators_json)
@@ -49,25 +42,51 @@ def initialize_validators(
     if not isinstance(validators_data, list):
         raise ValueError("validators_json must contain a JSON array")
 
-    # Delete all existing validators
-    validators_registry.delete_all_validators()
+    # Delete all existing validators using the manager's registry (triggers snapshot update)
+    await validators_manager.registry.delete_all_validators()
 
-    # Create new validators
+    # Import necessary dependencies for validator creation
+    from backend.database_handler.accounts_manager import AccountsManager
+    from backend.domain.types import Validator, LLMProvider
+    from backend.node.create_nodes.providers import get_default_provider_for
+
+    accounts_manager = AccountsManager(db_session)
+
+    # Collect all validators to create in a batch
+    validators_to_create: list[Validator] = []
+
     for validator_data in validators_data:
         try:
-            validator = ValidatorConfig(**validator_data)
+            validator_config = ValidatorConfig(**validator_data)
 
-            for _ in range(validator.amount):
-                validator_creator(
-                    validators_registry,
-                    accounts_manager,
-                    validator.stake,
-                    validator.provider,
-                    validator.model,
-                    validator.config,
-                    validator.plugin,
-                    validator.plugin_config,
+            for _ in range(validator_config.amount):
+                # Prepare LLM provider
+                llm_provider = get_default_provider_for(
+                    validator_config.provider, validator_config.model
+                )
+                if validator_config.config is not None:
+                    llm_provider.config = validator_config.config
+                if validator_config.plugin is not None:
+                    llm_provider.plugin = validator_config.plugin
+                if validator_config.plugin_config is not None:
+                    llm_provider.plugin_config = validator_config.plugin_config
+
+                # Create account
+                account = accounts_manager.create_new_account()
+
+                validators_to_create.append(
+                    Validator(
+                        address=account.address,
+                        private_key=account.key,
+                        stake=validator_config.stake,
+                        llmprovider=llm_provider,
+                    )
                 )
 
         except Exception as e:
             raise ValueError(f"Failed to create validator `{validator_data}`: {str(e)}")
+
+    # Batch create all validators with a single restart at the end
+    if validators_to_create:
+        logger.info(f"Batch creating {len(validators_to_create)} validators")
+        await validators_manager.registry.batch_create_validators(validators_to_create)

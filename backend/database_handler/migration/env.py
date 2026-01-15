@@ -10,7 +10,14 @@ import os
 # set up Python path as the project root directory, so that we can import as backend...
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 
-DB_URL = os.environ.get("DB_URL")
+# Construct database URL from individual environment variables for consistency with other services
+db_user = os.environ.get("DBUSER", "postgres")
+db_password = os.environ.get("DBPASSWORD", "postgres")
+db_host = os.environ.get("DBHOST", "localhost")
+db_port = os.environ.get("DBPORT", "5432")
+db_name = os.environ.get("DBNAME", "genlayer")
+
+DB_URL = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

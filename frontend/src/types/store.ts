@@ -1,3 +1,5 @@
+import type { Address, TransactionStatus } from 'genlayer-js/types';
+
 export interface ContractFile {
   id: string;
   name: string;
@@ -13,7 +15,7 @@ export interface OpenedFile {
 
 export interface DeployedContract {
   contractId: string;
-  address: string;
+  address: Address;
   defaultState: string;
 }
 
@@ -26,9 +28,9 @@ export interface NodeLog {
 }
 
 export interface TransactionItem {
-  hash: string;
-  type: 'deploy' | 'method';
-  status: string;
+  hash: `0x${string}`;
+  type: 'deploy' | 'method' | 'upgrade';
+  statusName: TransactionStatus;
   contractAddress: string;
   localContractId: string;
   data?: any;

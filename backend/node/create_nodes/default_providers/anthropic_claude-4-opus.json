@@ -1,0 +1,10 @@
+{
+  "provider": "anthropic",
+  "plugin": "anthropic",
+  "model": "claude-opus-4-20250514",
+  "config": {},
+  "plugin_config": {
+    "api_key_env_var": "ANTHROPIC_API_KEY",
+    "api_url": "https://api.anthropic.com"
+  }
+}

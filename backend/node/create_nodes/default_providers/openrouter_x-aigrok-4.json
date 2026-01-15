@@ -1,0 +1,10 @@
+{
+  "provider": "openrouter",
+  "plugin": "openai-compatible",
+  "model": "x-ai/grok-4",
+  "config": {},
+  "plugin_config": {
+    "api_key_env_var": "OPENROUTERAPIKEY",
+    "api_url": "https://openrouter.ai/api"
+  }
+}

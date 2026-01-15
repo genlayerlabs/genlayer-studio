@@ -4,8 +4,8 @@ on:
   pull_request:
     types: [closed]
     branches:
-      - main  # or your default branch name
-  workflow_dispatch:  # Add manual trigger
+      - main # or your default branch name
+  workflow_dispatch: # Add manual trigger
 
 jobs:
   trigger-infra-workflow:
@@ -21,8 +21,8 @@ jobs:
 
       - name: Trigger Infra Deploy Studio to Staging Environment
         run: |
-          curl -X POST \
+          curl -L -X POST \
             -H "Accept: application/vnd.github.v3+json" \
             -H "Authorization: token ${{ steps.ci_bot_token.outputs.token }}" \
-            https://api.github.com/repos/yeagerai/genlayer-simulator-infra/actions/workflows/deploy-stage.yml/dispatches \
+            https://api.github.com/repos/genlayerlabs/genlayer-infra/actions/workflows/deploy-stage.yml/dispatches \
             -d '{"ref":"main"}'

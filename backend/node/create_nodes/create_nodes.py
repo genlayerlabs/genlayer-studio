@@ -5,7 +5,7 @@ from numpy.random import default_rng
 from dotenv import load_dotenv
 
 from backend.domain.types import LLMProvider
-from backend.llms import Plugin
+import asyncio
 
 load_dotenv()
 rng = default_rng(secrets.randbits(128))
@@ -13,9 +13,9 @@ rng = default_rng(secrets.randbits(128))
 
 async def random_validator_config(
     get_stored_providers: Callable[[], list[LLMProvider]],
-    get_llm_plugin: Callable[[str, dict], Awaitable[Plugin]],
-    limit_providers: set[str] = None,
-    limit_models: set[str] = None,
+    check_llm_provider: Callable[[LLMProvider], Awaitable[bool]],
+    limit_providers: set[str] | None = None,
+    limit_models: set[str] | None = None,
     amount: int = 1,
 ) -> list[LLMProvider]:
     providers_to_use = get_stored_providers()
@@ -37,19 +37,16 @@ async def random_validator_config(
             f"Requested providers '{limit_providers}' do not match any stored providers. Please review your stored providers."
         )
 
-    async def filter_by_available(provider: LLMProvider) -> bool:
-        plugin = await get_llm_plugin(provider.plugin, provider.plugin_config)
-        if not await plugin.is_available():
-            return False
+    sem = asyncio.Semaphore(8)
 
-        if not await plugin.is_model_available(provider.model):
-            return False
+    async def check_with_semaphore(provider):
+        async with sem:
+            return await check_llm_provider(provider)
 
-        return True
-
-    providers_to_use = [
-        plug for plug in providers_to_use if await filter_by_available(plug)
-    ]
+    availability = await asyncio.gather(
+        *(check_with_semaphore(p) for p in providers_to_use)
+    )
+    providers_to_use = [p for p, ok in zip(providers_to_use, availability) if ok]
 
     if not providers_to_use:
         raise Exception("No providers available.")

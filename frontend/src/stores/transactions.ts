@@ -1,19 +1,30 @@
 import { defineStore } from 'pinia';
-import { ref } from 'vue';
+import { ref, computed } from 'vue';
 import type { TransactionItem } from '@/types';
 import type { TransactionHash } from 'genlayer-js/types';
-import { useDb, useGenlayer, useWebSocketClient, useRpcClient } from '@/hooks';
-import { useContractsStore } from '@/stores';
+import { TransactionStatus } from 'genlayer-js/types';
+import { useDb, useGenlayer, useWebSocketClient } from '@/hooks';
 
 export const useTransactionsStore = defineStore('transactionsStore', () => {
   const genlayer = useGenlayer();
-  const genlayerClient = genlayer.client?.value;
+  const genlayerClient = computed(() => genlayer.client.value);
   const webSocketClient = useWebSocketClient();
   const transactions = ref<TransactionItem[]>([]);
-  const contractsStore = useContractsStore();
   const subscriptions = new Set();
   const db = useDb();
-  const rpcClient = useRpcClient();
+
+  // Named handler for WebSocket reconnection
+  const handleReconnection = () => {
+    // Resubscribe to all transaction topics after reconnect/restart
+    if (subscriptions.size > 0) {
+      webSocketClient.emit('subscribe', Array.from(subscriptions));
+    }
+  };
+
+  // Handle WebSocket reconnection to restore transaction subscriptions
+  // Use off/on pattern to prevent duplicate listeners during HMR/re-inits
+  webSocketClient.off('connect', handleReconnection);
+  webSocketClient.on('connect', handleReconnection);
 
   function addTransaction(tx: TransactionItem) {
     transactions.value.unshift(tx); // Push on top in case there's no date property yet
@@ -35,7 +46,7 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
 
       transactions.value.splice(currentTxIndex, 1, {
         ...currentTx,
-        status: tx.status,
+        statusName: tx.statusName,
         data: tx,
       });
     } else {
@@ -46,12 +57,12 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
   }
 
   async function getTransaction(hash: TransactionHash) {
-    return genlayerClient?.getTransaction({ hash });
+    return genlayerClient.value?.getTransaction({ hash });
   }
 
   async function refreshPendingTransactions() {
     const pendingTxs = transactions.value.filter(
-      (tx: TransactionItem) => tx.status !== 'FINALIZED',
+      (tx: TransactionItem) => tx.statusName !== TransactionStatus.FINALIZED,
     ) as TransactionItem[];
 
     await Promise.all(
@@ -61,7 +72,7 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
         if (newTx) {
           updateTransaction(newTx);
           await db.transactions.where('hash').equals(tx.hash).modify({
-            status: newTx.status,
+            statusName: newTx.statusName,
             data: newTx,
           });
         } else {
@@ -86,8 +97,10 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
     await db.transactions.where('localContractId').equals(contractId).delete();
   }
 
-  async function setTransactionAppeal(tx_address: string) {
-    rpcClient.setTransactionAppeal(tx_address);
+  async function setTransactionAppeal(tx_address: `0x${string}`) {
+    await genlayerClient.value?.appealTransaction({
+      txId: tx_address,
+    });
   }
 
   function subscribe(topics: string[]) {

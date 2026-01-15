@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { useContractsStore } from '@/stores';
-import { FilePlus2, Upload } from 'lucide-vue-next';
+import { FilePlus2, Upload, FileDown } from 'lucide-vue-next';
 import { ref } from 'vue';
 import { v4 as uuidv4 } from 'uuid';
 import ContractItem from '@/components/Simulator/ContractItem.vue';
 import MainTitle from '@/components/Simulator/MainTitle.vue';
+import ImportContractModal from '@/components/contracts/ImportContractModal.vue';
 import { useEventTracking } from '@/hooks';
 
 const store = useContractsStore();
 const showNewFileInput = ref(false);
+const showImportModal = ref(false);
 const { trackEvent } = useEventTracking();
 
 /**
@@ -46,7 +48,7 @@ const handleAddNewFile = () => {
 };
 
 const handleSaveNewFile = (name: string) => {
-  if (name && name.replace('.gpy', '') !== '') {
+  if (name && name.replace('.py', '') !== '') {
     const id = uuidv4();
     store.addContractFile({ id, name, content: '' });
     store.openFile(id);
@@ -72,13 +74,13 @@ const handleSaveNewFile = (name: string) => {
 
         <GhostBtn class="!p-0" v-tooltip="'Add From File'">
           <label class="input-label p-1">
-            <input
-              type="file"
-              @change="loadContentFromFile"
-              accept=".gpy,.py"
-            />
+            <input type="file" @change="loadContentFromFile" accept=".py" />
             <Upload :size="16" />
           </label>
+        </GhostBtn>
+
+        <GhostBtn @click="showImportModal = true" v-tooltip="'Import Contract'">
+          <FileDown :size="16" />
         </GhostBtn>
       </template>
     </MainTitle>
@@ -98,6 +100,11 @@ const handleSaveNewFile = (name: string) => {
       :isNewFile="true"
       @save="handleSaveNewFile"
       @cancel="showNewFileInput = false"
+    />
+
+    <ImportContractModal
+      :open="showImportModal"
+      @close="showImportModal = false"
     />
   </div>
 </template>

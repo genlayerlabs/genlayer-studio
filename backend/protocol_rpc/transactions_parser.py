@@ -8,6 +8,7 @@ from eth_account._utils.legacy_transactions import Transaction
 import eth_utils
 from eth_utils import to_checksum_address
 from hexbytes import HexBytes
+import os
 from backend.rollup.consensus_service import ConsensusService
 from backend.domain.types import TransactionType
 
@@ -20,6 +21,7 @@ from backend.protocol_rpc.types import (
     DecodedRollupTransactionDataArgs,
     DecodedGenlayerTransaction,
     DecodedGenlayerTransactionData,
+    DecodedsubmitAppealDataArgs,
     ZERO_ADDRESS,
 )
 
@@ -67,27 +69,107 @@ class TransactionParser:
     ) -> DecodedRollupTransaction | None:
         try:
             transaction_bytes = HexBytes(raw_transaction)
-            signed_transaction = Transaction.from_bytes(transaction_bytes)
+            # Try decoding typed transactions first (supports EIP-2718/EIP-1559)
+            signed_transaction_as_dict = None
+            typed_decode_err = None
+            try:
+                if len(transaction_bytes) > 0 and transaction_bytes[0] in (1, 2):
+                    tx_type = transaction_bytes[0]
+                    decoded_items = rlp.decode(bytes(transaction_bytes[1:]))
+                    # EIP-2930 (0x01) access list tx
+                    # Fields: 0 chainId, 1 nonce, 2 gasPrice, 3 gas, 4 to, 5 value, 6 data, 7 accessList, 8 v, 9 r, 10 s
+                    # EIP-1559 (0x02) dynamic fee tx
+                    # Fields: 0 chainId, 1 nonce, 2 maxPriorityFeePerGas, 3 maxFeePerGas, 4 gas, 5 to, 6 value, 7 data, 8 accessList, 9 v, 10 r, 11 s
+
+                    def _to_int(value: bytes) -> int:
+                        return int.from_bytes(value, byteorder="big") if value else 0
+
+                    chain_id = _to_int(decoded_items[0])
+                    nonce = _to_int(decoded_items[1])
+
+                    if tx_type == 2:
+                        gas = _to_int(decoded_items[4])
+                        to_field = decoded_items[5] if decoded_items[5] else None
+                        value = _to_int(decoded_items[6])
+                        data_field = decoded_items[7] if decoded_items[7] else b""
+                    elif tx_type == 1:
+                        gas = _to_int(decoded_items[3])
+                        to_field = decoded_items[4] if decoded_items[4] else None
+                        value = _to_int(decoded_items[5])
+                        data_field = decoded_items[6] if decoded_items[6] else b""
+                    else:
+                        # Unknown typed transaction; fallback to legacy path below
+                        raise ValueError("Unsupported typed transaction")
+
+                    signed_transaction_as_dict = {
+                        "type": tx_type,
+                        "chainId": chain_id,
+                        "nonce": nonce,
+                        "gas": gas,
+                        "to": to_field,
+                        "value": value,
+                        "data": data_field,
+                    }
+                else:
+                    raise ValueError("Not a typed transaction")
+            except Exception as e:
+                typed_decode_err = e
+                # Fallback to legacy transaction decoding
+                try:
+                    signed_transaction = Transaction.from_bytes(transaction_bytes)
+                    signed_transaction_as_dict = signed_transaction.as_dict()
+                except Exception as legacy_err:
+                    print(
+                        "Error decoding transaction (typed and legacy failed)",
+                        typed_decode_err,
+                        legacy_err,
+                    )
+                    raise
 
             # extracting sender address
             sender = Account.recover_transaction(raw_transaction)
-            signed_transaction_as_dict = signed_transaction.as_dict()
-            to_address = (
-                to_checksum_address(f"0x{signed_transaction_as_dict['to'].hex()}")
-                if signed_transaction_as_dict["to"]
-                else None
-            )
+
+            # Normalize `to` field which may be bytes/HexBytes or string depending on decoder
+            to_raw = signed_transaction_as_dict.get("to")
+            if to_raw is None:
+                to_address = None
+            elif isinstance(to_raw, (bytes, bytearray, HexBytes)):
+                # Treat empty bytes as burn (no recipient)
+                if len(to_raw) == 0:
+                    to_address = None
+                else:
+                    hex_to = HexBytes(to_raw).hex()
+                    to_address = (
+                        to_checksum_address(f"0x{hex_to}")
+                        if len(hex_to) == 40
+                        else None
+                    )
+            elif isinstance(to_raw, str):
+                # Accept only full hex addresses; '0x' or empty means burn
+                if to_raw.lower() == "0x" or len(to_raw) == 0:
+                    to_address = None
+                else:
+                    to_address = to_checksum_address(to_raw)
+            else:
+                to_address = None
             nonce = signed_transaction_as_dict["nonce"]
             value = signed_transaction_as_dict["value"]
-            data = (
-                signed_transaction_as_dict["data"].hex()
-                if signed_transaction_as_dict["data"]
-                else None
+            # Some decoders return `data`, others return `input`
+            input_raw = (
+                signed_transaction_as_dict.get("data")
+                if signed_transaction_as_dict.get("data") is not None
+                else signed_transaction_as_dict.get("input")
             )
-
+            if input_raw is None:
+                data = None
+            elif isinstance(input_raw, (bytes, bytearray, HexBytes)):
+                data = HexBytes(input_raw).hex()
+            elif isinstance(input_raw, str):
+                data = input_raw
+            else:
+                data = None
             decoded_data = None
             contract_abi = self._get_contract_abi()
-
             if data and contract_abi:
                 # Remove '0x' prefix if present
                 data = data.removeprefix("0x")
@@ -143,7 +225,11 @@ class TransactionParser:
                                         data=params["_txData"],
                                     ),
                                 )
-                            break
+                            elif decoded_data["function"] == "submitAppeal":
+                                params = decoded_data["params"]
+                                decoded_data = DecodedsubmitAppealDataArgs(
+                                    tx_id=params["_txId"],
+                                )
 
             return DecodedRollupTransaction(
                 from_address=sender,
@@ -196,17 +282,25 @@ class TransactionParser:
                 from_address=rollup_transaction.from_address,
                 to_address=rollup_transaction.to_address,
                 data=None,
+                max_rotations=int(os.getenv("VITE_MAX_ROTATIONS", 3)),
+                num_of_initial_validators=None,
             )
 
         sender = rollup_transaction.data.args.sender
         recipient = rollup_transaction.data.args.recipient
+        max_rotations = rollup_transaction.data.args.max_rotations
         type = self._get_genlayer_transaction_type(recipient)
         data = self._get_genlayer_transaction_data(type, rollup_transaction.data.args)
+        num_of_initial_validators = (
+            rollup_transaction.data.args.num_of_initial_validators
+        )
 
         return DecodedGenlayerTransaction(
             from_address=sender,
             to_address=recipient,
             type=type,
+            max_rotations=max_rotations,
+            num_of_initial_validators=num_of_initial_validators,
             data=DecodedGenlayerTransactionData(
                 contract_code=(
                     data.contract_code if hasattr(data, "contract_code") else None
@@ -241,7 +335,22 @@ class TransactionParser:
         )
 
     def decode_method_call_data(self, data: str) -> DecodedMethodCallData:
-        return DecodedMethodCallData(eth_utils.hexadecimal.decode_hex(data))
+        raw_bytes = eth_utils.hexadecimal.decode_hex(data)
+
+        # Remove the null byte
+        if raw_bytes[-1] == 0:
+            raw_bytes = raw_bytes[:-1]
+
+            # Try to decode the outer list first
+            if raw_bytes[0] >= 0xF8:  # Long list
+                raw_bytes = raw_bytes[2:]  # Skip list prefix and length
+            elif raw_bytes[0] >= 0xC0:  # Short list
+                raw_bytes = raw_bytes[1:]  # Skip list prefix
+
+            # Now try to decode the inner string
+            raw_bytes = rlp.decode(raw_bytes)
+
+        return DecodedMethodCallData(raw_bytes)
 
     def decode_deployment_data(self, data: str) -> DecodedDeploymentData:
         data_bytes = HexBytes(data)

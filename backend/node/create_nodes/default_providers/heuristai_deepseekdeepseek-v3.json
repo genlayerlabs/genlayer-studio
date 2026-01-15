@@ -1,0 +1,10 @@
+{
+  "provider": "heuristai",
+  "plugin": "openai-compatible",
+  "model": "deepseek/deepseek-v3",
+  "config": {},
+  "plugin_config": {
+    "api_key_env_var": "HEURISTAIAPIKEY",
+    "api_url": "https://llm-gateway.heurist.xyz"
+  }
+}

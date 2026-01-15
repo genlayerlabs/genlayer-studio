@@ -1,7 +1,10 @@
 eth-account==0.13.7
 eth-abi==5.2.0
 web3==7.14.0
-psycopg2==2.9.11
+psycopg2-binary==2.9.11
 pytest==8.4.2
 pytest-xdist==3.8.0
 pytest-asyncio==0.26.0
+pytest-timeout==2.3.1
+genlayer-test==0.9.0
+httpx==0.27.2

@@ -28,6 +28,11 @@ class EndpointResult:
 
 
 @dataclass
+class DecodedsubmitAppealDataArgs:
+    tx_id: str
+
+
+@dataclass
 class DecodedRollupTransactionDataArgs:
     sender: str
     recipient: str
@@ -46,7 +51,7 @@ class DecodedRollupTransactionData:
 class DecodedRollupTransaction:
     from_address: str
     to_address: str
-    data: DecodedRollupTransactionData
+    data: DecodedRollupTransactionData | DecodedsubmitAppealDataArgs
     type: str
     nonce: int
     value: int
@@ -83,3 +88,5 @@ class DecodedGenlayerTransaction:
     to_address: str
     data: DecodedGenlayerTransactionData
     type: TransactionType
+    max_rotations: int
+    num_of_initial_validators: int

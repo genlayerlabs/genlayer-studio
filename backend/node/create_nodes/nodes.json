@@ -1,61 +1,61 @@
 [
   {
     "provider": "openai",
-    "model": "gpt-4",
+    "model": "gpt-4-1106-preview",
     "id": "0xFCB73dB7EA29aE0Eff3C0735E520dCd3ECBA0c78",
     "config": {}
   },
   {
     "provider": "openai",
-    "model": "gpt-4",
+    "model": "gpt-4-1106-preview",
     "id": "0x0777bf18D5FbC2B1AEe7ccAC76a42311ae49f7E9",
     "config": {}
   },
   {
     "provider": "openai",
-    "model": "gpt-4",
+    "model": "gpt-4-1106-preview",
     "id": "0xb3bF294AcB0Cc09Bc62d85aEDd4BFd37FEBFFC35",
     "config": {}
   },
   {
     "provider": "openai",
-    "model": "gpt-4",
+    "model": "gpt-4-1106-preview",
     "id": "0x739cADd489FAbf489f3051C0ecFDFC3cD6FC695d",
     "config": {}
   },
   {
     "provider": "openai",
-    "model": "gpt-4",
+    "model": "gpt-4-1106-preview",
     "id": "0x5bd55389DE34FA04EBeB98Bff92a4Fb7C2406d7d",
     "config": {}
   },
   {
     "provider": "openai",
-    "model": "gpt-4",
+    "model": "gpt-4-1106-preview",
     "id": "0x2b8480CFB5e8619CBbEE4FbDa50F5D46dAc0aBCB",
     "config": {}
   },
   {
     "provider": "openai",
-    "model": "gpt-4",
+    "model": "gpt-4-1106-preview",
     "id": "0xBc5CEC3aE2Ae1c8C0c6b2F6EDB47EF14ecbBfF64",
     "config": {}
   },
   {
     "provider": "openai",
-    "model": "gpt-4",
+    "model": "gpt-4-1106-preview",
     "id": "0x191DAefA45Be2a93C32dBcfEAa72F4ebfB7EE87F",
     "config": {}
   },
   {
     "provider": "openai",
-    "model": "gpt-4",
+    "model": "gpt-4-1106-preview",
     "id": "0x20ecE3C697bDDb6Ddb5fcCC8Df2CcFfFB28A7d11",
     "config": {}
   },
   {
     "provider": "openai",
-    "model": "gpt-4",
+    "model": "gpt-4-1106-preview",
     "id": "0xFA2f6FdfA0B9d4BfAf3ed09aae46eb8ecC9eacaB",
     "config": {}
   }

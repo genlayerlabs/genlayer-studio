@@ -1,0 +1,9 @@
+tls:
+  certificates:
+    - certFile: /etc/ssl/traefik/genlayer.com.crt
+      keyFile: /etc/ssl/traefik/genlayer.com.key
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /etc/ssl/traefik/genlayer.com.crt
+        keyFile: /etc/ssl/traefik/genlayer.com.key

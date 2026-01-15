@@ -115,6 +115,12 @@ contract ConsensusMain is
 		address idleness
 	);
 
+	struct internalMessageData {
+		address sender;
+		address recipient;
+		bytes data;
+	}
+
 	/**
 	 * @notice Initializes the contract
 	 */
@@ -148,6 +154,12 @@ contract ConsensusMain is
 		emit TransactionReceiptProposed(txId);
 	}
 
+	function emitTransactionLeaderTimeout(
+		bytes32 txId
+	) external {
+		emit TransactionLeaderTimeout(txId);
+	}
+
 	function emitVoteCommitted(
 		bytes32 txId,
 		address validator,
@@ -166,15 +178,46 @@ contract ConsensusMain is
 		emit VoteRevealed(txId, validator, voteType, isLastVote, result);
 	}
 
+	function _processInternalMessages(internalMessageData[] calldata internalMessages) internal {
+		for (uint256 i = 0; i < internalMessages.length; i++) {
+			if (!ghostContracts[internalMessages[i].recipient]) {
+				_storeGhost(internalMessages[i].recipient);
+			}
+			(
+				bytes32 generated_txId,
+				address newActivator
+			) = _addTransaction(
+				internalMessages[i].sender,
+				internalMessages[i].recipient,
+				5, // or pass as part of internalMessages.data
+				0, // or pass as part of internalMessages.data
+				internalMessages[i].data
+			);
+			emit InternalMessageProcessed(
+				generated_txId,
+				internalMessages[i].recipient,
+				newActivator
+			);
+		}
+	}
+
 	function emitTransactionAccepted(
-		bytes32 txId
+		bytes32 txId,
+		internalMessageData[] calldata internalMessages
 	) external {
+		if (internalMessages.length > 0) {
+			_processInternalMessages(internalMessages);
+		}
 		emit TransactionAccepted(txId);
 	}
 
 	function emitTransactionFinalized(
-		bytes32 txId
+		bytes32 txId,
+		internalMessageData[] calldata internalMessages
 	) external {
+		if (internalMessages.length > 0) {
+			_processInternalMessages(internalMessages);
+		}
 		emit TransactionFinalized(txId);
 	}
 

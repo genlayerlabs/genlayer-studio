@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Resource Monitor</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        h1 { text-align: center; }
+        .chart-container { width: 90%; margin: 30px auto; height: 300px; }
+    </style>
+</head>
+<body>
+    <h1>Resource Usage Graphs</h1>
+
+    <div class="chart-container">
+        <canvas id="cpuChart"></canvas>
+    </div>
+
+    <div class="chart-container">
+        <canvas id="memoryChart"></canvas>
+    </div>
+
+    <div class="chart-container">
+        <canvas id="loadChart"></canvas>
+    </div>
+
+    <script>
+        // Load and parse CSV file
+        fetch('resource_usage.csv')
+            .then(response => response.text())
+            .then(csvText => {
+                const lines = csvText.trim().split('\n');
+                const headers = lines[0].split(',');
+
+                const data = {
+                    timestamps: [],
+                    cpu: [],
+                    memory: [],
+                    load1: []
+                };
+
+                // Parse data (skip header)
+                for (let i = 1; i < lines.length; i++) {
+                    const values = lines[i].split(',');
+                    data.timestamps.push(values[0]);
+                    data.cpu.push(parseFloat(values[1]));
+                    data.memory.push(parseFloat(values[2]));
+                    data.load1.push(parseFloat(values[5]));
+                }
+
+                // CPU Chart
+                new Chart(document.getElementById('cpuChart'), {
+                    type: 'line',
+                    data: {
+                        labels: data.timestamps,
+                        datasets: [{
+                            label: 'CPU %',
+                            data: data.cpu,
+                            borderColor: 'rgb(255, 99, 132)',
+                            tension: 0.1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            title: {
+                                display: true,
+                                text: 'CPU Usage Over Time'
+                            }
+                        },
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                max: 100
+                            }
+                        }
+                    }
+                });
+
+                // Memory Chart
+                new Chart(document.getElementById('memoryChart'), {
+                    type: 'line',
+                    data: {
+                        labels: data.timestamps,
+                        datasets: [{
+                            label: 'Memory %',
+                            data: data.memory,
+                            borderColor: 'rgb(54, 162, 235)',
+                            tension: 0.1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            title: {
+                                display: true,
+                                text: 'Memory Usage Over Time'
+                            }
+                        },
+                        scales: {
+                            y: {
+                                beginAtZero: true,
+                                max: 100
+                            }
+                        }
+                    }
+                });
+
+                // Load Average Chart
+                new Chart(document.getElementById('loadChart'), {
+                    type: 'line',
+                    data: {
+                        labels: data.timestamps,
+                        datasets: [{
+                            label: 'Load (1 min)',
+                            data: data.load1,
+                            borderColor: 'rgb(75, 192, 192)',
+                            tension: 0.1
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            title: {
+                                display: true,
+                                text: 'System Load Average'
+                            }
+                        },
+                        scales: {
+                            y: {
+                                beginAtZero: true
+                            }
+                        }
+                    }
+                });
+            })
+            .catch(error => {
+                document.body.innerHTML += '<p style="color: red;">Error loading CSV file. Make sure resource_usage.csv is in the same directory.</p>';
+                console.error('Error:', error);
+            });
+    </script>
+</body>
+</html>
