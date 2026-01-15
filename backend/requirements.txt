@@ -1,7 +1,7 @@
 Flask-JSONRPC==3.0.1
 Flask[async]==3.1.0
 flask-socketio==5.5.1
-Flask-Cors==5.0.1
+Flask-Cors==6.0.0
 psycopg2-binary==2.9.10
 requests==2.32.3
 python-dotenv==1.1.0
