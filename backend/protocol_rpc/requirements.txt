@@ -12,7 +12,7 @@ pytest==8.4.1
 pytest-asyncio==0.26.0
 colorama==0.4.6
 debugpy==1.8.15
-aiohttp==3.12.14
+aiohttp==3.13.3
 SQLAlchemy[asyncio]==2.0.41
 alembic==1.16.4
 eth-account==0.13.7
