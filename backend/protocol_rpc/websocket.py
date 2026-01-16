@@ -128,6 +128,12 @@ async def websocket_handler(websocket: WebSocket, broadcast: Broadcast) -> None:
                         {"event": "unsubscribed", "data": {"room": topic}}
                     )
 
+            elif event == "ping":
+                # Respond to ping with pong to keep connection alive
+                await websocket.send_json(
+                    {"event": "pong", "data": {"timestamp": payload.get("timestamp")}}
+                )
+
             else:
                 await websocket.send_json(
                     {"event": "message", "data": f"Received event: {event}"}
