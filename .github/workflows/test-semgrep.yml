@@ -23,7 +23,7 @@ jobs:
     # Skip any PR created by dependabot/renovatebot to avoid permission issues:
     if: (github.actor != 'dependabot[bot]' && github.actor != 'renovate[bot]')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - id: semgrep_scan
         run: semgrep scan --config auto --sarif > semgrep.sarif
