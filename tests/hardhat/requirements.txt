@@ -1,7 +1,7 @@
-pytest==8.2.1
-debugpy==1.8.5
+pytest==8.3.5
+debugpy==1.8.14
 requests==2.32.3
 numpy==1.26.4
-web3==7.5.0
+web3==7.10.0
 eth-typing==5.0.1
-python-dotenv==1.0.1
+python-dotenv==1.1.0
