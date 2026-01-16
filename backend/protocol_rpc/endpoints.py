@@ -540,11 +540,8 @@ def admin_upgrade_contract_code(
             try:
                 # Get transaction count for contract to prevent replay attacks
                 # Each upgrade creates a new tx, so count always increases
-                tx_count = (
-                    session.query(Transactions)
-                    .filter(Transactions.to_address == contract_address)
-                    .count()
-                )
+                # Use get_contract_nonce for consistent address normalization
+                tx_count = get_contract_nonce(session, contract_address)
 
                 # Recover signer from signature
                 # Message: keccak256(contract_address + tx_count_bytes + keccak256(new_code))
