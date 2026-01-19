@@ -29,7 +29,7 @@ llm.exec_prompt_template_transform = function(args)
 		user_message = as_user_text,
 		temperature = 0.7,
 		images = {},
-		max_tokens = 1000,
+		max_tokens = 8000,
 		use_max_completion_tokens = false,
 	}
 
@@ -282,6 +282,7 @@ function ExecPrompt(ctx, args, remaining_gen)
 
 	local mapped = llm.exec_prompt_transform(args)
 
+	mapped.prompt.max_tokens = 8000
 	return just_in_backend(ctx, args, mapped)
 end
 
