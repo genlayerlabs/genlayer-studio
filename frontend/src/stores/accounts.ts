@@ -107,7 +107,7 @@ export const useAccountsStore = defineStore('accountsStore', () => {
 
   if (window.ethereum) {
     window.ethereum.on('accountsChanged', (newAccounts: string[]) => {
-      if (newAccounts.length > 0) {
+      if (newAccounts.length > 0 && newAccounts[0]) {
         const metamaskAccount: AccountInfo = {
           type: 'metamask',
           address: getAddress(newAccounts[0]) as Address,
@@ -130,7 +130,7 @@ export const useAccountsStore = defineStore('accountsStore', () => {
         accounts.value = accounts.value.filter(
           (acc) => acc.type !== 'metamask',
         );
-        setCurrentAccount(accounts.value[0]);
+        setCurrentAccount(accounts.value[0] ?? null);
       }
       localStorage.setItem(
         'accountsStore.accounts',

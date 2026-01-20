@@ -23,6 +23,7 @@ const loadContentFromFile = (event: Event) => {
 
   if (target.files && target.files.length > 0) {
     const [file] = target.files;
+    if (!file) return;
     const reader = new FileReader();
 
     reader.onload = (ev: ProgressEvent<FileReader>) => {

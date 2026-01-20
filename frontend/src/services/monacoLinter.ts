@@ -3,7 +3,7 @@
  * This file provides linting functionality for GenLayer contracts in Monaco Editor
  */
 
-import * as Monaco from 'monaco-editor/esm/vs/editor/editor.api';
+import * as Monaco from 'monaco-editor';
 import { RpcClient } from '@/clients/rpc';
 import type { JsonRPCResponse } from '@/types';
 
@@ -65,13 +65,6 @@ export async function lintGenVMCode(
           .slice(Math.max(0, err.column - 1))
           .match(/^[\w.]+/);
         const endColumn = err.column + (tokenMatch?.[0]?.length || 10);
-
-        const severityIcon =
-          err.severity === 'error'
-            ? '❌'
-            : err.severity === 'warning'
-              ? '⚠️'
-              : 'ℹ️';
 
         return {
           severity:
