@@ -405,6 +405,20 @@ async def lifespan(app: FastAPI):
                     f"Graceful shutdown timeout ({graceful_timeout}s) reached. "
                     f"Transaction {tx_hash} will be released back to the queue."
                 )
+                # Actually release the transaction to free the DB lock
+                try:
+                    with worker.get_session() as release_session:
+                        worker.release_transaction(release_session, tx_hash)
+                    logger.info(
+                        f"Successfully released transaction {tx_hash} during shutdown"
+                    )
+                except Exception as e:
+                    logger.exception(
+                        f"Failed to release transaction {tx_hash} during shutdown: {e}"
+                    )
+                finally:
+                    # Clear worker state to be consistent with other code paths
+                    worker.current_transaction = None
 
         if worker:
             worker.stop()
