@@ -106,6 +106,9 @@ _genvm_failure_unhealthy_threshold: int = int(
     os.environ.get("GENVM_FAILURE_UNHEALTHY_THRESHOLD", "3")
 )
 
+# Graceful shutdown flag - set when SIGTERM received
+shutting_down: bool = False
+
 
 def increment_genvm_failure():
     """Increment consecutive GenVM Manager failure counter."""
@@ -136,9 +139,12 @@ async def lifespan(app: FastAPI):
     """Manage the worker lifecycle."""
     global worker, worker_task
 
-    # Set up signal handlers for graceful shutdown logging
+    # Set up signal handlers for graceful shutdown
     def handle_signal(sig, frame):
+        global shutting_down
         logger.warning(f"Received signal {sig}, initiating graceful shutdown...")
+        shutting_down = True
+        # Worker will check this flag and stop claiming new transactions
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
@@ -263,6 +269,11 @@ async def lifespan(app: FastAPI):
     # Subscribe to validator events channel
     await msg_handler.subscribe_to_validator_events(handle_validator_change)
 
+    # Callback for graceful shutdown during K8s scale-down
+    def should_shutdown_callback():
+        """Returns True if graceful shutdown has been requested."""
+        return shutting_down
+
     # Create and start the worker
     worker = ConsensusWorker(
         get_session=get_session,
@@ -273,6 +284,7 @@ async def lifespan(app: FastAPI):
         worker_id=worker_id,
         poll_interval=poll_interval,
         transaction_timeout_minutes=transaction_timeout,
+        should_shutdown=should_shutdown_callback,
     )
 
     # Get restart configuration from environment
@@ -362,6 +374,51 @@ async def lifespan(app: FastAPI):
         # Cleanup on shutdown
         logger.info("Shutting down Consensus Worker Service...")
         print("Shutting down Consensus Worker Service...")
+
+        # Wait for current transaction to complete (graceful shutdown)
+        if worker and worker.current_transaction:
+            tx_hash = worker.current_transaction.get("hash", "unknown")
+            logger.info(
+                f"Waiting for current transaction {tx_hash} to complete before shutdown..."
+            )
+
+            # Get graceful shutdown timeout from env (default: 180 seconds)
+            # This gives the transaction time to finish before we force-stop
+            graceful_timeout = int(
+                os.environ.get("WORKER_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS", "180")
+            )
+            start_time = time.time()
+
+            while (
+                worker.current_transaction
+                and (time.time() - start_time) < graceful_timeout
+            ):
+                await asyncio.sleep(1)
+                elapsed = int(time.time() - start_time)
+                if elapsed % 10 == 0:  # Log every 10 seconds
+                    logger.info(
+                        f"Still waiting for transaction {tx_hash} to complete ({elapsed}s elapsed)..."
+                    )
+
+            if worker.current_transaction:
+                logger.warning(
+                    f"Graceful shutdown timeout ({graceful_timeout}s) reached. "
+                    f"Transaction {tx_hash} will be released back to the queue."
+                )
+                # Actually release the transaction to free the DB lock
+                try:
+                    with worker.get_session() as release_session:
+                        worker.release_transaction(release_session, tx_hash)
+                    logger.info(
+                        f"Successfully released transaction {tx_hash} during shutdown"
+                    )
+                except Exception as e:
+                    logger.exception(
+                        f"Failed to release transaction {tx_hash} during shutdown: {e}"
+                    )
+                finally:
+                    # Clear worker state to be consistent with other code paths
+                    worker.current_transaction = None
 
         if worker:
             worker.stop()

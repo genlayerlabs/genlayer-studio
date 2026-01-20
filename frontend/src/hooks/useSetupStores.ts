@@ -43,7 +43,9 @@ export const useSetupStores = () => {
         },
       );
       for (const key of Object.keys(contractsBlob)) {
-        const raw = await contractsBlob[key]();
+        const loader = contractsBlob[key];
+        if (!loader) continue;
+        const raw = await loader();
         const name = key.split('/').pop() || 'ExampleContract.py';
         if (!contractFiles.some((c) => c.name === name)) {
           const contract = {

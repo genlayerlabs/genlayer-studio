@@ -43,6 +43,7 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
 
     if (currentTxIndex !== -1) {
       const currentTx = transactions.value[currentTxIndex];
+      if (!currentTx) return;
 
       transactions.value.splice(currentTxIndex, 1, {
         ...currentTx,

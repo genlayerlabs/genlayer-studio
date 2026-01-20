@@ -4,7 +4,7 @@ import { BasePage } from './BasePage';
 import { expect } from 'chai';
 
 export class ValidatorsPage extends BasePage {
-  override baseurl = 'http://localhost:8080/validators';
+  override path = '/validators';
   override visibleLocator: Locator = By.xpath(
     "//*[@data-testid='validators-page-title']",
   );

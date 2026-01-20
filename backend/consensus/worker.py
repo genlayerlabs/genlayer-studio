@@ -45,6 +45,7 @@ class ConsensusWorker:
         worker_id: str = None,
         poll_interval: int = 5,
         transaction_timeout_minutes: int = 20,
+        should_shutdown: Optional[Callable[[], bool]] = None,
     ):
         """
         Initialize the consensus worker.
@@ -57,6 +58,7 @@ class ConsensusWorker:
             worker_id: Unique identifier for this worker (auto-generated if not provided)
             poll_interval: Seconds to wait between polls when no work available
             transaction_timeout_minutes: Minutes before a stuck transaction is recovered
+            should_shutdown: Callback that returns True if worker should stop claiming new work
         """
         self.worker_id = worker_id or f"worker-{uuid.uuid4().hex[:8]}"
         self.get_session = get_session
@@ -67,6 +69,9 @@ class ConsensusWorker:
         self.transaction_timeout_minutes = transaction_timeout_minutes
         self.running = True
         self.current_transaction = None  # Track currently processing transaction
+
+        # Callback for graceful shutdown during K8s scale-down
+        self.should_shutdown = should_shutdown
 
         now_monotonic = time.monotonic()
         self._query_log_interval = 60.0  # seconds
@@ -1157,6 +1162,14 @@ class ConsensusWorker:
 
         while self.running:
             try:
+                # Check if shutdown has been requested (graceful shutdown during K8s scale-down)
+                if self.should_shutdown and self.should_shutdown():
+                    logger.info(
+                        f"[Worker {self.worker_id}] Shutdown requested, stopping after current transaction completes"
+                    )
+                    self.running = False
+                    break
+
                 with self.get_session() as session:
                     # Periodically recover stuck transactions (every 12 iterations = ~60 seconds)
                     recovery_counter += 1

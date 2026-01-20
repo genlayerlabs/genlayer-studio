@@ -9,7 +9,7 @@ export interface MethodSignature {
   description: string;
 }
 
-export const methodSignatures: Record<string, MethodSignature> = {
+export const methodSignatures = {
   // gl root methods
   ContractAt: {
     params: '(address)',
@@ -240,7 +240,7 @@ export const methodSignatures: Record<string, MethodSignature> = {
     snippet: '()',
     description: 'Get total token supply',
   },
-};
+} as const satisfies Record<string, MethodSignature>;
 
 // Module descriptions for better context
 export const moduleDescriptions = {

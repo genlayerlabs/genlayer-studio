@@ -204,7 +204,7 @@ async function previousStep() {
 
   let process = () =>
     new Promise((resolve) => {
-      const cb = steps.value[futureStep].onNextStep;
+      const cb = steps.value[futureStep]?.onNextStep;
       if (cb) {
         cb().then(() => {
           currentStep.value = futureStep;
@@ -238,7 +238,7 @@ async function nextStep() {
 
   let process = () =>
     new Promise((resolve) => {
-      const cb = steps.value[currentStep.value].onNextStep;
+      const cb = steps.value[currentStep.value]?.onNextStep;
       if (cb) {
         cb().then(() => {
           currentStep.value = futureStep;

@@ -175,9 +175,11 @@ const handleChangeModel = () => {
 const tryInitValues = () => {
   if (!props.validator) {
     try {
-      newValidatorData.value.provider = nodeStore.nodeProviders[0].provider;
+      const firstProvider = nodeStore.nodeProviders[0];
+      if (!firstProvider) return;
+      newValidatorData.value.provider = firstProvider.provider;
       newValidatorData.value.config = JSON.stringify(
-        nodeStore.nodeProviders[0].config,
+        firstProvider.config,
         null,
         2,
       );
