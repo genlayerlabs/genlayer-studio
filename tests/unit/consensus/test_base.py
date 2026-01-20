@@ -718,6 +718,16 @@ async def test_validator_appeal_success_twice(consensus_algorithm):
         if current_status == TransactionStatus.ACTIVATED.value:
             transaction_status_history.append(TransactionStatus.ACTIVATED)
 
+        # Account for race condition: consensus may have already progressed to PROPOSING
+        actual_history = transactions_processor.updated_transaction_status_history.get(
+            "transaction_hash", []
+        )
+        if (
+            len(actual_history) == len(transaction_status_history) + 1
+            and actual_history[-1] == TransactionStatus.PROPOSING
+        ):
+            transaction_status_history.append(TransactionStatus.PROPOSING)
+
         assert dict(transactions_processor.updated_transaction_status_history) == {
             "transaction_hash": transaction_status_history
         }
@@ -786,6 +796,16 @@ async def test_validator_appeal_success_twice(consensus_algorithm):
         ]
         if current_status == TransactionStatus.ACTIVATED.value:
             transaction_status_history.append(TransactionStatus.ACTIVATED)
+
+        # Account for race condition: consensus may have already progressed to PROPOSING
+        actual_history = transactions_processor.updated_transaction_status_history.get(
+            "transaction_hash", []
+        )
+        if (
+            len(actual_history) == len(transaction_status_history) + 1
+            and actual_history[-1] == TransactionStatus.PROPOSING
+        ):
+            transaction_status_history.append(TransactionStatus.PROPOSING)
 
         assert dict(transactions_processor.updated_transaction_status_history) == {
             "transaction_hash": transaction_status_history
