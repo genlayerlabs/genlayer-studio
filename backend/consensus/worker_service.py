@@ -633,9 +633,9 @@ async def worker_status():
     }
 
 
-@app.post("/stop")
+@app.get("/stop")
 async def stop_worker():
-    """Gracefully stop the worker (for testing/maintenance)."""
+    """Gracefully stop the worker. Used by K8s preStop lifecycle hook."""
     global worker
 
     if worker:
