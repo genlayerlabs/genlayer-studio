@@ -202,8 +202,6 @@ class _SnapshotView(genvmbase.StateProxy):
 
     def get_balance(self, addr: Address) -> int:
         snap = self._get_snapshot(addr)
-        # FIXME(core-team): it is not obvious where `value` is added to `self.balance`
-        # but return must be increased by it
         return snap.balance
 
 
@@ -390,7 +388,7 @@ class Manager:
         return body
 
 
-class _StateProxyNone(genvmbase.StateProxy):
+class _StateProxyNone(genvmbase.StateProxyWritable):
     """
     state proxy that always fails and can give code only for address from a constructor
     useful for get_schema
@@ -603,18 +601,15 @@ class Node:
             res = res.replace(tzinfo=datetime.UTC)
         return res
 
-    async def _put_code_to(
-        self, to: genvmbase.StateProxy, code: bytes, timestamp: datetime.datetime
-    ) -> None:
-        from .genvm.origin import base_host
+    def _put_code_to(self, to: genvmbase.StateProxyWritable, code: bytes) -> None:
+        """Write contract code directly to storage using the code slot."""
+        from backend.node.genvm import get_code_slot
 
-        writes = await base_host.get_pre_deployment_writes(
-            code,
-            timestamp,
-            self.manager.url,
-        )
-        for slot, off, data in writes:
-            to.storage_write(slot, off, data)
+        code_slot = get_code_slot()
+        # Prefix with 4-byte little-endian length
+        code_len_prefix = len(code).to_bytes(4, byteorder="little", signed=False)
+        code_data = code_len_prefix + code
+        to.storage_write(code_slot, 0, code_data)
 
     async def deploy_contract(
         self,
@@ -630,20 +625,6 @@ class Node:
         if transaction_datetime is None:
             transaction_datetime = datetime.datetime.now()
 
-        def no_factory(*args, **kwargs):
-            raise Exception("factory is forbidden for code deployment")
-
-        snapshot_view_for_code = _SnapshotView(
-            self.contract_snapshot,
-            no_factory,
-            False,
-            None,
-        )
-
-        await self._put_code_to(
-            snapshot_view_for_code, code_to_deploy, transaction_datetime
-        )
-
         return await self._run_genvm(
             from_address,
             calldata,
@@ -651,6 +632,7 @@ class Node:
             is_init=True,
             transaction_hash=transaction_hash,
             transaction_datetime=transaction_datetime,
+            code=code_to_deploy,
         )
 
     async def run_contract(
@@ -727,11 +709,7 @@ class Node:
         )
 
     async def get_contract_schema(self, code: bytes) -> str:
-        storage = _StateProxyNone(Address(b"\x00" * 20))
-
-        await self._put_code_to(storage, code, datetime.datetime.now())
-
-        NO_ADDR = str(base64.b64encode(b"\x00" * 20), encoding="ascii")
+        NO_ADDR = Address(b"\x00" * 20)
         message = {
             "is_init": False,
             "contract_address": NO_ADDR,
@@ -740,12 +718,8 @@ class Node:
             "value": None,
             "chain_id": "0",
         }
-        state_proxy = _StateProxyNone(Address(NO_ADDR))
-        writes = await base_host.get_pre_deployment_writes(
-            code, datetime.datetime.now(), self.manager.url
-        )
-        for slot, off, data in writes:
-            state_proxy.storage_write(slot, off, data)
+        state_proxy = _StateProxyNone(NO_ADDR)
+        self._put_code_to(state_proxy, code)
 
         start_time = time.time()
         result = await genvmbase.run_genvm_host(
@@ -803,6 +777,7 @@ class Node:
         transaction_datetime: datetime.datetime | None,
         state_status: str | None = None,
         timeout: float = 10 * 60,
+        code: bytes | None = None,
     ) -> Receipt:
         self.timing_callback("GENVM_PREPARATION_START")
 
@@ -884,11 +859,11 @@ class Node:
 
         message = {
             "is_init": is_init,
-            "contract_address": contract_address.as_b64,
-            "sender_address": Address(from_address).as_b64,
+            "contract_address": contract_address,
+            "sender_address": Address(from_address),
             "origin_address": Address(
                 from_address
-            ).as_b64,  # FIXME: no origin in simulator #751
+            ),  # FIXME: no origin in simulator #751
             "value": None,
             "chain_id": str(
                 get_simulator_chain_id()
@@ -917,6 +892,7 @@ class Node:
             is_sync=False,
             manager_uri=self.manager.url,
             timeout=timeout,
+            code=code,
         )
         result.processing_time = int((time.time() - start_time) * 1000)
 

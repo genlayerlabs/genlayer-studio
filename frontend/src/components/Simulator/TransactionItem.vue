@@ -425,7 +425,10 @@ const badgeColorClass = computed(() => {
           >
             <div class="mb-2 flex flex-col gap-1">
               <span class="font-medium italic">
-                {{ history?.consensus_round || `Consensus Round ${index + 1}` }}
+                {{
+                  history?.consensus_round ||
+                  `Consensus Round ${Number(index) + 1}`
+                }}
               </span>
               <div
                 class="flex items-center gap-2 text-[10px] text-gray-600 dark:text-gray-400"
@@ -436,7 +439,7 @@ const badgeColorClass = computed(() => {
                 >
                   <span>{{ status }}</span>
                   <span
-                    v-if="sIndex < history.status_changes.length - 1"
+                    v-if="Number(sIndex) < history.status_changes.length - 1"
                     class="text-gray-400"
                     >→</span
                   >

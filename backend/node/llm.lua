@@ -1,6 +1,9 @@
 local lib = require("lib-genvm")
 local llm = require("lib-llm")
 
+-- Maximum output tokens for LLM responses
+local MAX_OUTPUT_TOKENS = 4000
+
 llm.exec_prompt_template_transform = function(args)
 	lib.log{level = "debug", message = "exec_prompt_template_transform", args = args}
 
@@ -29,7 +32,7 @@ llm.exec_prompt_template_transform = function(args)
 		user_message = as_user_text,
 		temperature = 0.7,
 		images = {},
-		max_tokens = 1000,
+		max_tokens = MAX_OUTPUT_TOKENS,
 		use_max_completion_tokens = false,
 	}
 
@@ -282,6 +285,7 @@ function ExecPrompt(ctx, args, remaining_gen)
 
 	local mapped = llm.exec_prompt_transform(args)
 
+	mapped.prompt.max_tokens = MAX_OUTPUT_TOKENS
 	return just_in_backend(ctx, args, mapped)
 end
 

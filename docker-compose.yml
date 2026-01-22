@@ -1,7 +1,7 @@
 services:
   traefik:
     profiles: ["studio"]
-    image: traefik:v3.3
+    image: traefik:v3.6
     command:
       # Core configuration
       - "--providers.docker=true"
@@ -117,7 +117,7 @@ services:
       - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-10}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - GENVMROOT=/genvm
-      - GENVM_TAG=v0.2.7
+      - GENVM_TAG=v0.2.11
     ports:
       - "${RPCPORT}:${RPCPORT}"
     expose:
@@ -214,7 +214,7 @@ services:
 
   ollama:
     profiles: ["ollama"]
-    image: ollama/ollama:0.6.5
+    image: ollama/ollama:0.14.1
     ports:
       - 11434:11434
     volumes:

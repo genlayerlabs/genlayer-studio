@@ -4,9 +4,11 @@ __all__ = (
     "run_genvm_host",
     "Host",
     "StateProxy",
+    "StateProxyWritable",
     "ExecutionError",
     "ExecutionReturn",
     "ExecutionResult",
+    "apply_storage_changes",
 )
 
 import math
@@ -30,7 +32,7 @@ from backend.node.types import (
     PendingTransaction,
     Address,
 )
-import backend.node.genvm.origin.calldata as calldata
+import backend.node.genvm.origin.calldata as gvm_calldata
 from dataclasses import dataclass
 
 from .origin.public_abi import *
@@ -102,6 +104,16 @@ class StateProxy(metaclass=abc.ABCMeta):
     def storage_read(
         self, account: Address, slot: bytes, index: int, le: int, /
     ) -> bytes: ...
+
+    @abc.abstractmethod
+    def get_balance(self, addr: Address) -> int: ...
+
+
+class StateProxyWritable(StateProxy, metaclass=abc.ABCMeta):
+    @abc.abstractmethod
+    def storage_read(
+        self, account: Address, slot: bytes, index: int, le: int, /
+    ) -> bytes: ...
     @abc.abstractmethod
     def storage_write(
         self,
@@ -112,6 +124,15 @@ class StateProxy(metaclass=abc.ABCMeta):
     ) -> None: ...
     @abc.abstractmethod
     def get_balance(self, addr: Address) -> int: ...
+
+
+def apply_storage_changes(
+    storage_changes: list[tuple[bytes, bytes]], state: StateProxyWritable
+) -> None:
+    for k, v in storage_changes:
+        slot_id = k[:32]
+        index = int.from_bytes(k[32:], byteorder="big") * 32
+        state.storage_write(slot_id, index, v)
 
 
 @dataclass
@@ -156,16 +177,50 @@ class Host(genvmhost.IHost):
         self._leader_results = leader_results
 
     def provide_result(
-        self, res: genvmhost.RunHostAndProgramRes, state: StateProxy
+        self, res: genvmhost.RunHostAndProgramRes, state: StateProxyWritable
     ) -> ExecutionResult:
-        assert self._result is not None
+        # Decode result from RunHostAndProgramRes
+        if res.result_kind == ResultCode.RETURN:
+            result = ExecutionReturn(gvm_calldata.encode(res.result_data))
+        elif (
+            res.result_kind == ResultCode.USER_ERROR
+            or res.result_kind == ResultCode.VM_ERROR
+        ):
+            result_decoded = res.result_data
+            if isinstance(result_decoded, dict):
+                _agent_log(
+                    "H4",
+                    "backend/node/genvm/base.py:Host.provide_result",
+                    "genvm result provided",
+                    {
+                        "result_code": getattr(
+                            res.result_kind, "name", str(res.result_kind)
+                        ),
+                        "message": (
+                            result_decoded.get("message")
+                            if isinstance(result_decoded, dict)
+                            else None
+                        ),
+                        "res_type": result_decoded.__class__.__name__,
+                    },
+                )
+                result = ExecutionError(result_decoded["message"], res.result_kind)
+            else:
+                result = ExecutionError(str(result_decoded), res.result_kind)
+        elif res.result_kind == ResultCode.INTERNAL_ERROR:
+            raise Exception("GenVM internal error", str(res.result_data))
+        else:
+            raise Exception(f"invalid result {res.result_kind}")
+
+        apply_storage_changes(res.result_storage_changes, state)
+
         return ExecutionResult(
             eq_outputs=self._eq_outputs,
             pending_transactions=self._pending_transactions,
             stdout=res.stdout,
             stderr=res.stderr,
             genvm_log=res.genvm_log,
-            result=self._result,
+            result=result,
             state=state,
             processing_time=0,
             nondet_disagree=self._nondet_disagreement,
@@ -191,49 +246,11 @@ class Host(genvmhost.IHost):
         self.sock_listener = None
         return self.sock
 
-    async def get_calldata(self, /) -> bytes:
-        return self.calldata_bytes
-
-    def has_result(self) -> bool:
-        return self._result is not None
-
     async def storage_read(
         self, type: StorageType, account: bytes, slot: bytes, index: int, le: int, /
     ) -> bytes:
         assert type != StorageType.LATEST_FINAL
         return self._state_proxy.storage_read(Address(account), slot, index, le)
-
-    async def storage_write(
-        self,
-        slot: bytes,
-        index: int,
-        got: collections.abc.Buffer,
-        /,
-    ) -> None:
-        return self._state_proxy.storage_write(slot, index, got)
-
-    async def consume_result(
-        self, type: ResultCode, data: collections.abc.Buffer, /
-    ) -> None:
-        if type == ResultCode.RETURN:
-            self._result = ExecutionReturn(ret=bytes(data))
-        elif type == ResultCode.USER_ERROR or type == ResultCode.VM_ERROR:
-            res = calldata.decode(data)
-            _agent_log(
-                "H4",
-                "backend/node/genvm/base.py:Host.consume_result",
-                "genvm result consumed",
-                {
-                    "result_code": getattr(type, "name", str(type)),
-                    "message": res.get("message") if isinstance(res, dict) else None,
-                    "res_type": res.__class__.__name__,
-                },
-            )
-            self._result = ExecutionError(res["message"], type)
-        elif type == ResultCode.INTERNAL_ERROR:
-            raise Exception("GenVM internal error", str(data, encoding="utf-8"))
-        else:
-            assert False, f"invalid result {type}"
 
     async def get_leader_nondet_result(self, call_no: int, /) -> collections.abc.Buffer:
         leader_results = self._leader_results
@@ -306,9 +323,6 @@ class Host(genvmhost.IHost):
     async def get_balance(self, account: bytes, /) -> int:
         return self._state_proxy.get_balance(Address(account))
 
-    async def post_event(self, topics: list[bytes], blob: bytes, /) -> None:
-        raise Exception("not supported in studio")
-
     async def notify_nondet_disagreement(self, call_no: int, /) -> None:
         self._nondet_disagreement = call_no
 
@@ -362,6 +376,7 @@ async def run_genvm_host(
     host_data: str = "",
     extra_args: list[str] = [],
     permissions: str = "rwscn",
+    code: bytes | None = None,
 ) -> ExecutionResult:
     if logger is None:
         logger = genvm_logger.NoLogger()
@@ -426,6 +441,10 @@ async def run_genvm_host(
                         logger=logger,
                         host=f"unix://{sock_path}",
                         extra_args=extra_args,
+                        code=code,
+                        calldata=fresh_args.get(
+                            "calldata_bytes", host_args.get("calldata_bytes", b"")
+                        ),
                     )
 
                     execution_result = host.provide_result(

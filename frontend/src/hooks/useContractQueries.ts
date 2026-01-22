@@ -338,7 +338,7 @@ export function useContractQueries() {
           concat([
             toBytes(contractAddress as `0x${string}`),
             toBytes(nonceBytes),
-            newCodeHash,
+            toBytes(newCodeHash),
           ]),
         );
 
