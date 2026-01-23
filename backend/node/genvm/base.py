@@ -39,6 +39,7 @@ from .origin.public_abi import *
 from .origin.host_fns import Errors
 from .origin import base_host
 from .origin import logger as genvm_logger
+from .error_codes import extract_error_code, extract_error_code_from_timeout
 
 
 # region agent log
@@ -75,9 +76,16 @@ def _agent_log(hypothesis_id: str, location: str, message: str, data: dict):
 class ExecutionError:
     message: str
     kind: typing.Literal[ResultCode.USER_ERROR, ResultCode.VM_ERROR]
+    error_code: str | None = None  # Standardized error code (e.g., LLM_RATE_LIMITED)
+    raw_error: dict | None = None  # Full Lua error structure (causes, fatal, ctx)
 
     def __repr__(self):
-        return json.dumps({"kind": self.kind.name, "message": self.message})
+        data = {"kind": self.kind.name, "message": self.message}
+        if self.error_code:
+            data["error_code"] = self.error_code
+        if self.raw_error:
+            data["raw_error"] = self.raw_error
+        return json.dumps(data)
 
 
 @dataclass
@@ -188,6 +196,11 @@ class Host(genvmhost.IHost):
         ):
             result_decoded = res.result_data
             if isinstance(result_decoded, dict):
+                # Extract standardized error code from Lua error structure
+                error_code = extract_error_code(result_decoded, res.stderr)
+                # Preserve raw error structure (causes, fatal, ctx) excluding message
+                raw_error = {k: v for k, v in result_decoded.items() if k != "message"}
+
                 _agent_log(
                     "H4",
                     "backend/node/genvm/base.py:Host.provide_result",
@@ -201,12 +214,24 @@ class Host(genvmhost.IHost):
                             if isinstance(result_decoded, dict)
                             else None
                         ),
+                        "error_code": error_code,
                         "res_type": result_decoded.__class__.__name__,
                     },
                 )
-                result = ExecutionError(result_decoded["message"], res.result_kind)
+                result = ExecutionError(
+                    result_decoded["message"],
+                    res.result_kind,
+                    error_code=error_code,
+                    raw_error=raw_error if raw_error else None,
+                )
             else:
-                result = ExecutionError(str(result_decoded), res.result_kind)
+                # String error - try to extract error code from message
+                error_code = extract_error_code(str(result_decoded), res.stderr)
+                result = ExecutionError(
+                    str(result_decoded),
+                    res.result_kind,
+                    error_code=error_code,
+                )
         elif res.result_kind == ResultCode.INTERNAL_ERROR:
             raise Exception("GenVM internal error", str(res.result_data))
         else:
@@ -351,8 +376,16 @@ def _create_timeout_result(
         error_str = "\n".join(traceback.format_exception(last_error))
     else:
         error_str = ""
+
+    # Extract appropriate error code based on the last error
+    error_code = extract_error_code_from_timeout(last_error)
+
     return ExecutionResult(
-        result=ExecutionError(message="timeout", kind=ResultCode.VM_ERROR),
+        result=ExecutionError(
+            message="timeout",
+            kind=ResultCode.VM_ERROR,
+            error_code=error_code,
+        ),
         eq_outputs={},
         pending_transactions=[],
         stdout="",
