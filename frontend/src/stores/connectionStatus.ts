@@ -8,17 +8,33 @@ export const useConnectionStatusStore = defineStore('connectionStatus', () => {
   // Only show "connection lost" after we've connected at least once
   const isConnected = ref(true);
   let hasConnectedOnce = false;
+  let disconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Debounce delay before showing connection lost banner (in ms)
+  const DISCONNECT_DEBOUNCE_MS = 5000;
 
   // Named handlers for connection events
   const handleConnect = () => {
     hasConnectedOnce = true;
     isConnected.value = true;
+
+    // Clear any pending disconnect timer
+    if (disconnectTimer) {
+      clearTimeout(disconnectTimer);
+      disconnectTimer = null;
+    }
   };
 
   const handleDisconnect = () => {
     // Only show disconnected state if we've successfully connected before
     if (hasConnectedOnce) {
-      isConnected.value = false;
+      // Debounce: wait before showing banner to allow reconnection attempts
+      if (!disconnectTimer) {
+        disconnectTimer = setTimeout(() => {
+          isConnected.value = false;
+          disconnectTimer = null;
+        }, DISCONNECT_DEBOUNCE_MS);
+      }
     }
   };
 
@@ -34,6 +50,10 @@ export const useConnectionStatusStore = defineStore('connectionStatus', () => {
     import.meta.hot.dispose(() => {
       webSocketClient.off('connect', handleConnect);
       webSocketClient.off('disconnect', handleDisconnect);
+      if (disconnectTimer) {
+        clearTimeout(disconnectTimer);
+        disconnectTimer = null;
+      }
     });
   }
 

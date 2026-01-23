@@ -343,7 +343,7 @@ const badgeColorClass = computed(() => {
             </div>
 
             <div>
-              <div class="mb-1 font-medium">LLM-0:</div>
+              <div class="mb-1 font-medium">Primary LLM:</div>
               <div>
                 <span class="font-medium">Model:</span>
                 {{ leaderReceipt.node_config.primary_model?.model }}
@@ -355,7 +355,7 @@ const badgeColorClass = computed(() => {
             </div>
 
             <div v-if="leaderReceipt.node_config.secondary_model">
-              <div class="mb-1 font-medium">LLM-1:</div>
+              <div class="mb-1 font-medium">Secondary LLM:</div>
               <div>
                 <span class="font-medium">Model:</span>
                 {{ leaderReceipt.node_config.secondary_model.model }}
@@ -388,7 +388,7 @@ const badgeColorClass = computed(() => {
           <div>
             <pre
               class="overflow-x-auto whitespace-pre rounded bg-gray-200 p-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
-              >{{ transaction.data.result || 'None' }}</pre
+              >{{ leaderReceipt?.result?.payload?.readable || 'None' }}</pre
             >
           </div>
         </ModalSection>
@@ -461,7 +461,17 @@ const badgeColorClass = computed(() => {
                   }}</span>
                 </div>
                 <div class="flex flex-row items-center gap-1 capitalize">
-                  <template v-if="history.leader_result.length === 1">
+                  <!-- LEADER_ONLY mode: single receipt means successful execution, not timeout -->
+                  <template
+                    v-if="
+                      history.leader_result.length === 1 &&
+                      transaction.data.execution_mode === 'LEADER_ONLY'
+                    "
+                  >
+                    <CheckCircleIcon class="h-4 w-4 text-green-500" />
+                    Leader Only
+                  </template>
+                  <template v-else-if="history.leader_result.length === 1">
                     <EllipsisHorizontalCircleIcon
                       class="h-4 w-4 text-yellow-500"
                     />

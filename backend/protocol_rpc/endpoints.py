@@ -1228,9 +1228,11 @@ def send_raw_transaction(
 
         transaction_data = {}
         leader_only = False
+        execution_mode = "NORMAL"
         rollup_transaction_details = None
         if genlayer_transaction.type != TransactionType.SEND:
             leader_only = genlayer_transaction.data.leader_only
+            execution_mode = genlayer_transaction.data.execution_mode
             rollup_transaction_details = consensus_service.add_transaction(
                 signed_rollup_transaction, from_address
             )  # because hardhat accounts are not funded
@@ -1303,6 +1305,8 @@ def send_raw_transaction(
             transaction_hash,
             genlayer_transaction.num_of_initial_validators,
             sim_config,
+            None,  # triggered_on
+            execution_mode,
         )
 
         # Post-insert verification: ensure the transaction is visible immediately

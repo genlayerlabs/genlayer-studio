@@ -57,7 +57,18 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
         label="Created At"
         value={tx.created_at ? format(new Date(tx.created_at), 'PPpp') : '-'}
       />
-      <InfoRow label="Leader Only" value={tx.leader_only ? 'Yes' : 'No'} />
+      <InfoRow
+        label="Execution Mode"
+        value={
+          tx.execution_mode === 'LEADER_ONLY' ? (
+            <span className="bg-yellow-50 text-yellow-700 px-2.5 py-1 rounded-lg text-xs font-semibold">Leader Only</span>
+          ) : tx.execution_mode === 'LEADER_SELF_VALIDATOR' ? (
+            <span className="bg-blue-50 text-blue-700 px-2.5 py-1 rounded-lg text-xs font-semibold">Leader + Self Validator</span>
+          ) : (
+            <span className="bg-green-50 text-green-700 px-2.5 py-1 rounded-lg text-xs font-semibold">Normal</span>
+          )
+        }
+      />
       <InfoRow label="Rotation Count" value={tx.rotation_count?.toString() || '-'} />
       <InfoRow label="Initial Validators" value={tx.num_of_initial_validators?.toString() || '-'} />
       {tx.worker_id && <InfoRow label="Worker ID" value={tx.worker_id} />}

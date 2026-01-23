@@ -925,6 +925,16 @@ class Node:
             genvm_result={
                 "stdout": result.stdout[:5000],
                 "stderr": result.stderr,
+                "error_code": (
+                    result.result.error_code
+                    if isinstance(result.result, genvmbase.ExecutionError)
+                    else None
+                ),
+                "raw_error": (
+                    result.result.raw_error
+                    if isinstance(result.result, genvmbase.ExecutionError)
+                    else None
+                ),
             },
             processing_time=result.processing_time,
             nondet_disagree=result.nondet_disagree,
