@@ -17,6 +17,7 @@ import type {
   TransactionHashVariant,
 } from 'genlayer-js/types';
 import { TransactionStatus } from 'genlayer-js/types';
+import type { ExecutionMode } from '@/types';
 
 const schema = ref<any>();
 
@@ -88,10 +89,14 @@ export function useContractQueries() {
       args: CalldataEncodable[];
       kwargs: { [key: string]: CalldataEncodable };
     },
-    leaderOnly: boolean,
+    executionMode: ExecutionMode,
     consensusMaxRotations: number,
   ) {
     isDeploying.value = true;
+
+    // Map executionMode to leaderOnly for backward compatibility with genlayer-js SDK
+    // TODO: Update genlayer-js SDK to support executionMode directly
+    const leaderOnly = executionMode !== 'NORMAL';
 
     try {
       if (!contract.value || !accountsStore.selectedAccount) {
@@ -197,7 +202,7 @@ export function useContractQueries() {
   async function callWriteMethod({
     method,
     args,
-    leaderOnly,
+    executionMode,
     consensusMaxRotations,
   }: {
     method: string;
@@ -205,9 +210,12 @@ export function useContractQueries() {
       args: CalldataEncodable[];
       kwargs: { [key: string]: CalldataEncodable };
     };
-    leaderOnly: boolean;
+    executionMode: ExecutionMode;
     consensusMaxRotations?: number;
   }) {
+    // Map executionMode to leaderOnly for backward compatibility with genlayer-js SDK
+    const leaderOnly = executionMode !== 'NORMAL';
+
     try {
       if (!accountsStore.selectedAccount) {
         throw new Error('Error writing to contract');
@@ -244,15 +252,12 @@ export function useContractQueries() {
   async function simulateWriteMethod({
     method,
     args,
-    consensusMaxRotations,
   }: {
     method: string;
     args: {
       args: CalldataEncodable[];
       kwargs: { [key: string]: CalldataEncodable };
     };
-    leaderOnly: boolean;
-    consensusMaxRotations?: number;
   }) {
     try {
       const result = await genlayerClient.value?.simulateWriteContract({

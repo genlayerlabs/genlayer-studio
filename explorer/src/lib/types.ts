@@ -11,6 +11,8 @@ export type TransactionStatus =
   | 'LEADER_TIMEOUT'
   | 'VALIDATORS_TIMEOUT';
 
+export type ExecutionMode = 'LEADER_ONLY' | 'LEADER_SELF_VALIDATOR' | 'NORMAL';
+
 export interface Transaction {
   hash: string;
   status: TransactionStatus;
@@ -25,6 +27,7 @@ export interface Transaction {
   gaslimit: number | null;
   created_at: string | null;
   leader_only: boolean;
+  execution_mode: ExecutionMode;
   r: number | null;
   s: number | null;
   v: number | null;

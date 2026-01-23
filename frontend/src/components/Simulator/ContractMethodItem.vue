@@ -9,6 +9,7 @@ import { ChevronDownIcon } from '@heroicons/vue/16/solid';
 import { useEventTracking, useContractQueries } from '@/hooks';
 import { unfoldArgsData, type ArgData } from './ContractParams';
 import ContractParams from './ContractParams.vue';
+import type { ExecutionMode, ReadStateMode } from '@/types';
 
 const { callWriteMethod, callReadMethod, simulateWriteMethod, contract } =
   useContractQueries();
@@ -18,13 +19,15 @@ const props = defineProps<{
   name: string;
   method: ContractMethod;
   methodType: 'read' | 'write';
-  leaderOnly: boolean;
+  executionMode: ExecutionMode;
   consensusMaxRotations?: number;
   simulationMode?: boolean;
+  readStateMode?: ReadStateMode;
 }>();
 
 const isExpanded = ref(false);
 const isCalling = ref(false);
+const responseMessage = ref('');
 const responseMessageAccepted = ref('');
 const responseMessageFinalized = ref('');
 
@@ -59,31 +62,24 @@ const formatResponseIfNeeded = (response: string): string => {
 };
 
 const handleCallReadMethod = async () => {
-  responseMessageAccepted.value = '';
-  responseMessageFinalized.value = '';
+  responseMessage.value = '';
   isCalling.value = true;
 
   try {
-    const [acceptedMsg, finalizedMsg] = await Promise.allSettled([
-      callReadMethod(
-        props.name,
-        unfoldArgsData(calldataArguments.value),
-        TransactionHashVariant.LATEST_NONFINAL,
-      ),
-      callReadMethod(
-        props.name,
-        unfoldArgsData(calldataArguments.value),
-        TransactionHashVariant.LATEST_FINAL,
-      ),
-    ]);
+    const variant =
+      props.readStateMode === 'FINALIZED'
+        ? TransactionHashVariant.LATEST_FINAL
+        : TransactionHashVariant.LATEST_NONFINAL;
 
-    responseMessageAccepted.value =
-      acceptedMsg.status === 'fulfilled' && acceptedMsg.value !== undefined
-        ? formatResponseIfNeeded(abi.calldata.toString(acceptedMsg.value))
-        : '';
-    responseMessageFinalized.value =
-      finalizedMsg.status === 'fulfilled' && finalizedMsg.value !== undefined
-        ? formatResponseIfNeeded(abi.calldata.toString(finalizedMsg.value))
+    const result = await callReadMethod(
+      props.name,
+      unfoldArgsData(calldataArguments.value),
+      variant,
+    );
+
+    responseMessage.value =
+      result !== undefined
+        ? formatResponseIfNeeded(abi.calldata.toString(result))
         : '';
 
     trackEvent('called_read_method', {
@@ -112,8 +108,6 @@ const handleCallWriteMethod = async () => {
 
       const result = await simulateWriteMethod({
         method: props.name,
-        leaderOnly: props.leaderOnly,
-        consensusMaxRotations: props.consensusMaxRotations,
         args: unfoldArgsData({
           args: calldataArguments.value.args,
           kwargs: calldataArguments.value.kwargs,
@@ -137,7 +131,7 @@ const handleCallWriteMethod = async () => {
       // Real transaction mode
       await callWriteMethod({
         method: props.name,
-        leaderOnly: props.leaderOnly,
+        executionMode: props.executionMode,
         consensusMaxRotations: props.consensusMaxRotations,
         args: unfoldArgsData({
           args: calldataArguments.value.args,
@@ -227,36 +221,35 @@ const handleCallWriteMethod = async () => {
           >
         </div>
 
+        <!-- Read method response (single response based on mode) -->
         <div
-          v-if="
-            (responseMessageAccepted && responseMessageAccepted !== '') ||
-            (responseMessageFinalized && responseMessageFinalized !== '')
-          "
+          v-if="methodType === 'read' && responseMessage !== ''"
           class="w-full break-all text-sm"
         >
-          <div v-if="responseMessageAccepted !== ''">
-            <div class="mb-1 text-xs font-medium">
-              {{
-                methodType === 'write' && simulationMode
-                  ? 'Simulation Result:'
-                  : 'Response Accepted:'
-              }}
-            </div>
-            <div
-              :data-testid="`method-response-${name}`"
-              class="w-full whitespace-pre-wrap rounded bg-white p-1 font-mono text-xs dark:bg-slate-600"
-            >
-              {{ responseMessageAccepted }}
-            </div>
+          <div class="mb-1 text-xs font-medium">
+            Response ({{
+              readStateMode === 'FINALIZED' ? 'Finalized' : 'Accepted'
+            }}):
           </div>
-          <div v-if="responseMessageFinalized !== ''">
-            <div class="mb-1 mt-4 text-xs font-medium">Response Finalized:</div>
-            <div
-              :data-testid="`method-response-${name}`"
-              class="w-full whitespace-pre-wrap rounded bg-white p-1 font-mono text-xs dark:bg-slate-600"
-            >
-              {{ responseMessageFinalized }}
-            </div>
+          <div
+            :data-testid="`method-response-${name}`"
+            class="w-full whitespace-pre-wrap rounded bg-white p-1 font-mono text-xs dark:bg-slate-600"
+          >
+            {{ responseMessage }}
+          </div>
+        </div>
+
+        <!-- Write method response (simulation result) -->
+        <div
+          v-if="methodType === 'write' && responseMessageAccepted !== ''"
+          class="w-full break-all text-sm"
+        >
+          <div class="mb-1 text-xs font-medium">Simulation Result:</div>
+          <div
+            :data-testid="`method-response-${name}`"
+            class="w-full whitespace-pre-wrap rounded bg-white p-1 font-mono text-xs dark:bg-slate-600"
+          >
+            {{ responseMessageAccepted }}
           </div>
         </div>
       </div>

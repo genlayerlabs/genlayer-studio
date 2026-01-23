@@ -105,6 +105,7 @@ class TransactionsProcessor:
             "v": transaction_data.v,
             "created_at": transaction_data.created_at.isoformat(),
             "leader_only": transaction_data.leader_only,
+            "execution_mode": transaction_data.execution_mode,
             "triggered_by": transaction_data.triggered_by_hash,
             "triggered_on": transaction_data.triggered_on,
             "triggered_transactions": [
@@ -229,6 +230,7 @@ class TransactionsProcessor:
         num_of_initial_validators: int | None = None,
         sim_config: dict | None = None,
         triggered_on: str | None = None,  # "accepted" or "finalized"
+        execution_mode: str = "NORMAL",  # "NORMAL", "LEADER_ONLY", or "LEADER_SELF_VALIDATOR"
     ) -> str:
 
         if transaction_hash is None:
@@ -254,6 +256,7 @@ class TransactionsProcessor:
             s=None,
             v=None,
             leader_only=leader_only,
+            execution_mode=execution_mode,
             triggered_by=(
                 self.session.query(Transactions).filter_by(hash=triggered_by_hash).one()
                 if triggered_by_hash
@@ -354,6 +357,16 @@ class TransactionsProcessor:
                 last_round_result = int(ConsensusResult.MAJORITY_AGREE)
             else:
                 last_round_result = int(ConsensusResult.MAJORITY_DISAGREE)
+        elif (
+            # Handle LEADER_ONLY mode specially - no validators, so no votes to count
+            # If the transaction is ACCEPTED or FINALIZED, the leader execution was successful
+            transaction_data.get("execution_mode") == "LEADER_ONLY"
+            and transaction_data.get("status")
+            in [TransactionStatus.ACCEPTED.value, TransactionStatus.FINALIZED.value]
+        ):
+            from backend.consensus.types import ConsensusResult
+
+            last_round_result = int(ConsensusResult.MAJORITY_AGREE)
         else:
             last_round_result = int(
                 determine_consensus_from_votes(
@@ -377,6 +390,7 @@ class TransactionsProcessor:
             "validator_votes": validator_votes,
             "validator_votes_name": validator_votes_name,
         }
+
         return transaction_data
 
     def _prepare_basic_transaction_data(self, transaction_data: dict) -> dict:
@@ -574,6 +588,21 @@ class TransactionsProcessor:
                 consensus_result = ConsensusResult.MAJORITY_AGREE
             else:
                 consensus_result = ConsensusResult.MAJORITY_DISAGREE
+            transaction_data["result"] = int(consensus_result)
+            transaction_data["result_name"] = consensus_result.value
+            return transaction_data
+
+        # Handle LEADER_ONLY mode specially - no validators, so no votes to count
+        # If the transaction is ACCEPTED or FINALIZED, the leader execution was successful
+        if transaction_data.get(
+            "execution_mode"
+        ) == "LEADER_ONLY" and transaction_data.get("status") in [
+            TransactionStatus.ACCEPTED.value,
+            TransactionStatus.FINALIZED.value,
+        ]:
+            from backend.consensus.types import ConsensusResult
+
+            consensus_result = ConsensusResult.MAJORITY_AGREE
             transaction_data["result"] = int(consensus_result)
             transaction_data["result_name"] = consensus_result.value
             return transaction_data

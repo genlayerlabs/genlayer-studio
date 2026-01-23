@@ -1,7 +1,7 @@
 # rpc/transaction_utils.py
 
 import rlp
-from rlp.sedes import text, binary
+from rlp.sedes import text, binary, big_endian_int
 from rlp.exceptions import DeserializationError, SerializationError
 from eth_account import Account
 from eth_account._utils.legacy_transactions import Transaction
@@ -57,6 +57,16 @@ class Boolean:
 
 
 boolean = Boolean()
+
+# Execution mode mapping: integer <-> string
+# 0=NORMAL, 1=LEADER_ONLY, 2=LEADER_SELF_VALIDATOR
+EXECUTION_MODE_INT_TO_STR = {
+    0: "NORMAL",
+    1: "LEADER_ONLY",
+    2: "LEADER_SELF_VALIDATOR",
+}
+
+EXECUTION_MODE_STR_TO_INT = {v: k for k, v in EXECUTION_MODE_INT_TO_STR.items()}
 
 
 class TransactionParser:
@@ -253,19 +263,42 @@ class TransactionParser:
             data_bytes = HexBytes(rollup_transaction_data_args.data)
 
             if type == TransactionType.DEPLOY_CONTRACT:
+                # Try V1 format first (leader_only boolean) for backward compatibility
                 try:
                     return rlp.decode(data_bytes, DeploymentContractTransactionPayload)
-                except rlp.exceptions.DeserializationError as e:
+                except rlp.exceptions.DeserializationError:
+                    pass
+
+                # Try V2 format (execution_mode integer)
+                try:
                     return rlp.decode(
-                        data_bytes, DeploymentContractTransactionPayloadDefault
+                        data_bytes, DeploymentContractTransactionPayloadV2
                     )
+                except rlp.exceptions.DeserializationError:
+                    pass
+
+                # Fallback to default format (no flag)
+                return rlp.decode(
+                    data_bytes, DeploymentContractTransactionPayloadDefault
+                )
+
             elif type == TransactionType.RUN_CONTRACT:
+                # Try V1 format first (leader_only boolean) for backward compatibility
                 try:
                     return rlp.decode(data_bytes, MethodSendTransactionPayload)
-                except rlp.exceptions.DeserializationError as e:
-                    return rlp.decode(data_bytes, MethodSendTransactionPayloadDefault)
+                except rlp.exceptions.DeserializationError:
+                    pass
+
+                # Try V2 format (execution_mode integer)
+                try:
+                    return rlp.decode(data_bytes, MethodSendTransactionPayloadV2)
+                except rlp.exceptions.DeserializationError:
+                    pass
+
+                # Fallback to default format (no flag)
+                return rlp.decode(data_bytes, MethodSendTransactionPayloadDefault)
         except rlp.exceptions.DeserializationError as e:
-            print("ERROR | both decoding attempts failed:", e)
+            print("ERROR | all decoding attempts failed:", e)
             raise e
 
     def _get_genlayer_transaction_type(self, to_address: str) -> TransactionType:
@@ -295,6 +328,24 @@ class TransactionParser:
             rollup_transaction.data.args.num_of_initial_validators
         )
 
+        # Determine execution_mode from decoded data
+        # V2 format has execution_mode as integer, V1 has leader_only boolean
+        if hasattr(data, "execution_mode"):
+            # V2 format: execution_mode is an integer
+            execution_mode = EXECUTION_MODE_INT_TO_STR.get(
+                data.execution_mode, "NORMAL"
+            )
+            # Compute leader_only for backward compatibility
+            leader_only = execution_mode != "NORMAL"
+        elif hasattr(data, "leader_only") and data.leader_only:
+            # V1 format: leader_only boolean is True -> LEADER_ONLY (no validation)
+            execution_mode = "LEADER_ONLY"
+            leader_only = True
+        else:
+            # Default format or leader_only=False: NORMAL mode
+            execution_mode = "NORMAL"
+            leader_only = False
+
         return DecodedGenlayerTransaction(
             from_address=sender,
             to_address=recipient,
@@ -306,9 +357,8 @@ class TransactionParser:
                     data.contract_code if hasattr(data, "contract_code") else None
                 ),
                 calldata=data.calldata,
-                leader_only=(
-                    data.leader_only if hasattr(data, "leader_only") else False
-                ),
+                leader_only=leader_only,
+                execution_mode=execution_mode,
             ),
         )
 
@@ -321,17 +371,42 @@ class TransactionParser:
     def decode_method_send_data(self, data: str) -> DecodedMethodSendData:
         data_bytes = HexBytes(data)
 
+        # Try V1 format first (leader_only boolean) for backward compatibility
+        # V1 accepts True/False encoded as b'\x01'/b''
         try:
             data_decoded = rlp.decode(data_bytes, MethodSendTransactionPayload)
-        except rlp.exceptions.DeserializationError as e:
-            print("WARN | falling back to default decode method call data:", e)
-            data_decoded = rlp.decode(data_bytes, MethodSendTransactionPayloadDefault)
+            leader_only = getattr(data_decoded, "leader_only", False)
+            execution_mode = "LEADER_ONLY" if leader_only else "NORMAL"
+            return DecodedMethodSendData(
+                calldata=data_decoded["calldata"],
+                leader_only=leader_only,
+                execution_mode=execution_mode,
+            )
+        except rlp.exceptions.DeserializationError:
+            pass
 
-        leader_only = getattr(data_decoded, "leader_only", False)
+        # Try V2 format (execution_mode integer 0=NORMAL, 1=LEADER_ONLY, 2=LEADER_SELF_VALIDATOR)
+        # This will only succeed for new clients sending values > 1 (e.g., 2 for LEADER_SELF_VALIDATOR)
+        try:
+            data_decoded = rlp.decode(data_bytes, MethodSendTransactionPayloadV2)
+            execution_mode = EXECUTION_MODE_INT_TO_STR.get(
+                data_decoded.execution_mode, "NORMAL"
+            )
+            leader_only = execution_mode != "NORMAL"
+            return DecodedMethodSendData(
+                calldata=data_decoded["calldata"],
+                leader_only=leader_only,
+                execution_mode=execution_mode,
+            )
+        except rlp.exceptions.DeserializationError:
+            pass
 
+        # Fallback to default format
+        data_decoded = rlp.decode(data_bytes, MethodSendTransactionPayloadDefault)
         return DecodedMethodSendData(
             calldata=data_decoded["calldata"],
-            leader_only=leader_only,
+            leader_only=False,
+            execution_mode="NORMAL",
         )
 
     def decode_method_call_data(self, data: str) -> DecodedMethodCallData:
@@ -355,20 +430,47 @@ class TransactionParser:
     def decode_deployment_data(self, data: str) -> DecodedDeploymentData:
         data_bytes = HexBytes(data)
 
+        # Try V1 format first (leader_only boolean) for backward compatibility
         try:
             data_decoded = rlp.decode(data_bytes, DeploymentContractTransactionPayload)
-        except rlp.exceptions.DeserializationError as e:
-            print("Error decoding deployment data, falling back to default:", e)
-            data_decoded = rlp.decode(
-                data_bytes, DeploymentContractTransactionPayloadDefault
+            leader_only = getattr(data_decoded, "leader_only", False)
+            execution_mode = "LEADER_ONLY" if leader_only else "NORMAL"
+            return DecodedDeploymentData(
+                contract_code=data_decoded["contract_code"],
+                calldata=data_decoded["calldata"],
+                leader_only=leader_only,
+                execution_mode=execution_mode,
             )
+        except rlp.exceptions.DeserializationError:
+            pass
 
-        leader_only = getattr(data_decoded, "leader_only", False)
+        # Try V2 format (execution_mode integer 0=NORMAL, 1=LEADER_ONLY, 2=LEADER_SELF_VALIDATOR)
+        try:
+            data_decoded = rlp.decode(
+                data_bytes, DeploymentContractTransactionPayloadV2
+            )
+            execution_mode = EXECUTION_MODE_INT_TO_STR.get(
+                data_decoded.execution_mode, "NORMAL"
+            )
+            leader_only = execution_mode != "NORMAL"
+            return DecodedDeploymentData(
+                contract_code=data_decoded["contract_code"],
+                calldata=data_decoded["calldata"],
+                leader_only=leader_only,
+                execution_mode=execution_mode,
+            )
+        except rlp.exceptions.DeserializationError:
+            pass
 
+        # Fallback to default format
+        data_decoded = rlp.decode(
+            data_bytes, DeploymentContractTransactionPayloadDefault
+        )
         return DecodedDeploymentData(
             contract_code=data_decoded["contract_code"],
             calldata=data_decoded["calldata"],
-            leader_only=leader_only,
+            leader_only=False,
+            execution_mode="NORMAL",
         )
 
     def _hash_of_signed_transaction(self, signed_transaction) -> bytes:
@@ -410,4 +512,20 @@ class MethodSendTransactionPayload(rlp.Serializable):
 class MethodSendTransactionPayloadDefault(rlp.Serializable):
     fields = [
         ("calldata", binary),
+    ]
+
+
+# V2 payloads with execution_mode as integer (0=NORMAL, 1=LEADER_ONLY, 2=LEADER_SELF_VALIDATOR)
+class DeploymentContractTransactionPayloadV2(rlp.Serializable):
+    fields = [
+        ("contract_code", binary),
+        ("calldata", binary),
+        ("execution_mode", big_endian_int),
+    ]
+
+
+class MethodSendTransactionPayloadV2(rlp.Serializable):
+    fields = [
+        ("calldata", binary),
+        ("execution_mode", big_endian_int),
     ]

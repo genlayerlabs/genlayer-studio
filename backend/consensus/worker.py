@@ -134,7 +134,7 @@ class ConsensusWorker:
                     AND t.appealed = false
                     AND t.timestamp_awaiting_finalization IS NOT NULL
                     AND (
-                        t.leader_only = true
+                        t.execution_mode IN ('LEADER_ONLY', 'LEADER_SELF_VALIDATOR')
                         OR (
                             EXTRACT(EPOCH FROM NOW()) - t.timestamp_awaiting_finalization - COALESCE(t.appeal_processing_time, 0)
                         ) > :finality_window_seconds * POWER(1 - :appeal_failed_reduction, COALESCE(t.appeal_failed, 0))
@@ -175,9 +175,9 @@ class ConsensusWorker:
             RETURNING transactions.hash, transactions.from_address, transactions.to_address,
                       transactions.data, transactions.value, transactions.type, transactions.nonce,
                       transactions.gaslimit, transactions.r, transactions.s, transactions.v,
-                      transactions.leader_only, transactions.sim_config, transactions.contract_snapshot,
-                      transactions.status, transactions.consensus_data, transactions.input_data,
-                      transactions.created_at, transactions.timestamp_awaiting_finalization,
+                      transactions.leader_only, transactions.execution_mode, transactions.sim_config,
+                      transactions.contract_snapshot, transactions.status, transactions.consensus_data,
+                      transactions.input_data, transactions.created_at, transactions.timestamp_awaiting_finalization,
                       transactions.appeal_failed, transactions.blocked_at;
         """
         )
@@ -213,6 +213,7 @@ class ConsensusWorker:
                 "s": result.s,
                 "v": result.v,
                 "leader_only": result.leader_only,
+                "execution_mode": result.execution_mode,
                 "sim_config": result.sim_config,
                 "contract_snapshot": result.contract_snapshot,
                 "status": result.status,
@@ -280,12 +281,12 @@ class ConsensusWorker:
             RETURNING transactions.hash, transactions.from_address, transactions.to_address,
                       transactions.data, transactions.value, transactions.type, transactions.nonce,
                       transactions.gaslimit, transactions.r, transactions.s, transactions.v,
-                      transactions.leader_only, transactions.sim_config, transactions.contract_snapshot,
-                      transactions.status, transactions.consensus_data, transactions.input_data,
-                      transactions.created_at, transactions.appealed, transactions.appeal_failed,
-                      transactions.timestamp_appeal, transactions.appeal_undetermined,
-                      transactions.appeal_leader_timeout, transactions.appeal_validators_timeout,
-                      transactions.blocked_at;
+                      transactions.leader_only, transactions.execution_mode, transactions.sim_config,
+                      transactions.contract_snapshot, transactions.status, transactions.consensus_data,
+                      transactions.input_data, transactions.created_at, transactions.appealed,
+                      transactions.appeal_failed, transactions.timestamp_appeal,
+                      transactions.appeal_undetermined, transactions.appeal_leader_timeout,
+                      transactions.appeal_validators_timeout, transactions.blocked_at;
         """
         )
 
@@ -315,6 +316,7 @@ class ConsensusWorker:
                 "s": result.s,
                 "v": result.v,
                 "leader_only": result.leader_only,
+                "execution_mode": result.execution_mode,
                 "sim_config": result.sim_config,
                 "contract_snapshot": result.contract_snapshot,
                 "status": result.status,
@@ -385,9 +387,9 @@ class ConsensusWorker:
             RETURNING transactions.hash, transactions.from_address, transactions.to_address,
                       transactions.data, transactions.value, transactions.type, transactions.nonce,
                       transactions.gaslimit, transactions.r, transactions.s, transactions.v,
-                      transactions.leader_only, transactions.sim_config, transactions.contract_snapshot,
-                      transactions.status, transactions.consensus_data, transactions.input_data,
-                      transactions.created_at, transactions.blocked_at;
+                      transactions.leader_only, transactions.execution_mode, transactions.sim_config,
+                      transactions.contract_snapshot, transactions.status, transactions.consensus_data,
+                      transactions.input_data, transactions.created_at, transactions.blocked_at;
         """
         )
 
@@ -418,6 +420,7 @@ class ConsensusWorker:
                 "s": result.s,
                 "v": result.v,
                 "leader_only": result.leader_only,
+                "execution_mode": result.execution_mode,
                 "sim_config": result.sim_config,
                 "contract_snapshot": result.contract_snapshot,
                 "status": result.status,

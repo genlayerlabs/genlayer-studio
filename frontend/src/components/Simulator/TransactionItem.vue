@@ -461,7 +461,17 @@ const badgeColorClass = computed(() => {
                   }}</span>
                 </div>
                 <div class="flex flex-row items-center gap-1 capitalize">
-                  <template v-if="history.leader_result.length === 1">
+                  <!-- LEADER_ONLY mode: single receipt means successful execution, not timeout -->
+                  <template
+                    v-if="
+                      history.leader_result.length === 1 &&
+                      transaction.data.execution_mode === 'LEADER_ONLY'
+                    "
+                  >
+                    <CheckCircleIcon class="h-4 w-4 text-green-500" />
+                    Leader Only
+                  </template>
+                  <template v-else-if="history.leader_result.length === 1">
                     <EllipsisHorizontalCircleIcon
                       class="h-4 w-4 text-yellow-500"
                     />
