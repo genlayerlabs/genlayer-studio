@@ -38,11 +38,24 @@ class HealthCache:
     # GenVM-specific (triggers 503 on failure)
     genvm_healthy: bool = True
     genvm_error: Optional[str] = None
+    # Additional metrics for external API
+    total_decisions: int = 0
+    total_users: int = 0
+    pending_transactions: int = 0
+    uptime_percent: float = 100.0
+    start_time: float = field(default_factory=time.time)
+    # Pending transactions per contract for dashboard
+    pending_contracts: list = field(default_factory=list)
 
 
 _health_cache = HealthCache()
 _background_task: Optional[asyncio.Task] = None
 _rpc_router_ref: Optional[FastAPIRPCRouter] = None
+_usage_metrics_service_ref: Optional[Any] = None
+_metrics_send_counter: int = 0
+
+# Send system health metrics every 6 health checks (6 × 10s = 60s = 1 minute)
+METRICS_SEND_INTERVAL = 6
 
 
 def get_health_check_interval() -> float:
@@ -104,6 +117,7 @@ async def _run_health_checks() -> None:
             "status": memory_status,
             "usage_mb": memory_health.get("memory_usage_mb"),
             "percent": memory_health.get("memory_percent"),
+            "cpu_percent": memory_health.get("cpu_percent", 0),
         }
         if memory_status in ["unhealthy", "degraded"]:
             if overall_status == "healthy":
@@ -124,6 +138,16 @@ async def _run_health_checks() -> None:
         _health_cache.genvm_healthy = genvm_ok
         _health_cache.genvm_error = genvm_error
 
+        # 6. Aggregate counts for metrics
+        decisions_count, users_count, pending_count = await _get_aggregate_counts()
+        _health_cache.total_decisions = decisions_count
+        _health_cache.total_users = users_count
+        _health_cache.pending_transactions = pending_count
+        _health_cache.uptime_percent = 100.0  # 100% while running
+
+        # 7. Get pending contracts breakdown for dashboard
+        _health_cache.pending_contracts = await _get_pending_contracts()
+
         # Update cache
         _health_cache.last_check = time.time()
         _health_cache.last_check_duration_ms = round((time.time() - start) * 1000, 2)
@@ -142,12 +166,27 @@ async def _run_health_checks() -> None:
 
 async def _background_health_loop() -> None:
     """Background loop that periodically runs health checks."""
+    global _metrics_send_counter
+
     interval = get_health_check_interval()
     logger.info(f"Starting background health checker (interval={interval}s)")
 
     while True:
         try:
             await _run_health_checks()
+
+            # Send system health metrics every 1 minute (every 6th iteration)
+            _metrics_send_counter += 1
+            if _metrics_send_counter >= METRICS_SEND_INTERVAL:
+                _metrics_send_counter = 0
+                if _usage_metrics_service_ref and _usage_metrics_service_ref.enabled:
+                    try:
+                        await _usage_metrics_service_ref.send_system_health_metrics(
+                            _health_cache
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to send system health metrics: {e}")
+
         except asyncio.CancelledError:
             logger.info("Background health checker cancelled")
             raise
@@ -159,11 +198,13 @@ async def _background_health_loop() -> None:
 
 def start_background_health_checker(
     rpc_router: Optional[FastAPIRPCRouter] = None,
+    usage_metrics_service: Optional[Any] = None,
 ) -> None:
     """Start the background health checker task. Call from app startup."""
-    global _background_task, _rpc_router_ref
+    global _background_task, _rpc_router_ref, _usage_metrics_service_ref
 
     _rpc_router_ref = rpc_router
+    _usage_metrics_service_ref = usage_metrics_service
 
     if _background_task is not None:
         logger.warning("Background health checker already running")
@@ -319,7 +360,7 @@ async def _check_consensus_health() -> Dict[str, Any]:
 
 
 async def _check_memory_health() -> Dict[str, Any]:
-    """Check memory usage."""
+    """Check memory usage and CPU usage."""
     try:
         import psutil
 
@@ -330,9 +371,71 @@ async def _check_memory_health() -> Dict[str, Any]:
             "status": "healthy",
             "memory_usage_mb": memory_info.rss / 1024 / 1024,
             "memory_percent": process.memory_percent(),
+            "cpu_percent": process.cpu_percent(interval=0.1),
         }
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+
+async def _get_aggregate_counts() -> tuple[int, int, int]:
+    """Query total decisions, unique users, and pending transactions from database."""
+    from sqlalchemy import text
+
+    try:
+        db_manager = get_database_manager()
+        with db_manager.engine.connect() as conn:
+            query = text(
+                """
+                SELECT
+                    COUNT(*) FILTER (WHERE status IN ('FINALIZED', 'ACCEPTED')) as decisions,
+                    COUNT(DISTINCT from_address) as users,
+                    COUNT(*) FILTER (WHERE status = 'PENDING') as pending
+                FROM transactions
+            """
+            )
+            result = conn.execute(query)
+            row = result.fetchone()
+            return (
+                (row.decisions or 0, row.users or 0, row.pending or 0)
+                if row
+                else (0, 0, 0)
+            )
+    except Exception as e:
+        logger.warning(f"Failed to get aggregate counts: {e}")
+        return (0, 0, 0)
+
+
+async def _get_pending_contracts() -> list[dict]:
+    """Query pending transactions grouped by contract address."""
+    from sqlalchemy import text
+
+    try:
+        db_manager = get_database_manager()
+        with db_manager.engine.connect() as conn:
+            query = text(
+                """
+                SELECT
+                    to_address as contract_address,
+                    COUNT(*) as pending_count
+                FROM transactions
+                WHERE status = 'PENDING'
+                  AND to_address IS NOT NULL
+                GROUP BY to_address
+                ORDER BY pending_count DESC
+                LIMIT 20
+            """
+            )
+            result = conn.execute(query)
+            return [
+                {
+                    "contractAddress": row.contract_address,
+                    "pendingCount": row.pending_count,
+                }
+                for row in result
+            ]
+    except Exception as e:
+        logger.warning(f"Failed to get pending contracts: {e}")
+        return []
 
 
 async def _check_redis_health() -> str:

@@ -70,6 +70,58 @@ class UsageMetricsService:
                 f"Failed to send usage metrics for transaction {transaction.hash}: {e}"
             )
 
+    async def send_system_health_metrics(self, health_cache) -> None:
+        """
+        Send system health metrics from cache to external API.
+
+        Args:
+            health_cache: The HealthCache object with current health data
+        """
+        if not self._enabled:
+            return
+
+        try:
+            # Build base payload
+            system_health = {
+                "instanceHealth": self._map_health_status(health_cache.status),
+                "genVmStatus": "healthy" if health_cache.genvm_healthy else "down",
+                "uptime": health_cache.uptime_percent,
+                "activeWorkers": health_cache.services.get("consensus", {}).get(
+                    "active_workers", 0
+                ),
+                "pendingTransactions": health_cache.pending_transactions,
+                "decisions": health_cache.total_decisions,
+                "users": health_cache.total_users,
+                "memoryUsage": health_cache.services.get("memory", {}).get(
+                    "percent", 0
+                ),
+                "cpuUsage": health_cache.services.get("memory", {}).get(
+                    "cpu_percent", 0
+                ),
+            }
+
+            # Add pending contracts breakdown if available
+            pending_contracts = getattr(health_cache, "pending_contracts", [])
+            if pending_contracts:
+                system_health["pendingContracts"] = pending_contracts
+
+            payload = {"systemHealth": system_health}
+            await self._send_to_api(payload)
+            logger.debug("System health metrics sent successfully")
+        except Exception as e:
+            logger.error(f"Failed to send system health metrics: {e}")
+
+    def _map_health_status(self, status: str) -> str:
+        """Map internal status to API enum."""
+        status_map = {
+            "healthy": "healthy",
+            "degraded": "degraded",
+            "unhealthy": "down",
+            "error": "down",
+            "initializing": "degraded",
+        }
+        return status_map.get(status, "down")
+
     def _build_decision_payload(
         self, transaction: Transaction, finalization_data: dict
     ) -> dict:
