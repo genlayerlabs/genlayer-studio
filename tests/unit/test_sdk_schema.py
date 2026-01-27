@@ -47,7 +47,7 @@ class TestSdkSchemaIntegration:
 
     def test_extract_simple_contract(self, has_sdk):
         """Test extraction of a simple contract (requires SDK)."""
-        simple_contract = b'''from genlayer import *
+        simple_contract = b"""from genlayer import *
 
 class SimpleContract(Contract):
     def __init__(self):
@@ -56,7 +56,7 @@ class SimpleContract(Contract):
     @public
     def hello(self) -> str:
         return "Hello"
-'''
+"""
         result = extract_schema_via_sdk(simple_contract)
 
         # Should return a schema or None (if SDK import fails)
