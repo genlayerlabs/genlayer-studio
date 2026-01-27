@@ -31,3 +31,4 @@ setuptools==77.0.1
 redis==5.0.1
 prometheus-client==0.23.1
 psutil==5.9.8
+sentry-sdk==2.50.0

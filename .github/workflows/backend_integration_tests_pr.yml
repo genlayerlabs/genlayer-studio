@@ -59,6 +59,9 @@ jobs:
           sed -i "s/COMPOSE_WORKER_MEM_LIMIT=\".*\"/COMPOSE_WORKER_MEM_LIMIT=\"6gb\"/" .env
           sed -i "s/COMPOSE_RPC_MEM_RESERVATION=\".*\"/COMPOSE_RPC_MEM_RESERVATION=\"2gb\"/" .env
           sed -i "s/COMPOSE_WORKER_MEM_RESERVATION=\".*\"/COMPOSE_WORKER_MEM_RESERVATION=\"2gb\"/" .env
+          sed -i "s/JSONRPC_REPLICAS=\".*\"/JSONRPC_REPLICAS=\"1\"/" .env
+          sed -i "s/CONSENSUS_WORKERS=\".*\"/CONSENSUS_WORKERS=\"3\"/" .env
+          sed -i "s/MAX_PARALLEL_TXS_PER_WORKER=\".*\"/MAX_PARALLEL_TXS_PER_WORKER=\"2\"/" .env
           echo >> .env
           if [[ "${{ needs.triggers.outputs.is_pull_request_review_approved }}" == "true" ]]; then
             echo "TEST_WITH_MOCK_LLMS=false" >> .env
@@ -124,8 +127,11 @@ jobs:
           pip install -r requirements.test.txt
           pip install -r backend/requirements.txt
 
-      - name: Run tests
-        run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/ -svv
+      - name: Run tests (parallel)
+        run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/ -svv -n 4 --ignore=tests/integration/test_validators.py
+
+      - name: Run validator CRUD tests (serial)
+        run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/test_validators.py -svv
 
       - name: Dump Docker Compose logs
         run: docker compose logs

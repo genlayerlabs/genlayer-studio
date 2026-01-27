@@ -3,6 +3,9 @@ from tests.common.request import payload, post_request_localhost
 from tests.common.response import has_success_status
 
 
+# Use xdist_group to ensure all validator CRUD tests run in the same worker
+# This prevents race conditions with parallel tests that also use validators
+@pytest.mark.xdist_group(name="validator_crud")
 @pytest.mark.parametrize("execution_number", range(5))
 def test_validators(execution_number):
     delete_validators_result = post_request_localhost(
