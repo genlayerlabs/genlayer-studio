@@ -15,23 +15,15 @@ The approach:
 from __future__ import annotations
 
 import importlib.util
-import json
 import logging
 import os
 import sys
 import tempfile
-import threading
 import time
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock
 
 logger = logging.getLogger(__name__)
-
-# Simple in-memory cache with TTL
-_schema_cache: dict[str, tuple[dict, float]] = {}
-_cache_lock = threading.Lock()
-_CACHE_TTL_SECONDS = 300  # 5 minutes
 
 # SDK paths relative to GENVMROOT
 _SDK_SRC_SUBPATH = "runners/genlayer-py-std/src"
@@ -81,43 +73,6 @@ def _setup_wasi_mocks() -> None:
     sys.modules["_genlayer_wasi"] = wasi_mock
 
 
-def _get_cache_key(code: bytes) -> str:
-    """Generate cache key from contract code hash."""
-    import hashlib
-
-    return hashlib.sha256(code).hexdigest()
-
-
-def _get_cached_schema(code: bytes) -> dict | None:
-    """Get schema from cache if valid."""
-    key = _get_cache_key(code)
-    with _cache_lock:
-        if key in _schema_cache:
-            schema, timestamp = _schema_cache[key]
-            if time.time() - timestamp < _CACHE_TTL_SECONDS:
-                logger.debug(f"SDK schema cache hit for {key[:8]}...")
-                return schema
-            else:
-                # Expired, remove from cache
-                del _schema_cache[key]
-    return None
-
-
-def _cache_schema(code: bytes, schema: dict) -> None:
-    """Cache schema with timestamp."""
-    key = _get_cache_key(code)
-    with _cache_lock:
-        _schema_cache[key] = (schema, time.time())
-        # Simple cache size limit
-        if len(_schema_cache) > 100:
-            # Remove oldest entries
-            sorted_entries = sorted(
-                _schema_cache.items(), key=lambda x: x[1][1]
-            )
-            for old_key, _ in sorted_entries[:20]:
-                del _schema_cache[old_key]
-
-
 def extract_schema_via_sdk(contract_code: bytes) -> dict | None:
     """
     Extract contract schema using SDK reflection.
@@ -131,11 +86,6 @@ def extract_schema_via_sdk(contract_code: bytes) -> dict | None:
 
     Performance: ~50-100ms vs ~200-300ms with GenVM
     """
-    # Check cache first
-    cached = _get_cached_schema(contract_code)
-    if cached is not None:
-        return cached
-
     sdk_paths = _get_sdk_paths()
     if sdk_paths is None:
         return None
@@ -201,9 +151,6 @@ def extract_schema_via_sdk(contract_code: bytes) -> dict | None:
                     f"for {contract_class.__name__}"
                 )
 
-                # Cache the result
-                _cache_schema(contract_code, schema)
-
                 return schema
 
             finally:
@@ -226,9 +173,3 @@ def extract_schema_via_sdk(contract_code: bytes) -> dict | None:
             exc_info=True,
         )
         return None
-
-
-def clear_cache() -> None:
-    """Clear the schema cache (useful for testing)."""
-    with _cache_lock:
-        _schema_cache.clear()
