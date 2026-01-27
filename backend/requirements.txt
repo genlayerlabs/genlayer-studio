@@ -19,7 +19,7 @@ jsonschema==4.23.0
 loguru==0.7.3
 web3==7.10.0
 PyYAML==6.0.2
-genvm-linter==0.1.0
+genvm-linter==0.2.0
 
 # FastAPI and ASGI dependencies
 fastapi==0.104.1
