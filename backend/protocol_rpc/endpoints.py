@@ -663,6 +663,20 @@ async def get_contract_schema(
             "Contract not deployed.",
         )
 
+    contract_code = base64.b64decode(contract_account["data"]["code"])
+
+    # Try SDK reflection first (faster: ~50-100ms vs ~200-300ms with GenVM)
+    try:
+        from backend.services.sdk_schema import extract_schema_via_sdk
+
+        sdk_schema = extract_schema_via_sdk(contract_code)
+        if sdk_schema is not None:
+            return sdk_schema
+        logger.debug("SDK schema extraction returned None, falling back to GenVM")
+    except Exception as e:
+        logger.debug(f"SDK schema extraction failed: {e}, falling back to GenVM")
+
+    # Fallback to GenVM-based extraction
     node = Node(  # Mock node just to get the data from the GenVM
         contract_snapshot=None,
         validator_mode=ExecutionMode.LEADER,
@@ -682,34 +696,13 @@ async def get_contract_schema(
         contract_snapshot_factory=None,
         manager=genvm_manager,
     )
-    schema = await node.get_contract_schema(
-        base64.b64decode(contract_account["data"]["code"])
-    )
+    schema = await node.get_contract_schema(contract_code)
     return json.loads(schema)
 
 
 async def get_contract_schema_for_code(
     genvm_manager: GenVMManager, msg_handler: IMessageHandler, contract_code_hex: str
 ) -> dict:
-    node = Node(  # Mock node just to get the data from the GenVM
-        contract_snapshot=None,
-        validator_mode=ExecutionMode.LEADER,
-        validator=Validator(
-            address="",
-            stake=0,
-            llmprovider=LLMProvider(
-                provider="",
-                model="",
-                config={},
-                plugin="",
-                plugin_config={},
-            ),
-        ),
-        leader_receipt=None,
-        msg_handler=msg_handler.with_client_session(get_client_session_id()),
-        contract_snapshot_factory=None,
-        manager=genvm_manager,
-    )
     # Contract code is expected to be a hex string, but it can be a plain UTF-8 string
     # When hex decoding fails, fall back to UTF-8 encoding
     try:
@@ -719,6 +712,38 @@ async def get_contract_schema_for_code(
             "Contract code is not hex-encoded, treating as UTF-8 string",
         )
         contract_code = contract_code_hex.encode("utf-8")
+
+    # Try SDK reflection first (faster: ~50-100ms vs ~200-300ms with GenVM)
+    try:
+        from backend.services.sdk_schema import extract_schema_via_sdk
+
+        sdk_schema = extract_schema_via_sdk(contract_code)
+        if sdk_schema is not None:
+            return sdk_schema
+        logger.debug("SDK schema extraction returned None, falling back to GenVM")
+    except Exception as e:
+        logger.debug(f"SDK schema extraction failed: {e}, falling back to GenVM")
+
+    # Fallback to GenVM-based extraction
+    node = Node(  # Mock node just to get the data from the GenVM
+        contract_snapshot=None,
+        validator_mode=ExecutionMode.LEADER,
+        validator=Validator(
+            address="",
+            stake=0,
+            llmprovider=LLMProvider(
+                provider="",
+                model="",
+                config={},
+                plugin="",
+                plugin_config={},
+            ),
+        ),
+        leader_receipt=None,
+        msg_handler=msg_handler.with_client_session(get_client_session_id()),
+        contract_snapshot_factory=None,
+        manager=genvm_manager,
+    )
     schema = await node.get_contract_schema(contract_code)
     return json.loads(schema)
 
