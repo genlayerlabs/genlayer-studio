@@ -42,7 +42,7 @@ def setup_validators():
             if len(existing_validators) < 5:
                 result = post_request_localhost(
                     payload(
-                        "sim_createRandomValidators", 5, 8, 12, ["openai"], ["gpt-5.1"]
+                        "sim_createRandomValidators", 5, 8, 12, ["openai"], ["gpt-4o"]
                     )
                 ).json()
                 assert has_success_status(result)
