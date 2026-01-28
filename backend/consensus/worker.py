@@ -70,7 +70,7 @@ class ConsensusWorker:
         self.running = True
 
         # Parallel transaction processing configuration
-        self.max_parallel_txs = int(os.environ.get("MAX_PARALLEL_TXS_PER_WORKER", "1"))
+        self.max_parallel_txs: int = self._parse_max_parallel_txs()
         self.current_transactions: dict[str, dict] = (
             {}
         )  # Track currently processing transactions by hash
@@ -120,6 +120,37 @@ class ConsensusWorker:
 
         # Initialize usage metrics service for reporting transaction metrics
         self.usage_metrics_service = UsageMetricsService()
+
+    def _parse_max_parallel_txs(self) -> int:
+        """
+        Parse MAX_PARALLEL_TXS_PER_WORKER from environment with validation.
+
+        Returns:
+            Parsed value (minimum 1) or default of 1 on invalid input.
+        """
+        default_value = 1
+        env_value = os.environ.get("MAX_PARALLEL_TXS_PER_WORKER")
+
+        if env_value is None:
+            return default_value
+
+        try:
+            parsed = int(env_value)
+        except (ValueError, TypeError):
+            logger.warning(
+                f"[Worker {self.worker_id}] Invalid MAX_PARALLEL_TXS_PER_WORKER value "
+                f"'{env_value}', using default {default_value}"
+            )
+            return default_value
+
+        if parsed < 1:
+            logger.warning(
+                f"[Worker {self.worker_id}] MAX_PARALLEL_TXS_PER_WORKER must be >= 1, "
+                f"got {parsed}, using minimum value 1"
+            )
+            return 1
+
+        return parsed
 
     async def claim_next_finalization(self, session: Session) -> Optional[dict]:
         """
