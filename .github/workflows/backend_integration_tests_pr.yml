@@ -71,6 +71,10 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          config-inline: |
+            [worker.oci]
+              max-parallelism = 4
 
       # Build only backend images with Buildx Bake and enable GHA cache
       - name: Build backend images with cache (buildx bake)
@@ -153,6 +157,10 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          config-inline: |
+            [worker.oci]
+              max-parallelism = 4
 
       - name: Cache Docker layers
         uses: actions/cache@v4
