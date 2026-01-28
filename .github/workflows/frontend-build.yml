@@ -1,0 +1,44 @@
+name: "Frontend Build Test"
+
+on:
+  workflow_call:
+    secrets:
+      codecov_token:
+        required: true
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Copy examples to assets
+        run: cp -r examples frontend/src/assets/examples
+        working-directory: .
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the frontend
+        run: npm run build
+
+      - name: Verify build output
+        run: ls -l ./dist # Adjust if your build output is in a different directory
+
+      - name: Run frontend unit tests
+        run: npm run coverage
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v4.5.0
+        with:
+          verbose: true
+          token: ${{ secrets.codecov_token }}
+          fail_ci_if_error: true
+          directory: frontend/coverage
