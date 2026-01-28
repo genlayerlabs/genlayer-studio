@@ -5,15 +5,28 @@ description: Setup Python virtual environment and run integration tests with glt
 
 # Run Integration Tests
 
-Setup the Python environment and run integration tests for GenLayer Studio.
+Setup the Python environment, start the studio, and run integration tests for GenLayer Studio.
 
 ## Prerequisites
 
 - Python 3.12 installed
 - virtualenv installed (`pip install virtualenv`)
-- Docker containers running (`docker compose up -d`)
+- Docker and Docker Compose installed
 
-## Setup Virtual Environment (first time or reset)
+## Step 1: Start the Studio
+
+The studio must be running before executing integration tests.
+
+```bash
+# Stop any existing containers and rebuild
+docker-compose down && docker-compose up --build
+```
+
+Wait for all services to be healthy before proceeding.
+
+## Step 2: Setup Virtual Environment (first time or reset)
+
+In a separate terminal:
 
 ```bash
 # Remove existing venv if present
@@ -37,61 +50,96 @@ pip install -r backend/requirements.txt
 export PYTHONPATH="$(pwd)"
 ```
 
-## Ensure Services Are Running
-
-Integration tests require the backend services:
-
-```bash
-# Start all services
-docker compose up -d
-
-# Verify services are healthy
-docker compose ps
-curl -s http://localhost:4000/health | jq .
-```
-
-## Run Tests
+## Step 3: Run Integration Tests
 
 ```bash
 # Activate venv (if not already)
 source .venv/bin/activate
 export PYTHONPATH="$(pwd)"
 
-# Run all integration tests
+# Run all integration tests (serial)
 gltest --contracts-dir . tests/integration
+
+# Run tests in parallel (4 workers) - excludes test_validators.py
+gltest --contracts-dir . tests/integration -n 4 --ignore=tests/integration/test_validators.py
+
+# Run validator CRUD tests separately (must run serially)
+gltest --contracts-dir . tests/integration/test_validators.py
+
+# Run faster with leader-only mode (skips validator consensus)
+gltest --contracts-dir . tests/integration --leader-only
 
 # Run specific test file
 gltest --contracts-dir . tests/integration/test_specific.py
 
 # Run with verbose output
-gltest --contracts-dir . tests/integration -svv
+gltest --contracts-dir . tests/integration -v
 
 # Run specific test function
 gltest --contracts-dir . tests/integration/test_file.py::test_function_name
 ```
 
-## Quick One-Liner (after initial setup)
+### Parallel Execution Notes
 
+- Use `-n 4` to run tests in parallel with 4 workers (pytest-xdist)
+- `test_validators.py` must be excluded from parallel runs (`--ignore`) because it tests validator CRUD operations and needs exclusive access to the validator state
+- Run `test_validators.py` separately after parallel tests complete
+
+## Quick Commands
+
+### Full Setup (first time)
+```bash
+# Terminal 1: Start studio
+docker-compose down && docker-compose up --build
+
+# Terminal 2: Setup and run tests
+rm -rf .venv && \
+virtualenv -p python3.12 .venv && \
+source .venv/bin/activate && \
+pip install --upgrade pip && \
+pip install -r requirements.txt && \
+pip install -r requirements.test.txt && \
+pip install -r backend/requirements.txt && \
+export PYTHONPATH="$(pwd)" && \
+gltest --contracts-dir . tests/integration
+```
+
+### Quick Run (after initial setup, studio already running)
 ```bash
 source .venv/bin/activate && export PYTHONPATH="$(pwd)" && gltest --contracts-dir . tests/integration
 ```
 
-## Test Contracts
-
-Integration test contracts are located in:
+### Parallel Run (4 workers)
+```bash
+source .venv/bin/activate && export PYTHONPATH="$(pwd)" && \
+gltest --contracts-dir . tests/integration -n 4 --ignore=tests/integration/test_validators.py && \
+gltest --contracts-dir . tests/integration/test_validators.py
 ```
-tests/integration/test_contracts/
+
+### Fast Run (leader-only mode)
+```bash
+source .venv/bin/activate && export PYTHONPATH="$(pwd)" && gltest --contracts-dir . tests/integration --leader-only
 ```
 
 ## Troubleshooting
 
-### Connection Refused Errors
+### Studio Not Running
 ```bash
-# Ensure Docker services are running
-docker compose ps
+# Check if containers are up
+docker-compose ps
 
-# Restart services if needed
-docker compose restart
+# Check container logs
+docker-compose logs -f backend
+```
+
+### Connection Refused Errors
+The studio needs time to initialize. Wait for all services to be healthy:
+```bash
+# Watch container status
+docker-compose ps
+
+# Check backend health
+curl http://localhost:4000/health
 ```
 
 ### Python 3.12 Not Found
@@ -121,10 +169,12 @@ export PYTHONPATH="$(pwd)"
 pwd  # Should be genlayer-studio
 ```
 
-### Timeout Errors
+### Test Timeouts
+Integration tests may timeout if the studio is under load. Try:
 ```bash
-# Check backend logs for issues
-docker compose logs -f backend
+# Run with leader-only for faster execution
+gltest --contracts-dir . tests/integration --leader-only
 
-# Increase timeout if needed (in test or via env)
+# Run a single test file to isolate issues
+gltest --contracts-dir . tests/integration/test_specific.py -v
 ```

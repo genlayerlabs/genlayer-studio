@@ -38,6 +38,7 @@ from backend.protocol_rpc.health import (
     start_background_health_checker,
     stop_background_health_checker,
 )
+from backend.services.usage_metrics_service import UsageMetricsService
 import backend.validators as validators
 from backend.node.base import Manager as GenVMManager
 
@@ -310,9 +311,13 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
     logger.info("[STARTUP] Creating RPC router")
     rpc_router = FastAPIRPCRouter(endpoint_manager=endpoint_manager)
 
+    # Initialize usage metrics service for external API reporting
+    logger.info("[STARTUP] Initializing usage metrics service")
+    usage_metrics_service = UsageMetricsService()
+
     # Start background health checker for fast /health endpoint responses
     logger.info("[STARTUP] Starting background health checker")
-    start_background_health_checker(rpc_router)
+    start_background_health_checker(rpc_router, usage_metrics_service)
 
     app_state = RPCAppState(
         db_manager=db_manager,
@@ -404,6 +409,11 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
         if redis_subscriber:
             await redis_subscriber.stop()
             logger.info("[SHUTDOWN] Redis subscriber stopped")
+
+        # Close usage metrics service
+        if usage_metrics_service:
+            await usage_metrics_service.close()
+            logger.info("[SHUTDOWN] Usage metrics service closed")
 
         # Stop background health checker
         stop_background_health_checker()

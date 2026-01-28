@@ -68,7 +68,13 @@ class ConsensusWorker:
         self.poll_interval = poll_interval
         self.transaction_timeout_minutes = transaction_timeout_minutes
         self.running = True
-        self.current_transaction = None  # Track currently processing transaction
+
+        # Parallel transaction processing configuration
+        self.max_parallel_txs: int = self._parse_max_parallel_txs()
+        self.current_transactions: dict[str, dict] = (
+            {}
+        )  # Track currently processing transactions by hash
+        self._active_tasks: set[asyncio.Task] = set()  # Track active processing tasks
 
         # Callback for graceful shutdown during K8s scale-down
         self.should_shutdown = should_shutdown
@@ -115,6 +121,37 @@ class ConsensusWorker:
         # Initialize usage metrics service for reporting transaction metrics
         self.usage_metrics_service = UsageMetricsService()
 
+    def _parse_max_parallel_txs(self) -> int:
+        """
+        Parse MAX_PARALLEL_TXS_PER_WORKER from environment with validation.
+
+        Returns:
+            Parsed value (minimum 1) or default of 1 on invalid input.
+        """
+        default_value = 1
+        env_value = os.environ.get("MAX_PARALLEL_TXS_PER_WORKER")
+
+        if env_value is None:
+            return default_value
+
+        try:
+            parsed = int(env_value)
+        except (ValueError, TypeError):
+            logger.warning(
+                f"[Worker {self.worker_id}] Invalid MAX_PARALLEL_TXS_PER_WORKER value "
+                f"'{env_value}', using default {default_value}"
+            )
+            return default_value
+
+        if parsed < 1:
+            logger.warning(
+                f"[Worker {self.worker_id}] MAX_PARALLEL_TXS_PER_WORKER must be >= 1, "
+                f"got {parsed}, using minimum value 1"
+            )
+            return 1
+
+        return parsed
+
     async def claim_next_finalization(self, session: Session) -> Optional[dict]:
         """
         Claim the next transaction that needs finalization (appeal window expired).
@@ -134,7 +171,7 @@ class ConsensusWorker:
                     AND t.appealed = false
                     AND t.timestamp_awaiting_finalization IS NOT NULL
                     AND (
-                        t.leader_only = true
+                        t.execution_mode IN ('LEADER_ONLY', 'LEADER_SELF_VALIDATOR')
                         OR (
                             EXTRACT(EPOCH FROM NOW()) - t.timestamp_awaiting_finalization - COALESCE(t.appeal_processing_time, 0)
                         ) > :finality_window_seconds * POWER(1 - :appeal_failed_reduction, COALESCE(t.appeal_failed, 0))
@@ -175,9 +212,9 @@ class ConsensusWorker:
             RETURNING transactions.hash, transactions.from_address, transactions.to_address,
                       transactions.data, transactions.value, transactions.type, transactions.nonce,
                       transactions.gaslimit, transactions.r, transactions.s, transactions.v,
-                      transactions.leader_only, transactions.sim_config, transactions.contract_snapshot,
-                      transactions.status, transactions.consensus_data, transactions.input_data,
-                      transactions.created_at, transactions.timestamp_awaiting_finalization,
+                      transactions.leader_only, transactions.execution_mode, transactions.sim_config,
+                      transactions.contract_snapshot, transactions.status, transactions.consensus_data,
+                      transactions.input_data, transactions.created_at, transactions.timestamp_awaiting_finalization,
                       transactions.appeal_failed, transactions.blocked_at;
         """
         )
@@ -213,6 +250,7 @@ class ConsensusWorker:
                 "s": result.s,
                 "v": result.v,
                 "leader_only": result.leader_only,
+                "execution_mode": result.execution_mode,
                 "sim_config": result.sim_config,
                 "contract_snapshot": result.contract_snapshot,
                 "status": result.status,
@@ -280,12 +318,12 @@ class ConsensusWorker:
             RETURNING transactions.hash, transactions.from_address, transactions.to_address,
                       transactions.data, transactions.value, transactions.type, transactions.nonce,
                       transactions.gaslimit, transactions.r, transactions.s, transactions.v,
-                      transactions.leader_only, transactions.sim_config, transactions.contract_snapshot,
-                      transactions.status, transactions.consensus_data, transactions.input_data,
-                      transactions.created_at, transactions.appealed, transactions.appeal_failed,
-                      transactions.timestamp_appeal, transactions.appeal_undetermined,
-                      transactions.appeal_leader_timeout, transactions.appeal_validators_timeout,
-                      transactions.blocked_at;
+                      transactions.leader_only, transactions.execution_mode, transactions.sim_config,
+                      transactions.contract_snapshot, transactions.status, transactions.consensus_data,
+                      transactions.input_data, transactions.created_at, transactions.appealed,
+                      transactions.appeal_failed, transactions.timestamp_appeal,
+                      transactions.appeal_undetermined, transactions.appeal_leader_timeout,
+                      transactions.appeal_validators_timeout, transactions.blocked_at;
         """
         )
 
@@ -315,6 +353,7 @@ class ConsensusWorker:
                 "s": result.s,
                 "v": result.v,
                 "leader_only": result.leader_only,
+                "execution_mode": result.execution_mode,
                 "sim_config": result.sim_config,
                 "contract_snapshot": result.contract_snapshot,
                 "status": result.status,
@@ -385,9 +424,9 @@ class ConsensusWorker:
             RETURNING transactions.hash, transactions.from_address, transactions.to_address,
                       transactions.data, transactions.value, transactions.type, transactions.nonce,
                       transactions.gaslimit, transactions.r, transactions.s, transactions.v,
-                      transactions.leader_only, transactions.sim_config, transactions.contract_snapshot,
-                      transactions.status, transactions.consensus_data, transactions.input_data,
-                      transactions.created_at, transactions.blocked_at;
+                      transactions.leader_only, transactions.execution_mode, transactions.sim_config,
+                      transactions.contract_snapshot, transactions.status, transactions.consensus_data,
+                      transactions.input_data, transactions.created_at, transactions.blocked_at;
         """
         )
 
@@ -418,6 +457,7 @@ class ConsensusWorker:
                 "s": result.s,
                 "v": result.v,
                 "leader_only": result.leader_only,
+                "execution_mode": result.execution_mode,
                 "sim_config": result.sim_config,
                 "contract_snapshot": result.contract_snapshot,
                 "status": result.status,
@@ -540,10 +580,11 @@ class ConsensusWorker:
         # Import NoValidatorsAvailableError here to avoid circular imports
         from backend.consensus.base import NoValidatorsAvailableError
 
+        tx_hash = transaction_data.get("hash")
         try:
             # Track current transaction for health monitoring
-            self.current_transaction = {
-                "hash": transaction_data.get("hash"),
+            self.current_transactions[tx_hash] = {
+                "hash": tx_hash,
                 "blocked_at": transaction_data.get("blocked_at"),
             }
 
@@ -718,7 +759,7 @@ class ConsensusWorker:
             session.rollback()
         finally:
             # Clear current transaction tracking
-            self.current_transaction = None
+            self.current_transactions.pop(tx_hash, None)
             # Always release the transaction when done - use fresh session since current one may be closed
             try:
                 with self.get_session() as release_session:
@@ -912,7 +953,7 @@ class ConsensusWorker:
 
         finally:
             # Clear current transaction tracking
-            self.current_transaction = None
+            self.current_transactions.pop(tx_hash, None)
             # Release the transaction
             try:
                 with self.get_session() as release_session:
@@ -931,7 +972,14 @@ class ConsensusWorker:
             finalization_data: Transaction data dictionary
             session: Database session
         """
+        tx_hash = finalization_data.get("hash")
         try:
+            # Track current transaction for health monitoring
+            self.current_transactions[tx_hash] = {
+                "hash": tx_hash,
+                "blocked_at": finalization_data.get("blocked_at"),
+            }
+
             # Convert to Transaction domain object
             transaction = Transaction.from_dict(finalization_data)
 
@@ -1019,6 +1067,8 @@ class ConsensusWorker:
             )
             session.rollback()
         finally:
+            # Clear current transaction tracking
+            self.current_transactions.pop(tx_hash, None)
             # Always release the transaction when done - use fresh session since current one may be closed
             try:
                 with self.get_session() as release_session:
@@ -1037,7 +1087,14 @@ class ConsensusWorker:
             appeal_data: Appeal transaction data dictionary
             session: Database session
         """
+        tx_hash = appeal_data.get("hash")
         try:
+            # Track current transaction for health monitoring
+            self.current_transactions[tx_hash] = {
+                "hash": tx_hash,
+                "blocked_at": appeal_data.get("blocked_at"),
+            }
+
             # Convert to Transaction domain object
             transaction = Transaction.from_dict(appeal_data)
 
@@ -1115,6 +1172,8 @@ class ConsensusWorker:
             )
             session.rollback()
         finally:
+            # Clear current transaction tracking
+            self.current_transactions.pop(tx_hash, None)
             # Always release the transaction when done - use fresh session since current one may be closed
             try:
                 with self.get_session() as release_session:
@@ -1152,21 +1211,130 @@ class ConsensusWorker:
         state["last_log"] = now_monotonic
         state["polls"] = 0
 
+    def _is_in_backoff(self, transaction_data: dict) -> bool:
+        """
+        Check if a transaction is in backoff due to no validators.
+
+        Args:
+            transaction_data: Transaction data dictionary
+
+        Returns:
+            True if transaction is in backoff period, False otherwise
+        """
+        tx_hash = transaction_data["hash"]
+        retry_info = self._no_validators_retries.get(tx_hash)
+        if not retry_info:
+            return False
+
+        backoff = self._no_validators_base_backoff * (2 ** (retry_info["count"] - 1))
+        time_since_last = time.time() - retry_info["last_attempt"]
+        if time_since_last < backoff:
+            logger.debug(
+                f"[Worker {self.worker_id}] Transaction {tx_hash} in backoff "
+                f"({time_since_last:.1f}s < {backoff}s)"
+            )
+            return True
+        return False
+
+    async def _process_transaction_task(self, transaction_data: dict):
+        """Task wrapper for processing a transaction with its own session."""
+        with self.get_session() as session:
+            await self.process_transaction(transaction_data, session)
+
+    async def _process_finalization_task(self, finalization_data: dict):
+        """Task wrapper for processing a finalization with its own session."""
+        with self.get_session() as session:
+            await self.process_finalization(finalization_data, session)
+
+    async def _process_appeal_task(self, appeal_data: dict):
+        """Task wrapper for processing an appeal with its own session."""
+        with self.get_session() as session:
+            await self.process_appeal(appeal_data, session)
+
+    async def _try_claim_work(self, session: Session) -> bool:
+        """
+        Try to claim and spawn task for next work item.
+
+        Args:
+            session: Database session for claiming work
+
+        Returns:
+            True if work was claimed and task spawned, False otherwise
+        """
+        # Priority: appeals > finalizations > transactions
+
+        appeal_data = await self.claim_next_appeal(session)
+        if appeal_data:
+            logger.debug(
+                f"[Worker {self.worker_id}] Claimed appeal for transaction {appeal_data['hash']}"
+            )
+            task = asyncio.create_task(self._process_appeal_task(appeal_data))
+            self._active_tasks.add(task)
+            return True
+
+        finalization_data = await self.claim_next_finalization(session)
+        if finalization_data:
+            logger.debug(
+                f"[Worker {self.worker_id}] Claimed finalization for transaction {finalization_data['hash']}"
+            )
+            task = asyncio.create_task(
+                self._process_finalization_task(finalization_data)
+            )
+            self._active_tasks.add(task)
+            return True
+
+        transaction_data = await self.claim_next_transaction(session)
+        if transaction_data:
+            tx_hash = transaction_data["hash"]
+            # Check backoff for no-validators retry
+            if not self._is_in_backoff(transaction_data):
+                logger.debug(f"[Worker {self.worker_id}] Claimed transaction {tx_hash}")
+                task = asyncio.create_task(
+                    self._process_transaction_task(transaction_data)
+                )
+                self._active_tasks.add(task)
+                return True
+            else:
+                # Release transaction if in backoff
+                self.release_transaction(session, tx_hash)
+
+        return False
+
     async def run(self):
         """
         Main worker loop that continuously claims and processes transactions, appeals, and finalizations.
+        Supports parallel processing when MAX_PARALLEL_TXS_PER_WORKER > 1.
         """
-        logger.info(f"[Worker {self.worker_id}] Starting consensus worker")
+        logger.info(
+            f"[Worker {self.worker_id}] Starting consensus worker "
+            f"(max_parallel_txs={self.max_parallel_txs})"
+        )
 
         recovery_counter = 0
 
         while self.running:
             try:
+                # Cleanup completed tasks and handle any exceptions
+                done_tasks = {t for t in self._active_tasks if t.done()}
+                for task in done_tasks:
+                    self._active_tasks.discard(task)
+                    # Handle any exceptions from completed tasks
+                    try:
+                        task.result()
+                    except Exception as e:
+                        logger.exception(f"[Worker {self.worker_id}] Task failed: {e}")
+
                 # Check if shutdown has been requested (graceful shutdown during K8s scale-down)
                 if self.should_shutdown and self.should_shutdown():
                     logger.info(
-                        f"[Worker {self.worker_id}] Shutdown requested, stopping after current transaction completes"
+                        f"[Worker {self.worker_id}] Shutdown requested, waiting for "
+                        f"{len(self._active_tasks)} active tasks to complete"
                     )
+                    # Wait for active tasks to complete
+                    if self._active_tasks:
+                        await asyncio.gather(
+                            *self._active_tasks, return_exceptions=True
+                        )
                     self.running = False
                     break
 
@@ -1181,82 +1349,32 @@ class ConsensusWorker:
                                 f"[Worker {self.worker_id}] Recovered {recovered} stuck transactions"
                             )
 
-                    # Priority order: appeals > finalizations > regular transactions
-
-                    # Try to claim an appeal first (highest priority)
-                    appeal_data = await self.claim_next_appeal(session)
-
-                    if appeal_data:
-                        logger.debug(
-                            f"[Worker {self.worker_id}] Claimed appeal for transaction {appeal_data['hash']}"
-                        )
-                        # Process in a new session
-                        with self.get_session() as process_session:
-                            await self.process_appeal(appeal_data, process_session)
-                        # Continue to next iteration to ensure fresh session state
-                        continue
-                    else:
-                        # No appeals, try to claim a finalization
-                        finalization_data = await self.claim_next_finalization(session)
-
-                        if finalization_data:
-                            logger.debug(
-                                f"[Worker {self.worker_id}] Claimed finalization for transaction {finalization_data['hash']}"
-                            )
-                            # Process in a new session
-                            with self.get_session() as process_session:
-                                await self.process_finalization(
-                                    finalization_data, process_session
-                                )
-                            # Continue to next iteration to ensure fresh session state
+                    # Claim and process while we have capacity
+                    if len(self._active_tasks) < self.max_parallel_txs:
+                        claimed = await self._try_claim_work(session)
+                        if claimed:
+                            # Try to claim more immediately if we have capacity
                             continue
-                        else:
-                            # No finalizations, try to claim a regular transaction
-                            transaction_data = await self.claim_next_transaction(
-                                session
-                            )
 
-                            if transaction_data:
-                                tx_hash = transaction_data["hash"]
-
-                                # Check if transaction is in backoff due to no validators
-                                retry_info = self._no_validators_retries.get(tx_hash)
-                                if retry_info:
-                                    backoff = self._no_validators_base_backoff * (
-                                        2 ** (retry_info["count"] - 1)
-                                    )
-                                    time_since_last = (
-                                        time.time() - retry_info["last_attempt"]
-                                    )
-                                    if time_since_last < backoff:
-                                        # Still in backoff period, release and skip
-                                        logger.debug(
-                                            f"[Worker {self.worker_id}] Transaction {tx_hash} in backoff "
-                                            f"({time_since_last:.1f}s < {backoff}s), releasing"
-                                        )
-                                        self.release_transaction(session, tx_hash)
-                                        await asyncio.sleep(1)
-                                        continue
-
-                                logger.debug(
-                                    f"[Worker {self.worker_id}] Claimed transaction {tx_hash}"
-                                )
-                                # Process in a new session
-                                with self.get_session() as process_session:
-                                    await self.process_transaction(
-                                        transaction_data, process_session
-                                    )
-                                # Continue to next iteration to ensure fresh session state
-                                continue
-                            else:
-                                # No work available, wait before polling again
-                                await asyncio.sleep(self.poll_interval)
+                # Wait for a task to complete or poll interval
+                if self._active_tasks:
+                    done, _ = await asyncio.wait(
+                        self._active_tasks,
+                        timeout=self.poll_interval,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                else:
+                    # No active tasks, wait before polling again
+                    await asyncio.sleep(self.poll_interval)
 
             except Exception as e:
                 logger.exception(f"[Worker {self.worker_id}] Error in main loop: {e}")
                 await asyncio.sleep(self.poll_interval)
 
     def stop(self):
-        """Stop the worker gracefully."""
-        logger.info(f"[Worker {self.worker_id}] Stopping consensus worker")
+        """Stop the worker gracefully. Active tasks will complete naturally in run() shutdown logic."""
+        logger.info(
+            f"[Worker {self.worker_id}] Stopping consensus worker "
+            f"({len(self._active_tasks)} active tasks)"
+        )
         self.running = False

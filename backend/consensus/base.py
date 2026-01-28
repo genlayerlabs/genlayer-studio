@@ -30,6 +30,7 @@ from backend.database_handler.types import ConsensusData
 from backend.domain.types import (
     Transaction,
     TransactionType,
+    TransactionExecutionMode,
     LLMProvider,
     Validator,
 )
@@ -1664,8 +1665,8 @@ class ConsensusAlgorithm:
     ) -> bool:
         """
         Check if the transaction can be finalized based on the following criteria:
-        - The transaction is a leader only transaction
-        - The transaction has exceeded the finality window
+        - The transaction is in LEADER_ONLY or LEADER_SELF_VALIDATOR mode (immediate finalization)
+        - The transaction has exceeded the finality window (for NORMAL mode)
         - The previous transaction has been finalized
 
         Args:
@@ -1677,18 +1678,30 @@ class ConsensusAlgorithm:
         Returns:
             bool: True if the transaction can be finalized, False otherwise.
         """
-        if (transaction.leader_only) or (
-            (
-                time.time()
-                - transaction.timestamp_awaiting_finalization
-                - transaction.appeal_processing_time
-            )
-            > self.finality_window_time
-            * (
-                (1 - self.finality_window_appeal_failed_reduction)
-                ** transaction.appeal_failed
-            )
-        ):
+        # Determine execution mode from transaction
+        execution_mode = TransactionExecutionMode(
+            transaction.execution_mode.value
+            if isinstance(transaction.execution_mode, TransactionExecutionMode)
+            else transaction.execution_mode
+        )
+
+        # Both LEADER_ONLY and LEADER_SELF_VALIDATOR modes finalize immediately
+        immediate_finalization = execution_mode in [
+            TransactionExecutionMode.LEADER_ONLY,
+            TransactionExecutionMode.LEADER_SELF_VALIDATOR,
+        ]
+
+        # Check if finalization criteria are met
+        time_based_finalization = (
+            time.time()
+            - transaction.timestamp_awaiting_finalization
+            - transaction.appeal_processing_time
+        ) > self.finality_window_time * (
+            (1 - self.finality_window_appeal_failed_reduction)
+            ** transaction.appeal_failed
+        )
+
+        if immediate_finalization or time_based_finalization:
             if index == 0:
                 return True
             else:
@@ -2623,8 +2636,15 @@ class ProposingState(TransactionState):
         context.transactions_processor.add_state_timestamp(
             context.transaction.hash, "PROPOSING.VALIDATORS_SELECTED"
         )
-        # If the transaction is leader-only, clear the validators
-        if context.transaction.leader_only:
+        # Determine execution mode and handle validator selection accordingly
+        execution_mode = TransactionExecutionMode(
+            context.transaction.execution_mode.value
+            if isinstance(context.transaction.execution_mode, TransactionExecutionMode)
+            else context.transaction.execution_mode
+        )
+
+        # For non-NORMAL modes, clear validators (leader handles everything)
+        if execution_mode != TransactionExecutionMode.NORMAL:
             context.remaining_validators = []
 
         # Send event in rollup to communicate the transaction is activated
@@ -2712,7 +2732,27 @@ class ProposingState(TransactionState):
             context.transaction.hash,
         )
 
-        # Transition to the CommittingState
+        # Handle execution mode-specific transitions
+        if execution_mode == TransactionExecutionMode.LEADER_ONLY:
+            # LEADER_ONLY: Skip ALL validation, go directly to AcceptedState
+            # Set the leader's vote as AGREE (no validation needed)
+            context.consensus_data.votes = {context.leader["address"]: Vote.AGREE.value}
+            context.votes = {context.leader["address"]: Vote.AGREE.value}
+            context.consensus_data.validators = []
+            context.validation_results = []
+
+            # Update transaction with consensus data
+            context.transactions_processor.set_transaction_result(
+                context.transaction.hash,
+                context.consensus_data.to_dict(strip_contract_state=True),
+            )
+
+            # Skip CommittingState/RevealingState entirely
+            return AcceptedState()
+
+        # LEADER_SELF_VALIDATOR or NORMAL mode: continue to CommittingState
+        # LEADER_SELF_VALIDATOR will have the leader validate themselves
+        # NORMAL will have multiple validators validate
         return CommittingState()
 
 
@@ -3756,6 +3796,15 @@ def _emit_messages(
         transaction_hash = (
             receipt["tx_ids_hex"][i] if receipt and "tx_ids_hex" in receipt else None
         )
+        # Determine execution_mode to cascade from parent transaction
+        execution_mode_str = (
+            context.transaction.execution_mode.value
+            if isinstance(context.transaction.execution_mode, TransactionExecutionMode)
+            else context.transaction.execution_mode
+        )
+        # Compute leader_only for backward compatibility
+        leader_only = execution_mode_str != "NORMAL"
+
         context.transactions_processor.insert_transaction(
             context.transaction.to_address,  # new calls are done by the contract
             insert_transaction_data[0],
@@ -3763,7 +3812,7 @@ def _emit_messages(
             value=0,  # we only handle EOA transfers at the moment, so no value gets transferred
             type=insert_transaction_data[2],
             nonce=insert_transaction_data[3],
-            leader_only=context.transaction.leader_only,  # Cascade
+            leader_only=leader_only,  # Backward compat
             num_of_initial_validators=context.transaction.num_of_initial_validators,
             triggered_by_hash=context.transaction.hash,
             transaction_hash=transaction_hash,
@@ -3774,4 +3823,5 @@ def _emit_messages(
                 else None
             ),
             triggered_on=triggered_on,
+            execution_mode=execution_mode_str,  # Cascade execution mode
         )

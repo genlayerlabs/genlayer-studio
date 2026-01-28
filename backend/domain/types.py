@@ -151,6 +151,20 @@ class TransactionType(IntEnum):
     UPGRADE_CONTRACT = 3
 
 
+class TransactionExecutionMode(Enum):
+    """
+    Defines how a transaction is executed and validated.
+
+    - LEADER_ONLY: Leader executes, NO validation at all. Immediate finalization.
+    - LEADER_SELF_VALIDATOR: Leader executes AND validates their own execution. Immediate finalization.
+    - NORMAL: Multi-validator consensus with full validation. Time-based finalization.
+    """
+
+    LEADER_ONLY = "LEADER_ONLY"
+    LEADER_SELF_VALIDATOR = "LEADER_SELF_VALIDATOR"
+    NORMAL = "NORMAL"
+
+
 @dataclass
 class Transaction:
     hash: str
@@ -170,6 +184,7 @@ class Transaction:
     leader_only: bool = (
         False  # Flag to indicate if this transaction should be processed only by the leader. Used for fast and cheap execution of transactions.
     )
+    execution_mode: TransactionExecutionMode = TransactionExecutionMode.NORMAL
     created_at: str | None = None
     appealed: bool = False
     timestamp_awaiting_finalization: int | None = None
@@ -207,6 +222,7 @@ class Transaction:
             "s": self.s,
             "v": self.v,
             "leader_only": self.leader_only,
+            "execution_mode": self.execution_mode.value,
             "created_at": self.created_at,
             "appealed": self.appealed,
             "timestamp_awaiting_finalization": self.timestamp_awaiting_finalization,
@@ -246,6 +262,9 @@ class Transaction:
             s=input.get("s"),
             v=input.get("v"),
             leader_only=input.get("leader_only", False),
+            execution_mode=TransactionExecutionMode(
+                input.get("execution_mode", TransactionExecutionMode.NORMAL.value)
+            ),
             created_at=input.get("created_at"),
             appealed=input.get("appealed", False),
             timestamp_awaiting_finalization=input.get(

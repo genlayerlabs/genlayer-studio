@@ -123,6 +123,7 @@
               "openai/gpt-5-mini",
               "z-ai/glm-4.7",
               "moonshotai/kimi-k2-0905",
+              "moonshotai/kimi-k2.5",
               "deepseek/deepseek-v3.2",
               "qwen/qwen3-235b-a22b-2507",
               "anthropic/claude-sonnet-4.5",

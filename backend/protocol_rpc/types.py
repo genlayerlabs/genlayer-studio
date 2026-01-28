@@ -66,6 +66,9 @@ class DecodedMethodCallData:
 class DecodedMethodSendData:
     calldata: bytes
     leader_only: bool = False
+    execution_mode: str = (
+        "NORMAL"  # "NORMAL", "LEADER_ONLY", or "LEADER_SELF_VALIDATOR"
+    )
 
 
 @dataclass
@@ -73,6 +76,9 @@ class DecodedDeploymentData:
     contract_code: bytes
     calldata: bytes
     leader_only: bool = False
+    execution_mode: str = (
+        "NORMAL"  # "NORMAL", "LEADER_ONLY", or "LEADER_SELF_VALIDATOR"
+    )
 
 
 @dataclass
@@ -80,6 +86,9 @@ class DecodedGenlayerTransactionData:
     contract_code: str
     calldata: str
     leader_only: bool = False
+    execution_mode: str = (
+        "NORMAL"  # "NORMAL", "LEADER_ONLY", or "LEADER_SELF_VALIDATOR"
+    )
 
 
 @dataclass
