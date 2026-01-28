@@ -11,6 +11,9 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 
+# Load environment variables early so SENTRY_DSN is available for initialization
+load_dotenv()
+
 from backend.protocol_rpc.app_lifespan import RPCAppSettings, rpc_app_lifespan
 from backend.protocol_rpc.dependencies import (
     get_rpc_router_optional,
@@ -22,11 +25,31 @@ from backend.protocol_rpc.rpc_endpoint_manager import JSONRPCResponse
 from backend.protocol_rpc.websocket import GLOBAL_CHANNEL, websocket_handler
 
 
+SENTRY_DSN = os.getenv("SENTRY_DSN", None)
+if SENTRY_DSN:
+    import sentry_sdk
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        # Add data like request headers and IP for users,
+        # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
+        send_default_pii=True,
+        # Set traces_sample_rate to 1.0 to capture 100%
+        # of transactions for tracing.
+        traces_sample_rate=1.0,
+        # Set profile_session_sample_rate to 1.0 to profile 100%
+        # of profile sessions.
+        profile_session_sample_rate=1.0,
+        # Set profile_lifecycle to "trace" to automatically
+        # run the profiler on when there is an active transaction
+        profile_lifecycle="trace",
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage FastAPI application lifecycle."""
 
-    load_dotenv()
     settings = RPCAppSettings.from_environment()
 
     async with rpc_app_lifespan(app, settings) as app_state:

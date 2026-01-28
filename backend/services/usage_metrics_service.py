@@ -7,7 +7,6 @@ from datetime import datetime
 import aiohttp
 from loguru import logger
 
-from backend.database_handler.models import TransactionStatus
 from backend.database_handler.types import ConsensusData
 from backend.domain.types import Transaction, TransactionType
 
@@ -129,8 +128,8 @@ class UsageMetricsService:
         # Map transaction type
         tx_type = self._map_transaction_type(transaction.type)
 
-        # Map transaction status
-        tx_status = self._map_transaction_status(transaction.status)
+        # Status is always "success" since we only report finalized transactions
+        tx_status = "success"
 
         # Calculate processing time in milliseconds
         processing_time_ms = self._calculate_processing_time_ms(finalization_data)
@@ -140,6 +139,12 @@ class UsageMetricsService:
 
         # Build ISO8601 timestamp from created_at
         created_at_iso = self._format_created_at(finalization_data.get("created_at"))
+
+        # Extract execution result from original status, consensus_data, and consensus_history
+        # Result can be: success, error, timeout, undetermined
+        execution_result = self._extract_execution_result(
+            finalization_data, transaction.consensus_data, transaction.consensus_history
+        )
 
         return {
             "externalId": transaction.hash,
@@ -151,6 +156,7 @@ class UsageMetricsService:
             "processingTimeMs": processing_time_ms,
             "createdAt": created_at_iso,
             "llmCalls": llm_calls,
+            "result": execution_result,
         }
 
     def _map_transaction_type(self, tx_type: TransactionType) -> str:
@@ -164,17 +170,6 @@ class UsageMetricsService:
         if isinstance(tx_type, int):
             tx_type = TransactionType(tx_type)
         return type_map.get(tx_type, "write")
-
-    def _map_transaction_status(self, status: TransactionStatus) -> str:
-        """Map internal TransactionStatus to API status string."""
-        status_map = {
-            TransactionStatus.ACCEPTED: "success",
-            TransactionStatus.FINALIZED: "success",
-            TransactionStatus.LEADER_TIMEOUT: "timeout",
-            TransactionStatus.VALIDATORS_TIMEOUT: "timeout",
-            TransactionStatus.UNDETERMINED: "undetermined",
-        }
-        return status_map.get(status, "undetermined")
 
     def _calculate_processing_time_ms(self, finalization_data: dict) -> int:
         """
@@ -209,6 +204,58 @@ class UsageMetricsService:
         except Exception as e:
             logger.warning(f"Failed to calculate processing time: {e}")
             return 0
+
+    def _extract_execution_result(
+        self,
+        finalization_data: dict,
+        consensus_data: Optional[ConsensusData],
+        consensus_history: Optional[dict],
+    ) -> str:
+        """
+        Extract execution result from original status, consensus_data, and consensus_history.
+
+        Returns one of: "success", "error", "timeout", "undetermined"
+
+        Priority:
+        1. Original status timeout (LEADER_TIMEOUT, VALIDATORS_TIMEOUT) -> "timeout"
+        2. Original status undetermined (UNDETERMINED) -> "undetermined"
+        3. consensus_history.consensus_results[-1].consensus_round == "Undetermined" -> "undetermined"
+        4. execution_result from consensus_data.leader_receipt[0] -> "success" or "error"
+        5. Default -> "success"
+        """
+        # Check original status from finalization_data for timeout/undetermined
+        original_status = finalization_data.get("status")
+        if original_status in ("LEADER_TIMEOUT", "VALIDATORS_TIMEOUT"):
+            return "timeout"
+        if original_status == "UNDETERMINED":
+            return "undetermined"
+
+        # Check if consensus was undetermined from consensus_history
+        if (
+            consensus_history is not None
+            and "consensus_results" in consensus_history
+            and len(consensus_history["consensus_results"]) > 0
+        ):
+            last_round = consensus_history["consensus_results"][-1]
+            if last_round.get("consensus_round") == "Undetermined":
+                return "undetermined"
+
+        # Try to get execution_result from leader receipt
+        if consensus_data is not None and consensus_data.leader_receipt:
+            first_receipt = consensus_data.leader_receipt[0]
+            if first_receipt is not None:
+                execution_result = getattr(first_receipt, "execution_result", None)
+                if execution_result is not None:
+                    # Handle both enum and string values
+                    if hasattr(execution_result, "value"):
+                        # It's an enum (ExecutionResultStatus)
+                        return execution_result.value.lower()
+                    else:
+                        # It's already a string
+                        return str(execution_result).lower()
+
+        # Default to success
+        return "success"
 
     def _extract_llm_calls(self, consensus_data: Optional[ConsensusData]) -> list:
         """

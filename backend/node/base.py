@@ -256,7 +256,8 @@ class Manager:
                 ],
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if self.proc.returncode is not None:
+            # Only kill if the process hasn't exited yet (returncode is None)
+            if self.proc.returncode is None:
                 self.proc.kill()
                 await self.proc.wait()
             self.proc = None

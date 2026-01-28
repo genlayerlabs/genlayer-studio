@@ -31,8 +31,8 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r backend/requirements.txt
-      - run: pip install pytest-cov
-      - run: pytest tests/unit --cov=backend --cov-report=xml --cov-branch
+      - run: pip install pytest-cov pytest-xdist
+      - run: pytest tests/unit --cov=backend --cov-report=xml --cov-branch -n auto
       - name: SonarCloud Scan
         uses: sonarsource/sonarqube-scan-action@v5.3.2
         env:

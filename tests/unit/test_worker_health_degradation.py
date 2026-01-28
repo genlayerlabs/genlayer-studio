@@ -66,7 +66,9 @@ class TestHealthEndpointWithFailures:
         mock_worker = MagicMock()
         mock_worker.worker_id = "test-worker-123"
         mock_worker.running = True
-        mock_worker.current_transaction = None
+        mock_worker.current_transactions = {}
+        mock_worker._active_tasks = set()
+        mock_worker.max_parallel_txs = 1
         worker_service.worker = mock_worker
 
         # Set up mock task that's not done
@@ -101,7 +103,9 @@ class TestHealthEndpointWithFailures:
         mock_worker = MagicMock()
         mock_worker.worker_id = "test-worker-123"
         mock_worker.running = True
-        mock_worker.current_transaction = None
+        mock_worker.current_transactions = {}
+        mock_worker._active_tasks = set()
+        mock_worker.max_parallel_txs = 1
         worker_service.worker = mock_worker
 
         # Set up mock task that's not done
@@ -137,7 +141,9 @@ class TestHealthEndpointWithFailures:
         mock_worker = MagicMock()
         mock_worker.worker_id = "test-worker-123"
         mock_worker.running = True
-        mock_worker.current_transaction = None
+        mock_worker.current_transactions = {}
+        mock_worker._active_tasks = set()
+        mock_worker.max_parallel_txs = 1
         worker_service.worker = mock_worker
 
         mock_task = MagicMock()
