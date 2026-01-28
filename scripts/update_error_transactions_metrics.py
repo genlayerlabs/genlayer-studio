@@ -138,13 +138,17 @@ def fetch_error_transactions(
     until_created_at: Optional[datetime] = None,
     batch_size: int = 100,
     total_to_scan: int = 0,
+    page_size: int = 500,
 ):
     """
     Fetch finalized transactions that have error results or undetermined consensus.
 
+    Uses OFFSET/LIMIT pagination instead of server-side cursors to minimize memory usage.
+    Each page is fetched, processed, and released before fetching the next page.
+
     Yields tuples of (batch, scanned_count) where batch is a list of transaction dicts.
     """
-    query = """
+    base_query = """
         SELECT
             hash,
             from_address,
@@ -159,32 +163,36 @@ def fetch_error_transactions(
         FROM transactions
         WHERE status = 'FINALIZED'
     """
-    params = []
+    base_params = []
 
     if from_created_at:
-        query += " AND created_at > %s"
-        params.append(from_created_at)
+        base_query += " AND created_at > %s"
+        base_params.append(from_created_at)
 
     if until_created_at:
-        query += " AND created_at < %s"
-        params.append(until_created_at)
+        base_query += " AND created_at < %s"
+        base_params.append(until_created_at)
 
-    query += " ORDER BY created_at ASC"
+    base_query += " ORDER BY created_at ASC"
 
-    # Use a named cursor for server-side cursor (avoids loading all rows into memory)
-    with conn.cursor(
-        name="tx_cursor", cursor_factory=psycopg2.extras.RealDictCursor
-    ) as cur:
-        cur.itersize = (
-            batch_size * 10
-        )  # Fetch more rows at a time from server for efficiency
-        cur.execute(query, params)
+    batch = []
+    scanned_count = 0
+    offset = 0
+    last_progress_report = 0
 
-        batch = []
-        scanned_count = 0
-        last_progress_report = 0
+    while True:
+        # Fetch one page at a time using OFFSET/LIMIT
+        page_query = base_query + f" LIMIT {page_size} OFFSET {offset}"
 
-        for row in cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(page_query, base_params)
+            rows = cur.fetchall()
+
+        # No more rows, exit loop
+        if not rows:
+            break
+
+        for row in rows:
             scanned_count += 1
             tx = dict(row)
 
@@ -204,8 +212,14 @@ def fetch_error_transactions(
                     yield batch, scanned_count
                     batch = []
 
-        if batch:
-            yield batch, scanned_count
+        # Clear page data to release memory
+        del rows
+
+        # Move to next page
+        offset += page_size
+
+    if batch:
+        yield batch, scanned_count
 
 
 def extract_execution_result(tx: dict) -> str:
