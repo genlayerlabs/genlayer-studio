@@ -138,8 +138,18 @@ local function try_provider(ctx, args, mapped_prompt, provider_id)
 
 	if llm.providers[provider_id] == nil then
 		lib.log{ level = "error", message = "provider does not exist", provider_id = provider_id }
+		return nil
 	end
-	local model_data = lib.get_first_from_table(llm.providers[provider_id].models)
+	local provider = llm.providers[provider_id]
+	if provider.models == nil then
+		lib.log{ level = "error", message = "provider has no models configured", provider_id = provider_id }
+		return nil
+	end
+	local model_data = lib.get_first_from_table(provider.models)
+	if model_data == nil then
+		lib.log{ level = "error", message = "provider has empty models", provider_id = provider_id }
+		return nil
+	end
 	local model = model_data.key
 
 	mapped_prompt.prompt.use_max_completion_tokens = model_data.value.use_max_completion_tokens
@@ -254,14 +264,25 @@ local function just_in_backend(ctx, args, mapped_prompt)
 		return primary_result
 	end
 
-	local primary_model = lib.get_first_from_table(llm.providers[primary_provider_id].models).key
+	local primary_model = nil
+	if llm.providers[primary_provider_id] and llm.providers[primary_provider_id].models then
+		local model_data = lib.get_first_from_table(llm.providers[primary_provider_id].models)
+		if model_data then
+			primary_model = model_data.key
+		end
+	end
 	local fallback_model = nil
 	-- Second: Try fallback model (3 attempts) if available
 	local fallback_provider_id = ctx.host_data.fallback_llm_id
 	if fallback_provider_id then
-		fallback_model = lib.get_first_from_table(llm.providers[fallback_provider_id].models).key
+		if llm.providers[fallback_provider_id] and llm.providers[fallback_provider_id].models then
+			local model_data = lib.get_first_from_table(llm.providers[fallback_provider_id].models)
+			if model_data then
+				fallback_model = model_data.key
+			end
+		end
 
-		lib.log{level = "warning", message = "switching from primary model " .. primary_model .. " to fallback model " .. fallback_model}
+		lib.log{level = "warning", message = "switching from primary model to fallback model", primary_model = primary_model, fallback_model = fallback_model}
 		local fallback_result = try_provider(ctx, args, mapped_prompt, fallback_provider_id)
 		if fallback_result then
 			return fallback_result

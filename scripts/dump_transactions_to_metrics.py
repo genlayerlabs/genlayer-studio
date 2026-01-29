@@ -164,6 +164,41 @@ def calculate_processing_time_ms(tx: dict) -> int:
         return 0
 
 
+def extract_execution_result(tx: dict) -> str:
+    """
+    Extract execution result from status and consensus_data.
+
+    Returns one of: "success", "error", "timeout", "undetermined"
+
+    Priority:
+    1. Original status timeout (LEADER_TIMEOUT, VALIDATORS_TIMEOUT) -> "timeout"
+    2. Original status undetermined (UNDETERMINED) -> "undetermined"
+    3. execution_result from consensus_data.leader_receipt[0] -> "success" or "error"
+    4. Default -> "success"
+    """
+    # Check original status for timeout/undetermined
+    original_status = tx.get("status")
+    if original_status in ("LEADER_TIMEOUT", "VALIDATORS_TIMEOUT"):
+        return "timeout"
+    if original_status == "UNDETERMINED":
+        return "undetermined"
+
+    # Try to get execution_result from leader receipt in consensus_data
+    consensus_data = tx.get("consensus_data")
+    if consensus_data is not None:
+        leader_receipts = consensus_data.get("leader_receipt", [])
+        if leader_receipts and len(leader_receipts) > 0:
+            first_receipt = leader_receipts[0]
+            if first_receipt is not None:
+                execution_result = first_receipt.get("execution_result")
+                if execution_result is not None:
+                    # Handle string value
+                    return str(execution_result).lower()
+
+    # Default to success
+    return "success"
+
+
 def extract_llm_calls(consensus_data: Optional[dict]) -> list:
     """Extract LLM provider/model info from consensus_data."""
     llm_calls = []
@@ -222,6 +257,7 @@ def build_decision_payload(tx: dict) -> dict:
     tx_status = TRANSACTION_STATUS_MAP.get(tx.get("status"), "undetermined")
     processing_time_ms = calculate_processing_time_ms(tx)
     llm_calls = extract_llm_calls(tx.get("consensus_data"))
+    execution_result = extract_execution_result(tx)
 
     created_at = tx.get("created_at")
     if isinstance(created_at, datetime):
@@ -241,6 +277,7 @@ def build_decision_payload(tx: dict) -> dict:
         "processingTimeMs": processing_time_ms,
         "createdAt": created_at_iso,
         "llmCalls": llm_calls,
+        "result": execution_result,
     }
 
 

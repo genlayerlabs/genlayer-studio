@@ -563,11 +563,14 @@ class Node:
         return enhanced_node_config
 
     def _set_vote(self, receipt: Receipt) -> Receipt:
-        if (receipt.result[0] == public_abi.ResultCode.VM_ERROR) and (
-            receipt.result[1:] == b"timeout"
-        ):
-            receipt.vote = Vote.TIMEOUT
-            return receipt
+        if receipt.result[0] == public_abi.ResultCode.VM_ERROR:
+            error_message = receipt.result[1:]
+            # Set TIMEOUT for timeout errors and GenVM internal errors
+            if error_message == b"timeout" or error_message.startswith(
+                b"GenVM internal error"
+            ):
+                receipt.vote = Vote.TIMEOUT
+                return receipt
 
         leader_receipt = self.leader_receipt
         if (
@@ -878,23 +881,65 @@ class Node:
             perms += "ws"  # write/send
 
         start_time = time.time()
-        result = await genvmbase.run_genvm_host(
-            functools.partial(
-                genvmbase.Host,
-                calldata_bytes=calldata,
-                state_proxy=snapshot_view,
-                leader_results=leader_res,
-            ),
-            message=message,
-            permissions=perms,
-            capture_output=True,
-            host_data=json.dumps(host_data),
-            extra_args=["--debug-mode"],
-            is_sync=False,
-            manager_uri=self.manager.url,
-            timeout=timeout,
-            code=code,
-        )
+        try:
+            result = await genvmbase.run_genvm_host(
+                functools.partial(
+                    genvmbase.Host,
+                    calldata_bytes=calldata,
+                    state_proxy=snapshot_view,
+                    leader_results=leader_res,
+                ),
+                message=message,
+                permissions=perms,
+                capture_output=True,
+                host_data=json.dumps(host_data),
+                extra_args=["--debug-mode"],
+                is_sync=False,
+                manager_uri=self.manager.url,
+                timeout=timeout,
+                code=code,
+                logger=logger,
+            )
+        except genvmbase.GenVMInternalError as e:
+            # For leaders: re-raise so worker can reset transaction and restart
+            if self.validator_mode == ExecutionMode.LEADER:
+                e.is_leader = True
+                raise
+
+            # For validators: return error receipt so consensus can continue
+            # with remaining validators
+            self.logger.warning(
+                f"Validator encountered GenVMInternalError",
+                error_code=e.error_code,
+                causes=e.causes,
+                is_fatal=e.is_fatal,
+            )
+            processing_time = int((time.time() - start_time) * 1000)
+            error_message = f"GenVM internal error: {e}"
+            error_result = bytes(
+                [public_abi.ResultCode.VM_ERROR]
+            ) + error_message.encode("utf-8")
+            result = Receipt(
+                result=error_result,
+                gas_used=0,
+                eq_outputs={},
+                pending_transactions=[],
+                vote=Vote.TIMEOUT,
+                execution_result=ExecutionResultStatus.ERROR,
+                contract_state=snapshot_view.snapshot.states.get("accepted", {}),
+                calldata=calldata,
+                mode=self.validator_mode,
+                node_config=self._create_enhanced_node_config(host_data),
+                genvm_result={
+                    "stdout": "",
+                    "stderr": str(e),
+                    "error_code": e.error_code,
+                    "raw_error": {"causes": e.causes, "is_fatal": e.is_fatal},
+                },
+                processing_time=processing_time,
+                nondet_disagree=None,
+            )
+            return self._set_vote(result)
         result.processing_time = int((time.time() - start_time) * 1000)
 
         await self._execution_finished(result, transaction_hash, from_address)

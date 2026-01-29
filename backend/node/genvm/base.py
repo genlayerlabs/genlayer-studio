@@ -9,6 +9,7 @@ __all__ = (
     "ExecutionReturn",
     "ExecutionResult",
     "apply_storage_changes",
+    "GenVMInternalError",
 )
 
 import math
@@ -20,6 +21,7 @@ import json
 import base64
 import asyncio
 import socket
+import logging
 import backend.node.genvm.origin.base_host as genvmhost
 import collections.abc
 import functools
@@ -39,7 +41,12 @@ from .origin.public_abi import *
 from .origin.host_fns import Errors
 from .origin import base_host
 from .origin import logger as genvm_logger
-from .error_codes import extract_error_code, extract_error_code_from_timeout
+from .error_codes import (
+    extract_error_code,
+    extract_error_code_from_timeout,
+    parse_module_error_string,
+    GenVMInternalError,
+)
 
 
 # region agent log
@@ -195,6 +202,8 @@ class Host(genvmhost.IHost):
             or res.result_kind == ResultCode.VM_ERROR
         ):
             result_decoded = res.result_data
+            error_code = None
+
             if isinstance(result_decoded, dict):
                 # Extract standardized error code from Lua error structure
                 error_code = extract_error_code(result_decoded, res.stderr)
@@ -233,7 +242,29 @@ class Host(genvmhost.IHost):
                     error_code=error_code,
                 )
         elif res.result_kind == ResultCode.INTERNAL_ERROR:
-            raise Exception("GenVM internal error", str(res.result_data))
+            error_str = str(res.result_data)
+
+            # Parse the ModuleError to extract details
+            error_code, causes, is_fatal = parse_module_error_string(error_str)
+            message = (
+                f"GenVM internal error: {', '.join(causes)}"
+                if causes
+                else "GenVM internal error"
+            )
+
+            # Increment failure counter to trigger unhealthy status
+            from backend.node.genvm.origin.base_host import _on_genvm_failure
+
+            if _on_genvm_failure is not None:
+                _on_genvm_failure()
+
+            # Raise exception - worker will release transaction and restart
+            raise GenVMInternalError(
+                message=message,
+                error_code=error_code,
+                causes=causes,
+                is_fatal=is_fatal,
+            )
         else:
             raise Exception(f"invalid result {res.result_kind}")
 
@@ -490,6 +521,10 @@ async def run_genvm_host(
                     )
 
                     return execution_result
+                except GenVMInternalError:
+                    # Re-raise GenVMInternalError to propagate to worker for proper handling
+                    # (stop worker, release transaction, report unhealthy)
+                    raise
                 except Exception as e:
                     logger.error(
                         f"GenVM execution attempt failed",
