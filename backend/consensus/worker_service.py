@@ -47,37 +47,6 @@ logger.add(
     level="ERROR",
 )
 
-
-# region agent log
-def _agent_log(hypothesis_id: str, location: str, message: str, data: dict):
-    """Best-effort NDJSON log for debug mode; never raises. Avoid secrets."""
-    import json as _json
-    import os as _os
-    import time as _time
-
-    payload = {
-        "sessionId": "debug-session",
-        "runId": _os.getenv("AGENT_DEBUG_RUN_ID", "pre-fix"),
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": int(_time.time() * 1000),
-    }
-    try:
-        log_path = _os.getenv("AGENT_DEBUG_LOG_PATH", "/tmp/agent_debug.log")
-        with open(log_path, "a") as f:
-            f.write(_json.dumps(payload) + "\n")
-    except Exception:
-        try:
-            print("AGENT_DEBUG " + _json.dumps(payload), flush=True)
-        except Exception:
-            pass
-
-
-# endregion
-
-
 # Load environment variables
 load_dotenv()
 
@@ -156,17 +125,6 @@ async def lifespan(app: FastAPI):
     # These zombie processes can consume gigabytes of memory outside Docker limits
     logger.info("Cleaning up orphaned GenVM processes from previous crashes...")
     _pkill_rc = os.system("pkill -9 -f 'genvm (llm|web)' 2>/dev/null || true")
-    _agent_log(
-        "H3",
-        "backend/consensus/worker_service.py:pkill_startup",
-        "pkill cleanup executed",
-        {
-            "rc": int(_pkill_rc),
-            "GENVMROOT": os.getenv("GENVMROOT"),
-            "GENVM_TAG": os.getenv("GENVM_TAG"),
-            "PATH_has_genvm": "/genvm/bin" in (os.getenv("PATH") or ""),
-        },
-    )
     logger.info("GenVM cleanup complete")
 
     # Database setup
@@ -237,28 +195,11 @@ async def lifespan(app: FastAPI):
     )
     logger.info("GenVM failure tracking callbacks configured")
 
-    _agent_log(
-        "H1",
-        "backend/consensus/worker_service.py:genvm_manager_ready",
-        "genvm_manager created",
-        {
-            "manager_url": getattr(genvm_manager, "url", None),
-            "GENVMROOT": os.getenv("GENVMROOT"),
-            "GENVM_TAG": os.getenv("GENVM_TAG"),
-        },
-    )
-
     # Initialize validators manager (MUST use global to prevent garbage collection)
     global validators_manager  # Declare before assignment to use the global variable
     validators_manager = validators.Manager(SessionLocal(), genvm_manager)
     await validators_manager.restart()
     logger.info("Validators manager initialized and restarted")
-    _agent_log(
-        "H4",
-        "backend/consensus/worker_service.py:validators_restarted",
-        "validators_manager.restart finished",
-        {"ok": True},
-    )
 
     # Subscribe to validator change events
     async def handle_validator_change(event_data):
@@ -457,6 +398,26 @@ async def lifespan(app: FastAPI):
         await genvm_manager.close()
 
 
+SENTRY_DSN = os.getenv("SENTRY_DSN", None)
+if SENTRY_DSN:
+    import sentry_sdk
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        # Add data like request headers and IP for users,
+        # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
+        send_default_pii=True,
+        # Set traces_sample_rate to 1.0 to capture 100%
+        # of transactions for tracing.
+        traces_sample_rate=1.0,
+        # Set profile_session_sample_rate to 1.0 to profile 100%
+        # of profile sessions.
+        profile_session_sample_rate=1.0,
+        # Set profile_lifecycle to "trace" to automatically
+        # run the profiler on when there is an active transaction
+        profile_lifecycle="trace",
+    )
+
 # Create FastAPI app
 app = FastAPI(title="Consensus Worker Service", version="1.0.0", lifespan=lifespan)
 start_time = time.time()
@@ -564,18 +525,6 @@ async def health_check():
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 _genvm_health_last_ok = False
                 _genvm_health_last_error = f"genvm_manager_status_error: {exc}"
-
-            _agent_log(
-                "H5",
-                "backend/consensus/worker_service.py:health_genvm_probe",
-                "genvm manager health probe executed",
-                {
-                    "status_url": status_url,
-                    "timeout_s": timeout_s,
-                    "ok": _genvm_health_last_ok,
-                    "error": _genvm_health_last_error,
-                },
-            )
 
         if not _genvm_health_last_ok:
             return JSONResponse(
