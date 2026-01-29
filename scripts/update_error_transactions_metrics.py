@@ -7,9 +7,9 @@ result="error", "timeout", or "undetermined" to the external usage metrics API
 to update their records with the new "result" field.
 
 Optimized for large datasets (70k+ transactions) with:
-- Chunked processing with server-side cursors
-- Progress reporting with percentage and ETA
-- Retry logic for failed API calls
+- SQL-side filtering to only load error/undetermined transactions
+- Pagination with garbage collection
+- Progress reporting and retry logic
 - Real-time output flushing
 
 Usage (from k8s pod):
@@ -132,22 +132,71 @@ def get_total_transaction_count(
         return cur.fetchone()[0]
 
 
+def is_error_transaction(tx: dict) -> bool:
+    """
+    Check if a transaction has an error result (Python-side filtering).
+
+    Returns True if the transaction has:
+    - ERROR execution result in leader receipt
+    - NULL/empty leader receipt
+    - Undetermined consensus round in history
+    """
+    consensus_data = tx.get("consensus_data")
+    consensus_history = tx.get("consensus_history")
+
+    # Check for ERROR execution result in leader receipt
+    if consensus_data is not None:
+        leader_receipts = consensus_data.get("leader_receipt", [])
+        if leader_receipts and len(leader_receipts) > 0:
+            first_receipt = leader_receipts[0]
+            if first_receipt is not None and isinstance(first_receipt, dict):
+                execution_result = first_receipt.get("execution_result")
+                if execution_result is not None:
+                    if str(execution_result).upper() == "ERROR":
+                        return True
+            else:
+                # leader_receipt[0] is NULL - this is an edge case error
+                return True
+        else:
+            # leader_receipt is empty or missing
+            return True
+    else:
+        # No consensus_data - edge case
+        return True
+
+    # Check for Undetermined consensus round in history
+    if (
+        consensus_history is not None
+        and "consensus_results" in consensus_history
+        and len(consensus_history["consensus_results"]) > 0
+    ):
+        last_round = consensus_history["consensus_results"][-1]
+        if last_round.get("consensus_round") == "Undetermined":
+            return True
+
+    return False
+
+
 def fetch_error_transactions(
     conn,
     from_created_at: Optional[datetime] = None,
     until_created_at: Optional[datetime] = None,
-    batch_size: int = 100,
+    batch_size: int = 50,
     total_to_scan: int = 0,
-    page_size: int = 500,
+    page_size: int = 100,
 ):
     """
     Fetch finalized transactions that have error results or undetermined consensus.
 
-    Uses OFFSET/LIMIT pagination instead of server-side cursors to minimize memory usage.
-    Each page is fetched, processed, and released before fetching the next page.
+    Uses a server-side cursor with Python-side filtering for memory efficiency.
+    The SQL query is simple and fast, filtering is done in Python.
 
     Yields tuples of (batch, scanned_count) where batch is a list of transaction dicts.
     """
+    import gc
+
+    # Simple SQL query - just fetch finalized transactions
+    # Filtering is done in Python which is much faster than JSONB text conversion
     base_query = """
         SELECT
             hash,
@@ -175,51 +224,51 @@ def fetch_error_transactions(
 
     base_query += " ORDER BY created_at ASC"
 
+    log("  Using server-side cursor with Python-side filtering...")
+
     batch = []
+    matched_count = 0
     scanned_count = 0
-    offset = 0
     last_progress_report = 0
 
-    while True:
-        # Fetch one page at a time using OFFSET/LIMIT
-        page_query = base_query + f" LIMIT {page_size} OFFSET {offset}"
+    # Use a named server-side cursor to stream results without loading all into memory
+    with conn.cursor(
+        name="error_tx_cursor", cursor_factory=psycopg2.extras.RealDictCursor
+    ) as cur:
+        cur.itersize = page_size  # Fetch this many rows at a time from server
+        cur.execute(base_query, base_params)
 
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(page_query, base_params)
-            rows = cur.fetchall()
-
-        # No more rows, exit loop
-        if not rows:
-            break
-
-        for row in rows:
+        for row in cur:
             scanned_count += 1
             tx = dict(row)
 
-            # Report scanning progress every 1000 transactions
-            if total_to_scan > 0 and scanned_count - last_progress_report >= 1000:
-                progress = (scanned_count / total_to_scan) * 100
+            # Filter in Python - check if this is an error transaction
+            if is_error_transaction(tx):
+                matched_count += 1
+                batch.append(tx)
+
+                if len(batch) >= batch_size:
+                    yield batch, matched_count
+                    batch = []
+                    gc.collect()
+
+            # Progress report every 5,000 transactions
+            if scanned_count - last_progress_report >= 5000:
+                progress_pct = (
+                    (scanned_count / total_to_scan * 100) if total_to_scan > 0 else 0
+                )
                 log(
-                    f"  Scanning progress: {scanned_count:,}/{total_to_scan:,} ({progress:.1f}%)"
+                    f"  Scanned {scanned_count:,}/{total_to_scan:,} ({progress_pct:.1f}%) - Found {matched_count:,} error transactions"
                 )
                 last_progress_report = scanned_count
+                gc.collect()
 
-            # Filter for error/timeout/undetermined transactions (not success)
-            result = extract_execution_result(tx)
-            if result in ("error", "timeout", "undetermined"):
-                batch.append(tx)
-                if len(batch) >= batch_size:
-                    yield batch, scanned_count
-                    batch = []
-
-        # Clear page data to release memory
-        del rows
-
-        # Move to next page
-        offset += page_size
+    log(
+        f"  Scan complete: {scanned_count:,} transactions scanned, {matched_count:,} error transactions found"
+    )
 
     if batch:
-        yield batch, scanned_count
+        yield batch, matched_count
 
 
 def extract_execution_result(tx: dict) -> str:
@@ -525,12 +574,11 @@ def main():
     total_matched = 0
     total_sent = 0
     total_failed = 0
-    total_scanned = 0
     batch_count = 0
     failed_hashes = []
     result_counts = {"error": 0, "timeout": 0, "undetermined": 0}
 
-    for batch, scanned_count in fetch_error_transactions(
+    for batch, matched_count in fetch_error_transactions(
         conn,
         from_created_at,
         until_created_at,
@@ -538,9 +586,8 @@ def main():
         total_to_scan=total_to_scan,
     ):
         batch_count += 1
-        total_scanned = scanned_count
+        total_matched = matched_count
         decisions = [build_decision_payload(tx) for tx in batch]
-        total_matched += len(decisions)
 
         # Count results by type
         for tx in batch:
@@ -550,9 +597,6 @@ def main():
 
         # Calculate progress
         elapsed = time.time() - start_time
-        scan_progress = (
-            (total_scanned / total_to_scan) * 100 if total_to_scan > 0 else 0
-        )
 
         if args.dry_run:
             if args.verbose:
@@ -560,23 +604,16 @@ def main():
                     print(json.dumps(decision, indent=2, default=str), flush=True)
             log(
                 f"[DRY RUN] Batch {batch_count}: Would send {len(decisions)} decisions | "
-                f"Matched: {total_matched:,} | Scanned: {total_scanned:,}/{total_to_scan:,} ({scan_progress:.1f}%)"
+                f"Total matched: {total_matched:,} | Elapsed: {format_duration(elapsed)}"
             )
         else:
             success, error_msg = send_to_api(args.api_url, args.api_key, decisions)
             if success:
                 total_sent += len(decisions)
-                # Calculate ETA based on scan progress
-                if scan_progress > 0:
-                    eta_seconds = (elapsed / scan_progress) * (100 - scan_progress)
-                    eta_str = format_duration(eta_seconds)
-                else:
-                    eta_str = "calculating..."
-
                 log(
                     f"Batch {batch_count}: Sent {len(decisions)} decisions | "
-                    f"Total sent: {total_sent:,} | Scanned: {total_scanned:,}/{total_to_scan:,} ({scan_progress:.1f}%) | "
-                    f"Elapsed: {format_duration(elapsed)} | ETA: {eta_str}"
+                    f"Total sent: {total_sent:,} | Total matched: {total_matched:,} | "
+                    f"Elapsed: {format_duration(elapsed)}"
                 )
             else:
                 total_failed += len(decisions)
@@ -597,7 +634,6 @@ def main():
     print("\n" + "=" * 60, flush=True)
     log("SUMMARY")
     print("=" * 60, flush=True)
-    print(f"  Total transactions scanned: {total_scanned:,}", flush=True)
     print(
         f"  Total matched (error/timeout/undetermined): {total_matched:,}", flush=True
     )
