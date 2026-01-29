@@ -115,6 +115,7 @@ onMounted(() => {
         :name="paramName"
         :placeholder="`${paramType}`"
         :label="paramName"
+        :unionTypes="inputMap.getUnionTypes(paramType)"
       />
     </div>
     <div
@@ -129,6 +130,7 @@ onMounted(() => {
         :name="paramName"
         :placeholder="`${paramType}`"
         :label="paramName"
+        :unionTypes="inputMap.getUnionTypes(paramType)"
       />
     </div>
   </div>
