@@ -49,36 +49,6 @@ from .error_codes import (
 )
 
 
-# region agent log
-def _agent_log(hypothesis_id: str, location: str, message: str, data: dict):
-    """Best-effort NDJSON log for debug mode; never raises. Avoid secrets."""
-    import json as _json
-    import os as _os
-    import time as _time
-
-    payload = {
-        "sessionId": "debug-session",
-        "runId": _os.getenv("AGENT_DEBUG_RUN_ID", "pre-fix"),
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": int(_time.time() * 1000),
-    }
-    try:
-        log_path = _os.getenv("AGENT_DEBUG_LOG_PATH", "/tmp/agent_debug.log")
-        with open(log_path, "a") as f:
-            f.write(_json.dumps(payload) + "\n")
-    except Exception:
-        try:
-            print("AGENT_DEBUG " + _json.dumps(payload), flush=True)
-        except Exception:
-            pass
-
-
-# endregion
-
-
 @dataclass
 class ExecutionError:
     message: str
@@ -210,23 +180,6 @@ class Host(genvmhost.IHost):
                 # Preserve raw error structure (causes, fatal, ctx) excluding message
                 raw_error = {k: v for k, v in result_decoded.items() if k != "message"}
 
-                _agent_log(
-                    "H4",
-                    "backend/node/genvm/base.py:Host.provide_result",
-                    "genvm result provided",
-                    {
-                        "result_code": getattr(
-                            res.result_kind, "name", str(res.result_kind)
-                        ),
-                        "message": (
-                            result_decoded.get("message")
-                            if isinstance(result_decoded, dict)
-                            else None
-                        ),
-                        "error_code": error_code,
-                        "res_type": result_decoded.__class__.__name__,
-                    },
-                )
                 result = ExecutionError(
                     result_decoded["message"],
                     res.result_kind,

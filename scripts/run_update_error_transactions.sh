@@ -169,8 +169,8 @@ kubectl logs -f "$POD_NAME" || true
 # Wait for completion and get exit code
 echo ""
 echo "Waiting for pod to complete..."
-kubectl wait pod "$POD_NAME" --for=jsonpath='{.status.phase}'=Succeeded --timeout=3600s 2>/dev/null || \
-kubectl wait pod "$POD_NAME" --for=jsonpath='{.status.phase}'=Failed --timeout=10s 2>/dev/null || true
+kubectl wait pod "$POD_NAME" --for=jsonpath='{.status.phase}'=Succeeded --timeout=86400s 2>/dev/null || \
+kubectl wait pod "$POD_NAME" --for=jsonpath='{.status.phase}'=Failed --timeout=60s 2>/dev/null || true
 
 # Get exit code
 EXIT_CODE=$(kubectl get pod "$POD_NAME" -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' 2>/dev/null || echo "unknown")
