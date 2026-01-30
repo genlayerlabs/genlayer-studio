@@ -239,6 +239,14 @@ class TransactionsProcessor:
                 from_address, to_address, data, value, type, current_nonce
             )
 
+        # Check if transaction with this hash already exists to avoid UniqueViolation
+        # This can happen due to race conditions or duplicate submissions
+        existing_transaction = (
+            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
+        )
+        if existing_transaction is not None:
+            return transaction_hash
+
         new_transaction = Transactions(
             hash=transaction_hash,
             from_address=from_address,
