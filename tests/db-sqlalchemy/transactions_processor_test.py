@@ -236,3 +236,55 @@ def test_get_highest_timestamp(transactions_processor: TransactionsProcessor):
 
     # Should return the highest timestamp (2000)
     assert transactions_processor.get_highest_timestamp() == 2000
+
+
+def test_insert_transaction_duplicate_hash_returns_existing(
+    transactions_processor: TransactionsProcessor,
+):
+    """Test that inserting a transaction with duplicate hash returns existing hash
+    instead of raising UniqueViolation error (fixes GENLAYER-STUDIO-12).
+    """
+    from_address = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
+    to_address = "0xAcec3A6d871C25F591aBd4fC24054e524BBbF794"
+    data = {"key": "value"}
+    duplicate_hash = f"0x{'d' * 64}"
+
+    # Insert first transaction
+    first_result = transactions_processor.insert_transaction(
+        from_address,
+        to_address,
+        data,
+        1.0,
+        1,
+        0,
+        True,
+        3,
+        transaction_hash=duplicate_hash,
+    )
+    transactions_processor.session.commit()
+
+    assert first_result == duplicate_hash
+
+    # Insert second transaction with same hash - should return existing hash, not error
+    second_result = transactions_processor.insert_transaction(
+        from_address,
+        to_address,
+        {"key": "different_value"},  # Different data
+        2.0,  # Different value
+        1,
+        1,  # Different nonce
+        True,
+        3,
+        transaction_hash=duplicate_hash,  # Same hash
+    )
+
+    # Should return the same hash without raising an error
+    assert second_result == duplicate_hash
+
+    # Session should still be usable (not in pending rollback state)
+    transactions_processor.session.commit()
+
+    # Verify only one transaction exists with this hash
+    tx = transactions_processor.get_transaction_by_hash(duplicate_hash)
+    assert tx is not None
+    assert tx["data"] == data  # Original data, not the second attempt's data
