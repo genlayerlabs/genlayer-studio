@@ -57,7 +57,7 @@ This will disable the Hardhat service when running `genlayer up`.
 
 
 ## 📖 The Docs
-Detailed information of how to use the Studio can be found at [GenLayer Docs](https://docs.genlayer.com/).
+Detailed information on how to use the Studio can be found at [GenLayer Docs](https://docs.genlayer.com/).
 
 
 ## Contributing
