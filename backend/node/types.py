@@ -20,7 +20,15 @@ class Address:
         self._as_hex = None
         if isinstance(val, str):
             if len(val) == 2 + Address.SIZE * 2 and val.startswith("0x"):
+                # 0x-prefixed hex string (42 chars)
                 val = bytes.fromhex(val[2:])
+            elif len(val) == Address.SIZE * 2:
+                # Hex string without 0x prefix (40 chars) - try hex first
+                try:
+                    val = bytes.fromhex(val)
+                except ValueError:
+                    # Not valid hex, try base64
+                    val = base64.b64decode(val)
             elif len(val) > Address.SIZE:
                 val = base64.b64decode(val)
         else:
