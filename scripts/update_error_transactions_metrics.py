@@ -147,18 +147,32 @@ def is_error_transaction(tx: dict) -> bool:
     # Check for ERROR execution result in leader receipt
     if consensus_data is not None:
         leader_receipts = consensus_data.get("leader_receipt", [])
-        if leader_receipts and len(leader_receipts) > 0:
-            first_receipt = leader_receipts[0]
-            if first_receipt is not None and isinstance(first_receipt, dict):
-                execution_result = first_receipt.get("execution_result")
-                if execution_result is not None:
-                    if str(execution_result).upper() == "ERROR":
-                        return True
+        # Handle both list and dict formats for leader_receipt
+        if isinstance(leader_receipts, list):
+            if leader_receipts and len(leader_receipts) > 0:
+                first_receipt = leader_receipts[0]
+                if first_receipt is not None and isinstance(first_receipt, dict):
+                    execution_result = first_receipt.get("execution_result")
+                    if execution_result is not None:
+                        if str(execution_result).upper() == "ERROR":
+                            return True
+                else:
+                    # leader_receipt[0] is NULL - this is an edge case error
+                    return True
             else:
-                # leader_receipt[0] is NULL - this is an edge case error
+                # leader_receipt is empty or missing
+                return True
+        elif isinstance(leader_receipts, dict):
+            # leader_receipt is a dict - check execution_result directly
+            execution_result = leader_receipts.get("execution_result")
+            if execution_result is not None:
+                if str(execution_result).upper() == "ERROR":
+                    return True
+            # Also check if it's empty or has no execution_result
+            if not leader_receipts:
                 return True
         else:
-            # leader_receipt is empty or missing
+            # Unknown format - treat as error
             return True
     else:
         # No consensus_data - edge case
@@ -307,13 +321,20 @@ def extract_execution_result(tx: dict) -> str:
     # Try to get execution_result from leader receipt
     if consensus_data is not None:
         leader_receipts = consensus_data.get("leader_receipt", [])
-        if leader_receipts and len(leader_receipts) > 0:
-            first_receipt = leader_receipts[0]
-            if first_receipt is not None and isinstance(first_receipt, dict):
-                execution_result = first_receipt.get("execution_result")
-                if execution_result is not None:
-                    # Convert to lowercase for consistency (stored as "SUCCESS" or "ERROR")
-                    return str(execution_result).lower()
+        # Handle both list and dict formats for leader_receipt
+        if isinstance(leader_receipts, list):
+            if leader_receipts and len(leader_receipts) > 0:
+                first_receipt = leader_receipts[0]
+                if first_receipt is not None and isinstance(first_receipt, dict):
+                    execution_result = first_receipt.get("execution_result")
+                    if execution_result is not None:
+                        # Convert to lowercase for consistency (stored as "SUCCESS" or "ERROR")
+                        return str(execution_result).lower()
+        elif isinstance(leader_receipts, dict):
+            # leader_receipt is a dict - check execution_result directly
+            execution_result = leader_receipts.get("execution_result")
+            if execution_result is not None:
+                return str(execution_result).lower()
 
     # Default to success
     return "success"
