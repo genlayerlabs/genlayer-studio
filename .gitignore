@@ -166,3 +166,7 @@ hardhat/deployments/*
 
 # Geth keystore
 hardhat/geth_keystore/*
+
+# Local development overrides (user copies from .example)
+docker-compose.override.yml
+config-overrides/
