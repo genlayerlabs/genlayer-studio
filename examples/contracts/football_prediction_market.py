@@ -44,7 +44,7 @@ class PredictionMarket(gl.Contract):
     def resolve(self) -> typing.Any:
 
         if self.has_resolved:
-            return "Already resolved"
+            raise gl.vm.UserError("Already resolved")
 
         market_resolution_url = self.resolution_url
         team1 = self.team1
