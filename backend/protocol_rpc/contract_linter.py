@@ -4,15 +4,39 @@ Provides validation and linting for GenLayer smart contracts.
 """
 
 import re
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from flask_jsonrpc.exceptions import JSONRPCError
 
 
 # Pattern to match the Depends header with "latest" or "test" versions
 # Matches: # { "Depends": "py-genlayer:latest" } or # { "Depends": "py-genlayer:test" }
-_INVALID_VERSION_PATTERN = re.compile(
+INVALID_VERSION_PATTERN = re.compile(
     r'#\s*\{\s*"Depends"\s*:\s*"py-genlayer:(latest|test)"\s*\}'
 )
+
+# User-friendly error message for invalid runner versions
+# Note: Curly braces in the example are escaped for .format() compatibility
+INVALID_VERSION_ERROR_MESSAGE = (
+    'Invalid runner version "{version}". The "latest" and "test" versions are not allowed. '
+    "Please use a fixed version hash in your contract header, e.g.: "
+    '# {{ "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }}'
+)
+
+
+def check_invalid_runner_version(source_code: str) -> Tuple[bool, Optional[str]]:
+    """
+    Check if source code contains an invalid runner version (latest or test).
+
+    Args:
+        source_code: Python source code to check
+
+    Returns:
+        Tuple of (has_invalid_version, version_name or None)
+    """
+    match = INVALID_VERSION_PATTERN.search(source_code)
+    if match:
+        return True, match.group(1)
+    return False, None
 
 
 class ContractLinter:
@@ -39,7 +63,7 @@ class ContractLinter:
         lines = source_code.split("\n")
 
         for line_num, line in enumerate(lines, start=1):
-            match = _INVALID_VERSION_PATTERN.search(line)
+            match = INVALID_VERSION_PATTERN.search(line)
             if match:
                 version = match.group(1)
                 issues.append(

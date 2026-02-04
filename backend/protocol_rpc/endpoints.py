@@ -598,20 +598,16 @@ def admin_upgrade_contract_code(
         )
 
     # Validate runner version is not 'latest' or 'test'
-    import re
-
-    invalid_version_match = re.search(
-        r'#\s*\{\s*"Depends"\s*:\s*"py-genlayer:(latest|test)"\s*\}', new_code
+    from backend.protocol_rpc.contract_linter import (
+        check_invalid_runner_version,
+        INVALID_VERSION_ERROR_MESSAGE,
     )
-    if invalid_version_match:
-        version = invalid_version_match.group(1)
+
+    has_invalid_version, version = check_invalid_runner_version(new_code)
+    if has_invalid_version:
         raise JSONRPCError(
             code=-32602,
-            message=(
-                f'Invalid runner version "{version}". The "latest" and "test" versions are not allowed. '
-                "Please use a fixed version hash in your contract header, e.g.: "
-                '# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }'
-            ),
+            message=INVALID_VERSION_ERROR_MESSAGE.format(version=version),
             data={"invalid_version": version},
         )
 
