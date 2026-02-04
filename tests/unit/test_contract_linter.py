@@ -105,3 +105,46 @@ class TestInvalidRunnerVersion:
         assert result["summary"]["by_severity"]["error"] == 1
         assert len(result["results"]) == 1
         assert result["results"][0]["rule_id"] == "INVALID_RUNNER_VERSION"
+
+
+class TestContractUpgradeValidation:
+    """Tests for invalid runner version validation in contract upgrades."""
+
+    def test_upgrade_rejects_latest_version(self):
+        """Contract upgrade should reject code with 'latest' version."""
+        import re
+
+        new_code = '# { "Depends": "py-genlayer:latest" }\nfrom genlayer import *'
+
+        # This is the same regex pattern used in admin_upgrade_contract_code
+        invalid_version_match = re.search(
+            r'#\s*\{\s*"Depends"\s*:\s*"py-genlayer:(latest|test)"\s*\}', new_code
+        )
+
+        assert invalid_version_match is not None
+        assert invalid_version_match.group(1) == "latest"
+
+    def test_upgrade_rejects_test_version(self):
+        """Contract upgrade should reject code with 'test' version."""
+        import re
+
+        new_code = '# { "Depends": "py-genlayer:test" }\nfrom genlayer import *'
+
+        invalid_version_match = re.search(
+            r'#\s*\{\s*"Depends"\s*:\s*"py-genlayer:(latest|test)"\s*\}', new_code
+        )
+
+        assert invalid_version_match is not None
+        assert invalid_version_match.group(1) == "test"
+
+    def test_upgrade_allows_valid_hash_version(self):
+        """Contract upgrade should allow code with valid hash version."""
+        import re
+
+        new_code = '# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }\nfrom genlayer import *'
+
+        invalid_version_match = re.search(
+            r'#\s*\{\s*"Depends"\s*:\s*"py-genlayer:(latest|test)"\s*\}', new_code
+        )
+
+        assert invalid_version_match is None

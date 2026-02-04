@@ -597,6 +597,24 @@ def admin_upgrade_contract_code(
             data={},
         )
 
+    # Validate runner version is not 'latest' or 'test'
+    import re
+
+    invalid_version_match = re.search(
+        r'#\s*\{\s*"Depends"\s*:\s*"py-genlayer:(latest|test)"\s*\}', new_code
+    )
+    if invalid_version_match:
+        version = invalid_version_match.group(1)
+        raise JSONRPCError(
+            code=-32602,
+            message=(
+                f'Invalid runner version "{version}". The "latest" and "test" versions are not allowed. '
+                "Please use a fixed version hash in your contract header, e.g.: "
+                '# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }'
+            ),
+            data={"invalid_version": version},
+        )
+
     # Validate contract exists and is deployed
     contract = session.query(CurrentState).filter_by(id=contract_address).one_or_none()
     if not contract or not contract.data or not contract.data.get("code"):
