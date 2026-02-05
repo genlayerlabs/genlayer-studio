@@ -19,6 +19,7 @@ __all__ = (
     "RATE_LIMIT_STATUSES",
     "extract_error_code",
     "parse_module_error_string",
+    "get_user_friendly_message",
 )
 
 
@@ -73,10 +74,59 @@ class GenVMErrorCode(StrEnum):
     WEB_REQUEST_FAILED = "WEB_REQUEST_FAILED"
     WEB_TLD_FORBIDDEN = "WEB_TLD_FORBIDDEN"
 
+    # Contract/runner errors
+    INVALID_RUNNER = "INVALID_RUNNER"
+
     # Execution errors
     GENVM_TIMEOUT = "GENVM_TIMEOUT"
     CONTRACT_ERROR = "CONTRACT_ERROR"
     INTERNAL_ERROR = "INTERNAL_ERROR"
+
+
+# User-friendly error messages for each error code
+ERROR_CODE_MESSAGES: dict[str, str] = {
+    GenVMErrorCode.INVALID_RUNNER: (
+        "Invalid runner version. The 'latest' and 'test' versions are not allowed. "
+        "Please use a fixed version hash in your contract header, e.g.: "
+        '# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }'
+    ),
+    GenVMErrorCode.LLM_RATE_LIMITED: "LLM provider rate limit exceeded. Please try again later.",
+    GenVMErrorCode.LLM_NO_PROVIDER: "No LLM provider available for the requested operation.",
+    GenVMErrorCode.LLM_PROVIDER_ERROR: "LLM provider returned an error.",
+    GenVMErrorCode.LLM_INVALID_API_KEY: "Invalid API key for the LLM provider.",
+    GenVMErrorCode.LLM_TIMEOUT: "LLM request timed out.",
+    GenVMErrorCode.WEB_REQUEST_FAILED: "Web request failed.",
+    GenVMErrorCode.WEB_TLD_FORBIDDEN: "Access to the requested domain is forbidden.",
+    GenVMErrorCode.GENVM_TIMEOUT: "Contract execution timed out.",
+    GenVMErrorCode.CONTRACT_ERROR: "Contract execution error.",
+    GenVMErrorCode.INTERNAL_ERROR: "Internal GenVM error.",
+}
+
+
+def get_user_friendly_message(
+    error_code: str | None, original_message: str, raw_error: dict | None = None
+) -> str:
+    """
+    Get a user-friendly error message based on the error code.
+
+    Args:
+        error_code: The standardized error code (e.g., INVALID_RUNNER)
+        original_message: The original error message from GenVM
+        raw_error: Optional raw error structure with causes
+
+    Returns:
+        A user-friendly error message
+    """
+    if error_code and error_code in ERROR_CODE_MESSAGES:
+        return ERROR_CODE_MESSAGES[error_code]
+
+    # Fallback: check raw_error causes for invalid runner pattern
+    if raw_error and isinstance(raw_error.get("causes"), list):
+        for cause in raw_error["causes"]:
+            if isinstance(cause, str) and "invalid runner id" in cause.lower():
+                return ERROR_CODE_MESSAGES[GenVMErrorCode.INVALID_RUNNER]
+
+    return original_message
 
 
 # Mapping from Lua error causes to standardized error codes
@@ -214,6 +264,9 @@ def extract_error_code(
     # Map Lua causes to error codes
     if isinstance(causes, list):
         for cause in causes:
+            # Check for invalid runner error (e.g., "invalid runner id: py-genlayer:latest")
+            if isinstance(cause, str) and "invalid runner id" in cause.lower():
+                return GenVMErrorCode.INVALID_RUNNER
             if cause in LUA_CAUSE_TO_CODE:
                 # Special case: STATUS_NOT_OK might be rate limiting based on ctx
                 if cause == "STATUS_NOT_OK":
@@ -229,6 +282,10 @@ def extract_error_code(
 def _extract_from_message(message: str, stderr: str = "") -> Optional[str]:
     """Extract error code from message string or stderr."""
     combined = f"{message} {stderr}".lower()
+
+    # Check for invalid runner (e.g., using :latest or :test in non-debug mode)
+    if "invalid runner" in combined:
+        return GenVMErrorCode.INVALID_RUNNER
 
     # Check for specific error patterns
     if "rate limit" in combined or "429" in combined:

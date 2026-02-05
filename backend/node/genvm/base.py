@@ -46,6 +46,7 @@ from .error_codes import (
     extract_error_code_from_timeout,
     parse_module_error_string,
     GenVMInternalError,
+    get_user_friendly_message,
 )
 
 
@@ -180,8 +181,14 @@ class Host(genvmhost.IHost):
                 # Preserve raw error structure (causes, fatal, ctx) excluding message
                 raw_error = {k: v for k, v in result_decoded.items() if k != "message"}
 
+                # Get user-friendly message if available
+                original_message = result_decoded["message"]
+                friendly_message = get_user_friendly_message(
+                    error_code, original_message, raw_error
+                )
+
                 result = ExecutionError(
-                    result_decoded["message"],
+                    friendly_message,
                     res.result_kind,
                     error_code=error_code,
                     raw_error=raw_error if raw_error else None,
@@ -189,8 +196,12 @@ class Host(genvmhost.IHost):
             else:
                 # String error - try to extract error code from message
                 error_code = extract_error_code(str(result_decoded), res.stderr)
+                original_message = str(result_decoded)
+                friendly_message = get_user_friendly_message(
+                    error_code, original_message
+                )
                 result = ExecutionError(
-                    str(result_decoded),
+                    friendly_message,
                     res.result_kind,
                     error_code=error_code,
                 )

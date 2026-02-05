@@ -22,8 +22,8 @@ class TestContract(gl.Contract):
         return self.balance
 """
 
-# Valid contract
-VALID_CONTRACT = """# { "Depends": "py-genlayer:test" }
+# Contract with invalid version (latest/test not allowed)
+CONTRACT_WITH_INVALID_VERSION = """# { "Depends": "py-genlayer:latest" }
 
 from genlayer import *
 
@@ -31,7 +31,23 @@ class TestContract(gl.Contract):
     balance: u256
 
     def __init__(self):
-        self.balance = 0
+        self.balance = u256(0)
+
+    @gl.public.view
+    def get_balance(self) -> int:
+        return self.balance
+"""
+
+# Valid contract with fixed version hash
+VALID_CONTRACT = """# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+
+from genlayer import *
+
+class TestContract(gl.Contract):
+    balance: u256
+
+    def __init__(self):
+        self.balance = u256(0)
 
     @gl.public.view
     def get_balance(self) -> int:
@@ -77,15 +93,57 @@ def test_linter_endpoint(url="http://localhost:4000/api"):
         if issue["suggestion"]:
             print(f"     💡 {issue['suggestion']}")
 
-    # Test 2: Valid contract
-    print("\n2. Testing valid contract:")
+    # Test 2: Contract with invalid runner version (latest/test)
+    print("\n2. Testing contract with invalid runner version:")
+    response = requests.post(
+        url,
+        json={
+            "jsonrpc": "2.0",
+            "method": "sim_lintContract",
+            "params": {
+                "source_code": CONTRACT_WITH_INVALID_VERSION,
+                "filename": "invalid_version.py",
+            },
+            "id": 2,
+        },
+        timeout=10,
+    )
+
+    response.raise_for_status()
+    payload = response.json()
+    assert "result" in payload, f"Unexpected payload: {payload}"
+
+    contract_result = payload["result"]
+    total_issues = contract_result["summary"]["total"]
+    assert total_issues > 0, "Expected the linter to report invalid version issue"
+
+    # Check that we have an INVALID_RUNNER_VERSION error
+    invalid_version_issues = [
+        i
+        for i in contract_result["results"]
+        if i["rule_id"] == "INVALID_RUNNER_VERSION"
+    ]
+    assert (
+        len(invalid_version_issues) > 0
+    ), "Expected INVALID_RUNNER_VERSION error for 'latest' version"
+
+    print(f"✅ Found {total_issues} issues including invalid runner version:")
+    for issue in contract_result["results"]:
+        print(
+            f"   - Line {issue['line']}: {issue['severity'].upper()} - {issue['message']}"
+        )
+        if issue["suggestion"]:
+            print(f"     💡 {issue['suggestion']}")
+
+    # Test 3: Valid contract
+    print("\n3. Testing valid contract:")
     response = requests.post(
         url,
         json={
             "jsonrpc": "2.0",
             "method": "sim_lintContract",
             "params": {"source_code": VALID_CONTRACT, "filename": "valid_contract.py"},
-            "id": 2,
+            "id": 3,
         },
         timeout=10,
     )
