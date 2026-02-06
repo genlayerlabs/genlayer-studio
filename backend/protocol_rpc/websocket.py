@@ -143,6 +143,10 @@ async def websocket_handler(websocket: WebSocket, broadcast: Broadcast) -> None:
 
     except WebSocketDisconnect:
         pass
+    except Exception:
+        # Handle ClientDisconnected (uvicorn), ConnectionClosedError (websockets),
+        # and other exceptions raised when client disconnects during send operations.
+        pass
     finally:
         await cleanup()
 
