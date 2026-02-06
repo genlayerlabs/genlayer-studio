@@ -1,0 +1,45 @@
+# GenVM Web Module Config - Local Development Override
+#
+# This config allows GenLayer contracts to make HTTP requests to localhost
+# and internal development services. See docker-compose.override.yml.example
+# for usage instructions.
+#
+# SECURITY WARNING: Do not use in production environments.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yeagerai/genvm/refs/tags/v0.2.11/doc/schemas/default-config.json#web
+bind_address: 127.0.0.1:3032
+webdriver_host: http://127.0.0.1:4444
+
+lua_script_path: ${exeDir}/../config/genvm-web-default.lua
+vm_count: 6
+lua_path: ${exeDir}/../lib/genvm-lua/?.lua
+signer_url: "#{signerUrl}"
+signer_headers: {}
+
+threads: 4
+blocking_threads: 16
+log_disable: ""
+
+session_create_request: |
+  {
+    "capabilities": {
+      "alwaysMatch": {
+        "browserName": "firefox",
+        "moz:firefoxOptions": {
+          "args": [
+            "--headless"
+          ]
+        }
+      }
+    }
+  }
+
+extra_tld: []
+
+# LOCAL DEVELOPMENT ONLY: Allow access to localhost and internal hosts
+# This enables GenLayer contracts to call local RPC endpoints (Anvil, Hardhat, etc.)
+always_allow_hosts:
+  - "localhost"
+  - "127.0.0.1"
+  - "host.docker.internal"
+  - "anvil-local"
