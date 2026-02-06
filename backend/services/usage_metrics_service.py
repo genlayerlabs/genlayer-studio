@@ -353,6 +353,14 @@ class UsageMetricsService:
                     )
         except asyncio.TimeoutError:
             logger.warning("Timeout sending usage metrics to API")
+        except aiohttp.ClientConnectorError:
+            # Connection errors are expected when API is unavailable - log at debug level
+            logger.debug(
+                f"Could not connect to usage metrics API at {self.api_url} - API may be unavailable"
+            )
+        except aiohttp.ClientError as e:
+            # Other client errors (DNS, SSL, etc.) - log at warning level
+            logger.warning(f"Client error sending usage metrics to API: {e}")
         except Exception as e:
             logger.error(f"Error sending usage metrics to API: {e}")
 
