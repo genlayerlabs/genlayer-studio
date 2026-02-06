@@ -17,7 +17,7 @@ jobs:
       - name: Use Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 24
       - name: Copy examples to assets
         run: cp -r examples frontend/src/assets/examples
         working-directory: .
