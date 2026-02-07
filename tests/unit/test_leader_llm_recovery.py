@@ -79,7 +79,7 @@ def _make_node(mode: ExecutionMode, leader_receipt: Receipt | None = None) -> No
         contract_snapshot=snapshot,
         validator_mode=mode,
         validator=_make_validator(),
-        contract_snapshot_factory=lambda addr: _make_snapshot(),
+        contract_snapshot_factory=lambda _addr: _make_snapshot(),
         leader_receipt=leader_receipt,
         manager=MagicMock(),
     )
@@ -181,3 +181,48 @@ async def test_leader_success_does_not_raise():
 
     assert receipt.execution_result == ExecutionResultStatus.SUCCESS
     assert receipt.genvm_result["error_code"] is None
+
+
+@pytest.mark.asyncio
+async def test_leader_llm_failure_respects_fatal_flag():
+    """Leader GenVMInternalError should carry the fatal flag from raw_error."""
+    node = _make_node(ExecutionMode.LEADER)
+    # Create error with fatal=False
+    error_result = ExecutionResult(
+        result=ExecutionError(
+            message="LLM provider failed",
+            kind=ResultCode.USER_ERROR,
+            error_code=GenVMErrorCode.LLM_RATE_LIMITED,
+            raw_error={
+                "causes": ["STATUS_NOT_OK"],
+                "fatal": False,
+                "ctx": {"status": 429},
+            },
+        ),
+        eq_outputs={},
+        pending_transactions=[],
+        stdout="",
+        stderr="rate limited",
+        genvm_log=[],
+        state=MagicMock(),
+        processing_time=100,
+        nondet_disagree=None,
+    )
+    error_result.state.snapshot.states = {"accepted": {}}
+
+    with patch(
+        "backend.node.genvm.base.run_genvm_host",
+        new_callable=AsyncMock,
+        return_value=error_result,
+    ):
+        with pytest.raises(GenVMInternalError) as exc_info:
+            await node._run_genvm(
+                from_address="0x000000000000000000000000000000000000dead",
+                calldata=b"\x00",
+                readonly=False,
+                is_init=False,
+                transaction_hash="0xtx",
+                transaction_datetime=None,
+            )
+
+        assert exc_info.value.is_fatal is False

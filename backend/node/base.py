@@ -937,7 +937,7 @@ class Node:
                     message=f"Leader LLM failure: {result.genvm_result.get('error_code')}",
                     error_code=result.genvm_result["error_code"],
                     causes=raw_error.get("causes", []),
-                    is_fatal=raw_error.get("is_fatal", True),
+                    is_fatal=raw_error.get("fatal", True),
                     is_leader=True,
                 )
             return result

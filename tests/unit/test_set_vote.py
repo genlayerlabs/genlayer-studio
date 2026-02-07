@@ -98,7 +98,7 @@ def test_llm_error_codes_vote_timeout(error_code: str):
         ResultCode.USER_ERROR,
         b"LLM error",
         error_code=error_code,
-        raw_error={"causes": ["NO_PROVIDER_FOR_PROMPT"], "is_fatal": True},
+        raw_error={"causes": ["NO_PROVIDER_FOR_PROMPT"], "fatal": True},
     )
 
     result = node._set_vote(receipt)
@@ -116,7 +116,7 @@ def test_web_error_not_timeout():
         ResultCode.USER_ERROR,
         b"Web error",
         error_code=GenVMErrorCode.WEB_REQUEST_FAILED,
-        raw_error={"causes": ["WEBPAGE_LOAD_FAILED"], "is_fatal": False},
+        raw_error={"causes": ["WEBPAGE_LOAD_FAILED"], "fatal": False},
     )
 
     result = node._set_vote(receipt)
