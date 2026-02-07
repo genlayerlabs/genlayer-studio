@@ -532,7 +532,10 @@ class Node:
 
         # LLM infrastructure failures (provider down, invalid API key, rate limited)
         # are not consensus-relevant — vote TIMEOUT so the operator can see the issue
-        if receipt.genvm_result and receipt.genvm_result.get("error_code") in LLM_ERROR_CODES:
+        if (
+            receipt.genvm_result
+            and receipt.genvm_result.get("error_code") in LLM_ERROR_CODES
+        ):
             self.logger.error(
                 "Validator LLM infrastructure failure - voting TIMEOUT",
                 error_code=receipt.genvm_result.get("error_code"),
