@@ -1,6 +1,5 @@
-"""Unit tests for Node._set_vote() LLM error handling."""
+"""Unit tests for Node._set_vote() voting logic."""
 
-import pytest
 from unittest.mock import MagicMock
 
 from backend.node.base import Node
@@ -77,35 +76,27 @@ def _make_success_receipt() -> Receipt:
     )
 
 
-# --- LLM error codes → Vote.TIMEOUT ---
+# --- LLM/fatal errors → DETERMINISTIC_VIOLATION at _set_vote level ---
+# (Replacement is handled by the consensus layer, not _set_vote)
 
 
-@pytest.mark.parametrize(
-    "error_code",
-    [
-        GenVMErrorCode.LLM_NO_PROVIDER,
-        GenVMErrorCode.LLM_RATE_LIMITED,
-        GenVMErrorCode.LLM_PROVIDER_ERROR,
-        GenVMErrorCode.LLM_INVALID_API_KEY,
-        GenVMErrorCode.LLM_TIMEOUT,
-    ],
-)
-def test_llm_error_codes_vote_timeout(error_code: str):
+def test_llm_fatal_error_votes_deterministic_violation():
+    """LLM fatal errors are no longer TIMEOUT — consensus layer handles replacement."""
     leader_receipt = _make_success_receipt()
     node = _make_node(leader_receipt)
 
     receipt = _make_receipt(
         ResultCode.USER_ERROR,
         b"LLM error",
-        error_code=error_code,
+        error_code=GenVMErrorCode.LLM_NO_PROVIDER,
         raw_error={"causes": ["NO_PROVIDER_FOR_PROMPT"], "fatal": True},
     )
 
     result = node._set_vote(receipt)
-    assert result.vote == Vote.TIMEOUT
+    assert result.vote == Vote.DETERMINISTIC_VIOLATION
 
 
-# --- Web errors should NOT be TIMEOUT ---
+# --- Web errors → DETERMINISTIC_VIOLATION ---
 
 
 def test_web_error_not_timeout():

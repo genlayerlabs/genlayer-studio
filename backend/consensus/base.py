@@ -3,6 +3,7 @@
 DEFAULT_VALIDATORS_COUNT = 5
 DEFAULT_CONSENSUS_SLEEP_TIME = 5
 ACTIVATED_TRANSACTION_TIMEOUT = 900
+MAX_IDLE_REPLACEMENTS = 3
 
 import os
 import asyncio
@@ -60,6 +61,7 @@ from backend.node.genvm.origin.public_abi import ResultCode
 from backend.consensus.types import ConsensusResult, ConsensusRound
 from backend.consensus.utils import determine_consensus_from_votes
 from backend.node.genvm import get_code_slot
+from backend.node.genvm.error_codes import GenVMInternalError, GenVMErrorCode
 from backend.node.base import Manager as GenVMManager
 
 type NodeFactory = Callable[
@@ -2666,26 +2668,45 @@ class ProposingState(TransactionState):
                 context.transaction.hash, f"PROPOSING.LEADER.{step_name}"
             )
 
-        # Create a leader node for executing the transaction
-        leader_node = context.node_factory(
-            context.leader,
-            ExecutionMode.LEADER,
-            deepcopy(context.contract_snapshot),
-            None,
-            context.msg_handler,
-            context.contract_snapshot_factory,
-            context.validators_snapshot,
-            leader_timing_callback,
-            context.genvm_manager,
-        )
+        # Execute leader with replacement on fatal infrastructure failures
+        for attempt in range(MAX_IDLE_REPLACEMENTS + 1):
+            leader_node = context.node_factory(
+                context.leader,
+                ExecutionMode.LEADER,
+                deepcopy(context.contract_snapshot),
+                None,
+                context.msg_handler,
+                context.contract_snapshot_factory,
+                context.validators_snapshot,
+                leader_timing_callback,
+                context.genvm_manager,
+            )
 
-        context.transactions_processor.add_state_timestamp(
-            context.transaction.hash, "PROPOSING.LEADER_NODE_CREATED"
-        )
-        # Execute the transaction and obtain the leader receipt
-        context.consensus_data.leader_receipt = [
-            await leader_node.exec_transaction(context.transaction)
-        ]
+            context.transactions_processor.add_state_timestamp(
+                context.transaction.hash,
+                f"PROPOSING.LEADER_NODE_CREATED.attempt_{attempt}",
+            )
+            try:
+                context.consensus_data.leader_receipt = [
+                    await leader_node.exec_transaction(context.transaction)
+                ]
+                break  # success
+            except GenVMInternalError as e:
+                if not e.is_fatal:
+                    raise  # non-fatal → propagate immediately
+                if not context.remaining_validators:
+                    raise  # pool empty → propagate
+                # Replace leader with next validator
+                context.leader = context.remaining_validators.pop(0)
+        else:
+            # All replacement attempts exhausted
+            raise GenVMInternalError(
+                message="Leader idle: all replacements exhausted",
+                error_code=GenVMErrorCode.LLM_NO_PROVIDER,
+                causes=["ALL_LEADERS_IDLE"],
+                is_fatal=True,
+                is_leader=True,
+            )
 
         context.transactions_processor.add_state_timestamp(
             context.transaction.hash, "PROPOSING.TRANSACTION_EXECUTED"
@@ -2815,15 +2836,57 @@ class CommittingState(TransactionState):
         # Execute the transaction with a semaphore to limit the number of concurrent validators
         sem = asyncio.Semaphore(8)
 
-        async def run_single_validator(validator: Node, index: int) -> Receipt:
+        # Build replacement pool: all validators minus those already assigned
+        assigned_addresses = {context.leader["address"]}
+        assigned_addresses.update(
+            v["address"] for v in context.remaining_validators
+        )
+        replacement_pool: list[dict] = [
+            n.validator.to_dict()
+            for n in context.validators_snapshot.nodes
+            if n.validator.to_dict()["address"] not in assigned_addresses
+        ]
+        pool_lock = asyncio.Lock()
+
+        async def pop_replacement() -> dict | None:
+            async with pool_lock:
+                return replacement_pool.pop(0) if replacement_pool else None
+
+        def _is_fatal_error(receipt: Receipt) -> bool:
+            raw_error = (receipt.genvm_result or {}).get("raw_error")
+            return isinstance(raw_error, dict) and raw_error.get("fatal") is True
+
+        async def run_single_validator(
+            validator_dict: dict, index: int
+        ) -> Receipt:
             async with sem:
-                context.transactions_processor.add_state_timestamp(
-                    context.transaction.hash, f"COMMITTING.VALIDATOR_{index}_START"
-                )
-                result = await validator.exec_transaction(context.transaction)
-                context.transactions_processor.add_state_timestamp(
-                    context.transaction.hash, f"COMMITTING.VALIDATOR_{index}_END"
-                )
+                current = validator_dict
+                for attempt in range(MAX_IDLE_REPLACEMENTS + 1):
+                    node = create_validator_node(context, current, index)
+                    context.transactions_processor.add_state_timestamp(
+                        context.transaction.hash,
+                        f"COMMITTING.VALIDATOR_{index}_START"
+                        f".attempt_{attempt}",
+                    )
+                    result = await node.exec_transaction(context.transaction)
+                    context.transactions_processor.add_state_timestamp(
+                        context.transaction.hash,
+                        f"COMMITTING.VALIDATOR_{index}_END"
+                        f".attempt_{attempt}",
+                    )
+
+                    if (
+                        _is_fatal_error(result)
+                        and attempt < MAX_IDLE_REPLACEMENTS
+                    ):
+                        replacement = await pop_replacement()
+                        if replacement is not None:
+                            current = replacement
+                            continue
+                    break
+
+                if _is_fatal_error(result):
+                    result.vote = Vote.IDLE
                 return result
 
         # Leader evaluates validation function
@@ -2832,39 +2895,38 @@ class CommittingState(TransactionState):
             and len(context.consensus_data.leader_receipt) == 1
         )
 
-        # Create validator node for the leader
+        # Build list of validator dicts to run
         if validation_by_leader:
-            context.validator_nodes = [
-                create_validator_node(context, context.leader, 0)
-            ]
+            validators_to_run = [context.leader] + context.remaining_validators
         else:
-            context.validator_nodes = []
+            validators_to_run = list(context.remaining_validators)
 
         context.transactions_processor.add_state_timestamp(
-            context.transaction.hash, "COMMITTING.LEADER_NODE_CREATED"
-        )
-        # Create validator nodes for each validator
-        start_index = 1 if validation_by_leader else 0
-        context.validator_nodes.extend(
-            [
-                create_validator_node(context, validator, start_index + index)
-                for index, validator in enumerate(context.remaining_validators)
-            ]
-        )
-        context.transactions_processor.add_state_timestamp(
-            context.transaction.hash, "COMMITTING.VALIDATOR_NODES_CREATED"
+            context.transaction.hash, "COMMITTING.VALIDATORS_PREPARED"
         )
 
-        # Execute the transaction on each validator node and gather the results
+        # Execute the transaction on each validator and gather the results
         context.transactions_processor.add_state_timestamp(
             context.transaction.hash, "COMMITTING.VALIDATORS_EXECUTION_START"
         )
 
         validation_tasks = [
-            run_single_validator(validator, index)
-            for index, validator in enumerate(context.validator_nodes)
+            run_single_validator(validator_dict, index)
+            for index, validator_dict in enumerate(validators_to_run)
         ]
         context.validation_results = await asyncio.gather(*validation_tasks)
+
+        # If all validators voted IDLE, infrastructure is systemically broken
+        if all(
+            r.vote == Vote.IDLE for r in context.validation_results
+        ):
+            raise GenVMInternalError(
+                message="All validators idle after replacements",
+                error_code=GenVMErrorCode.LLM_NO_PROVIDER,
+                causes=["ALL_VALIDATORS_IDLE"],
+                is_fatal=True,
+                is_leader=True,
+            )
 
         context.transactions_processor.add_state_timestamp(
             context.transaction.hash, "COMMITTING.VALIDATORS_EXECUTION_END"
@@ -2925,7 +2987,7 @@ class RevealingState(TransactionState):
         # Process each validation result and update the context
         for i, validation_result in enumerate(context.validation_results):
             # Store the vote from each validator node
-            context.votes[context.validator_nodes[i].address] = (
+            context.votes[validation_result.node_config["address"]] = (
                 validation_result.vote.value
             )
 
@@ -2934,14 +2996,21 @@ class RevealingState(TransactionState):
         consensus_result = determine_consensus_from_votes(votes_list)
 
         # Send event in rollup to communicate the votes are revealed
+        # Vote.IDLE maps to Vote.TIMEOUT for on-chain events (Solidity
+        # VoteType enum doesn't have IDLE)
         for i, validation_result in enumerate(context.validation_results):
             last_vote = i == len(context.validation_results) - 1
+            chain_vote = (
+                Vote.TIMEOUT
+                if validation_result.vote == Vote.IDLE
+                else validation_result.vote
+            )
             context.consensus_service.emit_transaction_event(
                 "emitVoteRevealed",
                 validation_result.node_config,
                 context.transaction.hash,
                 validation_result.node_config["address"],
-                int(validation_result.vote),
+                int(chain_vote),
                 last_vote,
                 int(consensus_result) if last_vote else int(ConsensusResult.IDLE),
             )

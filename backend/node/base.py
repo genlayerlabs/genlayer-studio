@@ -27,7 +27,6 @@ from .genvm.origin import logger as genvm_logger
 from .genvm.origin import public_abi
 
 from .types import Address
-from .genvm.error_codes import LLM_ERROR_CODES
 
 
 def _ensure_dotenv_loaded_for_chain_id() -> None:
@@ -529,20 +528,6 @@ class Node:
                 receipt.vote = Vote.TIMEOUT
                 return receipt
 
-        # LLM infrastructure failures (provider down, invalid API key, rate limited)
-        # are not consensus-relevant — vote TIMEOUT so the operator can see the issue
-        if (
-            receipt.genvm_result
-            and receipt.genvm_result.get("error_code") in LLM_ERROR_CODES
-        ):
-            self.logger.error(
-                "Validator LLM infrastructure failure - voting TIMEOUT",
-                error_code=receipt.genvm_result.get("error_code"),
-                raw_error=receipt.genvm_result.get("raw_error"),
-            )
-            receipt.vote = Vote.TIMEOUT
-            return receipt
-
         leader_receipt = self.leader_receipt
         if (
             leader_receipt.execution_result == receipt.execution_result
@@ -926,17 +911,18 @@ class Node:
         )
 
         if self.validator_mode == ExecutionMode.LEADER:
-            # Fatal LLM errors → reset transaction and kill worker via GenVMInternalError
-            if (
-                result.genvm_result
-                and result.genvm_result.get("error_code") in LLM_ERROR_CODES
-            ):
-                raw_error = result.genvm_result.get("raw_error") or {}
+            # Fatal user errors (infrastructure failures) → raise for consensus-level
+            # replacement. The consensus layer will retry with a replacement leader.
+            raw_error = (result.genvm_result or {}).get("raw_error") or {}
+            if raw_error.get("fatal") is True:
                 raise genvmbase.GenVMInternalError(
-                    message=f"Leader LLM failure: {result.genvm_result.get('error_code')}",
-                    error_code=result.genvm_result["error_code"],
+                    message=(
+                        f"Leader fatal error:"
+                        f" {result.genvm_result.get('error_code')}"
+                    ),
+                    error_code=result.genvm_result.get("error_code"),
                     causes=raw_error.get("causes", []),
-                    is_fatal=raw_error.get("fatal", True),
+                    is_fatal=True,
                     is_leader=True,
                 )
             return result

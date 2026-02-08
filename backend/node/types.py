@@ -97,6 +97,7 @@ class Vote(Enum):
     DISAGREE = "disagree"
     TIMEOUT = "timeout"
     DETERMINISTIC_VIOLATION = "deterministic_violation"
+    IDLE = "idle"
 
     @classmethod
     def from_string(cls, value: str) -> "Vote":
@@ -112,6 +113,7 @@ class Vote(Enum):
             Vote.DISAGREE: 2,
             Vote.TIMEOUT: 3,
             Vote.DETERMINISTIC_VIOLATION: 4,
+            Vote.IDLE: 5,
         }
         return values[self]
 
