@@ -19,6 +19,42 @@ logger = logging.getLogger(__name__)
 # Create FastAPI router for health endpoints
 health_router = APIRouter(tags=["health"])
 
+# =============================================================================
+# GenVM Execution Failure Tracking (complements /status probe)
+# =============================================================================
+
+_genvm_consecutive_failures: int = 0
+_genvm_failure_unhealthy_threshold: int = int(
+    os.environ.get("GENVM_FAILURE_UNHEALTHY_THRESHOLD", "3")
+)
+
+
+def record_genvm_execution_failure():
+    """Increment consecutive GenVM execution failure counter."""
+    global _genvm_consecutive_failures
+    _genvm_consecutive_failures += 1
+    logger.warning(
+        f"GenVM execution failure count: {_genvm_consecutive_failures}/{_genvm_failure_unhealthy_threshold}"
+    )
+
+
+def record_genvm_execution_success():
+    """Reset consecutive GenVM execution failure counter on success."""
+    global _genvm_consecutive_failures
+    if _genvm_consecutive_failures > 0:
+        logger.info(
+            f"GenVM execution success - resetting failure count from {_genvm_consecutive_failures} to 0"
+        )
+        _genvm_consecutive_failures = 0
+
+
+def get_genvm_execution_failure_count() -> int:
+    return _genvm_consecutive_failures
+
+
+def get_genvm_failure_unhealthy_threshold() -> int:
+    return _genvm_failure_unhealthy_threshold
+
 
 # =============================================================================
 # Background Health Check Cache
@@ -498,12 +534,24 @@ async def health_check() -> Union[dict, JSONResponse]:
     """
     # Check if GenVM is unhealthy - return 503 to trigger restart
     if not _health_cache.genvm_healthy:
-        # Note: genvm_error details logged server-side, not exposed to clients
         return JSONResponse(
             status_code=503,
             content={
                 "status": "unhealthy",
                 "error": "genvm_manager_unresponsive",
+                "timestamp": time.time(),
+            },
+        )
+
+    # Check if GenVM execution is failing consecutively
+    if _genvm_consecutive_failures >= _genvm_failure_unhealthy_threshold:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "error": "genvm_consecutive_failures",
+                "count": _genvm_consecutive_failures,
+                "threshold": _genvm_failure_unhealthy_threshold,
                 "timestamp": time.time(),
             },
         )
@@ -557,12 +605,19 @@ def create_readiness_check_with_state(
     async def readiness_check_with_state():
         """Readiness check to verify the service is ready to accept traffic."""
         rpc_router_ready = rpc_router_provider() is not None
+        genvm_exec_healthy = (
+            _genvm_consecutive_failures < _genvm_failure_unhealthy_threshold
+        )
+        is_ready = rpc_router_ready and genvm_exec_healthy
 
-        return {
-            "status": "ready" if rpc_router_ready else "not_ready",
+        result = {
+            "status": "ready" if is_ready else "not_ready",
             "service": "genlayer-rpc",
             "rpc_router_initialized": rpc_router_ready,
         }
+        if not genvm_exec_healthy:
+            result["genvm_execution_failures"] = _genvm_consecutive_failures
+        return result
 
     return readiness_check_with_state
 
