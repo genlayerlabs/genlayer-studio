@@ -64,7 +64,7 @@ def get_simulator_chain_id() -> int:
 
 def _filter_genvm_log_by_level(genvm_log: list[dict]) -> list[dict]:
     """
-    Filter genvm_log entries based on configured LOG_LEVEL with a minimum of WARNING.
+    Filter genvm_log entries based on configured LOG_LEVEL.
     Only includes log entries that meet or exceed the effective threshold.
     """
     # Get configured log level from environment
@@ -81,8 +81,7 @@ def _filter_genvm_log_by_level(genvm_log: list[dict]) -> list[dict]:
     }
 
     # Get numeric threshold for configured level (default to INFO if unknown)
-    # Enforce minimum WARNING level regardless of configuration
-    threshold = max(level_map.get(configured_level, logging.INFO), logging.WARNING)
+    threshold = level_map.get(configured_level, logging.INFO)
 
     # Filter log entries
     filtered_logs = []
