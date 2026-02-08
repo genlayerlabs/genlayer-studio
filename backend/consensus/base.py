@@ -2838,9 +2838,7 @@ class CommittingState(TransactionState):
 
         # Build replacement pool: all validators minus those already assigned
         assigned_addresses = {context.leader["address"]}
-        assigned_addresses.update(
-            v["address"] for v in context.remaining_validators
-        )
+        assigned_addresses.update(v["address"] for v in context.remaining_validators)
         replacement_pool: list[dict] = [
             n.validator.to_dict()
             for n in context.validators_snapshot.nodes
@@ -2856,29 +2854,22 @@ class CommittingState(TransactionState):
             raw_error = (receipt.genvm_result or {}).get("raw_error")
             return isinstance(raw_error, dict) and raw_error.get("fatal") is True
 
-        async def run_single_validator(
-            validator_dict: dict, index: int
-        ) -> Receipt:
+        async def run_single_validator(validator_dict: dict, index: int) -> Receipt:
             async with sem:
                 current = validator_dict
                 for attempt in range(MAX_IDLE_REPLACEMENTS + 1):
                     node = create_validator_node(context, current, index)
                     context.transactions_processor.add_state_timestamp(
                         context.transaction.hash,
-                        f"COMMITTING.VALIDATOR_{index}_START"
-                        f".attempt_{attempt}",
+                        f"COMMITTING.VALIDATOR_{index}_START" f".attempt_{attempt}",
                     )
                     result = await node.exec_transaction(context.transaction)
                     context.transactions_processor.add_state_timestamp(
                         context.transaction.hash,
-                        f"COMMITTING.VALIDATOR_{index}_END"
-                        f".attempt_{attempt}",
+                        f"COMMITTING.VALIDATOR_{index}_END" f".attempt_{attempt}",
                     )
 
-                    if (
-                        _is_fatal_error(result)
-                        and attempt < MAX_IDLE_REPLACEMENTS
-                    ):
+                    if _is_fatal_error(result) and attempt < MAX_IDLE_REPLACEMENTS:
                         replacement = await pop_replacement()
                         if replacement is not None:
                             current = replacement
@@ -2917,9 +2908,7 @@ class CommittingState(TransactionState):
         context.validation_results = await asyncio.gather(*validation_tasks)
 
         # If all validators voted IDLE, infrastructure is systemically broken
-        if all(
-            r.vote == Vote.IDLE for r in context.validation_results
-        ):
+        if all(r.vote == Vote.IDLE for r in context.validation_results):
             raise GenVMInternalError(
                 message="All validators idle after replacements",
                 error_code=GenVMErrorCode.LLM_NO_PROVIDER,

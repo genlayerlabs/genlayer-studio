@@ -31,9 +31,7 @@ def test_majority_timeout():
 def test_no_majority_split():
     """2 agree, 2 disagree, 1 timeout → no majority."""
     votes = (
-        [Vote.AGREE.value] * 2
-        + [Vote.DISAGREE.value] * 2
-        + [Vote.TIMEOUT.value] * 1
+        [Vote.AGREE.value] * 2 + [Vote.DISAGREE.value] * 2 + [Vote.TIMEOUT.value] * 1
     )
     assert determine_consensus_from_votes(votes) == ConsensusResult.NO_MAJORITY
 
@@ -65,11 +63,7 @@ def test_idle_counts_as_disagree():
 
 def test_idle_plus_disagree():
     """1 IDLE + 2 DISAGREE = 3 effective_disagree > 2.5 → MAJORITY_DISAGREE."""
-    votes = (
-        [Vote.AGREE.value] * 2
-        + [Vote.DISAGREE.value] * 2
-        + [Vote.IDLE.value] * 1
-    )
+    votes = [Vote.AGREE.value] * 2 + [Vote.DISAGREE.value] * 2 + [Vote.IDLE.value] * 1
     assert determine_consensus_from_votes(votes) == ConsensusResult.MAJORITY_DISAGREE
 
 
@@ -81,19 +75,11 @@ def test_all_idle():
 
 def test_idle_not_enough_for_majority():
     """1 IDLE + 1 DISAGREE vs 3 AGREE → agree wins."""
-    votes = (
-        [Vote.AGREE.value] * 3
-        + [Vote.DISAGREE.value] * 1
-        + [Vote.IDLE.value] * 1
-    )
+    votes = [Vote.AGREE.value] * 3 + [Vote.DISAGREE.value] * 1 + [Vote.IDLE.value] * 1
     assert determine_consensus_from_votes(votes) == ConsensusResult.MAJORITY_AGREE
 
 
 def test_idle_with_timeout_no_majority():
     """2 IDLE, 2 TIMEOUT, 1 AGREE → no majority."""
-    votes = (
-        [Vote.IDLE.value] * 2
-        + [Vote.TIMEOUT.value] * 2
-        + [Vote.AGREE.value] * 1
-    )
+    votes = [Vote.IDLE.value] * 2 + [Vote.TIMEOUT.value] * 2 + [Vote.AGREE.value] * 1
     assert determine_consensus_from_votes(votes) == ConsensusResult.NO_MAJORITY
