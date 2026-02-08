@@ -2837,7 +2837,9 @@ class CommittingState(TransactionState):
         sem = asyncio.Semaphore(8)
 
         # Build replacement pool: all validators minus those already assigned
-        assigned_addresses = {context.leader["address"]}
+        assigned_addresses: set[str] = set()
+        if context.leader.get("address"):
+            assigned_addresses.add(context.leader["address"])
         assigned_addresses.update(v["address"] for v in context.remaining_validators)
         replacement_pool: list[dict] = [
             n.validator.to_dict()
