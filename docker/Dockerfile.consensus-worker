@@ -90,7 +90,7 @@ RUN cd /genvm \
     && echo "GenVM installed successfully:" \
     && ls -la \
     && chown -R worker-user:worker-group /genvm \
-    && su - worker-user -c "/genvm/bin/post-install.py"
+    && su - worker-user -c "/genvm/bin/post-install.py --precompile false"
 
 # Set GenVM environment variables (GENVM_TAG is already set as ENV earlier)
 ENV GENVMROOT=/genvm
@@ -99,18 +99,18 @@ ENV PATH="/genvm/bin:${PATH}"
 # Copy necessary files
 COPY ../.env .
 COPY backend $path/backend
+COPY docker/consensus-worker-entrypoint.sh /entrypoint.sh
 
 # Change ownership of app files
 RUN chown -R worker-user:worker-group $path
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=40s \
+# Health check (start-period accounts for first-boot precompile ~60s)
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=120s \
     CMD curl -f http://localhost:${WORKER_PORT:-4001}/health || exit 1
 
 # Switch to non-root user
 USER worker-user
 
-# Run the consensus worker service with proper logging configuration
+# Precompile GenVM for host CPU on startup, then start worker
 WORKDIR /app
-# Use run_worker.py to configure uvicorn logging (filters health check access logs)
-CMD ["python3", "-m", "backend.consensus.run_worker"]
+ENTRYPOINT ["/entrypoint.sh"]
