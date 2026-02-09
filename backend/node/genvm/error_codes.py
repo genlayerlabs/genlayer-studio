@@ -15,6 +15,7 @@ from typing import Optional
 __all__ = (
     "GenVMErrorCode",
     "GenVMInternalError",
+    "LLM_ERROR_CODES",
     "LUA_CAUSE_TO_CODE",
     "RATE_LIMIT_STATUSES",
     "extract_error_code",
@@ -89,6 +90,18 @@ LUA_CAUSE_TO_CODE: dict[str, GenVMErrorCode] = {
 
 # HTTP status codes that indicate rate limiting
 RATE_LIMIT_STATUSES: set[int] = {429, 503, 529}
+
+# LLM error codes that indicate infrastructure/provider failures (not contract bugs).
+# These should trigger Vote.TIMEOUT for validators and GenVMInternalError for leaders.
+LLM_ERROR_CODES: frozenset[str] = frozenset(
+    {
+        GenVMErrorCode.LLM_RATE_LIMITED,
+        GenVMErrorCode.LLM_NO_PROVIDER,
+        GenVMErrorCode.LLM_PROVIDER_ERROR,
+        GenVMErrorCode.LLM_INVALID_API_KEY,
+        GenVMErrorCode.LLM_TIMEOUT,
+    }
+)
 
 # Regex pattern for extracting fatal flag from ModuleError
 _FATAL_PATTERN = re.compile(r"fatal:\s*(true|false)")
