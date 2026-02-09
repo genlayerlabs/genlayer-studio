@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-CACHE_MARKER="/genvm/.cache/pc/.precompiled-${GENVM_TAG}"
+CACHE_MARKER="/genvm/executor/${GENVM_TAG}/.cache/pc/.precompiled"
 
 if [ -f "$CACHE_MARKER" ]; then
     echo "GenVM ${GENVM_TAG} already precompiled for this host, skipping."

@@ -99,7 +99,7 @@ ENV PATH="/genvm/bin:${PATH}"
 # Copy necessary files
 COPY ../.env .
 COPY backend $path/backend
-COPY docker/consensus-worker-entrypoint.sh /entrypoint.sh
+COPY docker/entrypoint-consensus-worker.sh /entrypoint.sh
 
 # Change ownership of app files
 RUN chown -R worker-user:worker-group $path
