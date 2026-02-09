@@ -650,10 +650,12 @@ class Node:
             else res.stdout
         )
 
+        # Always log at INFO level - GenVM execution errors are user contract errors,
+        # not infrastructure errors. The error details are in the 'result' data field.
         msg_handler.send_message(
             LogEvent(
                 name="execution_finished",
-                type=(EventType.INFO if not is_error else EventType.ERROR),
+                type=EventType.INFO,
                 scope=EventScope.GENVM,
                 message="execution finished",
                 data={

@@ -258,7 +258,7 @@ def get_transactions_for_address(
     )
 
 
-@rpc.method("sim_setFinalityWindowTime")
+@rpc.method("sim_setFinalityWindowTime", log_policy=LogPolicy.debug())
 def set_finality_window_time(
     seconds: int,
     consensus=Depends(get_consensus),
@@ -266,7 +266,7 @@ def set_finality_window_time(
     return impl.set_finality_window_time(consensus, seconds)
 
 
-@rpc.method("sim_getFinalityWindowTime")
+@rpc.method("sim_getFinalityWindowTime", log_policy=LogPolicy.debug())
 def get_finality_window_time(
     consensus=Depends(get_consensus),
 ) -> dict:
@@ -305,7 +305,7 @@ def delete_all_snapshots(
     return impl.delete_all_snapshots(snapshot_manager=snapshot_manager)
 
 
-@rpc.method("sim_lintContract")
+@rpc.method("sim_lintContract", log_policy=LogPolicy.debug())
 def lint_contract(
     source_code: str,
     filename: str = "contract.py",
@@ -346,7 +346,7 @@ async def get_contract_schema_for_code(
     )
 
 
-@rpc.method("gen_getContractCode")
+@rpc.method("gen_getContractCode", log_policy=LogPolicy.debug())
 def get_contract_code(
     contract_address: str,
     session: Session = Depends(get_db_session),
@@ -354,7 +354,7 @@ def get_contract_code(
     return impl.get_contract_code(session=session, contract_address=contract_address)
 
 
-@rpc.method("gen_getContractNonce")
+@rpc.method("gen_getContractNonce", log_policy=LogPolicy.debug())
 def get_contract_nonce(
     contract_address: str,
     session: Session = Depends(get_db_session),
@@ -527,14 +527,14 @@ def net_version() -> str:
     return impl.get_net_version()
 
 
-@rpc.method("eth_blockNumber")
+@rpc.method("eth_blockNumber", log_policy=LogPolicy.debug())
 def eth_block_number(
     transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
 ) -> str:
     return impl.get_block_number(transactions_processor)
 
 
-@rpc.method("eth_getBlockByNumber")
+@rpc.method("eth_getBlockByNumber", log_policy=LogPolicy.debug())
 def eth_get_block_by_number(
     block_number: str,
     full_transactions: bool,
@@ -547,12 +547,12 @@ def eth_get_block_by_number(
     )
 
 
-@rpc.method("eth_gasPrice")
+@rpc.method("eth_gasPrice", log_policy=LogPolicy.debug())
 def eth_gas_price() -> str:
     return impl.get_gas_price()
 
 
-@rpc.method("eth_estimateGas")
+@rpc.method("eth_estimateGas", log_policy=LogPolicy.debug())
 def eth_estimate_gas(
     transaction: dict,
 ) -> str:
@@ -570,7 +570,7 @@ def eth_get_transaction_receipt(
     )
 
 
-@rpc.method("eth_getBlockByHash")
+@rpc.method("eth_getBlockByHash", log_policy=LogPolicy.debug())
 def eth_get_block_by_hash(
     block_hash: str,
     full_transactions: bool,
