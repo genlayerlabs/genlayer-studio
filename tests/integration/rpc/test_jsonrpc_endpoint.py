@@ -112,6 +112,7 @@ async def test_create_readiness_check_handles_router_instance(jsonrpc_test_app):
     readiness_func = create_readiness_check_with_state(app.state.rpc_router)
     payload = await readiness_func()
 
+    assert isinstance(payload, dict)
     assert payload["rpc_router_initialized"] is True
     assert payload["status"] == "ready"
 
@@ -121,5 +122,9 @@ async def test_create_readiness_check_handles_missing_router():
     readiness_func = create_readiness_check_with_state(None)
     payload = await readiness_func()
 
-    assert payload["rpc_router_initialized"] is False
-    assert payload["status"] == "not_ready"
+    import json
+
+    assert payload.status_code == 503
+    body = json.loads(payload.body.decode())
+    assert body["rpc_router_initialized"] is False
+    assert body["status"] == "not_ready"

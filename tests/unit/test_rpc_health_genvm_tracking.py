@@ -14,8 +14,11 @@ class TestGenVMExecutionFailureTracking:
 
     def setup_method(self):
         health_module._genvm_consecutive_failures = 0
+        health_module._health_cache.genvm_healthy = True
 
-    def test_record_failure_increments(self):
+    def test_record_failure_increments_when_manager_unhealthy(self):
+        """Failures count toward liveness only when manager /status is also down."""
+        health_module._health_cache.genvm_healthy = False
         assert health_module._genvm_consecutive_failures == 0
 
         health_module.record_genvm_execution_failure()
@@ -23,6 +26,24 @@ class TestGenVMExecutionFailureTracking:
 
         health_module.record_genvm_execution_failure()
         assert health_module._genvm_consecutive_failures == 2
+
+    def test_record_failure_ignored_when_manager_healthy(self):
+        """When manager /status is healthy, failures are capacity-related — don't count."""
+        health_module._health_cache.genvm_healthy = True
+
+        health_module.record_genvm_execution_failure()
+        assert health_module._genvm_consecutive_failures == 0
+
+    def test_record_failure_resets_counter_when_manager_healthy(self):
+        """If counter was previously elevated, it resets when manager is healthy."""
+        health_module._health_cache.genvm_healthy = False
+        health_module.record_genvm_execution_failure()
+        health_module.record_genvm_execution_failure()
+        assert health_module._genvm_consecutive_failures == 2
+
+        health_module._health_cache.genvm_healthy = True
+        health_module.record_genvm_execution_failure()
+        assert health_module._genvm_consecutive_failures == 0
 
     def test_record_success_resets(self):
         health_module._genvm_consecutive_failures = 5
@@ -111,6 +132,8 @@ class TestReadinessWithExecutionFailures:
     def setup_method(self):
         health_module._genvm_consecutive_failures = 0
         health_module._genvm_failure_unhealthy_threshold = 3
+        health_module._health_cache.genvm_healthy = True
+        health_module._health_cache.genvm_available_permits = None
 
     @pytest.mark.asyncio
     async def test_ready_returns_not_ready_when_threshold_exceeded(self):
@@ -119,8 +142,13 @@ class TestReadinessWithExecutionFailures:
         check_fn = health_module.create_readiness_check_with_state(MagicMock())
         response = await check_fn()
 
-        assert response["status"] == "not_ready"
-        assert response["genvm_execution_failures"] == 3
+        # not-ready uses HTTP 503 so Kubernetes stops routing traffic
+        import json
+
+        assert response.status_code == 503
+        payload = json.loads(response.body.decode())
+        assert payload["status"] == "not_ready"
+        assert payload["genvm_execution_failures"] == 3
 
     @pytest.mark.asyncio
     async def test_ready_returns_ready_when_below_threshold(self):
@@ -129,6 +157,7 @@ class TestReadinessWithExecutionFailures:
         check_fn = health_module.create_readiness_check_with_state(MagicMock())
         response = await check_fn()
 
+        assert isinstance(response, dict)
         assert response["status"] == "ready"
         assert "genvm_execution_failures" not in response
 
@@ -137,8 +166,12 @@ class TestReadinessWithExecutionFailures:
         check_fn = health_module.create_readiness_check_with_state(None)
         response = await check_fn()
 
-        assert response["status"] == "not_ready"
-        assert response["rpc_router_initialized"] is False
+        import json
+
+        assert response.status_code == 503
+        payload = json.loads(response.body.decode())
+        assert payload["status"] == "not_ready"
+        assert payload["rpc_router_initialized"] is False
 
 
 class TestThresholdConfig:
