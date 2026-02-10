@@ -623,6 +623,7 @@ class Node:
             calldata,
             readonly=True,
             is_init=False,
+            is_sync=True,
             transaction_datetime=(
                 transaction_datetime
                 if transaction_datetime is not None
@@ -698,7 +699,7 @@ class Node:
             extra_args=["--debug-mode"],
             host_data='{"node_address":"0x", "tx_id":"0x"}',
             capture_output=True,
-            is_sync=False,
+            is_sync=True,
             logger=self.logger,
             timeout=30,
             manager_uri=self.manager.url,
@@ -735,6 +736,7 @@ class Node:
         *,
         readonly: bool,
         is_init: bool,
+        is_sync: bool = False,
         transaction_hash: str | None = None,
         transaction_datetime: datetime.datetime | None,
         state_status: str | None = None,
@@ -820,7 +822,7 @@ class Node:
                 capture_output=True,
                 host_data=json.dumps(host_data),
                 extra_args=["--debug-mode"],
-                is_sync=False,
+                is_sync=is_sync,
                 manager_uri=self.manager.url,
                 timeout=timeout,
                 code=code,
