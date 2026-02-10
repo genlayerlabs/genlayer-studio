@@ -169,7 +169,7 @@ def send_raw_transaction(signed_transaction: str):
     return wait_for_transaction(transaction_hash)
 
 
-def wait_for_transaction(transaction_hash: str, interval: int = 10, retries: int = 15):
+def wait_for_transaction(transaction_hash: str, interval: int = 10, retries: int = 30):
     attempts = 0
     while attempts < retries:
         transaction_response = get_transaction_by_hash(str(transaction_hash))
