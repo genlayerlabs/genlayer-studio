@@ -91,7 +91,7 @@ RUN cd /genvm \
     && ls -la \
     && chown -R worker-user:worker-group /genvm \
     && su - worker-user -c "/genvm/bin/post-install.py --precompile false" \
-    && sed -i 's|cache_dir:.*|cache_dir: /genvm-cache/|' /genvm/config/genvm.yaml \
+    && find /genvm -name genvm.yaml -exec sed -i 's|cache_dir:.*|cache_dir: /genvm-cache/|' {} + \
     && mkdir -p /genvm-cache && chown worker-user:worker-group /genvm-cache
 
 # Set GenVM environment variables (GENVM_TAG is already set as ENV earlier)
