@@ -92,6 +92,11 @@ RUN cd /genvm \
     && chown -R worker-user:worker-group /genvm \
     && su - worker-user -c "/genvm/bin/post-install.py --precompile false"
 
+# Patch GenVM cache path to a fixed, version-agnostic location
+RUN sed -i 's|cache_dir:.*|cache_dir: /genvm-cache/|' /genvm/executor/*/config/genvm.yaml || \
+    sed -i 's|cache_dir:.*|cache_dir: /genvm-cache/|' /genvm/config/genvm.yaml || true
+RUN mkdir -p /genvm-cache && chown -R worker-user:worker-group /genvm-cache
+
 # Set GenVM environment variables (GENVM_TAG is already set as ENV earlier)
 ENV GENVMROOT=/genvm
 ENV PATH="/genvm/bin:${PATH}"
