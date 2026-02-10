@@ -4,7 +4,7 @@ FROM ubuntu:24.04 AS base
 ARG TARGETPLATFORM
 ARG TARGETARCH
 
-ARG GENVM_TAG=v0.2.11
+ARG GENVM_TAG=v0.2.12
 ENV GENVM_TAG=$GENVM_TAG
 
 ARG path=/app
@@ -90,7 +90,9 @@ RUN cd /genvm \
     && echo "GenVM installed successfully:" \
     && ls -la \
     && chown -R worker-user:worker-group /genvm \
-    && su - worker-user -c "/genvm/bin/post-install.py --precompile false"
+    && su - worker-user -c "/genvm/bin/post-install.py --precompile false" \
+    && sed -i 's|cache_dir:.*|cache_dir: /genvm-cache/|' /genvm/config/genvm.yaml \
+    && mkdir -p /genvm-cache && chown worker-user:worker-group /genvm-cache
 
 # Set GenVM environment variables (GENVM_TAG is already set as ENV earlier)
 ENV GENVMROOT=/genvm
