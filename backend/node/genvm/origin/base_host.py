@@ -180,6 +180,15 @@ async def host_loop(
     call_counts = {}
     meth_id: host_fns.Methods | None = None
 
+    # Per-phase timing accumulators for STORAGE_READ
+    _sr_count = 0
+    _sr_socket_read_total = 0.0
+    _sr_handler_total = 0.0
+    _sr_socket_write_total = 0.0
+    _sr_max_handler = 0.0
+    _sr_max_socket_read = 0.0
+    _sr_max_socket_write = 0.0
+
     handling_start = time.time()
     while True:
         cur_delta = time.time() - handling_start
@@ -195,26 +204,64 @@ async def host_loop(
         handling_start = time.time()
         match meth_id:
             case host_fns.Methods.STORAGE_READ:
+                _t0 = time.perf_counter()
                 mode = await read_exact(1)
                 mode = public_abi.StorageType(mode[0])
                 account = await read_exact(ACCOUNT_ADDR_SIZE)
                 slot = await read_exact(SLOT_ID_SIZE)
                 index = await recv_int()
                 le = await recv_int()
+                _t1 = time.perf_counter()
                 try:
                     res = await handler.storage_read(mode, account, slot, index, le)
                     assert len(res) == le
                 except HostException as e:
                     await send_all(bytes([e.error_code]))
                 else:
+                    _t2 = time.perf_counter()
                     await send_all(bytes([host_fns.Errors.OK]))
                     await send_all(res)
+                    _t3 = time.perf_counter()
+                    _sr_count += 1
+                    _d_sock_r = _t1 - _t0
+                    _d_handler = _t2 - _t1
+                    _d_sock_w = _t3 - _t2
+                    _sr_socket_read_total += _d_sock_r
+                    _sr_handler_total += _d_handler
+                    _sr_socket_write_total += _d_sock_w
+                    if _d_sock_r > _sr_max_socket_read:
+                        _sr_max_socket_read = _d_sock_r
+                    if _d_handler > _sr_max_handler:
+                        _sr_max_handler = _d_handler
+                    if _d_sock_w > _sr_max_socket_write:
+                        _sr_max_socket_write = _d_sock_w
             case host_fns.Methods.CONSUME_RESULT:
-                logger.debug(
+                _sr_breakdown = {}
+                if _sr_count > 0:
+                    _sr_breakdown = {
+                        "count": _sr_count,
+                        "socket_read_total_ms": round(_sr_socket_read_total * 1000, 2),
+                        "handler_total_ms": round(_sr_handler_total * 1000, 2),
+                        "socket_write_total_ms": round(
+                            _sr_socket_write_total * 1000, 2
+                        ),
+                        "avg_socket_read_us": round(
+                            _sr_socket_read_total / _sr_count * 1e6, 1
+                        ),
+                        "avg_handler_us": round(_sr_handler_total / _sr_count * 1e6, 1),
+                        "avg_socket_write_us": round(
+                            _sr_socket_write_total / _sr_count * 1e6, 1
+                        ),
+                        "max_socket_read_us": round(_sr_max_socket_read * 1e6, 1),
+                        "max_handler_us": round(_sr_max_handler * 1e6, 1),
+                        "max_socket_write_us": round(_sr_max_socket_write * 1e6, 1),
+                    }
+                logger.info(
                     "handling time",
                     total=total_handling_time,
                     by_method=time_per_method,
                     call_counts=call_counts,
+                    storage_read_breakdown=_sr_breakdown,
                 )
                 res = await read_slice()
 
