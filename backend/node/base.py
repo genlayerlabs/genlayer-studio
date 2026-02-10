@@ -930,6 +930,7 @@ class Node:
             },
             processing_time=result.processing_time,
             nondet_disagree=result.nondet_disagree,
+            execution_stats=result.execution_stats,
         )
 
         if self.validator_mode == ExecutionMode.LEADER:
