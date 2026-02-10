@@ -2,6 +2,10 @@
 """
 Logging configuration for uvicorn access logs.
 Filters out health check endpoints to reduce log noise.
+
+Routes logs to stdout/stderr based on severity for proper GCP Cloud Logging:
+- DEBUG/INFO/WARNING → stdout (GCP labels as INFO/default severity)
+- ERROR/CRITICAL → stderr (GCP labels as ERROR severity)
 """
 
 import logging
@@ -28,11 +32,29 @@ class HealthCheckFilter(logging.Filter):
         return True
 
 
+class InfoAndBelowFilter(logging.Filter):
+    """Filter to only allow DEBUG, INFO, and WARNING logs (below ERROR)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno < logging.ERROR
+
+
+class ErrorAndAboveFilter(logging.Filter):
+    """Filter to only allow ERROR and CRITICAL logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno >= logging.ERROR
+
+
 def get_uvicorn_log_config() -> dict:
     """Get a uvicorn-compatible logging configuration dict.
 
     This can be passed to uvicorn.run(log_config=...) for more
     comprehensive logging control.
+
+    Routes logs to stdout/stderr based on severity for proper GCP Cloud Logging:
+    - DEBUG/INFO/WARNING → stdout (GCP labels as INFO/default severity)
+    - ERROR/CRITICAL → stderr (GCP labels as ERROR severity)
     """
     log_level = os.getenv("LOG_LEVEL", "info").upper()
 
@@ -42,6 +64,12 @@ def get_uvicorn_log_config() -> dict:
         "filters": {
             "health_check_filter": {
                 "()": HealthCheckFilter,
+            },
+            "info_and_below": {
+                "()": InfoAndBelowFilter,
+            },
+            "error_and_above": {
+                "()": ErrorAndAboveFilter,
             },
         },
         "formatters": {
@@ -56,10 +84,19 @@ def get_uvicorn_log_config() -> dict:
             },
         },
         "handlers": {
-            "default": {
+            # Non-error logs to stdout (GCP labels as INFO/default)
+            "default_stdout": {
+                "formatter": "default",
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stdout",
+                "filters": ["info_and_below"],
+            },
+            # Error logs to stderr (GCP labels as ERROR)
+            "default_stderr": {
                 "formatter": "default",
                 "class": "logging.StreamHandler",
                 "stream": "ext://sys.stderr",
+                "filters": ["error_and_above"],
             },
             "access": {
                 "formatter": "access",
@@ -70,13 +107,13 @@ def get_uvicorn_log_config() -> dict:
         },
         "loggers": {
             "uvicorn": {
-                "handlers": ["default"],
+                "handlers": ["default_stdout", "default_stderr"],
                 "level": log_level,
                 "propagate": False,
             },
             "uvicorn.error": {
                 "level": log_level,
-                "handlers": ["default"],
+                "handlers": ["default_stdout", "default_stderr"],
                 "propagate": False,
             },
             "uvicorn.access": {
