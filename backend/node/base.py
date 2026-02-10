@@ -134,6 +134,7 @@ class _SnapshotView(genvmbase.StateProxy):
         self.cached = {}
         self.readonly = readonly
         self.state_status = state_status if state_status else "accepted"
+        self._decoded: dict[str, dict[bytes, bytes]] = {}
 
     def _get_snapshot(self, addr: Address) -> ContractSnapshot:
         if addr == self.contract_address:
@@ -145,15 +146,31 @@ class _SnapshotView(genvmbase.StateProxy):
         self.cached[addr] = res
         return res
 
+    def _get_decoded(self, snap: ContractSnapshot) -> dict[bytes, bytes]:
+        addr = snap.contract_address
+        decoded = self._decoded.get(addr)
+        if decoded is None:
+            state = snap.states.get(self.state_status, {})
+            decoded = {
+                base64.b64decode(k): base64.b64decode(v) for k, v in state.items()
+            }
+            self._decoded[addr] = decoded
+        return decoded
+
     def storage_read(
         self, account: Address, slot: bytes, index: int, le: int, /
     ) -> bytes:
         snap = self._get_snapshot(account)
-        slot_id = base64.b64encode(slot).decode("ascii")
-        for_slot = snap.states[self.state_status].setdefault(slot_id, "")
-        data = bytearray(base64.b64decode(for_slot))
-        data.extend(b"\x00" * (index + le - len(data)))
-        return data[index : index + le]
+        decoded = self._get_decoded(snap)
+        data = decoded.get(slot, b"")
+        end = index + le
+        if end <= len(data):
+            return data[index:end]
+        result = bytearray(le)
+        available = len(data) - index
+        if available > 0:
+            result[:available] = data[index : index + available]
+        return bytes(result)
 
     def storage_write(
         self,
@@ -164,12 +181,13 @@ class _SnapshotView(genvmbase.StateProxy):
     ) -> None:
         assert not self.readonly
         snap = self._get_snapshot(self.contract_address)
-        slot_id = base64.b64encode(slot).decode("ascii")
-        for_slot = snap.states[self.state_status].setdefault(slot_id, "")
-        data = bytearray(base64.b64decode(for_slot))
+        decoded = self._get_decoded(snap)
+        data = bytearray(decoded.get(slot, b""))
         mem = memoryview(got)
         data.extend(b"\x00" * (index + len(mem) - len(data)))
         data[index : index + len(mem)] = mem
+        decoded[slot] = bytes(data)
+        slot_id = base64.b64encode(slot).decode("ascii")
         snap.states[self.state_status][slot_id] = base64.b64encode(data).decode("utf-8")
 
     def get_balance(self, addr: Address) -> int:
