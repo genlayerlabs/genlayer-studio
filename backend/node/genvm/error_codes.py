@@ -45,12 +45,14 @@ class GenVMInternalError(Exception):
         causes: list[str],
         is_fatal: bool,
         is_leader: bool | None = None,
+        detail: str | None = None,
     ):
         super().__init__(message)
         self.error_code = error_code
         self.causes = causes
         self.is_fatal = is_fatal
         self.is_leader = is_leader
+        self.detail = detail
 
     def __repr__(self) -> str:
         return (
