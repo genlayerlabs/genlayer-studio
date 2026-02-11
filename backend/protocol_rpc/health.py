@@ -87,7 +87,7 @@ class HealthCache:
     services: Dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
     # GenVM-specific (triggers 503 on failure)
-    genvm_healthy: bool = True
+    genvm_healthy: bool = False
     genvm_error: Optional[str] = None
     # GenVM manager capacity (best-effort; populated from /status when available)
     genvm_max_permits: Optional[int] = None

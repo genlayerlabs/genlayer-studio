@@ -400,6 +400,9 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
         redis_subscriber.register_handler(
             "all_validators_deleted", handle_validator_change
         )
+        redis_subscriber.register_handler(
+            "validators_replaced", handle_validator_change
+        )
 
         logger.info(
             f"[STARTUP] Redis subscriber connected at {redis_url} for worker event broadcasting"
