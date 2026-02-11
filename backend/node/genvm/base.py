@@ -218,6 +218,7 @@ class Host(genvmhost.IHost):
                 error_code=error_code,
                 causes=causes,
                 is_fatal=is_fatal,
+                detail=error_str[:1000],
             )
         else:
             raise Exception(f"invalid result {res.result_kind}")

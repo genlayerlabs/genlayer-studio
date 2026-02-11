@@ -56,6 +56,12 @@ from backend.database_handler.snapshot_manager import SnapshotManager
 from backend.node.base import Manager as GenVMManager
 import asyncio
 
+# Limit concurrent GenVM executions on the jsonrpc path to prevent uvloop fd conflicts.
+# Workers use asyncio.Semaphore(8) in consensus/base.py; gen_call had none, allowing
+# unbounded concurrent GenVM socket operations that cause fd registry collisions.
+_GENVM_CONCURRENCY = int(os.environ.get("GENVM_MAX_CONCURRENT", "8"))
+_genvm_semaphore = asyncio.Semaphore(_GENVM_CONCURRENCY)
+
 
 ####### ADMIN ACCESS CONTROL #######
 def require_admin_access(func):
@@ -959,64 +965,65 @@ async def _gen_call_with_validator(
         sim_config is not None and sim_config.genvm_datetime is not None
     )
 
-    if type == "read":
-        # Pre-parse timestamp override and map errors
-        txn_dt = None
-        if sim_config and override_transaction_datetime:
-            try:
-                txn_dt = sim_config.genvm_datetime_as_datetime
-            except ValueError as e:
-                raise JSONRPCError(
-                    code=-32602,
-                    message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
-                    data={},
-                ) from e
-        decoded_data = transactions_parser.decode_method_call_data(data)
-        receipt = await node.get_contract_data(
-            from_address=from_address,
-            calldata=decoded_data.calldata,
-            state_status=state_status,
-            transaction_datetime=txn_dt,
-        )
-    elif type == "write":
-        txn_created_at = None
-        if sim_config and override_transaction_datetime:
-            try:
-                _ = sim_config.genvm_datetime_as_datetime  # validation only
-                txn_created_at = sim_config.genvm_datetime
-            except ValueError as e:
-                raise JSONRPCError(
-                    code=-32602,
-                    message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
-                    data={},
-                ) from e
-        decoded_data = transactions_parser.decode_method_send_data(data)
-        receipt = await node.run_contract(
-            from_address=from_address,
-            calldata=decoded_data.calldata,
-            transaction_created_at=txn_created_at,
-        )
-    elif type == "deploy":
-        txn_created_at = None
-        if sim_config and override_transaction_datetime:
-            try:
-                _ = sim_config.genvm_datetime_as_datetime  # validation only
-                txn_created_at = sim_config.genvm_datetime
-            except ValueError as e:
-                raise JSONRPCError(
-                    code=-32602,
-                    message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
-                    data={},
-                ) from e
-        decoded_data = transactions_parser.decode_deployment_data(data)
-        receipt = await node.deploy_contract(
-            from_address=from_address,
-            code_to_deploy=decoded_data.contract_code,
-            calldata=decoded_data.calldata,
-            transaction_created_at=txn_created_at,
-        )
-    else:
-        raise JSONRPCError(f"Invalid type: {type}")
+    async with _genvm_semaphore:
+        if type == "read":
+            # Pre-parse timestamp override and map errors
+            txn_dt = None
+            if sim_config and override_transaction_datetime:
+                try:
+                    txn_dt = sim_config.genvm_datetime_as_datetime
+                except ValueError as e:
+                    raise JSONRPCError(
+                        code=-32602,
+                        message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                        data={},
+                    ) from e
+            decoded_data = transactions_parser.decode_method_call_data(data)
+            receipt = await node.get_contract_data(
+                from_address=from_address,
+                calldata=decoded_data.calldata,
+                state_status=state_status,
+                transaction_datetime=txn_dt,
+            )
+        elif type == "write":
+            txn_created_at = None
+            if sim_config and override_transaction_datetime:
+                try:
+                    _ = sim_config.genvm_datetime_as_datetime  # validation only
+                    txn_created_at = sim_config.genvm_datetime
+                except ValueError as e:
+                    raise JSONRPCError(
+                        code=-32602,
+                        message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                        data={},
+                    ) from e
+            decoded_data = transactions_parser.decode_method_send_data(data)
+            receipt = await node.run_contract(
+                from_address=from_address,
+                calldata=decoded_data.calldata,
+                transaction_created_at=txn_created_at,
+            )
+        elif type == "deploy":
+            txn_created_at = None
+            if sim_config and override_transaction_datetime:
+                try:
+                    _ = sim_config.genvm_datetime_as_datetime  # validation only
+                    txn_created_at = sim_config.genvm_datetime
+                except ValueError as e:
+                    raise JSONRPCError(
+                        code=-32602,
+                        message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                        data={},
+                    ) from e
+            decoded_data = transactions_parser.decode_deployment_data(data)
+            receipt = await node.deploy_contract(
+                from_address=from_address,
+                code_to_deploy=decoded_data.contract_code,
+                calldata=decoded_data.calldata,
+                transaction_created_at=txn_created_at,
+            )
+        else:
+            raise JSONRPCError(f"Invalid type: {type}")
 
     # Return the result of the write method
     if receipt.execution_result != ExecutionResultStatus.SUCCESS:
