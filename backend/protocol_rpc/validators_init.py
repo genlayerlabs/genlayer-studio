@@ -108,9 +108,6 @@ async def initialize_validators(
             f"Validators config changed (current={current_hash} desired={desired_hash}), reinitializing"
         )
 
-    # Delete all existing validators using the manager's registry (triggers snapshot update)
-    await validators_manager.registry.delete_all_validators()
-
     # Import necessary dependencies for validator creation
     from backend.database_handler.accounts_manager import AccountsManager
     from backend.domain.types import Validator, LLMProvider
@@ -118,7 +115,7 @@ async def initialize_validators(
 
     accounts_manager = AccountsManager(db_session)
 
-    # Collect all validators to create in a batch
+    # Collect all validators to create
     validators_to_create: list[Validator] = []
 
     for validator_data in validators_data:
@@ -126,7 +123,6 @@ async def initialize_validators(
             validator_config = ValidatorConfig(**validator_data)
 
             for _ in range(validator_config.amount):
-                # Prepare LLM provider
                 llm_provider = get_default_provider_for(
                     validator_config.provider, validator_config.model
                 )
@@ -137,7 +133,6 @@ async def initialize_validators(
                 if validator_config.plugin_config is not None:
                     llm_provider.plugin_config = validator_config.plugin_config
 
-                # Create account
                 account = accounts_manager.create_new_account()
 
                 validators_to_create.append(
@@ -152,7 +147,8 @@ async def initialize_validators(
         except Exception as e:
             raise ValueError(f"Failed to create validator `{validator_data}`: {str(e)}")
 
-    # Batch create all validators with a single restart at the end
+    # Atomic replace: delete all + create new in one transaction, one Redis event.
+    # Workers never see 0 validators.
     if validators_to_create:
-        logger.info(f"Batch creating {len(validators_to_create)} validators")
-        await validators_manager.registry.batch_create_validators(validators_to_create)
+        logger.info(f"Atomic replacing validators ({len(validators_to_create)} new)")
+        await validators_manager.registry.replace_all_validators(validators_to_create)

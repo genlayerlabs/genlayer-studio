@@ -17,8 +17,7 @@ async def test_initialize_validators_empty_json():
 
     await initialize_validators("", mock_db_session, validators_manager)
 
-    mock_registry.delete_all_validators.assert_not_called()
-    mock_registry.batch_create_validators.assert_not_called()
+    mock_registry.replace_all_validators.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -38,8 +37,7 @@ async def test_initialize_validators_skips_when_config_unchanged():
 
     await initialize_validators(validators_json, mock_db_session, validators_manager)
 
-    mock_registry.delete_all_validators.assert_not_called()
-    mock_registry.batch_create_validators.assert_not_called()
+    mock_registry.replace_all_validators.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -47,7 +45,7 @@ async def test_initialize_validators_reinitializes_when_config_changed():
     """If DB validators differ from desired config, reinitialize."""
     mock_db_session = Mock()
     mock_registry = AsyncMock()
-    mock_registry.batch_create_validators = AsyncMock()
+    mock_registry.replace_all_validators = AsyncMock()
     # DB has old config
     mock_registry.get_all_validators = Mock(
         return_value=[
@@ -86,8 +84,7 @@ async def test_initialize_validators_reinitializes_when_config_changed():
                 validators_json, mock_db_session, validators_manager
             )
 
-            mock_registry.delete_all_validators.assert_called_once()
-            mock_registry.batch_create_validators.assert_called_once()
+            mock_registry.replace_all_validators.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -119,7 +116,7 @@ async def test_initialize_validators_success():
     """Test successful initialization when DB is empty"""
     mock_db_session = Mock()
     mock_registry = AsyncMock()
-    mock_registry.batch_create_validators = AsyncMock()
+    mock_registry.replace_all_validators = AsyncMock()
     # Empty DB → get_all_validators returns empty list
     mock_registry.get_all_validators = Mock(return_value=[])
     validators_manager = SimpleNamespace(registry=mock_registry)
@@ -166,9 +163,8 @@ async def test_initialize_validators_success():
                 validators_json, mock_db_session, validators_manager
             )
 
-            mock_registry.delete_all_validators.assert_called_once()
-            mock_registry.batch_create_validators.assert_called_once()
-            validators_arg = mock_registry.batch_create_validators.call_args[0][0]
+            mock_registry.replace_all_validators.assert_called_once()
+            validators_arg = mock_registry.replace_all_validators.call_args[0][0]
             assert len(validators_arg) == 3
             mock_accounts_manager_class.assert_called_once_with(mock_db_session)
             assert mock_accounts_manager.create_new_account.call_count == 3
@@ -201,7 +197,7 @@ async def test_initialize_validators_batch_create_error():
     """Test that batch_create_validators errors are properly propagated"""
     mock_db_session = Mock()
     mock_registry = AsyncMock()
-    mock_registry.batch_create_validators = AsyncMock(
+    mock_registry.replace_all_validators = AsyncMock(
         side_effect=Exception("Batch create error")
     )
     mock_registry.get_all_validators = Mock(return_value=[])
