@@ -425,7 +425,7 @@ class _MockReceipt:
     def to_dict(self, strip_contract_state=False):
         return {
             "vote": "agree",
-            "result": "ok",
+            "result": "AG9r",  # base64 of b'\x00ok' — _process_messages decodes result[0] as kind
             "node_config": {"address": "0x" + "aa" * 20},
         }
 
