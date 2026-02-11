@@ -6,7 +6,6 @@ import re
 import random
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, desc, and_, JSON, type_coerce, text
-from sqlalchemy.orm.attributes import flag_modified
 
 from backend.node.types import Vote, Receipt, ExecutionResultStatus
 from .models import Transactions, TransactionStatus
@@ -1043,21 +1042,22 @@ class TransactionsProcessor:
         validator_results: list[Receipt],
         extra_status_change: TransactionStatus | None = None,
     ):
-        # Expire cached ORM objects to ensure we read fresh data after raw SQL writes
-        self.session.expire_all()
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
-        )
+        # Narrow SELECT — only loads consensus_history, avoids 53MB contract_snapshot.
+        # FOR UPDATE locks the row to prevent lost updates from concurrent workers.
+        row = self.session.execute(
+            text(
+                "SELECT consensus_history FROM transactions"
+                " WHERE hash = :hash FOR UPDATE"
+            ),
+            {"hash": transaction_hash},
+        ).one()
+        current_history = row[0] or {}
 
-        status_changes_to_use = (
-            transaction.consensus_history["current_status_changes"]
-            if "current_status_changes" in transaction.consensus_history
-            else []
-        )
+        status_changes_to_use = list(current_history.get("current_status_changes", []))
         if extra_status_change:
             status_changes_to_use.append(extra_status_change.value)
 
-        monitoring_to_use = transaction.consensus_history.get("current_monitoring", {})
+        monitoring_to_use = current_history.get("current_monitoring", {})
 
         current_consensus_results = {
             "consensus_round": consensus_round.value,
@@ -1077,19 +1077,24 @@ class TransactionsProcessor:
             "monitoring": monitoring_to_use,
         }
 
-        if "consensus_results" in transaction.consensus_history:
-            transaction.consensus_history["consensus_results"].append(
-                current_consensus_results
-            )
-        else:
-            transaction.consensus_history["consensus_results"] = [
-                current_consensus_results
-            ]
+        consensus_results = list(current_history.get("consensus_results", []))
+        consensus_results.append(current_consensus_results)
 
-        transaction.consensus_history["current_status_changes"] = []
-        transaction.consensus_history["current_monitoring"] = {}
+        new_history = {
+            **current_history,
+            "consensus_results": consensus_results,
+            "current_status_changes": [],
+            "current_monitoring": {},
+        }
 
-        flag_modified(transaction, "consensus_history")
+        self.session.execute(
+            text(
+                "UPDATE transactions"
+                " SET consensus_history = CAST(:data AS jsonb)"
+                " WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash, "data": json.dumps(new_history)},
+        )
         self.session.commit()
 
     def reset_consensus_history(self, transaction_hash: str):
