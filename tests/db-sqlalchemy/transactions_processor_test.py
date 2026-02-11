@@ -423,7 +423,11 @@ class TestConsensusHistoryJsonbEdgeCases:
 
 class _MockReceipt:
     def to_dict(self, strip_contract_state=False):
-        return {"vote": "agree", "result": "ok"}
+        return {
+            "vote": "agree",
+            "result": "ok",
+            "node_config": {"address": "0x" + "aa" * 20},
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +466,7 @@ class TestConsensusHistory:
         tp.update_consensus_history(
             tx_hash,
             ConsensusRound.ACCEPTED,
-            None,
+            [_MockReceipt()],
             [],
         )
         tp.session.expire_all()
@@ -470,12 +474,12 @@ class TestConsensusHistory:
         results = tx["consensus_history"]["consensus_results"]
         assert len(results) == 1
         assert results[0]["consensus_round"] == ConsensusRound.ACCEPTED.value
-        assert results[0]["leader_result"] is None
+        assert results[0]["leader_result"] is not None
         assert results[0]["validator_results"] == []
 
     def test_update_consensus_history_appends_rounds(self, tp, session):
         tx_hash = _make_tx(tp)
-        tp.update_consensus_history(tx_hash, ConsensusRound.ACCEPTED, None, [])
+        tp.update_consensus_history(tx_hash, ConsensusRound.ACCEPTED, [_MockReceipt()], [])
         tp.update_consensus_history(
             tx_hash, ConsensusRound.LEADER_ROTATION, [_MockReceipt()], [_MockReceipt()]
         )
