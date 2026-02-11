@@ -8,6 +8,7 @@ if [ -f "$CACHE_MARKER" ]; then
 else
     echo "Precompiling GenVM ${GENVM_TAG} for host CPU..."
     /genvm/bin/post-install.py --default-steps false --precompile true
+    mkdir -p "$(dirname "$CACHE_MARKER")"
     touch "$CACHE_MARKER"
     echo "Precompilation complete."
 fi
