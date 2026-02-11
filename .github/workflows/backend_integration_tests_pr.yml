@@ -144,7 +144,9 @@ jobs:
       - name: Run tests (parallel)
         run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/ -svv -n 8 --ignore=tests/integration/test_validators.py
 
-      - name: Run validator CRUD tests (serial)
+      # Validator smoke test runs serial (GenVM LLM module restarts on each CRUD op).
+      # Full CRUD coverage is in db-sqlalchemy/validators_registry_test.py (<1s).
+      - name: Run validator smoke test (serial)
         run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/test_validators.py -svv
 
       - name: Dump Docker Compose logs
