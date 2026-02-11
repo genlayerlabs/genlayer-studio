@@ -764,10 +764,14 @@ class TransactionsProcessor:
                     UPDATE transactions
                     SET status = CAST(:new_status AS transaction_status),
                         consensus_history = jsonb_set(
-                            COALESCE(consensus_history, '{}'::jsonb),
+                            CASE WHEN jsonb_typeof(consensus_history) = 'object'
+                                 THEN consensus_history
+                                 ELSE '{}'::jsonb
+                            END,
                             '{current_status_changes}',
                             CASE
-                                WHEN consensus_history->'current_status_changes' IS NOT NULL
+                                WHEN jsonb_typeof(consensus_history) = 'object'
+                                     AND consensus_history->'current_status_changes' IS NOT NULL
                                 THEN consensus_history->'current_status_changes' || to_jsonb(CAST(:status_val AS text))
                                 ELSE jsonb_build_array(CAST(:pending_val AS text), CAST(:status_val AS text))
                             END
@@ -815,9 +819,16 @@ class TransactionsProcessor:
                 UPDATE transactions
                 SET consensus_history = jsonb_set(
                     jsonb_set(
-                        COALESCE(consensus_history, '{}'::jsonb),
+                        CASE WHEN jsonb_typeof(consensus_history) = 'object'
+                             THEN consensus_history
+                             ELSE '{}'::jsonb
+                        END,
                         '{current_monitoring}',
-                        COALESCE(consensus_history->'current_monitoring', '{}'::jsonb)
+                        CASE WHEN jsonb_typeof(consensus_history) = 'object'
+                                  AND consensus_history->'current_monitoring' IS NOT NULL
+                             THEN consensus_history->'current_monitoring'
+                             ELSE '{}'::jsonb
+                        END
                     ),
                     ARRAY['current_monitoring', :state_name],
                     to_jsonb(CAST(:ts AS double precision))
