@@ -281,7 +281,7 @@ class ConsensusWorker:
         query = text(
             """
             WITH locked_appeals AS (
-                SELECT t.*
+                SELECT t.hash, t.to_address, t.created_at
                 FROM transactions t
                 WHERE t.appealed = true
                     AND t.status IN ('ACCEPTED', 'UNDETERMINED', 'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT')
@@ -323,7 +323,7 @@ class ConsensusWorker:
                       transactions.data, transactions.value, transactions.type, transactions.nonce,
                       transactions.gaslimit, transactions.r, transactions.s, transactions.v,
                       transactions.leader_only, transactions.execution_mode, transactions.sim_config,
-                      transactions.contract_snapshot, transactions.status, transactions.consensus_data,
+                      transactions.status, transactions.consensus_data,
                       transactions.input_data, transactions.created_at, transactions.appealed,
                       transactions.appeal_failed, transactions.timestamp_appeal,
                       transactions.appeal_undetermined, transactions.appeal_leader_timeout,
@@ -359,7 +359,6 @@ class ConsensusWorker:
                 "leader_only": result.leader_only,
                 "execution_mode": result.execution_mode,
                 "sim_config": result.sim_config,
-                "contract_snapshot": result.contract_snapshot,
                 "status": result.status,
                 "consensus_data": result.consensus_data,
                 "input_data": result.input_data,
@@ -389,7 +388,7 @@ class ConsensusWorker:
         query = text(
             """
             WITH candidate_transactions AS (
-                SELECT t.*
+                SELECT t.hash, t.to_address, t.created_at
                 FROM transactions t
                 WHERE t.status IN ('PENDING', 'ACTIVATED')
                     AND (t.blocked_at IS NULL
@@ -429,7 +428,7 @@ class ConsensusWorker:
                       transactions.data, transactions.value, transactions.type, transactions.nonce,
                       transactions.gaslimit, transactions.r, transactions.s, transactions.v,
                       transactions.leader_only, transactions.execution_mode, transactions.sim_config,
-                      transactions.contract_snapshot, transactions.status, transactions.consensus_data,
+                      transactions.status, transactions.consensus_data,
                       transactions.input_data, transactions.created_at, transactions.blocked_at;
         """
         )
@@ -463,7 +462,6 @@ class ConsensusWorker:
                 "leader_only": result.leader_only,
                 "execution_mode": result.execution_mode,
                 "sim_config": result.sim_config,
-                "contract_snapshot": result.contract_snapshot,
                 "status": result.status,
                 "consensus_data": result.consensus_data,
                 "input_data": result.input_data,
@@ -753,7 +751,6 @@ class ConsensusWorker:
                 from backend.consensus.base import (
                     contract_snapshot_factory,
                     contract_processor_factory,
-                    chain_snapshot_factory,
                     transactions_processor_factory,
                     accounts_manager_factory,
                     node_factory,
@@ -806,7 +803,7 @@ class ConsensusWorker:
                         await self.consensus_algorithm.exec_transaction(
                             transaction,
                             transactions_processor_factory(session),
-                            chain_snapshot_factory(session),
+                            None,  # chain_snapshot not used by state handlers
                             accounts_manager_factory(session),
                             lambda contract_address: contract_snapshot_factory(
                                 contract_address, session, transaction
@@ -820,7 +817,7 @@ class ConsensusWorker:
                         await self.consensus_algorithm.exec_transaction(
                             transaction,
                             transactions_processor_factory(session),
-                            chain_snapshot_factory(session),
+                            None,  # chain_snapshot not used by state handlers
                             accounts_manager_factory(session),
                             lambda contract_address: contract_snapshot_factory(
                                 contract_address, session, transaction
@@ -1207,7 +1204,6 @@ class ConsensusWorker:
             from backend.consensus.base import (
                 contract_snapshot_factory,
                 contract_processor_factory,
-                chain_snapshot_factory,
                 transactions_processor_factory,
                 accounts_manager_factory,
                 node_factory,
@@ -1215,7 +1211,6 @@ class ConsensusWorker:
 
             # Process the appeal based on status
             transactions_processor = transactions_processor_factory(session)
-            chain_snapshot = chain_snapshot_factory(session)
             accounts_manager = accounts_manager_factory(session)
 
             async with self.validators_manager.snapshot() as validators_snapshot:
@@ -1224,7 +1219,7 @@ class ConsensusWorker:
                     await self.consensus_algorithm.process_leader_appeal(
                         transaction,
                         transactions_processor,
-                        chain_snapshot,
+                        None,  # chain_snapshot not used by state handlers
                         accounts_manager,
                         lambda contract_address: contract_snapshot_factory(
                             contract_address, session, transaction
@@ -1238,7 +1233,7 @@ class ConsensusWorker:
                     await self.consensus_algorithm.process_leader_timeout_appeal(
                         transaction,
                         transactions_processor,
-                        chain_snapshot,
+                        None,  # chain_snapshot not used by state handlers
                         accounts_manager,
                         lambda contract_address: contract_snapshot_factory(
                             contract_address, session, transaction
@@ -1252,7 +1247,7 @@ class ConsensusWorker:
                     await self.consensus_algorithm.process_validator_appeal(
                         transaction,
                         transactions_processor,
-                        chain_snapshot,
+                        None,  # chain_snapshot not used by state handlers
                         accounts_manager,
                         lambda contract_address: contract_snapshot_factory(
                             contract_address, session, transaction

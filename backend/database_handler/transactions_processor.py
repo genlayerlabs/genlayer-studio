@@ -629,6 +629,8 @@ class TransactionsProcessor:
     def get_transaction_by_hash(
         self, transaction_hash: str, sim_config: dict | None = None
     ) -> dict | None:
+        # Expire cached ORM objects to ensure we read fresh data after raw SQL writes
+        self.session.expire_all()
         transaction = (
             self.session.query(Transactions)
             .filter_by(hash=transaction_hash)
@@ -796,8 +798,6 @@ class TransactionsProcessor:
             return
 
         self.session.commit()
-        # Expire any cached ORM objects so they reflect the raw SQL changes
-        self.session.expire_all()
 
     def add_state_timestamp(self, transaction_hash: str, state_name: str):
         """
@@ -836,24 +836,26 @@ class TransactionsProcessor:
             return
 
         self.session.commit()
-        # Expire any cached ORM objects so they reflect the raw SQL changes
-        self.session.expire_all()
 
     def set_transaction_result(
         self, transaction_hash: str, consensus_data: dict | None
     ):
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
+        result = self.session.execute(
+            text(
+                "UPDATE transactions SET consensus_data = CAST(:data AS jsonb) WHERE hash = :hash"
+            ),
+            {
+                "hash": transaction_hash,
+                "data": json.dumps(consensus_data) if consensus_data else None,
+            },
         )
 
-        # If transaction doesn't exist (e.g., after snapshot restore), skip update
-        if not transaction:
+        if result.rowcount == 0:
             print(
                 f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping result update"
             )
             return
 
-        transaction.consensus_data = consensus_data
         self.session.commit()
 
     def get_transaction_count(self, address: str) -> int:
@@ -898,63 +900,72 @@ class TransactionsProcessor:
         ]
 
     def set_transaction_appeal(self, transaction_hash: str, appeal: bool):
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
-        )
-        # You can only appeal the transaction if it is in accepted or undetermined state
-        # Setting it to false is always allowed
         if not appeal:
-            transaction.appealed = appeal
+            self.session.execute(
+                text("UPDATE transactions SET appealed = :appeal WHERE hash = :hash"),
+                {"hash": transaction_hash, "appeal": appeal},
+            )
             self.session.commit()
-        elif transaction.status in (
-            TransactionStatus.ACCEPTED,
-            TransactionStatus.UNDETERMINED,
-            TransactionStatus.LEADER_TIMEOUT,
-            TransactionStatus.VALIDATORS_TIMEOUT,
-        ):
-            transaction.appealed = appeal
-            self.set_transaction_timestamp_appeal(transaction, int(time.time()))
-            self.session.commit()
+        else:
+            # Only appeal if transaction is in an appealable status
+            result = self.session.execute(
+                text(
+                    """
+                    UPDATE transactions
+                    SET appealed = :appeal,
+                        timestamp_appeal = :ts
+                    WHERE hash = :hash
+                      AND status IN ('ACCEPTED', 'UNDETERMINED', 'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT')
+                    """
+                ),
+                {"hash": transaction_hash, "appeal": appeal, "ts": int(time.time())},
+            )
+            if result.rowcount > 0:
+                self.session.commit()
 
     def set_transaction_timestamp_awaiting_finalization(
         self, transaction_hash: str, timestamp_awaiting_finalization: int = None
     ):
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        ts = (
+            timestamp_awaiting_finalization
+            if timestamp_awaiting_finalization
+            else int(time.time())
         )
-        if timestamp_awaiting_finalization:
-            transaction.timestamp_awaiting_finalization = (
-                timestamp_awaiting_finalization
-            )
-        else:
-            transaction.timestamp_awaiting_finalization = int(time.time())
+        self.session.execute(
+            text(
+                "UPDATE transactions SET timestamp_awaiting_finalization = :ts WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash, "ts": ts},
+        )
 
     def set_transaction_appeal_failed(self, transaction_hash: str, appeal_failed: int):
         if appeal_failed < 0:
             raise ValueError("appeal_failed must be a non-negative integer")
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
+        result = self.session.execute(
+            text("UPDATE transactions SET appeal_failed = :val WHERE hash = :hash"),
+            {"hash": transaction_hash, "val": appeal_failed},
         )
-        if not transaction:
+        if result.rowcount == 0:
             print(
                 f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping appeal_failed update"
             )
             return
-        transaction.appeal_failed = appeal_failed
         self.session.commit()
 
     def set_transaction_appeal_undetermined(
         self, transaction_hash: str, appeal_undetermined: bool
     ):
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
+        result = self.session.execute(
+            text(
+                "UPDATE transactions SET appeal_undetermined = :val WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash, "val": appeal_undetermined},
         )
-        if not transaction:
+        if result.rowcount == 0:
             print(
                 f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping appeal_undetermined update"
             )
             return
-        transaction.appeal_undetermined = appeal_undetermined
         self.session.commit()
 
     def get_highest_timestamp(self) -> int:
@@ -1032,6 +1043,8 @@ class TransactionsProcessor:
         validator_results: list[Receipt],
         extra_status_change: TransactionStatus | None = None,
     ):
+        # Expire cached ORM objects to ensure we read fresh data after raw SQL writes
+        self.session.expire_all()
         transaction = (
             self.session.query(Transactions).filter_by(hash=transaction_hash).one()
         )
@@ -1080,57 +1093,63 @@ class TransactionsProcessor:
         self.session.commit()
 
     def reset_consensus_history(self, transaction_hash: str):
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        self.session.execute(
+            text(
+                "UPDATE transactions SET consensus_history = '{}'::jsonb WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash},
         )
-        transaction.consensus_history = {}
         self.session.commit()
 
     def set_transaction_timestamp_appeal(
         self, transaction: Transactions | str, timestamp_appeal: int | None
     ):
-        if isinstance(transaction, str):  # hash
-            transaction = (
-                self.session.query(Transactions).filter_by(hash=transaction).one()
-            )
-        transaction.timestamp_appeal = timestamp_appeal
+        tx_hash = transaction if isinstance(transaction, str) else transaction.hash
+        self.session.execute(
+            text("UPDATE transactions SET timestamp_appeal = :ts WHERE hash = :hash"),
+            {"hash": tx_hash, "ts": timestamp_appeal},
+        )
 
     def set_transaction_appeal_processing_time(self, transaction_hash: str):
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
+        result = self.session.execute(
+            text(
+                """
+                UPDATE transactions
+                SET appeal_processing_time = appeal_processing_time + (CAST(:now AS integer) - timestamp_appeal)
+                WHERE hash = :hash
+                  AND timestamp_appeal IS NOT NULL
+                """
+            ),
+            {"hash": transaction_hash, "now": round(time.time())},
         )
-        if not transaction:
+        if result.rowcount == 0:
             print(
-                f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping appeal_processing_time update"
+                f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found or has no timestamp_appeal, skipping appeal_processing_time update"
             )
             return
-
-        # Check if timestamp_appeal is not None before performing arithmetic
-        if transaction.timestamp_appeal is not None:
-            transaction.appeal_processing_time += (
-                round(time.time()) - transaction.timestamp_appeal
-            )
-            flag_modified(transaction, "appeal_processing_time")
-            self.session.commit()
-        else:
-            print(
-                f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} has no timestamp_appeal, skipping appeal_processing_time update"
-            )
+        self.session.commit()
 
     def reset_transaction_appeal_processing_time(self, transaction_hash: str):
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        self.session.execute(
+            text(
+                "UPDATE transactions SET appeal_processing_time = 0 WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash},
         )
-        transaction.appeal_processing_time = 0
         self.session.commit()
 
     def set_transaction_contract_snapshot(
         self, transaction_hash: str, contract_snapshot: dict | None
     ):
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        self.session.execute(
+            text(
+                "UPDATE transactions SET contract_snapshot = CAST(:data AS jsonb) WHERE hash = :hash"
+            ),
+            {
+                "hash": transaction_hash,
+                "data": json.dumps(contract_snapshot) if contract_snapshot else None,
+            },
         )
-        transaction.contract_snapshot = contract_snapshot
         self.session.commit()
 
     def transactions_in_process_by_contract(self) -> list[dict]:
@@ -1162,6 +1181,8 @@ class TransactionsProcessor:
         status: TransactionStatus | None = None,
         filter_success: bool = False,
     ) -> dict | None:
+        # Expire cached ORM objects to ensure we read fresh data after raw SQL writes
+        self.session.expire_all()
         transaction = (
             self.session.query(Transactions).filter_by(hash=transaction_hash).one()
         )
@@ -1212,97 +1233,76 @@ class TransactionsProcessor:
         )
 
     def set_transaction_timestamp_last_vote(self, transaction_hash: str):
-        """
-        Set the last vote timestamp for a transaction to the current time.
-
-        Args:
-            transaction_hash: The hash of the transaction to update
-
-        Raises:
-            NoResultFound: If the transaction with the given hash doesn't exist
-        """
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        self.session.execute(
+            text(
+                "UPDATE transactions SET last_vote_timestamp = :ts WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash, "ts": int(time.time())},
         )
-        transaction.last_vote_timestamp = int(time.time())
         self.session.commit()
 
     def increase_transaction_rotation_count(self, transaction_hash: str):
-        """
-        Increment the rotation count for a transaction by 1.
-
-        Args:
-            transaction_hash: The hash of the transaction to update
-
-        Raises:
-            NoResultFound: If the transaction with the given hash doesn't exist
-        """
-        transaction = (
-            self.session.query(Transactions)
-            .filter_by(hash=transaction_hash)
-            .with_for_update()  # lock row
-            .one()
+        self.session.execute(
+            text(
+                """
+                UPDATE transactions
+                SET rotation_count = rotation_count + 1
+                WHERE hash = :hash
+                  AND (config_rotation_rounds IS NULL
+                       OR config_rotation_rounds = 0
+                       OR rotation_count < config_rotation_rounds)
+                """
+            ),
+            {"hash": transaction_hash},
         )
-        max_rotations = transaction.config_rotation_rounds or 0
-        if max_rotations and transaction.rotation_count >= max_rotations:
-            self.session.commit()
-            return  # already at the ceiling
-        transaction.rotation_count += 1
-        flag_modified(transaction, "rotation_count")
         self.session.commit()
 
     def reset_transaction_rotation_count(self, transaction_hash: str):
-        """
-        Reset the rotation count for a transaction to 0.
-
-        Args:
-            transaction_hash: The hash of the transaction to update
-
-        Raises:
-            NoResultFound: If the transaction with the given hash doesn't exist
-        """
-        transaction = (
-            self.session.query(Transactions)
-            .filter_by(hash=transaction_hash)
-            .with_for_update()  # Add row-level locking
-            .one()
+        self.session.execute(
+            text("UPDATE transactions SET rotation_count = 0 WHERE hash = :hash"),
+            {"hash": transaction_hash},
         )
-        transaction.rotation_count = 0
 
     def set_transaction_appeal_leader_timeout(
         self, transaction_hash: str, appeal_leader_timeout: bool
     ) -> bool:
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
+        result = self.session.execute(
+            text(
+                "UPDATE transactions SET appeal_leader_timeout = :val WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash, "val": appeal_leader_timeout},
         )
-        if not transaction:
+        if result.rowcount == 0:
             print(
                 f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping appeal_leader_timeout update"
             )
             return False
-        transaction.appeal_leader_timeout = appeal_leader_timeout
         self.session.commit()
         return appeal_leader_timeout
 
     def set_leader_timeout_validators(self, transaction_hash: str, validators: list):
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        self.session.execute(
+            text(
+                "UPDATE transactions SET leader_timeout_validators = CAST(:data AS jsonb) WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash, "data": json.dumps(validators)},
         )
-        transaction.leader_timeout_validators = validators
         self.session.commit()
 
     def set_transaction_appeal_validators_timeout(
         self, transaction_hash: str, appeal_validators_timeout: bool
     ) -> bool:
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
+        result = self.session.execute(
+            text(
+                "UPDATE transactions SET appeal_validators_timeout = :val WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash, "val": appeal_validators_timeout},
         )
-        if not transaction:
+        if result.rowcount == 0:
             print(
                 f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping appeal_validators_timeout update"
             )
             return False
-        transaction.appeal_validators_timeout = appeal_validators_timeout
         self.session.commit()
         return appeal_validators_timeout
 
