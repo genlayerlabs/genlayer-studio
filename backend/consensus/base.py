@@ -3,7 +3,7 @@
 DEFAULT_VALIDATORS_COUNT = 5
 DEFAULT_CONSENSUS_SLEEP_TIME = 5
 ACTIVATED_TRANSACTION_TIMEOUT = 900
-MAX_IDLE_REPLACEMENTS = 3
+MAX_IDLE_REPLACEMENTS = 5
 
 import os
 import asyncio
@@ -374,7 +374,7 @@ class TransactionContext:
         self,
         transaction: Transaction,
         transactions_processor: TransactionsProcessor,
-        chain_snapshot: ChainSnapshot,
+        chain_snapshot: ChainSnapshot | None,
         accounts_manager: AccountsManager,
         contract_snapshot_factory: Callable[[str], ContractSnapshot],
         contract_processor: ContractProcessor,
@@ -1195,7 +1195,7 @@ class ConsensusAlgorithm:
         self,
         transaction: Transaction,
         transactions_processor: TransactionsProcessor,
-        chain_snapshot: ChainSnapshot,
+        chain_snapshot: ChainSnapshot | None,
         accounts_manager: AccountsManager,
         contract_snapshot_factory: Callable[[str], ContractSnapshot],
         contract_processor: ContractProcessor,
@@ -1724,7 +1724,7 @@ class ConsensusAlgorithm:
         self,
         transaction: Transaction,
         transactions_processor: TransactionsProcessor,
-        chain_snapshot: ChainSnapshot,
+        chain_snapshot: ChainSnapshot | None,
         accounts_manager: AccountsManager,
         contract_snapshot_factory: Callable[[str], ContractSnapshot],
         contract_processor: ContractProcessor,
@@ -1764,7 +1764,7 @@ class ConsensusAlgorithm:
         self,
         transaction: Transaction,
         transactions_processor: TransactionsProcessor,
-        chain_snapshot: ChainSnapshot,
+        chain_snapshot: ChainSnapshot | None,
         accounts_manager: AccountsManager,
         contract_snapshot_factory: Callable[[str], ContractSnapshot],
         contract_processor: ContractProcessor,
@@ -1777,7 +1777,7 @@ class ConsensusAlgorithm:
         Args:
             transaction (Transaction): The transaction to appeal.
             transactions_processor (TransactionsProcessor): Instance responsible for handling transaction operations within the database.
-            chain_snapshot (ChainSnapshot): Snapshot of the chain state.
+            chain_snapshot (ChainSnapshot | None): Snapshot of the chain state (unused in worker path).
             accounts_manager (AccountsManager): Manager for accounts.
             contract_snapshot_factory (Callable[[str], ContractSnapshot]): Factory function to create contract snapshots.
             node_factory (Callable[[dict, ExecutionMode, ContractSnapshot, Receipt | None, MessageHandler, Callable[[str], ContractSnapshot]], Node]): Factory function to create nodes.
@@ -1859,7 +1859,7 @@ class ConsensusAlgorithm:
         self,
         transaction: Transaction,
         transactions_processor: TransactionsProcessor,
-        chain_snapshot: ChainSnapshot,
+        chain_snapshot: ChainSnapshot | None,
         accounts_manager: AccountsManager,
         contract_snapshot_factory: Callable[[str], ContractSnapshot],
         contract_processor: ContractProcessor,
@@ -1963,7 +1963,7 @@ class ConsensusAlgorithm:
         self,
         transaction: Transaction,
         transactions_processor: TransactionsProcessor,
-        chain_snapshot: ChainSnapshot,
+        chain_snapshot: ChainSnapshot | None,
         accounts_manager: AccountsManager,
         contract_snapshot_factory: Callable[[str], ContractSnapshot],
         contract_processor: ContractProcessor,

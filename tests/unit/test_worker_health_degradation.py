@@ -59,10 +59,8 @@ class TestHealthEndpointWithFailures:
         worker_service.worker_task = None
         worker_service.worker_permanently_failed = False
 
-    @pytest.mark.asyncio
-    async def test_health_returns_503_when_threshold_exceeded(self):
+    def test_health_returns_503_when_threshold_exceeded(self):
         """Health returns 503 when consecutive failures >= threshold"""
-        # Set up mock worker
         mock_worker = MagicMock()
         mock_worker.worker_id = "test-worker-123"
         mock_worker.running = True
@@ -71,35 +69,26 @@ class TestHealthEndpointWithFailures:
         mock_worker.max_parallel_txs = 1
         worker_service.worker = mock_worker
 
-        # Set up mock task that's not done
         mock_task = MagicMock()
         mock_task.done.return_value = False
         worker_service.worker_task = mock_task
 
-        # Set failures to threshold
         worker_service._genvm_consecutive_failures = 3
         worker_service._genvm_failure_unhealthy_threshold = 3
 
-        # Mock the aiohttp request for GenVM status probe
-        with patch("aiohttp.request") as mock_request:
-            mock_response = MagicMock()
-            mock_response.status = 200
-            mock_response.__aenter__ = MagicMock(return_value=mock_response)
-            mock_response.__aexit__ = MagicMock(return_value=None)
-            mock_request.return_value = mock_response
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.status = 200
+            mock_urlopen.return_value = mock_resp
 
-            # Call health endpoint
-            response = await worker_service.health_check()
+            response = worker_service.health_check()
 
-            # Should be 503 due to consecutive failures
             assert response.status_code == 503
             body = response.body.decode()
             assert "genvm_consecutive_failures" in body
 
-    @pytest.mark.asyncio
-    async def test_health_returns_200_when_below_threshold(self):
+    def test_health_returns_200_when_below_threshold(self):
         """Health returns 200 when consecutive failures < threshold"""
-        # Set up mock worker
         mock_worker = MagicMock()
         mock_worker.worker_id = "test-worker-123"
         mock_worker.running = True
@@ -108,35 +97,26 @@ class TestHealthEndpointWithFailures:
         mock_worker.max_parallel_txs = 1
         worker_service.worker = mock_worker
 
-        # Set up mock task that's not done
         mock_task = MagicMock()
         mock_task.done.return_value = False
         worker_service.worker_task = mock_task
 
-        # Set failures below threshold
         worker_service._genvm_consecutive_failures = 2
         worker_service._genvm_failure_unhealthy_threshold = 3
 
-        # Mock the aiohttp request for GenVM status probe
-        with patch("aiohttp.request") as mock_request:
-            mock_response = MagicMock()
-            mock_response.status = 200
-            mock_response.__aenter__ = MagicMock(return_value=mock_response)
-            mock_response.__aexit__ = MagicMock(return_value=None)
-            mock_request.return_value = mock_response
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.status = 200
+            mock_urlopen.return_value = mock_resp
 
-            # Call health endpoint
-            response = await worker_service.health_check()
+            response = worker_service.health_check()
 
-            # Should be healthy (200 or dict response)
-            # The endpoint returns dict for healthy, JSONResponse for unhealthy
             if hasattr(response, "status_code"):
                 assert response.status_code != 503
             else:
                 assert response.get("status") in ["healthy", "stopping"]
 
-    @pytest.mark.asyncio
-    async def test_health_includes_failure_count_in_503_response(self):
+    def test_health_includes_failure_count_in_503_response(self):
         """503 response includes failure count and threshold"""
         mock_worker = MagicMock()
         mock_worker.worker_id = "test-worker-123"
@@ -153,14 +133,12 @@ class TestHealthEndpointWithFailures:
         worker_service._genvm_consecutive_failures = 5
         worker_service._genvm_failure_unhealthy_threshold = 3
 
-        with patch("aiohttp.request") as mock_request:
-            mock_response = MagicMock()
-            mock_response.status = 200
-            mock_response.__aenter__ = MagicMock(return_value=mock_response)
-            mock_response.__aexit__ = MagicMock(return_value=None)
-            mock_request.return_value = mock_response
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.status = 200
+            mock_urlopen.return_value = mock_resp
 
-            response = await worker_service.health_check()
+            response = worker_service.health_check()
 
             assert response.status_code == 503
             import json
