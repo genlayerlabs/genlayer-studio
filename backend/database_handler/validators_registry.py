@@ -110,6 +110,21 @@ class ModifiableValidatorsRegistry(ValidatorsRegistry):
             results.append(self.get_validator(validator.address, False))
         return results
 
+    async def replace_all_validators(self, validators: list[Validator]) -> list[dict]:
+        """Atomically delete all validators and create new ones in a single transaction.
+
+        Workers never see an empty validator set because the delete + insert
+        happen in one flush before any Redis event is published.
+        """
+        self.session.query(Validators).delete(synchronize_session=False)
+        for validator in validators:
+            self.session.add(_to_db_model(validator))
+        self.session.flush()
+        results = []
+        for validator in validators:
+            results.append(self.get_validator(validator.address, False))
+        return results
+
 
 def _to_db_model(validator: Validator) -> Validators:
     return Validators(
