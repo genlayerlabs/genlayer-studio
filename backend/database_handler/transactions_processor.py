@@ -752,68 +752,92 @@ class TransactionsProcessor:
         new_status: TransactionStatus,
         update_current_status_changes: bool = True,
     ):
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
-        )
+        if update_current_status_changes:
+            # Use server-side JSONB update to avoid loading the full row (which
+            # includes the massive contract_snapshot column).
+            # Preserve original semantics: if current_status_changes is missing,
+            # initialize with [PENDING, new_status]; otherwise append.
+            result = self.session.execute(
+                text(
+                    """
+                    UPDATE transactions
+                    SET status = CAST(:new_status AS transaction_status),
+                        consensus_history = jsonb_set(
+                            COALESCE(consensus_history, '{}'::jsonb),
+                            '{current_status_changes}',
+                            CASE
+                                WHEN consensus_history->'current_status_changes' IS NOT NULL
+                                THEN consensus_history->'current_status_changes' || to_jsonb(CAST(:status_val AS text))
+                                ELSE jsonb_build_array(CAST(:pending_val AS text), CAST(:status_val AS text))
+                            END
+                        )
+                    WHERE hash = :hash
+                """
+                ),
+                {
+                    "hash": transaction_hash,
+                    "new_status": new_status.value,
+                    "status_val": new_status.value,
+                    "pending_val": TransactionStatus.PENDING.value,
+                },
+            )
+        else:
+            result = self.session.execute(
+                text(
+                    "UPDATE transactions SET status = CAST(:new_status AS transaction_status) WHERE hash = :hash"
+                ),
+                {"hash": transaction_hash, "new_status": new_status.value},
+            )
 
-        # If transaction doesn't exist (e.g., after snapshot restore), skip update
-        if not transaction:
+        if result.rowcount == 0:
             print(
                 f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping status update"
             )
             return
 
-        transaction.status = new_status
-
-        if update_current_status_changes:
-            if not transaction.consensus_history:
-                transaction.consensus_history = {}
-
-            if "current_status_changes" in transaction.consensus_history:
-                transaction.consensus_history["current_status_changes"].append(
-                    new_status.value
-                )
-            else:
-                transaction.consensus_history["current_status_changes"] = [
-                    TransactionStatus.PENDING.value,
-                    new_status.value,
-                ]
-            flag_modified(transaction, "consensus_history")
-
         self.session.commit()
+        # Expire any cached ORM objects so they reflect the raw SQL changes
+        self.session.expire_all()
 
     def add_state_timestamp(self, transaction_hash: str, state_name: str):
         """
         Add a timestamp for when a consensus state is entered.
 
+        Uses server-side JSONB update to avoid loading the full row
+        (which includes the massive contract_snapshot column).
+
         Args:
             transaction_hash (str): Hash of the transaction.
             state_name (str): Name of the state (e.g., "PENDING", "PROPOSING").
         """
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
+        result = self.session.execute(
+            text(
+                """
+                UPDATE transactions
+                SET consensus_history = jsonb_set(
+                    jsonb_set(
+                        COALESCE(consensus_history, '{}'::jsonb),
+                        '{current_monitoring}',
+                        COALESCE(consensus_history->'current_monitoring', '{}'::jsonb)
+                    ),
+                    ARRAY['current_monitoring', :state_name],
+                    to_jsonb(CAST(:ts AS double precision))
+                )
+                WHERE hash = :hash
+            """
+            ),
+            {"hash": transaction_hash, "state_name": state_name, "ts": time.time()},
         )
 
-        # If transaction doesn't exist (e.g., after snapshot restore), skip update
-        if not transaction:
+        if result.rowcount == 0:
             print(
                 f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping monitoring update"
             )
             return
 
-        if not transaction.consensus_history:
-            transaction.consensus_history = {}
-
-        if "current_monitoring" not in transaction.consensus_history:
-            transaction.consensus_history["current_monitoring"] = {}
-
-        # Store timestamp (in seconds with millisecond precision)
-        import time
-
-        transaction.consensus_history["current_monitoring"][state_name] = time.time()
-
-        flag_modified(transaction, "consensus_history")
         self.session.commit()
+        # Expire any cached ORM objects so they reflect the raw SQL changes
+        self.session.expire_all()
 
     def set_transaction_result(
         self, transaction_hash: str, consensus_data: dict | None

@@ -1724,7 +1724,7 @@ class ConsensusAlgorithm:
         self,
         transaction: Transaction,
         transactions_processor: TransactionsProcessor,
-        chain_snapshot: ChainSnapshot,
+        chain_snapshot: ChainSnapshot | None,
         accounts_manager: AccountsManager,
         contract_snapshot_factory: Callable[[str], ContractSnapshot],
         contract_processor: ContractProcessor,

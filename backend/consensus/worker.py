@@ -218,7 +218,7 @@ class ConsensusWorker:
                       transactions.data, transactions.value, transactions.type, transactions.nonce,
                       transactions.gaslimit, transactions.r, transactions.s, transactions.v,
                       transactions.leader_only, transactions.execution_mode, transactions.sim_config,
-                      transactions.contract_snapshot, transactions.status, transactions.consensus_data,
+                      transactions.status, transactions.consensus_data,
                       transactions.input_data, transactions.created_at, transactions.timestamp_awaiting_finalization,
                       transactions.appeal_failed, transactions.blocked_at;
         """
@@ -257,7 +257,6 @@ class ConsensusWorker:
                 "leader_only": result.leader_only,
                 "execution_mode": result.execution_mode,
                 "sim_config": result.sim_config,
-                "contract_snapshot": result.contract_snapshot,
                 "status": result.status,
                 "consensus_data": result.consensus_data,
                 "input_data": result.input_data,
@@ -1116,7 +1115,6 @@ class ConsensusWorker:
                 from backend.consensus.base import (
                     contract_snapshot_factory,
                     contract_processor_factory,
-                    chain_snapshot_factory,
                     transactions_processor_factory,
                     accounts_manager_factory,
                     node_factory,
@@ -1140,7 +1138,7 @@ class ConsensusWorker:
                     await self.consensus_algorithm.process_finalization(
                         transaction,
                         transactions_processor,
-                        chain_snapshot_factory(session),
+                        None,  # chain_snapshot not needed for finalization
                         accounts_manager_factory(session),
                         lambda contract_address: contract_snapshot_factory(
                             contract_address, session, transaction
