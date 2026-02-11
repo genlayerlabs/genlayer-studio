@@ -116,7 +116,11 @@ local function handle_custom_plugin(ctx, args, mapped_prompt)
 	local response_status = api_request.status
 
 	if response_status ~= 200 then
-		return false, lib.rs.json_stringify(response_data.error)
+		return false, {
+			status = response_status,
+			error_message = lib.rs.json_stringify(response_data.error),
+			body = response_data.error,
+		}
 	end
 
 	local result
@@ -188,18 +192,42 @@ local function try_provider(ctx, args, mapped_prompt, provider_id)
 		return result
 	end
 
-	local as_user_error = lib.rs.as_user_error(result)
-	if as_user_error == nil then
-		error(result)
-	end
+	-- Build error info for the caller so provider failures are recorded in the transaction
+	local error_info = {
+		model = model,
+		provider = provider_id,
+	}
 
-	if llm.overloaded_statuses[as_user_error.ctx.status] then
-		lib.log{level = "warning", message = "service is overloaded", error = as_user_error, request = request}
+	if ctx.host_data.custom_plugin_data then
+		-- Custom plugin returns structured error on failure
+		if type(result) == "table" then
+			error_info.status = result.status
+			error_info.error_message = result.error_message
+			error_info.body = result.body
+		else
+			error_info.error_message = tostring(result)
+		end
+		lib.log{level = "warning", message = "custom plugin provider failed", error_info = error_info}
 	else
-		lib.log{level = "warning", message = "provider failed", error = as_user_error, request = request}
+		local as_user_error = lib.rs.as_user_error(result)
+		if as_user_error ~= nil then
+			error_info.status = as_user_error.ctx and as_user_error.ctx.status or nil
+			error_info.error_message = tostring(result)
+			if as_user_error.ctx and as_user_error.ctx.body then
+				error_info.body = as_user_error.ctx.body
+			end
+			if llm.overloaded_statuses[as_user_error.ctx.status] then
+				lib.log{level = "warning", message = "service is overloaded", error = as_user_error, request = request}
+			else
+				lib.log{level = "warning", message = "provider failed", error = as_user_error, request = request}
+			end
+		else
+			error_info.error_message = tostring(result)
+			lib.log{level = "warning", message = "provider failed with unexpected error", error = tostring(result), request = request}
+		end
 	end
 
-	return nil
+	return nil, error_info
 end
 
 local function just_in_backend(ctx, args, mapped_prompt)
@@ -259,7 +287,7 @@ local function just_in_backend(ctx, args, mapped_prompt)
 
 	-- First: Try primary model (1 attempts)
 	local primary_provider_id = ctx.host_data.studio_llm_id
-	local primary_result = try_provider(ctx, args, mapped_prompt, primary_provider_id)
+	local primary_result, primary_error = try_provider(ctx, args, mapped_prompt, primary_provider_id)
 	if primary_result then
 		return primary_result
 	end
@@ -272,6 +300,7 @@ local function just_in_backend(ctx, args, mapped_prompt)
 		end
 	end
 	local fallback_model = nil
+	local fallback_error = nil
 	-- Second: Try fallback model (3 attempts) if available
 	local fallback_provider_id = ctx.host_data.fallback_llm_id
 	if fallback_provider_id then
@@ -283,7 +312,8 @@ local function just_in_backend(ctx, args, mapped_prompt)
 		end
 
 		lib.log{level = "warning", message = "switching from primary model to fallback model", primary_model = primary_model, fallback_model = fallback_model}
-		local fallback_result = try_provider(ctx, args, mapped_prompt, fallback_provider_id)
+		local fallback_result
+		fallback_result, fallback_error = try_provider(ctx, args, mapped_prompt, fallback_provider_id)
 		if fallback_result then
 			return fallback_result
 		end
@@ -296,7 +326,9 @@ local function just_in_backend(ctx, args, mapped_prompt)
 			prompt = mapped_prompt,
 			host_data = ctx.host_data,
 			primary_model = primary_model,
+			primary_error = primary_error,
 			fallback_model = fallback_model,
+			fallback_error = fallback_error,
 		}
 	})
 end
