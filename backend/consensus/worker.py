@@ -388,7 +388,7 @@ class ConsensusWorker:
         query = text(
             """
             WITH candidate_transactions AS (
-                SELECT t.hash, t.to_address, t.created_at
+                SELECT t.hash, t.to_address, t.type, t.created_at
                 FROM transactions t
                 WHERE t.status IN ('PENDING', 'ACTIVATED')
                     AND (t.blocked_at IS NULL
@@ -401,22 +401,24 @@ class ConsensusWorker:
                             AND t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
                             AND t2.hash != t.hash
                     )
-                ORDER BY t.created_at ASC
+                ORDER BY CASE WHEN t.type = 3 THEN 0 ELSE 1 END, t.created_at ASC
                 FOR UPDATE SKIP LOCKED
             ),
             oldest_per_contract AS (
                 SELECT *, ROW_NUMBER() OVER (
                     PARTITION BY to_address
-                    ORDER BY created_at ASC
+                    ORDER BY CASE WHEN type = 3 THEN 0 ELSE 1 END,
+                             created_at ASC
                 ) as rn
                 FROM candidate_transactions
             ),
             single_transaction AS (
                 -- Select only ONE transaction (oldest across all contracts)
+                -- Upgrade transactions (type=3) are prioritized ahead of regular txs
                 SELECT *
                 FROM oldest_per_contract
                 WHERE rn = 1
-                ORDER BY created_at ASC
+                ORDER BY CASE WHEN type = 3 THEN 0 ELSE 1 END, created_at ASC
                 LIMIT 1
             )
             UPDATE transactions
