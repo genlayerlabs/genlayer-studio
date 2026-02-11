@@ -1,7 +1,7 @@
 {
   "provider": "openrouter",
   "plugin": "openai-compatible",
-  "model": "@preset/rally-testnet-sonet-4-5",
+  "model": "@preset/rally-testnet-sonnet-4-5",
   "config": {},
   "plugin_config": {
     "api_key_env_var": "OPENROUTERAPIKEY",
