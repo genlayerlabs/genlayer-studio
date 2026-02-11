@@ -1,4 +1,5 @@
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 import pytest
 from unittest.mock import patch, MagicMock
 import os
@@ -288,3 +289,99 @@ def test_insert_transaction_duplicate_hash_returns_existing(
     tx = transactions_processor.get_transaction_by_hash(duplicate_hash)
     assert tx is not None
     assert tx["data"] == data  # Original data, not the second attempt's data
+
+
+def _insert_tx_with_consensus_history(session, tp, consensus_history_sql, suffix):
+    """Insert a transaction then force consensus_history to a specific SQL value."""
+    tx_hash = tp.insert_transaction(
+        "0x9F0e84243496AcFB3Cd99D02eA59673c05901501",
+        "0xAcec3A6d871C25F591aBd4fC24054e524BBbF794",
+        {"key": "value"},
+        1.0,
+        1,
+        0,
+        True,
+        3,
+        transaction_hash=f"0x{suffix * 64}",
+    )
+    session.commit()
+    session.execute(
+        text(
+            f"UPDATE transactions SET consensus_history = {consensus_history_sql} WHERE hash = :hash"
+        ),
+        {"hash": tx_hash},
+    )
+    session.commit()
+    return tx_hash
+
+
+class TestConsensusHistoryJsonbEdgeCases:
+    """Regression tests for jsonb_set on consensus_history with non-object values.
+
+    In prod, consensus_history can be SQL NULL (no default in model) or JSONB
+    null (a valid JSONB scalar). COALESCE only catches SQL NULL, so jsonb_set
+    on JSONB null crashes with "cannot set path in scalar".
+    """
+
+    def test_update_transaction_status_with_sql_null(
+        self, transactions_processor, session
+    ):
+        tx_hash = _insert_tx_with_consensus_history(
+            session, transactions_processor, "NULL", "a"
+        )
+        transactions_processor.update_transaction_status(
+            tx_hash, TransactionStatus.PROPOSING
+        )
+        tx = transactions_processor.get_transaction_by_hash(tx_hash)
+        assert tx["status"] == TransactionStatus.PROPOSING.value
+
+    def test_update_transaction_status_with_jsonb_null(
+        self, transactions_processor, session
+    ):
+        tx_hash = _insert_tx_with_consensus_history(
+            session, transactions_processor, "'null'::jsonb", "b"
+        )
+        transactions_processor.update_transaction_status(
+            tx_hash, TransactionStatus.PROPOSING
+        )
+        tx = transactions_processor.get_transaction_by_hash(tx_hash)
+        assert tx["status"] == TransactionStatus.PROPOSING.value
+
+    def test_update_transaction_status_with_empty_object(
+        self, transactions_processor, session
+    ):
+        tx_hash = _insert_tx_with_consensus_history(
+            session, transactions_processor, "'{}'::jsonb", "c"
+        )
+        transactions_processor.update_transaction_status(
+            tx_hash, TransactionStatus.PROPOSING
+        )
+        tx = transactions_processor.get_transaction_by_hash(tx_hash)
+        assert tx["status"] == TransactionStatus.PROPOSING.value
+        assert "PROPOSING" in tx["consensus_history"]["current_status_changes"]
+
+    def test_add_state_timestamp_with_sql_null(self, transactions_processor, session):
+        tx_hash = _insert_tx_with_consensus_history(
+            session, transactions_processor, "NULL", "e"
+        )
+        transactions_processor.add_state_timestamp(tx_hash, "PENDING")
+        tx = transactions_processor.get_transaction_by_hash(tx_hash)
+        assert "PENDING" in tx["consensus_history"]["current_monitoring"]
+
+    def test_add_state_timestamp_with_jsonb_null(self, transactions_processor, session):
+        tx_hash = _insert_tx_with_consensus_history(
+            session, transactions_processor, "'null'::jsonb", "f"
+        )
+        transactions_processor.add_state_timestamp(tx_hash, "PENDING")
+        tx = transactions_processor.get_transaction_by_hash(tx_hash)
+        assert "PENDING" in tx["consensus_history"]["current_monitoring"]
+
+    def test_add_state_timestamp_with_empty_object(
+        self, transactions_processor, session
+    ):
+        tx_hash = _insert_tx_with_consensus_history(
+            session, transactions_processor, "'{}'::jsonb", "g"
+        )
+        transactions_processor.add_state_timestamp(tx_hash, "PROPOSING")
+        tx = transactions_processor.get_transaction_by_hash(tx_hash)
+        assert "PROPOSING" in tx["consensus_history"]["current_monitoring"]
