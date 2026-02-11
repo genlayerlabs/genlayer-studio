@@ -40,6 +40,8 @@ class ConsensusWorker:
     This reuses the exec_transaction logic from ConsensusAlgorithm.
     """
 
+    MAX_GENERIC_ERROR_RETRIES = 3
+
     def __init__(
         self,
         get_session: Callable[[], Session],
@@ -121,6 +123,13 @@ class ConsensusWorker:
         )
         self._no_validators_base_backoff = float(
             os.environ.get("NO_VALIDATORS_BASE_BACKOFF_SECONDS", "30")
+        )
+
+        # Track retry counts for transactions that failed due to generic errors
+        # Key: transaction_hash, Value: {"count": int, "last_attempt": float, "last_error": str}
+        self._generic_error_retries: dict[str, dict] = {}
+        self._generic_error_base_backoff = float(
+            os.environ.get("GENERIC_ERROR_BASE_BACKOFF_SECONDS", "10")
         )
 
         # Initialize usage metrics service for reporting transaction metrics
@@ -658,6 +667,7 @@ class ConsensusWorker:
                 f"[Worker {self.worker_id}] Error processing {tx_type} {tx_hash}: {e}"
             )
             session.rollback()
+            await self._handle_generic_error_retry(tx_hash, e)
         finally:
             # Clear current transaction tracking
             self.current_transactions.pop(tx_hash, None)
@@ -837,6 +847,8 @@ class ConsensusWorker:
                 # Clean up retry tracking on success
                 if transaction.hash in self._no_validators_retries:
                     del self._no_validators_retries[transaction.hash]
+                if transaction.hash in self._generic_error_retries:
+                    del self._generic_error_retries[transaction.hash]
 
         except NoValidatorsAvailableError:
             # Handle no-validators case with retry logic and backoff
@@ -953,6 +965,59 @@ class ConsensusWorker:
                 f"[Worker {self.worker_id}] No validators for {tx_hash}, "
                 f"retry {retry_info['count']}/{self._max_no_validators_retries}, "
                 f"next attempt in {backoff}s"
+            )
+
+    async def _handle_generic_error_retry(self, tx_hash: str, error: Exception):
+        """
+        Handle retry logic for generic errors during transaction processing.
+        Implements exponential backoff and cancels after MAX_GENERIC_ERROR_RETRIES.
+
+        Args:
+            tx_hash: Transaction hash
+            error: The exception that occurred
+        """
+        retry_info = self._generic_error_retries.get(
+            tx_hash, {"count": 0, "last_attempt": 0, "last_error": ""}
+        )
+        retry_info["count"] += 1
+        retry_info["last_attempt"] = time.time()
+        retry_info["last_error"] = str(error)
+        self._generic_error_retries[tx_hash] = retry_info
+
+        if retry_info["count"] >= self.MAX_GENERIC_ERROR_RETRIES:
+            # Cancel the transaction after max retries
+            logger.error(
+                f"[Worker {self.worker_id}] Transaction {tx_hash} canceled after "
+                f"{retry_info['count']} generic error retries - last error: {error}"
+            )
+            with self.get_session() as cancel_session:
+                tx = cancel_session.query(Transactions).filter_by(hash=tx_hash).one()
+                tx.status = TransactionStatus.CANCELED
+                tx.consensus_data = {
+                    "error": "max_generic_retries_exceeded",
+                    "last_error": str(error),
+                    "retries": retry_info["count"],
+                }
+                cancel_session.commit()
+
+                # Send WebSocket notification
+                await ConsensusAlgorithm.dispatch_transaction_status_update(
+                    TransactionsProcessor(cancel_session),
+                    tx_hash,
+                    TransactionStatus.CANCELED,
+                    self.msg_handler,
+                )
+
+            # Clean up retry tracking
+            del self._generic_error_retries[tx_hash]
+        else:
+            backoff = self._generic_error_base_backoff * (
+                2 ** (retry_info["count"] - 1)
+            )
+            logger.warning(
+                f"[Worker {self.worker_id}] Generic error for {tx_hash}, "
+                f"retry {retry_info['count']}/{self.MAX_GENERIC_ERROR_RETRIES}, "
+                f"next attempt in {backoff}s - error: {error}"
             )
 
     async def _process_upgrade_transaction(
@@ -1293,7 +1358,7 @@ class ConsensusWorker:
 
     def _is_in_backoff(self, transaction_data: dict) -> bool:
         """
-        Check if a transaction is in backoff due to no validators.
+        Check if a transaction is in backoff due to no validators or generic errors.
 
         Args:
             transaction_data: Transaction data dictionary
@@ -1302,18 +1367,35 @@ class ConsensusWorker:
             True if transaction is in backoff period, False otherwise
         """
         tx_hash = transaction_data["hash"]
-        retry_info = self._no_validators_retries.get(tx_hash)
-        if not retry_info:
-            return False
 
-        backoff = self._no_validators_base_backoff * (2 ** (retry_info["count"] - 1))
-        time_since_last = time.time() - retry_info["last_attempt"]
-        if time_since_last < backoff:
-            logger.debug(
-                f"[Worker {self.worker_id}] Transaction {tx_hash} in backoff "
-                f"({time_since_last:.1f}s < {backoff}s)"
+        # Check no-validators backoff
+        retry_info = self._no_validators_retries.get(tx_hash)
+        if retry_info:
+            backoff = self._no_validators_base_backoff * (
+                2 ** (retry_info["count"] - 1)
             )
-            return True
+            time_since_last = time.time() - retry_info["last_attempt"]
+            if time_since_last < backoff:
+                logger.debug(
+                    f"[Worker {self.worker_id}] Transaction {tx_hash} in no-validators backoff "
+                    f"({time_since_last:.1f}s < {backoff}s)"
+                )
+                return True
+
+        # Check generic error backoff
+        generic_info = self._generic_error_retries.get(tx_hash)
+        if generic_info:
+            backoff = self._generic_error_base_backoff * (
+                2 ** (generic_info["count"] - 1)
+            )
+            time_since_last = time.time() - generic_info["last_attempt"]
+            if time_since_last < backoff:
+                logger.debug(
+                    f"[Worker {self.worker_id}] Transaction {tx_hash} in generic-error backoff "
+                    f"({time_since_last:.1f}s < {backoff}s)"
+                )
+                return True
+
         return False
 
     async def _process_transaction_task(self, transaction_data: dict):
