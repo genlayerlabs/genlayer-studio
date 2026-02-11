@@ -131,6 +131,7 @@ class ExecutionResult:
     state: StateProxy
     processing_time: int
     nondet_disagree: int | None
+    execution_stats: dict | None = None
 
 
 class Host(genvmhost.IHost):
@@ -233,6 +234,7 @@ class Host(genvmhost.IHost):
             state=state,
             processing_time=0,
             nondet_disagree=self._nondet_disagreement,
+            execution_stats=res.execution_stats,
         )
 
     async def loop_enter(self, cancellation) -> socket.socket:

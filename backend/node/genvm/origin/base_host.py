@@ -144,7 +144,7 @@ class IHost(metaclass=abc.ABCMeta):
 
 async def host_loop(
     handler: IHost, cancellation: asyncio.Event, *, logger: Logger
-) -> tuple[public_abi.ResultCode, bytes]:
+) -> tuple[public_abi.ResultCode, bytes, dict]:
     async_loop = asyncio.get_event_loop()
 
     logger.trace("entering loop")
@@ -210,6 +210,13 @@ async def host_loop(
                     await send_all(bytes([host_fns.Errors.OK]))
                     await send_all(res)
             case host_fns.Methods.CONSUME_RESULT:
+                execution_stats = {
+                    "host_handling_time_ms": round(total_handling_time * 1000),
+                    "by_method_ms": {
+                        k: round(v * 1000) for k, v in time_per_method.items()
+                    },
+                    "call_counts": call_counts,
+                }
                 logger.debug(
                     "handling time",
                     total=total_handling_time,
@@ -220,7 +227,7 @@ async def host_loop(
 
                 await send_all(bytes([0]))
 
-                return public_abi.ResultCode(res[0]), res[1:]
+                return public_abi.ResultCode(res[0]), res[1:], execution_stats
             case host_fns.Methods.GET_LEADER_NONDET_RESULT:
                 call_no = await recv_int()
                 try:
@@ -342,6 +349,7 @@ class RunHostAndProgramRes:
     result_fingerprint: typing.Any
     result_storage_changes: list[tuple[bytes, bytes]]
     result_events: list[list[bytes]]
+    execution_stats: dict | None = None
 
 
 async def _send_timeout(manager_uri: str, genvm_id: str, logger: Logger):
@@ -635,7 +643,7 @@ async def run_genvm(
     # Note: CancelledError inherits from BaseException, not Exception
     exceptions: list[BaseException] = []
     cancelled_tasks: list[str] = []
-    result_host: tuple[public_abi.ResultCode, bytes] | None = None
+    result_host: tuple[public_abi.ResultCode, bytes, dict] | None = None
 
     try:
         result_host = fut_host.result()
@@ -698,6 +706,7 @@ async def run_genvm(
             result_fingerprint = None
             result_storage_changes = []
             result_events = []
+            execution_stats = {}
         else:
             result_kind = result_host[0]
             decoded = gvm_calldata.decode(result_host[1])
@@ -705,6 +714,7 @@ async def run_genvm(
             result_fingerprint = decoded.get("fingerprint")
             result_storage_changes = decoded.get("storage_changes", [])
             result_events = decoded.get("events", [])
+            execution_stats = result_host[2]
 
         return RunHostAndProgramRes(
             stdout=status["stdout"],
@@ -715,6 +725,7 @@ async def run_genvm(
             result_fingerprint=result_fingerprint,
             result_storage_changes=result_storage_changes,
             result_events=result_events,
+            execution_stats=execution_stats,
         )
 
     raise Exception("Execution failed")
