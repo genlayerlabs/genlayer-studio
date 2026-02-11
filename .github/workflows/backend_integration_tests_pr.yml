@@ -81,7 +81,10 @@ jobs:
             backend/requirements.txt
 
       - name: Install Python dependencies
-        run: pip install -r requirements.txt -r requirements.test.txt -r backend/requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements.test.txt
+          pip install -r backend/requirements.txt
 
       - name: Extract GenVM version for cache key
         id: genvm
