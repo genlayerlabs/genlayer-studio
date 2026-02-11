@@ -426,7 +426,7 @@ class _MockReceipt:
         return {
             "vote": "agree",
             "result": "AG9r",  # base64 of b'\x00ok' — _process_messages decodes result[0] as kind
-            "node_config": {"address": "0x" + "aa" * 20},
+            "node_config": {"address": "0xaAaAaAaaAaAaAaaAaAAAAAAAAaaaAaAaAaaAaaAa"},
         }
 
 
