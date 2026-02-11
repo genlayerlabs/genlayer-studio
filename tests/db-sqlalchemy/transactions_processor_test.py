@@ -479,7 +479,9 @@ class TestConsensusHistory:
 
     def test_update_consensus_history_appends_rounds(self, tp, session):
         tx_hash = _make_tx(tp)
-        tp.update_consensus_history(tx_hash, ConsensusRound.ACCEPTED, [_MockReceipt()], [])
+        tp.update_consensus_history(
+            tx_hash, ConsensusRound.ACCEPTED, [_MockReceipt()], []
+        )
         tp.update_consensus_history(
             tx_hash, ConsensusRound.LEADER_ROTATION, [_MockReceipt()], [_MockReceipt()]
         )
