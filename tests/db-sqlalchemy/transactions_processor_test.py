@@ -10,8 +10,37 @@ from web3.providers import BaseProvider
 
 from backend.database_handler.chain_snapshot import ChainSnapshot
 from backend.database_handler.models import Transactions
-from backend.database_handler.transactions_processor import TransactionStatus
-from backend.database_handler.transactions_processor import TransactionsProcessor
+from backend.database_handler.transactions_processor import (
+    TransactionStatus,
+    TransactionsProcessor,
+    TransactionAddressFilter,
+)
+from backend.consensus.types import ConsensusRound
+
+
+_tx_counter = 0
+
+
+def _make_tx(tp, **overrides):
+    """Create a transaction with sensible defaults and unique hash."""
+    global _tx_counter
+    _tx_counter += 1
+    defaults = dict(
+        from_address="0x9F0e84243496AcFB3Cd99D02eA59673c05901501",
+        to_address="0xAcec3A6d871C25F591aBd4fC24054e524BBbF794",
+        data={"key": "value"},
+        value=1.0,
+        type=1,
+        nonce=0,
+        leader_only=True,
+        config_rotation_rounds=3,
+        triggered_by_hash=None,
+        transaction_hash=f"0x{_tx_counter:064x}",
+    )
+    defaults.update(overrides)
+    tx_hash = tp.insert_transaction(**{k: v for k, v in defaults.items()})
+    tp.session.commit()
+    return tx_hash
 
 
 def _create_mock_web3_instance(is_connected: bool):
@@ -385,3 +414,228 @@ class TestConsensusHistoryJsonbEdgeCases:
         transactions_processor.add_state_timestamp(tx_hash, "PROPOSING")
         tx = transactions_processor.get_transaction_by_hash(tx_hash)
         assert "PROPOSING" in tx["consensus_history"]["current_monitoring"]
+
+
+# ---------------------------------------------------------------------------
+# Mock Receipt for update_consensus_history tests
+# ---------------------------------------------------------------------------
+
+
+class _MockReceipt:
+    def to_dict(self, strip_contract_state=False):
+        return {"vote": "agree", "result": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# New comprehensive tests
+# ---------------------------------------------------------------------------
+
+
+class TestTransactionStatusUpdates:
+    def test_update_status_pending_to_proposing(self, tp):
+        tx_hash = _make_tx(tp)
+        tp.update_transaction_status(tx_hash, TransactionStatus.PROPOSING)
+        tx = tp.get_transaction_by_hash(tx_hash)
+        assert tx["status"] == TransactionStatus.PROPOSING.value
+
+    def test_update_status_records_in_consensus_history(self, tp):
+        tx_hash = _make_tx(tp)
+        tp.update_transaction_status(tx_hash, TransactionStatus.PROPOSING)
+        tp.session.expire_all()
+        tx = tp.get_transaction_by_hash(tx_hash)
+        changes = tx["consensus_history"]["current_status_changes"]
+        assert changes == ["PENDING", "PROPOSING"]
+
+    def test_update_status_appends_to_existing_status_changes(self, tp):
+        tx_hash = _make_tx(tp)
+        tp.update_transaction_status(tx_hash, TransactionStatus.PROPOSING)
+        tp.update_transaction_status(tx_hash, TransactionStatus.COMMITTING)
+        tp.session.expire_all()
+        tx = tp.get_transaction_by_hash(tx_hash)
+        changes = tx["consensus_history"]["current_status_changes"]
+        assert changes == ["PENDING", "PROPOSING", "COMMITTING"]
+
+
+class TestConsensusHistory:
+    def test_update_consensus_history_empty_initial(self, tp, session):
+        tx_hash = _make_tx(tp)
+        tp.update_consensus_history(
+            tx_hash,
+            ConsensusRound.ACCEPTED,
+            None,
+            [],
+        )
+        tp.session.expire_all()
+        tx = tp.get_transaction_by_hash(tx_hash)
+        results = tx["consensus_history"]["consensus_results"]
+        assert len(results) == 1
+        assert results[0]["consensus_round"] == ConsensusRound.ACCEPTED.value
+        assert results[0]["leader_result"] is None
+        assert results[0]["validator_results"] == []
+
+    def test_update_consensus_history_appends_rounds(self, tp, session):
+        tx_hash = _make_tx(tp)
+        tp.update_consensus_history(tx_hash, ConsensusRound.ACCEPTED, None, [])
+        tp.update_consensus_history(
+            tx_hash, ConsensusRound.LEADER_ROTATION, [_MockReceipt()], [_MockReceipt()]
+        )
+        tp.session.expire_all()
+        tx = tp.get_transaction_by_hash(tx_hash)
+        results = tx["consensus_history"]["consensus_results"]
+        assert len(results) == 2
+        assert results[1]["consensus_round"] == ConsensusRound.LEADER_ROTATION.value
+
+    def test_reset_consensus_history(self, tp):
+        tx_hash = _make_tx(tp)
+        tp.update_transaction_status(tx_hash, TransactionStatus.PROPOSING)
+        tp.reset_consensus_history(tx_hash)
+        tp.session.expire_all()
+        tx = tp.get_transaction_by_hash(tx_hash)
+        assert tx["consensus_history"] == {}
+
+
+class TestTransactionResult:
+    def test_set_transaction_result(self, tp):
+        tx_hash = _make_tx(tp)
+        tp.set_transaction_result(tx_hash, {"result": "success"})
+        tp.session.expire_all()
+        tx = tp.get_transaction_by_hash(tx_hash)
+        assert tx["consensus_data"]["result"] == "success"
+
+    def test_set_transaction_result_overwrites(self, tp):
+        tx_hash = _make_tx(tp)
+        tp.set_transaction_result(tx_hash, {"result": "first"})
+        tp.set_transaction_result(tx_hash, {"result": "second"})
+        tp.session.expire_all()
+        tx = tp.get_transaction_by_hash(tx_hash)
+        assert tx["consensus_data"]["result"] == "second"
+
+
+class TestTransactionTimestamps:
+    def test_set_timestamp_awaiting_finalization(self, tp):
+        tx_hash = _make_tx(tp)
+        tp.set_transaction_timestamp_awaiting_finalization(tx_hash, 12345)
+        tp.session.commit()
+        tp.session.expire_all()
+        tx = tp.get_transaction_by_hash(tx_hash)
+        assert tx["timestamp_awaiting_finalization"] == 12345
+
+    def test_get_highest_timestamp_ignores_null(self, tp):
+        tx1 = _make_tx(tp)
+        tx2 = _make_tx(tp)
+        tp.set_transaction_timestamp_awaiting_finalization(tx1, 9999)
+        tp.session.commit()
+        # tx2 has no timestamp set
+        assert tp.get_highest_timestamp() == 9999
+
+
+class TestTransactionAppeal:
+    def test_set_transaction_appeal_fields(self, tp):
+        tx_hash = _make_tx(tp)
+        # Must be in appealable status for appeal=True to take effect
+        tp.update_transaction_status(tx_hash, TransactionStatus.ACCEPTED)
+        tp.set_transaction_appeal(tx_hash, True)
+        tp.session.expire_all()
+        tx = tp.get_transaction_by_hash(tx_hash)
+        assert tx["appealed"] is True
+        assert tx["timestamp_appeal"] is not None
+
+    def test_set_transaction_appeal_failed(self, tp):
+        tx_hash = _make_tx(tp)
+        tp.set_transaction_appeal_failed(tx_hash, 2)
+        tp.session.expire_all()
+        tx = tp.get_transaction_by_hash(tx_hash)
+        assert tx["appeal_failed"] == 2
+
+    def test_set_transaction_appeal_validators_timeout(self, tp):
+        tx_hash = _make_tx(tp)
+        tp.set_transaction_appeal_validators_timeout(tx_hash, True)
+        tp.session.expire_all()
+        tx = tp.get_transaction_by_hash(tx_hash)
+        assert tx["appeal_validators_timeout"] is True
+
+
+class TestStateTimestamp:
+    def test_add_state_timestamp_new_key(self, tp):
+        tx_hash = _make_tx(tp)
+        tp.add_state_timestamp(tx_hash, "PROPOSING")
+        tp.session.expire_all()
+        tx = tp.get_transaction_by_hash(tx_hash)
+        monitoring = tx["consensus_history"]["current_monitoring"]
+        assert "PROPOSING" in monitoring
+        assert isinstance(monitoring["PROPOSING"], float)
+
+    def test_add_state_timestamp_overwrites(self, tp):
+        tx_hash = _make_tx(tp)
+        tp.add_state_timestamp(tx_hash, "PROPOSING")
+        tp.session.expire_all()
+        tx1 = tp.get_transaction_by_hash(tx_hash)
+        ts1 = tx1["consensus_history"]["current_monitoring"]["PROPOSING"]
+
+        import time
+
+        time.sleep(0.05)  # ensure different timestamp
+
+        tp.add_state_timestamp(tx_hash, "PROPOSING")
+        tp.session.expire_all()
+        tx2 = tp.get_transaction_by_hash(tx_hash)
+        ts2 = tx2["consensus_history"]["current_monitoring"]["PROPOSING"]
+        assert ts2 >= ts1
+
+
+class TestGetTransactions:
+    def test_get_transaction_by_hash(self, tp):
+        tx_hash = _make_tx(tp, value=42.0)
+        tx = tp.get_transaction_by_hash(tx_hash)
+        assert tx is not None
+        assert tx["hash"] == tx_hash
+        assert tx["from_address"] == "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
+        assert tx["value"] == 42.0
+
+    def test_get_transaction_by_hash_not_found(self, tp):
+        result = tp.get_transaction_by_hash("0x" + "ff" * 32)
+        assert result is None
+
+    def test_get_transactions_for_address(self, tp):
+        addr_a = "0xAcec3A6d871C25F591aBd4fC24054e524BBbF794"
+        addr_b = "0x1111111111111111111111111111111111111111"
+        _make_tx(tp, to_address=addr_a)
+        _make_tx(tp, to_address=addr_a)
+        _make_tx(tp, to_address=addr_b)
+        txs = tp.get_transactions_for_address(addr_a, TransactionAddressFilter.TO)
+        assert len(txs) == 2
+        for t in txs:
+            assert t["to_address"] == addr_a
+
+
+class TestContractSnapshot:
+    def test_set_transaction_contract_snapshot(self, tp):
+        tx_hash = _make_tx(tp)
+        snapshot = {"state": "deployed", "code": "abc"}
+        tp.set_transaction_contract_snapshot(tx_hash, snapshot)
+        tp.session.expire_all()
+        tx = tp.get_transaction_by_hash(tx_hash)
+        assert tx["contract_snapshot"] == snapshot
+
+
+class TestRotationCount:
+    def test_increase_transaction_rotation_count(self, tp, session):
+        tx_hash = _make_tx(tp)
+        tp.increase_transaction_rotation_count(tx_hash)
+        tp.session.expire_all()
+        row = session.execute(
+            text("SELECT rotation_count FROM transactions WHERE hash = :h"),
+            {"h": tx_hash},
+        ).one()
+        assert row[0] == 1
+
+    def test_reset_transaction_rotation_count(self, tp, session):
+        tx_hash = _make_tx(tp)
+        tp.increase_transaction_rotation_count(tx_hash)
+        tp.reset_transaction_rotation_count(tx_hash)
+        tp.session.expire_all()
+        row = session.execute(
+            text("SELECT rotation_count FROM transactions WHERE hash = :h"),
+            {"h": tx_hash},
+        ).one()
+        assert row[0] == 0
