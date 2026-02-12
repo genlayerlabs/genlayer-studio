@@ -210,7 +210,7 @@ class Receipt:
     nondet_disagree: int | None = None
     execution_stats: dict | None = None
 
-    def _extract_llm_result(self) -> dict | None:
+    def _extract_llm_error_result(self) -> dict | None:
         """Extract LLM provider error details from genvm_result.
 
         Returns a dict with primary_error and/or fallback_error containing
@@ -271,7 +271,7 @@ class Receipt:
                 for pending_transaction in self.pending_transactions
             ],
             "genvm_result": self.genvm_result,
-            "llm_result": self._extract_llm_result(),
+            "llm_error_result": self._extract_llm_error_result(),
             "processing_time": self.processing_time,
             "nondet_disagree": self.nondet_disagree,
             "execution_stats": self.execution_stats,

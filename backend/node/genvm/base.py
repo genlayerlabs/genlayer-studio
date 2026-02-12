@@ -45,6 +45,7 @@ from .error_codes import (
     extract_error_code,
     extract_error_code_from_timeout,
     parse_module_error_string,
+    parse_ctx_from_module_error_string,
     GenVMInternalError,
 )
 
@@ -196,10 +197,25 @@ class Host(genvmhost.IHost):
                     error_code=error_code,
                 )
         elif res.result_kind == ResultCode.INTERNAL_ERROR:
-            error_str = str(res.result_data)
+            from loguru import logger as _ilog
 
-            # Parse the ModuleError to extract details
-            error_code, causes, is_fatal = parse_module_error_string(error_str)
+            error_ctx = None
+
+            # Try to extract structured data if result_data is a dict
+            if isinstance(res.result_data, dict):
+                error_ctx = res.result_data.get("ctx")
+                error_code = extract_error_code(res.result_data, res.stderr)
+                causes_raw = res.result_data.get("causes", [])
+                causes = list(causes_raw) if isinstance(causes_raw, list) else []
+                is_fatal = bool(res.result_data.get("fatal", False))
+            else:
+                error_str = str(res.result_data)
+                # Parse the ModuleError string to extract details
+                error_code, causes, is_fatal = parse_module_error_string(error_str)
+                # Extract LLM error context (primary_error/fallback_error)
+                # from the Rust debug format string
+                error_ctx = parse_ctx_from_module_error_string(error_str)
+
             message = (
                 f"GenVM internal error: {', '.join(causes)}"
                 if causes
@@ -218,6 +234,7 @@ class Host(genvmhost.IHost):
                 error_code=error_code,
                 causes=causes,
                 is_fatal=is_fatal,
+                ctx=error_ctx,
             )
         else:
             raise Exception(f"invalid result {res.result_kind}")

@@ -141,7 +141,12 @@ local function try_provider(ctx, args, mapped_prompt, provider_id)
 	end
 
 	if llm.providers[provider_id] == nil then
-		lib.log{ level = "error", message = "provider does not exist", provider_id = provider_id }
+		-- Log all available provider IDs to help diagnose missing providers
+		local available_ids = {}
+		for k, _ in pairs(llm.providers) do
+			table.insert(available_ids, k)
+		end
+		lib.log{ level = "error", message = "provider does not exist", provider_id = provider_id, available_providers = available_ids }
 		return nil
 	end
 	local provider = llm.providers[provider_id]
@@ -187,10 +192,11 @@ local function try_provider(ctx, args, mapped_prompt, provider_id)
 		end
 	end
 
-	lib.log{level = "debug", message = "executed with", success = success, type = type(result), res = result}
 	if success and result then
+		lib.log{level = "debug", message = "executed with", success = success, type = type(result), res = result, provider_id = provider_id}
 		return result
 	end
+	lib.log{level = "warning", message = "LLM provider call result", success = success, type = type(result), res = result, provider_id = provider_id}
 
 	-- Build error info for the caller so provider failures are recorded in the transaction
 	local error_info = {
@@ -318,6 +324,16 @@ local function just_in_backend(ctx, args, mapped_prompt)
 			return fallback_result
 		end
 	end
+
+	lib.log{
+		level = "error",
+		message = "All LLM providers failed, raising NO_PROVIDER_FOR_PROMPT",
+		primary_provider_id = primary_provider_id,
+		primary_model = primary_model,
+		primary_error = primary_error,
+		fallback_model = fallback_model,
+		fallback_error = fallback_error,
+	}
 
 	lib.rs.user_error({
 		causes = {"NO_PROVIDER_FOR_PROMPT"},

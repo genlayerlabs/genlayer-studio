@@ -859,12 +859,19 @@ class Node:
                 error_code=e.error_code,
                 causes=e.causes,
                 is_fatal=e.is_fatal,
+                ctx=e.ctx,
             )
             processing_time = int((time.time() - start_time) * 1000)
             error_message = f"GenVM internal error: {e}"
             error_result = bytes(
                 [public_abi.ResultCode.VM_ERROR]
             ) + error_message.encode("utf-8")
+            raw_error = {
+                "causes": e.causes,
+                "fatal": e.is_fatal,
+            }
+            if e.ctx:
+                raw_error["ctx"] = e.ctx
             result = Receipt(
                 result=error_result,
                 gas_used=0,
@@ -880,7 +887,7 @@ class Node:
                     "stdout": "",
                     "stderr": str(e),
                     "error_code": e.error_code,
-                    "raw_error": {"causes": e.causes, "is_fatal": e.is_fatal},
+                    "raw_error": raw_error,
                 },
                 processing_time=processing_time,
                 nondet_disagree=None,
