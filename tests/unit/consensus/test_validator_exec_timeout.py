@@ -67,6 +67,7 @@ async def test_committing_times_out_hung_validator_without_blocking(monkeypatch)
         _timing_callback,
         _genvm_manager,
         _shared_decoded_value_cache,
+        _shared_contract_snapshot_cache,
     ):
         if validator["address"] == "validator-1":
             return SimpleNamespace(exec_transaction=exec_hung)
@@ -89,6 +90,7 @@ async def test_committing_times_out_hung_validator_without_blocking(monkeypatch)
         ),
         genvm_manager=MagicMock(),
         shared_decoded_value_cache={},
+        shared_contract_snapshot_cache={},
         leader={"address": "leader"},
         remaining_validators=[
             {"address": "validator-1"},

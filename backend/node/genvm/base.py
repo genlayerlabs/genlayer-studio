@@ -348,19 +348,28 @@ async def _copy_state_proxy(state_proxy) -> StateProxy:
     shared_decoded_value_cache = getattr(
         state_proxy, "_shared_decoded_value_cache", None
     )
+    shared_contract_snapshot_cache = getattr(
+        state_proxy, "_shared_contract_snapshot_cache", None
+    )
     try:
         state_proxy.snapshot_factory = None
         if hasattr(state_proxy, "_shared_decoded_value_cache"):
             state_proxy._shared_decoded_value_cache = None
+        if hasattr(state_proxy, "_shared_contract_snapshot_cache"):
+            state_proxy._shared_contract_snapshot_cache = None
         state_copy = copy.deepcopy(state_proxy)
         state_copy.snapshot_factory = factory
         if hasattr(state_copy, "_shared_decoded_value_cache"):
             state_copy._shared_decoded_value_cache = shared_decoded_value_cache
+        if hasattr(state_copy, "_shared_contract_snapshot_cache"):
+            state_copy._shared_contract_snapshot_cache = shared_contract_snapshot_cache
         return state_copy
     finally:
         state_proxy.snapshot_factory = factory
         if hasattr(state_proxy, "_shared_decoded_value_cache"):
             state_proxy._shared_decoded_value_cache = shared_decoded_value_cache
+        if hasattr(state_proxy, "_shared_contract_snapshot_cache"):
+            state_proxy._shared_contract_snapshot_cache = shared_contract_snapshot_cache
 
 
 def _create_timeout_result(

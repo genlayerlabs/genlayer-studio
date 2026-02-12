@@ -114,6 +114,7 @@ def test_snapshot_view_shared_decode_cache_reused_across_executions():
         lambda _addr: snap1,
         readonly=True,
         shared_decoded_value_cache=shared_decode_cache,
+        collect_metrics=True,
     )
     got1 = view1.storage_read(Address(contract_address), slot, 0, len(value))
     assert got1 == value
@@ -127,9 +128,122 @@ def test_snapshot_view_shared_decode_cache_reused_across_executions():
         lambda _addr: snap2,
         readonly=True,
         shared_decoded_value_cache=shared_decode_cache,
+        collect_metrics=True,
     )
     got2 = view2.storage_read(Address(contract_address), slot, 0, len(value))
     assert got2 == value
     metrics2 = view2.get_metrics()
     assert metrics2["shared_decoded_cache_hits"] == 1
     assert metrics2["decoded_slots_total"] == 0
+
+
+def test_snapshot_view_primary_reads_use_fast_path_without_snapshot_factory():
+    slot = b"\x02" * 32
+    value = b"primary-fast-path"
+    slot_key = base64.b64encode(slot).decode("ascii")
+    raw_value = base64.b64encode(value).decode("utf-8")
+    contract_address = "0x" + "cd" * 20
+
+    primary_snapshot = MagicMock(spec=ContractSnapshot)
+    primary_snapshot.contract_address = contract_address
+    primary_snapshot.states = {"accepted": {slot_key: raw_value}}
+    primary_snapshot.balance = 0
+
+    snapshot_factory = MagicMock(side_effect=AssertionError("should not be called"))
+    view = _SnapshotView(
+        primary_snapshot,
+        snapshot_factory,
+        readonly=True,
+        shared_decoded_value_cache={},
+        collect_metrics=True,
+    )
+
+    for _ in range(3):
+        got = view.storage_read(Address(contract_address), slot, 0, len(value))
+        assert got == value
+
+    assert snapshot_factory.call_count == 0
+
+
+def test_snapshot_view_cross_contract_reads_remain_lazy():
+    slot = b"\x03" * 32
+    value = b"cross-lazy-value"
+    slot_key = base64.b64encode(slot).decode("ascii")
+    raw_value = base64.b64encode(value).decode("utf-8")
+    primary_address = "0x" + "aa" * 20
+    cross_address = "0x" + "bb" * 20
+
+    primary_snapshot = MagicMock(spec=ContractSnapshot)
+    primary_snapshot.contract_address = primary_address
+    primary_snapshot.states = {"accepted": {}}
+    primary_snapshot.balance = 0
+
+    cross_snapshot = MagicMock(spec=ContractSnapshot)
+    cross_snapshot.contract_address = cross_address
+    cross_snapshot.states = {"accepted": {slot_key: raw_value}}
+    cross_snapshot.balance = 0
+
+    view = _SnapshotView(
+        primary_snapshot,
+        lambda _addr: cross_snapshot,
+        readonly=True,
+        shared_decoded_value_cache={},
+        collect_metrics=True,
+    )
+
+    got1 = view.storage_read(Address(cross_address), slot, 0, len(value))
+    got2 = view.storage_read(Address(cross_address), slot, 0, len(value))
+    assert got1 == value
+    assert got2 == value
+
+    metrics = view.get_metrics()
+    assert metrics["decoded_slots_total"] == 1
+    assert metrics["decoded_cache_hits"] >= 1
+
+
+def test_snapshot_view_reuses_shared_cross_contract_snapshot_cache():
+    slot = b"\x04" * 32
+    value = b"shared-snapshot-value"
+    slot_key = base64.b64encode(slot).decode("ascii")
+    raw_value = base64.b64encode(value).decode("utf-8")
+    primary_address = "0x" + "11" * 20
+    cross_address = "0x" + "22" * 20
+
+    primary_snapshot = MagicMock(spec=ContractSnapshot)
+    primary_snapshot.contract_address = primary_address
+    primary_snapshot.states = {"accepted": {}}
+    primary_snapshot.balance = 0
+
+    cross_snapshot = MagicMock(spec=ContractSnapshot)
+    cross_snapshot.contract_address = cross_address
+    cross_snapshot.states = {"accepted": {slot_key: raw_value}}
+    cross_snapshot.balance = 0
+
+    snapshot_factory = MagicMock(return_value=cross_snapshot)
+    shared_snapshot_cache: dict[str, ContractSnapshot] = {}
+
+    view1 = _SnapshotView(
+        primary_snapshot,
+        snapshot_factory,
+        readonly=True,
+        shared_decoded_value_cache={},
+        shared_contract_snapshot_cache=shared_snapshot_cache,
+        collect_metrics=True,
+    )
+    got1 = view1.storage_read(Address(cross_address), slot, 0, len(value))
+    assert got1 == value
+    assert snapshot_factory.call_count == 1
+
+    view2 = _SnapshotView(
+        primary_snapshot,
+        snapshot_factory,
+        readonly=True,
+        shared_decoded_value_cache={},
+        shared_contract_snapshot_cache=shared_snapshot_cache,
+        collect_metrics=True,
+    )
+    got2 = view2.storage_read(Address(cross_address), slot, 0, len(value))
+    assert got2 == value
+    assert snapshot_factory.call_count == 1
+    metrics2 = view2.get_metrics()
+    assert metrics2["snapshot_shared_cache_hits"] == 1

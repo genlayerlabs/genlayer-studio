@@ -77,6 +77,7 @@ type NodeFactory = Callable[
         Callable[[str], None] | None,
         GenVMManager,
         dict[str, bytes] | None,
+        dict[str, ContractSnapshot] | None,
     ],
     Node,
 ]
@@ -240,6 +241,7 @@ def node_factory(
     timing_callback: Callable[[str], None] | None,
     genvm_manager: GenVMManager,
     shared_decoded_value_cache: dict[str, bytes] | None = None,
+    shared_contract_snapshot_cache: dict[str, ContractSnapshot] | None = None,
 ) -> Node:
     """
     Factory function to create a Node instance.
@@ -280,6 +282,7 @@ def node_factory(
         timing_callback=timing_callback,
         manager=genvm_manager,
         shared_decoded_value_cache=shared_decoded_value_cache,
+        shared_contract_snapshot_cache=shared_contract_snapshot_cache,
     )
 
 
@@ -437,6 +440,7 @@ class TransactionContext:
         self.leader: dict = {}
         # Shared for the lifetime of this transaction context (leader + validators).
         self.shared_decoded_value_cache: dict[str, bytes] = {}
+        self.shared_contract_snapshot_cache: dict[str, ContractSnapshot] = {}
 
         if self.transaction.type != TransactionType.SEND:
             if self.transaction.contract_snapshot:
@@ -2700,6 +2704,7 @@ class ProposingState(TransactionState):
                 leader_timing_callback,
                 context.genvm_manager,
                 context.shared_decoded_value_cache,
+                context.shared_contract_snapshot_cache,
             )
 
             context.transactions_processor.add_state_timestamp(
@@ -2844,6 +2849,7 @@ class CommittingState(TransactionState):
                 validator_timing_callback,
                 context.genvm_manager,
                 context.shared_decoded_value_cache,
+                context.shared_contract_snapshot_cache,
             )
 
         # Dispatch a transaction status update to COMMITTING
