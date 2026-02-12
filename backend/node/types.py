@@ -210,42 +210,6 @@ class Receipt:
     nondet_disagree: int | None = None
     execution_stats: dict | None = None
 
-    def _extract_llm_error_result(self) -> dict | None:
-        """Extract LLM provider error details from genvm_result.
-
-        Returns a dict with primary_error and/or fallback_error containing
-        model, provider, HTTP status, and error_message for easy access.
-        Returns None if no LLM errors are present.
-        """
-        if not self.genvm_result:
-            return None
-        raw_error = self.genvm_result.get("raw_error")
-        if not raw_error or not isinstance(raw_error, dict):
-            return None
-        ctx = raw_error.get("ctx")
-        if not ctx or not isinstance(ctx, dict):
-            return None
-
-        result = {}
-        for key in ("primary_error", "fallback_error"):
-            err = ctx.get(key)
-            if err and isinstance(err, dict):
-                summary = {}
-                if err.get("status") is not None:
-                    summary["status"] = err["status"]
-                if err.get("model"):
-                    summary["model"] = err["model"]
-                if err.get("provider"):
-                    summary["provider"] = err["provider"]
-                err_msg = err.get("error_message")
-                if err_msg:
-                    summary["error_message"] = (
-                        err_msg[:200] if len(str(err_msg)) > 200 else err_msg
-                    )
-                if summary:
-                    result[key] = summary
-        return result if result else None
-
     def to_dict(self, strip_contract_state: bool = False):
         """Convert Receipt to dict.
 
@@ -271,7 +235,6 @@ class Receipt:
                 for pending_transaction in self.pending_transactions
             ],
             "genvm_result": self.genvm_result,
-            "llm_error_result": self._extract_llm_error_result(),
             "processing_time": self.processing_time,
             "nondet_disagree": self.nondet_disagree,
             "execution_stats": self.execution_stats,
