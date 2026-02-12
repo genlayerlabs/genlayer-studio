@@ -296,35 +296,31 @@ async def _run_health_checks() -> None:
         _health_cache.genvm_healthy = genvm_ok
         _health_cache.genvm_error = genvm_error
 
-        # Best-effort parse of permit info (do not fail overall health on missing keys).
+        # Best-effort parse of permit info from /status.
+        # The manager returns: {"permits": {"current": N, "max": M}, "executions": {...}}
+        # where permits.current = available permits (semaphore value).
         try:
-            max_permits = genvm_status.get("max_permits")
-            current_permits = genvm_status.get("current_permits")
-            active_exec = genvm_status.get("active_executions")
+            permits_obj = genvm_status.get("permits") or {}
+            executions_obj = genvm_status.get("executions")
 
-            max_permits_i = int(max_permits) if max_permits is not None else None
-            current_permits_i = (
-                int(current_permits) if current_permits is not None else None
-            )
+            max_permits_i = int(permits_obj["max"]) if "max" in permits_obj else None
+            # permits.current IS the available count (semaphore value)
             available_i = (
-                max_permits_i - current_permits_i
-                if max_permits_i is not None and current_permits_i is not None
-                else None
+                int(permits_obj["current"]) if "current" in permits_obj else None
             )
+            active_i = len(executions_obj) if isinstance(executions_obj, dict) else None
 
             _health_cache.genvm_max_permits = max_permits_i
-            _health_cache.genvm_current_permits = current_permits_i
             _health_cache.genvm_available_permits = available_i
-            _health_cache.genvm_active_executions = (
-                int(active_exec) if active_exec is not None else None
-            )
+            _health_cache.genvm_current_permits = active_i  # in-use count
+            _health_cache.genvm_active_executions = active_i
 
             services["genvm"].update(
                 {
                     "max_permits": max_permits_i,
-                    "current_permits": current_permits_i,
                     "available_permits": available_i,
-                    "active_executions": _health_cache.genvm_active_executions,
+                    "current_permits": active_i,
+                    "active_executions": active_i,
                 }
             )
         except Exception as e:
