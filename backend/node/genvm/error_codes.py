@@ -47,6 +47,7 @@ class GenVMInternalError(Exception):
         is_fatal: bool,
         is_leader: bool | None = None,
         ctx: dict | None = None,
+        detail: str | None = None,
     ):
         super().__init__(message)
         self.error_code = error_code
@@ -54,6 +55,7 @@ class GenVMInternalError(Exception):
         self.is_fatal = is_fatal
         self.is_leader = is_leader
         self.ctx = ctx
+        self.detail = detail
 
     def __repr__(self) -> str:
         return (

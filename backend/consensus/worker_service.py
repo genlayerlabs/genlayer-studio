@@ -619,6 +619,11 @@ def health_check():
         "active_task_count": len(worker._active_tasks),
         "max_parallel_txs": worker.max_parallel_txs,
         "restart_count": worker_restart_count,
+        "generic_error_retries": (
+            len(worker._generic_error_retries)
+            if hasattr(worker, "_generic_error_retries")
+            else 0
+        ),
         **metrics,
     }
 
