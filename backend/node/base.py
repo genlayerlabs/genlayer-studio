@@ -61,6 +61,13 @@ def get_simulator_chain_id() -> int:
     return _parse_chain_id()
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _filter_genvm_log_by_level(genvm_log: list[dict]) -> list[dict]:
     """
     Filter genvm_log entries based on configured LOG_LEVEL.
@@ -127,42 +134,186 @@ class _SnapshotView(genvmbase.StateProxy):
         snapshot_factory: typing.Callable[[str], ContractSnapshot],
         readonly: bool,
         state_status: str | None = None,
+        shared_decoded_value_cache: dict[str, bytes] | None = None,
+        shared_contract_snapshot_cache: dict[str, ContractSnapshot] | None = None,
+        collect_metrics: bool = False,
     ):
         self.contract_address = Address(snapshot.contract_address)
         self.snapshot = snapshot
         self.snapshot_factory = snapshot_factory
-        self.cached = {}
+        self.cached: dict[str, ContractSnapshot] = {}
         self.readonly = readonly
         self.state_status = state_status if state_status else "accepted"
-        self._decoded: dict[str, dict[bytes, bytes]] = {}
+        self._shared_decoded_value_cache = shared_decoded_value_cache
+        # Shared immutable cross-contract snapshots for this transaction context.
+        self._shared_contract_snapshot_cache = shared_contract_snapshot_cache
+        self._collect_metrics = collect_metrics
+        # Primary contract fast path:
+        # decode the full primary contract state once and then read by bytes slot key.
+        self._primary_decoded: dict[bytes, bytes] | None = None
+        # Per-contract decoded slot cache:
+        # {contract_address: {base64_slot_key: decoded_value_bytes}}
+        # This is only used for non-primary contract lazy reads.
+        self._decoded_slots: dict[str, dict[str, bytes]] = {}
+        self._slot_keys: dict[bytes, str] = {}
+        # Execution-scoped metrics to quantify cross-contract read cold/warm behavior.
+        if collect_metrics:
+            self._metrics: dict[str, int] | None = {
+                "primary_contract_lookups": 0,
+                "snapshot_cache_hits": 0,
+                "snapshot_cache_misses": 0,
+                "snapshot_shared_cache_hits": 0,
+                "snapshot_shared_cache_misses": 0,
+                "snapshot_factory_ms": 0,
+                "decoded_cache_hits": 0,
+                "decoded_cache_misses": 0,
+                "decoded_build_ms": 0,
+                "decoded_slots_total": 0,
+                "shared_decoded_cache_hits": 0,
+                "shared_decoded_cache_misses": 0,
+            }
+        else:
+            self._metrics = None
 
     def _get_snapshot(self, addr: Address) -> ContractSnapshot:
         if addr == self.contract_address:
             return self.snapshot
-        res = self.cached.get(addr)
+        addr_hex = addr.as_hex.lower()
+        res = self.cached.get(addr_hex)
         if res is not None:
+            metrics = self._metrics
+            if metrics is not None:
+                metrics["snapshot_cache_hits"] += 1
             return res
+        metrics = self._metrics
+        if metrics is not None:
+            metrics["snapshot_cache_misses"] += 1
+        shared_cache = self._shared_contract_snapshot_cache
+        if shared_cache is not None:
+            res = shared_cache.get(addr_hex)
+            if res is not None:
+                if metrics is not None:
+                    metrics["snapshot_shared_cache_hits"] += 1
+                self.cached[addr_hex] = res
+                return res
+            if metrics is not None:
+                metrics["snapshot_shared_cache_misses"] += 1
+        start = time.perf_counter() if metrics is not None else 0.0
         res = self.snapshot_factory(addr.as_hex)
-        self.cached[addr] = res
+        if metrics is not None:
+            metrics["snapshot_factory_ms"] += round(
+                (time.perf_counter() - start) * 1000
+            )
+        self.cached[addr_hex] = res
+        if shared_cache is not None:
+            shared_cache[addr_hex] = res
         return res
 
-    def _get_decoded(self, snap: ContractSnapshot) -> dict[bytes, bytes]:
-        addr = snap.contract_address
-        decoded = self._decoded.get(addr)
-        if decoded is None:
-            state = snap.states.get(self.state_status, {})
-            decoded = {
-                base64.b64decode(k): base64.b64decode(v) for k, v in state.items()
-            }
-            self._decoded[addr] = decoded
+    def _slot_key(self, slot: bytes) -> str:
+        slot_key = self._slot_keys.get(slot)
+        if slot_key is None:
+            slot_key = base64.b64encode(slot).decode("ascii")
+            self._slot_keys[slot] = slot_key
+        return slot_key
+
+    def _get_contract_slot_cache(self, snap: ContractSnapshot) -> dict[str, bytes]:
+        return self._decoded_slots.setdefault(snap.contract_address, {})
+
+    def _get_primary_decoded(self) -> dict[bytes, bytes]:
+        decoded = self._primary_decoded
+        if decoded is not None:
+            return decoded
+
+        decoded = {}
+        state = self.snapshot.states.get(self.state_status, {})
+        shared_cache = self._shared_decoded_value_cache
+        for slot_key, raw in state.items():
+            slot = base64.b64decode(slot_key)
+            if shared_cache is None:
+                value = base64.b64decode(raw)
+                metrics = self._metrics
+                if metrics is not None:
+                    metrics["decoded_slots_total"] += 1
+            else:
+                value = shared_cache.get(raw)
+                if value is None:
+                    metrics = self._metrics
+                    if metrics is not None:
+                        metrics["shared_decoded_cache_misses"] += 1
+                    value = base64.b64decode(raw)
+                    shared_cache[raw] = value
+                    if metrics is not None:
+                        metrics["decoded_slots_total"] += 1
+                else:
+                    metrics = self._metrics
+                    if metrics is not None:
+                        metrics["shared_decoded_cache_hits"] += 1
+            decoded[slot] = value
+
+        self._primary_decoded = decoded
         return decoded
+
+    def _read_primary_slot_value(self, slot: bytes) -> bytes:
+        return self._get_primary_decoded().get(slot, b"")
+
+    def _read_cross_slot_value(self, snap: ContractSnapshot, slot: bytes) -> bytes:
+        slot_cache = self._get_contract_slot_cache(snap)
+        slot_key = self._slot_key(slot)
+        data = slot_cache.get(slot_key)
+        if data is not None:
+            metrics = self._metrics
+            if metrics is not None:
+                metrics["decoded_cache_hits"] += 1
+            return data
+
+        metrics = self._metrics
+        if metrics is not None:
+            metrics["decoded_cache_misses"] += 1
+        raw = snap.states.get(self.state_status, {}).get(slot_key)
+        shared_cache = self._shared_decoded_value_cache
+        if raw is not None and shared_cache is not None:
+            data = shared_cache.get(raw)
+            if data is not None:
+                if metrics is not None:
+                    metrics["shared_decoded_cache_hits"] += 1
+                slot_cache[slot_key] = data
+                return data
+            if metrics is not None:
+                metrics["shared_decoded_cache_misses"] += 1
+
+        start = time.perf_counter() if metrics is not None else 0.0
+        data = base64.b64decode(raw) if raw is not None else b""
+        if metrics is not None:
+            metrics["decoded_build_ms"] += round((time.perf_counter() - start) * 1000)
+        if raw is not None:
+            if metrics is not None:
+                metrics["decoded_slots_total"] += 1
+            if shared_cache is not None:
+                shared_cache[raw] = data
+        slot_cache[slot_key] = data
+        return data
+
+    def get_metrics(self) -> dict[str, int]:
+        metrics = self._metrics
+        if metrics is None:
+            return {}
+        return {
+            **metrics,
+            "cached_contracts": len(self.cached),
+            "decoded_contracts": len(self._decoded_slots),
+        }
 
     def storage_read(
         self, account: Address, slot: bytes, index: int, le: int, /
     ) -> bytes:
-        snap = self._get_snapshot(account)
-        decoded = self._get_decoded(snap)
-        data = decoded.get(slot, b"")
+        if account == self.contract_address:
+            metrics = self._metrics
+            if metrics is not None:
+                metrics["primary_contract_lookups"] += 1
+            data = self._read_primary_slot_value(slot)
+        else:
+            snap = self._get_snapshot(account)
+            data = self._read_cross_slot_value(snap, slot)
         end = index + le
         if end <= len(data):
             return data[index:end]
@@ -180,15 +331,20 @@ class _SnapshotView(genvmbase.StateProxy):
         /,
     ) -> None:
         assert not self.readonly
-        snap = self._get_snapshot(self.contract_address)
-        decoded = self._get_decoded(snap)
-        data = bytearray(decoded.get(slot, b""))
+        slot_key = self._slot_key(slot)
+        state_bucket = self.snapshot.states.setdefault(self.state_status, {})
+        primary_decoded = self._get_primary_decoded()
+        existing = primary_decoded.get(slot, b"")
+        data = bytearray(existing)
         mem = memoryview(got)
         data.extend(b"\x00" * (index + len(mem) - len(data)))
         data[index : index + len(mem)] = mem
-        decoded[slot] = bytes(data)
-        slot_id = base64.b64encode(slot).decode("ascii")
-        snap.states[self.state_status][slot_id] = base64.b64encode(data).decode("utf-8")
+        new_value = bytes(data)
+        primary_decoded[slot] = new_value
+        raw_new_value = base64.b64encode(data).decode("utf-8")
+        state_bucket[slot_key] = raw_new_value
+        if self._shared_decoded_value_cache is not None:
+            self._shared_decoded_value_cache[raw_new_value] = new_value
 
     def get_balance(self, addr: Address) -> int:
         snap = self._get_snapshot(addr)
@@ -415,6 +571,8 @@ class Node:
         *,
         manager: Manager,
         logger: genvm_logger.Logger | None = None,
+        shared_decoded_value_cache: dict[str, bytes] | None = None,
+        shared_contract_snapshot_cache: dict[str, ContractSnapshot] | None = None,
     ):
         assert manager is not None
 
@@ -427,6 +585,9 @@ class Node:
         self.contract_snapshot_factory = contract_snapshot_factory
         self.manager = manager
         self.validators_snapshot = validators_snapshot
+        self.shared_decoded_value_cache = shared_decoded_value_cache
+        self.shared_contract_snapshot_cache = shared_contract_snapshot_cache
+        self.collect_state_proxy_metrics = _env_bool("GENVM_STATE_PROXY_METRICS")
         if timing_callback is None:
 
             def _timing_callback(x: str) -> None:
@@ -781,6 +942,9 @@ class Node:
             self.contract_snapshot_factory,
             readonly,
             state_status,
+            self.shared_decoded_value_cache,
+            self.shared_contract_snapshot_cache,
+            self.collect_state_proxy_metrics,
         )
 
         self.timing_callback("SNAPSHOT_CREATION_END")
@@ -887,6 +1051,18 @@ class Node:
             )
             return self._set_vote(result)
         result.processing_time = int((time.time() - start_time) * 1000)
+
+        # State-proxy metrics are opt-in via GENVM_STATE_PROXY_METRICS.
+        # Use the executed state proxy from run_genvm_host, because that object can be
+        # a deep-copied instance created per execution attempt.
+        state_proxy_for_metrics = (
+            result.state if hasattr(result.state, "get_metrics") else snapshot_view
+        )
+        state_proxy_metrics = state_proxy_for_metrics.get_metrics()
+        if state_proxy_metrics:
+            if result.execution_stats is None:
+                result.execution_stats = {}
+            result.execution_stats["state_proxy"] = state_proxy_metrics
 
         await self._execution_finished(result, transaction_hash, from_address)
 

@@ -218,6 +218,7 @@ class Host(genvmhost.IHost):
                 error_code=error_code,
                 causes=causes,
                 is_fatal=is_fatal,
+                detail=error_str[:1000],
             )
         else:
             raise Exception(f"invalid result {res.result_kind}")
@@ -344,13 +345,31 @@ class Host(genvmhost.IHost):
 async def _copy_state_proxy(state_proxy) -> StateProxy:
     # snapshot_factory cannot be pickled. Temporarily remove the factory to allow deepcopy
     factory = state_proxy.snapshot_factory
+    shared_decoded_value_cache = getattr(
+        state_proxy, "_shared_decoded_value_cache", None
+    )
+    shared_contract_snapshot_cache = getattr(
+        state_proxy, "_shared_contract_snapshot_cache", None
+    )
     try:
         state_proxy.snapshot_factory = None
+        if hasattr(state_proxy, "_shared_decoded_value_cache"):
+            state_proxy._shared_decoded_value_cache = None
+        if hasattr(state_proxy, "_shared_contract_snapshot_cache"):
+            state_proxy._shared_contract_snapshot_cache = None
         state_copy = copy.deepcopy(state_proxy)
         state_copy.snapshot_factory = factory
+        if hasattr(state_copy, "_shared_decoded_value_cache"):
+            state_copy._shared_decoded_value_cache = shared_decoded_value_cache
+        if hasattr(state_copy, "_shared_contract_snapshot_cache"):
+            state_copy._shared_contract_snapshot_cache = shared_contract_snapshot_cache
         return state_copy
     finally:
         state_proxy.snapshot_factory = factory
+        if hasattr(state_proxy, "_shared_decoded_value_cache"):
+            state_proxy._shared_decoded_value_cache = shared_decoded_value_cache
+        if hasattr(state_proxy, "_shared_contract_snapshot_cache"):
+            state_proxy._shared_contract_snapshot_cache = shared_contract_snapshot_cache
 
 
 def _create_timeout_result(
@@ -424,13 +443,17 @@ async def run_genvm_host(
                     int(timeout * 1000),
                 )
 
-            # Create fresh copies of the arguments for each attempt
-            fresh_args = {}
-            for key, value in host_args.items():
-                if key == "state_proxy" and hasattr(value, "snapshot_factory"):
-                    fresh_args[key] = await _copy_state_proxy(value)
-                else:
-                    fresh_args[key] = copy.deepcopy(value)
+            # Avoid expensive state deep-copy on the first attempt. We only need
+            # a clean copy when retrying after a failed execution attempt.
+            if retry_count == 0:
+                fresh_args = dict(host_args)
+            else:
+                fresh_args = {}
+                for key, value in host_args.items():
+                    if key == "state_proxy" and hasattr(value, "snapshot_factory"):
+                        fresh_args[key] = await _copy_state_proxy(value)
+                    else:
+                        fresh_args[key] = copy.deepcopy(value)
 
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock_listener:
                 sock_listener.setblocking(False)
