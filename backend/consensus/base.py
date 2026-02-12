@@ -4,6 +4,7 @@ DEFAULT_VALIDATORS_COUNT = 5
 DEFAULT_CONSENSUS_SLEEP_TIME = 5
 ACTIVATED_TRANSACTION_TIMEOUT = 900
 MAX_IDLE_REPLACEMENTS = 5
+DEFAULT_VALIDATOR_EXEC_TIMEOUT_SECONDS = ACTIVATED_TRANSACTION_TIMEOUT
 
 import os
 import asyncio
@@ -75,6 +76,7 @@ type NodeFactory = Callable[
         validators.Snapshot,
         Callable[[str], None] | None,
         GenVMManager,
+        dict[str, bytes] | None,
     ],
     Node,
 ]
@@ -214,6 +216,19 @@ def _redact_contract_for_log(contract_dict: dict) -> dict:
     return redacted
 
 
+def _validator_exec_timeout_seconds() -> float:
+    raw_timeout = os.getenv("CONSENSUS_VALIDATOR_EXEC_TIMEOUT_SECONDS")
+    if raw_timeout is None:
+        return float(DEFAULT_VALIDATOR_EXEC_TIMEOUT_SECONDS)
+    try:
+        timeout = float(raw_timeout)
+    except ValueError:
+        return float(DEFAULT_VALIDATOR_EXEC_TIMEOUT_SECONDS)
+    if timeout <= 0:
+        return float(DEFAULT_VALIDATOR_EXEC_TIMEOUT_SECONDS)
+    return timeout
+
+
 def node_factory(
     validator: dict,
     validator_mode: ExecutionMode,
@@ -224,6 +239,7 @@ def node_factory(
     validators_manager_snapshot: validators.Snapshot,
     timing_callback: Callable[[str], None] | None,
     genvm_manager: GenVMManager,
+    shared_decoded_value_cache: dict[str, bytes] | None = None,
 ) -> Node:
     """
     Factory function to create a Node instance.
@@ -263,6 +279,7 @@ def node_factory(
         validators_snapshot=validators_manager_snapshot,
         timing_callback=timing_callback,
         manager=genvm_manager,
+        shared_decoded_value_cache=shared_decoded_value_cache,
     )
 
 
@@ -418,6 +435,8 @@ class TransactionContext:
         self.rotation_count: int = 0
         self.consensus_service = consensus_service
         self.leader: dict = {}
+        # Shared for the lifetime of this transaction context (leader + validators).
+        self.shared_decoded_value_cache: dict[str, bytes] = {}
 
         if self.transaction.type != TransactionType.SEND:
             if self.transaction.contract_snapshot:
@@ -2680,6 +2699,7 @@ class ProposingState(TransactionState):
                 context.validators_snapshot,
                 leader_timing_callback,
                 context.genvm_manager,
+                context.shared_decoded_value_cache,
             )
 
             context.transactions_processor.add_state_timestamp(
@@ -2823,6 +2843,7 @@ class CommittingState(TransactionState):
                 context.validators_snapshot,
                 validator_timing_callback,
                 context.genvm_manager,
+                context.shared_decoded_value_cache,
             )
 
         # Dispatch a transaction status update to COMMITTING
@@ -2832,6 +2853,8 @@ class CommittingState(TransactionState):
             TransactionStatus.COMMITTING,
             context.msg_handler,
         )
+
+        validator_exec_timeout_seconds = _validator_exec_timeout_seconds()
 
         # Execute the transaction with a semaphore to limit the number of concurrent validators
         sem = asyncio.Semaphore(8)
@@ -2856,6 +2879,34 @@ class CommittingState(TransactionState):
             raw_error = (receipt.genvm_result or {}).get("raw_error")
             return isinstance(raw_error, dict) and raw_error.get("fatal") is True
 
+        def _build_timeout_receipt(validator_dict: dict) -> Receipt:
+            timeout_ms = int(validator_exec_timeout_seconds * 1000)
+            return Receipt(
+                result=bytes([ResultCode.VM_ERROR]) + b"timeout",
+                calldata=b"",
+                gas_used=0,
+                mode=ExecutionMode.VALIDATOR,
+                contract_state={},
+                node_config=validator_dict,
+                eq_outputs={},
+                execution_result=ExecutionResultStatus.ERROR,
+                vote=None,
+                genvm_result={
+                    "stdout": "",
+                    "stderr": (
+                        "Validator execution exceeded "
+                        f"{validator_exec_timeout_seconds:.3f}s"
+                    ),
+                    "error_code": "CONSENSUS_VALIDATOR_EXEC_TIMEOUT",
+                    "raw_error": {
+                        "causes": ["VALIDATOR_EXEC_TIMEOUT"],
+                        # Mark as fatal so replacement validators are attempted.
+                        "fatal": True,
+                    },
+                },
+                processing_time=timeout_ms,
+            )
+
         async def run_single_validator(validator_dict: dict, index: int) -> Receipt:
             async with sem:
                 current = validator_dict
@@ -2865,7 +2916,32 @@ class CommittingState(TransactionState):
                         context.transaction.hash,
                         f"COMMITTING.VALIDATOR_{index}_START" f".attempt_{attempt}",
                     )
-                    result = await node.exec_transaction(context.transaction)
+                    exec_task = asyncio.create_task(
+                        node.exec_transaction(context.transaction)
+                    )
+                    done, _ = await asyncio.wait(
+                        {exec_task},
+                        timeout=validator_exec_timeout_seconds,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if exec_task in done:
+                        result = await exec_task
+                    else:
+                        exec_task.cancel()
+                        try:
+                            await asyncio.wait_for(exec_task, timeout=0.1)
+                        except (
+                            asyncio.CancelledError,
+                            asyncio.TimeoutError,
+                            Exception,
+                        ):
+                            pass
+                        context.transactions_processor.add_state_timestamp(
+                            context.transaction.hash,
+                            f"COMMITTING.VALIDATOR_{index}_TIMEOUT"
+                            f".attempt_{attempt}",
+                        )
+                        result = _build_timeout_receipt(current)
                     context.transactions_processor.add_state_timestamp(
                         context.transaction.hash,
                         f"COMMITTING.VALIDATOR_{index}_END" f".attempt_{attempt}",

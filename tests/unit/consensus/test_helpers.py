@@ -613,6 +613,7 @@ def node_factory(
     snap: validators.Snapshot,
     timing_callback: Optional[Callable[[str], None]],
     manager: GenVMManager,
+    shared_decoded_value_cache: Optional[dict[str, bytes]],
     vote: Vote,
     timeout: bool,
 ):
