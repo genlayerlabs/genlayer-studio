@@ -4,7 +4,7 @@ from enum import Enum
 import rlp
 import re
 import random
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import or_, desc, and_, JSON, type_coerce, text
 
 from backend.node.types import Vote, Receipt, ExecutionResultStatus
@@ -734,6 +734,7 @@ class TransactionsProcessor:
         cutoff_time = datetime.now() - timedelta(seconds=seconds)
         stuck_transactions = (
             self.session.query(Transactions)
+            .options(selectinload(Transactions.triggered_transactions))
             .filter(
                 Transactions.status == TransactionStatus.ACTIVATED,
                 Transactions.created_at < cutoff_time,
@@ -889,7 +890,9 @@ class TransactionsProcessor:
         address: str,
         filter: TransactionAddressFilter,
     ) -> list[dict]:
-        query = self.session.query(Transactions)
+        query = self.session.query(Transactions).options(
+            selectinload(Transactions.triggered_transactions)
+        )
 
         if filter == TransactionAddressFilter.TO:
             query = query.filter(Transactions.to_address == address)
@@ -992,11 +995,13 @@ class TransactionsProcessor:
     def get_transactions_for_block(
         self, block_number: int, include_full_tx: bool
     ) -> dict:
-        transactions = (
-            self.session.query(Transactions)
-            .filter(Transactions.timestamp_awaiting_finalization == block_number)
-            .all()
+        query = self.session.query(Transactions).filter(
+            Transactions.timestamp_awaiting_finalization == block_number
         )
+        # Only eager load triggered_transactions if we need full transaction data
+        if include_full_tx:
+            query = query.options(selectinload(Transactions.triggered_transactions))
+        transactions = query.all()
 
         block_hash = "0x" + "0" * 64
         parent_hash = "0x" + "0" * 64  # Placeholder for parent block hash
@@ -1034,6 +1039,7 @@ class TransactionsProcessor:
         )
         transactions = (
             self.session.query(Transactions)
+            .options(selectinload(Transactions.triggered_transactions))
             .filter(
                 Transactions.created_at > transaction.created_at,
                 Transactions.to_address == transaction.to_address,
@@ -1171,6 +1177,7 @@ class TransactionsProcessor:
     def transactions_in_process_by_contract(self) -> list[dict]:
         transactions = (
             self.session.query(Transactions)
+            .options(selectinload(Transactions.triggered_transactions))
             .filter(
                 Transactions.to_address.isnot(None),
                 Transactions.status.in_(

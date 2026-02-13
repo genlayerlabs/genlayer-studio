@@ -627,7 +627,7 @@ class ConsensusWorker:
             logger.error(
                 f"[Worker {self.worker_id}] GenVM internal error during {tx_type} {tx_hash}: "
                 f"code={e.error_code}, causes={e.causes}, is_fatal={e.is_fatal}, "
-                f"is_leader={e.is_leader}, message={e}, detail={e.detail}"
+                f"is_leader={e.is_leader}, message={e}, detail={e.detail}, ctx={e.ctx}"
             )
             session.rollback()
 
