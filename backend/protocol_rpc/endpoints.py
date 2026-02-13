@@ -1,6 +1,7 @@
 # rpc/endpoints.py
 import random
 import json
+import time
 import eth_utils
 import logging
 from functools import partial, wraps
@@ -61,6 +62,40 @@ import asyncio
 # unbounded concurrent GenVM socket operations that cause fd registry collisions.
 _GENVM_CONCURRENCY = int(os.environ.get("GENVM_MAX_CONCURRENT", "8"))
 _genvm_semaphore = asyncio.Semaphore(_GENVM_CONCURRENCY)
+
+# ---------------------------------------------------------------------------
+# Per-address rate limiting for gen_call / sim_call
+# Prevents a single contract from monopolising all GenVM execution slots.
+# ---------------------------------------------------------------------------
+_RATE_LIMIT_WINDOW = float(
+    os.environ.get("GEN_CALL_RATE_LIMIT_WINDOW", "10")
+)  # seconds
+_RATE_LIMIT_MAX = int(
+    os.environ.get("GEN_CALL_RATE_LIMIT_MAX", "20")
+)  # max requests per window per address
+
+_address_request_log: dict[str, list[float]] = {}  # {address: [timestamp, ...]}
+
+_rate_limit_logger = logging.getLogger(__name__ + ".rate_limit")
+
+
+def _check_rate_limit(address: str) -> None:
+    """Reject if address exceeds rate limit. Prunes old entries."""
+    now = time.monotonic()
+    timestamps = _address_request_log.get(address, [])
+    cutoff = now - _RATE_LIMIT_WINDOW
+    timestamps = [t for t in timestamps if t > cutoff]
+    if len(timestamps) >= _RATE_LIMIT_MAX:
+        _rate_limit_logger.warning(
+            f"Rate limit exceeded for {address}: {len(timestamps)} requests in {_RATE_LIMIT_WINDOW}s window"
+        )
+        raise JSONRPCError(
+            code=-32005,
+            message=f"Rate limit exceeded: max {_RATE_LIMIT_MAX} gen_call requests per {_RATE_LIMIT_WINDOW}s per contract address",
+            data={"address": address, "retry_after_seconds": _RATE_LIMIT_WINDOW},
+        )
+    timestamps.append(now)
+    _address_request_log[address] = timestamps
 
 
 ####### ADMIN ACCESS CONTROL #######
@@ -936,6 +971,9 @@ async def _gen_call_with_validator(
     if not accounts_manager.is_valid_address(to_address):
         raise InvalidAddressError(to_address)
 
+    # Rate limit per contract address — reject early before acquiring resources
+    _check_rate_limit(to_address)
+
     if transaction_hash_variant == "latest-final":
         state_status = "finalized"
     else:
@@ -964,6 +1002,16 @@ async def _gen_call_with_validator(
     override_transaction_datetime: bool = (
         sim_config is not None and sim_config.genvm_datetime is not None
     )
+
+    if _genvm_semaphore.locked():
+        _rate_limit_logger.warning(
+            f"GenVM at capacity ({_GENVM_CONCURRENCY} concurrent) — rejecting gen_call to {to_address}"
+        )
+        raise JSONRPCError(
+            code=-32006,
+            message=f"Server busy: all {_GENVM_CONCURRENCY} execution slots occupied, retry later",
+            data={"retry_after_seconds": 2},
+        )
 
     async with _genvm_semaphore:
         if type == "read":

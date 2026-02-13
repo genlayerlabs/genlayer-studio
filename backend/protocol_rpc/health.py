@@ -911,6 +911,39 @@ async def health_database() -> Dict[str, Any]:
         return {"status": "error", "error": str(e)}
 
 
+@health_router.get("/health/ratelimit")
+async def health_ratelimit() -> Dict[str, Any]:
+    """Show per-address gen_call rate limit state."""
+    from backend.protocol_rpc.endpoints import (
+        _address_request_log,
+        _RATE_LIMIT_WINDOW,
+        _RATE_LIMIT_MAX,
+        _genvm_semaphore,
+        _GENVM_CONCURRENCY,
+    )
+    import time as _time
+
+    now = _time.monotonic()
+    cutoff = now - _RATE_LIMIT_WINDOW
+    addresses = {}
+    for addr, timestamps in _address_request_log.items():
+        recent = [t for t in timestamps if t > cutoff]
+        if recent:
+            addresses[addr] = {
+                "requests_in_window": len(recent),
+                "limit": _RATE_LIMIT_MAX,
+                "oldest_in_window_age_s": round(now - min(recent), 1),
+            }
+    return {
+        "window_seconds": _RATE_LIMIT_WINDOW,
+        "max_per_window": _RATE_LIMIT_MAX,
+        "genvm_concurrency_limit": _GENVM_CONCURRENCY,
+        "genvm_semaphore_available": _genvm_semaphore._value,  # noqa: SLF001
+        "active_addresses": len(addresses),
+        "addresses": addresses,
+    }
+
+
 @health_router.get("/health/memory")
 async def health_memory() -> Dict[str, Any]:
     """Show detailed memory usage statistics."""
