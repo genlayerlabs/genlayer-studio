@@ -6,6 +6,6 @@ eth-utils
 eth-hash[pycryptodome]
 jsonschema==4.25.0
 aiohttp==3.13.3
-openai==1.97.1
+openai==2.21.0
 anthropic==0.58.2
 python-dotenv==1.1.1
