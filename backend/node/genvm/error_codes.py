@@ -20,6 +20,7 @@ __all__ = (
     "RATE_LIMIT_STATUSES",
     "extract_error_code",
     "parse_module_error_string",
+    "parse_ctx_from_module_error_string",
 )
 
 
@@ -45,6 +46,7 @@ class GenVMInternalError(Exception):
         causes: list[str],
         is_fatal: bool,
         is_leader: bool | None = None,
+        ctx: dict | None = None,
         detail: str | None = None,
     ):
         super().__init__(message)
@@ -52,13 +54,15 @@ class GenVMInternalError(Exception):
         self.causes = causes
         self.is_fatal = is_fatal
         self.is_leader = is_leader
+        self.ctx = ctx
         self.detail = detail
 
     def __repr__(self) -> str:
         return (
             f"GenVMInternalError(message={self.args[0]!r}, "
             f"error_code={self.error_code!r}, causes={self.causes!r}, "
-            f"is_fatal={self.is_fatal!r}, is_leader={self.is_leader!r})"
+            f"is_fatal={self.is_fatal!r}, is_leader={self.is_leader!r}, "
+            f"ctx={self.ctx!r})"
         )
 
 
@@ -117,6 +121,84 @@ _LLM_STACK_PATTERN = re.compile(
     r"(lib-llm\.exec_prompt|llm\.lua|exec_prompt_in_provider)", re.IGNORECASE
 )
 _WEB_STACK_PATTERN = re.compile(r"(web\.lua|webpage_load|fetch_url)", re.IGNORECASE)
+
+
+def _extract_balanced_braces(text: str, start: int) -> str | None:
+    """Extract content between matched { } starting at position after opening brace."""
+    depth = 1
+    i = start
+    while i < len(text) and depth > 0:
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+        elif text[i] == '"':
+            # Skip quoted strings to avoid counting braces inside them
+            i += 1
+            while i < len(text) and text[i] != '"':
+                if text[i] == "\\":
+                    i += 1  # skip escaped char
+                i += 1
+        i += 1
+    if depth == 0:
+        return text[start : i - 1]
+    return None
+
+
+def _extract_map_content(text: str, key: str) -> str | None:
+    """Extract content of a Map({...}) value for a given key, handling nested braces."""
+    pattern = re.compile(r'"' + re.escape(key) + r'":\s*Map\(\{')
+    match = pattern.search(text)
+    if not match:
+        return None
+    return _extract_balanced_braces(text, match.end())
+
+
+_RUST_STR_PATTERN = re.compile(r'"(\w+)":\s*Str\("((?:[^"\\]|\\.)*)"\)')
+_RUST_NUMBER_PATTERN = re.compile(r'"(\w+)":\s*Number\(([\d.]+)\)')
+
+
+def _parse_error_entry(map_content: str) -> dict:
+    """Parse a primary_error or fallback_error Map content into a dict."""
+    result: dict = {}
+
+    # Extract all Str values
+    for m in _RUST_STR_PATTERN.finditer(map_content):
+        field, value = m.group(1), m.group(2).replace('\\"', '"')
+        if field in ("model", "provider", "error_message"):
+            result[field] = value
+
+    # Extract all Number values
+    for m in _RUST_NUMBER_PATTERN.finditer(map_content):
+        field, value = m.group(1), float(m.group(2))
+        if field == "status":
+            result["status"] = int(value) if value == int(value) else value
+
+    return result
+
+
+def parse_ctx_from_module_error_string(error_str: str) -> dict | None:
+    """Parse the ctx from a ModuleError Rust debug string.
+
+    Extracts primary_error and fallback_error with their
+    status, model, provider, and error_message fields.
+
+    The GenVM serializes INTERNAL_ERROR result_data as a Rust debug string:
+        ModuleError { causes: [...], fatal: true, ctx: {"primary_error": Map({
+            "status": Number(401.0), "model": Str("..."), ...
+        }), ...} }
+
+    Returns:
+        Dict with primary_error and/or fallback_error entries, or None.
+    """
+    result: dict = {}
+    for key in ("primary_error", "fallback_error"):
+        content = _extract_map_content(error_str, key)
+        if content:
+            entry = _parse_error_entry(content)
+            if entry:
+                result[key] = entry
+    return result if result else None
 
 
 def parse_module_error_string(error_str: str) -> tuple[str | None, list[str], bool]:

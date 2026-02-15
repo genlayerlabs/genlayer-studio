@@ -2722,6 +2722,13 @@ class ProposingState(TransactionState):
                 if not context.remaining_validators:
                     raise  # pool empty → propagate
                 # Replace leader with next validator
+                from loguru import logger
+
+                logger.error(
+                    f"Leader GenVM internal error for {context.transaction.hash}, "
+                    f"replacing leader (attempt {attempt + 1}/{MAX_IDLE_REPLACEMENTS}): "
+                    f"code={e.error_code}, causes={e.causes}, ctx={e.ctx}"
+                )
                 context.leader = context.remaining_validators.pop(0)
         else:
             # All replacement attempts exhausted
@@ -2913,6 +2920,32 @@ class CommittingState(TransactionState):
                 processing_time=timeout_ms,
             )
 
+        def _build_internal_error_receipt(
+            validator_dict: dict, e: GenVMInternalError
+        ) -> Receipt:
+            raw_error = {"causes": e.causes, "fatal": e.is_fatal}
+            if e.ctx:
+                raw_error["ctx"] = e.ctx
+            return Receipt(
+                result=bytes([ResultCode.VM_ERROR])
+                + f"GenVM internal error: {e}".encode("utf-8"),
+                calldata=b"",
+                gas_used=0,
+                mode=ExecutionMode.VALIDATOR,
+                contract_state={},
+                node_config=validator_dict,
+                eq_outputs={},
+                execution_result=ExecutionResultStatus.ERROR,
+                vote=Vote.TIMEOUT,
+                genvm_result={
+                    "stdout": "",
+                    "stderr": str(e),
+                    "error_code": e.error_code,
+                    "raw_error": raw_error,
+                },
+                processing_time=0,
+            )
+
         async def run_single_validator(validator_dict: dict, index: int) -> Receipt:
             async with sem:
                 current = validator_dict
@@ -2931,7 +2964,16 @@ class CommittingState(TransactionState):
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     if exec_task in done:
-                        result = await exec_task
+                        try:
+                            result = await exec_task
+                        except GenVMInternalError as e:
+                            from loguru import logger
+
+                            logger.error(
+                                f"Validator {index} GenVM internal error for "
+                                f"{context.transaction.hash}: {e}, ctx={e.ctx}"
+                            )
+                            result = _build_internal_error_receipt(current, e)
                     else:
                         exec_task.cancel()
                         try:
@@ -3361,15 +3403,6 @@ class AcceptedState(TransactionState):
             TransactionStatus.ACCEPTED,
         )
 
-        # Update the transaction status to ACCEPTED and await Redis publish completion
-        await ConsensusAlgorithm.dispatch_transaction_status_update(
-            context.transactions_processor,
-            context.transaction.hash,
-            TransactionStatus.ACCEPTED,
-            context.msg_handler,
-            False,
-        )
-
         # Send a message indicating consensus was reached
         context.msg_handler.send_message(
             LogEvent(
@@ -3470,6 +3503,10 @@ class AcceptedState(TransactionState):
                     internal_messages_data,
                 )
 
+                # Insert triggered transactions BEFORE updating parent status
+                # to ACCEPTED.  This prevents a race where external callers see
+                # the ACCEPTED status but the triggered_transactions
+                # relationship is still empty.
                 _emit_messages(
                     context, insert_transactions_data, rollup_receipt, "accepted"
                 )
@@ -3483,6 +3520,16 @@ class AcceptedState(TransactionState):
                 context.transaction.hash,
                 [],
             )
+
+        # Update the transaction status to ACCEPTED after triggered transactions
+        # have been inserted so they are visible when callers observe the new status.
+        await ConsensusAlgorithm.dispatch_transaction_status_update(
+            context.transactions_processor,
+            context.transaction.hash,
+            TransactionStatus.ACCEPTED,
+            context.msg_handler,
+            False,
+        )
 
         # Set the transaction appeal undetermined status to false and return appeal status
         if context.transaction.appeal_undetermined:
@@ -3796,14 +3843,6 @@ class FinalizingState(TransactionState):
             context.transaction.hash, "FINALIZED"
         )
 
-        # Update the transaction status to FINALIZED
-        await ConsensusAlgorithm.dispatch_transaction_status_update(
-            context.transactions_processor,
-            context.transaction.hash,
-            TransactionStatus.FINALIZED,
-            context.msg_handler,
-        )
-
         # Retrieve the leader's receipt from the consensus data
         leader_receipt = context.transaction.consensus_data.leader_receipt[0]
 
@@ -3841,6 +3880,10 @@ class FinalizingState(TransactionState):
                 internal_messages_data,
             )
 
+            # Insert triggered transactions BEFORE updating parent status to
+            # FINALIZED.  This prevents a race where external callers see the
+            # FINALIZED status but the triggered_transactions relationship is
+            # still empty.
             _emit_messages(
                 context, insert_transactions_data, rollup_receipt, "finalized"
             )
@@ -3852,6 +3895,16 @@ class FinalizingState(TransactionState):
                 context.transaction.hash,
                 [],
             )
+
+        # Update the transaction status to FINALIZED after triggered
+        # transactions have been inserted so they are visible when callers
+        # observe the new status.
+        await ConsensusAlgorithm.dispatch_transaction_status_update(
+            context.transactions_processor,
+            context.transaction.hash,
+            TransactionStatus.FINALIZED,
+            context.msg_handler,
+        )
 
 
 def _get_messages_data(

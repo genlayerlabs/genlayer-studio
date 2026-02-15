@@ -5,6 +5,7 @@ from backend.node.genvm.error_codes import (
     GenVMErrorCode,
     extract_error_code,
     extract_error_code_from_timeout,
+    parse_ctx_from_module_error_string,
     LUA_CAUSE_TO_CODE,
     RATE_LIMIT_STATUSES,
 )
@@ -222,3 +223,94 @@ class TestRateLimitStatuses:
         assert 200 not in RATE_LIMIT_STATUSES
         assert 400 not in RATE_LIMIT_STATUSES
         assert 500 not in RATE_LIMIT_STATUSES
+
+
+class TestParseCtxFromModuleErrorString:
+    """Tests for parse_ctx_from_module_error_string function."""
+
+    def test_no_primary_error_returns_none(self):
+        """String without primary_error should return None."""
+        assert parse_ctx_from_module_error_string("some random error") is None
+
+    def test_extracts_primary_error_fields(self):
+        """Should extract status, model, provider, error_message from primary_error."""
+        error_str = (
+            'ModuleError { causes: ["NO_PROVIDER_FOR_PROMPT"], fatal: true, '
+            'ctx: {"primary_error": Map({"status": Number(401.0), '
+            '"model": Str("openai/gpt-4"), "provider": Str("openrouter"), '
+            '"error_message": Str("User not found.")}), '
+            '"fallback_error": Nil} }'
+        )
+        result = parse_ctx_from_module_error_string(error_str)
+        assert result is not None
+        assert "primary_error" in result
+        pe = result["primary_error"]
+        assert pe["status"] == 401
+        assert pe["model"] == "openai/gpt-4"
+        assert pe["provider"] == "openrouter"
+        assert pe["error_message"] == "User not found."
+
+    def test_extracts_both_primary_and_fallback(self):
+        """Should extract both primary_error and fallback_error when present."""
+        error_str = (
+            'ctx: {"primary_error": Map({"status": Number(401.0), '
+            '"model": Str("gpt-4"), "provider": Str("openai")}), '
+            '"fallback_error": Map({"status": Number(429.0), '
+            '"model": Str("claude-3"), "provider": Str("anthropic"), '
+            '"error_message": Str("Rate limited")})}'
+        )
+        result = parse_ctx_from_module_error_string(error_str)
+        assert result is not None
+        assert result["primary_error"]["status"] == 401
+        assert result["primary_error"]["model"] == "gpt-4"
+        assert result["fallback_error"]["status"] == 429
+        assert result["fallback_error"]["error_message"] == "Rate limited"
+
+    def test_handles_nested_maps_in_body(self):
+        """Should handle nested Map structures (like body.error) without breaking."""
+        error_str = (
+            '"primary_error": Map({"body": Map({"error": Map({"code": Number(401.0), '
+            '"message": Str("User not found.")})}), '
+            '"error_message": Str("Auth failed"), '
+            '"model": Str("gpt-4"), "provider": Str("openai"), '
+            '"status": Number(401.0)})'
+        )
+        result = parse_ctx_from_module_error_string(error_str)
+        assert result is not None
+        pe = result["primary_error"]
+        assert pe["status"] == 401
+        assert pe["model"] == "gpt-4"
+        assert pe["error_message"] == "Auth failed"
+
+    def test_nil_fallback_error_excluded(self):
+        """Nil fallback_error should not appear in result."""
+        error_str = (
+            '"primary_error": Map({"status": Number(500.0), '
+            '"model": Str("gpt-4"), "provider": Str("openai")}), '
+            '"fallback_error": Nil'
+        )
+        result = parse_ctx_from_module_error_string(error_str)
+        assert result is not None
+        assert "primary_error" in result
+        assert "fallback_error" not in result
+
+    def test_handles_escaped_quotes_in_error_message(self):
+        """Should handle escaped quotes within Str values."""
+        error_str = (
+            '"primary_error": Map({"status": Number(400.0), '
+            '"model": Str("gpt-4"), "provider": Str("openai"), '
+            r'"error_message": Str("invalid \"json\" input")})'
+        )
+        result = parse_ctx_from_module_error_string(error_str)
+        assert result is not None
+        assert result["primary_error"]["error_message"] == 'invalid "json" input'
+
+    def test_integer_status(self):
+        """Status should be returned as int when it's a whole number."""
+        error_str = (
+            '"primary_error": Map({"status": Number(503.0), '
+            '"model": Str("m"), "provider": Str("p")})'
+        )
+        result = parse_ctx_from_module_error_string(error_str)
+        assert result["primary_error"]["status"] == 503
+        assert isinstance(result["primary_error"]["status"], int)

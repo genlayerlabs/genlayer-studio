@@ -296,35 +296,31 @@ async def _run_health_checks() -> None:
         _health_cache.genvm_healthy = genvm_ok
         _health_cache.genvm_error = genvm_error
 
-        # Best-effort parse of permit info (do not fail overall health on missing keys).
+        # Best-effort parse of permit info from /status.
+        # The manager returns: {"permits": {"current": N, "max": M}, "executions": {...}}
+        # where permits.current = available permits (semaphore value).
         try:
-            max_permits = genvm_status.get("max_permits")
-            current_permits = genvm_status.get("current_permits")
-            active_exec = genvm_status.get("active_executions")
+            permits_obj = genvm_status.get("permits") or {}
+            executions_obj = genvm_status.get("executions")
 
-            max_permits_i = int(max_permits) if max_permits is not None else None
-            current_permits_i = (
-                int(current_permits) if current_permits is not None else None
-            )
+            max_permits_i = int(permits_obj["max"]) if "max" in permits_obj else None
+            # permits.current IS the available count (semaphore value)
             available_i = (
-                max_permits_i - current_permits_i
-                if max_permits_i is not None and current_permits_i is not None
-                else None
+                int(permits_obj["current"]) if "current" in permits_obj else None
             )
+            active_i = len(executions_obj) if isinstance(executions_obj, dict) else None
 
             _health_cache.genvm_max_permits = max_permits_i
-            _health_cache.genvm_current_permits = current_permits_i
             _health_cache.genvm_available_permits = available_i
-            _health_cache.genvm_active_executions = (
-                int(active_exec) if active_exec is not None else None
-            )
+            _health_cache.genvm_current_permits = active_i  # in-use count
+            _health_cache.genvm_active_executions = active_i
 
             services["genvm"].update(
                 {
                     "max_permits": max_permits_i,
-                    "current_permits": current_permits_i,
                     "available_permits": available_i,
-                    "active_executions": _health_cache.genvm_active_executions,
+                    "current_permits": active_i,
+                    "active_executions": active_i,
                 }
             )
         except Exception as e:
@@ -913,6 +909,39 @@ async def health_database() -> Dict[str, Any]:
     except Exception as e:
         logger.exception("Database health check failed")
         return {"status": "error", "error": str(e)}
+
+
+@health_router.get("/health/ratelimit")
+async def health_ratelimit() -> Dict[str, Any]:
+    """Show per-address gen_call rate limit state."""
+    from backend.protocol_rpc.endpoints import (
+        _address_request_log,
+        _RATE_LIMIT_WINDOW,
+        _RATE_LIMIT_MAX,
+        _genvm_semaphore,
+        _GENVM_CONCURRENCY,
+    )
+    import time as _time
+
+    now = _time.monotonic()
+    cutoff = now - _RATE_LIMIT_WINDOW
+    addresses = {}
+    for addr, timestamps in _address_request_log.items():
+        recent = [t for t in timestamps if t > cutoff]
+        if recent:
+            addresses[addr] = {
+                "requests_in_window": len(recent),
+                "limit": _RATE_LIMIT_MAX,
+                "oldest_in_window_age_s": round(now - min(recent), 1),
+            }
+    return {
+        "window_seconds": _RATE_LIMIT_WINDOW,
+        "max_per_window": _RATE_LIMIT_MAX,
+        "genvm_concurrency_limit": _GENVM_CONCURRENCY,
+        "genvm_semaphore_available": _genvm_semaphore._value,  # noqa: SLF001
+        "active_addresses": len(addresses),
+        "addresses": addresses,
+    }
 
 
 @health_router.get("/health/memory")
