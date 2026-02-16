@@ -14,7 +14,8 @@ def _make_redis_mock():
     """Create a mock Redis client with pipeline support."""
     redis = AsyncMock()
     pipe = AsyncMock()
-    redis.pipeline.return_value = pipe
+    # pipeline() is synchronous in redis.asyncio, so use MagicMock
+    redis.pipeline = MagicMock(return_value=pipe)
     redis.hgetall = AsyncMock(return_value={})
     redis.hset = AsyncMock()
     redis.expire = AsyncMock()
