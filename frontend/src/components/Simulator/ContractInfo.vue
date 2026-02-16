@@ -5,7 +5,9 @@ import { ArrowPathIcon } from '@heroicons/vue/20/solid';
 import EmptyListPlaceholder from '@/components/Simulator/EmptyListPlaceholder.vue';
 import { useNodeStore, useUIStore } from '@/stores';
 import { useContractQueries, useShortAddress } from '@/hooks';
-import { UploadIcon } from 'lucide-vue-next';
+import { UploadIcon, Share2, Check } from 'lucide-vue-next';
+import { useClipboard } from '@vueuse/core';
+import { computed } from 'vue';
 
 const nodeStore = useNodeStore();
 const { shorten } = useShortAddress();
@@ -18,6 +20,15 @@ const emit = defineEmits(['openDeployment']);
 const { isDeployed, address, contract, upgradeContract, isUpgrading } =
   useContractQueries();
 const uiStore = useUIStore();
+
+const shareUrl = computed(
+  () => `${window.location.origin}/?import-contract=${address.value}`,
+);
+const {
+  copy: copyShareUrl,
+  copied: shareCopied,
+  isSupported: shareIsSupported,
+} = useClipboard({ source: shareUrl });
 
 const upgradeTooltip = `
 <div style="text-align: left; max-width: 240px;">
@@ -63,6 +74,17 @@ const upgradeTooltip = `
       </div>
 
       <CopyTextButton :text="address" />
+
+      <button
+        v-if="shareIsSupported"
+        v-tooltip="shareCopied ? 'Link copied!' : 'Share contract'"
+        data-testid="share-contract-button"
+        @click.stop="copyShareUrl(shareUrl)"
+        class="shrink-0 text-gray-400 transition-all hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-400"
+      >
+        <Check v-if="shareCopied" class="h-4 w-4" />
+        <Share2 v-else class="h-4 w-4" />
+      </button>
     </div>
 
     <EmptyListPlaceholder v-else>Not deployed yet.</EmptyListPlaceholder>
