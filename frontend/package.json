@@ -97,7 +97,7 @@
     "tsx": "^4.11.0",
     "typescript": "~5.8.0",
     "vite": "^6.0.0",
-    "vite-plugin-vue-devtools": "^7.0.25",
+    "vite-plugin-vue-devtools": "^8.0.0",
     "vitest": "^3.0.0",
     "vue-tsc": "^2.0.11"
   }
