@@ -216,3 +216,104 @@ def test_none_error_code_not_timeout():
 
     result = node._set_vote(receipt)
     assert result.vote == Vote.DETERMINISTIC_VIOLATION
+
+
+# --- VM crash (non-timeout) → DISAGREE ---
+
+
+def test_vm_error_exit_code_votes_disagree():
+    """VM crash (exit_code) should be DISAGREE — validator couldn't validate."""
+    leader_receipt = _make_success_receipt()
+    node = _make_node(leader_receipt)
+
+    receipt = _make_receipt(
+        ResultCode.VM_ERROR,
+        b"exit_code 1",
+    )
+
+    result = node._set_vote(receipt)
+    assert result.vote == Vote.DISAGREE
+
+
+def test_vm_error_oom_votes_disagree():
+    """VM OOM should be DISAGREE."""
+    leader_receipt = _make_success_receipt()
+    node = _make_node(leader_receipt)
+
+    receipt = _make_receipt(
+        ResultCode.VM_ERROR,
+        b"OOM",
+    )
+
+    result = node._set_vote(receipt)
+    assert result.vote == Vote.DISAGREE
+
+
+def test_vm_error_matching_leader_still_disagree():
+    """Even if leader and validator crash with same VM error, validator votes DISAGREE."""
+    leader_receipt = _make_receipt(
+        ResultCode.VM_ERROR,
+        b"exit_code 1",
+        execution_result=ExecutionResultStatus.ERROR,
+        contract_state={"slot": "data"},
+    )
+    node = _make_node(leader_receipt)
+
+    validator_receipt = _make_receipt(
+        ResultCode.VM_ERROR,
+        b"exit_code 1",
+        execution_result=ExecutionResultStatus.ERROR,
+        contract_state={"slot": "data"},
+    )
+
+    result = node._set_vote(validator_receipt)
+    assert result.vote == Vote.DISAGREE
+
+
+# --- Nondet disagree takes precedence ---
+
+
+def test_nondet_disagree_before_det_violation():
+    """GenVM nondet disagreement should be DISAGREE even if state matches leader."""
+    leader_receipt = _make_receipt(
+        ResultCode.RETURN,
+        b"\x00\x00",
+        execution_result=ExecutionResultStatus.SUCCESS,
+        contract_state={"slot": "data"},
+    )
+    node = _make_node(leader_receipt)
+
+    validator_receipt = _make_receipt(
+        ResultCode.RETURN,
+        b"\x00\x00",
+        execution_result=ExecutionResultStatus.SUCCESS,
+        contract_state={"slot": "data"},
+    )
+    validator_receipt.nondet_disagree = 3
+
+    result = node._set_vote(validator_receipt)
+    assert result.vote == Vote.DISAGREE
+
+
+# --- USER_ERROR with matching state → AGREE (deterministic contract error) ---
+
+
+def test_user_error_matching_state_votes_agree():
+    """If both leader and validator get USER_ERROR with same state, it's a valid agree."""
+    leader_receipt = _make_receipt(
+        ResultCode.USER_ERROR,
+        b"contract raised ValueError",
+        execution_result=ExecutionResultStatus.ERROR,
+        contract_state={"slot": "data"},
+    )
+    node = _make_node(leader_receipt)
+
+    validator_receipt = _make_receipt(
+        ResultCode.USER_ERROR,
+        b"contract raised ValueError",
+        execution_result=ExecutionResultStatus.ERROR,
+        contract_state={"slot": "data"},
+    )
+
+    result = node._set_vote(validator_receipt)
+    assert result.vote == Vote.AGREE
