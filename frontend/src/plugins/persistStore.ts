@@ -118,7 +118,9 @@ export function persistStorePlugin(context: PiniaPluginContext): void {
         switch (name) {
           case 'generateNewAccount':
           case 'removeAccount':
-          case 'fetchMetaMaskAccount':
+          case 'connectExternalWallet':
+          case 'disconnectExternalWallet':
+          case 'updateExternalWalletAddress':
           case 'setCurrentAccount':
             localStorage.setItem(
               'accountsStore.accounts',

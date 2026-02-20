@@ -12,40 +12,53 @@ import FloatingVue from 'floating-vue';
 import 'floating-vue/dist/style.css';
 import { createPlausible } from 'v-plausible/vue';
 import { getRuntimeConfig } from '@/utils/runtimeConfig';
+import { initAppKit, wagmiAdapterRef } from '@/hooks/useAppKit';
+import { WagmiPlugin } from '@wagmi/vue';
 
-const app = createApp(App);
-const pinia = createPinia();
+async function bootstrap() {
+  const app = createApp(App);
+  const pinia = createPinia();
 
-pinia.use(persistStorePlugin);
-app.use(pinia);
-app.use(VueQueryPlugin);
-app.use(router);
-app.use(FloatingVue, {
-  themes: {
-    tooltip: {
-      distance: 10,
-      delay: {
-        show: 0,
-        hide: 0,
+  pinia.use(persistStorePlugin);
+  app.use(pinia);
+
+  await initAppKit();
+
+  if (wagmiAdapterRef.value?.wagmiConfig) {
+    app.use(WagmiPlugin, { config: wagmiAdapterRef.value.wagmiConfig });
+  }
+
+  app.use(VueQueryPlugin);
+  app.use(router);
+  app.use(FloatingVue, {
+    themes: {
+      tooltip: {
+        distance: 10,
+        delay: {
+          show: 0,
+          hide: 0,
+        },
       },
     },
-  },
-});
-app.use(Notifications);
-app.use(VueSpinnersPlugin);
+  });
+  app.use(Notifications);
+  app.use(VueSpinnersPlugin);
 
-const plausible = createPlausible({
-  init: {
-    domain: getRuntimeConfig('VITE_PLAUSIBLE_DOMAIN', 'studio.genlayer.com'),
-    trackLocalhost: true,
-  },
-  settings: {
-    enableAutoPageviews: true,
-  },
-});
+  const plausible = createPlausible({
+    init: {
+      domain: getRuntimeConfig('VITE_PLAUSIBLE_DOMAIN', 'studio.genlayer.com'),
+      trackLocalhost: true,
+    },
+    settings: {
+      enableAutoPageviews: true,
+    },
+  });
 
-app.use(plausible);
+  app.use(plausible);
 
-registerGlobalComponents(app);
+  registerGlobalComponents(app);
 
-app.mount('#app');
+  app.mount('#app');
+}
+
+bootstrap();
