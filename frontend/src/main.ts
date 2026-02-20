@@ -22,7 +22,14 @@ async function bootstrap() {
   pinia.use(persistStorePlugin);
   app.use(pinia);
 
-  await initAppKit();
+  try {
+    await initAppKit();
+  } catch (err) {
+    console.error(
+      'AppKit initialization failed, continuing without wallet support:',
+      err,
+    );
+  }
 
   if (wagmiAdapterRef.value?.wagmiConfig) {
     app.use(WagmiPlugin, { config: wagmiAdapterRef.value.wagmiConfig });
@@ -61,4 +68,8 @@ async function bootstrap() {
   app.mount('#app');
 }
 
-bootstrap();
+bootstrap().catch((err) => {
+  console.error('Application failed to initialize:', err);
+  document.getElementById('app')!.textContent =
+    'Failed to load the application. Please refresh.';
+});
