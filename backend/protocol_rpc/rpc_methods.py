@@ -15,6 +15,7 @@ from backend.protocol_rpc.dependencies import (
     get_db_session,
     get_llm_provider_registry,
     get_message_handler,
+    get_rate_limiter,
     get_snapshot_manager,
     get_sqlalchemy_db,
     get_transactions_parser,
@@ -606,3 +607,65 @@ def dev_get_pool_status(
     sqlalchemy_db=Depends(get_sqlalchemy_db),
 ) -> dict:
     return impl.dev_get_pool_status(sqlalchemy_db)
+
+
+# ---------------------------------------------------------------------------
+# Admin API key rate limiting endpoints
+# ---------------------------------------------------------------------------
+
+
+@rpc.method("admin_createTier")
+def rpc_admin_create_tier(
+    name: str,
+    rate_limit_minute: int,
+    rate_limit_hour: int,
+    rate_limit_day: int,
+    admin_key: str = None,
+    session: Session = Depends(get_db_session),
+) -> dict:
+    return impl.admin_create_tier(
+        session=session,
+        name=name,
+        rate_limit_minute=rate_limit_minute,
+        rate_limit_hour=rate_limit_hour,
+        rate_limit_day=rate_limit_day,
+        admin_key=admin_key,
+    )
+
+
+@rpc.method("admin_listTiers")
+def rpc_admin_list_tiers(
+    admin_key: str = None,
+    session: Session = Depends(get_db_session),
+) -> list[dict]:
+    return impl.admin_list_tiers(session=session, admin_key=admin_key)
+
+
+@rpc.method("admin_createApiKey")
+def rpc_admin_create_api_key(
+    tier_name: str,
+    description: str = None,
+    admin_key: str = None,
+    session: Session = Depends(get_db_session),
+) -> dict:
+    return impl.admin_create_api_key(
+        session=session,
+        tier_name=tier_name,
+        description=description,
+        admin_key=admin_key,
+    )
+
+
+@rpc.method("admin_deactivateApiKey")
+async def rpc_admin_deactivate_api_key(
+    key_prefix: str,
+    admin_key: str = None,
+    session: Session = Depends(get_db_session),
+    rate_limiter=Depends(get_rate_limiter),
+) -> dict:
+    return await impl.admin_deactivate_api_key(
+        session=session,
+        key_prefix=key_prefix,
+        rate_limiter=rate_limiter,
+        admin_key=admin_key,
+    )

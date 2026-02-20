@@ -21,6 +21,7 @@ from backend.protocol_rpc.dependencies import (
 )
 from backend.protocol_rpc.fastapi_rpc_router import FastAPIRPCRouter
 from backend.protocol_rpc.health import health_router
+from backend.protocol_rpc.rate_limit_middleware import RateLimitMiddleware
 from backend.protocol_rpc.rpc_endpoint_manager import JSONRPCResponse
 from backend.protocol_rpc.websocket import GLOBAL_CHANNEL, websocket_handler
 
@@ -68,6 +69,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add rate limiting middleware (executes after CORS, before route handler)
+app.add_middleware(RateLimitMiddleware)
 
 # Include health check endpoints
 app.include_router(health_router)

@@ -43,6 +43,8 @@ from backend.protocol_rpc.health import (
 from backend.services.usage_metrics_service import UsageMetricsService
 import backend.validators as validators
 from backend.node.base import Manager as GenVMManager
+from backend.protocol_rpc.rate_limiter import RateLimiterService
+import redis.asyncio as aioredis
 
 
 @dataclass(frozen=True)
@@ -89,6 +91,7 @@ class RPCAppState:
     sqlalchemy_db: Any
     rpc_router: FastAPIRPCRouter
     genvm_manager: GenVMManager
+    rate_limiter: Optional[RateLimiterService] = None
 
     def apply_to_app(self, app) -> None:
         """Populate FastAPI state with the configured services."""
@@ -109,6 +112,7 @@ class RPCAppState:
         state.rpc_router = self.rpc_router
         state.rpc_context = state
         state.genvm_manager = self.genvm_manager
+        state.rate_limiter = self.rate_limiter
 
 
 @dataclass
@@ -416,10 +420,23 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
         logger.error(error_msg)
         raise RuntimeError(error_msg) from e
 
+    # Initialize rate limiter with a dedicated Redis client
+    rate_limit_redis = aioredis.from_url(redis_url, decode_responses=True)
+    rate_limiter = RateLimiterService.from_environment(
+        redis_client=rate_limit_redis,
+        get_session=lambda: db_manager.open_session(),
+    )
+    app_state.rate_limiter = rate_limiter
+    logger.info(f"[STARTUP] Rate limiter initialized (enabled={rate_limiter.enabled})")
+
     try:
         yield app_state
 
     finally:
+        if rate_limit_redis:
+            await rate_limit_redis.close()
+            logger.info("[SHUTDOWN] Rate limiter Redis client closed")
+
         if redis_subscriber:
             await redis_subscriber.stop()
             logger.info("[SHUTDOWN] Redis subscriber stopped")
