@@ -4,7 +4,7 @@ import {
   useAppKitProvider,
   useDisconnect,
 } from '@reown/appkit/vue';
-import { computed, ref } from 'vue';
+import { computed, ref, toRefs } from 'vue';
 import { getAddress } from 'viem';
 import type { EIP1193Provider } from 'viem';
 import type { Address } from '@/types';
@@ -24,7 +24,8 @@ export function useWallet() {
   }
 
   const accountData = useAppKitAccount();
-  const appKitProvider = useAppKitProvider<EIP1193Provider>('eip155');
+  const providerData = useAppKitProvider<EIP1193Provider>('eip155');
+  const { walletProvider: appKitWalletProvider } = toRefs(providerData);
   const { disconnect: appKitDisconnect } = useDisconnect();
   const appKit = useAppKit();
 
@@ -40,12 +41,7 @@ export function useWallet() {
   });
 
   const walletProvider = computed<EIP1193Provider | undefined>(
-    () =>
-      (
-        appKitProvider as unknown as {
-          walletProvider: { value: EIP1193Provider | undefined };
-        }
-      ).walletProvider.value,
+    () => appKitWalletProvider.value,
   );
 
   function connect() {

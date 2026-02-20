@@ -4,7 +4,7 @@ import { createAppKit } from '@reown/appkit/vue';
 import type { AppKitNetwork } from '@reown/appkit/networks';
 import { mainnet, sepolia } from '@reown/appkit/networks';
 import { getRuntimeConfig } from '@/utils/runtimeConfig';
-import { genlayerLocalnet } from './useNetworks';
+import { createGenlayerLocalnet } from './useNetworks';
 
 export const wagmiAdapterRef = shallowRef<WagmiAdapter>();
 export let appKitReady = false;
@@ -38,6 +38,8 @@ export async function initAppKit() {
     );
     return;
   }
+
+  const genlayerLocalnet = createGenlayerLocalnet();
 
   const networks: [AppKitNetwork, ...AppKitNetwork[]] = [
     genlayerLocalnet,
