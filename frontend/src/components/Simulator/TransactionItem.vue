@@ -85,6 +85,23 @@ const handleSetTransactionAppeal = async () => {
 
 const isAppealed = computed(() => props.transaction.data.appealed);
 
+const canCancel = computed(
+  () =>
+    props.transaction.statusName === 'PENDING' ||
+    props.transaction.statusName === 'ACTIVATED',
+);
+const isCancelling = ref(false);
+const handleCancelTransaction = async () => {
+  isCancelling.value = true;
+  try {
+    await transactionsStore.cancelTransaction(props.transaction.hash);
+  } catch (e) {
+    console.error('Error cancelling transaction', e);
+  } finally {
+    isCancelling.value = false;
+  }
+};
+
 function prettifyTxData(x: any): any {
   const oldResult = x?.consensus_data?.leader_receipt?.[0].result;
 
@@ -218,9 +235,27 @@ const badgeColorClass = computed(() => {
           transaction.statusName !== 'ACCEPTED' &&
           transaction.statusName !== 'UNDETERMINED' &&
           transaction.statusName !== 'LEADER_TIMEOUT' &&
-          transaction.statusName !== 'VALIDATORS_TIMEOUT'
+          transaction.statusName !== 'VALIDATORS_TIMEOUT' &&
+          transaction.statusName !== 'CANCELED'
         "
       />
+
+      <div @click.stop="">
+        <Btn
+          v-if="canCancel"
+          @click="handleCancelTransaction"
+          tiny
+          class="!h-[18px] !px-[4px] !py-[1px] !text-[9px] !font-medium"
+          :data-testid="`cancel-transaction-btn-${transaction.hash}`"
+          :loading="isCancelling"
+          :disabled="isCancelling"
+        >
+          <div class="flex items-center gap-1">
+            {{ isCancelling ? 'CANCELLING...' : 'CANCEL' }}
+            <XCircleIcon class="h-2.5 w-2.5" />
+          </div>
+        </Btn>
+      </div>
 
       <div @click.stop="">
         <Btn
@@ -303,7 +338,8 @@ const badgeColorClass = computed(() => {
                   transaction.statusName !== 'ACCEPTED' &&
                   transaction.statusName !== 'UNDETERMINED' &&
                   transaction.statusName !== 'LEADER_TIMEOUT' &&
-                  transaction.statusName !== 'VALIDATORS_TIMEOUT'
+                  transaction.statusName !== 'VALIDATORS_TIMEOUT' &&
+                  transaction.statusName !== 'CANCELED'
                 "
               />
               <TransactionStatusBadge

@@ -181,6 +181,62 @@ describe('useTransactionsStore', () => {
     );
   });
 
+  describe('cancelTransaction', () => {
+    const mockCancelTransaction = vi.fn().mockResolvedValue({
+      transaction_hash: testTransaction.hash,
+      status: 'CANCELED',
+    });
+
+    beforeEach(() => {
+      vi.doMock('@/hooks/useRpcClient', () => ({
+        useRpcClient: vi.fn(() => ({
+          cancelTransaction: mockCancelTransaction,
+        })),
+      }));
+
+      vi.doMock('@/stores/accounts', () => ({
+        useAccountsStore: vi.fn(() => ({
+          selectedAccount: null,
+        })),
+      }));
+
+      mockCancelTransaction.mockClear();
+    });
+
+    it('should call rpcClient.cancelTransaction with hash', async () => {
+      await transactionsStore.cancelTransaction(
+        testTransaction.hash as `0x${string}`,
+      );
+
+      expect(mockCancelTransaction).toHaveBeenCalledWith(
+        testTransaction.hash,
+        undefined,
+      );
+    });
+
+    it('should send no signature when no account is selected', async () => {
+      await transactionsStore.cancelTransaction(
+        testTransaction.hash as `0x${string}`,
+      );
+
+      // Second argument should be undefined (no signature)
+      expect(mockCancelTransaction).toHaveBeenCalledWith(
+        testTransaction.hash,
+        undefined,
+      );
+    });
+
+    it('should propagate errors from rpcClient', async () => {
+      mockCancelTransaction.mockRejectedValueOnce(new Error('Cannot cancel'));
+
+      await expect(
+        transactionsStore.cancelTransaction(
+          testTransaction.hash as `0x${string}`,
+        ),
+      ).rejects.toThrow('Cannot cancel');
+    });
+  });
+
   describe('WebSocket reconnection', () => {
     it('should set up connect event handler on store initialization', () => {
       expect(mockWebSocketClient.on).toHaveBeenCalledWith(
