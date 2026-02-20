@@ -3,11 +3,10 @@ import { computed, ref } from 'vue';
 import type { Address } from '@/types';
 import { createAccount, generatePrivateKey } from 'genlayer-js';
 import { useShortAddress, useWebSocketClient } from '@/hooks';
-import { notify } from '@kyvg/vue3-notification';
 import { getAddress } from 'viem';
 
 export interface AccountInfo {
-  type: 'local' | 'metamask';
+  type: 'local' | 'external';
   address: Address;
   privateKey?: Address; // Only for local accounts
 }
@@ -16,7 +15,7 @@ export const useAccountsStore = defineStore('accountsStore', () => {
   const { shorten } = useShortAddress();
   const webSocketClient = useWebSocketClient();
 
-  // Store all accounts (both local and MetaMask)
+  // Store all accounts (both local and external wallet)
   const accounts = ref<AccountInfo[]>([]);
   const selectedAccount = ref<AccountInfo | null>(null);
 
@@ -45,21 +44,40 @@ export const useAccountsStore = defineStore('accountsStore', () => {
   }
 
   // Initialize accounts from localStorage
-  const storedAccounts = JSON.parse(
+  const storedAccounts: AccountInfo[] = JSON.parse(
     localStorage.getItem('accountsStore.accounts') || '[]',
   );
-  if (storedAccounts.length === 0) {
+
+  // Migrate 'metamask' type to 'external'
+  const migratedAccounts = storedAccounts.map((acc) => ({
+    ...acc,
+    type:
+      (acc.type as string) === 'metamask'
+        ? ('external' as const)
+        : (acc.type as AccountInfo['type']),
+  }));
+
+  if (migratedAccounts.length === 0) {
     generateNewAccount();
     _initAccountsLocalStorage();
   } else {
-    accounts.value = storedAccounts;
+    accounts.value = migratedAccounts;
 
     // Initialize selected account from localStorage
-    const storedSelectedAccount = JSON.parse(
+    const storedSelectedAccount: AccountInfo | null = JSON.parse(
       localStorage.getItem('accountsStore.currentAccount') || 'null',
     );
+    const migratedSelected = storedSelectedAccount
+      ? {
+          ...storedSelectedAccount,
+          type:
+            (storedSelectedAccount.type as string) === 'metamask'
+              ? ('external' as const)
+              : (storedSelectedAccount.type as AccountInfo['type']),
+        }
+      : null;
     setCurrentAccount(
-      storedSelectedAccount ? storedSelectedAccount : accounts.value[0],
+      migratedSelected ? migratedSelected : (accounts.value[0] ?? null),
     );
   }
 
@@ -74,73 +92,50 @@ export const useAccountsStore = defineStore('accountsStore', () => {
     );
   }
 
-  async function fetchMetaMaskAccount() {
-    if (!window.ethereum) {
-      notify({
-        title: 'MetaMask is not installed',
-        type: 'error',
-      });
-      return;
-    }
-
-    const ethAccounts = await window.ethereum.request({
-      method: 'eth_requestAccounts',
-    });
-
-    const metamaskAccount: AccountInfo = {
-      type: 'metamask',
-      address: getAddress(ethAccounts[0]) as Address,
+  function connectExternalWallet(address: Address) {
+    const externalAccount: AccountInfo = {
+      type: 'external',
+      address: getAddress(address) as Address,
     };
 
-    // Update or add MetaMask account
-    const existingMetaMaskIndex = accounts.value.findIndex(
-      (acc) => acc.type === 'metamask',
+    const existingExternalIndex = accounts.value.findIndex(
+      (acc) => acc.type === 'external',
     );
-    if (existingMetaMaskIndex >= 0) {
-      accounts.value[existingMetaMaskIndex] = metamaskAccount;
+    if (existingExternalIndex >= 0) {
+      accounts.value[existingExternalIndex] = externalAccount;
     } else {
-      accounts.value.push(metamaskAccount);
+      accounts.value.push(externalAccount);
     }
 
-    setCurrentAccount(metamaskAccount);
+    setCurrentAccount(externalAccount);
   }
 
-  if (window.ethereum) {
-    window.ethereum.on('accountsChanged', (newAccounts: string[]) => {
-      if (newAccounts.length > 0 && newAccounts[0]) {
-        const metamaskAccount: AccountInfo = {
-          type: 'metamask',
-          address: getAddress(newAccounts[0]) as Address,
-        };
+  function disconnectExternalWallet() {
+    accounts.value = accounts.value.filter((acc) => acc.type !== 'external');
+    if (
+      selectedAccount.value?.type === 'external' ||
+      !accounts.value.find(
+        (acc) => acc.address === selectedAccount.value?.address,
+      )
+    ) {
+      setCurrentAccount(accounts.value[0] ?? null);
+    }
+  }
 
-        const existingMetaMaskIndex = accounts.value.findIndex(
-          (acc) => acc.type === 'metamask',
-        );
-        if (existingMetaMaskIndex >= 0) {
-          accounts.value[existingMetaMaskIndex] = metamaskAccount;
-        }
-
-        if (
-          selectedAccount.value?.type === 'metamask' &&
-          selectedAccount.value.address !== metamaskAccount.address
-        ) {
-          setCurrentAccount(metamaskAccount);
-        }
-      } else {
-        accounts.value = accounts.value.filter(
-          (acc) => acc.type !== 'metamask',
-        );
-        setCurrentAccount(accounts.value[0] ?? null);
+  function updateExternalWalletAddress(newAddress: Address) {
+    const checksummed = getAddress(newAddress) as Address;
+    const existingExternalIndex = accounts.value.findIndex(
+      (acc) => acc.type === 'external',
+    );
+    if (existingExternalIndex >= 0) {
+      accounts.value[existingExternalIndex] = {
+        type: 'external',
+        address: checksummed,
+      };
+      if (selectedAccount.value?.type === 'external') {
+        setCurrentAccount(accounts.value[existingExternalIndex]);
       }
-      localStorage.setItem(
-        'accountsStore.accounts',
-        JSON.stringify(accounts.value),
-      );
-      localStorage.setItem(
-        'accountsStore.currentAccount',
-        JSON.stringify(selectedAccount.value),
-      );
-    });
+    }
   }
 
   function generateNewAccount(): AccountInfo {
@@ -158,6 +153,11 @@ export const useAccountsStore = defineStore('accountsStore', () => {
   }
 
   function removeAccount(accountToRemove: AccountInfo) {
+    if (accountToRemove.type === 'external') {
+      disconnectExternalWallet();
+      return;
+    }
+
     if (
       accounts.value.filter((acc) => acc.type === 'local').length <= 1 &&
       accountToRemove.type === 'local'
@@ -243,7 +243,9 @@ export const useAccountsStore = defineStore('accountsStore', () => {
     accounts,
     selectedAccount,
     currentUserAddress,
-    fetchMetaMaskAccount,
+    connectExternalWallet,
+    disconnectExternalWallet,
+    updateExternalWalletAddress,
     generateNewAccount,
     removeAccount,
     setCurrentAccount,

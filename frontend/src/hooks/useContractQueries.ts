@@ -9,7 +9,7 @@ import {
 import { useDebounceFn } from '@vueuse/core';
 import { notify } from '@kyvg/vue3-notification';
 import { useMockContractData } from './useMockContractData';
-import { useEventTracking, useGenlayer } from '@/hooks';
+import { useEventTracking, useGenlayer, useWallet } from '@/hooks';
 import type {
   Address,
   TransactionHash,
@@ -24,6 +24,7 @@ const schema = ref<any>();
 export function useContractQueries() {
   const genlayer = useGenlayer();
   const genlayerClient = computed(() => genlayer.client.value);
+  const wallet = useWallet();
   const accountsStore = useAccountsStore();
   const transactionsStore = useTransactionsStore();
   const contractsStore = useContractsStore();
@@ -355,12 +356,12 @@ export function useContractQueries() {
           signature = await signer.signMessage({
             message: { raw: messageHash },
           });
-        } else if (account.type === 'metamask' && window.ethereum) {
-          // MetaMask - request signature
-          signature = await window.ethereum.request({
+        } else if (account.type === 'external' && wallet.walletProvider.value) {
+          // External wallet - request signature via AppKit provider
+          signature = (await wallet.walletProvider.value.request({
             method: 'personal_sign',
             params: [toHex(messageHash), account.address],
-          });
+          })) as string;
         } else {
           console.warn(
             `Unsupported account type '${account.type}' for signing - upgrade will proceed without signature`,

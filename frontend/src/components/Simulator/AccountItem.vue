@@ -64,9 +64,9 @@ const showConfirmDelete = ref(false);
       </span>
 
       <Wallet
-        v-if="account.type === 'metamask'"
-        class="h-4 w-4 text-orange-500"
-        v-tooltip="'MetaMask Account'"
+        v-if="account.type === 'external'"
+        class="h-4 w-4 text-blue-500"
+        v-tooltip="'External Wallet'"
       />
 
       <div

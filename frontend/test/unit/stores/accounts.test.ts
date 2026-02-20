@@ -3,6 +3,7 @@ import { setActivePinia, createPinia } from 'pinia';
 import { useAccountsStore, type AccountInfo } from '@/stores';
 import { useGenlayer } from '@/hooks';
 import type { Address } from 'genlayer-js/types';
+import { getAddress } from 'viem';
 
 const testKey1 =
   '0xb69426b0f5838a514b263868978faaa53057ac83c5ccad6b7fddbc051b052c6a' as Address; // ! NEVER USE THIS PRIVATE KEY
@@ -316,47 +317,153 @@ describe('useAccountsStore', () => {
   });
 });
 
-describe('fetchMetaMaskAccount', () => {
+describe('connectExternalWallet', () => {
   let accountsStore: ReturnType<typeof useAccountsStore>;
 
   beforeEach(() => {
-    setActivePinia(createPinia());
-    accountsStore = useAccountsStore();
-
-    // Mock `window.ethereum`
-    vi.stubGlobal('window', {
-      ethereum: {
-        request: vi.fn(),
-        on: vi.fn(),
-      },
-    });
-  });
-
-  it('should fetch the MetaMask account and set it as selected', async () => {
-    const testAccount = '0x1234567890abcdef1234567890abcdef12345678';
-    (window?.ethereum?.request as Mock).mockResolvedValueOnce([testAccount]);
-
-    await accountsStore.fetchMetaMaskAccount();
-
-    expect(window?.ethereum?.request).toHaveBeenCalledWith({
-      method: 'eth_requestAccounts',
-    });
-
-    const expectedMetaMaskAccount = {
-      type: 'metamask',
-      address: '0x1234567890AbcdEF1234567890aBcdef12345678', // Checksum format from getAddress
+    mockWebSocketClientGlobal = {
+      connected: true,
+      emit: vi.fn(),
+      on: vi.fn(),
+      off: vi.fn(),
     };
 
-    expect(accountsStore.accounts).toContainEqual(expectedMetaMaskAccount);
-    expect(accountsStore.selectedAccount).toEqual(expectedMetaMaskAccount);
+    setActivePinia(createPinia());
+    (useGenlayer as Mock).mockReturnValue({
+      client: {},
+    });
+
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+
+    accountsStore = useAccountsStore();
   });
 
-  it('should not modify accounts if window.ethereum is undefined', async () => {
-    vi.stubGlobal('window', {}); // Remove ethereum from window object
-    const initialAccounts = [...accountsStore.accounts];
+  it('should add an external account and set it as selected', () => {
+    const externalAddress =
+      '0x1234567890abcdef1234567890abcdef12345678' as Address;
+    accountsStore.connectExternalWallet(externalAddress);
 
-    await accountsStore.fetchMetaMaskAccount();
+    const expectedAccount = {
+      type: 'external',
+      address: getAddress(externalAddress),
+    };
 
-    expect(accountsStore.accounts).toEqual(initialAccounts);
+    expect(accountsStore.accounts).toContainEqual(expectedAccount);
+    expect(accountsStore.selectedAccount).toEqual(expectedAccount);
+  });
+
+  it('should update existing external account if one exists', () => {
+    const address1 = '0x1234567890abcdef1234567890abcdef12345678' as Address;
+    const address2 = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd' as Address;
+
+    accountsStore.connectExternalWallet(address1);
+    accountsStore.connectExternalWallet(address2);
+
+    const externalAccounts = accountsStore.accounts.filter(
+      (a) => a.type === 'external',
+    );
+    expect(externalAccounts).toHaveLength(1);
+    expect(externalAccounts[0].address).toBe(getAddress(address2));
+  });
+});
+
+describe('disconnectExternalWallet', () => {
+  let accountsStore: ReturnType<typeof useAccountsStore>;
+
+  beforeEach(() => {
+    mockWebSocketClientGlobal = {
+      connected: true,
+      emit: vi.fn(),
+      on: vi.fn(),
+      off: vi.fn(),
+    };
+
+    setActivePinia(createPinia());
+    (useGenlayer as Mock).mockReturnValue({
+      client: {},
+    });
+
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+
+    accountsStore = useAccountsStore();
+  });
+
+  it('should remove external account and select a local account', () => {
+    const externalAddress =
+      '0x1234567890abcdef1234567890abcdef12345678' as Address;
+
+    accountsStore.connectExternalWallet(externalAddress);
+    expect(accountsStore.selectedAccount?.type).toBe('external');
+
+    accountsStore.disconnectExternalWallet();
+
+    expect(accountsStore.accounts.every((a) => a.type === 'local')).toBe(true);
+    expect(accountsStore.selectedAccount?.type).toBe('local');
+  });
+
+  it('should disconnect external wallet when removing external account via removeAccount', () => {
+    const externalAddress =
+      '0x1234567890abcdef1234567890abcdef12345678' as Address;
+    accountsStore.connectExternalWallet(externalAddress);
+    const externalAccount = accountsStore.accounts.find(
+      (a) => a.type === 'external',
+    )!;
+
+    accountsStore.removeAccount(externalAccount);
+
+    expect(accountsStore.accounts.every((a) => a.type === 'local')).toBe(true);
+  });
+});
+
+describe('updateExternalWalletAddress', () => {
+  let accountsStore: ReturnType<typeof useAccountsStore>;
+
+  beforeEach(() => {
+    mockWebSocketClientGlobal = {
+      connected: true,
+      emit: vi.fn(),
+      on: vi.fn(),
+      off: vi.fn(),
+    };
+
+    setActivePinia(createPinia());
+    (useGenlayer as Mock).mockReturnValue({
+      client: {},
+    });
+
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn(),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+
+    accountsStore = useAccountsStore();
+  });
+
+  it('should update the address of an existing external account', () => {
+    const address1 = '0x1234567890abcdef1234567890abcdef12345678' as Address;
+    const address2 = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd' as Address;
+
+    accountsStore.connectExternalWallet(address1);
+    accountsStore.updateExternalWalletAddress(address2);
+
+    expect(accountsStore.selectedAccount?.address).toBe(getAddress(address2));
+  });
+
+  it('should do nothing if no external account exists', () => {
+    const address = '0x1234567890abcdef1234567890abcdef12345678' as Address;
+    const accountsBefore = [...accountsStore.accounts];
+
+    accountsStore.updateExternalWalletAddress(address);
+
+    expect(accountsStore.accounts.length).toBe(accountsBefore.length);
   });
 });
