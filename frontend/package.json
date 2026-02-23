@@ -60,7 +60,7 @@
   "devDependencies": {
     "@rushstack/eslint-patch": "^1.8.0",
     "@tailwindcss/forms": "^0.5.7",
-    "@tsconfig/node22": "^22.0.0",
+    "@tsconfig/node24": "^24.0.0",
     "@types/chai": "^5.0.0",
     "@types/jsdom": "^21.1.6",
     "@types/lodash-es": "^4.17.12",
@@ -80,7 +80,7 @@
     "@vue/tsconfig": "^0.7.0",
     "autoprefixer": "^10.4.19",
     "chai": "^5.1.1",
-    "eslint": "^8.56.0",
+    "eslint": "^9.0.0",
     "eslint-plugin-vue": "^9.23.0",
     "jsdom": "^26.0.0",
     "mocha": "^11.0.0",
