@@ -146,8 +146,8 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:${RPCPORT}/health"]
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 40s
+      retries: 5
+      start_period: 180s
     restart: always
     security_opt:
       - "no-new-privileges=true"
@@ -308,7 +308,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 180s
     mem_limit:  ${COMPOSE_WORKER_MEM_LIMIT:-8g}
     mem_reservation: ${COMPOSE_WORKER_MEM_RESERVATION:-2g}
     memswap_limit: ${COMPOSE_WORKER_MEM_SWAP_LIMIT:-8g}

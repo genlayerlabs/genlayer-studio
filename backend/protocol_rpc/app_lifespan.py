@@ -37,6 +37,8 @@ from backend.protocol_rpc.redis_subscriber import RedisEventSubscriber
 from backend.protocol_rpc.health import (
     start_background_health_checker,
     stop_background_health_checker,
+    record_genvm_execution_success,
+    record_genvm_execution_failure,
 )
 from backend.services.usage_metrics_service import UsageMetricsService
 import backend.validators as validators
@@ -244,6 +246,15 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
 
     genvm_manager = await create_genvm_manager()
 
+    # Wire GenVM execution failure tracking callbacks (same pattern as worker_service.py)
+    from backend.node.genvm.origin.base_host import set_genvm_callbacks
+
+    set_genvm_callbacks(
+        on_success=record_genvm_execution_success,
+        on_failure=record_genvm_execution_failure,
+    )
+    logger.info("[STARTUP] GenVM execution failure tracking callbacks registered")
+
     validators_session = db_manager.open_session()
     # Manages the validators registry with locking for concurrent access
     # Handles LLM and web modules and configuration file changes
@@ -388,6 +399,9 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
         redis_subscriber.register_handler("validator_deleted", handle_validator_change)
         redis_subscriber.register_handler(
             "all_validators_deleted", handle_validator_change
+        )
+        redis_subscriber.register_handler(
+            "validators_replaced", handle_validator_change
         )
 
         logger.info(

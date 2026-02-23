@@ -1,6 +1,7 @@
 # rpc/endpoints.py
 import random
 import json
+import time
 import eth_utils
 import logging
 from functools import partial, wraps
@@ -55,6 +56,46 @@ from backend.protocol_rpc.types import DecodedsubmitAppealDataArgs
 from backend.database_handler.snapshot_manager import SnapshotManager
 from backend.node.base import Manager as GenVMManager
 import asyncio
+
+# Limit concurrent GenVM executions on the jsonrpc path to prevent uvloop fd conflicts.
+# Workers use asyncio.Semaphore(8) in consensus/base.py; gen_call had none, allowing
+# unbounded concurrent GenVM socket operations that cause fd registry collisions.
+_GENVM_CONCURRENCY = int(os.environ.get("GENVM_MAX_CONCURRENT", "8"))
+_genvm_semaphore = asyncio.Semaphore(_GENVM_CONCURRENCY)
+
+# ---------------------------------------------------------------------------
+# Per-address rate limiting for gen_call / sim_call
+# Prevents a single contract from monopolising all GenVM execution slots.
+# ---------------------------------------------------------------------------
+_RATE_LIMIT_WINDOW = float(
+    os.environ.get("GEN_CALL_RATE_LIMIT_WINDOW", "10")
+)  # seconds
+_RATE_LIMIT_MAX = int(
+    os.environ.get("GEN_CALL_RATE_LIMIT_MAX", "20")
+)  # max requests per window per address
+
+_address_request_log: dict[str, list[float]] = {}  # {address: [timestamp, ...]}
+
+_rate_limit_logger = logging.getLogger(__name__ + ".rate_limit")
+
+
+def _check_rate_limit(address: str) -> None:
+    """Reject if address exceeds rate limit. Prunes old entries."""
+    now = time.monotonic()
+    timestamps = _address_request_log.get(address, [])
+    cutoff = now - _RATE_LIMIT_WINDOW
+    timestamps = [t for t in timestamps if t > cutoff]
+    if len(timestamps) >= _RATE_LIMIT_MAX:
+        _rate_limit_logger.warning(
+            f"Rate limit exceeded for {address}: {len(timestamps)} requests in {_RATE_LIMIT_WINDOW}s window"
+        )
+        raise JSONRPCError(
+            code=-32005,
+            message=f"Rate limit exceeded: max {_RATE_LIMIT_MAX} gen_call requests per {_RATE_LIMIT_WINDOW}s per contract address",
+            data={"address": address, "retry_after_seconds": _RATE_LIMIT_WINDOW},
+        )
+    timestamps.append(now)
+    _address_request_log[address] = timestamps
 
 
 ####### ADMIN ACCESS CONTROL #######
@@ -930,6 +971,9 @@ async def _gen_call_with_validator(
     if not accounts_manager.is_valid_address(to_address):
         raise InvalidAddressError(to_address)
 
+    # Rate limit per contract address — reject early before acquiring resources
+    _check_rate_limit(to_address)
+
     if transaction_hash_variant == "latest-final":
         state_status = "finalized"
     else:
@@ -959,64 +1003,75 @@ async def _gen_call_with_validator(
         sim_config is not None and sim_config.genvm_datetime is not None
     )
 
-    if type == "read":
-        # Pre-parse timestamp override and map errors
-        txn_dt = None
-        if sim_config and override_transaction_datetime:
-            try:
-                txn_dt = sim_config.genvm_datetime_as_datetime
-            except ValueError as e:
-                raise JSONRPCError(
-                    code=-32602,
-                    message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
-                    data={},
-                ) from e
-        decoded_data = transactions_parser.decode_method_call_data(data)
-        receipt = await node.get_contract_data(
-            from_address=from_address,
-            calldata=decoded_data.calldata,
-            state_status=state_status,
-            transaction_datetime=txn_dt,
+    if _genvm_semaphore.locked():
+        _rate_limit_logger.warning(
+            f"GenVM at capacity ({_GENVM_CONCURRENCY} concurrent) — rejecting gen_call to {to_address}"
         )
-    elif type == "write":
-        txn_created_at = None
-        if sim_config and override_transaction_datetime:
-            try:
-                _ = sim_config.genvm_datetime_as_datetime  # validation only
-                txn_created_at = sim_config.genvm_datetime
-            except ValueError as e:
-                raise JSONRPCError(
-                    code=-32602,
-                    message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
-                    data={},
-                ) from e
-        decoded_data = transactions_parser.decode_method_send_data(data)
-        receipt = await node.run_contract(
-            from_address=from_address,
-            calldata=decoded_data.calldata,
-            transaction_created_at=txn_created_at,
+        raise JSONRPCError(
+            code=-32006,
+            message=f"Server busy: all {_GENVM_CONCURRENCY} execution slots occupied, retry later",
+            data={"retry_after_seconds": 2},
         )
-    elif type == "deploy":
-        txn_created_at = None
-        if sim_config and override_transaction_datetime:
-            try:
-                _ = sim_config.genvm_datetime_as_datetime  # validation only
-                txn_created_at = sim_config.genvm_datetime
-            except ValueError as e:
-                raise JSONRPCError(
-                    code=-32602,
-                    message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
-                    data={},
-                ) from e
-        decoded_data = transactions_parser.decode_deployment_data(data)
-        receipt = await node.deploy_contract(
-            from_address=from_address,
-            code_to_deploy=decoded_data.contract_code,
-            calldata=decoded_data.calldata,
-            transaction_created_at=txn_created_at,
-        )
-    else:
-        raise JSONRPCError(f"Invalid type: {type}")
+
+    async with _genvm_semaphore:
+        if type == "read":
+            # Pre-parse timestamp override and map errors
+            txn_dt = None
+            if sim_config and override_transaction_datetime:
+                try:
+                    txn_dt = sim_config.genvm_datetime_as_datetime
+                except ValueError as e:
+                    raise JSONRPCError(
+                        code=-32602,
+                        message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                        data={},
+                    ) from e
+            decoded_data = transactions_parser.decode_method_call_data(data)
+            receipt = await node.get_contract_data(
+                from_address=from_address,
+                calldata=decoded_data.calldata,
+                state_status=state_status,
+                transaction_datetime=txn_dt,
+            )
+        elif type == "write":
+            txn_created_at = None
+            if sim_config and override_transaction_datetime:
+                try:
+                    _ = sim_config.genvm_datetime_as_datetime  # validation only
+                    txn_created_at = sim_config.genvm_datetime
+                except ValueError as e:
+                    raise JSONRPCError(
+                        code=-32602,
+                        message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                        data={},
+                    ) from e
+            decoded_data = transactions_parser.decode_method_send_data(data)
+            receipt = await node.run_contract(
+                from_address=from_address,
+                calldata=decoded_data.calldata,
+                transaction_created_at=txn_created_at,
+            )
+        elif type == "deploy":
+            txn_created_at = None
+            if sim_config and override_transaction_datetime:
+                try:
+                    _ = sim_config.genvm_datetime_as_datetime  # validation only
+                    txn_created_at = sim_config.genvm_datetime
+                except ValueError as e:
+                    raise JSONRPCError(
+                        code=-32602,
+                        message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                        data={},
+                    ) from e
+            decoded_data = transactions_parser.decode_deployment_data(data)
+            receipt = await node.deploy_contract(
+                from_address=from_address,
+                code_to_deploy=decoded_data.contract_code,
+                calldata=decoded_data.calldata,
+                transaction_created_at=txn_created_at,
+            )
+        else:
+            raise JSONRPCError(f"Invalid type: {type}")
 
     # Return the result of the write method
     if receipt.execution_result != ExecutionResultStatus.SUCCESS:

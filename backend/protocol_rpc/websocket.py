@@ -22,8 +22,10 @@ async def _forward_messages(websocket: WebSocket, subscriber: Any) -> None:
             await websocket.send_text(event.message)
     except asyncio.CancelledError:  # Expected during shutdown/unsubscribe
         raise
-    except (WebSocketDisconnect, RuntimeError):
-        # Ignore send failures caused by abruptly closed sockets
+    except Exception:
+        # Ignore send failures caused by client disconnection.
+        # This covers WebSocketDisconnect, RuntimeError, ClientDisconnected (uvicorn),
+        # ConnectionClosedError (websockets), IncompleteReadError (asyncio), etc.
         pass
 
 
@@ -140,6 +142,10 @@ async def websocket_handler(websocket: WebSocket, broadcast: Broadcast) -> None:
                 )
 
     except WebSocketDisconnect:
+        pass
+    except Exception:
+        # Handle ClientDisconnected (uvicorn), ConnectionClosedError (websockets),
+        # and other exceptions raised when client disconnects during send operations.
         pass
     finally:
         await cleanup()

@@ -127,6 +127,18 @@ class ModifiableValidatorsRegistryInterceptor(vr.ModifiableValidatorsRegistry):
             )
             return res
 
+    async def replace_all_validators(
+        self, validators: list[vr.Validator]
+    ) -> list[dict]:
+        """Atomically replace all validators. Single DB commit, single Redis event."""
+        async with self._parent.do_write():
+            res = await super().replace_all_validators(validators)
+            self.session.commit()
+            await self._parent._notify_validator_change(
+                "validators_replaced", {"count": len(res)}
+            )
+            return res
+
 
 @dataclasses.dataclass
 class SingleValidatorSnapshot:

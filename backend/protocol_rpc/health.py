@@ -2,6 +2,7 @@
 import time
 import os
 import math
+import random
 from typing import Optional, Union, Dict, Any
 import logging
 import asyncio
@@ -18,6 +19,56 @@ logger = logging.getLogger(__name__)
 
 # Create FastAPI router for health endpoints
 health_router = APIRouter(tags=["health"])
+
+# =============================================================================
+# GenVM Execution Failure Tracking (complements /status probe)
+# =============================================================================
+
+_genvm_consecutive_failures: int = 0
+_genvm_failure_unhealthy_threshold: int = int(
+    os.environ.get("GENVM_FAILURE_UNHEALTHY_THRESHOLD", "3")
+)
+
+
+def record_genvm_execution_failure():
+    """Increment consecutive GenVM execution failure counter, but only if the
+    GenVM manager process is actually unhealthy.  When the manager /status probe
+    is healthy (checked every 10s by background task), the failure is capacity-
+    related (semaphore full / timeout) and should NOT count toward liveness —
+    restarting the pod won't fix permit starvation.
+    """
+    global _genvm_consecutive_failures
+    if _health_cache.genvm_healthy:
+        if _genvm_consecutive_failures > 0:
+            logger.info(
+                f"GenVM execution failed but manager is healthy — resetting failure count from {_genvm_consecutive_failures} to 0"
+            )
+            _genvm_consecutive_failures = 0
+        else:
+            logger.debug("GenVM execution failed but manager is healthy — ignoring")
+        return
+    _genvm_consecutive_failures += 1
+    logger.warning(
+        f"GenVM execution failure (manager unhealthy): {_genvm_consecutive_failures}/{_genvm_failure_unhealthy_threshold}"
+    )
+
+
+def record_genvm_execution_success():
+    """Reset consecutive GenVM execution failure counter on success."""
+    global _genvm_consecutive_failures
+    if _genvm_consecutive_failures > 0:
+        logger.info(
+            f"GenVM execution success - resetting failure count from {_genvm_consecutive_failures} to 0"
+        )
+        _genvm_consecutive_failures = 0
+
+
+def get_genvm_execution_failure_count() -> int:
+    return _genvm_consecutive_failures
+
+
+def get_genvm_failure_unhealthy_threshold() -> int:
+    return _genvm_failure_unhealthy_threshold
 
 
 # =============================================================================
@@ -36,8 +87,13 @@ class HealthCache:
     services: Dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
     # GenVM-specific (triggers 503 on failure)
-    genvm_healthy: bool = True
+    genvm_healthy: bool = False
     genvm_error: Optional[str] = None
+    # GenVM manager capacity (best-effort; populated from /status when available)
+    genvm_max_permits: Optional[int] = None
+    genvm_current_permits: Optional[int] = None
+    genvm_available_permits: Optional[int] = None
+    genvm_active_executions: Optional[int] = None
     # Additional metrics for external API
     total_decisions: int = 0
     total_users: int = 0
@@ -53,6 +109,108 @@ _background_task: Optional[asyncio.Task] = None
 _rpc_router_ref: Optional[FastAPIRPCRouter] = None
 _usage_metrics_service_ref: Optional[Any] = None
 _metrics_send_counter: int = 0
+
+# =============================================================================
+# Permit-aware readiness state (in-process)
+# =============================================================================
+
+_permits_below_threshold_since: Optional[float] = None
+_permits_recovered_since: Optional[float] = None
+
+
+def _get_readiness_permit_min_available() -> int:
+    """
+    Minimum required available permits for readiness gating.
+
+    Default is 0 to keep behavior unchanged unless explicitly enabled.
+    """
+    try:
+        return int(os.getenv("READINESS_PERMIT_MIN_AVAILABLE", "0"))
+    except Exception:
+        return 0
+
+
+def _get_readiness_permit_sustain_seconds() -> float:
+    """
+    Require permit exhaustion to be sustained before flipping not-ready.
+    """
+    try:
+        return float(os.getenv("READINESS_PERMIT_SUSTAIN_SECONDS", "20"))
+    except Exception:
+        return 20.0
+
+
+def _get_readiness_permit_recover_seconds() -> float:
+    """
+    Require permits to be back above threshold for a bit before flipping ready again.
+    """
+    try:
+        return float(os.getenv("READINESS_PERMIT_RECOVER_SECONDS", "10"))
+    except Exception:
+        return 10.0
+
+
+def _get_readiness_permit_jitter_seconds() -> float:
+    """
+    Small per-pod jitter reduces synchronized readiness flapping.
+    """
+    try:
+        return float(os.getenv("READINESS_PERMIT_JITTER_SECONDS", "2"))
+    except Exception:
+        return 2.0
+
+
+# Per-process stable jitter in [0, jitter_s]
+_READINESS_JITTER_S: float = (
+    random.Random(os.getpid()).random() * _get_readiness_permit_jitter_seconds()
+)
+
+
+def _evaluate_permit_readiness(
+    now: float, available_permits: Optional[int]
+) -> tuple[bool, Optional[str]]:
+    """
+    Decide whether we should be ready based on available permits.
+
+    This is intentionally conservative: by default it's disabled (min=0), and it
+    uses sustain/recover windows plus jitter to avoid thrashing.
+    """
+    global _permits_below_threshold_since, _permits_recovered_since
+
+    min_avail = _get_readiness_permit_min_available()
+    if min_avail <= 0:
+        _permits_below_threshold_since = None
+        _permits_recovered_since = None
+        return True, None
+
+    if available_permits is None:
+        # If we can't observe permits, don't gate readiness (safer than outage).
+        _permits_below_threshold_since = None
+        _permits_recovered_since = None
+        return True, "permits_unknown"
+
+    below = available_permits < min_avail
+    sustain_s = _get_readiness_permit_sustain_seconds() + _READINESS_JITTER_S
+    recover_s = _get_readiness_permit_recover_seconds() + _READINESS_JITTER_S
+
+    if below:
+        _permits_recovered_since = None
+        if _permits_below_threshold_since is None:
+            _permits_below_threshold_since = now
+            return True, "permits_low_transient"
+        if (now - _permits_below_threshold_since) >= sustain_s:
+            return False, "permits_low_sustained"
+        return True, "permits_low_transient"
+
+    # Recovered (>= min_avail)
+    _permits_below_threshold_since = None
+    if _permits_recovered_since is None:
+        _permits_recovered_since = now
+        return True, "permits_recovering"
+    if (now - _permits_recovered_since) >= recover_s:
+        return True, None
+    return True, "permits_recovering"
+
 
 # Send system health metrics every 6 health checks (6 × 10s = 60s = 1 minute)
 METRICS_SEND_INTERVAL = 6
@@ -105,7 +263,7 @@ async def _run_health_checks() -> None:
             if overall_status == "healthy":
                 overall_status = "degraded"
             issues.append("consensus_issue")
-        elif consensus_health.get("total_orphaned_transactions", 0) > 0:
+        elif consensus_health.get("total_orphaned_transactions", 0) >= 3:
             if overall_status == "healthy":
                 overall_status = "degraded"
             issues.append("orphaned_transactions")
@@ -132,11 +290,45 @@ async def _run_health_checks() -> None:
                 overall_status = "degraded"
             issues.append("redis_unreachable")
 
-        # 5. GenVM manager health
-        genvm_ok, genvm_error = await _check_genvm_health()
+        # 5. GenVM manager health (+ capacity details when available)
+        genvm_ok, genvm_error, genvm_status = await _check_genvm_health()
         services["genvm"] = {"status": "healthy" if genvm_ok else "unhealthy"}
         _health_cache.genvm_healthy = genvm_ok
         _health_cache.genvm_error = genvm_error
+
+        # Best-effort parse of permit info from /status.
+        # The manager returns: {"permits": {"current": N, "max": M}, "executions": {...}}
+        # where permits.current = available permits (semaphore value).
+        try:
+            permits_obj = genvm_status.get("permits") or {}
+            executions_obj = genvm_status.get("executions")
+
+            max_permits_i = int(permits_obj["max"]) if "max" in permits_obj else None
+            # permits.current IS the available count (semaphore value)
+            available_i = (
+                int(permits_obj["current"]) if "current" in permits_obj else None
+            )
+            active_i = len(executions_obj) if isinstance(executions_obj, dict) else None
+
+            _health_cache.genvm_max_permits = max_permits_i
+            _health_cache.genvm_available_permits = available_i
+            _health_cache.genvm_current_permits = active_i  # in-use count
+            _health_cache.genvm_active_executions = active_i
+
+            services["genvm"].update(
+                {
+                    "max_permits": max_permits_i,
+                    "available_permits": available_i,
+                    "current_permits": active_i,
+                    "active_executions": active_i,
+                }
+            )
+        except Exception as e:
+            logger.debug(f"Failed to parse GenVM permit info from /status: {e}")
+            _health_cache.genvm_max_permits = None
+            _health_cache.genvm_current_permits = None
+            _health_cache.genvm_available_permits = None
+            _health_cache.genvm_active_executions = None
 
         # 6. Aggregate counts for metrics
         decisions_count, users_count, pending_count = await _get_aggregate_counts()
@@ -457,8 +649,8 @@ async def _check_redis_health() -> str:
         return "unhealthy"
 
 
-async def _check_genvm_health() -> tuple[bool, Optional[str]]:
-    """Check GenVM manager health."""
+async def _check_genvm_health() -> tuple[bool, Optional[str], Dict[str, Any]]:
+    """Check GenVM manager health and (best-effort) parse permit status."""
     status_url = os.getenv("GENVM_MANAGER_STATUS_URL", "http://127.0.0.1:3999/status")
     timeout_s = float(os.getenv("GENVM_MANAGER_HEALTH_TIMEOUT_SECONDS", "2"))
 
@@ -469,14 +661,24 @@ async def _check_genvm_health() -> tuple[bool, Optional[str]]:
             timeout=aiohttp.ClientTimeout(total=timeout_s),
         ) as resp:
             if resp.status != 200:
-                return False, f"genvm_manager_status_http_{resp.status}"
-            return True, None
+                return False, f"genvm_manager_status_http_{resp.status}", {}
+
+            # /status is expected to be JSON and may contain permits + executions.
+            # Treat JSON parse failures as "healthy but unknown capacity" to avoid
+            # false negatives taking out production traffic.
+            try:
+                payload = await resp.json()
+                if not isinstance(payload, dict):
+                    return True, None, {}
+                return True, None, payload
+            except Exception:
+                return True, None, {}
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-        return False, f"genvm_manager_status_error: {exc}"
+        return False, f"genvm_manager_status_error: {exc}", {}
     except Exception as e:
         # Don't fail on unexpected errors
         logger.warning(f"GenVM health probe failed unexpectedly: {e}")
-        return True, None
+        return True, None, {}
 
 
 # =============================================================================
@@ -498,12 +700,24 @@ async def health_check() -> Union[dict, JSONResponse]:
     """
     # Check if GenVM is unhealthy - return 503 to trigger restart
     if not _health_cache.genvm_healthy:
-        # Note: genvm_error details logged server-side, not exposed to clients
         return JSONResponse(
             status_code=503,
             content={
                 "status": "unhealthy",
                 "error": "genvm_manager_unresponsive",
+                "timestamp": time.time(),
+            },
+        )
+
+    # Check if GenVM execution is failing consecutively
+    if _genvm_consecutive_failures >= _genvm_failure_unhealthy_threshold:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "error": "genvm_consecutive_failures",
+                "count": _genvm_consecutive_failures,
+                "threshold": _genvm_failure_unhealthy_threshold,
                 "timestamp": time.time(),
             },
         )
@@ -531,12 +745,17 @@ async def health_check() -> Union[dict, JSONResponse]:
 
 
 @health_router.get("/ready")
-async def readiness_check():
-    """Readiness check to verify the service is ready to accept traffic."""
-    return {
-        "status": "ready",
-        "service": "genlayer-rpc",
-    }
+async def readiness_check(
+    rpc_router: FastAPIRPCRouter | None = Depends(get_rpc_router_optional),
+):
+    """
+    Readiness check for Kubernetes.
+
+    Returns HTTP 200 when ready, HTTP 503 when not-ready so kube-proxy/Ingress
+    stops routing new traffic to this pod.
+    """
+    readiness_func = create_readiness_check_with_state(rpc_router)
+    return await readiness_func()
 
 
 def create_readiness_check_with_state(
@@ -557,12 +776,43 @@ def create_readiness_check_with_state(
     async def readiness_check_with_state():
         """Readiness check to verify the service is ready to accept traffic."""
         rpc_router_ready = rpc_router_provider() is not None
+        genvm_exec_healthy = (
+            _genvm_consecutive_failures < _genvm_failure_unhealthy_threshold
+        )
+        permits_ready, permits_reason = _evaluate_permit_readiness(
+            time.time(), _health_cache.genvm_available_permits
+        )
 
-        return {
-            "status": "ready" if rpc_router_ready else "not_ready",
+        # If the GenVM manager is unhealthy, we are not ready (and /health already 503s).
+        # Permit gating is optional and defaults to disabled (min_available=0).
+        is_ready = (
+            rpc_router_ready
+            and genvm_exec_healthy
+            and _health_cache.genvm_healthy
+            and permits_ready
+        )
+
+        result = {
+            "status": "ready" if is_ready else "not_ready",
             "service": "genlayer-rpc",
             "rpc_router_initialized": rpc_router_ready,
+            "genvm_manager_healthy": _health_cache.genvm_healthy,
+            "genvm_permits": {
+                "max_permits": _health_cache.genvm_max_permits,
+                "current_permits": _health_cache.genvm_current_permits,
+                "available_permits": _health_cache.genvm_available_permits,
+                "active_executions": _health_cache.genvm_active_executions,
+                "min_available_for_ready": _get_readiness_permit_min_available(),
+                "reason": permits_reason,
+            },
         }
+        if not genvm_exec_healthy:
+            result["genvm_execution_failures"] = _genvm_consecutive_failures
+        if not _health_cache.genvm_healthy:
+            result["genvm_error"] = _health_cache.genvm_error
+        if not is_ready:
+            return JSONResponse(status_code=503, content=result)
+        return result
 
     return readiness_check_with_state
 
@@ -659,6 +909,39 @@ async def health_database() -> Dict[str, Any]:
     except Exception as e:
         logger.exception("Database health check failed")
         return {"status": "error", "error": str(e)}
+
+
+@health_router.get("/health/ratelimit")
+async def health_ratelimit() -> Dict[str, Any]:
+    """Show per-address gen_call rate limit state."""
+    from backend.protocol_rpc.endpoints import (
+        _address_request_log,
+        _RATE_LIMIT_WINDOW,
+        _RATE_LIMIT_MAX,
+        _genvm_semaphore,
+        _GENVM_CONCURRENCY,
+    )
+    import time as _time
+
+    now = _time.monotonic()
+    cutoff = now - _RATE_LIMIT_WINDOW
+    addresses = {}
+    for addr, timestamps in _address_request_log.items():
+        recent = [t for t in timestamps if t > cutoff]
+        if recent:
+            addresses[addr] = {
+                "requests_in_window": len(recent),
+                "limit": _RATE_LIMIT_MAX,
+                "oldest_in_window_age_s": round(now - min(recent), 1),
+            }
+    return {
+        "window_seconds": _RATE_LIMIT_WINDOW,
+        "max_per_window": _RATE_LIMIT_MAX,
+        "genvm_concurrency_limit": _GENVM_CONCURRENCY,
+        "genvm_semaphore_available": _genvm_semaphore._value,  # noqa: SLF001
+        "active_addresses": len(addresses),
+        "addresses": addresses,
+    }
 
 
 @health_router.get("/health/memory")
@@ -875,8 +1158,6 @@ async def health_consensus(
 @health_router.get("/metrics")
 async def metrics():
     """Return worker metrics for autoscaling in Prometheus format."""
-    from datetime import datetime, timedelta, timezone
-    from sqlalchemy import select, distinct, and_
     from fastapi.responses import Response
     from prometheus_client import (
         CollectorRegistry,
@@ -884,43 +1165,64 @@ async def metrics():
         generate_latest,
         CONTENT_TYPE_LATEST,
     )
-    from backend.database_handler.models import Transactions
     from backend.database_handler.session_factory import get_database_manager
 
     try:
         db_manager = get_database_manager()
         with db_manager.engine.connect() as conn:
-            now = datetime.now(timezone.utc)
-            recent_threshold = now - timedelta(hours=1)
+            from sqlalchemy import text
 
-            worker_query = select(distinct(Transactions.worker_id)).where(
-                and_(
-                    Transactions.worker_id.isnot(None),
-                    Transactions.created_at > recent_threshold,
+            # Count distinct contracts that have schedulable work:
+            # - "occupied": has an in-flight tx (worker is actively processing)
+            # - "runnable": has pending tx but no in-flight (a worker could pick it up)
+            # This directly measures max useful parallelism since transactions
+            # for the same contract are processed sequentially.
+            row = conn.execute(
+                text(
+                    """
+                    WITH per_contract AS (
+                        SELECT
+                            to_address,
+                            BOOL_OR(status = 'PENDING') AS has_pending,
+                            BOOL_OR(status IN ('PROPOSING', 'COMMITTING', 'UNDETERMINED')) AS has_inflight
+                        FROM transactions
+                        WHERE status IN ('PENDING', 'PROPOSING', 'COMMITTING', 'UNDETERMINED')
+                        GROUP BY to_address
+                    )
+                    SELECT
+                        COALESCE(COUNT(*) FILTER (WHERE has_inflight), 0) AS occupied,
+                        COALESCE(COUNT(*) FILTER (WHERE has_pending AND NOT has_inflight), 0) AS runnable
+                    FROM per_contract
+                    """
                 )
-            )
+            ).fetchone()
 
-            worker_result = conn.execute(worker_query)
-            active_workers_count = len({row[0] for row in worker_result if row[0]})
+            occupied_count = row[0] if row else 0
+            runnable_count = row[1] if row else 0
 
-        # needed_workers = active_workers + ceil(active_workers * 0.1), minimum 1
-        needed_workers_count = max(
-            1, active_workers_count + math.ceil(active_workers_count * 0.1)
-        )
+        base = occupied_count + runnable_count
+        # Add 10% headroom for burst absorption, minimum 0 (HPA minReplicas handles floor)
+        needed_workers_count = math.ceil(base * 1.10) if base > 0 else 0
 
         # Create a fresh registry for each request to avoid duplicate metrics
         registry = CollectorRegistry()
-        active_workers = Gauge(
-            "genlayer_active_workers",
-            "Number of active workers processing transactions in the last hour",
+        occupied_contracts = Gauge(
+            "genlayer_occupied_contracts",
+            "Contracts with an in-flight transaction (worker actively processing)",
+            registry=registry,
+        )
+        runnable_contracts = Gauge(
+            "genlayer_runnable_contracts",
+            "Contracts with pending work and no in-flight transaction",
             registry=registry,
         )
         needed_workers = Gauge(
             "genlayer_needed_workers",
-            "Number of workers needed for autoscaling (active + 10% buffer, min 1)",
+            "Workers needed: distinct schedulable contracts + 10% headroom",
             registry=registry,
         )
-        active_workers.set(active_workers_count)
+        occupied_contracts.set(occupied_count)
+        runnable_contracts.set(runnable_count)
         needed_workers.set(needed_workers_count)
 
         return Response(

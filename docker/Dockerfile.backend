@@ -3,7 +3,7 @@ FROM ubuntu:24.04 AS base
 ARG TARGETPLATFORM
 ARG TARGETARCH
 
-ARG GENVM_TAG=v0.2.11
+ARG GENVM_TAG=v0.2.12
 
 ENV GENVM_TAG=$GENVM_TAG
 
@@ -66,7 +66,9 @@ RUN cd /genvm \
     && rm *.tar.xz \
     && ls -R . \
     && chown -R backend-user:backend-group /genvm \
-    && su - backend-user -c "/genvm/bin/post-install.py" \
+    && su - backend-user -c "/genvm/bin/post-install.py --precompile false" \
+    && find /genvm -name genvm.yaml -exec sed -i 's|cache_dir:.*|cache_dir: /genvm-cache/|' {} + \
+    && mkdir -p /genvm-cache && chown backend-user:backend-group /genvm-cache \
     && cd "$path" \
     && true
 
@@ -77,21 +79,21 @@ ENV PATH="/genvm/bin:${PATH}"
 COPY backend $path/backend
 COPY asgi.py $path/asgi.py
 COPY uvicorn_config.py $path/uvicorn_config.py
+COPY docker/entrypoint-backend.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
-HEALTHCHECK --interval=1s --timeout=1s --retries=30 --start-period=3s CMD python3 backend/healthcheck.py --port ${RPCPORT:-4000}
+HEALTHCHECK --interval=1s --timeout=1s --retries=30 --start-period=120s CMD python3 backend/healthcheck.py --port ${RPCPORT:-4000}
 
 ###########START NEW IMAGE : DEBUGGER ###################
 FROM base AS debug
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --cache-dir=/root/.cache/pip debugpy
 USER backend-user
-# Use uvicorn's native --reload flag for hot reloading
-# This watches all Python files and automatically restarts on changes
-CMD python3 -m debugpy --listen 0.0.0.0:${RPCDEBUGPORT} -m uvicorn asgi:application --host 0.0.0.0 --port ${RPCPORT:-4000} --reload --reload-dir /app/backend
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["python3", "-m", "debugpy", "--listen", "0.0.0.0:${RPCDEBUGPORT}", "-m", "uvicorn", "asgi:application", "--host", "0.0.0.0", "--port", "${RPCPORT:-4000}", "--reload", "--reload-dir", "/app/backend"]
 
 ###########START NEW IMAGE: PRODUCTION ###################
 FROM base AS prod
-# Dependencies are already installed from backend/protocol_rpc/requirements.txt in the base stage
 USER backend-user
-# Use run_server.py to configure uvicorn logging (filters health check access logs)
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["python3", "-m", "backend.protocol_rpc.run_server"]
