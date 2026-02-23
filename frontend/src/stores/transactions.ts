@@ -114,7 +114,7 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
     let signature: string | undefined;
 
     if (account) {
-      const { keccak256, toBytes, concat, stringToBytes, toHex } =
+      const { keccak256, toBytes, concat, stringToBytes } =
         await import('viem');
       const { privateKeyToAccount } = await import('viem/accounts');
 
@@ -130,7 +130,7 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
       } else if (account.type === 'metamask' && window.ethereum) {
         signature = await window.ethereum.request({
           method: 'personal_sign',
-          params: [toHex(messageHash), account.address],
+          params: [messageHash, account.address],
         });
       }
     }

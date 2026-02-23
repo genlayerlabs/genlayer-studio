@@ -186,8 +186,13 @@ describe('useTransactionsStore', () => {
       transaction_hash: testTransaction.hash,
       status: 'CANCELED',
     });
+    const mockEthereumRequest = vi.fn();
+    let selectedAccount: any = null;
 
     beforeEach(() => {
+      selectedAccount = null;
+      mockEthereumRequest.mockReset();
+
       vi.doMock('@/hooks/useRpcClient', () => ({
         useRpcClient: vi.fn(() => ({
           cancelTransaction: mockCancelTransaction,
@@ -196,11 +201,12 @@ describe('useTransactionsStore', () => {
 
       vi.doMock('@/stores/accounts', () => ({
         useAccountsStore: vi.fn(() => ({
-          selectedAccount: null,
+          selectedAccount,
         })),
       }));
 
       mockCancelTransaction.mockClear();
+      (window as any).ethereum = { request: mockEthereumRequest };
     });
 
     it('should call rpcClient.cancelTransaction with hash', async () => {
@@ -234,6 +240,41 @@ describe('useTransactionsStore', () => {
           testTransaction.hash as `0x${string}`,
         ),
       ).rejects.toThrow('Cannot cancel');
+    });
+
+    it('should send raw hash to personal_sign for metamask accounts', async () => {
+      selectedAccount = {
+        type: 'metamask',
+        address: '0x9F0e84243496AcFB3Cd99D02eA59673c05901501',
+      };
+      const mockSignature = '0xmetamasksignature';
+      mockEthereumRequest.mockResolvedValueOnce(mockSignature);
+
+      const { keccak256, toBytes, concat, stringToBytes, toHex } =
+        await import('viem');
+      const expectedMessageHash = keccak256(
+        concat([
+          stringToBytes('cancel_transaction'),
+          toBytes(testTransaction.hash as `0x${string}`),
+        ]),
+      );
+
+      await transactionsStore.cancelTransaction(
+        testTransaction.hash as `0x${string}`,
+      );
+
+      expect(mockEthereumRequest).toHaveBeenCalledWith({
+        method: 'personal_sign',
+        params: [expectedMessageHash, selectedAccount.address],
+      });
+      expect(mockEthereumRequest).not.toHaveBeenCalledWith({
+        method: 'personal_sign',
+        params: [toHex(expectedMessageHash), selectedAccount.address],
+      });
+      expect(mockCancelTransaction).toHaveBeenCalledWith(
+        testTransaction.hash,
+        mockSignature,
+      );
     });
   });
 

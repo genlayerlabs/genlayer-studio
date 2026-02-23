@@ -6,6 +6,7 @@ import { useTimeAgo } from '@vueuse/core';
 import ModalSection from '@/components/Simulator/ModalSection.vue';
 import JsonViewer from '@/components/JsonViewer/json-viewer.vue';
 import { useUIStore, useNodeStore, useTransactionsStore } from '@/stores';
+import { notify } from '@kyvg/vue3-notification';
 import {
   CheckCircleIcon,
   XCircleIcon,
@@ -18,7 +19,10 @@ import {
   b64ToArray,
   calldataToUserFriendlyJson,
 } from '@/calldata/jsonifier';
-import { getRuntimeConfigNumber } from '@/utils/runtimeConfig';
+import {
+  getRuntimeConfigBoolean,
+  getRuntimeConfigNumber,
+} from '@/utils/runtimeConfig';
 
 const uiStore = useUIStore();
 const nodeStore = useNodeStore();
@@ -84,18 +88,32 @@ const handleSetTransactionAppeal = async () => {
 };
 
 const isAppealed = computed(() => props.transaction.data.appealed);
-
-const canCancel = computed(
-  () =>
-    props.transaction.statusName === 'PENDING' ||
-    props.transaction.statusName === 'ACTIVATED',
+const isHosted = getRuntimeConfigBoolean('VITE_IS_HOSTED', false);
+const hasSenderAddress = computed(() =>
+  Boolean(
+    props.transaction.data?.from_address || props.transaction.data?.sender,
+  ),
 );
+
+const canCancel = computed(() => {
+  const cancellableStatus =
+    props.transaction.statusName === 'PENDING' ||
+    props.transaction.statusName === 'ACTIVATED';
+  const requiresAdminOnly =
+    isHosted && props.transaction.type === 'upgrade' && !hasSenderAddress.value;
+  return cancellableStatus && !requiresAdminOnly;
+});
 const isCancelling = ref(false);
 const handleCancelTransaction = async () => {
   isCancelling.value = true;
   try {
     await transactionsStore.cancelTransaction(props.transaction.hash);
-  } catch (e) {
+  } catch (e: any) {
+    notify({
+      type: 'error',
+      title: 'Error cancelling transaction',
+      text: e?.message ?? 'Unable to cancel transaction',
+    });
     console.error('Error cancelling transaction', e);
   } finally {
     isCancelling.value = false;

@@ -709,11 +709,10 @@ def cancel_transaction(
     Returns:
         dict with transaction_hash and status
     """
-    from backend.database_handler.models import Transactions, TransactionStatus
+    from backend.database_handler.models import Transactions
     from eth_account.messages import encode_defunct
     from eth_account import Account
     from web3 import Web3
-    from sqlalchemy import text
     import os
 
     # Validate transaction hash format
@@ -789,21 +788,11 @@ def cancel_transaction(
             )
 
     # Atomic cancel - only succeeds if tx is still pending/activated and not claimed by worker
-    result = session.execute(
-        text(
-            """
-            UPDATE transactions
-            SET status = CAST('CANCELED' AS transaction_status)
-            WHERE hash = :hash
-              AND status IN ('PENDING', 'ACTIVATED')
-              AND blocked_at IS NULL
-            """
-        ),
-        {"hash": transaction_hash},
+    was_cancelled = TransactionsProcessor.cancel_transaction_if_available(
+        session, transaction_hash
     )
-    session.commit()
 
-    if result.rowcount == 0:
+    if not was_cancelled:
         raise JSONRPCError(
             code=-32000,
             message="Transaction cannot be cancelled: already being processed or in a terminal state",
