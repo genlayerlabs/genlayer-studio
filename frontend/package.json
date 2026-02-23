@@ -79,7 +79,7 @@
     "@vue/test-utils": "^2.4.5",
     "@vue/tsconfig": "^0.7.0",
     "autoprefixer": "^10.4.19",
-    "chai": "^5.1.1",
+    "chai": "^6.0.0",
     "eslint": "^9.0.0",
     "eslint-plugin-vue": "^9.23.0",
     "jsdom": "^26.0.0",
