@@ -11,15 +11,32 @@ class ConsensusData:
     )  # first item is leader function, second item is validator function
     validators: list[Receipt] | None = None
 
-    def to_dict(self):
+    def to_dict(self, strip_contract_state: bool = True):
+        """Convert ConsensusData to dict.
+
+        Args:
+            strip_contract_state: If True (default), removes contract_state from receipts
+                                 to save database storage. Contract state is persisted in
+                                 CurrentState table and doesn't need duplication here.
+        """
         return {
             "votes": self.votes,
             "leader_receipt": (
-                [receipt.to_dict() for receipt in self.leader_receipt]
+                [
+                    receipt.to_dict(strip_contract_state=strip_contract_state)
+                    for receipt in self.leader_receipt
+                ]
                 if self.leader_receipt
                 else None
             ),
-            "validators": [receipt.to_dict() for receipt in self.validators],
+            "validators": (
+                [
+                    receipt.to_dict(strip_contract_state=strip_contract_state)
+                    for receipt in self.validators
+                ]
+                if self.validators
+                else []
+            ),
         }
 
     @classmethod

@@ -1,12 +1,17 @@
 import { By, until, WebDriver, type Locator } from 'selenium-webdriver';
+import { E2E_CONFIG } from '../config';
 
 export class BasePage {
   protected readonly driver: WebDriver;
-  readonly baseurl?: string;
+  readonly path?: string;
   readonly visibleLocator?: Locator;
 
   public constructor(driver: WebDriver) {
     this.driver = driver;
+  }
+
+  get baseurl(): string | undefined {
+    return this.path ? `${E2E_CONFIG.BASE_URL}${this.path}` : undefined;
   }
 
   async close() {

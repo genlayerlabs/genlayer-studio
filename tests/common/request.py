@@ -29,19 +29,24 @@ def payload(function_name: str, *args) -> dict:
 
 def post_request(
     payload: dict,
-    protocol: str = os.environ["RPCPROTOCOL"],
-    host: str = os.environ["RPCHOST"],
-    port: str = os.environ["RPCPORT"],
+    protocol: str,
+    host: str,
+    port: str,
 ):
+    jsonrpc_url = (
+        protocol + "://" + host + ":" + port + "/api"
+        if protocol and host and port
+        else os.environ.get("JSONRPC_SERVER_URL", "http://localhost:4000")
+    )
     return requests.post(
-        protocol + "://" + host + ":" + port + "/api",
+        jsonrpc_url,
         data=json.dumps(payload),
         headers={"Content-Type": "application/json"},
     )
 
 
 def post_request_localhost(payload: dict):
-    return post_request(payload, "http", "localhost")
+    return post_request(payload, "http", "localhost", "4000")
 
 
 def get_transaction_by_hash(transaction_hash: str):
@@ -164,7 +169,7 @@ def send_raw_transaction(signed_transaction: str):
     return wait_for_transaction(transaction_hash)
 
 
-def wait_for_transaction(transaction_hash: str, interval: int = 10, retries: int = 15):
+def wait_for_transaction(transaction_hash: str, interval: int = 10, retries: int = 30):
     attempts = 0
     while attempts < retries:
         transaction_response = get_transaction_by_hash(str(transaction_hash))

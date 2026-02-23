@@ -7,6 +7,7 @@ import {
   ArrowDownUp,
   HardDrive,
   Vote,
+  FileText,
 } from 'lucide-vue-next';
 
 const props = defineProps<{
@@ -22,6 +23,8 @@ const icon = computed(() => {
       return HardDrive;
     case 'Consensus':
       return Vote;
+    case 'Contract':
+      return FileText;
     case 'error':
       return CircleX;
     case 'info':

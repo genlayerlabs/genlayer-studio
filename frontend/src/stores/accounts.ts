@@ -2,8 +2,9 @@ import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 import type { Address } from '@/types';
 import { createAccount, generatePrivateKey } from 'genlayer-js';
-import { useShortAddress } from '@/hooks';
+import { useShortAddress, useWebSocketClient } from '@/hooks';
 import { notify } from '@kyvg/vue3-notification';
+import { getAddress } from 'viem';
 
 export interface AccountInfo {
   type: 'local' | 'metamask';
@@ -13,10 +14,24 @@ export interface AccountInfo {
 
 export const useAccountsStore = defineStore('accountsStore', () => {
   const { shorten } = useShortAddress();
+  const webSocketClient = useWebSocketClient();
 
   // Store all accounts (both local and MetaMask)
   const accounts = ref<AccountInfo[]>([]);
   const selectedAccount = ref<AccountInfo | null>(null);
+
+  // Track current account subscription
+  let currentAccountSubscription: Address | null = null;
+
+  // Handle WebSocket reconnection to restore account subscription
+  const resubscribeOnConnect = () => {
+    if (currentAccountSubscription) {
+      webSocketClient.emit('subscribe', [currentAccountSubscription]);
+    }
+  };
+  // ensure single listener across HMR/re-inits
+  webSocketClient.off('connect', resubscribeOnConnect);
+  webSocketClient.on('connect', resubscribeOnConnect);
 
   // Migrate from old storage to new storage
   const storedKeys = localStorage.getItem('accountsStore.privateKeys');
@@ -38,15 +53,15 @@ export const useAccountsStore = defineStore('accountsStore', () => {
     _initAccountsLocalStorage();
   } else {
     accounts.value = storedAccounts;
-  }
 
-  // Initialize selected account from localStorage
-  const storedSelectedAccount = JSON.parse(
-    localStorage.getItem('accountsStore.currentAccount') || 'null',
-  );
-  setCurrentAccount(
-    storedSelectedAccount ? storedSelectedAccount : accounts.value[0],
-  );
+    // Initialize selected account from localStorage
+    const storedSelectedAccount = JSON.parse(
+      localStorage.getItem('accountsStore.currentAccount') || 'null',
+    );
+    setCurrentAccount(
+      storedSelectedAccount ? storedSelectedAccount : accounts.value[0],
+    );
+  }
 
   function _initAccountsLocalStorage() {
     localStorage.setItem(
@@ -74,7 +89,7 @@ export const useAccountsStore = defineStore('accountsStore', () => {
 
     const metamaskAccount: AccountInfo = {
       type: 'metamask',
-      address: ethAccounts[0] as Address,
+      address: getAddress(ethAccounts[0]) as Address,
     };
 
     // Update or add MetaMask account
@@ -92,10 +107,10 @@ export const useAccountsStore = defineStore('accountsStore', () => {
 
   if (window.ethereum) {
     window.ethereum.on('accountsChanged', (newAccounts: string[]) => {
-      if (newAccounts.length > 0) {
+      if (newAccounts.length > 0 && newAccounts[0]) {
         const metamaskAccount: AccountInfo = {
           type: 'metamask',
-          address: newAccounts[0] as Address,
+          address: getAddress(newAccounts[0]) as Address,
         };
 
         const existingMetaMaskIndex = accounts.value.findIndex(
@@ -105,14 +120,17 @@ export const useAccountsStore = defineStore('accountsStore', () => {
           accounts.value[existingMetaMaskIndex] = metamaskAccount;
         }
 
-        if (selectedAccount.value?.type === 'metamask') {
+        if (
+          selectedAccount.value?.type === 'metamask' &&
+          selectedAccount.value.address !== metamaskAccount.address
+        ) {
           setCurrentAccount(metamaskAccount);
         }
       } else {
         accounts.value = accounts.value.filter(
           (acc) => acc.type !== 'metamask',
         );
-        setCurrentAccount(accounts.value[0]);
+        setCurrentAccount(accounts.value[0] ?? null);
       }
       localStorage.setItem(
         'accountsStore.accounts',
@@ -159,8 +177,44 @@ export const useAccountsStore = defineStore('accountsStore', () => {
     }
   }
 
+  // Account subscription management
+  function subscribeToAccount(accountAddress: Address) {
+    // Avoid duplicate subscriptions
+    if (currentAccountSubscription === accountAddress) {
+      return;
+    }
+
+    currentAccountSubscription = accountAddress;
+    if (webSocketClient.connected) {
+      webSocketClient.emit('subscribe', [accountAddress]);
+    }
+  }
+
+  function unsubscribeFromAccount(accountAddress: Address) {
+    if (currentAccountSubscription === accountAddress) {
+      currentAccountSubscription = null;
+    }
+    if (webSocketClient.connected) {
+      webSocketClient.emit('unsubscribe', [accountAddress]);
+    }
+  }
+
   function setCurrentAccount(account: AccountInfo | null) {
     selectedAccount.value = account;
+
+    // Manage WebSocket account subscription for logs
+    const newAddress = account?.address || null;
+
+    // Only change subscription if the address is different
+    if (currentAccountSubscription !== newAddress) {
+      if (currentAccountSubscription) {
+        unsubscribeFromAccount(currentAccountSubscription);
+      }
+
+      if (newAddress) {
+        subscribeToAccount(newAddress);
+      }
+    }
   }
 
   const displayAddress = computed(() => {

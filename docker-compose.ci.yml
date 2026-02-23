@@ -1,0 +1,10 @@
+# CI-only overrides: mount host GenVM precompile cache into containers
+# Usage: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d ...
+services:
+  jsonrpc:
+    volumes:
+      - ${GENVM_CACHE_DIR:-/tmp/genvm-cache}:/genvm-cache
+
+  consensus-worker:
+    volumes:
+      - ${GENVM_CACHE_DIR:-/tmp/genvm-cache}:/genvm-cache

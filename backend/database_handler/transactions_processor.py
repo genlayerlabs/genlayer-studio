@@ -3,9 +3,9 @@ from datetime import datetime
 from enum import Enum
 import rlp
 import re
-from sqlalchemy.orm import Session
+import random
+from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import or_, desc, and_, JSON, type_coerce, text
-from sqlalchemy.orm.attributes import flag_modified
 
 from backend.node.types import Vote, Receipt, ExecutionResultStatus
 from .models import Transactions, TransactionStatus
@@ -18,6 +18,7 @@ from web3 import Web3
 import os
 from backend.consensus.types import ConsensusRound
 from backend.consensus.utils import determine_consensus_from_votes
+from backend.rollup.web3_pool import Web3ConnectionPool
 
 
 class TransactionAddressFilter(Enum):
@@ -69,11 +70,8 @@ class TransactionsProcessor:
     ):
         self.session = session
 
-        # Connect to Hardhat Network
-        port = os.environ.get("HARDHAT_PORT")
-        url = os.environ.get("HARDHAT_URL")
-        hardhat_url = f"{url}:{port}"
-        self.web3 = Web3(Web3.HTTPProvider(hardhat_url))
+        # Use singleton Web3 connection pool
+        self.web3 = Web3ConnectionPool.get()
 
     @staticmethod
     def _parse_transaction_data(transaction_data: Transactions) -> dict:
@@ -106,7 +104,9 @@ class TransactionsProcessor:
             "v": transaction_data.v,
             "created_at": transaction_data.created_at.isoformat(),
             "leader_only": transaction_data.leader_only,
+            "execution_mode": transaction_data.execution_mode,
             "triggered_by": transaction_data.triggered_by_hash,
+            "triggered_on": transaction_data.triggered_on,
             "triggered_transactions": [
                 transaction.hash
                 for transaction in transaction_data.triggered_transactions
@@ -126,6 +126,7 @@ class TransactionsProcessor:
             "appeal_leader_timeout": transaction_data.appeal_leader_timeout,
             "leader_timeout_validators": transaction_data.leader_timeout_validators,
             "appeal_validators_timeout": transaction_data.appeal_validators_timeout,
+            "sim_config": transaction_data.sim_config,
         }
 
     @staticmethod
@@ -188,31 +189,28 @@ class TransactionsProcessor:
         type: int,
         nonce: int,
     ) -> str:
-        from_address_bytes = (
-            to_bytes(hexstr=from_address) if is_address(from_address) else None
+        """Generate a fallback transaction hash similar to ConsensusMain._generateTx."""
+
+        # Prepare recipient bytes as the solidity address encoding (20 bytes)
+        recipient_bytes = (
+            to_bytes(hexstr=to_address) if is_address(to_address) else b"\x00" * 20
         )
-        to_address_bytes = (
-            to_bytes(hexstr=to_address) if is_address(to_address) else None
+
+        # Use current timestamp with microsecond precision to ensure uniqueness
+        timestamp = time.time()
+        timestamp_int = int(timestamp * 1_000_000)  # Convert to microseconds as integer
+        timestamp_bytes = timestamp_int.to_bytes(32, byteorder="big", signed=False)
+
+        # Derive a deterministic pseudo-random seed from the recipient address
+        seed_source = f"{to_address or '0x0'}:{timestamp}"
+        rng = random.Random(seed_source)
+        random_hex = "".join(rng.choice("0123456789abcdef") for _ in range(64))
+        random_seed_bytes = bytes.fromhex(random_hex)
+
+        tx_hash = (
+            "0x" + keccak(recipient_bytes + timestamp_bytes + random_seed_bytes).hex()
         )
-
-        data_bytes = to_bytes(text=TransactionsProcessor._transaction_data_to_str(data))
-
-        tx_elements = [
-            from_address_bytes,
-            to_address_bytes,
-            to_bytes(hexstr=hex(int(value))),
-            data_bytes,
-            to_bytes(hexstr=hex(type)),
-            to_bytes(hexstr=hex(nonce)),
-            to_bytes(hexstr=hex(0)),  # gas price (placeholder)
-            to_bytes(hexstr=hex(0)),  # gas limit (placeholder)
-        ]
-
-        # Filter out None values
-        tx_elements = [elem for elem in tx_elements if elem is not None]
-        rlp_encoded = rlp.encode(tx_elements)
-        hash = "0x" + keccak(rlp_encoded).hex()
-        return hash
+        return tx_hash
 
     def insert_transaction(
         self,
@@ -229,20 +227,24 @@ class TransactionsProcessor:
         ) = None,  # If filled, the transaction must be present in the database (committed)
         transaction_hash: str | None = None,
         num_of_initial_validators: int | None = None,
+        sim_config: dict | None = None,
+        triggered_on: str | None = None,  # "accepted" or "finalized"
+        execution_mode: str = "NORMAL",  # "NORMAL", "LEADER_ONLY", or "LEADER_SELF_VALIDATOR"
     ) -> str:
-        current_nonce = self.get_transaction_count(from_address)
-
-        # Follow up: https://github.com/MetaMask/metamask-extension/issues/29787
-        # to uncomment this check
-        # if nonce != current_nonce:
-        #     raise Exception(
-        #         f"Unexpected nonce. Provided: {nonce}, expected: {current_nonce}"
-        #     )
 
         if transaction_hash is None:
+            current_nonce = self.get_transaction_count(from_address)
             transaction_hash = self._generate_transaction_hash(
                 from_address, to_address, data, value, type, current_nonce
             )
+
+        # Check if transaction with this hash already exists to avoid UniqueViolation
+        # This can happen due to race conditions or duplicate submissions
+        existing_transaction = (
+            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
+        )
+        if existing_transaction is not None:
+            return transaction_hash
 
         new_transaction = Transactions(
             hash=transaction_hash,
@@ -261,6 +263,7 @@ class TransactionsProcessor:
             s=None,
             v=None,
             leader_only=leader_only,
+            execution_mode=execution_mode,
             triggered_by=(
                 self.session.query(Transactions).filter_by(hash=triggered_by_hash).one()
                 if triggered_by_hash
@@ -281,18 +284,24 @@ class TransactionsProcessor:
             appeal_leader_timeout=False,
             leader_timeout_validators=None,
             appeal_validators_timeout=False,
+            sim_config=sim_config,
+            triggered_on=triggered_on,
         )
 
         self.session.add(new_transaction)
 
         self.session.flush()  # So that `created_at` gets set
+        self.session.commit()  # Persist the transaction to the database
 
-        return new_transaction.hash
+        return transaction_hash
 
     def _process_round_data(self, transaction_data: dict) -> dict:
         """Process round data and prepare transaction data."""
 
-        if "consensus_results" in transaction_data["consensus_history"]:
+        if (
+            transaction_data["consensus_history"] is not None
+            and "consensus_results" in transaction_data["consensus_history"]
+        ):
             transaction_data["num_of_rounds"] = str(
                 len(transaction_data["consensus_history"]["consensus_results"])
             )
@@ -303,12 +312,19 @@ class TransactionsProcessor:
         validator_votes = []
         validator_votes_hash = []
         round_validators = []
-        if "consensus_results" in transaction_data["consensus_history"]:
+        if (
+            transaction_data["consensus_history"] is not None
+            and "consensus_results" in transaction_data["consensus_history"]
+        ):
             round_number = str(
                 len(transaction_data["consensus_history"]["consensus_results"]) - 1
             )
             last_round = transaction_data["consensus_history"]["consensus_results"][-1]
-            if "leader_result" in last_round and last_round["leader_result"]:
+            if (
+                "leader_result" in last_round
+                and last_round["leader_result"] is not None
+                and len(last_round["leader_result"]) > 1
+            ):
                 leader = last_round["leader_result"][1]
                 validator_votes_name.append(leader["vote"].upper())
                 vote_number = int(Vote.from_string(leader["vote"]))
@@ -334,11 +350,36 @@ class TransactionsProcessor:
                 round_validators.append(validator_address)
         else:
             round_number = "0"
-        last_round_result = int(
-            determine_consensus_from_votes(
-                [vote.lower() for vote in validator_votes_name]
+
+        # Handle upgrade transactions specially - they bypass consensus
+        # and have upgrade_result instead of votes
+        if (
+            transaction_data.get("type") == TransactionType.UPGRADE_CONTRACT
+            and transaction_data.get("consensus_data") is not None
+            and "upgrade_result" in transaction_data["consensus_data"]
+        ):
+            from backend.consensus.types import ConsensusResult
+
+            if transaction_data["consensus_data"]["upgrade_result"] == "success":
+                last_round_result = int(ConsensusResult.MAJORITY_AGREE)
+            else:
+                last_round_result = int(ConsensusResult.MAJORITY_DISAGREE)
+        elif (
+            # Handle LEADER_ONLY mode specially - no validators, so no votes to count
+            # If the transaction is ACCEPTED or FINALIZED, the leader execution was successful
+            transaction_data.get("execution_mode") == "LEADER_ONLY"
+            and transaction_data.get("status")
+            in [TransactionStatus.ACCEPTED.value, TransactionStatus.FINALIZED.value]
+        ):
+            from backend.consensus.types import ConsensusResult
+
+            last_round_result = int(ConsensusResult.MAJORITY_AGREE)
+        else:
+            last_round_result = int(
+                determine_consensus_from_votes(
+                    [vote.lower() for vote in validator_votes_name]
+                )
             )
-        )
 
         transaction_data["last_round"] = {
             "round": round_number,
@@ -347,8 +388,8 @@ class TransactionsProcessor:
             "votes_revealed": str(len(validator_votes_name)),
             "appeal_bond": "0",
             "rotations_left": str(
-                transaction_data.get("config_rotation_rounds", 0)
-                - transaction_data.get("rotation_count", 0)
+                (transaction_data.get("config_rotation_rounds") or 0)
+                - (transaction_data.get("rotation_count") or 0)
             ),
             "result": last_round_result,
             "round_validators": round_validators,
@@ -356,6 +397,7 @@ class TransactionsProcessor:
             "validator_votes": validator_votes,
             "validator_votes_name": validator_votes_name,
         }
+
         return transaction_data
 
     def _prepare_basic_transaction_data(self, transaction_data: dict) -> dict:
@@ -378,7 +420,10 @@ class TransactionsProcessor:
             "processing_block": "0",
             "proposal_block": "0",
         }
-        if "consensus_results" in transaction_data["consensus_history"]:
+        if (
+            transaction_data["consensus_history"] is not None
+            and "consensus_results" in transaction_data["consensus_history"]
+        ):
             transaction_data["activator"] = transaction_data["consensus_history"][
                 "consensus_results"
             ][0]["leader_result"][0]["node_config"]["address"]
@@ -441,6 +486,7 @@ class TransactionsProcessor:
         eq_output = []
         if (
             "consensus_history" in transaction_data
+            and transaction_data["consensus_history"] is not None
             and "consensus_results" in transaction_data["consensus_history"]
         ):
             for consensus_round in transaction_data["consensus_history"][
@@ -536,6 +582,38 @@ class TransactionsProcessor:
         return transaction_data
 
     def _process_result(self, transaction_data: dict) -> dict:
+        # Handle upgrade transactions specially - they bypass consensus
+        # and have upgrade_result instead of votes
+        if (
+            transaction_data.get("type") == TransactionType.UPGRADE_CONTRACT
+            and transaction_data.get("consensus_data") is not None
+            and "upgrade_result" in transaction_data["consensus_data"]
+        ):
+            from backend.consensus.types import ConsensusResult
+
+            if transaction_data["consensus_data"]["upgrade_result"] == "success":
+                consensus_result = ConsensusResult.MAJORITY_AGREE
+            else:
+                consensus_result = ConsensusResult.MAJORITY_DISAGREE
+            transaction_data["result"] = int(consensus_result)
+            transaction_data["result_name"] = consensus_result.value
+            return transaction_data
+
+        # Handle LEADER_ONLY mode specially - no validators, so no votes to count
+        # If the transaction is ACCEPTED or FINALIZED, the leader execution was successful
+        if transaction_data.get(
+            "execution_mode"
+        ) == "LEADER_ONLY" and transaction_data.get("status") in [
+            TransactionStatus.ACCEPTED.value,
+            TransactionStatus.FINALIZED.value,
+        ]:
+            from backend.consensus.types import ConsensusResult
+
+            consensus_result = ConsensusResult.MAJORITY_AGREE
+            transaction_data["result"] = int(consensus_result)
+            transaction_data["result_name"] = consensus_result.value
+            return transaction_data
+
         if (transaction_data["consensus_data"] is not None) and (
             "votes" in transaction_data["consensus_data"]
         ):
@@ -547,7 +625,11 @@ class TransactionsProcessor:
         transaction_data["result_name"] = consensus_result.value
         return transaction_data
 
-    def get_transaction_by_hash(self, transaction_hash: str) -> dict | None:
+    def get_transaction_by_hash(
+        self, transaction_hash: str, sim_config: dict | None = None
+    ) -> dict | None:
+        # Expire cached ORM objects to ensure we read fresh data after raw SQL writes
+        self.session.expire_all()
         transaction = (
             self.session.query(Transactions)
             .filter_by(hash=transaction_hash)
@@ -559,6 +641,28 @@ class TransactionsProcessor:
 
         transaction_data = self._parse_transaction_data(transaction)
 
+        # Handle contract_state based on sim_config
+        include_contract_state = sim_config and sim_config.get(
+            "include_contract_state", False
+        )
+
+        # Remove contract_state from consensus_data by default (unless explicitly requested)
+        if (
+            transaction_data.get("consensus_data")
+            and "leader_receipt" in transaction_data["consensus_data"]
+        ):
+            leader_receipt = transaction_data["consensus_data"]["leader_receipt"]
+
+            if isinstance(leader_receipt, dict):
+                if not include_contract_state and "contract_state" in leader_receipt:
+                    del leader_receipt["contract_state"]
+
+            elif isinstance(leader_receipt, list):
+                for receipt in leader_receipt:
+                    if isinstance(receipt, dict):
+                        if not include_contract_state and "contract_state" in receipt:
+                            del receipt["contract_state"]
+
         # Process for testnet
         transaction_data = self._prepare_basic_transaction_data(transaction_data)
         transaction_data = self._process_result(transaction_data)
@@ -569,47 +673,214 @@ class TransactionsProcessor:
         transaction_data = self._process_round_data(transaction_data)
         return transaction_data
 
+    def get_studio_transaction_by_hash(
+        self, transaction_hash: str, full: bool
+    ) -> dict | None:
+        transaction = (
+            self.session.query(Transactions)
+            .filter_by(hash=transaction_hash)
+            .one_or_none()
+        )
+
+        if transaction is None:
+            return None
+
+        transaction_data = self._parse_transaction_data(transaction)
+
+        # Transform studio fields to testnet fields
+        transaction_data["tx_id"] = transaction_data.pop("hash", None)
+        transaction_data["sender"] = transaction_data.pop("from_address", None)
+        transaction_data["recipient"] = transaction_data.pop("to_address", None)
+        transaction_data["initial_rotations"] = transaction_data.pop(
+            "config_rotation_rounds", None
+        )
+        transaction_data["created_timestamp"] = str(
+            int(
+                datetime.fromisoformat(
+                    transaction_data.pop("created_at", "0")
+                ).timestamp()
+            )
+        )
+        transaction_data["last_vote_timestamp"] = str(
+            transaction_data.pop("last_vote_timestamp", 0)
+        )
+
+        if not full:
+            # Remove validators info and encoded data
+            for key in [
+                "data",
+                "consensus_data",
+                "consensus_history",
+                "contract_snapshot",
+                "leader_timeout_validators",
+                "sim_config",
+            ]:
+                transaction_data.pop(key, None)
+
+        return transaction_data
+
+    def get_activated_transactions_older_than(self, seconds: int) -> list[dict]:
+        """
+        Get ACTIVATED transactions that have been stuck for more than the specified seconds.
+
+        Args:
+            seconds: Number of seconds a transaction must be ACTIVATED to be considered stuck
+
+        Returns:
+            List of transaction data dictionaries for stuck transactions
+        """
+        from datetime import datetime, timedelta
+
+        cutoff_time = datetime.now() - timedelta(seconds=seconds)
+        stuck_transactions = (
+            self.session.query(Transactions)
+            .options(selectinload(Transactions.triggered_transactions))
+            .filter(
+                Transactions.status == TransactionStatus.ACTIVATED,
+                Transactions.created_at < cutoff_time,
+            )
+            .order_by(Transactions.created_at)
+            .all()
+        )
+
+        return [
+            self._parse_transaction_data(transaction)
+            for transaction in stuck_transactions
+        ]
+
     def update_transaction_status(
         self,
         transaction_hash: str,
         new_status: TransactionStatus,
         update_current_status_changes: bool = True,
     ):
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
-        )
-        transaction.status = new_status
-
         if update_current_status_changes:
-            if not transaction.consensus_history:
-                transaction.consensus_history = {}
+            # Use server-side JSONB update to avoid loading the full row (which
+            # includes the massive contract_snapshot column).
+            # Preserve original semantics: if current_status_changes is missing,
+            # initialize with [PENDING, new_status]; otherwise append.
+            result = self.session.execute(
+                text(
+                    """
+                    UPDATE transactions
+                    SET status = CAST(:new_status AS transaction_status),
+                        consensus_history = jsonb_set(
+                            CASE WHEN jsonb_typeof(consensus_history) = 'object'
+                                 THEN consensus_history
+                                 ELSE '{}'::jsonb
+                            END,
+                            '{current_status_changes}',
+                            CASE
+                                WHEN jsonb_typeof(consensus_history) = 'object'
+                                     AND consensus_history->'current_status_changes' IS NOT NULL
+                                THEN consensus_history->'current_status_changes' || to_jsonb(CAST(:status_val AS text))
+                                ELSE jsonb_build_array(CAST(:pending_val AS text), CAST(:status_val AS text))
+                            END
+                        )
+                    WHERE hash = :hash
+                """
+                ),
+                {
+                    "hash": transaction_hash,
+                    "new_status": new_status.value,
+                    "status_val": new_status.value,
+                    "pending_val": TransactionStatus.PENDING.value,
+                },
+            )
+        else:
+            result = self.session.execute(
+                text(
+                    "UPDATE transactions SET status = CAST(:new_status AS transaction_status) WHERE hash = :hash"
+                ),
+                {"hash": transaction_hash, "new_status": new_status.value},
+            )
 
-            if "current_status_changes" in transaction.consensus_history:
-                transaction.consensus_history["current_status_changes"].append(
-                    new_status.value
+        if result.rowcount == 0:
+            print(
+                f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping status update"
+            )
+            return
+
+        self.session.commit()
+
+    def add_state_timestamp(self, transaction_hash: str, state_name: str):
+        """
+        Add a timestamp for when a consensus state is entered.
+
+        Uses server-side JSONB update to avoid loading the full row
+        (which includes the massive contract_snapshot column).
+
+        Args:
+            transaction_hash (str): Hash of the transaction.
+            state_name (str): Name of the state (e.g., "PENDING", "PROPOSING").
+        """
+        result = self.session.execute(
+            text(
+                """
+                UPDATE transactions
+                SET consensus_history = jsonb_set(
+                    jsonb_set(
+                        CASE WHEN jsonb_typeof(consensus_history) = 'object'
+                             THEN consensus_history
+                             ELSE '{}'::jsonb
+                        END,
+                        '{current_monitoring}',
+                        CASE WHEN jsonb_typeof(consensus_history) = 'object'
+                                  AND consensus_history->'current_monitoring' IS NOT NULL
+                             THEN consensus_history->'current_monitoring'
+                             ELSE '{}'::jsonb
+                        END
+                    ),
+                    ARRAY['current_monitoring', :state_name],
+                    to_jsonb(CAST(:ts AS double precision))
                 )
-            else:
-                transaction.consensus_history["current_status_changes"] = [
-                    TransactionStatus.PENDING.value,
-                    new_status.value,
-                ]
-            flag_modified(transaction, "consensus_history")
+                WHERE hash = :hash
+            """
+            ),
+            {"hash": transaction_hash, "state_name": state_name, "ts": time.time()},
+        )
+
+        if result.rowcount == 0:
+            print(
+                f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping monitoring update"
+            )
+            return
 
         self.session.commit()
 
     def set_transaction_result(
         self, transaction_hash: str, consensus_data: dict | None
     ):
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        result = self.session.execute(
+            text(
+                "UPDATE transactions SET consensus_data = CAST(:data AS jsonb) WHERE hash = :hash"
+            ),
+            {
+                "hash": transaction_hash,
+                "data": json.dumps(consensus_data) if consensus_data else None,
+            },
         )
-        transaction.consensus_data = consensus_data
+
+        if result.rowcount == 0:
+            print(
+                f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping result update"
+            )
+            return
+
         self.session.commit()
 
     def get_transaction_count(self, address: str) -> int:
+        # Normalize address to checksum format
+        try:
+            checksum_address = self.web3.to_checksum_address(address)
+        except:
+            checksum_address = address
+
+        # Always use database count as source of truth
+        # Our transactions are stored in PostgreSQL, not on Hardhat blockchain
         count = (
             self.session.query(Transactions)
-            .filter(Transactions.from_address == address)
+            .filter(Transactions.from_address == checksum_address)
             .count()
         )
         return count
@@ -619,7 +890,9 @@ class TransactionsProcessor:
         address: str,
         filter: TransactionAddressFilter,
     ) -> list[dict]:
-        query = self.session.query(Transactions)
+        query = self.session.query(Transactions).options(
+            selectinload(Transactions.triggered_transactions)
+        )
 
         if filter == TransactionAddressFilter.TO:
             query = query.filter(Transactions.to_address == address)
@@ -640,52 +913,73 @@ class TransactionsProcessor:
         ]
 
     def set_transaction_appeal(self, transaction_hash: str, appeal: bool):
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
-        )
-        # You can only appeal the transaction if it is in accepted or undetermined state
-        # Setting it to false is always allowed
         if not appeal:
-            transaction.appealed = appeal
+            self.session.execute(
+                text("UPDATE transactions SET appealed = :appeal WHERE hash = :hash"),
+                {"hash": transaction_hash, "appeal": appeal},
+            )
             self.session.commit()
-        elif transaction.status in (
-            TransactionStatus.ACCEPTED,
-            TransactionStatus.UNDETERMINED,
-            TransactionStatus.LEADER_TIMEOUT,
-            TransactionStatus.VALIDATORS_TIMEOUT,
-        ):
-            transaction.appealed = appeal
-            self.set_transaction_timestamp_appeal(transaction, int(time.time()))
-            self.session.commit()
+        else:
+            # Only appeal if transaction is in an appealable status
+            result = self.session.execute(
+                text(
+                    """
+                    UPDATE transactions
+                    SET appealed = :appeal,
+                        timestamp_appeal = :ts
+                    WHERE hash = :hash
+                      AND status IN ('ACCEPTED', 'UNDETERMINED', 'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT')
+                    """
+                ),
+                {"hash": transaction_hash, "appeal": appeal, "ts": int(time.time())},
+            )
+            if result.rowcount > 0:
+                self.session.commit()
 
     def set_transaction_timestamp_awaiting_finalization(
         self, transaction_hash: str, timestamp_awaiting_finalization: int = None
     ):
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        ts = (
+            timestamp_awaiting_finalization
+            if timestamp_awaiting_finalization
+            else int(time.time())
         )
-        if timestamp_awaiting_finalization:
-            transaction.timestamp_awaiting_finalization = (
-                timestamp_awaiting_finalization
-            )
-        else:
-            transaction.timestamp_awaiting_finalization = int(time.time())
+        self.session.execute(
+            text(
+                "UPDATE transactions SET timestamp_awaiting_finalization = :ts WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash, "ts": ts},
+        )
 
     def set_transaction_appeal_failed(self, transaction_hash: str, appeal_failed: int):
         if appeal_failed < 0:
             raise ValueError("appeal_failed must be a non-negative integer")
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        result = self.session.execute(
+            text("UPDATE transactions SET appeal_failed = :val WHERE hash = :hash"),
+            {"hash": transaction_hash, "val": appeal_failed},
         )
-        transaction.appeal_failed = appeal_failed
+        if result.rowcount == 0:
+            print(
+                f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping appeal_failed update"
+            )
+            return
+        self.session.commit()
 
     def set_transaction_appeal_undetermined(
         self, transaction_hash: str, appeal_undetermined: bool
     ):
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        result = self.session.execute(
+            text(
+                "UPDATE transactions SET appeal_undetermined = :val WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash, "val": appeal_undetermined},
         )
-        transaction.appeal_undetermined = appeal_undetermined
+        if result.rowcount == 0:
+            print(
+                f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping appeal_undetermined update"
+            )
+            return
+        self.session.commit()
 
     def get_highest_timestamp(self) -> int:
         transaction = (
@@ -701,11 +995,13 @@ class TransactionsProcessor:
     def get_transactions_for_block(
         self, block_number: int, include_full_tx: bool
     ) -> dict:
-        transactions = (
-            self.session.query(Transactions)
-            .filter(Transactions.timestamp_awaiting_finalization == block_number)
-            .all()
+        query = self.session.query(Transactions).filter(
+            Transactions.timestamp_awaiting_finalization == block_number
         )
+        # Only eager load triggered_transactions if we need full transaction data
+        if include_full_tx:
+            query = query.options(selectinload(Transactions.triggered_transactions))
+        transactions = query.all()
 
         block_hash = "0x" + "0" * 64
         parent_hash = "0x" + "0" * 64  # Placeholder for parent block hash
@@ -743,6 +1039,7 @@ class TransactionsProcessor:
         )
         transactions = (
             self.session.query(Transactions)
+            .options(selectinload(Transactions.triggered_transactions))
             .filter(
                 Transactions.created_at > transaction.created_at,
                 Transactions.to_address == transaction.to_address,
@@ -762,88 +1059,125 @@ class TransactionsProcessor:
         validator_results: list[Receipt],
         extra_status_change: TransactionStatus | None = None,
     ):
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
-        )
+        # Narrow SELECT — only loads consensus_history, avoids 53MB contract_snapshot.
+        # FOR UPDATE locks the row to prevent lost updates from concurrent workers.
+        row = self.session.execute(
+            text(
+                "SELECT consensus_history FROM transactions"
+                " WHERE hash = :hash FOR UPDATE"
+            ),
+            {"hash": transaction_hash},
+        ).one()
+        current_history = row[0] or {}
 
-        status_changes_to_use = (
-            transaction.consensus_history["current_status_changes"]
-            if "current_status_changes" in transaction.consensus_history
-            else []
-        )
+        status_changes_to_use = list(current_history.get("current_status_changes", []))
         if extra_status_change:
             status_changes_to_use.append(extra_status_change.value)
+
+        monitoring_to_use = current_history.get("current_monitoring", {})
 
         current_consensus_results = {
             "consensus_round": consensus_round.value,
             "leader_result": (
-                [receipt.to_dict() for receipt in leader_result]
+                [
+                    receipt.to_dict(strip_contract_state=True)
+                    for receipt in leader_result
+                ]
                 if leader_result
                 else None
             ),
-            "validator_results": [receipt.to_dict() for receipt in validator_results],
+            "validator_results": [
+                receipt.to_dict(strip_contract_state=True)
+                for receipt in validator_results
+            ],
             "status_changes": status_changes_to_use,
+            "monitoring": monitoring_to_use,
         }
 
-        if "consensus_results" in transaction.consensus_history:
-            transaction.consensus_history["consensus_results"].append(
-                current_consensus_results
-            )
-        else:
-            transaction.consensus_history["consensus_results"] = [
-                current_consensus_results
-            ]
+        consensus_results = list(current_history.get("consensus_results", []))
+        consensus_results.append(current_consensus_results)
 
-        transaction.consensus_history["current_status_changes"] = []
+        new_history = {
+            **current_history,
+            "consensus_results": consensus_results,
+            "current_status_changes": [],
+            "current_monitoring": {},
+        }
 
-        flag_modified(transaction, "consensus_history")
+        self.session.execute(
+            text(
+                "UPDATE transactions"
+                " SET consensus_history = CAST(:data AS jsonb)"
+                " WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash, "data": json.dumps(new_history)},
+        )
         self.session.commit()
 
     def reset_consensus_history(self, transaction_hash: str):
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        self.session.execute(
+            text(
+                "UPDATE transactions SET consensus_history = '{}'::jsonb WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash},
         )
-        transaction.consensus_history = {}
         self.session.commit()
 
     def set_transaction_timestamp_appeal(
         self, transaction: Transactions | str, timestamp_appeal: int | None
     ):
-        if isinstance(transaction, str):  # hash
-            transaction = (
-                self.session.query(Transactions).filter_by(hash=transaction).one()
-            )
-        transaction.timestamp_appeal = timestamp_appeal
+        tx_hash = transaction if isinstance(transaction, str) else transaction.hash
+        self.session.execute(
+            text("UPDATE transactions SET timestamp_appeal = :ts WHERE hash = :hash"),
+            {"hash": tx_hash, "ts": timestamp_appeal},
+        )
 
     def set_transaction_appeal_processing_time(self, transaction_hash: str):
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        result = self.session.execute(
+            text(
+                """
+                UPDATE transactions
+                SET appeal_processing_time = appeal_processing_time + (CAST(:now AS integer) - timestamp_appeal)
+                WHERE hash = :hash
+                  AND timestamp_appeal IS NOT NULL
+                """
+            ),
+            {"hash": transaction_hash, "now": round(time.time())},
         )
-        transaction.appeal_processing_time += (
-            round(time.time()) - transaction.timestamp_appeal
-        )
-        flag_modified(transaction, "appeal_processing_time")
+        if result.rowcount == 0:
+            print(
+                f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found or has no timestamp_appeal, skipping appeal_processing_time update"
+            )
+            return
         self.session.commit()
 
     def reset_transaction_appeal_processing_time(self, transaction_hash: str):
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        self.session.execute(
+            text(
+                "UPDATE transactions SET appeal_processing_time = 0 WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash},
         )
-        transaction.appeal_processing_time = 0
         self.session.commit()
 
     def set_transaction_contract_snapshot(
         self, transaction_hash: str, contract_snapshot: dict | None
     ):
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        self.session.execute(
+            text(
+                "UPDATE transactions SET contract_snapshot = CAST(:data AS jsonb) WHERE hash = :hash"
+            ),
+            {
+                "hash": transaction_hash,
+                "data": json.dumps(contract_snapshot) if contract_snapshot else None,
+            },
         )
-        transaction.contract_snapshot = contract_snapshot
         self.session.commit()
 
     def transactions_in_process_by_contract(self) -> list[dict]:
         transactions = (
             self.session.query(Transactions)
+            .options(selectinload(Transactions.triggered_transactions))
             .filter(
                 Transactions.to_address.isnot(None),
                 Transactions.status.in_(
@@ -870,6 +1204,8 @@ class TransactionsProcessor:
         status: TransactionStatus | None = None,
         filter_success: bool = False,
     ) -> dict | None:
+        # Expire cached ORM objects to ensure we read fresh data after raw SQL writes
+        self.session.expire_all()
         transaction = (
             self.session.query(Transactions).filter_by(hash=transaction_hash).one()
         )
@@ -920,86 +1256,235 @@ class TransactionsProcessor:
         )
 
     def set_transaction_timestamp_last_vote(self, transaction_hash: str):
-        """
-        Set the last vote timestamp for a transaction to the current time.
-
-        Args:
-            transaction_hash: The hash of the transaction to update
-
-        Raises:
-            NoResultFound: If the transaction with the given hash doesn't exist
-        """
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        self.session.execute(
+            text(
+                "UPDATE transactions SET last_vote_timestamp = :ts WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash, "ts": int(time.time())},
         )
-        transaction.last_vote_timestamp = int(time.time())
         self.session.commit()
 
     def increase_transaction_rotation_count(self, transaction_hash: str):
-        """
-        Increment the rotation count for a transaction by 1.
-
-        Args:
-            transaction_hash: The hash of the transaction to update
-
-        Raises:
-            NoResultFound: If the transaction with the given hash doesn't exist
-        """
-        transaction = (
-            self.session.query(Transactions)
-            .filter_by(hash=transaction_hash)
-            .with_for_update()  # lock row
-            .one()
+        self.session.execute(
+            text(
+                """
+                UPDATE transactions
+                SET rotation_count = rotation_count + 1
+                WHERE hash = :hash
+                  AND (config_rotation_rounds IS NULL
+                       OR config_rotation_rounds = 0
+                       OR rotation_count < config_rotation_rounds)
+                """
+            ),
+            {"hash": transaction_hash},
         )
-        max_rotations = transaction.config_rotation_rounds or 0
-        if max_rotations and transaction.rotation_count >= max_rotations:
-            self.session.commit()
-            return  # already at the ceiling
-        transaction.rotation_count += 1
-        flag_modified(transaction, "rotation_count")
         self.session.commit()
 
     def reset_transaction_rotation_count(self, transaction_hash: str):
-        """
-        Reset the rotation count for a transaction to 0.
-
-        Args:
-            transaction_hash: The hash of the transaction to update
-
-        Raises:
-            NoResultFound: If the transaction with the given hash doesn't exist
-        """
-        transaction = (
-            self.session.query(Transactions)
-            .filter_by(hash=transaction_hash)
-            .with_for_update()  # Add row-level locking
-            .one()
+        self.session.execute(
+            text("UPDATE transactions SET rotation_count = 0 WHERE hash = :hash"),
+            {"hash": transaction_hash},
         )
-        transaction.rotation_count = 0
 
     def set_transaction_appeal_leader_timeout(
         self, transaction_hash: str, appeal_leader_timeout: bool
     ) -> bool:
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        result = self.session.execute(
+            text(
+                "UPDATE transactions SET appeal_leader_timeout = :val WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash, "val": appeal_leader_timeout},
         )
-        transaction.appeal_leader_timeout = appeal_leader_timeout
+        if result.rowcount == 0:
+            print(
+                f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping appeal_leader_timeout update"
+            )
+            return False
         self.session.commit()
         return appeal_leader_timeout
 
     def set_leader_timeout_validators(self, transaction_hash: str, validators: list):
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        self.session.execute(
+            text(
+                "UPDATE transactions SET leader_timeout_validators = CAST(:data AS jsonb) WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash, "data": json.dumps(validators)},
         )
-        transaction.leader_timeout_validators = validators
         self.session.commit()
 
     def set_transaction_appeal_validators_timeout(
         self, transaction_hash: str, appeal_validators_timeout: bool
     ) -> bool:
-        transaction = (
-            self.session.query(Transactions).filter_by(hash=transaction_hash).one()
+        result = self.session.execute(
+            text(
+                "UPDATE transactions SET appeal_validators_timeout = :val WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash, "val": appeal_validators_timeout},
         )
-        transaction.appeal_validators_timeout = appeal_validators_timeout
+        if result.rowcount == 0:
+            print(
+                f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping appeal_validators_timeout update"
+            )
+            return False
         self.session.commit()
         return appeal_validators_timeout
+
+    def get_pending_transaction_count_for_address(self, address: str) -> int:
+        """
+        Get the count of pending transactions for a given recipient address.
+
+        Args:
+            address: The recipient address to count pending transactions for
+
+        Returns:
+            int: The number of pending transactions for the address
+        """
+        try:
+            # Normalize address to checksum format
+            checksum_address = self.web3.to_checksum_address(address)
+        except ValueError:
+            # If address normalization fails, use as-is
+            checksum_address = address
+
+        count = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.to_address == checksum_address,
+                Transactions.status == TransactionStatus.PENDING,
+            )
+            .count()
+        )
+        return count
+
+    def get_transaction_status(self, transaction_hash: str) -> str | None:
+        transaction = (
+            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
+        )
+        if not transaction:
+            return None
+        transaction_status = transaction.status
+        return transaction_status.value
+
+    def get_processing_transaction_for_contract(
+        self, contract_address: str
+    ) -> dict | None:
+        """
+        Check if there's a transaction currently being processed for a contract.
+
+        Args:
+            contract_address: The contract address to check
+
+        Returns:
+            Transaction data if processing, None otherwise
+        """
+        processing_tx = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.to_address == contract_address,
+                Transactions.status.in_(
+                    [
+                        TransactionStatus.ACTIVATED,
+                        TransactionStatus.PROPOSING,
+                        TransactionStatus.COMMITTING,
+                        TransactionStatus.REVEALING,
+                    ]
+                ),
+            )
+            .first()
+        )
+
+        return self._parse_transaction_data(processing_tx) if processing_tx else None
+
+    def get_oldest_pending_for_contract(self, contract_address: str) -> dict | None:
+        """
+        Get the oldest pending transaction for a specific contract.
+
+        Args:
+            contract_address: The contract address
+
+        Returns:
+            Oldest pending transaction data or None
+        """
+        pending_tx = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.to_address == contract_address,
+                Transactions.status == TransactionStatus.PENDING,
+            )
+            .order_by(Transactions.created_at)
+            .first()
+        )
+
+        return self._parse_transaction_data(pending_tx) if pending_tx else None
+
+    def get_contracts_with_pending(self) -> list[str]:
+        """
+        Get all distinct contract addresses that have pending transactions.
+        Also includes a special marker for None addresses (burn transactions).
+
+        Returns:
+            List of contract addresses with pending transactions (may include special marker)
+        """
+        results = (
+            self.session.query(Transactions.to_address)
+            .filter(Transactions.status == TransactionStatus.PENDING)
+            .distinct()
+            .all()
+        )
+
+        # Convert None addresses to a special marker
+        addresses = []
+        for (addr,) in results:
+            if addr is None:
+                addresses.append(
+                    "__zero_address__"
+                )  # Special marker for burn transactions
+            else:
+                addresses.append(addr)
+        return addresses
+
+    def reset_stuck_transactions(self, timeout_seconds: int = 900) -> int:
+        """
+        Reset transactions that have been stuck in processing states.
+
+        Args:
+            timeout_seconds: How long a transaction must be in processing state to be considered stuck
+
+        Returns:
+            Number of transactions reset
+        """
+        from datetime import datetime, timedelta, timezone
+
+        cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)
+
+        stuck_transactions = (
+            self.session.query(Transactions)
+            .filter(
+                Transactions.status.in_(
+                    [
+                        TransactionStatus.ACTIVATED,
+                        TransactionStatus.PROPOSING,
+                        TransactionStatus.COMMITTING,
+                        TransactionStatus.REVEALING,
+                    ]
+                ),
+                Transactions.created_at < cutoff_time,
+            )
+            .all()
+        )
+
+        count = 0
+        for tx in stuck_transactions:
+            tx.status = TransactionStatus.PENDING
+            # Reset appeal flags if consensus_data is missing (can't process appeal without it)
+            if tx.consensus_data is None:
+                tx.appealed = False
+                tx.appeal_undetermined = False
+                tx.appeal_validators_timeout = False
+                tx.appeal_leader_timeout = False
+            count += 1
+
+        if count > 0:
+            self.session.commit()
+
+        return count

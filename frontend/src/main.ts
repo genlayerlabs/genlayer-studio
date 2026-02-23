@@ -11,6 +11,7 @@ import { VueQueryPlugin } from '@tanstack/vue-query';
 import FloatingVue from 'floating-vue';
 import 'floating-vue/dist/style.css';
 import { createPlausible } from 'v-plausible/vue';
+import { getRuntimeConfig } from '@/utils/runtimeConfig';
 
 const app = createApp(App);
 const pinia = createPinia();
@@ -35,7 +36,7 @@ app.use(VueSpinnersPlugin);
 
 const plausible = createPlausible({
   init: {
-    domain: import.meta.env.VITE_PLAUSIBLE_DOMAIN || 'studio.genlayer.com',
+    domain: getRuntimeConfig('VITE_PLAUSIBLE_DOMAIN', 'studio.genlayer.com'),
     trackLocalhost: true,
   },
   settings: {

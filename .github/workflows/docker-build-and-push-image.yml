@@ -17,6 +17,10 @@ on:
       dockerhub_username:
         required: true
         type: string
+      build_args:
+        required: false
+        type: string
+        default: ""
     secrets:
       dockerhub_token:
         required: true
@@ -25,9 +29,18 @@ permissions:
   contents: read
 
 jobs:
-  build_and_push_backend:
-    name: Push Docker image to Docker Hub
-    runs-on: ubuntu-latest
+  build:
+    name: Build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -52,24 +65,51 @@ jobs:
           latest_tag=$(git describe --tags `git rev-list --tags --max-count=1`)
           echo "latest_tag=$latest_tag" >> $GITHUB_ENV
 
-      - name: Docker Metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: |
-            ${{ inputs.dockerhub_repo }}
-          tags: |
-            ${{ env.latest_tag }}
-            latest
-
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.docker_build_context }}
           file: ${{ inputs.dockerfile }}
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ inputs.dockerhub_repo }}:${{ env.latest_tag }}-${{ matrix.arch }}
+          cache-from: type=gha,scope=${{ inputs.dockerhub_repo }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.dockerhub_repo }}-${{ matrix.arch }}
+          provenance: false
+          build-args: ${{ inputs.build_args }}
+
+  create-manifest:
+    name: Create multi-arch manifest
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch All Tags
+        run: git fetch --tags --force
+
+      - name: Get the Most Recent Git Tag
+        id: get_latest_tag
+        run: |
+          latest_tag=$(git describe --tags `git rev-list --tags --max-count=1`)
+          echo "latest_tag=$latest_tag" >> $GITHUB_ENV
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ inputs.dockerhub_username }}
+          password: ${{ secrets.dockerhub_token }}
+
+      - name: Create and push manifest
+        run: |
+          # Create manifest for versioned tag
+          docker manifest create ${{ inputs.dockerhub_repo }}:${{ env.latest_tag }} \
+            ${{ inputs.dockerhub_repo }}:${{ env.latest_tag }}-amd64 \
+            ${{ inputs.dockerhub_repo }}:${{ env.latest_tag }}-arm64
+          docker manifest push ${{ inputs.dockerhub_repo }}:${{ env.latest_tag }}
+
+          # Create manifest for latest tag
+          docker manifest create ${{ inputs.dockerhub_repo }}:latest \
+            ${{ inputs.dockerhub_repo }}:${{ env.latest_tag }}-amd64 \
+            ${{ inputs.dockerhub_repo }}:${{ env.latest_tag }}-arm64
+          docker manifest push ${{ inputs.dockerhub_repo }}:latest

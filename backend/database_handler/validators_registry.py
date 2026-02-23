@@ -44,25 +44,42 @@ class ValidatorsRegistry:
         return validator_data
 
     def count_validators(self) -> int:
-        return self.session.query(Validators).count()
+        # Expire all objects to ensure we get fresh data from the database
+        self.session.expire_all()
+        count = self.session.query(Validators).count()
+        # Commit to close the implicit transaction and prevent idle-in-transaction
+        self.session.commit()
+        return count
 
     def get_all_validators(self, include_private_key: bool = True) -> List[dict]:
+        # Expire all objects to ensure we get fresh data from the database
+        self.session.expire_all()
         validators_data = self.session.query(Validators).all()
-        return [
+        result = [
             to_dict(validator, include_private_key) for validator in validators_data
         ]
+        # Commit to close the implicit transaction and prevent idle-in-transaction
+        self.session.commit()
+        return result
 
     def get_validator(
         self, validator_address: str, include_private_key: bool = True
     ) -> dict:
-        return to_dict(
+        # Expire all objects to ensure we get fresh data from the database
+        self.session.expire_all()
+        result = to_dict(
             self._get_validator_or_fail(validator_address), include_private_key
         )
+        # Commit to close the implicit transaction and prevent idle-in-transaction
+        self.session.commit()
+        return result
 
 
 class ModifiableValidatorsRegistry(ValidatorsRegistry):
     async def create_validator(self, validator: Validator) -> dict:
-        self.session.add(_to_db_model(validator))
+        db_validator = _to_db_model(validator)
+        self.session.add(db_validator)
+        self.session.flush()  # Ensure the validator is persisted and queryable
         return self.get_validator(validator.address, False)
 
     async def update_validator(
@@ -78,15 +95,44 @@ class ModifiableValidatorsRegistry(ValidatorsRegistry):
         validator.plugin = new_validator.llmprovider.plugin
         validator.plugin_config = new_validator.llmprovider.plugin_config
 
+        self.session.flush()  # Ensure the validator update is persisted
         return to_dict(validator, False)
 
     async def delete_validator(self, validator_address):
         validator = self._get_validator_or_fail(validator_address)
 
         self.session.delete(validator)
+        self.session.flush()  # Ensure the validator deletion is persisted
 
     async def delete_all_validators(self):
-        self.session.query(Validators).delete()
+        self.session.query(Validators).delete(synchronize_session=False)
+        self.session.flush()  # Ensure all validator deletions are persisted
+
+    async def batch_create_validators(self, validators: list[Validator]) -> list[dict]:
+        """Create multiple validators in a single batch without triggering restarts per-validator."""
+        results = []
+        for validator in validators:
+            db_validator = _to_db_model(validator)
+            self.session.add(db_validator)
+        self.session.flush()  # Persist all validators at once
+        for validator in validators:
+            results.append(self.get_validator(validator.address, False))
+        return results
+
+    async def replace_all_validators(self, validators: list[Validator]) -> list[dict]:
+        """Atomically delete all validators and create new ones in a single transaction.
+
+        Workers never see an empty validator set because the delete + insert
+        happen in one flush before any Redis event is published.
+        """
+        self.session.query(Validators).delete(synchronize_session=False)
+        for validator in validators:
+            self.session.add(_to_db_model(validator))
+        self.session.flush()
+        results = []
+        for validator in validators:
+            results.append(self.get_validator(validator.address, False))
+        return results
 
 
 def _to_db_model(validator: Validator) -> Validators:

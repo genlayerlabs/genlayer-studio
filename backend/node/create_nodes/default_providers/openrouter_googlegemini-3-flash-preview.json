@@ -1,0 +1,10 @@
+{
+  "provider": "openrouter",
+  "plugin": "openai-compatible",
+  "model": "google/gemini-3-flash-preview",
+  "config": {},
+  "plugin_config": {
+    "api_key_env_var": "OPENROUTERAPIKEY",
+    "api_url": "https://openrouter.ai/api"
+  }
+}

@@ -40,6 +40,24 @@ Have ideas for new features or use cases? We're eager to hear them! But first:
    $ docker compose up
    ```
 
+- **1.4. Running Tests**:
+
+   ```sh
+   # DB/SQLAlchemy tests (dockerized, self-contained - primary backend tests)
+   $ docker compose -f tests/db-sqlalchemy/docker-compose.yml --project-directory . run --build --rm tests
+
+   # Backend unit tests (requires local venv)
+   $ python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+   $ .venv/bin/pytest tests/unit/ -v --tb=short --ignore=tests/unit/test_rpc_endpoint_manager.py
+
+   # Integration tests (requires venv + running containers)
+   $ .venv/bin/gltest --contracts-dir . tests/integration/ -svv
+
+   # Frontend tests
+   $ cd frontend && npm run test      # Unit tests (Vitest)
+   $ cd frontend && npm run test:e2e  # E2E tests (Mocha/Selenium)
+   ```
+
 #### 2. Submit your solution
 - **2.1. Install [pre-commit](https://pre-commit.com) hooks**: this is used for linting, testing, and enforcing conventions.
 

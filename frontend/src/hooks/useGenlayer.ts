@@ -3,6 +3,7 @@ import { createClient, createAccount } from 'genlayer-js';
 import type { GenLayerClient } from 'genlayer-js/types';
 import { ref, watch, type Ref } from 'vue';
 import { useAccountsStore } from '@/stores';
+import { getRuntimeConfig } from '@/utils/runtimeConfig';
 
 type UseGenlayerReturn = {
   client: Ref<GenLayerClient<typeof localnet> | null>;
@@ -29,7 +30,10 @@ export function useGenlayer(): UseGenlayerReturn {
 
     client.value = createClient({
       chain: localnet,
-      endpoint: import.meta.env.VITE_JSON_RPC_SERVER_URL,
+      endpoint: getRuntimeConfig(
+        'VITE_JSON_RPC_SERVER_URL',
+        'http://127.0.0.1:4000/api',
+      ),
       account: clientAccount,
     });
   }

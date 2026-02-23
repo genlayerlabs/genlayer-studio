@@ -23,6 +23,7 @@ export default defineConfig(({ mode }) => {
       allowedHosts: [
         '.genlayer.com', // match all genlayer.com sub-domains
         '.genlayerlabs.com', // match all genlayerlabs.com sub-domains
+        '.genlayer.org', // match all genlayer.org sub-domains
       ],
     },
     server: {
@@ -30,20 +31,6 @@ export default defineConfig(({ mode }) => {
       strictPort: true,
       host: true,
       origin: 'http://0.0.0.0:8080',
-      proxy:
-        env.VITE_PROXY_ENABLED !== 'true'
-          ? undefined
-          : {
-              '/api': {
-                target: env.VITE_PROXY_JSON_RPC_SERVER_URL,
-                changeOrigin: true,
-              },
-              '/socket.io': {
-                target: env.VITE_PROXY_WS_SERVER_URL,
-                ws: true,
-                rewriteWsOrigin: true,
-              },
-            },
     },
   };
 

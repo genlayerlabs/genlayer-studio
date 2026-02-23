@@ -1,0 +1,10 @@
+{
+  "provider": "openrouter",
+  "plugin": "openai-compatible",
+  "model": "nvidia/llama-3.1-nemotron-ultra-253b-v1",
+  "config": {},
+  "plugin_config": {
+    "api_key_env_var": "OPENROUTERAPIKEY",
+    "api_url": "https://openrouter.ai/api"
+  }
+}

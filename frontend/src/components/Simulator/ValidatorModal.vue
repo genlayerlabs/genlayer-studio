@@ -6,7 +6,7 @@ import {
   type ProviderModel,
 } from '@/types';
 import { notify } from '@kyvg/vue3-notification';
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import SelectInput from '@/components/global/inputs/SelectInput.vue';
 import NumberInput from '@/components/global/inputs/NumberInput.vue';
 import TextAreaInput from '@/components/global/inputs/TextAreaInput.vue';
@@ -110,10 +110,13 @@ const isConfigValid = computed(() => {
 
 const providerOptions = computed(() => {
   return uniqBy(nodeStore.nodeProviders, 'provider').map((provider: any) => {
+    const hasIssue = !provider?.is_available;
     return {
-      label: provider.provider,
+      label: hasIssue
+        ? `${provider.provider} (potential config issue)`
+        : provider.provider,
       value: provider.provider,
-      disabled: !provider?.is_available,
+      disabled: false,
     };
   });
 });
@@ -128,20 +131,21 @@ const modelOptions = computed(() => {
     return {
       value: provider.model,
       label: isDisabled
-        ? `${provider.model} (missing configuration)`
+        ? `${provider.model} (potential config issue)`
         : provider.model,
-      disabled: !provider?.is_model_available,
+      disabled: false,
     };
   });
 });
 
 const handleChangeProvider = () => {
   error.value = '';
-  const availableModels = nodeStore.availableModelsForProvider(
-    newValidatorData.value.provider,
-  );
-  newValidatorData.value.model =
-    availableModels.length > 0 ? availableModels[0] : '';
+  // Get all models for this provider (not just available ones)
+  const allModels = nodeStore.nodeProviders
+    .filter((p: any) => p.provider === newValidatorData.value.provider)
+    .map((p: any) => p.model);
+
+  newValidatorData.value.model = allModels.length > 0 ? allModels[0] : '';
   adaptValues();
 };
 
@@ -171,9 +175,11 @@ const handleChangeModel = () => {
 const tryInitValues = () => {
   if (!props.validator) {
     try {
-      newValidatorData.value.provider = nodeStore.nodeProviders[0].provider;
+      const firstProvider = nodeStore.nodeProviders[0];
+      if (!firstProvider) return;
+      newValidatorData.value.provider = firstProvider.provider;
       newValidatorData.value.config = JSON.stringify(
-        nodeStore.nodeProviders[0].config,
+        firstProvider.config,
         null,
         2,
       );
@@ -199,6 +205,17 @@ const isStakeValid = computed(() => {
     newValidatorData.value.stake >= 1
   );
 });
+
+// Watch for providers loading and initialize values once they're available
+watch(
+  () => nodeStore.nodeProviders.length,
+  (newLength) => {
+    if (newLength > 0 && !props.validator && !newValidatorData.value.provider) {
+      tryInitValues();
+    }
+  },
+  { immediate: true },
+);
 </script>
 
 <template>

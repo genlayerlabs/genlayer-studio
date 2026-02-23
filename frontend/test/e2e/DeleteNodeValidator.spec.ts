@@ -27,7 +27,7 @@ describe('Settings - Delete Node Validator', () => {
 
     await validatorsPage.createValidator({
       provider: 'heuristai',
-      model: 'mistralai/mixtral-8x22b-instruct',
+      model: 'mistralai/mixtral-8x7b-instruct',
       stake: 7,
     });
     const existingValidators = await validatorsPage.getValidatorsElements();

@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { useContractsStore } from '@/stores';
-import { FilePlus2, Upload } from 'lucide-vue-next';
+import { FilePlus2, Upload, FileDown } from 'lucide-vue-next';
 import { ref } from 'vue';
 import { v4 as uuidv4 } from 'uuid';
 import ContractItem from '@/components/Simulator/ContractItem.vue';
 import MainTitle from '@/components/Simulator/MainTitle.vue';
+import ImportContractModal from '@/components/contracts/ImportContractModal.vue';
 import { useEventTracking } from '@/hooks';
 
 const store = useContractsStore();
 const showNewFileInput = ref(false);
+const showImportModal = ref(false);
 const { trackEvent } = useEventTracking();
 
 /**
@@ -21,6 +23,7 @@ const loadContentFromFile = (event: Event) => {
 
   if (target.files && target.files.length > 0) {
     const [file] = target.files;
+    if (!file) return;
     const reader = new FileReader();
 
     reader.onload = (ev: ProgressEvent<FileReader>) => {
@@ -76,6 +79,10 @@ const handleSaveNewFile = (name: string) => {
             <Upload :size="16" />
           </label>
         </GhostBtn>
+
+        <GhostBtn @click="showImportModal = true" v-tooltip="'Import Contract'">
+          <FileDown :size="16" />
+        </GhostBtn>
       </template>
     </MainTitle>
 
@@ -94,6 +101,11 @@ const handleSaveNewFile = (name: string) => {
       :isNewFile="true"
       @save="handleSaveNewFile"
       @cancel="showNewFileInput = false"
+    />
+
+    <ImportContractModal
+      :open="showImportModal"
+      @close="showImportModal = false"
     />
   </div>
 </template>

@@ -68,7 +68,9 @@ class CurrentState(Base):
 class Transactions(Base):
     __tablename__ = "transactions"
     __table_args__ = (
-        CheckConstraint("type = ANY (ARRAY[0, 1, 2])", name="transactions_type_check"),
+        CheckConstraint(
+            "type = ANY (ARRAY[0, 1, 2, 3])", name="transactions_type_check"
+        ),
         PrimaryKeyConstraint("hash", name="transactions_pkey"),
         CheckConstraint("value >= 0", name="value_unsigned_int"),
     )
@@ -108,6 +110,12 @@ class Transactions(Base):
     last_vote_timestamp: Mapped[Optional[int]] = mapped_column(BigInteger)
     rotation_count: Mapped[Optional[int]] = mapped_column(Integer)
     leader_timeout_validators: Mapped[Optional[list]] = mapped_column(JSONB)
+    sim_config: Mapped[Optional[dict]] = mapped_column(
+        JSONB, nullable=True, default=None
+    )
+    triggered_on: Mapped[Optional[str]] = mapped_column(
+        String(20), nullable=True, default=None
+    )  # "accepted" or "finalized" - indicates when this triggered tx was created
 
     # Relationship for triggered transactions
     triggered_by_hash: Mapped[Optional[str]] = mapped_column(
@@ -133,6 +141,15 @@ class Transactions(Base):
     appeal_validators_timeout: Mapped[bool] = mapped_column(Boolean, default=False)
     timestamp_awaiting_finalization: Mapped[Optional[int]] = mapped_column(
         BigInteger, default=None
+    )
+    blocked_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), nullable=True, default=None
+    )
+    worker_id: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True, default=None
+    )
+    execution_mode: Mapped[str] = mapped_column(
+        String(30), server_default="NORMAL", nullable=False, default="NORMAL"
     )
 
 

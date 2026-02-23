@@ -3,13 +3,78 @@
 # These types should not depend on any other layer.
 
 from dataclasses import dataclass, field
+import datetime
 import decimal
 from enum import Enum, IntEnum
 import os
-
 from backend.database_handler.models import TransactionStatus
 from backend.database_handler.types import ConsensusData
 from backend.database_handler.contract_snapshot import ContractSnapshot
+
+
+@dataclass
+class SimValidatorConfig:
+    stake: int
+    provider: str
+    model: str
+    config: dict
+    plugin: str
+    plugin_config: dict
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "SimValidatorConfig":
+        return cls(
+            stake=d.get("stake", 0),
+            provider=d.get("provider"),
+            model=d.get("model"),
+            config=d.get("config"),
+            plugin=d.get("plugin"),
+            plugin_config=d.get("plugin_config"),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "stake": self.stake,
+            "provider": self.provider,
+            "model": self.model,
+            "config": self.config,
+            "plugin": self.plugin,
+            "plugin_config": self.plugin_config,
+        }
+
+
+@dataclass
+class SimConfig:
+    validators: list[SimValidatorConfig]
+    genvm_datetime: str | None = None
+
+    @property
+    def genvm_datetime_as_datetime(self) -> datetime.datetime | None:
+        if self.genvm_datetime is None:
+            return None
+        dt = datetime.datetime.fromisoformat(self.genvm_datetime.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(datetime.timezone.utc)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "SimConfig":
+        validators = [
+            SimValidatorConfig.from_dict(v) if isinstance(v, dict) else v
+            for v in d.get("validators", [])
+        ]
+        return cls(
+            validators=validators,
+            genvm_datetime=d.get("genvm_datetime"),
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "validators": [
+                v.to_dict() if hasattr(v, "to_dict") else v for v in self.validators
+            ],
+            "genvm_datetime": self.genvm_datetime,
+        }
 
 
 @dataclass()
@@ -40,6 +105,7 @@ class Validator:
     llmprovider: LLMProvider
     id: int | None = None
     private_key: str | None = None
+    fallback_validator: str | None = None
 
     @staticmethod
     def from_dict(d: dict) -> "Validator":
@@ -56,7 +122,7 @@ class Validator:
         )
         ret.id = d.get("id", None)
         ret.private_key = d.get("private_key", None)
-
+        ret.fallback_validator = d.get("fallback_validator", None)
         return ret
 
     def to_dict(self):
@@ -69,6 +135,7 @@ class Validator:
             "plugin": self.llmprovider.plugin,
             "plugin_config": self.llmprovider.plugin_config,
             "private_key": self.private_key,
+            "fallback_validator": self.fallback_validator,
         }
 
         if self.id:
@@ -81,6 +148,21 @@ class TransactionType(IntEnum):
     SEND = 0
     DEPLOY_CONTRACT = 1
     RUN_CONTRACT = 2
+    UPGRADE_CONTRACT = 3
+
+
+class TransactionExecutionMode(Enum):
+    """
+    Defines how a transaction is executed and validated.
+
+    - LEADER_ONLY: Leader executes, NO validation at all. Immediate finalization.
+    - LEADER_SELF_VALIDATOR: Leader executes AND validates their own execution. Immediate finalization.
+    - NORMAL: Multi-validator consensus with full validation. Time-based finalization.
+    """
+
+    LEADER_ONLY = "LEADER_ONLY"
+    LEADER_SELF_VALIDATOR = "LEADER_SELF_VALIDATOR"
+    NORMAL = "NORMAL"
 
 
 @dataclass
@@ -102,6 +184,7 @@ class Transaction:
     leader_only: bool = (
         False  # Flag to indicate if this transaction should be processed only by the leader. Used for fast and cheap execution of transactions.
     )
+    execution_mode: TransactionExecutionMode = TransactionExecutionMode.NORMAL
     created_at: str | None = None
     appealed: bool = False
     timestamp_awaiting_finalization: int | None = None
@@ -118,6 +201,7 @@ class Transaction:
     appeal_leader_timeout: bool = False
     leader_timeout_validators: list | None = None
     appeal_validators_timeout: bool = False
+    sim_config: SimConfig | None = None
 
     def to_dict(self):
         return {
@@ -138,6 +222,7 @@ class Transaction:
             "s": self.s,
             "v": self.v,
             "leader_only": self.leader_only,
+            "execution_mode": self.execution_mode.value,
             "created_at": self.created_at,
             "appealed": self.appealed,
             "timestamp_awaiting_finalization": self.timestamp_awaiting_finalization,
@@ -156,6 +241,7 @@ class Transaction:
             "appeal_leader_timeout": self.appeal_leader_timeout,
             "leader_timeout_validators": self.leader_timeout_validators,
             "appeal_validators_timeout": self.appeal_validators_timeout,
+            "sim_config": self.sim_config.to_dict() if self.sim_config else None,
         }
 
     @classmethod
@@ -176,8 +262,11 @@ class Transaction:
             s=input.get("s"),
             v=input.get("v"),
             leader_only=input.get("leader_only", False),
+            execution_mode=TransactionExecutionMode(
+                input.get("execution_mode", TransactionExecutionMode.NORMAL.value)
+            ),
             created_at=input.get("created_at"),
-            appealed=input.get("appealed"),
+            appealed=input.get("appealed", False),
             timestamp_awaiting_finalization=input.get(
                 "timestamp_awaiting_finalization"
             ),
@@ -196,4 +285,9 @@ class Transaction:
             appeal_leader_timeout=input.get("appeal_leader_timeout", False),
             leader_timeout_validators=input.get("leader_timeout_validators"),
             appeal_validators_timeout=input.get("appeal_validators_timeout", False),
+            sim_config=(
+                SimConfig.from_dict(input["sim_config"])
+                if input.get("sim_config")
+                else None
+            ),
         )

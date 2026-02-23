@@ -29,7 +29,7 @@ export interface NodeLog {
 
 export interface TransactionItem {
   hash: `0x${string}`;
-  type: 'deploy' | 'method';
+  type: 'deploy' | 'method' | 'upgrade';
   statusName: TransactionStatus;
   contractAddress: string;
   localContractId: string;

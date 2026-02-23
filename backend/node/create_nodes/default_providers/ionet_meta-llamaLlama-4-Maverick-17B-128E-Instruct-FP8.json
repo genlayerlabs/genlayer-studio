@@ -1,0 +1,10 @@
+{
+  "provider": "ionet",
+  "plugin": "openai-compatible",
+  "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+  "config": {},
+  "plugin_config": {
+    "api_key_env_var": "IONETAPIKEY",
+    "api_url": "https://api.intelligence.io.solutions/api"
+  }
+}
