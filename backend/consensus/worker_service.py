@@ -424,17 +424,22 @@ start_time = time.time()
 
 
 @app.get("/health")
-async def health_check():
-    """Health check endpoint for the worker."""
+def health_check():
+    """Health check endpoint for the worker.
+
+    This is intentionally a sync (def) endpoint so FastAPI runs it in a
+    threadpool, independent of the asyncio event loop.  This guarantees
+    the liveness probe can respond even when the event loop is blocked by
+    long-running synchronous DB operations in the consensus worker.
+    """
     import psutil
     from datetime import datetime
     from fastapi.responses import JSONResponse
-    import aiohttp
+    from urllib.request import urlopen, Request
+    from urllib.error import URLError
 
     global worker, worker_task, worker_restart_count, worker_permanently_failed
     global _genvm_health_last_check, _genvm_health_last_ok, _genvm_health_last_error
-
-    endpoint_start = time.time()
 
     if worker is None:
         return {"status": "initializing", "worker_id": None}
@@ -493,10 +498,8 @@ async def health_check():
     except:
         pass
 
-    # Optional: probe local GenVM manager responsiveness.
-    # This catches the exact failure mode you described: /health looks fine, but GenVM's
-    # HTTP server (127.0.0.1:3999) is wedged and never responds, so consensus execution hangs.
-    #
+    # Probe local GenVM manager responsiveness.
+    # Uses urllib (sync) instead of aiohttp since this runs in a threadpool.
     try:
         now = time.time()
         probe_interval_s = float(
@@ -509,20 +512,17 @@ async def health_check():
             )
             timeout_s = float(os.getenv("GENVM_MANAGER_HEALTH_TIMEOUT_SECONDS", "2"))
             try:
-                async with aiohttp.request(
-                    "GET",
-                    status_url,
-                    timeout=aiohttp.ClientTimeout(total=timeout_s),
-                ) as resp:
-                    if resp.status != 200:
-                        _genvm_health_last_ok = False
-                        _genvm_health_last_error = (
-                            f"genvm_manager_status_http_{resp.status}"
-                        )
-                    else:
-                        _genvm_health_last_ok = True
-                        _genvm_health_last_error = None
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                resp = urlopen(Request(status_url), timeout=timeout_s)
+                if resp.status != 200:
+                    _genvm_health_last_ok = False
+                    _genvm_health_last_error = (
+                        f"genvm_manager_status_http_{resp.status}"
+                    )
+                else:
+                    _genvm_health_last_ok = True
+                    _genvm_health_last_error = None
+                resp.close()
+            except (URLError, OSError, TimeoutError) as exc:
                 _genvm_health_last_ok = False
                 _genvm_health_last_error = f"genvm_manager_status_error: {exc}"
 
@@ -619,6 +619,11 @@ async def health_check():
         "active_task_count": len(worker._active_tasks),
         "max_parallel_txs": worker.max_parallel_txs,
         "restart_count": worker_restart_count,
+        "generic_error_retries": (
+            len(worker._generic_error_retries)
+            if hasattr(worker, "_generic_error_retries")
+            else 0
+        ),
         **metrics,
     }
 

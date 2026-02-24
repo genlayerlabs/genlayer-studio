@@ -108,6 +108,12 @@ def test_jsonrpc_malformed_payload_returns_parse_error(jsonrpc_test_app):
 
 @pytest.mark.asyncio
 async def test_create_readiness_check_handles_router_instance(jsonrpc_test_app):
+    from backend.protocol_rpc.health import _health_cache
+
+    # In test there's no GenVM manager; simulate a healthy check so readiness
+    # evaluates the RPC-router path rather than short-circuiting to 503.
+    _health_cache.genvm_healthy = True
+
     app, _ = jsonrpc_test_app
     readiness_func = create_readiness_check_with_state(app.state.rpc_router)
     payload = await readiness_func()

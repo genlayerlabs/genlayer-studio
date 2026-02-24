@@ -87,7 +87,7 @@ class HealthCache:
     services: Dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
     # GenVM-specific (triggers 503 on failure)
-    genvm_healthy: bool = True
+    genvm_healthy: bool = False
     genvm_error: Optional[str] = None
     # GenVM manager capacity (best-effort; populated from /status when available)
     genvm_max_permits: Optional[int] = None
@@ -263,7 +263,7 @@ async def _run_health_checks() -> None:
             if overall_status == "healthy":
                 overall_status = "degraded"
             issues.append("consensus_issue")
-        elif consensus_health.get("total_orphaned_transactions", 0) > 0:
+        elif consensus_health.get("total_orphaned_transactions", 0) >= 3:
             if overall_status == "healthy":
                 overall_status = "degraded"
             issues.append("orphaned_transactions")
@@ -296,35 +296,31 @@ async def _run_health_checks() -> None:
         _health_cache.genvm_healthy = genvm_ok
         _health_cache.genvm_error = genvm_error
 
-        # Best-effort parse of permit info (do not fail overall health on missing keys).
+        # Best-effort parse of permit info from /status.
+        # The manager returns: {"permits": {"current": N, "max": M}, "executions": {...}}
+        # where permits.current = available permits (semaphore value).
         try:
-            max_permits = genvm_status.get("max_permits")
-            current_permits = genvm_status.get("current_permits")
-            active_exec = genvm_status.get("active_executions")
+            permits_obj = genvm_status.get("permits") or {}
+            executions_obj = genvm_status.get("executions")
 
-            max_permits_i = int(max_permits) if max_permits is not None else None
-            current_permits_i = (
-                int(current_permits) if current_permits is not None else None
-            )
+            max_permits_i = int(permits_obj["max"]) if "max" in permits_obj else None
+            # permits.current IS the available count (semaphore value)
             available_i = (
-                max_permits_i - current_permits_i
-                if max_permits_i is not None and current_permits_i is not None
-                else None
+                int(permits_obj["current"]) if "current" in permits_obj else None
             )
+            active_i = len(executions_obj) if isinstance(executions_obj, dict) else None
 
             _health_cache.genvm_max_permits = max_permits_i
-            _health_cache.genvm_current_permits = current_permits_i
             _health_cache.genvm_available_permits = available_i
-            _health_cache.genvm_active_executions = (
-                int(active_exec) if active_exec is not None else None
-            )
+            _health_cache.genvm_current_permits = active_i  # in-use count
+            _health_cache.genvm_active_executions = active_i
 
             services["genvm"].update(
                 {
                     "max_permits": max_permits_i,
-                    "current_permits": current_permits_i,
                     "available_permits": available_i,
-                    "active_executions": _health_cache.genvm_active_executions,
+                    "current_permits": active_i,
+                    "active_executions": active_i,
                 }
             )
         except Exception as e:
@@ -915,6 +911,39 @@ async def health_database() -> Dict[str, Any]:
         return {"status": "error", "error": str(e)}
 
 
+@health_router.get("/health/ratelimit")
+async def health_ratelimit() -> Dict[str, Any]:
+    """Show per-address gen_call rate limit state."""
+    from backend.protocol_rpc.endpoints import (
+        _address_request_log,
+        _RATE_LIMIT_WINDOW,
+        _RATE_LIMIT_MAX,
+        _genvm_semaphore,
+        _GENVM_CONCURRENCY,
+    )
+    import time as _time
+
+    now = _time.monotonic()
+    cutoff = now - _RATE_LIMIT_WINDOW
+    addresses = {}
+    for addr, timestamps in _address_request_log.items():
+        recent = [t for t in timestamps if t > cutoff]
+        if recent:
+            addresses[addr] = {
+                "requests_in_window": len(recent),
+                "limit": _RATE_LIMIT_MAX,
+                "oldest_in_window_age_s": round(now - min(recent), 1),
+            }
+    return {
+        "window_seconds": _RATE_LIMIT_WINDOW,
+        "max_per_window": _RATE_LIMIT_MAX,
+        "genvm_concurrency_limit": _GENVM_CONCURRENCY,
+        "genvm_semaphore_available": _genvm_semaphore._value,  # noqa: SLF001
+        "active_addresses": len(addresses),
+        "addresses": addresses,
+    }
+
+
 @health_router.get("/health/memory")
 async def health_memory() -> Dict[str, Any]:
     """Show detailed memory usage statistics."""
@@ -1129,8 +1158,6 @@ async def health_consensus(
 @health_router.get("/metrics")
 async def metrics():
     """Return worker metrics for autoscaling in Prometheus format."""
-    from datetime import datetime, timedelta, timezone
-    from sqlalchemy import select, distinct, and_
     from fastapi.responses import Response
     from prometheus_client import (
         CollectorRegistry,
@@ -1138,43 +1165,64 @@ async def metrics():
         generate_latest,
         CONTENT_TYPE_LATEST,
     )
-    from backend.database_handler.models import Transactions
     from backend.database_handler.session_factory import get_database_manager
 
     try:
         db_manager = get_database_manager()
         with db_manager.engine.connect() as conn:
-            now = datetime.now(timezone.utc)
-            recent_threshold = now - timedelta(hours=1)
+            from sqlalchemy import text
 
-            worker_query = select(distinct(Transactions.worker_id)).where(
-                and_(
-                    Transactions.worker_id.isnot(None),
-                    Transactions.created_at > recent_threshold,
+            # Count distinct contracts that have schedulable work:
+            # - "occupied": has an in-flight tx (worker is actively processing)
+            # - "runnable": has pending tx but no in-flight (a worker could pick it up)
+            # This directly measures max useful parallelism since transactions
+            # for the same contract are processed sequentially.
+            row = conn.execute(
+                text(
+                    """
+                    WITH per_contract AS (
+                        SELECT
+                            to_address,
+                            BOOL_OR(status = 'PENDING') AS has_pending,
+                            BOOL_OR(status IN ('PROPOSING', 'COMMITTING', 'UNDETERMINED')) AS has_inflight
+                        FROM transactions
+                        WHERE status IN ('PENDING', 'PROPOSING', 'COMMITTING', 'UNDETERMINED')
+                        GROUP BY to_address
+                    )
+                    SELECT
+                        COALESCE(COUNT(*) FILTER (WHERE has_inflight), 0) AS occupied,
+                        COALESCE(COUNT(*) FILTER (WHERE has_pending AND NOT has_inflight), 0) AS runnable
+                    FROM per_contract
+                    """
                 )
-            )
+            ).fetchone()
 
-            worker_result = conn.execute(worker_query)
-            active_workers_count = len({row[0] for row in worker_result if row[0]})
+            occupied_count = row[0] if row else 0
+            runnable_count = row[1] if row else 0
 
-        # needed_workers = active_workers + ceil(active_workers * 0.1), minimum 1
-        needed_workers_count = max(
-            1, active_workers_count + math.ceil(active_workers_count * 0.1)
-        )
+        base = occupied_count + runnable_count
+        # Add 10% headroom for burst absorption, minimum 0 (HPA minReplicas handles floor)
+        needed_workers_count = math.ceil(base * 1.10) if base > 0 else 0
 
         # Create a fresh registry for each request to avoid duplicate metrics
         registry = CollectorRegistry()
-        active_workers = Gauge(
-            "genlayer_active_workers",
-            "Number of active workers processing transactions in the last hour",
+        occupied_contracts = Gauge(
+            "genlayer_occupied_contracts",
+            "Contracts with an in-flight transaction (worker actively processing)",
+            registry=registry,
+        )
+        runnable_contracts = Gauge(
+            "genlayer_runnable_contracts",
+            "Contracts with pending work and no in-flight transaction",
             registry=registry,
         )
         needed_workers = Gauge(
             "genlayer_needed_workers",
-            "Number of workers needed for autoscaling (active + 10% buffer, min 1)",
+            "Workers needed: distinct schedulable contracts + 10% headroom",
             registry=registry,
         )
-        active_workers.set(active_workers_count)
+        occupied_contracts.set(occupied_count)
+        runnable_contracts.set(runnable_count)
         needed_workers.set(needed_workers_count)
 
         return Response(

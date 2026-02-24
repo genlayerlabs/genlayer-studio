@@ -81,8 +81,9 @@ class UsageMetricsService:
 
         try:
             # Build base payload
+            mapped_status = self._map_health_status(health_cache.status)
             system_health = {
-                "instanceHealth": self._map_health_status(health_cache.status),
+                "instanceHealth": mapped_status,
                 "genVmStatus": "healthy" if health_cache.genvm_healthy else "down",
                 "uptime": health_cache.uptime_percent,
                 "activeWorkers": health_cache.services.get("consensus", {}).get(
@@ -98,6 +99,9 @@ class UsageMetricsService:
                     "cpu_percent", 0
                 ),
             }
+
+            if mapped_status != "healthy":
+                system_health["instanceHealthReasons"] = health_cache.issues
 
             # Add pending contracts breakdown if available
             pending_contracts = getattr(health_cache, "pending_contracts", [])
