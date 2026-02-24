@@ -1160,9 +1160,12 @@ async def eth_call(
     params: dict,
     block_tag: str = "latest",
 ) -> str:
-    to_address = params["to"]
-    from_address = params["from"] if "from" in params else None
-    data = params["data"]
+    to_address = params.get("to")
+    from_address = params.get("from")
+    data = params.get("data")
+
+    if not to_address or not data:
+        return "0x"
 
     # Validate to_address first
     if not accounts_manager.is_valid_address(to_address):

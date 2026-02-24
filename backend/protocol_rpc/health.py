@@ -263,7 +263,7 @@ async def _run_health_checks() -> None:
             if overall_status == "healthy":
                 overall_status = "degraded"
             issues.append("consensus_issue")
-        elif consensus_health.get("total_orphaned_transactions", 0) > 0:
+        elif consensus_health.get("total_orphaned_transactions", 0) >= 3:
             if overall_status == "healthy":
                 overall_status = "degraded"
             issues.append("orphaned_transactions")

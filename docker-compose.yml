@@ -61,6 +61,7 @@ services:
       - VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION=${VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION}
       - VITE_MAX_ROTATIONS=${VITE_MAX_ROTATIONS}
       - VITE_PLAUSIBLE_DOMAIN=${VITE_PLAUSIBLE_DOMAIN}
+      - VITE_APPKIT_PROJECT_ID=${VITE_APPKIT_PROJECT_ID}
     restart: always
     security_opt:
       - "no-new-privileges=true"
@@ -151,7 +152,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 180s
+      start_period: 300s
     restart: always
     security_opt:
       - "no-new-privileges=true"
