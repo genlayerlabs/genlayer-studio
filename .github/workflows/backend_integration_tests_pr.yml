@@ -71,9 +71,9 @@ jobs:
 
       # Set up Python + pip early so it overlaps with Docker build
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           cache: pip
           cache-dependency-path: |
             requirements.txt
@@ -91,7 +91,7 @@ jobs:
         run: echo "tag=$(grep -m1 'ARG GENVM_TAG=' docker/Dockerfile.backend | cut -d= -f2)" >> "$GITHUB_OUTPUT"
 
       - name: Restore GenVM precompile cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/genvm-cache
           key: genvm-precompile-${{ steps.genvm.outputs.tag }}-amd64

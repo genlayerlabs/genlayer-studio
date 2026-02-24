@@ -28,12 +28,12 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
-          python-version: 3.13.5
+          python-version: 3.14.3
           cache: pip
       - run: pip install -r backend/requirements.txt
       - run: pip install pytest-cov pytest-xdist
       - run: pytest tests/unit --cov=backend --cov-report=xml --cov-branch -n auto
       - name: SonarCloud Scan
-        uses: sonarsource/sonarqube-scan-action@v5.3.2
+        uses: sonarsource/sonarqube-scan-action@v7.0.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
