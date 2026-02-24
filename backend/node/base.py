@@ -698,29 +698,39 @@ class Node:
         return enhanced_node_config
 
     def _set_vote(self, receipt: Receipt) -> Receipt:
-        if receipt.result[0] == public_abi.ResultCode.VM_ERROR:
+        result_code = receipt.result[0]
+
+        # 1. Timeout: VM-level timeout or GenVM internal error
+        if result_code == public_abi.ResultCode.VM_ERROR:
             error_message = receipt.result[1:]
-            # Set TIMEOUT for timeout errors and GenVM internal errors
             if error_message == b"timeout" or error_message.startswith(
                 b"GenVM internal error"
             ):
                 receipt.vote = Vote.TIMEOUT
                 return receipt
 
+        # 2. Non-deterministic disagreement signaled by GenVM
+        if receipt.nondet_disagree is not None:
+            receipt.vote = Vote.DISAGREE
+            return receipt
+
+        # 3. VM crash (exit_code, OOM, etc.) — validator couldn't validate
+        if result_code == public_abi.ResultCode.VM_ERROR:
+            receipt.vote = Vote.DISAGREE
+            return receipt
+
+        # 4. Deterministic violation: execution outcome or state diverges from leader
         leader_receipt = self.leader_receipt
         if (
-            leader_receipt.execution_result == receipt.execution_result
-            and leader_receipt.result == receipt.result
-            and leader_receipt.contract_state == receipt.contract_state
-            and leader_receipt.pending_transactions == receipt.pending_transactions
+            leader_receipt.execution_result != receipt.execution_result
+            or leader_receipt.contract_state != receipt.contract_state
+            or leader_receipt.pending_transactions != receipt.pending_transactions
         ):
-            if receipt.nondet_disagree is not None:
-                receipt.vote = Vote.DISAGREE
-            else:
-                receipt.vote = Vote.AGREE
-        else:
             receipt.vote = Vote.DETERMINISTIC_VIOLATION
+            return receipt
 
+        # 5. Valid execution (RETURN or USER_ERROR) with matching state → agree
+        receipt.vote = Vote.AGREE
         return receipt
 
     def _date_from_str(
