@@ -13,8 +13,11 @@ from backend.protocol_rpc.exceptions import RateLimitExceeded
 def _make_redis_mock():
     """Create a mock Redis client with pipeline support."""
     redis = AsyncMock()
-    pipe = AsyncMock()
-    # pipeline() is synchronous in redis.asyncio, so use MagicMock
+    # Pipeline methods (zremrangebyscore, zcard, zadd, expire) are called
+    # without await for chaining; only execute() is awaited.
+    pipe = MagicMock()
+    pipe.execute = AsyncMock()
+    # pipeline() itself is synchronous in redis.asyncio
     redis.pipeline = MagicMock(return_value=pipe)
     redis.hgetall = AsyncMock(return_value={})
     redis.hset = AsyncMock()

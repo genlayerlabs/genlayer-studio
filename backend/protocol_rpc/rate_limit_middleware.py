@@ -47,5 +47,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 },
                 headers={"Retry-After": retry_after},
             )
+        except Exception:
+            logger.warning(
+                "Rate limiter unavailable, allowing request through",
+                exc_info=True,
+            )
 
         return await call_next(request)

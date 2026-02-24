@@ -170,3 +170,18 @@ class TestMiddlewareRateLimiting:
 
         assert response.status_code == 429
         assert response.headers.get("Retry-After") == "60"  # default
+
+    @pytest.mark.asyncio
+    async def test_fails_open_when_rate_limiter_throws_unexpected_error(self):
+        limiter = AsyncMock()
+        limiter.enabled = True
+        limiter.check_rate_limit = AsyncMock(side_effect=RuntimeError("redis down"))
+        request = _make_request()
+        request.app.state.rate_limiter = limiter
+        call_next = _make_call_next()
+
+        middleware = RateLimitMiddleware(app=MagicMock())
+        response = await middleware.dispatch(request, call_next)
+
+        assert response.status_code == 200
+        call_next.assert_called_once()
