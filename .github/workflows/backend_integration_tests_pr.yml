@@ -91,7 +91,7 @@ jobs:
         run: echo "tag=$(grep -m1 'ARG GENVM_TAG=' docker/Dockerfile.backend | cut -d= -f2)" >> "$GITHUB_OUTPUT"
 
       - name: Restore GenVM precompile cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/genvm-cache
           key: genvm-precompile-${{ steps.genvm.outputs.tag }}-amd64
