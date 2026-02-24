@@ -104,6 +104,40 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
     });
   }
 
+  async function cancelTransaction(txHash: `0x${string}`) {
+    const { useRpcClient } = await import('@/hooks/useRpcClient');
+    const rpcClient = useRpcClient();
+
+    const { useAccountsStore } = await import('@/stores/accounts');
+    const accountsStore = useAccountsStore();
+    const account = accountsStore.selectedAccount;
+    let signature: string | undefined;
+
+    if (account) {
+      const { keccak256, toBytes, concat, stringToBytes } =
+        await import('viem');
+      const { privateKeyToAccount } = await import('viem/accounts');
+
+      const messageHash = keccak256(
+        concat([stringToBytes('cancel_transaction'), toBytes(txHash)]),
+      );
+
+      if (account.type === 'local' && account.privateKey) {
+        const signer = privateKeyToAccount(account.privateKey as `0x${string}`);
+        signature = await signer.signMessage({
+          message: { raw: messageHash },
+        });
+      } else if (account.type === 'metamask' && window.ethereum) {
+        signature = await window.ethereum.request({
+          method: 'personal_sign',
+          params: [messageHash, account.address],
+        });
+      }
+    }
+
+    await rpcClient.cancelTransaction(txHash, signature);
+  }
+
   function subscribe(topics: string[]) {
     topics.forEach((topic) => {
       subscriptions.add(topic);
@@ -138,6 +172,7 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
     updateTransaction,
     clearTransactionsForContract,
     setTransactionAppeal,
+    cancelTransaction,
     refreshPendingTransactions,
     initSubscriptions,
     resetStorage,
