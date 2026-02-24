@@ -214,7 +214,7 @@ services:
 
   ollama:
     profiles: ["ollama"]
-    image: ollama/ollama:0.14.1
+    image: ollama/ollama:0.17.0
     ports:
       - 11434:11434
     volumes:
@@ -382,7 +382,7 @@ services:
 
   vector:
     profiles: ["monitoring"]  # Only run when monitoring is needed
-    image: timberio/vector:0.42.0-alpine
+    image: timberio/vector:0.53.0-alpine
     container_name: vector
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/etc/vector/gcp_credentials.json
