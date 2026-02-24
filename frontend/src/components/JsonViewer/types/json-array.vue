@@ -52,14 +52,14 @@ export default {
         this.$el.dispatchEvent(new Event('resized'));
       } catch (e) {
         // handle IE not supporting Event constructor
-        var evt = document.createEvent('Event');
+        const evt = document.createEvent('Event');
         evt.initEvent('resized', true, false);
         this.$el.dispatchEvent(evt);
       }
     },
   },
   render() {
-    let elements = [];
+    const elements = [];
 
     if (!this.previewMode && !this.keyName) {
       elements.push(

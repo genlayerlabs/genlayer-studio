@@ -1,8 +1,11 @@
 FROM ubuntu:24.04 AS base
 
 ARG TARGETPLATFORM
+ARG TARGETARCH
 
-ARG GENVM_TAG=v0.0.15
+ARG GENVM_TAG=v0.2.12
+
+ENV GENVM_TAG=$GENVM_TAG
 
 ARG path=/app
 WORKDIR $path
@@ -10,7 +13,8 @@ WORKDIR $path
 SHELL ["/bin/bash", "-x", "-c"]
 RUN apt-get update -y \
     && DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install -y --no-install-recommends \
-        curl unzip xz-utils ca-certificates python3.12 \
+        curl unzip xz-utils ca-certificates python3.12 python3.12-venv python3-dev gcc libssl3 \
+        musl musl-dev \
     && mkdir -p "$HOME/.config/pip/" \
     && printf "[global]\nbreak-system-packages = true\n" >> "$HOME/.config/pip/pip.conf" \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2 \
@@ -19,9 +23,9 @@ RUN apt-get update -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-ADD backend/protocol_rpc/requirements.txt backend/protocol_rpc/requirements.txt
+ADD backend/requirements.txt backend/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --cache-dir=/root/.cache/pip -r backend/protocol_rpc/requirements.txt
+    pip install --cache-dir=/root/.cache/pip -r backend/requirements.txt
 
 RUN groupadd -r backend-group \
     && useradd -r -g backend-group backend-user \
@@ -31,49 +35,65 @@ RUN groupadd -r backend-group \
     && mkdir -p /genvm
 
 ENV PYTHONPATH "${PYTHONPATH}:/${path}"
-ENV FLASK_APP backend/protocol_rpc/server.py
 ENV HUGGINGFACE_HUB_CACHE /home/backend-user/.cache/huggingface
 
 ENV RUST_BACKTRACE=1
 
+ADD \
+   https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-linux-amd64.tar.xz \
+   /genvm/genvm-linux-amd64.tar.xz
+
+ADD \
+   https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-linux-arm64.tar.xz \
+   /genvm/genvm-linux-arm64.tar.xz
+
+ADD \
+   https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-universal.tar.xz \
+   /genvm/genvm-universal.tar.xz
+
+# Extract and prepare GenVM binaries
 RUN cd /genvm \
     && if [[ "$TARGETPLATFORM" == "linux/amd64" ]] ; \
-       then \
-           EXECUTOR_URL="https://github.com/yeagerai/genvm/releases/download/$GENVM_TAG/genvm-linux-amd64.zip" ; \
-       elif [[ "$TARGETPLATFORM" == "linux/arm64" ]] ; \
-       then \
-           EXECUTOR_URL="https://github.com/yeagerai/genvm/releases/download/$GENVM_TAG/genvm-linux-arm64.zip" && \
-           DIR="$(pwd)" && \
-           mkdir -p /openssl && cd /openssl && \
-           curl -L --fail-with-body -H 'Accept: application/octet-stream' -o "openssl.tar.xz" "http://mirror.archlinuxarm.org/aarch64/core/openssl-1.0-1.0.2.u-1-aarch64.pkg.tar.xz" && \
-           tar -xf openssl.tar.xz && \
-           cp usr/lib/*.so* /usr/lib/ && \
-           cd "$DIR" || exit 1 ; \
-       else echo "Sorry, $TARGETPLATFORM is not supported yet" ; exit 1 ; \
-       fi \
-    && curl -L --fail-with-body -H 'Accept: application/octet-stream' -o executor.zip "$EXECUTOR_URL" \
-    && RUNNERS_URL="https://github.com/yeagerai/genvm/releases/download/$GENVM_TAG/genvm-runners.zip" \
-    && curl -L --fail-with-body -H 'Accept: application/octet-stream' -o runners.zip "$RUNNERS_URL" \
-    && unzip runners.zip && unzip executor.zip && rm runners.zip executor.zip \
+        then \
+            tar -xf genvm-linux-amd64.tar.xz ; \
+        elif [[ "$TARGETPLATFORM" == "linux/arm64" ]] ; \
+        then \
+            tar -xf genvm-linux-arm64.tar.xz ; \
+        else \
+            echo "Sorry, $TARGETPLATFORM is not supported yet" ; exit 1 ; \
+        fi \
+    && tar -xf genvm-universal.tar.xz \
+    && rm *.tar.xz \
     && ls -R . \
+    && chown -R backend-user:backend-group /genvm \
+    && su - backend-user -c "/genvm/bin/post-install.py --precompile false" \
+    && find /genvm -name genvm.yaml -exec sed -i 's|cache_dir:.*|cache_dir: /genvm-cache/|' {} + \
+    && mkdir -p /genvm-cache && chown backend-user:backend-group /genvm-cache \
     && cd "$path" \
     && true
 
-RUN su - backend-user -c '/genvm/bin/genvm precompile'
+# Set GenVM environment variables (GENVM_TAG is already set as ENV earlier)
+ENV GENVMROOT=/genvm
+ENV PATH="/genvm/bin:${PATH}"
 
-COPY ../.env .
 COPY backend $path/backend
+COPY asgi.py $path/asgi.py
+COPY uvicorn_config.py $path/uvicorn_config.py
+COPY docker/entrypoint-backend.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
-HEALTHCHECK --interval=1s --timeout=1s --retries=30 --start-period=3s CMD python3 backend/healthcheck.py --port ${FLASK_SERVER_PORT}
+HEALTHCHECK --interval=1s --timeout=1s --retries=30 --start-period=120s CMD python3 backend/healthcheck.py --port ${RPCPORT:-4000}
 
 ###########START NEW IMAGE : DEBUGGER ###################
 FROM base AS debug
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --cache-dir=/root/.cache/pip debugpy watchdog
+    pip install --cache-dir=/root/.cache/pip debugpy
 USER backend-user
-CMD watchmedo auto-restart --no-restart-on-command-exit --recursive --pattern="*.py" --ignore-patterns="*.pyc;*__pycache__*" -- python3 -m debugpy --listen 0.0.0.0:${RPCDEBUGPORT} -m flask run -h 0.0.0.0 -p ${FLASK_SERVER_PORT}
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["python3", "-m", "debugpy", "--listen", "0.0.0.0:${RPCDEBUGPORT}", "-m", "uvicorn", "asgi:application", "--host", "0.0.0.0", "--port", "${RPCPORT:-4000}", "--reload", "--reload-dir", "/app/backend"]
 
 ###########START NEW IMAGE: PRODUCTION ###################
 FROM base AS prod
 USER backend-user
-CMD flask run -h 0.0.0.0 -p ${FLASK_SERVER_PORT}
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["python3", "-m", "backend.protocol_rpc.run_server"]

@@ -45,14 +45,14 @@ export default {
         this.$el.dispatchEvent(new Event('resized'));
       } catch (e) {
         // handle IE not supporting Event constructor
-        var evt = document.createEvent('Event');
+        const evt = document.createEvent('Event');
         evt.initEvent('resized', true, false);
         this.$el.dispatchEvent(evt);
       }
     },
   },
   render() {
-    let elements = [];
+    const elements = [];
     let dataType;
     // We have to check if it's a complex type or not and assing a type
     // the dataType is used to know which component to render as a child

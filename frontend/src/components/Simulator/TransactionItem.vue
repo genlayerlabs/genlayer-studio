@@ -1,20 +1,24 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue';
+import { ref, computed } from 'vue';
 import type { TransactionItem } from '@/types';
 import TransactionStatusBadge from '@/components/Simulator/TransactionStatusBadge.vue';
 import { useTimeAgo } from '@vueuse/core';
 import ModalSection from '@/components/Simulator/ModalSection.vue';
 import JsonViewer from '@/components/JsonViewer/json-viewer.vue';
 import { useUIStore, useNodeStore, useTransactionsStore } from '@/stores';
-import { CheckCircleIcon, XCircleIcon } from '@heroicons/vue/16/solid';
+import {
+  CheckCircleIcon,
+  XCircleIcon,
+  EllipsisHorizontalCircleIcon,
+} from '@heroicons/vue/16/solid';
 import CopyTextButton from '../global/CopyTextButton.vue';
 import { FilterIcon, GavelIcon, UserPen, UserSearch } from 'lucide-vue-next';
-import { abi } from 'genlayer-js';
 import {
   resultToUserFriendlyJson,
   b64ToArray,
   calldataToUserFriendlyJson,
 } from '@/calldata/jsonifier';
+import { getRuntimeConfigNumber } from '@/utils/runtimeConfig';
 
 const uiStore = useUIStore();
 const nodeStore = useNodeStore();
@@ -26,7 +30,7 @@ const props = defineProps<{
 }>();
 
 const finalityWindowAppealFailedReduction = ref(
-  Number(import.meta.env.VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION),
+  getRuntimeConfigNumber('VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION', 0.2),
 );
 
 const isDetailsModalOpen = ref(false);
@@ -46,7 +50,29 @@ const dateText = computed(() => {
 });
 
 const leaderReceipt = computed(() => {
-  return props.transaction?.data?.consensus_data?.leader_receipt;
+  return props.transaction?.data?.consensus_data?.leader_receipt?.[0];
+});
+
+const eqOutputs = computed(() => {
+  const outputs = leaderReceipt.value?.eq_outputs || {};
+  return Object.entries(outputs).map(([key, value]: [string, unknown]) => {
+    const decodedResult = resultToUserFriendlyJson(value);
+    const parsedValue = decodedResult?.payload?.readable ?? value;
+    try {
+      if (typeof parsedValue === 'string') {
+        return {
+          key,
+          value: JSON.parse(parsedValue),
+        };
+      }
+    } catch (e) {
+      console.error('Error parsing JSON:', e);
+    }
+    return {
+      key,
+      value: parsedValue,
+    };
+  });
 });
 
 const shortHash = computed(() => {
@@ -60,22 +86,22 @@ const handleSetTransactionAppeal = async () => {
 const isAppealed = computed(() => props.transaction.data.appealed);
 
 function prettifyTxData(x: any): any {
-  const oldResult = x?.consensus_data?.leader_receipt?.result;
+  const oldResult = x?.consensus_data?.leader_receipt?.[0].result;
 
   if (oldResult) {
     try {
-      x.consensus_data.leader_receipt.result =
+      x.consensus_data.leader_receipt[0].result =
         resultToUserFriendlyJson(oldResult);
     } catch (e) {
       console.log(e);
     }
   }
 
-  const oldCalldata = x?.consensus_data?.leader_receipt?.calldata;
+  const oldCalldata = x?.consensus_data?.leader_receipt?.[0].calldata;
 
   if (oldCalldata) {
     try {
-      x.consensus_data.leader_receipt.calldata = {
+      x.consensus_data.leader_receipt[0].calldata = {
         base64: oldCalldata,
         ...calldataToUserFriendlyJson(b64ToArray(oldCalldata)),
       };
@@ -97,17 +123,14 @@ function prettifyTxData(x: any): any {
     }
   }
 
-  const oldEqOutputs = x?.consensus_data?.leader_receipt?.eq_outputs;
+  const oldEqOutputs = x?.consensus_data?.leader_receipt?.[0].eq_outputs;
   if (oldEqOutputs == undefined) {
     return x;
   }
   try {
-    const new_eq_outputs = Object.fromEntries(
+    const newEqOutputs = Object.fromEntries(
       Object.entries(oldEqOutputs).map(([k, v]) => {
-        const arrayBuffer = b64ToArray(String(v));
-        const val = resultToUserFriendlyJson(
-          new TextDecoder().decode(arrayBuffer),
-        );
+        const val = resultToUserFriendlyJson(v);
         return [k, val];
       }),
     );
@@ -115,10 +138,13 @@ function prettifyTxData(x: any): any {
       ...x,
       consensus_data: {
         ...x.consensus_data,
-        leader_receipt: {
-          ...x.consensus_data.leader_receipt,
-          eq_outputs: new_eq_outputs,
-        },
+        leader_receipt: [
+          {
+            ...x.consensus_data.leader_receipt[0],
+            eq_outputs: newEqOutputs,
+          },
+          x.consensus_data.leader_receipt[1],
+        ],
       },
     };
     return ret;
@@ -127,6 +153,23 @@ function prettifyTxData(x: any): any {
     return x;
   }
 }
+
+const badgeColorClass = computed(() => {
+  if (props.transaction.statusName !== 'FINALIZED') {
+    return '';
+  } else {
+    const executionResult =
+      props.transaction.data?.last_round?.result || leaderReceipt.value?.result;
+    if (
+      executionResult === 6 &&
+      leaderReceipt.value?.execution_result !== 'ERROR'
+    ) {
+      return '!bg-green-500';
+    } else {
+      return '!bg-red-500';
+    }
+  }
+});
 </script>
 
 <template>
@@ -143,7 +186,9 @@ function prettifyTxData(x: any): any {
       {{
         transaction.type === 'method'
           ? transaction.decodedData?.functionName
-          : 'Deploy'
+          : transaction.type === 'upgrade'
+            ? 'Upgrade'
+            : 'Deploy'
       }}
     </div>
 
@@ -169,9 +214,11 @@ function prettifyTxData(x: any): any {
       <Loader
         :size="15"
         v-if="
-          transaction.status !== 'FINALIZED' &&
-          transaction.status !== 'ACCEPTED' &&
-          transaction.status !== 'UNDETERMINED'
+          transaction.statusName !== 'FINALIZED' &&
+          transaction.statusName !== 'ACCEPTED' &&
+          transaction.statusName !== 'UNDETERMINED' &&
+          transaction.statusName !== 'LEADER_TIMEOUT' &&
+          transaction.statusName !== 'VALIDATORS_TIMEOUT'
         "
       />
 
@@ -179,8 +226,10 @@ function prettifyTxData(x: any): any {
         <Btn
           v-if="
             transaction.data.leader_only == false &&
-            (transaction.status == 'ACCEPTED' ||
-              transaction.status == 'UNDETERMINED') &&
+            (transaction.statusName == 'ACCEPTED' ||
+              transaction.statusName == 'UNDETERMINED' ||
+              transaction.statusName == 'LEADER_TIMEOUT' ||
+              transaction.statusName == 'VALIDATORS_TIMEOUT') &&
             Date.now() / 1000 -
               transaction.data.timestamp_awaiting_finalization -
               transaction.data.appeal_processing_time <=
@@ -203,12 +252,9 @@ function prettifyTxData(x: any): any {
       </div>
 
       <TransactionStatusBadge
-        :class="[
-          'px-[4px] py-[1px] text-[9px]',
-          transaction.status === 'FINALIZED' ? '!bg-green-500' : '',
-        ]"
+        :class="['px-[4px] py-[1px] text-[9px]', badgeColorClass]"
       >
-        {{ transaction.status }}
+        {{ transaction.statusName }}
       </TransactionStatusBadge>
     </div>
 
@@ -221,7 +267,9 @@ function prettifyTxData(x: any): any {
               {{
                 transaction.type === 'method'
                   ? 'Method Call'
-                  : 'Contract Deployment'
+                  : transaction.type === 'upgrade'
+                    ? 'Code Upgrade'
+                    : 'Contract Deployment'
               }}
             </span>
           </div>
@@ -242,83 +290,80 @@ function prettifyTxData(x: any): any {
       </template>
 
       <div class="flex flex-col gap-4">
-        <div class="mt-2 flex flex-col">
-          <p
-            class="text-md mb-1 flex flex-row items-center gap-2 font-semibold"
-          >
-            Status:
-            <Loader
-              :size="15"
-              v-if="
-                transaction.status !== 'FINALIZED' &&
-                transaction.status !== 'ACCEPTED' &&
-                transaction.status !== 'UNDETERMINED'
-              "
-            />
-            <TransactionStatusBadge
-              :class="[
-                'px-[4px] py-[1px] text-[9px]',
-                transaction.status === 'FINALIZED' ? '!bg-green-500' : '',
-              ]"
-            >
-              {{ transaction.status }}
-            </TransactionStatusBadge>
-          </p>
-        </div>
+        <ModalSection>
+          <template #title>Execution</template>
 
-        <ModalSection v-if="transaction.data.data">
+          <div class="flex flex-row gap-2 text-sm">
+            <div class="flex items-center gap-2">
+              <span class="font-medium">Status:</span>
+              <Loader
+                :size="15"
+                v-if="
+                  transaction.statusName !== 'FINALIZED' &&
+                  transaction.statusName !== 'ACCEPTED' &&
+                  transaction.statusName !== 'UNDETERMINED' &&
+                  transaction.statusName !== 'LEADER_TIMEOUT' &&
+                  transaction.statusName !== 'VALIDATORS_TIMEOUT'
+                "
+              />
+              <TransactionStatusBadge
+                :class="['px-[4px] py-[1px] text-[9px]', badgeColorClass]"
+              >
+                {{ transaction.statusName }}
+              </TransactionStatusBadge>
+            </div>
+
+            <div v-if="leaderReceipt" class="flex items-center gap-2">
+              <span class="font-medium">Result:</span>
+              <TransactionStatusBadge
+                :class="
+                  leaderReceipt.execution_result === 'ERROR'
+                    ? '!bg-red-500'
+                    : '!bg-green-500'
+                "
+              >
+                {{ leaderReceipt.execution_result }}
+              </TransactionStatusBadge>
+            </div>
+          </div>
+        </ModalSection>
+
+        <ModalSection v-if="transaction.data.data?.calldata">
           <template #title>Input</template>
 
           <pre
             v-if="transaction.data.data.calldata.readable"
-            class="overflow-hidden rounded bg-gray-200 p-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
+            class="overflow-x-auto whitespace-pre rounded bg-gray-200 p-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
             >{{ transaction.data.data.calldata.readable }}</pre
           >
           <pre
             v-if="!transaction.data.data.calldata.readable"
-            class="overflow-hidden rounded bg-gray-200 p-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
+            class="overflow-x-auto whitespace-pre rounded bg-gray-200 p-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
             >{{ transaction.data.data.calldata.base64 }}</pre
           >
         </ModalSection>
 
-        <ModalSection v-if="leaderReceipt">
-          <template #title>
-            Execution
-            <TransactionStatusBadge
-              :class="
-                leaderReceipt.execution_result === 'ERROR'
-                  ? '!bg-red-500'
-                  : '!bg-green-500'
-              "
+        <ModalSection v-if="transaction.data.data?.calldata">
+          <template #title>Output</template>
+          <div>
+            <pre
+              class="overflow-x-auto whitespace-pre rounded bg-gray-200 p-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
+              >{{ leaderReceipt?.result?.payload?.readable || 'None' }}</pre
             >
-              {{ leaderReceipt.execution_result }}
-            </TransactionStatusBadge>
-          </template>
+          </div>
+        </ModalSection>
 
-          <span class="text-sm font-semibold">Leader:</span>
-
-          <div class="flex flex-row items-start gap-4 text-xs">
-            <div>
-              <div>
-                <span class="font-medium">Gas used:</span>
-                {{ leaderReceipt.gas_used }}
+        <ModalSection v-if="eqOutputs.length > 0">
+          <template #title>Equivalence Principles Output</template>
+          <div class="flex flex-col gap-2">
+            <div v-for="(output, index) in eqOutputs" :key="index">
+              <div class="mb-1 text-xs font-medium">
+                Equivalence Principle #{{ output.key }}:
               </div>
-              <div>
-                <span class="font-medium"
-                  >Stake: {{ leaderReceipt.node_config.stake }}</span
-                >
-              </div>
-            </div>
-
-            <div>
-              <div>
-                <span class="font-medium">Model:</span>
-                {{ leaderReceipt.node_config.model }}
-              </div>
-              <div>
-                <span class="font-medium">Provider:</span>
-                {{ leaderReceipt.node_config.provider }}
-              </div>
+              <pre
+                class="overflow-x-auto whitespace-pre rounded bg-gray-200 p-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
+                >{{ output.value }}</pre
+              >
             </div>
           </div>
         </ModalSection>
@@ -340,7 +385,10 @@ function prettifyTxData(x: any): any {
           >
             <div class="mb-2 flex flex-col gap-1">
               <span class="font-medium italic">
-                {{ history?.consensus_round || `Consensus Round ${index + 1}` }}
+                {{
+                  history?.consensus_round ||
+                  `Consensus Round ${Number(index) + 1}`
+                }}
               </span>
               <div
                 class="flex items-center gap-2 text-[10px] text-gray-600 dark:text-gray-400"
@@ -351,49 +399,114 @@ function prettifyTxData(x: any): any {
                 >
                   <span>{{ status }}</span>
                   <span
-                    v-if="sIndex < history.status_changes.length - 1"
+                    v-if="Number(sIndex) < history.status_changes.length - 1"
                     class="text-gray-400"
                     >→</span
                   >
                 </template>
               </div>
             </div>
+          </div>
+        </ModalSection>
+        <ModalSection
+          v-if="transaction.data.consensus_history?.consensus_results?.length"
+        >
+          <template #title>Validator Set</template>
 
-            <div
-              class="divide-y overflow-hidden rounded border dark:border-gray-600"
+          <div
+            class="divide-y overflow-hidden rounded border dark:border-gray-600"
+          >
+            <template
+              v-for="(history, index) in transaction.data.consensus_history
+                .consensus_results || []"
+              :key="index"
             >
+              <!-- Leader row -->
               <div
                 v-if="history?.leader_result"
                 class="flex flex-row items-center justify-between p-2 text-xs dark:border-gray-600"
               >
-                <div class="flex items-center gap-1">
-                  <UserPen class="h-4 w-4" />
-                  <span class="font-mono text-xs">{{
-                    history.leader_result.node_config.address
-                  }}</span>
+                <div class="flex flex-col gap-0.5">
+                  <div class="flex items-center gap-1">
+                    <UserPen class="h-4 w-4" />
+                    <span class="font-mono text-xs">{{
+                      history.leader_result[0].node_config.address
+                    }}</span>
+                  </div>
+                  <div
+                    v-if="history.leader_result[0].node_config.primary_model"
+                    class="ml-5 text-[10px] text-gray-500 dark:text-gray-400"
+                  >
+                    {{
+                      history.leader_result[0].node_config.primary_model
+                        .provider
+                    }}
+                    /
+                    {{
+                      history.leader_result[0].node_config.primary_model.model
+                    }}
+                  </div>
                 </div>
                 <div class="flex flex-row items-center gap-1 capitalize">
-                  <template v-if="history.leader_result.vote === 'agree'">
+                  <!-- LEADER_ONLY mode: single receipt means successful execution, not timeout -->
+                  <template
+                    v-if="
+                      history.leader_result.length === 1 &&
+                      transaction.data.execution_mode === 'LEADER_ONLY'
+                    "
+                  >
                     <CheckCircleIcon class="h-4 w-4 text-green-500" />
-                    Agree
+                    Leader Only
                   </template>
-                  <template v-if="history.leader_result.vote === 'disagree'">
-                    <XCircleIcon class="h-4 w-4 text-red-500" />
-                    Disagree
+                  <template v-else-if="history.leader_result.length === 1">
+                    <EllipsisHorizontalCircleIcon
+                      class="h-4 w-4 text-yellow-500"
+                    />
+                    Timeout
+                  </template>
+                  <template v-else>
+                    <template v-if="history.leader_result[1].vote === 'agree'">
+                      <CheckCircleIcon class="h-4 w-4 text-green-500" />
+                      Agree
+                    </template>
+                    <template
+                      v-if="history.leader_result[1].vote === 'disagree'"
+                    >
+                      <XCircleIcon class="h-4 w-4 text-red-500" />
+                      Disagree
+                    </template>
+                    <template
+                      v-if="history.leader_result[1].vote === 'timeout'"
+                    >
+                      <EllipsisHorizontalCircleIcon
+                        class="h-4 w-4 text-yellow-500"
+                      />
+                      Timeout
+                    </template>
                   </template>
                 </div>
               </div>
 
+              <!-- Validator rows -->
               <div
-                v-for="(validator, vIndex) in history?.validator_results || []"
-                :key="vIndex"
+                v-for="(validator, vIndex) in history.validator_results || []"
+                :key="`${index}-${vIndex}`"
                 class="flex flex-row items-center justify-between p-2 text-xs dark:border-gray-600"
               >
-                <div class="flex items-center gap-1">
-                  <UserSearch class="h-4 w-4" />
-                  <span class="font-mono text-xs">{{
-                    validator.node_config.address
-                  }}</span>
+                <div class="flex flex-col gap-0.5">
+                  <div class="flex items-center gap-1">
+                    <UserSearch class="h-4 w-4" />
+                    <span class="font-mono text-xs">{{
+                      validator.node_config.address
+                    }}</span>
+                  </div>
+                  <div
+                    v-if="validator.node_config.primary_model"
+                    class="ml-5 text-[10px] text-gray-500 dark:text-gray-400"
+                  >
+                    {{ validator.node_config.primary_model.provider }} /
+                    {{ validator.node_config.primary_model.model }}
+                  </div>
                 </div>
                 <div class="flex flex-row items-center gap-1 capitalize">
                   <template v-if="validator.vote === 'agree'">
@@ -404,9 +517,15 @@ function prettifyTxData(x: any): any {
                     <XCircleIcon class="h-4 w-4 text-red-500" />
                     Disagree
                   </template>
+                  <template v-if="validator.vote === 'timeout'">
+                    <EllipsisHorizontalCircleIcon
+                      class="h-4 w-4 text-yellow-500"
+                    />
+                    Timeout
+                  </template>
                 </div>
               </div>
-            </div>
+            </template>
           </div>
         </ModalSection>
 
@@ -414,7 +533,7 @@ function prettifyTxData(x: any): any {
           <template #title>Equivalence Principle Output</template>
 
           <pre
-            class="overflow-x-auto rounded bg-gray-200 p-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
+            class="overflow-x-auto whitespace-pre rounded bg-gray-200 p-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
             >{{ leaderReceipt?.eq_outputs?.leader }}</pre
           >
         </ModalSection>

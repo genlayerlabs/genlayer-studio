@@ -58,7 +58,7 @@ const isSupported = computed(() => {
 });
 
 const tooltip = computed(() => {
-  let text = [];
+  const text = [];
   if (props.property.$comment) {
     text.push(props.property.$comment);
   }

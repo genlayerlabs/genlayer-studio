@@ -1,7 +1,29 @@
 import { abi } from 'genlayer-js';
 
-export function b64ToArray(b64: string): Uint8Array {
-  return Uint8Array.from(atob(b64 as string), (c) => c.charCodeAt(0));
+function normalizeBase64(input: string): string | null {
+  let s = input.trim().replace(/[\r\n\s]/g, '');
+  if (s.length === 0) return null;
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  const mod = s.length % 4;
+  if (mod === 1) return null;
+  if (mod === 2) s += '==';
+  if (mod === 3) s += '=';
+  return s;
+}
+
+export function b64ToArray(b64: unknown): Uint8Array {
+  if (b64 instanceof Uint8Array) return b64;
+  if (typeof b64 !== 'string') return new Uint8Array();
+  const normalized = normalizeBase64(b64);
+  if (!normalized) return new Uint8Array();
+  try {
+    const binary = decodeBase64(normalized);
+    const out = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+    return out;
+  } catch {
+    return new Uint8Array();
+  }
 }
 
 export function calldataToUserFriendlyJson(cd: Uint8Array): any {
@@ -20,27 +42,92 @@ const RESULT_CODES = new Map([
   [5, 'no_leaders'],
 ]);
 
-export function resultToUserFriendlyJson(cd64: string): any {
-  const raw = b64ToArray(cd64);
+function arrayToB64(bytes: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++)
+    binary += String.fromCharCode(bytes[i]!);
+  // btoa throws on non-Latin1; bytes are arbitrary here but safe for btoa
+  return encodeBase64(binary);
+}
 
-  const code = RESULT_CODES.get(raw[0]);
-  let status: string;
-  let payload: string | null = null;
+type ResultLike = {
+  raw: unknown;
+  status: string;
+  payload?: unknown;
+};
 
-  if (code === undefined) {
-    status = '<unknown>';
+function looksLikeResultLike(x: unknown): x is ResultLike {
+  return (
+    typeof x === 'object' &&
+    x !== null &&
+    'raw' in (x as any) &&
+    'status' in (x as any)
+  );
+}
+
+export function resultToUserFriendlyJson(input: unknown): any {
+  if (looksLikeResultLike(input)) return input;
+
+  let bytes: Uint8Array;
+  let rawB64: string | null = null;
+
+  if (input instanceof Uint8Array) {
+    bytes = input;
+    rawB64 = arrayToB64(bytes);
+  } else if (typeof input === 'string') {
+    // If it looks like JSON, try parse and return if already formatted
+    const trimmed = input.trim();
+    if (
+      (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+      (trimmed.startsWith('[') && trimmed.endsWith(']'))
+    ) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (looksLikeResultLike(parsed)) return parsed;
+      } catch {
+        // fall through to treat as base64
+      }
+    }
+    rawB64 = normalizeBase64(input);
+    bytes = b64ToArray(input);
   } else {
-    status = code;
-    if ([1, 2].includes(raw[0])) {
-      payload = new TextDecoder('utf-8').decode(raw.slice(1));
-    } else if (raw[0] == 0) {
-      payload = calldataToUserFriendlyJson(raw.slice(1));
+    return { raw: input, status: '<unknown>', payload: null };
+  }
+
+  const codeByte = bytes[0]!;
+  const code = RESULT_CODES.get(codeByte);
+  const status: string = code ?? '<unknown>';
+  let payload: any = null;
+
+  if (code !== undefined) {
+    if (codeByte === 1 || codeByte === 2) {
+      const text = new TextDecoder('utf-8').decode(bytes.slice(1));
+      payload = text;
+    } else if (codeByte === 0) {
+      payload = calldataToUserFriendlyJson(bytes.slice(1));
     }
   }
 
   return {
-    raw: cd64,
+    raw: rawB64 ?? input,
     status,
     payload,
   };
+}
+
+function decodeBase64(s: string): string {
+  const globalObject = globalThis as { atob?: (value: string) => string };
+  if (typeof globalObject?.atob === 'function') return globalObject.atob(s);
+  if (typeof Buffer !== 'undefined')
+    return Buffer.from(s, 'base64').toString('binary');
+  throw new Error('No base64 decoder available in this environment');
+}
+
+function encodeBase64(binary: string): string {
+  const globalObject = globalThis as { btoa?: (value: string) => string };
+  if (typeof globalObject?.btoa === 'function')
+    return globalObject.btoa(binary);
+  if (typeof Buffer !== 'undefined')
+    return Buffer.from(binary, 'binary').toString('base64');
+  throw new Error('No base64 encoder available in this environment');
 }

@@ -1,4 +1,3 @@
-/* eslint-disable no-useless-escape */
 import * as monaco from 'monaco-editor/esm/vs/editor/editor.api';
 
 const pythonSyntax: monaco.languages.IMonarchLanguage = {

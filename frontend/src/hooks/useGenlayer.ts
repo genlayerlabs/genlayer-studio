@@ -1,17 +1,18 @@
-import { simulator } from 'genlayer-js/chains';
+import { localnet } from 'genlayer-js/chains';
 import { createClient, createAccount } from 'genlayer-js';
 import type { GenLayerClient } from 'genlayer-js/types';
 import { ref, watch, type Ref } from 'vue';
 import { useAccountsStore } from '@/stores';
+import { getRuntimeConfig } from '@/utils/runtimeConfig';
 
 type UseGenlayerReturn = {
-  client: Ref<GenLayerClient<typeof simulator> | null>;
+  client: Ref<GenLayerClient<typeof localnet> | null>;
   initClient: () => void;
 };
 
 export function useGenlayer(): UseGenlayerReturn {
   const accountsStore = useAccountsStore();
-  const client = ref<GenLayerClient<typeof simulator> | null>(null);
+  const client = ref<GenLayerClient<typeof localnet> | null>(null);
 
   if (!client.value) {
     initClient();
@@ -28,8 +29,11 @@ export function useGenlayer(): UseGenlayerReturn {
         : accountsStore.selectedAccount?.address;
 
     client.value = createClient({
-      chain: simulator,
-      endpoint: import.meta.env.VITE_JSON_RPC_SERVER_URL,
+      chain: localnet,
+      endpoint: getRuntimeConfig(
+        'VITE_JSON_RPC_SERVER_URL',
+        'http://127.0.0.1:4000/api',
+      ),
       account: clientAccount,
     });
   }

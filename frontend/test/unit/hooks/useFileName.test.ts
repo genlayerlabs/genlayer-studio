@@ -4,28 +4,28 @@ import { useFileName } from '@/hooks';
 describe('useFileName composable', () => {
   const { cleanupFileName } = useFileName();
 
-  it('should return the original name with ".gpy" when there is no period in the name', () => {
+  it('should return the original name with ".py" when there is no period in the name', () => {
     const result = cleanupFileName('example');
-    expect(result).toBe('example.gpy');
+    expect(result).toBe('example.py');
   });
 
-  it('should replace the extension with ".gpy" if there is a period in the name', () => {
+  it('should replace the extension with ".py" if there is a period in the name', () => {
     const result = cleanupFileName('document.txt');
-    expect(result).toBe('document.gpy');
+    expect(result).toBe('document.py');
   });
 
-  it('should return ".gpy" if the name is just a period', () => {
+  it('should return ".py" if the name is just a period', () => {
     const result = cleanupFileName('.');
-    expect(result).toBe('.gpy');
+    expect(result).toBe('.py');
   });
 
   it('should handle names with multiple periods correctly', () => {
     const result = cleanupFileName('archive.tar.gz');
-    expect(result).toBe('archive.gpy');
+    expect(result).toBe('archive.py');
   });
 
-  it('should return ".gpy" for an empty string', () => {
+  it('should return ".py" for an empty string', () => {
     const result = cleanupFileName('');
-    expect(result).toBe('.gpy');
+    expect(result).toBe('.py');
   });
 });

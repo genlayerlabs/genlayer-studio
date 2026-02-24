@@ -28,6 +28,11 @@ class EndpointResult:
 
 
 @dataclass
+class DecodedsubmitAppealDataArgs:
+    tx_id: str
+
+
+@dataclass
 class DecodedRollupTransactionDataArgs:
     sender: str
     recipient: str
@@ -46,7 +51,7 @@ class DecodedRollupTransactionData:
 class DecodedRollupTransaction:
     from_address: str
     to_address: str
-    data: DecodedRollupTransactionData
+    data: DecodedRollupTransactionData | DecodedsubmitAppealDataArgs
     type: str
     nonce: int
     value: int
@@ -61,6 +66,9 @@ class DecodedMethodCallData:
 class DecodedMethodSendData:
     calldata: bytes
     leader_only: bool = False
+    execution_mode: str = (
+        "NORMAL"  # "NORMAL", "LEADER_ONLY", or "LEADER_SELF_VALIDATOR"
+    )
 
 
 @dataclass
@@ -68,6 +76,9 @@ class DecodedDeploymentData:
     contract_code: bytes
     calldata: bytes
     leader_only: bool = False
+    execution_mode: str = (
+        "NORMAL"  # "NORMAL", "LEADER_ONLY", or "LEADER_SELF_VALIDATOR"
+    )
 
 
 @dataclass
@@ -75,6 +86,9 @@ class DecodedGenlayerTransactionData:
     contract_code: str
     calldata: str
     leader_only: bool = False
+    execution_mode: str = (
+        "NORMAL"  # "NORMAL", "LEADER_ONLY", or "LEADER_SELF_VALIDATOR"
+    )
 
 
 @dataclass
@@ -83,3 +97,5 @@ class DecodedGenlayerTransaction:
     to_address: str
     data: DecodedGenlayerTransactionData
     type: TransactionType
+    max_rotations: int
+    num_of_initial_validators: int

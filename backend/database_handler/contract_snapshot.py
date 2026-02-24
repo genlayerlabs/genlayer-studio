@@ -1,29 +1,29 @@
 # database_handler/contract_snapshot.py
 from .models import CurrentState
+from .errors import ContractNotFoundError
 from sqlalchemy.orm import Session
-from typing import Optional
+from typing import Optional, Dict
+import base64
+import json
 
 
 class ContractSnapshot:
     """
     Warning: if you initialize this class with a contract_address:
     - The contract_address must exist in the database.
-    - `self.contract_data`, `self.contract_code` and `self.encoded_state` will be loaded from the database **only once** at initialization.
+    - `self.contract_data`, `self.contract_code` and `self.states` will be loaded from the database **only once** at initialization.
     """
 
     contract_address: str
     contract_code: str
-    encoded_state: dict[str, str]
     balance: int
-    states: dict[str, dict[str, str]]
+    states: Dict[str, Dict[str, str]]
 
     def __init__(self, contract_address: str | None, session: Session):
-        self.session = session
-
         if contract_address is not None:
             self.contract_address = contract_address
 
-            contract_account = self._load_contract_account()
+            contract_account = self._load_contract_account(session)
             self.contract_data = contract_account.data
             self.contract_code = self.contract_data["code"]
             self.balance = contract_account.balance
@@ -35,7 +35,6 @@ class ContractSnapshot:
             else:
                 # Convert old state format
                 self.states = {"accepted": self.contract_data["state"], "finalized": {}}
-            self.encoded_state = self.states["accepted"]
 
     def to_dict(self):
         return {
@@ -43,7 +42,6 @@ class ContractSnapshot:
                 self.contract_address if self.contract_address else None
             ),
             "contract_code": self.contract_code if self.contract_code else None,
-            "encoded_state": self.encoded_state if self.encoded_state else {},
             "states": self.states if self.states else {"accepted": {}, "finalized": {}},
         }
 
@@ -51,24 +49,57 @@ class ContractSnapshot:
     def from_dict(cls, input: dict | None) -> Optional["ContractSnapshot"]:
         if input:
             instance = cls.__new__(cls)
-            instance.session = None
             instance.contract_address = input.get("contract_address", None)
             instance.contract_code = input.get("contract_code", None)
-            instance.encoded_state = input.get("encoded_state", {})
             instance.states = input.get("states", {"accepted": {}, "finalized": {}})
             return instance
         else:
             return None
 
-    def _load_contract_account(self) -> CurrentState:
+    def _load_contract_account(self, session: Session) -> CurrentState:
         """Load and return the current state of the contract from the database."""
         result = (
-            self.session.query(CurrentState)
+            session.query(CurrentState)
             .filter(CurrentState.id == self.contract_address)
+            .populate_existing()  # Force refresh from database even if cached
             .one_or_none()
         )
 
         if result is None:
-            raise Exception(f"Contract {self.contract_address} not found")
+            raise ContractNotFoundError(self.contract_address)
+
+        # Handle legacy JSON string data and validate deployment
+        if isinstance(result.data, str):
+            result.data = json.loads(result.data)
+
+        if not result.data:
+            raise ContractNotFoundError(
+                self.contract_address, f"Contract {self.contract_address} not deployed"
+            )
 
         return result
+
+    def extract_deployed_code_b64(self) -> Optional[str]:
+        """Extract the deployed contract code as base64 from this instance's state.
+
+        This reads the code slot key, fetches the stored blob, validates and
+        slices out the code payload, and returns it base64-encoded. Returns None
+        if missing/invalid.
+        """
+        # Import here to avoid circular dependencies at module import time
+        from backend.node.genvm import get_code_slot
+
+        accepted = self.states.get("accepted") or {}
+
+        try:
+            code_slot_b64 = base64.b64encode(get_code_slot()).decode("ascii")
+            stored = accepted.get(code_slot_b64)
+            if not stored:
+                return None
+
+            raw = base64.b64decode(stored, validate=True)
+            code_len = int.from_bytes(raw[0:4], byteorder="little", signed=False)
+            code_bytes = raw[4 : 4 + code_len]
+            return base64.b64encode(code_bytes).decode("ascii")
+        except Exception:
+            return None

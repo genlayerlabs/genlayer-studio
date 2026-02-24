@@ -14,7 +14,10 @@ import type {
   Address,
   TransactionHash,
   CalldataEncodable,
+  TransactionHashVariant,
 } from 'genlayer-js/types';
+import { TransactionStatus } from 'genlayer-js/types';
+import type { ExecutionMode } from '@/types';
 
 const schema = ref<any>();
 
@@ -75,20 +78,9 @@ export function useContractQueries() {
       schema.value = result;
       return schema.value;
     } catch (error: any) {
-      const errorMessage = extractErrorMessage(error);
-      throw new Error(errorMessage);
+      throw new Error(error.details);
     }
   }
-
-  const extractErrorMessage = (error: any) => {
-    try {
-      const details = JSON.parse(error.details);
-      const message = details.data.error.args[1].stderr;
-      return message;
-    } catch (err) {
-      return error.details;
-    }
-  };
 
   const isDeploying = ref(false);
 
@@ -97,9 +89,14 @@ export function useContractQueries() {
       args: CalldataEncodable[];
       kwargs: { [key: string]: CalldataEncodable };
     },
-    leaderOnly: boolean,
+    executionMode: ExecutionMode,
+    consensusMaxRotations: number,
   ) {
     isDeploying.value = true;
+
+    // Map executionMode to leaderOnly for backward compatibility with genlayer-js SDK
+    // TODO: Update genlayer-js SDK to support executionMode directly
+    const leaderOnly = executionMode !== 'NORMAL';
 
     try {
       if (!contract.value || !accountsStore.selectedAccount) {
@@ -113,6 +110,7 @@ export function useContractQueries() {
         code: code_bytes as any as string, // FIXME: code should accept both bytes and string in genlayer-js
         args: args.args,
         leaderOnly,
+        consensusMaxRotations,
       });
 
       const tx: TransactionItem = {
@@ -120,7 +118,7 @@ export function useContractQueries() {
         localContractId: contract.value?.id ?? '',
         hash: result as TransactionHash,
         type: 'deploy',
-        status: 'PENDING',
+        statusName: TransactionStatus.PENDING,
         data: {},
       };
 
@@ -172,7 +170,7 @@ export function useContractQueries() {
     }
 
     const result = await genlayerClient.value?.getContractSchema(
-      deployedContract.value?.address ?? '',
+      deployedContract.value?.address ?? '0x0',
     );
 
     return result;
@@ -184,12 +182,14 @@ export function useContractQueries() {
       args: CalldataEncodable[];
       kwargs: { [key: string]: CalldataEncodable };
     },
+    transactionHashVariant: TransactionHashVariant,
   ) {
     try {
       const result = await genlayerClient.value?.readContract({
         address: address.value as Address,
         functionName: method,
         args: args.args,
+        transactionHashVariant,
       });
 
       return result;
@@ -202,15 +202,20 @@ export function useContractQueries() {
   async function callWriteMethod({
     method,
     args,
-    leaderOnly,
+    executionMode,
+    consensusMaxRotations,
   }: {
     method: string;
     args: {
       args: CalldataEncodable[];
       kwargs: { [key: string]: CalldataEncodable };
     };
-    leaderOnly: boolean;
+    executionMode: ExecutionMode;
+    consensusMaxRotations?: number;
   }) {
+    // Map executionMode to leaderOnly for backward compatibility with genlayer-js SDK
+    const leaderOnly = executionMode !== 'NORMAL';
+
     try {
       if (!accountsStore.selectedAccount) {
         throw new Error('Error writing to contract');
@@ -222,14 +227,15 @@ export function useContractQueries() {
         args: args.args,
         value: BigInt(0),
         leaderOnly,
+        consensusMaxRotations,
       });
 
       transactionsStore.addTransaction({
         contractAddress: address.value || '',
         localContractId: contract.value?.id || '',
-        hash: result,
+        hash: result as TransactionHash,
         type: 'method',
-        status: 'PENDING',
+        statusName: TransactionStatus.PENDING,
         data: {},
         decodedData: {
           functionName: method,
@@ -240,6 +246,166 @@ export function useContractQueries() {
     } catch (error) {
       console.error(error);
       throw new Error('Error writing to contract');
+    }
+  }
+
+  async function simulateWriteMethod({
+    method,
+    args,
+  }: {
+    method: string;
+    args: {
+      args: CalldataEncodable[];
+      kwargs: { [key: string]: CalldataEncodable };
+    };
+  }) {
+    try {
+      const result = await genlayerClient.value?.simulateWriteContract({
+        address: address.value as Address,
+        functionName: method,
+        args: args.args,
+      });
+
+      return result;
+    } catch (error) {
+      console.error(error);
+      throw new Error('Error simulating write method');
+    }
+  }
+
+  async function fetchContractCode(contractAddress: string): Promise<string> {
+    try {
+      if (!genlayerClient.value) {
+        throw new Error('Genlayer client not initialized');
+      }
+
+      const code = await genlayerClient.value.getContractCode(
+        contractAddress as Address,
+      );
+
+      if (!code || !code.trim()) {
+        throw new Error('Contract code not found');
+      }
+
+      return code;
+    } catch (error) {
+      console.error('Error fetching contract code:', error);
+      throw error;
+    }
+  }
+
+  const isUpgrading = ref(false);
+
+  async function upgradeContract() {
+    if (!contract.value || !deployedContract.value) {
+      notify({
+        type: 'error',
+        title: 'Cannot upgrade: contract not deployed',
+      });
+      return;
+    }
+
+    const contractCode = contract.value.content;
+    const contractAddress = deployedContract.value.address;
+
+    if (!contractCode) {
+      notify({
+        type: 'error',
+        title: 'No contract code to upgrade',
+      });
+      return;
+    }
+
+    isUpgrading.value = true;
+
+    try {
+      // Sign the upgrade request
+      // Message: keccak256(contract_address + nonce_bytes32 + keccak256(new_code))
+      // Including nonce prevents replay attacks (nonce increments after each tx)
+      const { keccak256, toBytes, concat, toHex, stringToBytes, pad } =
+        await import('viem');
+      const { privateKeyToAccount } = await import('viem/accounts');
+
+      // Fetch contract nonce to include in signature
+      const { useRpcClient } = await import('@/hooks/useRpcClient');
+      const rpcClient = useRpcClient();
+      const nonce = await rpcClient.getContractNonce(contractAddress);
+
+      const account = accountsStore.selectedAccount;
+      let signature: string | undefined;
+
+      if (account) {
+        // Create message hash matching backend
+        // nonce as 32-byte big-endian
+        const nonceBytes = pad(toHex(nonce), { size: 32 });
+        const newCodeHash = keccak256(stringToBytes(contractCode));
+        const messageHash = keccak256(
+          concat([
+            toBytes(contractAddress as `0x${string}`),
+            toBytes(nonceBytes),
+            toBytes(newCodeHash),
+          ]),
+        );
+
+        if (account.type === 'local' && account.privateKey) {
+          // Local account - sign directly with private key
+          const signer = privateKeyToAccount(
+            account.privateKey as `0x${string}`,
+          );
+          signature = await signer.signMessage({
+            message: { raw: messageHash },
+          });
+        } else if (account.type === 'metamask' && window.ethereum) {
+          // MetaMask - request signature
+          signature = await window.ethereum.request({
+            method: 'personal_sign',
+            params: [toHex(messageHash), account.address],
+          });
+        } else {
+          console.warn(
+            `Unsupported account type '${account.type}' for signing - upgrade will proceed without signature`,
+          );
+        }
+      }
+
+      // Use JsonRpcService to call the upgrade endpoint (rpcClient already initialized above)
+      const result = await rpcClient.upgradeContractCode(
+        contractAddress,
+        contractCode,
+        signature,
+      );
+
+      // Add to transaction store
+      const tx: TransactionItem = {
+        hash: result.transaction_hash as TransactionHash,
+        type: 'upgrade',
+        statusName: TransactionStatus.PENDING,
+        contractAddress: contractAddress,
+        localContractId: contract.value?.id ?? '',
+        data: { new_code: contractCode },
+      };
+      transactionsStore.addTransaction(tx);
+
+      notify({
+        title: 'Upgrade queued',
+        type: 'success',
+      });
+
+      trackEvent('upgraded_contract', {
+        contract_name: contract.value?.name || '',
+      });
+
+      return result.transaction_hash;
+    } catch (error: any) {
+      notify({
+        type: 'error',
+        title: 'Error upgrading contract',
+        text: error.message,
+      });
+      console.error('Error upgrading contract', error);
+      throw error;
+    } finally {
+      isUpgrading.value = false;
     }
   }
 
@@ -254,6 +420,10 @@ export function useContractQueries() {
     deployContract,
     callReadMethod,
     callWriteMethod,
+    simulateWriteMethod,
+    fetchContractCode,
+    upgradeContract,
+    isUpgrading,
 
     mockContractSchema,
     isMock,

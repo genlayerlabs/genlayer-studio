@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GenLayer Studio API Test Report</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .header {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #2d3748;
+            margin-bottom: 10px;
+        }
+        .timestamp {
+            color: #718096;
+            font-size: 14px;
+        }
+        .summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 36px;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        .stat-label {
+            color: #718096;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .total { color: #4299e1; }
+        .passed { color: #48bb78; }
+        .failed { color: #f56565; }
+        .rate { color: #805ad5; }
+        .results-section {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+        h2 {
+            color: #2d3748;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #e2e8f0;
+        }
+        .category-section {
+            margin-bottom: 30px;
+        }
+        h3 {
+            color: #4a5568;
+            margin-bottom: 15px;
+            font-size: 18px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th {
+            background: #f7fafc;
+            color: #2d3748;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+            border-bottom: 2px solid #e2e8f0;
+        }
+        td {
+            padding: 12px;
+            border-bottom: 1px solid #e2e8f0;
+            color: #4a5568;
+        }
+        tr:hover {
+            background: #f7fafc;
+        }
+        .status-pass {
+            color: #48bb78;
+            font-weight: 600;
+        }
+        .status-fail {
+            color: #f56565;
+            font-weight: 600;
+        }
+        .config-info {
+            background: #f7fafc;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .config-item {
+            display: inline-block;
+            margin-right: 30px;
+            color: #4a5568;
+        }
+        .config-item strong {
+            color: #2d3748;
+        }
+        .no-params {
+            color: #a0aec0;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>GenLayer Studio API Test Report</h1>
+            <div class="timestamp">Generated: <span id="timestamp"></span></div>
+        </div>
+
+        <div class="summary">
+            <div class="stat-card">
+                <div class="stat-value total" id="total-tests">0</div>
+                <div class="stat-label">Total Tests</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value passed" id="passed-tests">0</div>
+                <div class="stat-label">Passed</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value failed" id="failed-tests">0</div>
+                <div class="stat-label">Failed</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value rate" id="success-rate">0%</div>
+                <div class="stat-label">Success Rate</div>
+            </div>
+        </div>
+
+        <div class="results-section">
+            <h2>Test Configuration</h2>
+            <div class="config-info" id="config-info"></div>
+
+            <h2>Detailed Results</h2>
+            <div id="results-container"></div>
+        </div>
+    </div>
+
+    <script>
+        // Embedded test data
+        const testData =
+{
+  "test_suite": "GenLayer Studio API Comprehensive Test",
+  "timestamp": "2025-09-09 09:04:21",
+  "end_time": "2025-09-09 09:10:17",
+  "duration_seconds": 356,
+  "configuration": {
+    "base_url": "https://studio-stress.genlayer.com/api",
+    "requests_per_test": 1000,
+    "concurrency": 100
+  },
+  "summary": {
+    "total_tests": 33,
+    "passed": 33,
+    "failed": 0,
+    "success_rate": 100.00
+  },
+  "results": [
+    {
+  "category": "Read-Only",
+  "method": "ping",
+  "params": "",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Read-Only",
+  "method": "eth_blockNumber",
+  "params": "",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Read-Only",
+  "method": "eth_gasPrice",
+  "params": "",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Read-Only",
+  "method": "eth_chainId",
+  "params": "",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Read-Only",
+  "method": "net_version",
+  "params": "",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Read-Only",
+  "method": "sim_getFinalityWindowTime",
+  "params": "",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Read-Only",
+  "method": "sim_countValidators",
+  "params": "",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Read-Only",
+  "method": "sim_getAllValidators",
+  "params": "",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Read-Only",
+  "method": "eth_getBalance",
+  "params": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8 latest",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Read-Only",
+  "method": "eth_getTransactionCount",
+  "params": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8 latest",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Read-Only",
+  "method": "eth_getBlockByNumber",
+  "params": "0x1 true",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Read-Only",
+  "method": "eth_getBlockByHash",
+  "params": "0x0000000000000000000000000000000000000000000000000000000000000000 true",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Read-Only",
+  "method": "eth_getTransactionByHash",
+  "params": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Read-Only",
+  "method": "eth_getTransactionReceipt",
+  "params": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Read-Only",
+  "method": "sim_getValidator",
+  "params": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Read-Only",
+  "method": "sim_getTransactionsForAddress",
+  "params": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Read-Only",
+  "method": "sim_getConsensusContract",
+  "params": "",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Setup",
+  "method": "sim_createRandomValidator",
+  "params": "",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Setup",
+  "method": "sim_createRandomValidators",
+  "params": "3",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Setup",
+  "method": "sim_createValidator",
+  "params": "{\"stake\":1,\"provider\":\"openai\",\"model\":\"gpt-4-1106-preview\",\"config\":{},\"address\":\"0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC\"}",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Setup",
+  "method": "sim_updateValidator",
+  "params": "{\"address\":\"0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC\",\"stake\":2,\"provider\":\"openai\",\"model\":\"gpt-4\",\"config\":{}}",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Setup",
+  "method": "sim_deleteValidator",
+  "params": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Setup",
+  "method": "sim_fundAccount",
+  "params": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8 1000000000000000000",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Setup",
+  "method": "sim_setFinalityWindowTime",
+  "params": "10",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Setup",
+  "method": "sim_createSnapshot",
+  "params": "test_snapshot",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Setup",
+  "method": "sim_restoreSnapshot",
+  "params": "test_snapshot",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Setup",
+  "method": "sim_deleteAllSnapshots",
+  "params": "",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Setup",
+  "method": "sim_addProvider",
+  "params": "{\"provider\":\"openai\",\"model\":\"gpt-4\",\"config\":{\"api_key_env_var\":\"OPENAI_API_KEY\"}}",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Setup",
+  "method": "sim_updateProvider",
+  "params": "openai {\"provider\":\"openai\",\"model\":\"gpt-4-turbo\",\"config\":{\"api_key_env_var\":\"OPENAI_API_KEY\"}}",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Setup",
+  "method": "sim_deleteProvider",
+  "params": "openai",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Setup",
+  "method": "sim_resetDefaultsLlmProviders",
+  "params": "",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Setup",
+  "method": "sim_deleteAllValidators",
+  "params": "",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+,
+    {
+  "category": "Setup",
+  "method": "sim_clearDbTables",
+  "params": "",
+  "status": "pass",
+  "requests": 1000,
+  "concurrency": 100
+}
+
+  ]
+}
+        ;
+
+        // Populate the report
+        document.getElementById('timestamp').textContent = testData.timestamp;
+        document.getElementById('total-tests').textContent = testData.summary.total_tests;
+        document.getElementById('passed-tests').textContent = testData.summary.passed;
+        document.getElementById('failed-tests').textContent = testData.summary.failed;
+        document.getElementById('success-rate').textContent = testData.summary.success_rate + '%';
+
+        // Configuration info
+        const configHtml = `
+            <div class="config-item"><strong>Base URL:</strong> ${testData.configuration.base_url}</div>
+            <div class="config-item"><strong>Requests per Test:</strong> ${testData.configuration.requests_per_test}</div>
+            <div class="config-item"><strong>Concurrency:</strong> ${testData.configuration.concurrency}</div>
+            <div class="config-item"><strong>Duration:</strong> ${testData.duration_seconds}s</div>
+        `;
+        document.getElementById('config-info').innerHTML = configHtml;
+
+        // Group results by category
+        const categories = {};
+        testData.results.forEach(result => {
+            if (!categories[result.category]) {
+                categories[result.category] = [];
+            }
+            categories[result.category].push(result);
+        });
+
+        // Generate results HTML
+        const container = document.getElementById('results-container');
+        Object.keys(categories).sort().forEach(category => {
+            const section = document.createElement('div');
+            section.className = 'category-section';
+
+            const title = document.createElement('h3');
+            title.textContent = category;
+            section.appendChild(title);
+
+            const table = document.createElement('table');
+            const thead = `
+                <thead>
+                    <tr>
+                        <th>Method</th>
+                        <th>Parameters</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+            `;
+
+            const tbody = categories[category].map(result => `
+                <tr>
+                    <td><code>${result.method}</code></td>
+                    <td>${result.params || '<span class="no-params">none</span>'}</td>
+                    <td class="status-${result.status}">${result.status.toUpperCase()}</td>
+                </tr>
+            `).join('');
+
+            table.innerHTML = thead + '<tbody>' + tbody + '</tbody>';
+            section.appendChild(table);
+            container.appendChild(section);
+        });
+    </script>
+</body>
+</html>

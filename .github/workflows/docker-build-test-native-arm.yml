@@ -1,0 +1,104 @@
+name: "Test: Native ARM Docker Build"
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: 'Image to build (jsonrpc, frontend, consensus-worker, database-migration)'
+        required: true
+        default: 'jsonrpc'
+        type: choice
+        options:
+          - jsonrpc
+          - frontend
+          - consensus-worker
+          - database-migration
+      push:
+        description: 'Push to DockerHub (use test- prefix)'
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  DOCKERFILE_MAP: '{"jsonrpc":"docker/Dockerfile.backend","frontend":"docker/Dockerfile.frontend","consensus-worker":"docker/Dockerfile.consensus-worker","database-migration":"docker/Dockerfile.database-migration"}'
+  REPO_MAP: '{"jsonrpc":"yeagerai/simulator-jsonrpc","frontend":"yeagerai/simulator-frontend","consensus-worker":"yeagerai/simulator-consensus-worker","database-migration":"yeagerai/simulator-database-migration"}'
+
+jobs:
+  build:
+    name: Build ${{ inputs.image }} (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image config
+        id: config
+        run: |
+          echo "dockerfile=${{ fromJson(env.DOCKERFILE_MAP)[inputs.image] }}" >> $GITHUB_OUTPUT
+          echo "repo=${{ fromJson(env.REPO_MAP)[inputs.image] }}" >> $GITHUB_OUTPUT
+
+      - name: Login to Docker Hub
+        if: ${{ inputs.push }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create .env file
+        run: cp .env.example .env
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ steps.config.outputs.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          push: ${{ inputs.push }}
+          tags: ${{ steps.config.outputs.repo }}:test-${{ matrix.arch }}
+          cache-from: type=gha,scope=${{ inputs.image }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.image }}-${{ matrix.arch }}
+
+      - name: Report build time
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image:** ${{ inputs.image }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Platform:** ${{ matrix.platform }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Runner:** ${{ matrix.runner }}" >> $GITHUB_STEP_SUMMARY
+
+  create-manifest:
+    name: Create multi-arch manifest
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ inputs.push }}
+    steps:
+      - name: Set image config
+        id: config
+        run: |
+          echo "repo=${{ fromJson(env.REPO_MAP)[inputs.image] }}" >> $GITHUB_OUTPUT
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create and push manifest
+        run: |
+          docker manifest create ${{ steps.config.outputs.repo }}:test-multiarch \
+            ${{ steps.config.outputs.repo }}:test-amd64 \
+            ${{ steps.config.outputs.repo }}:test-arm64
+          docker manifest push ${{ steps.config.outputs.repo }}:test-multiarch

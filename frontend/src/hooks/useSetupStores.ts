@@ -11,6 +11,7 @@ import {
   useGenlayer,
   useTransactionListener,
   useContractListener,
+  useWebSocketClientAsync,
 } from '@/hooks';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -18,12 +19,16 @@ export const useSetupStores = () => {
   const setupStores = async () => {
     const contractsStore = useContractsStore();
     const accountsStore = useAccountsStore();
-    const transactionsStore = useTransactionsStore();
-    const nodeStore = useNodeStore();
-    const consensusStore = useConsensusStore();
     const tutorialStore = useTutorialStore();
     const db = useDb();
     const genlayer = useGenlayer();
+
+    await useWebSocketClientAsync();
+
+    const transactionsStore = useTransactionsStore();
+    const nodeStore = useNodeStore();
+    const consensusStore = useConsensusStore();
+
     const transactionListener = useTransactionListener();
     const contractListener = useContractListener();
     const contractFiles = await db.contractFiles.toArray();
@@ -38,7 +43,9 @@ export const useSetupStores = () => {
         },
       );
       for (const key of Object.keys(contractsBlob)) {
-        const raw = await contractsBlob[key]();
+        const loader = contractsBlob[key];
+        if (!loader) continue;
+        const raw = await loader();
         const name = key.split('/').pop() || 'ExampleContract.py';
         if (!contractFiles.some((c) => c.name === name)) {
           const contract = {
@@ -65,7 +72,8 @@ export const useSetupStores = () => {
     tutorialStore.resetTutorialState();
     nodeStore.getValidatorsData();
     nodeStore.getProvidersData();
-    consensusStore.fetchFinalityWindowTime();
+    await consensusStore.fetchFinalityWindowTime();
+    consensusStore.setupReconnectionListener();
 
     if (accountsStore.accounts.length < 1) {
       accountsStore.generateNewAccount();

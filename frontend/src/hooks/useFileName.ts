@@ -2,9 +2,9 @@ export const useFileName = () => {
   function cleanupFileName(name: string) {
     const tokens = name.split('.');
     if (tokens.length > 0) {
-      return `${tokens[0]}.gpy`;
+      return `${tokens[0]}.py`;
     }
-    return `${name}.gpy`;
+    return `${name}.py`;
   }
 
   return {

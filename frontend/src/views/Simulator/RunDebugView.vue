@@ -3,7 +3,7 @@ import ConstructorParameters from '@/components/Simulator/ConstructorParameters.
 import ContractReadMethods from '@/components/Simulator/ContractReadMethods.vue';
 import ContractWriteMethods from '@/components/Simulator/ContractWriteMethods.vue';
 import TransactionsList from '@/components/Simulator/TransactionsList.vue';
-import { useContractQueries, useConfig } from '@/hooks';
+import { useContractQueries } from '@/hooks';
 import MainTitle from '@/components/Simulator/MainTitle.vue';
 import { ref, watch, computed } from 'vue';
 import {
@@ -14,16 +14,25 @@ import {
 } from '@/stores';
 
 import ContractInfo from '@/components/Simulator/ContractInfo.vue';
-import BooleanField from '@/components/global/fields/BooleanField.vue';
-import FieldError from '@/components/global/fields/FieldError.vue';
-import NumberInput from '@/components/global/inputs/NumberInput.vue';
+import SelectInput from '@/components/global/inputs/SelectInput.vue';
+import type { ExecutionMode } from '@/types';
 
 const uiStore = useUIStore();
 const contractsStore = useContractsStore();
 const { isDeployed, address, contract } = useContractQueries();
 const nodeStore = useNodeStore();
 const consensusStore = useConsensusStore();
-const leaderOnly = ref(false);
+
+// Execution mode selection
+const executionMode = ref<ExecutionMode>('NORMAL');
+const executionModeOptions = [
+  { value: 'NORMAL', label: 'Normal (Full Consensus)' },
+  { value: 'LEADER_ONLY', label: 'Leader Only (Fast, No Validation)' },
+  // {
+  //   value: 'LEADER_SELF_VALIDATOR',
+  //   label: 'Leader + Self Validator',
+  // },
+];
 
 const isDeploymentOpen = ref(!isDeployed.value);
 const finalityWindow = computed({
@@ -34,8 +43,6 @@ const finalityWindow = computed({
     }
   },
 });
-const isLoading = computed(() => consensusStore.isLoading);
-const { canUpdateFinalityWindow } = useConfig();
 
 // Hide constructors by default when contract is already deployed
 const setConstructorVisibility = () => {
@@ -50,6 +57,8 @@ watch(
 function isFinalityWindowValid(value: number) {
   return Number.isInteger(value) && value >= 0;
 }
+
+const consensusMaxRotations = computed(() => consensusStore.maxRotations);
 </script>
 
 <template>
@@ -59,39 +68,45 @@ function isFinalityWindowValid(value: number) {
     <template
       v-if="contractsStore.currentContract && contractsStore.currentContractId"
     >
-      <BooleanField
-        v-model="leaderOnly"
-        name="leaderOnly"
-        label="Leader Only (Fast Execution)"
-        class="p-2"
-      />
-
-      <div v-if="isLoading">Loading finality window...</div>
-      <div v-else>
-        <div v-if="canUpdateFinalityWindow" class="p-2">
-          <div class="flex flex-wrap items-center gap-2">
-            <label for="finalityWindow" class="text-xs"
-              >Finality Window (seconds)</label
-            >
-            <NumberInput
-              id="finalityWindow"
-              name="finalityWindow"
-              :min="0"
-              :step="1"
-              v-model.number="finalityWindow"
-              required
-              testId="input-finalityWindow"
-              :disabled="false"
-              class="w-20"
-              tiny
-            />
-          </div>
-
-          <FieldError v-if="!isFinalityWindowValid"
-            >Please enter a positive integer.</FieldError
-          >
-        </div>
+      <div class="p-2">
+        <label for="executionMode" class="mb-1 block text-xs font-medium">
+          Execution Mode
+        </label>
+        <SelectInput
+          v-model="executionMode"
+          name="executionMode"
+          testId="select-executionMode"
+          :options="executionModeOptions"
+          class="w-64"
+        />
       </div>
+
+      <!-- Temporary disabled finality window settings -->
+      <!--      <div v-if="isLoading">Loading finality window...</div> -->
+      <!--      <div v-else> -->
+      <!--        <div v-if="canUpdateFinalityWindow" class="p-2"> -->
+      <!--          <div class="flex flex-wrap items-center gap-2"> -->
+      <!--            <label for="finalityWindow" class="text-xs"> -->
+      <!--              Finality Window (seconds)</label -->
+      <!--            > -->
+      <!--            <NumberInput -->
+      <!--              id="finalityWindow" -->
+      <!--              name="finalityWindow" -->
+      <!--              :min="0" -->
+      <!--              :step="1" -->
+      <!--              v-model.number="finalityWindow" -->
+      <!--              required -->
+      <!--              testId="input-finalityWindow" -->
+      <!--              :disabled="false" -->
+      <!--              class="w-20" -->
+      <!--              tiny -->
+      <!--            /> -->
+      <!--          </div> -->
+      <!--          <FieldError v-if="!isFinalityWindowValid" -->
+      <!--            >Please enter a positive integer.</FieldError -->
+      <!--          > -->
+      <!--        </div> -->
+      <!--      </div> -->
 
       <ContractInfo
         :showNewDeploymentButton="!isDeploymentOpen"
@@ -103,18 +118,20 @@ function isFinalityWindowValid(value: number) {
           id="tutorial-how-to-deploy"
           v-if="isDeploymentOpen"
           @deployedContract="isDeploymentOpen = false"
-          :leaderOnly="leaderOnly"
+          :executionMode="executionMode"
+          :consensusMaxRotations="consensusMaxRotations"
         />
 
         <ContractReadMethods
           v-if="isDeployed"
           id="tutorial-read-methods"
-          :leaderOnly="leaderOnly"
+          :executionMode="executionMode"
         />
         <ContractWriteMethods
           v-if="isDeployed"
           id="tutorial-write-methods"
-          :leaderOnly="leaderOnly"
+          :executionMode="executionMode"
+          :consensusMaxRotations="consensusMaxRotations"
         />
         <TransactionsList
           id="tutorial-tx-response"

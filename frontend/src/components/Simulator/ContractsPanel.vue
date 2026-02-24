@@ -28,13 +28,6 @@ const showHome = computed(() => store.currentContractId === '');
       <div class="flex h-full w-full grow overflow-hidden">
         <CodeEditor :contract="contract" />
       </div>
-
-      <div
-        v-if="!!error"
-        class="max-h-[160px] w-full shrink-0 overflow-y-auto whitespace-pre-wrap bg-red-500 bg-opacity-80 px-2 py-1 text-xs text-white"
-      >
-        {{ error }}
-      </div>
     </div>
   </div>
 </template>
