@@ -209,7 +209,7 @@ export default {
     enableScrolling() {
       if (this.params.enableScrolling) {
         if (this.step.duration || this.step.offset) {
-          let jumpOptions = {
+          const jumpOptions = {
             duration: this.step.duration || 1000,
             offset: this.step.offset || 0,
             callback: undefined,

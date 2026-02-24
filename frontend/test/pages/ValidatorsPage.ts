@@ -4,7 +4,7 @@ import { BasePage } from './BasePage';
 import { expect } from 'chai';
 
 export class ValidatorsPage extends BasePage {
-  override baseurl = 'http://localhost:8080/validators';
+  override path = '/validators';
   override visibleLocator: Locator = By.xpath(
     "//*[@data-testid='validators-page-title']",
   );
@@ -72,7 +72,7 @@ export class ValidatorsPage extends BasePage {
     if (initialValidators.length < 1) {
       await this.createValidator({
         provider: 'heuristai',
-        model: 'mistralai/mixtral-8x22b-instruct',
+        model: 'mistralai/mixtral-8x7b-instruct',
         stake: 7,
       });
       const existingValidators = await this.getValidatorsElements();

@@ -11,12 +11,11 @@ from tests.common.request import (
 from tests.common.response import (
     has_success_status,
 )
-
-from tests.common.accounts import create_new_account
+from gltest import create_account
 
 
 def test_accounts_funding():
-    account = create_new_account()
+    account = create_account()
     new_account_address = account.address
     fund_amount = 1000
 
@@ -62,10 +61,10 @@ def test_accounts_funding():
 
 def test_accounts_transfers():
     # Setup test accounts
-    account_1 = create_new_account()
+    account_1 = create_account()
     account_1_address = account_1.address
 
-    account_2 = create_new_account()
+    account_2 = create_account()
     account_2_address = account_2.address
 
     fund_amount = 1000
@@ -97,7 +96,7 @@ def test_accounts_transfers():
 
 def test_accounts_burn():
     # Setup test accounts
-    account_1 = create_new_account()
+    account_1 = create_account()
     account_1_address = account_1.address
 
     fund_amount = 1000

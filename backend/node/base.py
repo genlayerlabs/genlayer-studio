@@ -1,12 +1,19 @@
 from contextlib import redirect_stdout
 from dataclasses import asdict
 import datetime
+import functools
 import json
 import base64
+from pathlib import Path
+import time
+import yaml
+import sys
+import asyncio
 from typing import Callable, Optional
 import typing
 import collections.abc
 import os
+import logging
 
 from backend.domain.types import Validator, Transaction, TransactionType
 from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope
@@ -14,11 +21,110 @@ import backend.node.genvm.base as genvmbase
 import backend.node.genvm.origin.calldata as calldata
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.node.types import Receipt, ExecutionMode, Vote, ExecutionResultStatus
-from backend.protocol_rpc.message_handler.base import MessageHandler
+from backend.protocol_rpc.message_handler.base import IMessageHandler
+from .genvm.origin import base_host
+from .genvm.origin import logger as genvm_logger
+from .genvm.origin import public_abi
 
 from .types import Address
 
-SIMULATOR_CHAIN_ID: typing.Final[int] = 61999
+
+def _ensure_dotenv_loaded_for_chain_id() -> None:
+    if os.getenv("HARDHAT_CHAIN_ID") is not None:
+        return
+
+    try:
+        from dotenv import load_dotenv
+    except Exception:
+        return
+
+    dotenv_path = Path(__file__).resolve().parents[2] / ".env"
+    load_dotenv(dotenv_path=dotenv_path, override=False)
+
+
+# endregion
+
+
+def _parse_chain_id() -> int:
+    _ensure_dotenv_loaded_for_chain_id()
+    raw = os.getenv("HARDHAT_CHAIN_ID", "61127")
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"HARDHAT_CHAIN_ID must be decimal digits, got '{raw}'"
+        ) from exc
+
+
+@functools.lru_cache(maxsize=1)
+def get_simulator_chain_id() -> int:
+    return _parse_chain_id()
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _filter_genvm_log_by_level(genvm_log: list[dict]) -> list[dict]:
+    """
+    Filter genvm_log entries based on configured LOG_LEVEL.
+    Only includes log entries that meet or exceed the effective threshold.
+    """
+    # Get configured log level from environment
+    configured_level = os.getenv("LOG_LEVEL", "INFO").upper()
+
+    # Map string levels to numeric values (matching Python's logging module)
+    level_map = {
+        "DEBUG": logging.DEBUG,  # 10
+        "INFO": logging.INFO,  # 20
+        "WARNING": logging.WARNING,  # 30
+        "WARN": logging.WARNING,  # 30 (alias)
+        "ERROR": logging.ERROR,  # 40
+        "CRITICAL": logging.CRITICAL,  # 50
+    }
+
+    # Get numeric threshold for configured level (default to INFO if unknown)
+    threshold = level_map.get(configured_level, logging.INFO)
+
+    # Filter log entries
+    filtered_logs = []
+    for log_entry in genvm_log:
+        if not isinstance(log_entry, dict):
+            # Keep non-dict entries as-is
+            filtered_logs.append(log_entry)
+            continue
+
+        entry_level = log_entry.get("level", "info").upper()
+        entry_numeric_level = level_map.get(entry_level, logging.INFO)
+
+        # Include if entry level >= threshold
+        if entry_numeric_level >= threshold:
+            filtered_logs.append(log_entry)
+
+    return filtered_logs
+
+
+def _repr_result_with_capped_data(
+    result: genvmbase.ExecutionReturn | genvmbase.ExecutionError, cap: int = 1000
+) -> str:
+    """
+    Return a JSON string representation of result with the 'data' field capped.
+    Falls back to the default repr if parsing fails or no 'data' field exists.
+    """
+    try:
+        as_str = f"{result!r}"
+        parsed = json.loads(as_str)
+        if isinstance(parsed, dict):
+            data_value = parsed.get("data")
+            if isinstance(data_value, str) and len(data_value) > cap:
+                parsed["data"] = data_value[:cap]
+                return json.dumps(parsed)
+        return as_str
+    except Exception:
+        return f"{result!r}"
 
 
 class _SnapshotView(genvmbase.StateProxy):
@@ -27,60 +133,428 @@ class _SnapshotView(genvmbase.StateProxy):
         snapshot: ContractSnapshot,
         snapshot_factory: typing.Callable[[str], ContractSnapshot],
         readonly: bool,
+        state_status: str | None = None,
+        shared_decoded_value_cache: dict[str, bytes] | None = None,
+        shared_contract_snapshot_cache: dict[str, ContractSnapshot] | None = None,
+        collect_metrics: bool = False,
     ):
         self.contract_address = Address(snapshot.contract_address)
         self.snapshot = snapshot
         self.snapshot_factory = snapshot_factory
-        self.cached = {}
+        self.cached: dict[str, ContractSnapshot] = {}
         self.readonly = readonly
+        self.state_status = state_status if state_status else "accepted"
+        self._shared_decoded_value_cache = shared_decoded_value_cache
+        # Shared immutable cross-contract snapshots for this transaction context.
+        self._shared_contract_snapshot_cache = shared_contract_snapshot_cache
+        self._collect_metrics = collect_metrics
+        # Primary contract fast path:
+        # decode the full primary contract state once and then read by bytes slot key.
+        self._primary_decoded: dict[bytes, bytes] | None = None
+        # Per-contract decoded slot cache:
+        # {contract_address: {base64_slot_key: decoded_value_bytes}}
+        # This is only used for non-primary contract lazy reads.
+        self._decoded_slots: dict[str, dict[str, bytes]] = {}
+        self._slot_keys: dict[bytes, str] = {}
+        # Execution-scoped metrics to quantify cross-contract read cold/warm behavior.
+        if collect_metrics:
+            self._metrics: dict[str, int] | None = {
+                "primary_contract_lookups": 0,
+                "snapshot_cache_hits": 0,
+                "snapshot_cache_misses": 0,
+                "snapshot_shared_cache_hits": 0,
+                "snapshot_shared_cache_misses": 0,
+                "snapshot_factory_ms": 0,
+                "decoded_cache_hits": 0,
+                "decoded_cache_misses": 0,
+                "decoded_build_ms": 0,
+                "decoded_slots_total": 0,
+                "shared_decoded_cache_hits": 0,
+                "shared_decoded_cache_misses": 0,
+            }
+        else:
+            self._metrics = None
 
     def _get_snapshot(self, addr: Address) -> ContractSnapshot:
         if addr == self.contract_address:
             return self.snapshot
-        res = self.cached.get(addr)
+        addr_hex = addr.as_hex.lower()
+        res = self.cached.get(addr_hex)
         if res is not None:
+            metrics = self._metrics
+            if metrics is not None:
+                metrics["snapshot_cache_hits"] += 1
             return res
+        metrics = self._metrics
+        if metrics is not None:
+            metrics["snapshot_cache_misses"] += 1
+        shared_cache = self._shared_contract_snapshot_cache
+        if shared_cache is not None:
+            res = shared_cache.get(addr_hex)
+            if res is not None:
+                if metrics is not None:
+                    metrics["snapshot_shared_cache_hits"] += 1
+                self.cached[addr_hex] = res
+                return res
+            if metrics is not None:
+                metrics["snapshot_shared_cache_misses"] += 1
+        start = time.perf_counter() if metrics is not None else 0.0
         res = self.snapshot_factory(addr.as_hex)
-        self.cached[addr] = res
+        if metrics is not None:
+            metrics["snapshot_factory_ms"] += round(
+                (time.perf_counter() - start) * 1000
+            )
+        self.cached[addr_hex] = res
+        if shared_cache is not None:
+            shared_cache[addr_hex] = res
         return res
 
-    def get_code(self, addr: Address) -> bytes:
-        return base64.b64decode(self._get_snapshot(addr).contract_code)
+    def _slot_key(self, slot: bytes) -> str:
+        slot_key = self._slot_keys.get(slot)
+        if slot_key is None:
+            slot_key = base64.b64encode(slot).decode("ascii")
+            self._slot_keys[slot] = slot_key
+        return slot_key
+
+    def _get_contract_slot_cache(self, snap: ContractSnapshot) -> dict[str, bytes]:
+        return self._decoded_slots.setdefault(snap.contract_address, {})
+
+    def _get_primary_decoded(self) -> dict[bytes, bytes]:
+        decoded = self._primary_decoded
+        if decoded is not None:
+            return decoded
+
+        decoded = {}
+        state = self.snapshot.states.get(self.state_status, {})
+        shared_cache = self._shared_decoded_value_cache
+        for slot_key, raw in state.items():
+            slot = base64.b64decode(slot_key)
+            if shared_cache is None:
+                value = base64.b64decode(raw)
+                metrics = self._metrics
+                if metrics is not None:
+                    metrics["decoded_slots_total"] += 1
+            else:
+                value = shared_cache.get(raw)
+                if value is None:
+                    metrics = self._metrics
+                    if metrics is not None:
+                        metrics["shared_decoded_cache_misses"] += 1
+                    value = base64.b64decode(raw)
+                    shared_cache[raw] = value
+                    if metrics is not None:
+                        metrics["decoded_slots_total"] += 1
+                else:
+                    metrics = self._metrics
+                    if metrics is not None:
+                        metrics["shared_decoded_cache_hits"] += 1
+            decoded[slot] = value
+
+        self._primary_decoded = decoded
+        return decoded
+
+    def _read_primary_slot_value(self, slot: bytes) -> bytes:
+        return self._get_primary_decoded().get(slot, b"")
+
+    def _read_cross_slot_value(self, snap: ContractSnapshot, slot: bytes) -> bytes:
+        slot_cache = self._get_contract_slot_cache(snap)
+        slot_key = self._slot_key(slot)
+        data = slot_cache.get(slot_key)
+        if data is not None:
+            metrics = self._metrics
+            if metrics is not None:
+                metrics["decoded_cache_hits"] += 1
+            return data
+
+        metrics = self._metrics
+        if metrics is not None:
+            metrics["decoded_cache_misses"] += 1
+        raw = snap.states.get(self.state_status, {}).get(slot_key)
+        shared_cache = self._shared_decoded_value_cache
+        if raw is not None and shared_cache is not None:
+            data = shared_cache.get(raw)
+            if data is not None:
+                if metrics is not None:
+                    metrics["shared_decoded_cache_hits"] += 1
+                slot_cache[slot_key] = data
+                return data
+            if metrics is not None:
+                metrics["shared_decoded_cache_misses"] += 1
+
+        start = time.perf_counter() if metrics is not None else 0.0
+        data = base64.b64decode(raw) if raw is not None else b""
+        if metrics is not None:
+            metrics["decoded_build_ms"] += round((time.perf_counter() - start) * 1000)
+        if raw is not None:
+            if metrics is not None:
+                metrics["decoded_slots_total"] += 1
+            if shared_cache is not None:
+                shared_cache[raw] = data
+        slot_cache[slot_key] = data
+        return data
+
+    def get_metrics(self) -> dict[str, int]:
+        metrics = self._metrics
+        if metrics is None:
+            return {}
+        return {
+            **metrics,
+            "cached_contracts": len(self.cached),
+            "decoded_contracts": len(self._decoded_slots),
+        }
 
     def storage_read(
         self, account: Address, slot: bytes, index: int, le: int, /
     ) -> bytes:
-        snap = self._get_snapshot(account)
-        slot_id = base64.b64encode(slot).decode("ascii")
-        for_slot = snap.encoded_state.setdefault(slot_id, "")
-        data = bytearray(base64.b64decode(for_slot))
-        data.extend(b"\x00" * (index + le - len(data)))
-        return data[index : index + le]
+        if account == self.contract_address:
+            metrics = self._metrics
+            if metrics is not None:
+                metrics["primary_contract_lookups"] += 1
+            data = self._read_primary_slot_value(slot)
+        else:
+            snap = self._get_snapshot(account)
+            data = self._read_cross_slot_value(snap, slot)
+        end = index + le
+        if end <= len(data):
+            return data[index:end]
+        result = bytearray(le)
+        available = len(data) - index
+        if available > 0:
+            result[:available] = data[index : index + available]
+        return bytes(result)
 
     def storage_write(
         self,
-        account: Address,
         slot: bytes,
         index: int,
         got: collections.abc.Buffer,
         /,
     ) -> None:
-        assert account == self.contract_address
         assert not self.readonly
-        snap = self._get_snapshot(account)
-        slot_id = base64.b64encode(slot).decode("ascii")
-        for_slot = snap.encoded_state.setdefault(slot_id, "")
-        data = bytearray(base64.b64decode(for_slot))
+        slot_key = self._slot_key(slot)
+        state_bucket = self.snapshot.states.setdefault(self.state_status, {})
+        primary_decoded = self._get_primary_decoded()
+        existing = primary_decoded.get(slot, b"")
+        data = bytearray(existing)
         mem = memoryview(got)
         data.extend(b"\x00" * (index + len(mem) - len(data)))
         data[index : index + len(mem)] = mem
-        snap.encoded_state[slot_id] = base64.b64encode(data).decode("utf-8")
+        new_value = bytes(data)
+        primary_decoded[slot] = new_value
+        raw_new_value = base64.b64encode(data).decode("utf-8")
+        state_bucket[slot_key] = raw_new_value
+        if self._shared_decoded_value_cache is not None:
+            self._shared_decoded_value_cache[raw_new_value] = new_value
 
     def get_balance(self, addr: Address) -> int:
         snap = self._get_snapshot(addr)
-        # FIXME(core-team): it is not obvious where `value` is added to `self.balance`
-        # but return must be increased by it
         return snap.balance
+
+
+import aiohttp
+
+from .genvm.origin.logger import Logger
+
+from loguru import logger as loguru_logger
+
+Logger.register(type(loguru_logger))
+
+
+class LLMConfig(typing.TypedDict):
+    host: str
+    provider: str
+    models: dict[str, typing.Any]
+    key: str
+    enabled: bool
+
+
+class LLMTestPrompt(typing.TypedDict):
+    system_message: str
+    user_message: str
+    temperature: float
+    max_tokens: int
+    use_max_completion_tokens: typing.NotRequired[bool]
+    images: typing.NotRequired[list]
+
+
+_MODULE_MAP = {
+    "llm": "Llm",
+    "web": "Web",
+}
+
+
+class Manager:
+    url: str
+    llm_config_base: dict[str, typing.Any]
+    web_config_base: dict[str, typing.Any]
+    logger: Logger
+    proc: asyncio.subprocess.Process | None
+
+    async def close(self):
+        if self.proc is not None:
+            import signal
+
+            self.proc.send_signal(signal.SIGINT)
+            await asyncio.wait(
+                [
+                    asyncio.ensure_future(self.proc.wait()),
+                    asyncio.ensure_future(asyncio.sleep(1)),
+                ],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            # Only kill if the process hasn't exited yet (returncode is None)
+            if self.proc.returncode is None:
+                self.proc.kill()
+                await self.proc.wait()
+            self.proc = None
+
+    @staticmethod
+    async def create() -> "Manager":
+        genvm_root = Path(os.environ["GENVMROOT"])
+
+        url = "http://127.0.0.1:3999"
+
+        man = Manager()
+        # man.logger = loguru_logger
+        man.logger = genvm_logger.StderrLogger(min_level="info")
+        man.url = url
+        man.llm_config_base = yaml.safe_load(
+            genvm_root.joinpath("config", "genvm-module-llm.yaml").read_text()
+        )
+        man.web_config_base = yaml.safe_load(
+            genvm_root.joinpath("config", "genvm-module-web.yaml").read_text()
+        )
+
+        debug_enabled = os.getenv("GENVM_WEB_DEBUG") == "1"
+        stream_target = sys.stdout if debug_enabled else asyncio.subprocess.DEVNULL
+
+        exe = genvm_root.joinpath("bin", "genvm-modules")
+        man.proc = await asyncio.subprocess.create_subprocess_exec(
+            exe,
+            "manager",
+            "--port",
+            "3999",
+            "--die-with-parent",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=stream_target,
+            stderr=stream_target,
+        )
+
+        return man
+
+    async def stop_module(self, module_type: typing.Literal["llm", "web"]):
+
+        data = {"module_type": _MODULE_MAP[module_type]}
+        async with aiohttp.request(
+            "POST", f"{self.url}/module/stop", json=data
+        ) as resp:
+            body = await resp.json()
+            if resp.status != 200:
+                self.logger.error(
+                    f"Failed to stop LLM module", body=body, status=resp.status
+                )
+            else:
+                self.logger.info(f"Stopped LLM module", body=body, status=resp.status)
+
+    async def start_module(
+        self,
+        module_type: typing.Literal["llm", "web"],
+        config: dict[str, typing.Any] | None,
+        extra: dict = {},
+    ):
+        data = {"module_type": _MODULE_MAP[module_type], "config": config, **extra}
+        async with aiohttp.request(
+            "POST", f"{self.url}/module/start", json=data
+        ) as resp:
+            body = await resp.json()
+            if resp.status != 200:
+                self.logger.error(
+                    f"Failed to start module",
+                    module=module_type,
+                    body=body,
+                    status=resp.status,
+                )
+                raise RuntimeError("Failed to start module")
+
+    async def try_llms(
+        self, configs: list[LLMConfig], *, prompt: LLMTestPrompt | None
+    ) -> list[dict]:
+        """
+        Executes test prompt against all LLM configs
+        """
+        if prompt is None:
+            prompt = {
+                "system_message": "",
+                "user_message": "Respond with two letters 'OK' and nothing else",
+                "temperature": 0.7,
+                "max_tokens": 300,
+            }
+
+        data = {
+            "configs": configs,
+            "test_prompts": [prompt],
+        }
+        async with aiohttp.request("POST", f"{self.url}/llm/check", json=data) as resp:
+            body = await resp.json()
+            if resp.status != 200:
+                self.logger.error(
+                    f"Failed to check llms", body=body, status=resp.status
+                )
+                # Return error response for each config when the check fails
+                return [
+                    {
+                        "config_index": i,
+                        "prompt_index": 0,
+                        "available": False,
+                        "error": body.get("error", "LLM check request failed"),
+                    }
+                    for i in range(len(configs))
+                ]
+
+        body = typing.cast(list[dict], body)
+        body.sort(key=lambda x: x["config_index"])
+
+        self.logger.debug("check executed", configs=configs, prompt=prompt, body=body)
+
+        return body
+
+
+class _StateProxyNone(genvmbase.StateProxyWritable):
+    """
+    state proxy that always fails and can give code only for address from a constructor
+    useful for get_schema
+    """
+
+    data: dict[bytes, bytearray]
+
+    def __init__(self, my_address: Address):
+        self.my_address = my_address
+        self.data = {}
+
+    def storage_read(
+        self, account: Address, slot: bytes, index: int, le: int, /
+    ) -> bytes:
+        assert account == self.my_address
+        res = self.data.setdefault(slot, bytearray())
+        return res[index : index + le] + b"\x00" * (le - max(0, len(res) - index))
+
+    def storage_write(
+        self,
+        slot: bytes,
+        index: int,
+        got: collections.abc.Buffer,
+        /,
+    ) -> None:
+        res = self.data.setdefault(slot, bytearray())
+        what = memoryview(got)
+        res.extend(b"\x00" * (index + len(what) - len(res)))
+        memoryview(res)[index : index + len(what)] = what
+
+    def get_balance(self, addr: Address) -> int:
+        return 0
+
+
+import backend.validators as validators
 
 
 class Node:
@@ -91,8 +565,17 @@ class Node:
         validator: Validator,
         contract_snapshot_factory: Callable[[str], ContractSnapshot] | None,
         leader_receipt: Optional[Receipt] = None,
-        msg_handler: MessageHandler | None = None,
+        validators_snapshot: validators.Snapshot | None = None,
+        timing_callback: Optional[Callable[[str], None]] = None,
+        msg_handler: IMessageHandler | None = None,
+        *,
+        manager: Manager,
+        logger: genvm_logger.Logger | None = None,
+        shared_decoded_value_cache: dict[str, bytes] | None = None,
+        shared_contract_snapshot_cache: dict[str, ContractSnapshot] | None = None,
     ):
+        assert manager is not None
+
         self.contract_snapshot = contract_snapshot
         self.validator_mode = validator_mode
         self.validator = validator
@@ -100,86 +583,212 @@ class Node:
         self.leader_receipt = leader_receipt
         self.msg_handler = msg_handler
         self.contract_snapshot_factory = contract_snapshot_factory
+        self.manager = manager
+        self.validators_snapshot = validators_snapshot
+        self.shared_decoded_value_cache = shared_decoded_value_cache
+        self.shared_contract_snapshot_cache = shared_contract_snapshot_cache
+        self.collect_state_proxy_metrics = _env_bool("GENVM_STATE_PROXY_METRICS")
+        if timing_callback is None:
 
-    def _create_genvm(self) -> genvmbase.IGenVM:
-        return genvmbase.GenVMHost()
+            def _timing_callback(x: str) -> None:
+                pass
+
+            timing_callback = _timing_callback
+        self.timing_callback = timing_callback
+
+        if logger is None:
+            logger = genvm_logger.StderrLogger()
+        self.logger = logger.with_keys({"node_address": self.address})
 
     async def exec_transaction(self, transaction: Transaction) -> Receipt:
+        self.timing_callback("EXEC_START")
+
         assert transaction.data is not None
         transaction_data = transaction.data
         assert transaction.from_address is not None
+
+        # Override transaction timestamp
+        sim_config = transaction.sim_config
+        transaction_created_at = transaction.created_at
+        if sim_config is not None and sim_config.genvm_datetime is not None:
+            transaction_created_at = sim_config.genvm_datetime
+
         if transaction.type == TransactionType.DEPLOY_CONTRACT:
+            self.timing_callback("DEPLOY_START")
+
             code = base64.b64decode(transaction_data["contract_code"])
             calldata = base64.b64decode(transaction_data["calldata"])
+
+            self.timing_callback("DECODE_COMPLETE")
+
             receipt = await self.deploy_contract(
                 transaction.from_address,
                 code,
                 calldata,
                 transaction.hash,
-                transaction.created_at,
+                transaction_created_at,
             )
+
+            self.timing_callback("DEPLOY_END")
         elif transaction.type == TransactionType.RUN_CONTRACT:
+            self.timing_callback("RUN_START")
+
             calldata = base64.b64decode(transaction_data["calldata"])
+
+            self.timing_callback("DECODE_COMPLETE")
+
             receipt = await self.run_contract(
                 transaction.from_address,
                 calldata,
                 transaction.hash,
-                transaction.created_at,
+                transaction_created_at,
             )
+
+            self.timing_callback("RUN_END")
         else:
             raise Exception(f"unknown transaction type {transaction.type}")
+
+        self.timing_callback("RECEIPT_CREATED")
+
         return receipt
+
+    def _create_enhanced_node_config(self, host_data: dict | None) -> dict:
+        """
+        Create enhanced node_config that includes both primary and fallback provider info.
+
+        Args:
+            host_data: The host_data dict containing primary and fallback provider IDs
+
+        Returns:
+            Enhanced node_config dict with fallback information
+        """
+        node_config = self.validator.to_dict()
+        enhanced_node_config = {
+            "address": node_config["address"],
+            "private_key": node_config["private_key"],
+            "stake": node_config["stake"],
+            "primary_model": {
+                k: v
+                for k, v in node_config.items()
+                if k not in ["address", "private_key", "stake"]
+            },
+            "secondary_model": None,
+        }
+
+        if host_data is None:
+            return enhanced_node_config
+
+        fallback_llm_id = host_data.get("fallback_llm_id")
+        if fallback_llm_id and self.validators_snapshot:
+            fallback_validator = None
+            for node in self.validators_snapshot.nodes:
+                if f"node-{node.validator.address}" == fallback_llm_id:
+                    fallback_validator = node.validator
+                    break
+
+            if fallback_validator:
+                enhanced_node_config["secondary_model"] = {
+                    "provider": fallback_validator.llmprovider.provider,
+                    "model": fallback_validator.llmprovider.model,
+                    "plugin": fallback_validator.llmprovider.plugin,
+                    "plugin_config": fallback_validator.llmprovider.plugin_config,
+                    "config": fallback_validator.llmprovider.config,
+                }
+
+        return enhanced_node_config
 
     def _set_vote(self, receipt: Receipt) -> Receipt:
-        leader_receipt = self.leader_receipt
-        if self.validator_mode == ExecutionMode.LEADER:
-            receipt.vote = Vote.AGREE
-        elif (
-            leader_receipt.execution_result == receipt.execution_result
-            and leader_receipt.result == receipt.result
-            and leader_receipt.contract_state == receipt.contract_state
-            and leader_receipt.pending_transactions == receipt.pending_transactions
-        ):
-            receipt.vote = Vote.AGREE
-        else:
-            receipt.vote = Vote.DISAGREE
+        result_code = receipt.result[0]
 
+        # 1. Timeout: VM-level timeout or GenVM internal error
+        if result_code == public_abi.ResultCode.VM_ERROR:
+            error_message = receipt.result[1:]
+            if error_message == b"timeout" or error_message.startswith(
+                b"GenVM internal error"
+            ):
+                receipt.vote = Vote.TIMEOUT
+                return receipt
+
+        # 2. Non-deterministic disagreement signaled by GenVM
+        if receipt.nondet_disagree is not None:
+            receipt.vote = Vote.DISAGREE
+            return receipt
+
+        # 3. VM crash (exit_code, OOM, etc.) — validator couldn't validate
+        if result_code == public_abi.ResultCode.VM_ERROR:
+            receipt.vote = Vote.DISAGREE
+            return receipt
+
+        # 4. Deterministic violation: execution outcome or state diverges from leader
+        leader_receipt = self.leader_receipt
+        if (
+            leader_receipt.execution_result != receipt.execution_result
+            or leader_receipt.contract_state != receipt.contract_state
+            or leader_receipt.pending_transactions != receipt.pending_transactions
+        ):
+            receipt.vote = Vote.DETERMINISTIC_VIOLATION
+            return receipt
+
+        # 5. Valid execution (RETURN or USER_ERROR) with matching state → agree
+        receipt.vote = Vote.AGREE
         return receipt
 
-    def _date_from_str(self, date: str | None) -> datetime.datetime | None:
+    def _date_from_str(
+        self, date: str | datetime.datetime | None
+    ) -> datetime.datetime | None:
         if date is None:
             return None
-        res = datetime.datetime.fromisoformat(date)
+        # If already a datetime, ensure it's timezone-aware
+        if isinstance(date, datetime.datetime):
+            if date.tzinfo is None:
+                return date.replace(tzinfo=datetime.UTC)
+            return date
+        # Otherwise, parse from string; accept ISO-8601 with trailing 'Z'
+        date_str = date.replace("Z", "+00:00")
+        res = datetime.datetime.fromisoformat(date_str)
         if res.tzinfo is None:
             res = res.replace(tzinfo=datetime.UTC)
         return res
+
+    def _put_code_to(self, to: genvmbase.StateProxyWritable, code: bytes) -> None:
+        """Write contract code directly to storage using the code slot."""
+        from backend.node.genvm import get_code_slot
+
+        code_slot = get_code_slot()
+        # Prefix with 4-byte little-endian length
+        code_len_prefix = len(code).to_bytes(4, byteorder="little", signed=False)
+        code_data = code_len_prefix + code
+        to.storage_write(code_slot, 0, code_data)
 
     async def deploy_contract(
         self,
         from_address: str,
         code_to_deploy: bytes,
         calldata: bytes,
-        transaction_hash: str,
+        transaction_hash: str | None = None,
         transaction_created_at: str | None = None,
     ) -> Receipt:
         assert self.contract_snapshot is not None
-        self.contract_snapshot.contract_code = base64.b64encode(code_to_deploy).decode(
-            "ascii"
-        )
+
+        transaction_datetime = self._date_from_str(transaction_created_at)
+        if transaction_datetime is None:
+            transaction_datetime = datetime.datetime.now()
+
         return await self._run_genvm(
             from_address,
             calldata,
             readonly=False,
             is_init=True,
             transaction_hash=transaction_hash,
-            transaction_datetime=self._date_from_str(transaction_created_at),
+            transaction_datetime=transaction_datetime,
+            code=code_to_deploy,
         )
 
     async def run_contract(
         self,
         from_address: str,
         calldata: bytes,
-        transaction_hash: str,
+        transaction_hash: str | None = None,
         transaction_created_at: str | None = None,
     ) -> Receipt:
         return await self._run_genvm(
@@ -195,54 +804,110 @@ class Node:
         self,
         from_address: str,
         calldata: bytes,
+        state_status: str | None = None,
+        transaction_datetime: datetime.datetime | None = None,
     ) -> Receipt:
         return await self._run_genvm(
             from_address,
             calldata,
             readonly=True,
             is_init=False,
-            transaction_datetime=datetime.datetime.now().astimezone(datetime.UTC),
+            is_sync=True,
+            transaction_datetime=(
+                transaction_datetime
+                if transaction_datetime is not None
+                else datetime.datetime.now().astimezone(datetime.UTC)
+            ),
+            state_status=state_status,
         )
 
     async def _execution_finished(
-        self, res: genvmbase.ExecutionResult, transaction_hash_str: str | None
+        self,
+        res: genvmbase.ExecutionResult,
+        transaction_hash_str: str | None,
+        from_address: str | None,
     ):
         msg_handler = self.msg_handler
         if msg_handler is None:
             return
+        is_error = isinstance(res.result, genvmbase.ExecutionError)
+
+        # Filter genvm_log based on configured log level
+        filtered_genvm_log = _filter_genvm_log_by_level(res.genvm_log)
+        capped_stdout = (
+            res.stdout[:500] + res.stdout[-500:]
+            if len(res.stdout) > 1000
+            else res.stdout
+        )
+
+        # Always log at INFO level - GenVM execution errors are user contract errors,
+        # not infrastructure errors. The error details are in the 'result' data field.
         msg_handler.send_message(
             LogEvent(
                 name="execution_finished",
-                type=(
-                    EventType.INFO
-                    if isinstance(res.result, genvmbase.ExecutionReturn)
-                    else EventType.ERROR
-                ),
+                type=EventType.INFO,
                 scope=EventScope.GENVM,
                 message="execution finished",
                 data={
-                    "result": f"{res.result!r}",
-                    "stdout": res.stdout,
+                    "result": _repr_result_with_capped_data(res.result),
+                    "stdout": res.stdout if is_error else capped_stdout,
                     "stderr": res.stderr,
-                    "genvm_log": res.genvm_log,
+                    "genvm_log": filtered_genvm_log,
                 },
                 transaction_hash=transaction_hash_str,
+                account_address=from_address,
+                client_session_id=getattr(msg_handler, "client_session_id", None),
             )
         )
 
     async def get_contract_schema(self, code: bytes) -> str:
-        genvm = self._create_genvm()
-        res = await genvm.get_contract_schema(code)
-        await self._execution_finished(res, None)
-        err_data = {
-            "stdout": res.stdout,
-            "stderr": res.stderr,
-            "genvm_log": res.genvm_log,
-            "result": f"{res.result!r}",
+        NO_ADDR = Address(b"\x00" * 20)
+        message = {
+            "is_init": False,
+            "contract_address": NO_ADDR,
+            "sender_address": NO_ADDR,
+            "origin_address": NO_ADDR,
+            "value": None,
+            "chain_id": "0",
         }
-        if not isinstance(res.result, genvmbase.ExecutionReturn):
+        state_proxy = _StateProxyNone(NO_ADDR)
+        self._put_code_to(state_proxy, code)
+
+        start_time = time.time()
+        result = await genvmbase.run_genvm_host(
+            functools.partial(
+                genvmbase.Host,
+                calldata_bytes=calldata.encode(
+                    {"method": public_abi.SpecialMethod.GET_SCHEMA.value}
+                ),
+                state_proxy=state_proxy,
+                leader_results=None,
+            ),
+            message=message,
+            permissions="rw",
+            extra_args=["--debug-mode"],
+            host_data='{"node_address":"0x", "tx_id":"0x"}',
+            capture_output=True,
+            is_sync=True,
+            logger=self.logger,
+            timeout=30,
+            manager_uri=self.manager.url,
+        )
+        result.processing_time = int((time.time() - start_time) * 1000)
+
+        await self._execution_finished(result, None, None)
+
+        filtered_genvm_log = _filter_genvm_log_by_level(result.genvm_log)
+
+        err_data = {
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "genvm_log": filtered_genvm_log,
+            "result": _repr_result_with_capped_data(result.result),
+        }
+        if not isinstance(result.result, genvmbase.ExecutionReturn):
             raise Exception("execution failed", err_data)
-        ret_calldata = res.result.ret
+        ret_calldata = result.result.ret
         try:
             schema = calldata.decode(ret_calldata)
         except Exception as e:
@@ -260,10 +925,15 @@ class Node:
         *,
         readonly: bool,
         is_init: bool,
+        is_sync: bool = False,
         transaction_hash: str | None = None,
         transaction_datetime: datetime.datetime | None,
+        state_status: str | None = None,
+        timeout: float = 10 * 60,
+        code: bytes | None = None,
     ) -> Receipt:
-        genvm = self._create_genvm()
+        self.timing_callback("GENVM_PREPARATION_START")
+
         leader_res: None | dict[int, bytes]
         if self.leader_receipt is None:
             leader_res = None
@@ -274,69 +944,158 @@ class Node:
             }
         assert self.contract_snapshot is not None
         assert self.contract_snapshot_factory is not None
-        config = {
-            "modules": [
-                {
-                    "path": "${genvmRoot}/lib/genvm-modules/",
-                    "id": "llm",
-                    "config": {
-                        "host": f"{os.environ['WEBREQUESTPROTOCOL']}://{os.environ['WEBREQUESTHOST']}:{os.environ['WEBREQUESTPORT']}",
-                        "provider": "simulator",
-                        "model": json.dumps(self.validator.llmprovider.__dict__),
-                    },
-                },
-                {
-                    "path": "${genvmRoot}/lib/genvm-modules/",
-                    "id": "web",
-                    "config": {
-                        "host": f"{os.environ['WEBREQUESTPROTOCOL']}://{os.environ['WEBDRIVERHOST']}:{os.environ['WEBDRIVERPORT']}"
-                    },
-                },
-            ]
-        }
+
+        self.timing_callback("SNAPSHOT_CREATION_START")
+
         snapshot_view = _SnapshotView(
-            self.contract_snapshot, self.contract_snapshot_factory, readonly
+            self.contract_snapshot,
+            self.contract_snapshot_factory,
+            readonly,
+            state_status,
+            self.shared_decoded_value_cache,
+            self.shared_contract_snapshot_cache,
+            self.collect_state_proxy_metrics,
         )
 
+        self.timing_callback("SNAPSHOT_CREATION_END")
+
+        host_data = None
+        if self.validators_snapshot is not None:
+            for n in self.validators_snapshot.nodes:
+                if n.validator.address == self.validator.address:
+                    host_data = n.genvm_host_data
+
+        self.timing_callback("GENVM_EXECUTION_START")
+
         result_exec_code: ExecutionResultStatus
-        res = await genvm.run_contract(
-            snapshot_view,
-            contract_address=Address(self.contract_snapshot.contract_address),
-            from_address=Address(from_address),
-            calldata_raw=calldata,
-            is_init=is_init,
-            readonly=readonly,
-            leader_results=leader_res,
-            config=json.dumps(config),
-            date=transaction_datetime,
-            chain_id=SIMULATOR_CHAIN_ID,
+
+        if host_data is None:
+            host_data = {}
+
+        contract_address = Address(self.contract_snapshot.contract_address)
+
+        if "tx_id" not in host_data:
+            host_data["tx_id"] = "0x"
+        if "node_address" not in host_data:
+            host_data["node_address"] = self.address
+
+        logger = self.logger.with_keys({"tx_id": host_data["tx_id"]})
+
+        message = {
+            "is_init": is_init,
+            "contract_address": contract_address,
+            "sender_address": Address(from_address),
+            "origin_address": Address(
+                from_address
+            ),  # FIXME: no origin in simulator #751
+            "value": None,
+            "chain_id": str(
+                get_simulator_chain_id()
+            ),  # NOTE: it can overflow u64 so better to wrap it into a string
+        }
+        if transaction_datetime is not None:
+            assert transaction_datetime.tzinfo is not None
+            message["datetime"] = transaction_datetime.isoformat()
+        perms = "rcn"  # read/call/spawn nondet
+        if not readonly:
+            perms += "ws"  # write/send
+
+        start_time = time.time()
+        try:
+            result = await genvmbase.run_genvm_host(
+                functools.partial(
+                    genvmbase.Host,
+                    calldata_bytes=calldata,
+                    state_proxy=snapshot_view,
+                    leader_results=leader_res,
+                ),
+                message=message,
+                permissions=perms,
+                capture_output=True,
+                host_data=json.dumps(host_data),
+                extra_args=["--debug-mode"],
+                is_sync=is_sync,
+                manager_uri=self.manager.url,
+                timeout=timeout,
+                code=code,
+                logger=logger,
+            )
+        except genvmbase.GenVMInternalError as e:
+            e.is_leader = self.validator_mode == ExecutionMode.LEADER
+            raise
+        result.processing_time = int((time.time() - start_time) * 1000)
+
+        # State-proxy metrics are opt-in via GENVM_STATE_PROXY_METRICS.
+        # Use the executed state proxy from run_genvm_host, because that object can be
+        # a deep-copied instance created per execution attempt.
+        state_proxy_for_metrics = (
+            result.state if hasattr(result.state, "get_metrics") else snapshot_view
         )
-        await self._execution_finished(res, transaction_hash)
+        state_proxy_metrics = state_proxy_for_metrics.get_metrics()
+        if state_proxy_metrics:
+            if result.execution_stats is None:
+                result.execution_stats = {}
+            result.execution_stats["state_proxy"] = state_proxy_metrics
+
+        await self._execution_finished(result, transaction_hash, from_address)
+
+        self.timing_callback("EXECUTION_FINISHED")
 
         result_exec_code = (
             ExecutionResultStatus.SUCCESS
-            if isinstance(res.result, genvmbase.ExecutionReturn)
+            if isinstance(result.result, genvmbase.ExecutionReturn)
             else ExecutionResultStatus.ERROR
         )
 
-        return self._set_vote(
-            Receipt(
-                result=genvmbase.encode_result_to_bytes(res.result),
-                gas_used=0,
-                eq_outputs={
-                    k: base64.b64encode(v).decode("ascii")
-                    for k, v in res.eq_outputs.items()
-                },
-                pending_transactions=res.pending_transactions,
-                vote=None,
-                execution_result=result_exec_code,
-                contract_state=self.contract_snapshot.encoded_state,
-                calldata=calldata,
-                mode=self.validator_mode,
-                node_config=self.validator.to_dict(),
-                genvm_result={
-                    "stdout": res.stdout,
-                    "stderr": res.stderr,
-                },
-            )
+        result = Receipt(
+            result=genvmbase.encode_result_to_bytes(result.result),
+            gas_used=0,
+            eq_outputs={
+                k: base64.b64encode(v).decode("ascii")
+                for k, v in result.eq_outputs.items()
+            },
+            pending_transactions=result.pending_transactions,
+            vote=None,
+            execution_result=result_exec_code,
+            contract_state=typing.cast(_SnapshotView, result.state).snapshot.states[
+                "accepted"
+            ],
+            calldata=calldata,
+            mode=self.validator_mode,
+            node_config=self._create_enhanced_node_config(host_data),
+            genvm_result={
+                "stdout": result.stdout[:5000],
+                "stderr": result.stderr,
+                "error_code": (
+                    result.result.error_code
+                    if isinstance(result.result, genvmbase.ExecutionError)
+                    else None
+                ),
+                "raw_error": (
+                    result.result.raw_error
+                    if isinstance(result.result, genvmbase.ExecutionError)
+                    else None
+                ),
+            },
+            processing_time=result.processing_time,
+            nondet_disagree=result.nondet_disagree,
+            execution_stats=result.execution_stats,
         )
+
+        if self.validator_mode == ExecutionMode.LEADER:
+            # Fatal user errors (infrastructure failures) → raise for consensus-level
+            # replacement. The consensus layer will retry with a replacement leader.
+            raw_error = (result.genvm_result or {}).get("raw_error") or {}
+            if raw_error.get("fatal") is True:
+                raise genvmbase.GenVMInternalError(
+                    message=(
+                        f"Leader fatal error:"
+                        f" {result.genvm_result.get('error_code')}"
+                    ),
+                    error_code=result.genvm_result.get("error_code"),
+                    causes=raw_error.get("causes", []),
+                    is_fatal=True,
+                    is_leader=True,
+                )
+            return result
+        return self._set_vote(result)

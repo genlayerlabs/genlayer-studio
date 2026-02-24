@@ -3,28 +3,83 @@ import typing
 import collections.abc
 import asyncio
 import os
+import sys
 import abc
 import json
+import time
+
+import aiohttp
 
 from dataclasses import dataclass
 
 from pathlib import Path
 
-if typing.TYPE_CHECKING:
-    from .host_fns import *
-    from .result_codes import *
-else:
-    from pathlib import Path
-
-    exec(Path(__file__).parent.joinpath("host_fns.py").read_text())
-    exec(Path(__file__).parent.joinpath("result_codes.py").read_text())
+from . import calldata as gvm_calldata
+from . import host_fns
+from . import public_abi
 
 ACCOUNT_ADDR_SIZE = 20
-GENERIC_ADDR_SIZE = 32
+SLOT_ID_SIZE = 32
+
+from .logger import Logger, NoLogger
 
 
-class GenVMTimeoutException(Exception):
-    "Exception that is raised when time limit is exceeded"
+def _get_timeout_seconds(env_key: str, default: float) -> float:
+    raw = os.getenv(env_key)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _get_int(env_key: str, default: int) -> int:
+    raw = os.getenv(env_key)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+# Callbacks for tracking GenVM Manager failures (set by worker_service)
+_on_genvm_success: typing.Callable[[], None] | None = None
+_on_genvm_failure: typing.Callable[[], None] | None = None
+
+
+def set_genvm_callbacks(
+    on_success: typing.Callable[[], None] | None = None,
+    on_failure: typing.Callable[[], None] | None = None,
+):
+    """Set callbacks for GenVM Manager success/failure tracking."""
+    global _on_genvm_success, _on_genvm_failure
+    _on_genvm_success = on_success
+    _on_genvm_failure = on_failure
+
+
+def _http_timeout(
+    *,
+    total_s: float,
+    connect_s: float | None = None,
+    sock_read_s: float | None = None,
+) -> aiohttp.ClientTimeout:
+    """
+    Explicit aiohttp timeout to avoid wedging consensus when the local GenVM manager
+    accepts a connection but never responds.
+    """
+    return aiohttp.ClientTimeout(
+        total=total_s, connect=connect_s, sock_read=sock_read_s
+    )
+
+
+class HostException(Exception):
+    def __init__(self, error_code: host_fns.Errors, message: str = ""):
+        if error_code == host_fns.Errors.OK:
+            raise ValueError("Error code cannot be OK")
+        self.error_code = error_code
+        super().__init__(message or f"GenVM error: {error_code}")
 
 
 class DefaultEthTransactionData(typing.TypedDict):
@@ -38,46 +93,30 @@ class DefaultTransactionData(typing.TypedDict):
 
 class DeployDefaultTransactionData(DefaultTransactionData):
     salt_nonce: typing.NotRequired[str]
-    value: str
-    on: str
 
 
 class IHost(metaclass=abc.ABCMeta):
     @abc.abstractmethod
-    async def loop_enter(self) -> socket.socket: ...
+    async def loop_enter(self, cancellation: asyncio.Event) -> socket.socket: ...
 
     @abc.abstractmethod
-    async def get_calldata(self, /) -> bytes: ...
-    @abc.abstractmethod
-    async def get_code(self, addr: bytes, /) -> bytes: ...
-    @abc.abstractmethod
     async def storage_read(
-        self, mode: StorageType, account: bytes, slot: bytes, index: int, le: int, /
-    ) -> bytes: ...
-    @abc.abstractmethod
-    async def storage_write(
         self,
+        mode: public_abi.StorageType,
         account: bytes,
         slot: bytes,
         index: int,
-        got: collections.abc.Buffer,
+        le: int,
         /,
-    ) -> None: ...
-
-    @abc.abstractmethod
-    async def consume_result(
-        self, type: ResultCode, data: collections.abc.Buffer, /
-    ) -> None: ...
-    @abc.abstractmethod
-    def has_result(self) -> bool: ...
+    ) -> bytes: ...
 
     @abc.abstractmethod
     async def get_leader_nondet_result(
         self, call_no: int, /
-    ) -> tuple[ResultCode, collections.abc.Buffer] | ResultCode: ...
+    ) -> collections.abc.Buffer: ...
     @abc.abstractmethod
     async def post_nondet_result(
-        self, call_no: int, type: ResultCode, data: collections.abc.Buffer, /
+        self, call_no: int, data: collections.abc.Buffer, /
     ) -> None: ...
     @abc.abstractmethod
     async def post_message(
@@ -97,12 +136,34 @@ class IHost(metaclass=abc.ABCMeta):
     async def eth_call(self, account: bytes, calldata: bytes, /) -> bytes: ...
     @abc.abstractmethod
     async def get_balance(self, account: bytes, /) -> int: ...
+    @abc.abstractmethod
+    async def remaining_fuel_as_gen(self, /) -> int: ...
+    @abc.abstractmethod
+    async def notify_nondet_disagreement(self, call_no: int, /) -> None: ...
 
 
-async def host_loop(handler: IHost):
+async def host_loop(
+    handler: IHost,
+    cancellation: asyncio.Event,
+    *,
+    logger: Logger,
+    metrics: dict[str, typing.Any] | None = None,
+) -> tuple[public_abi.ResultCode, bytes, dict]:
     async_loop = asyncio.get_event_loop()
+    if metrics is None:
+        metrics = {}
 
-    sock = await handler.loop_enter()
+    logger.trace("entering loop")
+    loop_enter_wait_start = time.perf_counter()
+    sock = await handler.loop_enter(cancellation)
+    metrics["host_loop_entered_s"] = time.perf_counter()
+    metrics["host_loop_enter_wait_ms"] = round(
+        (metrics["host_loop_entered_s"] - loop_enter_wait_start) * 1000
+    )
+    logger.trace("entered loop")
+    accept_time = time.perf_counter()
+    first_method_name: str | None = None
+    first_method_received_s: float | None = None
 
     async def send_all(data: collections.abc.Buffer):
         await async_loop.sock_sendall(sock, data)
@@ -123,60 +184,102 @@ async def host_loop(handler: IHost):
     async def send_int(i: int, bytes=4):
         await send_all(int.to_bytes(i, bytes, byteorder="little", signed=False))
 
-    async def read_result() -> tuple[ResultCode, bytes]:
-        type = await recv_int(1)
+    async def read_slice() -> memoryview:
         le = await recv_int()
         data = await read_exact(le)
-        return (ResultCode(type), data)
+        return memoryview(data)
 
+    total_handling_time = 0.0
+    time_per_method = {}
+    call_counts = {}
+    meth_id: host_fns.Methods | None = None
+
+    handling_start = time.time()
     while True:
-        meth_id = Methods(await recv_int(1))
+        cur_delta = time.time() - handling_start
+        if meth_id is not None:
+            total_handling_time += cur_delta
+            time_per_method[meth_id.name] = (
+                time_per_method.get(meth_id.name, 0.0) + cur_delta
+            )
+        meth_id = host_fns.Methods(await recv_int(1))
+        if first_method_name is None:
+            first_method_name = meth_id.name
+            first_method_received_s = time.perf_counter()
+            metrics["host_first_method_received_s"] = first_method_received_s
+            metrics["host_accept_to_first_method_ms"] = round(
+                (first_method_received_s - accept_time) * 1000
+            )
+        logger.trace("got method", method=meth_id, method_name=meth_id.name)
+        call_counts[meth_id.name] = call_counts.get(meth_id.name, 0) + 1
+
+        handling_start = time.time()
         match meth_id:
-            case Methods.GET_CALLDATA:
-                cd = await handler.get_calldata()
-                await send_int(len(cd))
-                await send_all(cd)
-            case Methods.GET_CODE:
-                addr = await read_exact(ACCOUNT_ADDR_SIZE)
-                code = await handler.get_code(addr)
-                await send_int(len(code))
-                await send_all(code)
-            case Methods.STORAGE_READ:
+            case host_fns.Methods.STORAGE_READ:
                 mode = await read_exact(1)
-                mode = StorageType(mode[0])
+                mode = public_abi.StorageType(mode[0])
                 account = await read_exact(ACCOUNT_ADDR_SIZE)
-                slot = await read_exact(GENERIC_ADDR_SIZE)
+                slot = await read_exact(SLOT_ID_SIZE)
                 index = await recv_int()
                 le = await recv_int()
-                res = await handler.storage_read(mode, account, slot, index, le)
-                assert len(res) == le
-                await send_all(res)
-            case Methods.STORAGE_WRITE:
-                account = await read_exact(ACCOUNT_ADDR_SIZE)
-                slot = await read_exact(GENERIC_ADDR_SIZE)
-                index = await recv_int()
-                le = await recv_int()
-                got = await read_exact(le)
-                await handler.storage_write(account, slot, index, got)
-            case Methods.CONSUME_RESULT:
-                await handler.consume_result(*await read_result())
-                await send_all(b"\x00")
-                return
-            case Methods.GET_LEADER_NONDET_RESULT:
-                call_no = await recv_int()
-                data = await handler.get_leader_nondet_result(call_no)
-                if isinstance(data, (ResultCode, int)):
-                    await send_all(bytes([data]))
+                try:
+                    res = await handler.storage_read(mode, account, slot, index, le)
+                    assert len(res) == le
+                except HostException as e:
+                    await send_all(bytes([e.error_code]))
                 else:
-                    code, as_bytes = data
-                    await send_all(bytes([code]))
-                    as_bytes = memoryview(as_bytes)
-                    await send_int(len(as_bytes))
-                    await send_all(as_bytes)
-            case Methods.POST_NONDET_RESULT:
+                    await send_all(bytes([host_fns.Errors.OK]))
+                    await send_all(res)
+            case host_fns.Methods.CONSUME_RESULT:
+                lifecycle_ms = {
+                    "host_loop_enter_wait_ms": metrics.get(
+                        "host_loop_enter_wait_ms", 0
+                    ),
+                    "host_accept_to_first_method_ms": metrics.get(
+                        "host_accept_to_first_method_ms", 0
+                    ),
+                }
+                if first_method_name is not None:
+                    lifecycle_ms["host_first_method"] = first_method_name
+                execution_stats = {
+                    "host_handling_time_ms": round(total_handling_time * 1000),
+                    "by_method_ms": {
+                        k: round(v * 1000) for k, v in time_per_method.items()
+                    },
+                    "call_counts": call_counts,
+                    "lifecycle_ms": lifecycle_ms,
+                }
+                logger.debug(
+                    "handling time",
+                    total=total_handling_time,
+                    by_method=time_per_method,
+                    call_counts=call_counts,
+                )
+                res = await read_slice()
+
+                await send_all(bytes([0]))
+
+                return public_abi.ResultCode(res[0]), res[1:], execution_stats
+            case host_fns.Methods.GET_LEADER_NONDET_RESULT:
                 call_no = await recv_int()
-                await handler.post_nondet_result(call_no, *await read_result())
-            case Methods.POST_MESSAGE:
+                try:
+                    data = await handler.get_leader_nondet_result(call_no)
+                except HostException as e:
+                    await send_all(bytes([e.error_code]))
+                else:
+                    await send_all(bytes([host_fns.Errors.OK]))
+                    data = memoryview(data)
+                    await send_int(len(data))
+                    await send_all(data)
+            case host_fns.Methods.POST_NONDET_RESULT:
+                call_no = await recv_int()
+                try:
+                    await handler.post_nondet_result(call_no, await read_slice())
+                except HostException as e:
+                    await send_all(bytes([e.error_code]))
+                else:
+                    await send_all(bytes([host_fns.Errors.OK]))
+            case host_fns.Methods.POST_MESSAGE:
                 account = await read_exact(ACCOUNT_ADDR_SIZE)
 
                 calldata_len = await recv_int()
@@ -186,11 +289,16 @@ async def host_loop(handler: IHost):
                 message_data_bytes = await read_exact(message_data_len)
                 message_data = json.loads(str(message_data_bytes, "utf-8"))
 
-                await handler.post_message(account, calldata, message_data)
-            case Methods.CONSUME_FUEL:
+                try:
+                    await handler.post_message(account, calldata, message_data)
+                except HostException as e:
+                    await send_all(bytes([e.error_code]))
+                else:
+                    await send_all(bytes([host_fns.Errors.OK]))
+            case host_fns.Methods.CONSUME_FUEL:
                 gas = await recv_int(8)
                 await handler.consume_gas(gas)
-            case Methods.DEPLOY_CONTRACT:
+            case host_fns.Methods.DEPLOY_CONTRACT:
                 calldata_len = await recv_int()
                 calldata = await read_exact(calldata_len)
 
@@ -201,9 +309,14 @@ async def host_loop(handler: IHost):
                 message_data_bytes = await read_exact(message_data_len)
                 message_data = json.loads(str(message_data_bytes, "utf-8"))
 
-                await handler.deploy_contract(calldata, code, message_data)
+                try:
+                    await handler.deploy_contract(calldata, code, message_data)
+                except HostException as e:
+                    await send_all(bytes([e.error_code]))
+                else:
+                    await send_all(bytes([host_fns.Errors.OK]))
 
-            case Methods.ETH_SEND:
+            case host_fns.Methods.ETH_SEND:
                 account = await read_exact(ACCOUNT_ADDR_SIZE)
                 calldata_len = await recv_int()
                 calldata = await read_exact(calldata_len)
@@ -212,19 +325,47 @@ async def host_loop(handler: IHost):
                 message_data_bytes = await read_exact(message_data_len)
                 message_data = json.loads(str(message_data_bytes, "utf-8"))
 
-                await handler.eth_send(account, calldata, message_data)
-            case Methods.ETH_CALL:
+                try:
+                    await handler.eth_send(account, calldata, message_data)
+                except HostException as e:
+                    await send_all(bytes([e.error_code]))
+                else:
+                    await send_all(bytes([host_fns.Errors.OK]))
+            case host_fns.Methods.ETH_CALL:
                 account = await read_exact(ACCOUNT_ADDR_SIZE)
                 calldata_len = await recv_int()
                 calldata = await read_exact(calldata_len)
 
-                res = await handler.eth_call(account, calldata)
-                await send_int(len(res))
-                await send_all(res)
-            case Methods.GET_BALANCE:
+                try:
+                    res = await handler.eth_call(account, calldata)
+                except HostException as e:
+                    await send_all(bytes([e.error_code]))
+                else:
+                    await send_all(bytes([host_fns.Errors.OK]))
+                    await send_int(len(res))
+                    await send_all(res)
+            case host_fns.Methods.GET_BALANCE:
                 account = await read_exact(ACCOUNT_ADDR_SIZE)
-                res = await handler.get_balance(account)
-                await send_all(res.to_bytes(32, byteorder="little", signed=False))
+                try:
+                    res = await handler.get_balance(account)
+                except HostException as e:
+                    await send_all(bytes([e.error_code]))
+                else:
+                    await send_all(bytes([host_fns.Errors.OK]))
+                    await send_all(res.to_bytes(32, byteorder="little", signed=False))
+            case host_fns.Methods.REMAINING_FUEL_AS_GEN:
+                try:
+                    res = await handler.remaining_fuel_as_gen()
+                except HostException as e:
+                    await send_all(bytes([e.error_code]))
+                else:
+                    res = min(res, 2**53 - 1)
+                    await send_all(bytes([host_fns.Errors.OK]))
+                    await send_all(res.to_bytes(8, byteorder="little", signed=False))
+            case host_fns.Methods.NOTIFY_NONDET_DISAGREEMENT:
+                call_no = await recv_int()
+                await handler.notify_nondet_disagreement(call_no)
+                # No response needed according to the spec
             case x:
                 raise Exception(f"unknown method {x}")
 
@@ -233,172 +374,467 @@ async def host_loop(handler: IHost):
 class RunHostAndProgramRes:
     stdout: str
     stderr: str
-    genvm_log: str
+    genvm_log: list[dict[str, typing.Any]]
+
+    result_kind: public_abi.ResultCode
+    result_data: typing.Any
+    result_fingerprint: typing.Any
+    result_storage_changes: list[tuple[bytes, bytes]]
+    result_events: list[list[bytes]]
+    execution_stats: dict | None = None
 
 
-async def run_host_and_program(
-    handler: IHost,
-    program: list[Path | str],
-    *,
-    env=None,
-    cwd: Path | None = None,
-    exit_timeout=0.05,
-    deadline: float | None = None,
-) -> RunHostAndProgramRes:
-    loop = asyncio.get_running_loop()
-
-    async def connect_reader(fd):
-        reader = asyncio.StreamReader(loop=loop)
-        reader_proto = asyncio.StreamReaderProtocol(reader)
-        transport, _ = await loop.connect_read_pipe(
-            lambda: reader_proto, os.fdopen(fd, "rb")
-        )
-        return reader, transport
-
-    stdout_rfd, stdout_wfd = os.pipe()
-    stderr_rfd, stderr_wfd = os.pipe()
-    genvm_log_rfd, genvm_log_wfd = os.pipe()
-    stdout_reader, stdout_transport = await connect_reader(stdout_rfd)
-    stderr_reader, stderr_transport = await connect_reader(stderr_rfd)
-    genvm_log_reader, genvm_log_transport = await connect_reader(genvm_log_rfd)
-
-    run_idx = program.index("run")
-    program.insert(run_idx, "--log-fd")
-    program.insert(run_idx + 1, str(genvm_log_wfd))
-
-    process = await asyncio.create_subprocess_exec(
-        *program,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=stdout_wfd,
-        stderr=stderr_wfd,
-        cwd=cwd,
-        env=env,
-        pass_fds=(genvm_log_wfd,),
-    )
-    os.close(stdout_wfd)
-    os.close(stderr_wfd)
-    os.close(genvm_log_wfd)
-    if process.stdin is not None:
-        process.stdin.close()
-
-    async def read_whole(reader, transport, put_to: list[bytes]):
-        try:
-            while True:
-                read = await reader.read(4096)
-                if read is None or len(read) == 0:
-                    break
-                put_to.append(read)
-        finally:
-            try:
-                transport.close()
-            except OSError:
-                pass
-            await asyncio.sleep(0)
-
-    stdout, stderr, genvm_log = [], [], []
-
-    async def wrap_proc():
-        await asyncio.gather(
-            read_whole(stdout_reader, stdout_transport, stdout),
-            read_whole(stderr_reader, stderr_transport, stderr),
-            read_whole(genvm_log_reader, genvm_log_transport, genvm_log),
-            process.wait(),
+async def _send_timeout(manager_uri: str, genvm_id: str, logger: Logger):
+    try:
+        async with aiohttp.request(
+            "DELETE",
+            f"{manager_uri}/genvm/{genvm_id}?wait_timeout_ms=20",
+            timeout=_http_timeout(
+                total_s=_get_timeout_seconds(
+                    "GENVM_MANAGER_DELETE_HTTP_TIMEOUT_SECONDS", 3.0
+                ),
+                connect_s=1.5,
+                sock_read_s=1.5,
+            ),
+        ) as resp:
+            logger.debug("delete /genvm", genvm_id=genvm_id, status=resp.status)
+            if resp.status != 200:
+                logger.warning(
+                    "delete /genvm failed", genvm_id=genvm_id, body=await resp.text()
+                )
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        logger.warning(
+            "delete /genvm request failed", genvm_id=genvm_id, error=str(exc)
         )
 
-    coro_proc = asyncio.ensure_future(wrap_proc())
 
-    async def wrap_host():
-        await host_loop(handler)
-
-    coro_loop = asyncio.ensure_future(wrap_host())
-
-    all_proc = [coro_loop, coro_proc]
-    deadline_future: None | asyncio.Task[None] = None
-    if deadline is not None:
-        deadline_future = asyncio.ensure_future(asyncio.sleep(deadline))
-        all_proc.append(deadline_future)
-
-    done, _pending = await asyncio.wait(
-        all_proc,
+async def _await_first_cancel_others(*it):
+    _done, pending = await asyncio.wait(
+        [asyncio.ensure_future(x) for x in it],
         return_when=asyncio.FIRST_COMPLETED,
     )
 
-    errors = []
+    for task in pending:
+        task.cancel()
 
-    for x in done:
+    for task in pending:
         try:
-            x.result()
-        except ConnectionResetError:
+            await task
+        except asyncio.CancelledError:
             pass
-        except Exception as e:
-            errors.append(e)
 
-    # coro_loop must finish first if everything succeeded
-    if not coro_loop.done() and not handler.has_result() and deadline is None:
-        print("WARNING: genvm finished first")
-        coro_loop.cancel()
 
-    async def wait_all_timeout():
-        timeout = asyncio.ensure_future(asyncio.sleep(exit_timeout))
-        all_futs = [timeout, coro_proc]
-        if not coro_loop.done():
-            all_futs.append(coro_loop)
-        done, _pending = await asyncio.wait(
-            all_futs,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if coro_loop in done:
-            await wait_all_timeout()
+async def run_genvm(
+    handler: IHost,
+    *,
+    timeout: float | None = None,
+    manager_uri: str = "http://127.0.0.1:3999",
+    logger: Logger | None = None,
+    is_sync: bool,
+    capture_output: bool = True,
+    message: typing.Any,
+    host_data: str = "",
+    host: str,
+    extra_args: list[str] = [],
+    storage_pages: int = 10_000_000,
+    code: bytes | None = None,
+    calldata: bytes,
+) -> RunHostAndProgramRes:
+    if logger is None:
+        logger = NoLogger()
 
-    if handler.has_result():
-        await wait_all_timeout()
+    perf_timeline: dict[str, typing.Any] = {
+        "run_started_s": time.perf_counter(),
+        "genvm_id_obtained_s": None,
+        "manager_run_attempts": [],
+    }
+    genvm_id_cell: list[str | None] = [None]
+    status_cell: list[dict | Exception | None] = [None]
+    timeout_task_cell: list[asyncio.Task | None] = [None]
+    cancellation_event = asyncio.Event()
 
-    if not coro_proc.done():
-        try:
-            process.terminate()
-        except:
-            pass
-        await wait_all_timeout()
-        if not coro_proc.done():
-            # genvm exit takes to long, forcefully quit it
-            try:
-                process.kill()
-            except:
-                pass
-
-    try:
-        await coro_loop
-    except ConnectionResetError:
-        pass
-    except (Exception, asyncio.CancelledError) as e:
-        errors.append(e)
-
-    exit_code = await process.wait()
-
-    if not handler.has_result():
-        if (
-            deadline_future is None
-            or deadline_future is not None
-            and deadline_future not in done
-        ):
-            errors.append(Exception("no result provided"))
-        else:
-            await handler.consume_result(ResultCode.CONTRACT_ERROR, b"timeout")
-
-    result = RunHostAndProgramRes(
-        b"".join(stdout).decode(),
-        b"".join(stderr).decode(),
-        b"".join(genvm_log).decode(),
+    run_http_timeout_s = _get_timeout_seconds(
+        "GENVM_MANAGER_RUN_HTTP_TIMEOUT_SECONDS",
+        10.0,  # Reduced from 30s for faster failure detection
+    )
+    status_http_timeout_s = _get_timeout_seconds(
+        "GENVM_MANAGER_STATUS_HTTP_TIMEOUT_SECONDS", 10.0
+    )
+    max_retries = _get_int("GENVM_MANAGER_RUN_RETRIES", 3)
+    retry_base_delay_s = _get_timeout_seconds(
+        "GENVM_MANAGER_RUN_RETRY_DELAY_SECONDS", 1.0
     )
 
-    if len(errors) > 0:
-        raise Exception(
-            *errors,
-            {
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "genvm_log": result.genvm_log,
-            },
-        ) from errors[0]
+    async def wrap_proc_body(attempt: int):
+        max_exec_mins = 20
+        if timeout is not None:
+            max_exec_mins = int(max(max_exec_mins, (timeout * 1.5 + 59) // 60))
 
-    return result
+        timestamp = message.get("datetime", "2024-11-26T06:42:42.424242Z")
+
+        async with aiohttp.request(
+            "POST",
+            f"{manager_uri}/genvm/run",
+            data=gvm_calldata.encode(
+                {
+                    "major": 0,  # FIXME
+                    "message": message,
+                    "is_sync": is_sync,
+                    "capture_output": capture_output,
+                    "host_data": host_data,
+                    "max_execution_minutes": max_exec_mins,  # this parameter is needed to prevent zombie genvms
+                    "timestamp": timestamp,
+                    "host": host,
+                    "extra_args": extra_args,
+                    "storage_pages": storage_pages,
+                    "code": code,
+                    "calldata": calldata,
+                }
+            ),
+            timeout=_http_timeout(
+                total_s=run_http_timeout_s,
+                connect_s=min(5.0, run_http_timeout_s),
+                sock_read_s=run_http_timeout_s,
+            ),
+        ) as resp:
+            logger.debug("post /genvm/run", status=resp.status, attempt=attempt + 1)
+            data = await resp.json()
+            logger.trace("post /genvm/run", body=data)
+            if resp.status != 200:
+                logger.error(
+                    "genvm manager /genvm/run failed",
+                    status=resp.status,
+                    body=data,
+                )
+                raise Exception(
+                    f"genvm manager /genvm/run failed: {resp.status} {data}"
+                )
+            else:
+                genvm_id = data["id"]
+                logger.debug(
+                    "genvm manager /genvm",
+                    genvm_id=genvm_id,
+                    status=resp.status,
+                )
+                genvm_id_cell[0] = genvm_id
+                perf_timeline["genvm_id_obtained_s"] = time.perf_counter()
+                timeout_task_cell[0] = asyncio.ensure_future(wrap_timeout(genvm_id))
+                # Success - reset failure counter
+                if _on_genvm_success is not None:
+                    _on_genvm_success()
+
+    async def wrap_proc():
+        for attempt in range(max_retries):
+            attempt_start = time.perf_counter()
+            try:
+                await wrap_proc_body(attempt)
+                perf_timeline["manager_run_attempts"].append(
+                    {
+                        "attempt": attempt + 1,
+                        "outcome": "success",
+                        "duration_ms": round(
+                            (time.perf_counter() - attempt_start) * 1000
+                        ),
+                    }
+                )
+                return  # Success, exit retry loop
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                perf_timeline["manager_run_attempts"].append(
+                    {
+                        "attempt": attempt + 1,
+                        "outcome": "retryable_error",
+                        "error_type": type(exc).__name__,
+                        "duration_ms": round(
+                            (time.perf_counter() - attempt_start) * 1000
+                        ),
+                    }
+                )
+                is_last_attempt = attempt >= max_retries - 1
+
+                if is_last_attempt:
+                    # All retries exhausted - track failure and propagate
+                    logger.error(
+                        "genvm manager request failed after all retries",
+                        error=str(exc),
+                        attempts=max_retries,
+                    )
+                    if _on_genvm_failure is not None:
+                        _on_genvm_failure()
+                    cancellation_event.set()
+                    raise
+                else:
+                    # Retry with exponential backoff
+                    delay = retry_base_delay_s * (2**attempt)
+                    logger.warning(
+                        "genvm manager request failed, retrying",
+                        error=str(exc),
+                        attempt=attempt + 1,
+                        max_retries=max_retries,
+                        retry_delay_s=delay,
+                    )
+                    await asyncio.sleep(delay)
+            except Exception as exc:
+                perf_timeline["manager_run_attempts"].append(
+                    {
+                        "attempt": attempt + 1,
+                        "outcome": "fatal_error",
+                        "error_type": type(exc).__name__,
+                        "duration_ms": round(
+                            (time.perf_counter() - attempt_start) * 1000
+                        ),
+                    }
+                )
+                raise
+            finally:
+                # Only log when we have a valid genvm_id (successful start)
+                if genvm_id_cell[0] is not None:
+                    logger.debug("proc started", genvm_id=genvm_id_cell[0])
+
+    async def wrap_host():
+        r = await host_loop(
+            handler, cancellation_event, logger=logger, metrics=perf_timeline
+        )
+        logger.debug("host loop finished")
+        return r
+
+    timeout_fired = asyncio.Event()
+
+    async def wrap_timeout(genvm_id: str):
+        if timeout is None:
+            return
+        await asyncio.sleep(timeout)
+        logger.debug("timeout reached", genvm_id=genvm_id)
+        timeout_fired.set()
+        await _send_timeout(manager_uri, genvm_id, logger)
+
+    poll_status_mutex = asyncio.Lock()
+
+    async def poll_status(genvm_id: str):
+        async with poll_status_mutex:
+            old_status = status_cell[0]
+            if old_status is not None:
+                return old_status
+            try:
+                async with aiohttp.request(
+                    "GET",
+                    f"{manager_uri}/genvm/{genvm_id}",
+                    timeout=_http_timeout(
+                        total_s=status_http_timeout_s,
+                        connect_s=min(3.0, status_http_timeout_s),
+                        sock_read_s=status_http_timeout_s,
+                    ),
+                ) as resp:
+                    logger.debug("get /genvm", genvm_id=genvm_id, status=resp.status)
+                    body = await resp.json()
+                    logger.trace("get /genvm", genvm_id=genvm_id, body=body)
+                    if resp.status != 200:
+                        new_res = Exception(
+                            f"genvm manager /genvm failed: {resp.status} {body}"
+                        )
+                    elif body["status"] is None:
+                        return None
+                    else:
+                        new_res = typing.cast(dict, body["status"])
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                new_res = Exception(f"genvm manager /genvm request failed: {exc}")
+            status_cell[0] = new_res
+            return new_res
+
+    async def prob_died():
+        await _await_first_cancel_others(asyncio.sleep(1), cancellation_event.wait())
+
+        genvm_id = genvm_id_cell[0]
+        if genvm_id is None:
+            return
+        status = await poll_status(genvm_id)
+        if status is not None and not cancellation_event.is_set():
+            logger.error(
+                "genvm died without connecting", genvm_id=genvm_id, status=status
+            )
+            cancellation_event.set()
+
+    fut_host = asyncio.ensure_future(wrap_host())
+    fut_proc = asyncio.ensure_future(wrap_proc())
+    fut_prob = asyncio.ensure_future(prob_died())
+
+    # Map futures to names for debugging
+    task_names = {
+        id(fut_host): "host_loop",
+        id(fut_proc): "genvm_run",
+        id(fut_prob): "prob_died",
+    }
+
+    # IMPORTANT: if proc setup fails (e.g., manager accepts TCP but never replies),
+    # don't wait forever on host_loop.
+    done, pending = await asyncio.wait(
+        [fut_host, fut_proc, fut_prob], return_when=asyncio.FIRST_EXCEPTION
+    )
+
+    # Log which tasks completed/failed for debugging
+    done_names = [task_names.get(id(t), "unknown") for t in done]
+    pending_names = [task_names.get(id(t), "unknown") for t in pending]
+    logger.debug(
+        "asyncio.wait returned",
+        done_tasks=done_names,
+        pending_tasks=pending_names,
+        genvm_id=genvm_id_cell[0],
+    )
+
+    # If anything errored, stop the host loop.
+    for task in done:
+        exc = task.exception()
+        if exc is not None:
+            task_name = task_names.get(id(task), "unknown")
+            logger.error(
+                "task raised exception",
+                task_name=task_name,
+                exception_type=type(exc).__name__,
+                exception_msg=str(exc),
+                genvm_id=genvm_id_cell[0],
+            )
+            cancellation_event.set()
+
+    # Cancel any pending tasks to prevent leaks
+    for task in pending:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    # Cancel the timeout task if it's still pending
+    timeout_task = timeout_task_cell[0]
+    if timeout_task is not None and not timeout_task.done():
+        timeout_task.cancel()
+        try:
+            await timeout_task
+        except asyncio.CancelledError:
+            pass
+
+    # Collect exceptions from all tasks, including CancelledError
+    # Note: CancelledError inherits from BaseException, not Exception
+    exceptions: list[BaseException] = []
+    cancelled_tasks: list[str] = []
+    result_host: tuple[public_abi.ResultCode, bytes, dict] | None = None
+
+    try:
+        result_host = fut_host.result()
+    except asyncio.CancelledError:
+        cancelled_tasks.append("host_loop")
+    except BaseException as e:
+        if not timeout_fired.is_set():
+            exceptions.append(e)
+        else:
+            logger.warning("host handler failed after timeout", error=e)
+
+    try:
+        fut_proc.result()
+    except asyncio.CancelledError:
+        cancelled_tasks.append("genvm_run")
+    except BaseException as e:
+        exceptions.append(e)
+
+    # Log if tasks were cancelled (helps debug root cause)
+    if cancelled_tasks:
+        logger.debug(
+            "tasks were cancelled",
+            cancelled_tasks=cancelled_tasks,
+            exception_count=len(exceptions),
+            genvm_id=genvm_id_cell[0],
+        )
+
+    if len(exceptions) > 0:
+        # Include cancelled tasks info in the exception message for debugging
+        error_details = {
+            "exceptions": [f"{type(e).__name__}: {e}" for e in exceptions],
+            "cancelled_tasks": cancelled_tasks,
+            "genvm_id": genvm_id_cell[0],
+        }
+        logger.error("genvm execution failed", **error_details)
+        raise Exception(f"genvm execution failed: {error_details}") from exceptions[0]
+
+    # If all tasks were cancelled but no exceptions, something went wrong
+    if cancelled_tasks and len(exceptions) == 0:
+        error_msg = f"all genvm tasks cancelled without error: cancelled={cancelled_tasks}, genvm_id={genvm_id_cell[0]}"
+        logger.error(error_msg)
+        raise Exception(error_msg)
+
+    genvm_id = genvm_id_cell[0]
+    if genvm_id is not None:
+        await _send_timeout(manager_uri, genvm_id, logger)
+
+        status = await poll_status(genvm_id)
+        if status is None:
+            exceptions.append(Exception("execution failed: no status"))
+        elif isinstance(status, Exception):
+            exceptions.append(status)
+        if len(exceptions) > 0:
+            final_exception = Exception("execution failed", exceptions[1:])
+            raise final_exception from exceptions[0]
+
+        if result_host is None:
+            result_kind = public_abi.ResultCode.INTERNAL_ERROR
+            result_data = "no_result"
+            result_fingerprint = None
+            result_storage_changes = []
+            result_events = []
+            execution_stats = {}
+        else:
+            result_kind = result_host[0]
+            decoded = gvm_calldata.decode(result_host[1])
+            result_data = decoded.get("data")
+            result_fingerprint = decoded.get("fingerprint")
+            result_storage_changes = decoded.get("storage_changes", [])
+            result_events = decoded.get("events", [])
+            execution_stats = result_host[2] or {}
+
+        lifecycle_ms = execution_stats.get("lifecycle_ms")
+        if not isinstance(lifecycle_ms, dict):
+            lifecycle_ms = {}
+            execution_stats["lifecycle_ms"] = lifecycle_ms
+
+        manager_attempts = perf_timeline.get("manager_run_attempts", [])
+        if manager_attempts:
+            lifecycle_ms["manager_run_attempts_count"] = len(manager_attempts)
+            success_attempt = next(
+                (
+                    attempt
+                    for attempt in manager_attempts
+                    if attempt["outcome"] == "success"
+                ),
+                None,
+            )
+            if success_attempt is not None:
+                lifecycle_ms["manager_run_http_ms"] = success_attempt["duration_ms"]
+
+        run_started_s = perf_timeline.get("run_started_s")
+        genvm_id_obtained_s = perf_timeline.get("genvm_id_obtained_s")
+        host_first_method_received_s = perf_timeline.get("host_first_method_received_s")
+        if run_started_s is not None and genvm_id_obtained_s is not None:
+            lifecycle_ms["run_to_genvm_id_ms"] = round(
+                (genvm_id_obtained_s - run_started_s) * 1000
+            )
+        if genvm_id_obtained_s is not None and host_first_method_received_s is not None:
+            lifecycle_ms["genvm_id_to_first_method_ms"] = round(
+                (host_first_method_received_s - genvm_id_obtained_s) * 1000
+            )
+        if run_started_s is not None and host_first_method_received_s is not None:
+            lifecycle_ms["run_to_first_method_ms"] = round(
+                (host_first_method_received_s - run_started_s) * 1000
+            )
+
+        execution_stats["manager_run_attempts"] = manager_attempts
+
+        return RunHostAndProgramRes(
+            stdout=status["stdout"],
+            stderr=status["stderr"],
+            genvm_log=status.get("genvm_log") or [],
+            result_kind=result_kind,
+            result_data=result_data,
+            result_fingerprint=result_fingerprint,
+            result_storage_changes=result_storage_changes,
+            result_events=result_events,
+            execution_stats=execution_stats,
+        )
+
+    raise Exception("Execution failed")

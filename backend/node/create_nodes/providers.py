@@ -2,6 +2,7 @@ import json
 import os
 from threading import Thread
 from typing import List
+import socket
 
 from jsonschema import Draft202012Validator, validate
 
@@ -12,6 +13,18 @@ schema_file = os.path.join(current_directory, "providers_schema.json")
 default_providers_folder = os.path.join(current_directory, "default_providers")
 
 default_providers_cache: List[LLMProvider] = []
+
+
+def is_ollama_available() -> bool:
+    """Check if Ollama service is available by attempting to connect to it."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1)
+        result = sock.connect_ex(("ollama", int(os.getenv("OLAMAPORT", "11434"))))
+        sock.close()
+        return result == 0
+    except:
+        return False
 
 
 def get_schema() -> dict:
@@ -35,6 +48,17 @@ def validate_provider(provider: LLMProvider):
         raise ValueError(f"Error validating provider: {e}")
 
 
+def _to_domain(provider: dict) -> LLMProvider:
+    return LLMProvider(
+        id=None,
+        provider=provider["provider"],
+        model=provider["model"],
+        config=provider["config"],
+        plugin=provider["plugin"],
+        plugin_config=provider["plugin_config"],
+    )
+
+
 def get_default_providers() -> List[LLMProvider]:
     global default_providers_cache
     if default_providers_cache:
@@ -49,15 +73,19 @@ def get_default_providers() -> List[LLMProvider]:
     ]
 
     providers = []
+    ollama_available = is_ollama_available()
     for file in files:
         with open(file, "r") as f:
             provider = json.loads(f.read())
-        try:
-            validate(instance=provider, schema=schema)
-        except Exception as e:
-            raise ValueError(f"Error validating file {file}, provider {provider}: {e}")
+        if ollama_available or provider["provider"] != "ollama":
+            try:
+                validate(instance=provider, schema=schema)
+            except Exception as e:
+                raise ValueError(
+                    f"Error validating file {file}, provider {provider}: {e}"
+                )
 
-        providers.append(_to_domain(provider))
+            providers.append(_to_domain(provider))
 
     default_providers_cache = providers
     return providers
@@ -80,17 +108,6 @@ def get_default_provider_for(provider: str, model: str) -> LLMProvider:
     if len(matches) > 1:
         raise ValueError(f"Multiple default providers found for {provider} and {model}")
     return matches[0]
-
-
-def _to_domain(provider: dict) -> LLMProvider:
-    return LLMProvider(
-        id=None,
-        provider=provider["provider"],
-        model=provider["model"],
-        config=provider["config"],
-        plugin=provider["plugin"],
-        plugin_config=provider["plugin_config"],
-    )
 
 
 # TODO: We could merge part of this logic of getting the available providers by loading the plugins. The plugins could have methods like `is_available` and `get_available_models` that would simplify this logic.

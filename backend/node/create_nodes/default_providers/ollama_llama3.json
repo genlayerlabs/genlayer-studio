@@ -21,6 +21,7 @@
     "top_p": 0.9
   },
   "plugin_config": {
-    "api_url": "http://ollama:11434/api/"
+    "api_key_env_var": "<no-key>",
+    "api_url": "http://ollama:11434"
   }
 }

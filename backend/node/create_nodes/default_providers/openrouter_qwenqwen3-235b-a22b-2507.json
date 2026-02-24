@@ -1,0 +1,10 @@
+{
+  "provider": "openrouter",
+  "plugin": "openai-compatible",
+  "model": "qwen/qwen3-235b-a22b-2507",
+  "config": {},
+  "plugin_config": {
+    "api_key_env_var": "OPENROUTERAPIKEY",
+    "api_url": "https://openrouter.ai/api"
+  }
+}

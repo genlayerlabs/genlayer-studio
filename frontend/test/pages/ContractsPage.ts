@@ -2,7 +2,7 @@ import { By, type Locator, until } from 'selenium-webdriver';
 import { BasePage } from './BasePage';
 
 export class ContractsPage extends BasePage {
-  override baseurl = 'http://localhost:8080/contracts';
+  override path = '/contracts';
   override visibleLocator: Locator = By.xpath(
     "//*[@data-testid='contracts-page-title']",
   );

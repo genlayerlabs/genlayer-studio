@@ -5,7 +5,15 @@
   "properties": {
     "provider": {
       "type": "string",
-      "examples": ["ollama", "heuristai", "openai", "anthropic"]
+      "examples": [
+        "ollama",
+        "heuristai",
+        "openai",
+        "anthropic",
+        "xai",
+        "google",
+        "openrouter"
+      ]
     },
     "model": {
       "type": "string"
@@ -15,7 +23,7 @@
     },
     "plugin": {
       "$comment": "Plugin to be loaded by the Studio to interact with the provider",
-      "enum": ["openai", "ollama", "anthropic"]
+      "enum": ["openai-compatible", "ollama", "anthropic", "google", "custom"]
     },
     "plugin_config": {
       "type": "object"
@@ -39,19 +47,114 @@
     {
       "if": {
         "properties": {
+          "provider": { "const": "xai" }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "const": "openai-compatible"
+          },
+          "model": {
+            "enum": ["grok-3"]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "provider": { "const": "google" }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "const": "google"
+          },
+          "model": {
+            "enum": [
+              "gemini-2.0-flash-lite-001",
+              "gemini-2.5-flash-lite",
+              "gemini-2.5-flash",
+              "gemini-3.0-flash",
+              "gemini-2.5-flash-lite"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
           "provider": { "const": "heuristai" }
         }
       },
       "then": {
         "properties": {
           "plugin": {
-            "const": "openai"
+            "const": "openai-compatible"
           },
           "model": {
             "enum": [
-              "mistralai/mixtral-8x22b-instruct",
-              "meta-llama/llama-3.1-405b-instruct",
-              "meta-llama/llama-3-70b-instruct"
+              "deepseek/deepseek-v3",
+              "mistralai/mixtral-8x7b-instruct",
+              "meta-llama/llama-3.3-70b-instruct"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "provider": { "const": "openrouter" }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "const": "openai-compatible"
+          },
+          "model": {
+            "enum": [
+              "@preset/rally-testnet-gpt-5-1",
+              "@preset/rally-testnet-sonnet-4-5",
+              "@preset/rally-testnet-gemini-3-flash",
+              "openai/gpt-5.2",
+              "openai/gpt-5.1",
+              "openai/gpt-5-mini",
+              "z-ai/glm-4.7",
+              "moonshotai/kimi-k2-0905",
+              "moonshotai/kimi-k2.5",
+              "deepseek/deepseek-v3.2",
+              "qwen/qwen3-235b-a22b-2507",
+              "anthropic/claude-sonnet-4.5",
+              "google/gemini-3-flash-preview",
+              "x-ai/grok-4",
+              "mistralai/mistral-large-2512",
+              "meta-llama/llama-4-maverick",
+              "nvidia/llama-3.1-nemotron-ultra-253b-v1"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "provider": { "const": "ionet" }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "const": "openai-compatible"
+          },
+          "model": {
+            "enum": [
+              "deepseek-ai/DeepSeek-V3.2",
+              "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
             ]
           }
         }
@@ -66,10 +169,21 @@
       "then": {
         "properties": {
           "plugin": {
-            "const": "openai"
+            "const": "openai-compatible"
           },
           "model": {
-            "enum": ["gpt-4", "gpt-4o", "gpt-4o-mini", "o1-preview", "o1-mini"]
+            "enum": [
+              "gpt-4-1106-preview",
+              "gpt-4o",
+              "gpt-4.1-mini",
+              "gpt-4.1-nano",
+              "gpt-4.1",
+              "gpt-5",
+              "gpt-5-mini",
+              "gpt-5-nano",
+              "gpt-5.1",
+              "gpt-5.1-nano"
+            ]
           }
         }
       }
@@ -89,17 +203,15 @@
             "enum": [
               "claude-3-7-sonnet-20250219",
               "claude-3-5-haiku-20241022",
-              "claude-3-5-sonnet-20241022",
-              "claude-3-5-sonnet-20240620",
-              "claude-3-opus-20240229",
-              "claude-3-sonnet-20240229",
-              "claude-3-haiku-20240307"
+              "claude-sonnet-4-20250514",
+              "claude-opus-4-20250514",
+              "claude-sonnet-4-5",
+              "claude-opus-4-5"
             ]
           }
         }
       }
     },
-
     {
       "if": {
         "properties": {
@@ -112,11 +224,15 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "api_url": {
+              "api_key_env_var": {
                 "type": "string",
                 "$comment": "Environment variable that contains the API key",
-                "default": "http://ollama:11434/api/",
+                "default": "<no-key>",
                 "minLength": 1
+              },
+              "api_url": {
+                "type": ["string", "null"],
+                "$comment": "URL of the API endpoint"
               }
             }
           },
@@ -247,7 +363,7 @@
     {
       "if": {
         "properties": {
-          "plugin": { "const": "openai" }
+          "plugin": { "const": "openai-compatible" }
         }
       },
       "then": {
@@ -265,6 +381,14 @@
               "api_url": {
                 "type": ["string", "null"],
                 "$comment": "URL of the API endpoint. Leave empty to use the official OpenAI API endpoint."
+              },
+              "mock_response": {
+                "type": "object",
+                "$comment": "Mock LLM responses"
+              },
+              "mock_web_response": {
+                "type": "object",
+                "$comment": "Mock web responses"
               }
             },
             "required": ["api_key_env_var", "api_url"]
@@ -285,16 +409,59 @@
                 "minimum": 100,
                 "maximum": 2000,
                 "multipleOf": 10,
-                "default": 500,
-                "$comment": "gpt-4, gpt-4o, gpt-4o-mini"
+                "default": 500
               },
-              "max_completion_tokens": {
+              "use_max_completion_tokens": {
+                "type": "boolean",
+                "default": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "plugin": { "const": "google" }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin_config": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "api_key_env_var": {
+                "type": "string",
+                "$comment": "Environment variable that contains the API key",
+                "default": "GEMINI_API_KEY",
+                "minLength": 1
+              },
+              "api_url": {
+                "type": ["string", "null"],
+                "$comment": "URL of the API endpoint"
+              }
+            },
+            "required": ["api_key_env_var", "api_url"]
+          },
+          "config": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "temperature": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "multipleOf": 0.05,
+                "default": 0.75
+              },
+              "max_tokens": {
                 "type": "integer",
-                "minimum": 3000,
-                "maximum": 25000,
-                "multipleOf": 100,
-                "default": 5000,
-                "$comment": "o1-preview, o1-mini"
+                "minimum": 100,
+                "maximum": 2000,
+                "multipleOf": 10,
+                "default": 500
               }
             }
           }
@@ -370,8 +537,54 @@
                 },
                 "default": []
               }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "plugin": { "const": "custom" }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin_config": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "api_key_env_var": {
+                "type": "string",
+                "$comment": "Environment variable that contains the API key",
+                "minLength": 1
+              },
+              "api_url": {
+                "type": ["string", "null"],
+                "$comment": "URL of the API endpoint"
+              }
             },
-            "required": ["max_tokens"]
+            "required": ["api_key_env_var", "api_url"]
+          },
+          "config": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "temperature": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "multipleOf": 0.05,
+                "default": 0.75
+              },
+              "max_tokens": {
+                "type": "integer",
+                "minimum": 100,
+                "maximum": 2000,
+                "multipleOf": 10,
+                "default": 500
+              }
+            }
           }
         }
       }

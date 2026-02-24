@@ -13,8 +13,10 @@
     />
     <meta name="robots" content="index, follow" />
     <meta name="author" content="YeagerAI" />
-    <link rel="shortcut icon" type="image/png" href="/favicon.png"/>
-    <meta name="theme-color" content="#ffffff" />
+    <link rel="shortcut icon" type="image/svg+xml" href="/src/assets/images/mark_black.svg" media="(prefers-color-scheme: light)"/>
+    <link rel="shortcut icon" type="image/svg+xml" href="/src/assets/images/mark_white.svg" media="(prefers-color-scheme: dark)"/>
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)"/>
+    <meta name="theme-color" content="#18181b" media="(prefers-color-scheme: dark)"/>
     <link rel="stylesheet" type="text/css" href="/loader.css" />
   </head>
 
@@ -22,7 +24,7 @@
     <div id="app" class="h-full">
       <div id="loading-bg">
         <div class="loading-logo">
-          <img src="/logo.png" alt="GenLayer" width="139" />
+          <img src="/src/assets/images/mark_black.svg" alt="GenLayer" width="139" />
         </div>
         <div class="loading">
           <div class="effect-1 effects"></div>
@@ -31,6 +33,7 @@
         </div>
       </div>
     </div>
+    <script src="/runtime-config.js"></script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

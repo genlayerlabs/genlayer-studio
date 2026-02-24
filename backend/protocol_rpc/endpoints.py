@@ -1,36 +1,38 @@
 # rpc/endpoints.py
 import random
 import json
+import time
 import eth_utils
+import logging
 from functools import partial, wraps
 from typing import Any
-from flask_jsonrpc import JSONRPC
-from flask_jsonrpc.exceptions import JSONRPCError
+from backend.protocol_rpc.exceptions import JSONRPCError, NotFoundError
 from sqlalchemy import Table
 from sqlalchemy.orm import Session
+import backend.validators as validators
 
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.database_handler.llm_providers import LLMProviderRegistry
 from backend.rollup.consensus_service import ConsensusService
-from backend.database_handler.models import Base
-from backend.domain.types import LLMProvider, Validator, TransactionType
+from backend.database_handler.models import Base, TransactionStatus
+from backend.domain.types import LLMProvider, Validator, TransactionType, SimConfig
 from backend.node.create_nodes.providers import (
     get_default_provider_for,
     validate_provider,
 )
-from backend.llms import get_llm_plugin
 from backend.protocol_rpc.message_handler.base import (
-    MessageHandler,
+    IMessageHandler,
     get_client_session_id,
 )
 from backend.database_handler.accounts_manager import AccountsManager
-from backend.database_handler.validators_registry import ValidatorsRegistry
+from backend.database_handler.validators_registry import (
+    ValidatorsRegistry,
+    ModifiableValidatorsRegistry,
+)
 
 from backend.node.create_nodes.create_nodes import (
     random_validator_config,
 )
-
-from backend.protocol_rpc.endpoint_generator import generate_rpc_endpoint
 
 from backend.protocol_rpc.transactions_parser import TransactionParser
 from backend.errors.errors import InvalidAddressError, InvalidTransactionError
@@ -39,29 +41,107 @@ from backend.database_handler.transactions_processor import (
     TransactionAddressFilter,
     TransactionsProcessor,
 )
-from backend.node.base import Node, SIMULATOR_CHAIN_ID
+
+
+logger = logging.getLogger(__name__)
+from backend.node.base import Node, get_simulator_chain_id
 from backend.node.types import ExecutionMode, ExecutionResultStatus
 from backend.consensus.base import ConsensusAlgorithm
+from backend.protocol_rpc.call_interceptor import handle_consensus_data_call
 
-from flask_jsonrpc.exceptions import JSONRPCError
 import base64
 import os
 from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope
+from backend.protocol_rpc.types import DecodedsubmitAppealDataArgs
+from backend.database_handler.snapshot_manager import SnapshotManager
+from backend.node.base import Manager as GenVMManager
+import asyncio
+
+# Limit concurrent GenVM executions on the jsonrpc path to prevent uvloop fd conflicts.
+# Workers use asyncio.Semaphore(8) in consensus/base.py; gen_call had none, allowing
+# unbounded concurrent GenVM socket operations that cause fd registry collisions.
+_GENVM_CONCURRENCY = int(os.environ.get("GENVM_MAX_CONCURRENT", "8"))
+_genvm_semaphore = asyncio.Semaphore(_GENVM_CONCURRENCY)
+
+# ---------------------------------------------------------------------------
+# Per-address rate limiting for gen_call / sim_call
+# Prevents a single contract from monopolising all GenVM execution slots.
+# ---------------------------------------------------------------------------
+_RATE_LIMIT_WINDOW = float(
+    os.environ.get("GEN_CALL_RATE_LIMIT_WINDOW", "10")
+)  # seconds
+_RATE_LIMIT_MAX = int(
+    os.environ.get("GEN_CALL_RATE_LIMIT_MAX", "20")
+)  # max requests per window per address
+
+_address_request_log: dict[str, list[float]] = {}  # {address: [timestamp, ...]}
+
+_rate_limit_logger = logging.getLogger(__name__ + ".rate_limit")
 
 
-####### WRAPPER TO BLOCK ENDPOINTS FOR HOSTED ENVIRONMENT #######
-def check_forbidden_method_in_hosted_studio(func):
+def _check_rate_limit(address: str) -> None:
+    """Reject if address exceeds rate limit. Prunes old entries."""
+    now = time.monotonic()
+    timestamps = _address_request_log.get(address, [])
+    cutoff = now - _RATE_LIMIT_WINDOW
+    timestamps = [t for t in timestamps if t > cutoff]
+    if len(timestamps) >= _RATE_LIMIT_MAX:
+        _rate_limit_logger.warning(
+            f"Rate limit exceeded for {address}: {len(timestamps)} requests in {_RATE_LIMIT_WINDOW}s window"
+        )
+        raise JSONRPCError(
+            code=-32005,
+            message=f"Rate limit exceeded: max {_RATE_LIMIT_MAX} gen_call requests per {_RATE_LIMIT_WINDOW}s per contract address",
+            data={"address": address, "retry_after_seconds": _RATE_LIMIT_WINDOW},
+        )
+    timestamps.append(now)
+    _address_request_log[address] = timestamps
+
+
+####### ADMIN ACCESS CONTROL #######
+def require_admin_access(func):
+    """
+    Admin access control decorator:
+    - ADMIN_API_KEY set → requires matching admin_key (works in all modes including hosted)
+    - VITE_IS_HOSTED=true without ADMIN_API_KEY → blocked entirely
+    - Neither set → open access (local dev)
+    """
+
     @wraps(func)
     def wrapper(*args, **kwargs):
-        if os.getenv("VITE_IS_HOSTED") == "true":
+        is_hosted = os.getenv("VITE_IS_HOSTED") == "true"
+        admin_api_key = os.getenv("ADMIN_API_KEY")
+
+        # If admin key is configured, check it (works in all modes including hosted)
+        if admin_api_key:
+            request_key = kwargs.get("admin_key")
+            if request_key == admin_api_key:
+                # Valid admin key - proceed
+                return func(*args, **kwargs)
+            # Invalid key in any mode
             raise JSONRPCError(
                 code=-32000,
-                message="Non-allowed operation",
+                message="Invalid or missing admin key",
                 data={},
             )
+
+        # No admin key configured
+        if is_hosted:
+            # Hosted without admin key = blocked
+            raise JSONRPCError(
+                code=-32000,
+                message="Operation not available in hosted mode",
+                data={},
+            )
+
+        # Local dev = open access
         return func(*args, **kwargs)
 
     return wrapper
+
+
+# Alias for backwards compatibility
+check_forbidden_method_in_hosted_studio = require_admin_access
 
 
 ####### HELPER ENDPOINTS #######
@@ -80,17 +160,23 @@ def clear_db_tables(session: Session, tables: list) -> None:
 
 
 def fund_account(
-    accounts_manager: AccountsManager,
-    transactions_processor: TransactionsProcessor,
+    session: Session,
     account_address: str,
     amount: int,
 ) -> str:
+    """Fund an account within a request-scoped database session."""
+    accounts_manager = AccountsManager(session)
+    transactions_processor = TransactionsProcessor(session)
+
     if not accounts_manager.is_valid_address(account_address):
         raise InvalidAddressError(account_address)
 
+    import secrets
+
     nonce = transactions_processor.get_transaction_count(None)
-    transaction_hash = transactions_processor.insert_transaction(
-        None, account_address, None, amount, 0, nonce, False
+    transaction_hash = "0x" + secrets.token_hex(32)
+    transactions_processor.insert_transaction(
+        None, account_address, None, amount, 0, nonce, False, 0, None, transaction_hash
     )
     return transaction_hash
 
@@ -100,14 +186,91 @@ def reset_defaults_llm_providers(llm_provider_registry: LLMProviderRegistry) -> 
     llm_provider_registry.reset_defaults()
 
 
+async def check_provider_is_available(
+    genvm_manager: GenVMManager, provider: LLMProvider | dict
+) -> bool:
+    if isinstance(provider, LLMProvider):
+        model = provider.model
+        url = provider.plugin_config["api_url"]
+        plugin = provider.plugin
+        key = provider.plugin_config["api_key_env_var"]
+        temperature = provider.config.get("temperature", 1)
+        use_max_completion_tokens = provider.config.get(
+            "use_max_completion_tokens", False
+        )
+    else:
+        model = provider["model"]
+        url = provider["plugin_config"]["api_url"]
+        plugin = provider["plugin"]
+        key = provider["plugin_config"]["api_key_env_var"]
+        temperature = provider["config"].get("temperature", 1)
+        use_max_completion_tokens = provider["config"].get(
+            "use_max_completion_tokens", False
+        )
+    key = f"${{ENV[{key}]}}"
+    res = await genvm_manager.try_llms(
+        [
+            {
+                "host": url,
+                "model": model,
+                "provider": plugin,
+                "key": key,
+            }
+        ],
+        prompt={
+            "system_message": "",
+            "user_message": "respond with two letters 'ok' and nothing else. No quotes, no repetition",
+            "temperature": temperature,
+            "max_tokens": 500,
+            "use_max_completion_tokens": use_max_completion_tokens,
+            "images": [],
+        },
+    )
+    if len(res) != 1:
+        genvm_manager.logger.error(
+            f"LLM provider check failed", provider=provider, result=res
+        )
+        return False
+    res = res[0]
+    if (text_response := res.get("response")) is None:
+        genvm_manager.logger.error(
+            f"LLM provider check failed", provider=provider, result=res
+        )
+        return False
+
+    what_returned = text_response.strip().lower()
+    if what_returned != "ok":
+        genvm_manager.logger.error(
+            f"LLM provider check failed", provider=provider, text_response=text_response
+        )
+        return False
+    return True
+
+
 async def get_providers_and_models(
     llm_provider_registry: LLMProviderRegistry,
+    genvm_manager: GenVMManager,
 ) -> list[dict]:
-    return await llm_provider_registry.get_all_dict()
+    providers = await llm_provider_registry.get_all_dict()
+    sem = asyncio.Semaphore(8)
+
+    async def check_with_semaphore(genvm_manager, provider):
+        async with sem:
+            return await check_provider_is_available(genvm_manager, provider)
+
+    availability = await asyncio.gather(
+        *(check_with_semaphore(genvm_manager, p) for p in providers)
+    )
+    for provider, is_available in zip(providers, availability):
+        provider["is_model_available"] = is_available
+    return providers
 
 
 @check_forbidden_method_in_hosted_studio
-def add_provider(llm_provider_registry: LLMProviderRegistry, params: dict) -> int:
+def add_provider(session: Session, params: dict) -> int:
+    """Add a provider using the request-scoped session."""
+    llm_provider_registry = LLMProviderRegistry(session)
+
     provider = LLMProvider(
         provider=params["provider"],
         model=params["model"],
@@ -122,9 +285,10 @@ def add_provider(llm_provider_registry: LLMProviderRegistry, params: dict) -> in
 
 
 @check_forbidden_method_in_hosted_studio
-def update_provider(
-    llm_provider_registry: LLMProviderRegistry, id: int, params: dict
-) -> None:
+def update_provider(session: Session, id: int, params: dict) -> None:
+    """Update a provider using the request-scoped session."""
+    llm_provider_registry = LLMProviderRegistry(session)
+
     provider = LLMProvider(
         provider=params["provider"],
         model=params["model"],
@@ -138,13 +302,15 @@ def update_provider(
 
 
 @check_forbidden_method_in_hosted_studio
-def delete_provider(llm_provider_registry: LLMProviderRegistry, id: int) -> None:
+def delete_provider(session: Session, id: int) -> None:
+    """Delete a provider using the request-scoped session."""
+    llm_provider_registry = LLMProviderRegistry(session)
     llm_provider_registry.delete(id)
 
 
-def create_validator(
-    validators_registry: ValidatorsRegistry,
-    accounts_manager: AccountsManager,
+async def create_validator(
+    session: Session,
+    validators_manager: validators.Manager,
     stake: int,
     provider: str,
     model: str,
@@ -167,9 +333,11 @@ def create_validator(
         )
         validate_provider(llm_provider)
 
+    accounts_manager = AccountsManager(session)
+
     account = accounts_manager.create_new_account()
 
-    return validators_registry.create_validator(
+    return await validators_manager.registry.create_validator(
         Validator(
             address=account.address,
             private_key=account.key,
@@ -181,16 +349,16 @@ def create_validator(
 
 @check_forbidden_method_in_hosted_studio
 async def create_random_validator(
-    validators_registry: ValidatorsRegistry,
-    accounts_manager: AccountsManager,
-    llm_provider_registry: LLMProviderRegistry,
+    session: Session,
+    validators_manager: validators.Manager,
+    genvm_manager: GenVMManager,
     stake: int,
 ) -> dict:
     return (
         await create_random_validators(
-            validators_registry,
-            accounts_manager,
-            llm_provider_registry,
+            session,
+            validators_manager,
+            genvm_manager,
             1,
             stake,
             stake,
@@ -200,24 +368,27 @@ async def create_random_validator(
 
 @check_forbidden_method_in_hosted_studio
 async def create_random_validators(
-    validators_registry: ValidatorsRegistry,
-    accounts_manager: AccountsManager,
-    llm_provider_registry: LLMProviderRegistry,
+    session: Session,
+    validators_manager: validators.Manager,
+    genvm_manager: GenVMManager,
     count: int,
     min_stake: int,
     max_stake: int,
     limit_providers: list[str] = None,
     limit_models: list[str] = None,
 ) -> list[dict]:
+    accounts_manager = AccountsManager(session)
+    llm_provider_registry = LLMProviderRegistry(session)
+
     limit_providers = limit_providers or []
     limit_models = limit_models or []
 
     details = await random_validator_config(
         llm_provider_registry.get_all,
-        get_llm_plugin,
-        limit_providers=set(limit_providers),
-        limit_models=set(limit_models),
-        amount=count,
+        partial(check_provider_is_available, genvm_manager),
+        set(limit_providers),
+        set(limit_models),
+        count,
     )
 
     response = []
@@ -225,7 +396,7 @@ async def create_random_validators(
         stake = random.randint(min_stake, max_stake)
         validator_account = accounts_manager.create_new_account()
 
-        validator = validators_registry.create_validator(
+        validator = await validators_manager.registry.create_validator(
             Validator(
                 address=validator_account.address,
                 private_key=validator_account.key,
@@ -239,9 +410,9 @@ async def create_random_validators(
 
 
 @check_forbidden_method_in_hosted_studio
-def update_validator(
-    validators_registry: ValidatorsRegistry,
-    accounts_manager: AccountsManager,
+async def update_validator(
+    session: Session,
+    validators_manager: validators.Manager,
     validator_address: str,
     stake: int,
     provider: str,
@@ -276,49 +447,248 @@ def update_validator(
         stake=stake,
         llmprovider=llm_provider,
     )
-    return validators_registry.update_validator(validator)
+    return await validators_manager.registry.update_validator(validator)
 
 
 @check_forbidden_method_in_hosted_studio
-def delete_validator(
-    validators_registry: ValidatorsRegistry,
-    accounts_manager: AccountsManager,
+async def delete_validator(
+    validators_manager: validators.Manager,
     validator_address: str,
 ) -> str:
     # Remove validation while adding migration to update the db address
     # if not accounts_manager.is_valid_address(validator_address):
     #     raise InvalidAddressError(validator_address)
 
-    validators_registry.delete_validator(validator_address)
+    await validators_manager.registry.delete_validator(validator_address)
     return validator_address
 
 
 @check_forbidden_method_in_hosted_studio
-def delete_all_validators(
-    validators_registry: ValidatorsRegistry,
+async def delete_all_validators(
+    validators_manager: validators.Manager,
 ) -> list:
-    validators_registry.delete_all_validators()
-    return validators_registry.get_all_validators()
+    await validators_manager.registry.delete_all_validators()
+    return validators_manager.registry.get_all_validators()
 
 
 def get_all_validators(validators_registry: ValidatorsRegistry) -> list:
-    return validators_registry.get_all_validators()
+    return validators_registry.get_all_validators(include_private_key=False)
 
 
 def get_validator(
     validators_registry: ValidatorsRegistry, validator_address: str
 ) -> dict:
-    return validators_registry.get_validator(validator_address)
+    return validators_registry.get_validator(
+        validator_address=validator_address, include_private_key=False
+    )
 
 
 def count_validators(validators_registry: ValidatorsRegistry) -> int:
     return validators_registry.count_validators()
 
 
+####### CONTRACT UPGRADE ENDPOINTS #######
+def get_contract_deployer(session: Session, contract_address: str) -> str | None:
+    """Get the address that deployed a contract by looking up the deploy transaction."""
+    from backend.database_handler.models import Transactions
+
+    deploy_tx = (
+        session.query(Transactions)
+        .filter(
+            Transactions.to_address == contract_address,
+            Transactions.type == TransactionType.DEPLOY_CONTRACT.value,
+            Transactions.status == TransactionStatus.FINALIZED,
+        )
+        .first()
+    )
+
+    return deploy_tx.from_address if deploy_tx else None
+
+
+def get_contract_nonce(session: Session, contract_address: str) -> int:
+    """Get contract nonce (tx count TO this contract) for upgrade signatures."""
+    from backend.database_handler.models import Transactions
+
+    try:
+        checksum_address = eth_utils.to_checksum_address(contract_address)
+    except (ValueError, TypeError):
+        checksum_address = contract_address
+
+    count = (
+        session.query(Transactions)
+        .filter(Transactions.to_address == checksum_address)
+        .count()
+    )
+    return count
+
+
+def admin_upgrade_contract_code(
+    session: Session,
+    contract_address: str,
+    new_code: str,
+    signature: str | None = None,
+    admin_key: str | None = None,
+) -> dict:
+    """
+    Queue a contract code upgrade. Returns immediately with tx hash.
+    Upgrade executes when worker processes it (after any pending txs for this contract).
+
+    Access control:
+    - Local (no env vars): open access
+    - Hosted/Self-hosted: admin_key allows ANY contract, signature allows own contracts
+
+    Args:
+        session: Database session
+        contract_address: Address of contract to upgrade
+        new_code: New Python contract source code
+        signature: Hex-encoded signature from deployer (required in hosted mode unless admin_key)
+        admin_key: Admin API key for full access to any contract
+
+    Returns:
+        dict with transaction_hash for polling status
+    """
+    from backend.database_handler.models import (
+        CurrentState,
+        Transactions,
+        TransactionStatus,
+    )
+    from backend.domain.types import TransactionType
+    from eth_account.messages import encode_defunct
+    from eth_account import Account
+    from web3 import Web3
+    import secrets
+
+    # Normalize address to checksum format for consistent comparison
+    # This must match get_contract_nonce() which frontend calls for signing
+    try:
+        contract_address = eth_utils.to_checksum_address(contract_address)
+    except (ValueError, TypeError):
+        pass  # Keep original if invalid - will fail later validation
+
+    is_hosted = os.getenv("VITE_IS_HOSTED") == "true"
+    admin_api_key = os.getenv("ADMIN_API_KEY")
+
+    # Check if authorization is needed (hosted or self-hosted with key configured)
+    needs_auth = is_hosted or admin_api_key
+
+    if needs_auth:
+        # Option 1: Admin key grants full access to ANY contract
+        if admin_api_key and admin_key == admin_api_key:
+            pass  # Authorized - proceed with upgrade
+
+        # Option 2: Signature from deployer grants access to own contracts
+        elif signature:
+            try:
+                # Get transaction count for contract to prevent replay attacks
+                # Each upgrade creates a new tx, so count always increases
+                # Use get_contract_nonce for consistent address normalization
+                tx_count = get_contract_nonce(session, contract_address)
+
+                # Recover signer from signature
+                # Message: keccak256(contract_address + tx_count_bytes + keccak256(new_code))
+                # Including tx_count makes signatures single-use (count increments after each tx)
+                new_code_hash = Web3.keccak(text=new_code)
+                tx_count_bytes = tx_count.to_bytes(32, byteorder="big")
+                message_hash = Web3.keccak(
+                    Web3.to_bytes(hexstr=contract_address)
+                    + tx_count_bytes
+                    + new_code_hash
+                )
+                message = encode_defunct(primitive=message_hash)
+                signer = Account.recover_message(message, signature=signature)
+
+                # Verify signer is deployer
+                deployer = get_contract_deployer(session, contract_address)
+                if not deployer:
+                    raise NotFoundError(
+                        message="Contract not found",
+                        data={"contract_address": contract_address},
+                    )
+                if signer.lower() != deployer.lower():
+                    raise JSONRPCError(
+                        code=-32000,
+                        message="Only contract deployer can upgrade",
+                        data={"signer": signer, "deployer": deployer},
+                    )
+                # Authorized - proceed with upgrade
+            except JSONRPCError:
+                raise
+            except Exception as e:
+                raise JSONRPCError(
+                    code=-32000,
+                    message=f"Invalid signature: {e!s}",
+                    data={},
+                ) from e
+
+        else:
+            # No valid auth provided
+            raise JSONRPCError(
+                code=-32000,
+                message="Upgrade requires admin key or deployer signature",
+                data={},
+            )
+
+    # Local mode (no env vars): allow all - no auth check needed
+
+    # Validate new code is not empty
+    if not new_code or not new_code.strip():
+        raise JSONRPCError(
+            code=-32602,
+            message="Contract code cannot be empty",
+            data={},
+        )
+
+    # Validate contract exists and is deployed
+    contract = session.query(CurrentState).filter_by(id=contract_address).one_or_none()
+    if not contract or not contract.data or not contract.data.get("code"):
+        raise NotFoundError(
+            message="Contract not found",
+            data={"contract_address": contract_address},
+        )
+
+    # Create upgrade transaction
+    tx_hash = "0x" + secrets.token_hex(32)
+    upgrade_tx = Transactions(
+        hash=tx_hash,
+        status=TransactionStatus.PENDING,
+        from_address=None,
+        to_address=contract_address,
+        input_data=None,
+        data={"new_code": new_code},
+        consensus_data=None,
+        nonce=None,
+        value=0,
+        type=TransactionType.UPGRADE_CONTRACT.value,
+        gaslimit=None,
+        leader_only=True,
+        r=None,
+        s=None,
+        v=None,
+        appeal_failed=None,
+        consensus_history=None,
+        timestamp_appeal=None,
+        appeal_processing_time=None,
+        contract_snapshot=None,
+        config_rotation_rounds=None,
+        num_of_initial_validators=None,
+        last_vote_timestamp=None,
+        rotation_count=None,
+        leader_timeout_validators=None,
+    )
+    session.add(upgrade_tx)
+    session.commit()
+
+    return {
+        "transaction_hash": tx_hash,
+        "message": "Upgrade queued. Poll eth_getTransactionReceipt for completion.",
+    }
+
+
 ####### GEN ENDPOINTS #######
 async def get_contract_schema(
     accounts_manager: AccountsManager,
-    msg_handler: MessageHandler,
+    genvm_manager: GenVMManager,
+    msg_handler: IMessageHandler,
     contract_address: str,
 ) -> dict:
     if not accounts_manager.is_valid_address(contract_address):
@@ -351,6 +721,7 @@ async def get_contract_schema(
         leader_receipt=None,
         msg_handler=msg_handler.with_client_session(get_client_session_id()),
         contract_snapshot_factory=None,
+        manager=genvm_manager,
     )
     schema = await node.get_contract_schema(
         base64.b64decode(contract_account["data"]["code"])
@@ -359,7 +730,7 @@ async def get_contract_schema(
 
 
 async def get_contract_schema_for_code(
-    msg_handler: MessageHandler, contract_code_hex: str
+    genvm_manager: GenVMManager, msg_handler: IMessageHandler, contract_code_hex: str
 ) -> dict:
     node = Node(  # Mock node just to get the data from the GenVM
         contract_snapshot=None,
@@ -378,11 +749,338 @@ async def get_contract_schema_for_code(
         leader_receipt=None,
         msg_handler=msg_handler.with_client_session(get_client_session_id()),
         contract_snapshot_factory=None,
+        manager=genvm_manager,
     )
-    schema = await node.get_contract_schema(
-        eth_utils.hexadecimal.decode_hex(contract_code_hex)
-    )
+    # Contract code is expected to be a hex string, but it can be a plain UTF-8 string
+    # When hex decoding fails, fall back to UTF-8 encoding
+    try:
+        contract_code = eth_utils.hexadecimal.decode_hex(contract_code_hex)
+    except ValueError:
+        logger.debug(
+            "Contract code is not hex-encoded, treating as UTF-8 string",
+        )
+        contract_code = contract_code_hex.encode("utf-8")
+    schema = await node.get_contract_schema(contract_code)
     return json.loads(schema)
+
+
+def get_contract_code(session: Session, contract_address: str) -> str:
+    contract_snapshot = ContractSnapshot(contract_address, session)
+    code_b64 = contract_snapshot.extract_deployed_code_b64()
+    if not code_b64:
+        raise InvalidAddressError(
+            contract_address,
+            "Contract not deployed",
+        )
+    return code_b64
+
+
+async def _execute_call_with_snapshot(
+    session: Session,
+    accounts_manager: AccountsManager,
+    msg_handler: IMessageHandler,
+    transactions_parser: TransactionParser,
+    validators_manager: validators.Manager,
+    genvm_manager: GenVMManager,
+    params: dict,
+):
+    """Common logic for gen_call and sim_call"""
+    sim_config_obj = None
+    if "sim_config" in params and params["sim_config"]:
+        sim_config_obj = SimConfig.from_dict(params["sim_config"])
+
+    virtual_validators = []
+
+    # Use sim_config_obj if provided
+    if sim_config_obj and sim_config_obj.validators:
+        for validator in sim_config_obj.validators:
+            provider = validator.provider
+            model = validator.model
+            config = validator.config
+            plugin = validator.plugin
+            plugin_config = validator.plugin_config
+            try:
+                if config is None or plugin is None or plugin_config is None:
+                    llm_provider = get_default_provider_for(provider, model)
+                else:
+                    llm_provider = LLMProvider(
+                        provider=provider,
+                        model=model,
+                        config=config,
+                        plugin=plugin,
+                        plugin_config=plugin_config,
+                    )
+                    validate_provider(llm_provider)
+            except ValueError as e:
+                raise JSONRPCError(code=-32602, message=str(e), data={}) from e
+            account = accounts_manager.create_new_account()
+            virtual_validators.append(
+                Validator(
+                    address=account.address,
+                    private_key=account.key,
+                    stake=validator.stake,
+                    llmprovider=llm_provider,
+                )
+            )
+    else:
+        # Fallback to old behavior for backward compatibility
+        sim_config = params.get("sim_config", {})
+        provider = sim_config.get("provider")
+        model = sim_config.get("model")
+
+        if provider is not None and model is not None:
+            config = sim_config.get("config")
+            plugin = sim_config.get("plugin")
+            plugin_config = sim_config.get("plugin_config")
+
+            try:
+                if config is None or plugin is None or plugin_config is None:
+                    llm_provider = get_default_provider_for(provider, model)
+                else:
+                    llm_provider = LLMProvider(
+                        provider=provider,
+                        model=model,
+                        config=config,
+                        plugin=plugin,
+                        plugin_config=plugin_config,
+                    )
+                    validate_provider(llm_provider)
+            except ValueError as e:
+                raise JSONRPCError(code=-32602, message=str(e), data={}) from e
+            account = accounts_manager.create_new_account()
+            virtual_validators.append(
+                Validator(
+                    address=account.address,
+                    private_key=account.key,
+                    stake=0,
+                    llmprovider=llm_provider,
+                )
+            )
+        elif provider is None and model is None:
+            pass
+        else:
+            raise JSONRPCError(
+                code=-32602,
+                message="Both 'provider' and 'model' must be supplied together.",
+                data={},
+            )
+
+    if len(virtual_validators) > 0:
+        snapshot_func = validators_manager.temporal_snapshot
+        args = [virtual_validators]
+    else:
+        snapshot_func = validators_manager.snapshot
+        args = []
+
+    async with snapshot_func(*args) as snapshot:
+        if len(snapshot.nodes) == 0:
+            raise JSONRPCError("No validators exist to execute the call")
+
+        receipt = await _gen_call_with_validator(
+            session,
+            accounts_manager,
+            genvm_manager,
+            msg_handler,
+            transactions_parser,
+            snapshot,
+            params,
+        )
+        return receipt
+
+
+async def gen_call(
+    session: Session,
+    accounts_manager: AccountsManager,
+    msg_handler: IMessageHandler,
+    transactions_parser: TransactionParser,
+    validators_manager: validators.Manager,
+    genvm_manager: GenVMManager,
+    params: dict,
+) -> str:
+    receipt = await _execute_call_with_snapshot(
+        session,
+        accounts_manager,
+        msg_handler,
+        transactions_parser,
+        validators_manager,
+        genvm_manager,
+        params,
+    )
+    return eth_utils.hexadecimal.encode_hex(receipt.result[1:])[2:]
+
+
+def sim_lint_contract(source_code: str, filename: str = "contract.py") -> dict:
+    """Lint GenVM contract source code.
+
+    Args:
+        source_code: Python source code to lint
+        filename: Optional filename for error reporting
+
+    Returns:
+        dict with 'results' array and 'summary' object
+    """
+    from backend.protocol_rpc.contract_linter import ContractLinter
+
+    linter = ContractLinter()
+    return linter.lint_contract(source_code, filename)
+
+
+async def sim_call(
+    session: Session,
+    accounts_manager: AccountsManager,
+    msg_handler: IMessageHandler,
+    transactions_parser: TransactionParser,
+    validators_manager: validators.Manager,
+    genvm_manager: GenVMManager,
+    params: dict,
+) -> dict:
+    receipt = await _execute_call_with_snapshot(
+        session,
+        accounts_manager,
+        msg_handler,
+        transactions_parser,
+        validators_manager,
+        genvm_manager,
+        params,
+    )
+    return receipt.to_dict()
+
+
+async def _gen_call_with_validator(
+    session: Session,
+    accounts_manager: AccountsManager,
+    genvm_manager: GenVMManager,
+    msg_handler: IMessageHandler,
+    transactions_parser: TransactionParser,
+    validators_snapshot: validators.Snapshot,
+    params: dict,
+):
+    type = params["type"]
+    data = params["data"]
+    to_address = params["to"]
+    from_address = params["from"]
+    transaction_hash_variant = (
+        params["transaction_hash_variant"]
+        if "transaction_hash_variant" in params
+        else None
+    )
+
+    if not accounts_manager.is_valid_address(from_address):
+        raise InvalidAddressError(from_address)
+
+    if not accounts_manager.is_valid_address(to_address):
+        raise InvalidAddressError(to_address)
+
+    # Rate limit per contract address — reject early before acquiring resources
+    _check_rate_limit(to_address)
+
+    if transaction_hash_variant == "latest-final":
+        state_status = "finalized"
+    else:
+        state_status = "accepted"
+
+    # Get a validator
+    if len(validators_snapshot.nodes) > 0:
+        validator = validators_snapshot.nodes[0].validator
+    else:
+        raise JSONRPCError(f"No validators exist to execute the gen_call")
+
+    # Create validator node
+    node = Node(
+        contract_snapshot=ContractSnapshot(to_address, session),
+        contract_snapshot_factory=partial(ContractSnapshot, session=session),
+        validator_mode=ExecutionMode.LEADER,
+        validator=validator,
+        leader_receipt=None,
+        msg_handler=msg_handler.with_client_session(get_client_session_id()),
+        validators_snapshot=validators_snapshot,
+        manager=genvm_manager,
+    )
+
+    sc_raw = params.get("sim_config")
+    sim_config = SimConfig.from_dict(sc_raw) if sc_raw else None
+    override_transaction_datetime: bool = (
+        sim_config is not None and sim_config.genvm_datetime is not None
+    )
+
+    if _genvm_semaphore.locked():
+        _rate_limit_logger.warning(
+            f"GenVM at capacity ({_GENVM_CONCURRENCY} concurrent) — rejecting gen_call to {to_address}"
+        )
+        raise JSONRPCError(
+            code=-32006,
+            message=f"Server busy: all {_GENVM_CONCURRENCY} execution slots occupied, retry later",
+            data={"retry_after_seconds": 2},
+        )
+
+    async with _genvm_semaphore:
+        if type == "read":
+            # Pre-parse timestamp override and map errors
+            txn_dt = None
+            if sim_config and override_transaction_datetime:
+                try:
+                    txn_dt = sim_config.genvm_datetime_as_datetime
+                except ValueError as e:
+                    raise JSONRPCError(
+                        code=-32602,
+                        message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                        data={},
+                    ) from e
+            decoded_data = transactions_parser.decode_method_call_data(data)
+            receipt = await node.get_contract_data(
+                from_address=from_address,
+                calldata=decoded_data.calldata,
+                state_status=state_status,
+                transaction_datetime=txn_dt,
+            )
+        elif type == "write":
+            txn_created_at = None
+            if sim_config and override_transaction_datetime:
+                try:
+                    _ = sim_config.genvm_datetime_as_datetime  # validation only
+                    txn_created_at = sim_config.genvm_datetime
+                except ValueError as e:
+                    raise JSONRPCError(
+                        code=-32602,
+                        message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                        data={},
+                    ) from e
+            decoded_data = transactions_parser.decode_method_send_data(data)
+            receipt = await node.run_contract(
+                from_address=from_address,
+                calldata=decoded_data.calldata,
+                transaction_created_at=txn_created_at,
+            )
+        elif type == "deploy":
+            txn_created_at = None
+            if sim_config and override_transaction_datetime:
+                try:
+                    _ = sim_config.genvm_datetime_as_datetime  # validation only
+                    txn_created_at = sim_config.genvm_datetime
+                except ValueError as e:
+                    raise JSONRPCError(
+                        code=-32602,
+                        message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                        data={},
+                    ) from e
+            decoded_data = transactions_parser.decode_deployment_data(data)
+            receipt = await node.deploy_contract(
+                from_address=from_address,
+                code_to_deploy=decoded_data.contract_code,
+                calldata=decoded_data.calldata,
+                transaction_created_at=txn_created_at,
+            )
+        else:
+            raise JSONRPCError(f"Invalid type: {type}")
+
+    # Return the result of the write method
+    if receipt.execution_result != ExecutionResultStatus.SUCCESS:
+        raise JSONRPCError(
+            message="running contract failed",
+            data={"receipt": receipt.to_dict(), "params": params},
+        )
+
+    return receipt
 
 
 ####### ETH ENDPOINTS #######
@@ -404,59 +1102,117 @@ def get_transaction_count(
 
 
 def get_transaction_by_hash(
+    transactions_processor: TransactionsProcessor,
+    transaction_hash: str,
+    sim_config: dict | None = None,
+) -> dict:
+    transaction = transactions_processor.get_transaction_by_hash(
+        transaction_hash, sim_config
+    )
+
+    if transaction is None:
+        raise NotFoundError(
+            message=f"Transaction {transaction_hash} not found",
+            data={"hash": transaction_hash},
+        )
+    return transaction
+
+
+def get_studio_transaction_by_hash(
+    transactions_processor: TransactionsProcessor,
+    transaction_hash: str,
+    full: bool = True,
+) -> dict:
+    transaction = transactions_processor.get_studio_transaction_by_hash(
+        transaction_hash, full
+    )
+
+    if transaction is None:
+        raise NotFoundError(
+            message=f"Transaction {transaction_hash} not found",
+            data={"hash": transaction_hash},
+        )
+    return transaction
+
+
+def get_transaction_status(
     transactions_processor: TransactionsProcessor, transaction_hash: str
-) -> dict | None:
-    return transactions_processor.get_transaction_by_hash(transaction_hash)
+) -> str:
+    status = transactions_processor.get_transaction_status(transaction_hash)
+    if status is None:
+        raise NotFoundError(
+            message=f"Transaction {transaction_hash} not found",
+            data={"hash": transaction_hash},
+        )
+    return status
 
 
-async def call(
+async def eth_call(
     session: Session,
     accounts_manager: AccountsManager,
-    msg_handler: MessageHandler,
+    msg_handler: IMessageHandler,
     transactions_parser: TransactionParser,
+    validators_manager: validators.Manager,
+    genvm_manager: GenVMManager,
+    transactions_processor: TransactionsProcessor,
     params: dict,
     block_tag: str = "latest",
 ) -> str:
-    to_address = params["to"]
-    from_address = params["from"] if "from" in params else None
-    data = params["data"]
+    to_address = params.get("to")
+    from_address = params.get("from")
+    data = params.get("data")
 
-    if from_address is None:
-        return base64.b64encode(b"\x00' * 31 + b'\x01").decode(
-            "ascii"
-        )  # Return '1' as a uint256
+    if not to_address or not data:
+        return "0x"
 
-    if from_address and not accounts_manager.is_valid_address(from_address):
-        raise InvalidAddressError(from_address)
-
+    # Validate to_address first
     if not accounts_manager.is_valid_address(to_address):
         raise InvalidAddressError(to_address)
 
+    # Check if this is a ConsensusData contract call that we should handle locally
+    # This should happen before early return to allow interception even without 'from'
+    consensus_data_result = handle_consensus_data_call(
+        transactions_processor, to_address, data
+    )
+    if consensus_data_result is not None:
+        return consensus_data_result
+
+    # Handle missing from_address after interceptor check
+    if from_address is None:
+        # Return '1' as a proper hex-encoded uint256
+        return "0x0000000000000000000000000000000000000000000000000000000000000001"
+
+    # Validate from_address if present
+    if not accounts_manager.is_valid_address(from_address):
+        raise InvalidAddressError(from_address)
+
     decoded_data = transactions_parser.decode_method_call_data(data)
 
-    node = Node(  # Mock node just to get the data from the GenVM
-        contract_snapshot=ContractSnapshot(to_address, session),
-        contract_snapshot_factory=partial(ContractSnapshot, session=session),
-        validator_mode=ExecutionMode.LEADER,
-        validator=Validator(
-            address="",
-            stake=0,
-            llmprovider=LLMProvider(
-                provider="",
-                model="",
-                config={},
-                plugin="",
-                plugin_config={},
-            ),
-        ),
-        leader_receipt=None,
-        msg_handler=msg_handler.with_client_session(get_client_session_id()),
-    )
+    async with validators_manager.snapshot() as snapshot:
+        print(snapshot.nodes)
+        if len(snapshot.nodes) == 0:
+            raise JSONRPCError(
+                code=-32000,
+                message="No validators available to execute eth_call",
+                data={"reason": "no_validators"},
+            )
+        as_validator = snapshot.nodes[0].validator
+        node = Node(  # Mock node just to get the data from the GenVM
+            contract_snapshot=ContractSnapshot(to_address, session),
+            contract_snapshot_factory=partial(ContractSnapshot, session=session),
+            validator_mode=ExecutionMode.LEADER,
+            validator=as_validator,
+            leader_receipt=None,
+            msg_handler=msg_handler.with_client_session(get_client_session_id()),
+            validators_snapshot=snapshot,
+            manager=genvm_manager,
+        )
 
-    receipt = await node.get_contract_data(
-        from_address="0x" + "00" * 20,
-        calldata=decoded_data.calldata,
-    )
+        receipt = await node.get_contract_data(
+            from_address=as_validator.address,
+            calldata=decoded_data.calldata,
+        )
+
     if receipt.execution_result != ExecutionResultStatus.SUCCESS:
         raise JSONRPCError(
             message="running contract failed", data={"receipt": receipt.to_dict()}
@@ -465,17 +1221,22 @@ async def call(
 
 
 def send_raw_transaction(
-    transactions_processor: TransactionsProcessor,
-    accounts_manager: AccountsManager,
+    session: Session,
+    msg_handler: IMessageHandler,
     transactions_parser: TransactionParser,
     consensus_service: ConsensusService,
     signed_rollup_transaction: str,
+    sim_config: dict | None = None,
 ) -> str:
+    """Persist a raw transaction using a request-scoped session."""
+    accounts_manager = AccountsManager(session)
+    transactions_processor = TransactionsProcessor(session)
+
     # Decode transaction
     decoded_rollup_transaction = transactions_parser.decode_signed_transaction(
         signed_rollup_transaction
     )
-    print("DECODED ROLLUP TRANSACTION", decoded_rollup_transaction)
+    logger.debug("Decoded rollup transaction %s", decoded_rollup_transaction)
 
     # Validate transaction
     if decoded_rollup_transaction is None:
@@ -495,72 +1256,151 @@ def send_raw_transaction(
     if not transaction_signature_valid:
         raise InvalidTransactionError("Transaction signature verification failed")
 
-    rollup_transaction_details = consensus_service.add_transaction(
-        signed_rollup_transaction, from_address
-    )
+    if isinstance(decoded_rollup_transaction.data, DecodedsubmitAppealDataArgs):
+        tx_id = decoded_rollup_transaction.data.tx_id
+        tx_id_hex = "0x" + tx_id.hex() if isinstance(tx_id, bytes) else tx_id
+        transactions_processor.set_transaction_appeal(tx_id_hex, True)
+        msg_handler.send_message(
+            log_event=LogEvent(
+                "transaction_appeal_updated",
+                EventType.INFO,
+                EventScope.CONSENSUS,
+                "Set transaction appealed",
+                {
+                    "hash": tx_id_hex,
+                },
+            ),
+            log_to_terminal=False,
+        )
+        return tx_id_hex
+    else:
+        transaction_hash = consensus_service.generate_transaction_hash(
+            signed_rollup_transaction
+        )
+        to_address = decoded_rollup_transaction.to_address
+        nonce = decoded_rollup_transaction.nonce
+        value = decoded_rollup_transaction.value
+        genlayer_transaction = transactions_parser.get_genlayer_transaction(
+            decoded_rollup_transaction
+        )
 
-    to_address = decoded_rollup_transaction.to_address
-    nonce = decoded_rollup_transaction.nonce
-    value = decoded_rollup_transaction.value
-    genlayer_transaction = transactions_parser.get_genlayer_transaction(
-        decoded_rollup_transaction
-    )
+        transaction_data = {}
+        leader_only = False
+        execution_mode = "NORMAL"
+        rollup_transaction_details = None
+        if genlayer_transaction.type != TransactionType.SEND:
+            leader_only = genlayer_transaction.data.leader_only
+            execution_mode = genlayer_transaction.data.execution_mode
+            rollup_transaction_details = consensus_service.add_transaction(
+                signed_rollup_transaction, from_address
+            )  # because hardhat accounts are not funded
 
-    transaction_data = {}
-    leader_only = False
-    if genlayer_transaction.type != TransactionType.SEND:
-        leader_only = genlayer_transaction.data.leader_only
+            if (
+                consensus_service.web3.is_connected()
+                and rollup_transaction_details is None
+            ):
+                # raise JSONRPCError(
+                #     code=-32000,
+                #     message="Failed to add transaction to consensus layer",
+                #     data={},
+                # )
+                logger.warning(
+                    "Failed to add transaction to consensus layer",
+                    extra={
+                        "from_address": from_address,
+                        "transaction_type": genlayer_transaction.type.name,
+                        "leader_only": leader_only,
+                    },
+                )
 
-    if genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT:
-        if value > 0:
-            raise InvalidTransactionError("Deploy Transaction can't send value")
+        if genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT:
+            if value > 0:
+                raise InvalidTransactionError("Deploy Transaction can't send value")
 
-        if (
-            rollup_transaction_details is None
-            or not "recipient" in rollup_transaction_details
-        ):
-            new_account = accounts_manager.create_new_account()
-            new_contract_address = new_account.address
-        else:
-            new_contract_address = rollup_transaction_details["recipient"]
-            accounts_manager.create_new_account_with_address(new_contract_address)
+            if (
+                rollup_transaction_details is None
+                or not "recipient" in rollup_transaction_details
+            ):
+                new_account = accounts_manager.create_new_account()
+                new_contract_address = new_account.address
+            else:
+                new_contract_address = rollup_transaction_details["recipient"]
+                accounts_manager.create_new_account_with_address(new_contract_address)
 
-        transaction_data = {
-            "contract_address": new_contract_address,
-            "contract_code": genlayer_transaction.data.contract_code,
-            "calldata": genlayer_transaction.data.calldata,
-        }
-        to_address = new_contract_address
-    elif genlayer_transaction.type == TransactionType.RUN_CONTRACT:
-        # Contract Call
-        if not accounts_manager.is_valid_address(to_address):
-            raise InvalidAddressError(
-                to_address, f"Invalid address to_address: {to_address}"
+            transaction_data = {
+                "contract_address": new_contract_address,
+                "contract_code": genlayer_transaction.data.contract_code,
+                "calldata": genlayer_transaction.data.calldata,
+            }
+            to_address = new_contract_address
+        elif genlayer_transaction.type == TransactionType.RUN_CONTRACT:
+            # Contract Call
+            to_address = genlayer_transaction.to_address
+            if not accounts_manager.is_valid_address(to_address):
+                raise InvalidAddressError(
+                    to_address, f"Invalid address to_address: {to_address}"
+                )
+
+            if accounts_manager.get_account(to_address) is None:
+                raise NotFoundError(
+                    message="Contract not found",
+                    data={"address": to_address},
+                )
+
+            transaction_data = {"calldata": genlayer_transaction.data.calldata}
+
+        # Insert transaction into the database
+        transactions_processor.insert_transaction(
+            genlayer_transaction.from_address,
+            to_address,
+            transaction_data,
+            value,
+            genlayer_transaction.type.value,
+            nonce,
+            leader_only,
+            genlayer_transaction.max_rotations,
+            None,
+            transaction_hash,
+            genlayer_transaction.num_of_initial_validators,
+            sim_config,
+            None,  # triggered_on
+            execution_mode,
+        )
+
+        # Post-insert verification: ensure the transaction is visible immediately
+        try:
+            verified_status = transactions_processor.get_transaction_status(
+                transaction_hash
+            )
+            if verified_status is None:
+                logger.error(
+                    "Post-insert verification failed: transaction not found after commit",
+                    extra={"hash": transaction_hash},
+                )
+                msg_handler.send_message(
+                    log_event=LogEvent(
+                        "transaction_post_insert_verification_failed",
+                        EventType.ERROR,
+                        EventScope.RPC,
+                        "Inserted transaction not found immediately after commit",
+                        {"hash": transaction_hash},
+                    ),
+                    log_to_terminal=False,
+                )
+        except Exception as e:
+            logger.exception("Post-insert verification threw an exception")
+            msg_handler.send_message(
+                log_event=LogEvent(
+                    "transaction_post_insert_verification_exception",
+                    EventType.ERROR,
+                    EventScope.RPC,
+                    f"Exception during post-insert verification: {str(e)}",
+                    {"hash": transaction_hash},
+                ),
+                log_to_terminal=False,
             )
 
-        to_address = genlayer_transaction.to_address
-        transaction_data = {"calldata": genlayer_transaction.data.calldata}
-
-    # Obtain transaction hash from new transaction event
-    if rollup_transaction_details and "tx_id_hex" in rollup_transaction_details:
-        transaction_hash = rollup_transaction_details["tx_id_hex"]
-    else:
-        transaction_hash = None
-
-    # Insert transaction into the database
-    transaction_hash = transactions_processor.insert_transaction(
-        genlayer_transaction.from_address,
-        to_address,
-        transaction_data,
-        value,
-        genlayer_transaction.type.value,
-        nonce,
-        leader_only,
-        None,
-        transaction_hash,
-    )
-
-    return transaction_hash
+        return transaction_hash
 
 
 def get_transactions_for_address(
@@ -577,41 +1417,27 @@ def get_transactions_for_address(
     )
 
 
-def set_transaction_appeal(
-    transactions_processor: TransactionsProcessor,
-    msg_handler: MessageHandler,
-    transaction_hash: str,
-) -> None:
-    transactions_processor.set_transaction_appeal(transaction_hash, True)
-    msg_handler.send_message(
-        log_event=LogEvent(
-            "transaction_appeal_updated",
-            EventType.INFO,
-            EventScope.CONSENSUS,
-            "Set transaction appealed",
-            {
-                "hash": transaction_hash,
-            },
-        ),
-        log_to_terminal=False,
-    )
-
-
 @check_forbidden_method_in_hosted_studio
 def set_finality_window_time(consensus: ConsensusAlgorithm, time: int) -> None:
+    if consensus is None:
+        # Silently ignore when consensus is not initialized
+        return
     consensus.set_finality_window_time(time)
 
 
 def get_finality_window_time(consensus: ConsensusAlgorithm) -> int:
+    if consensus is None:
+        # Return default finality window time when consensus is not initialized
+        return os.environ.get("VITE_FINALITY_WINDOW", 1800)  # Default to 60 seconds
     return consensus.finality_window_time
 
 
 def get_chain_id() -> str:
-    return hex(SIMULATOR_CHAIN_ID)
+    return hex(get_simulator_chain_id())
 
 
 def get_net_version() -> str:
-    return str(SIMULATOR_CHAIN_ID)
+    return str(get_simulator_chain_id())
 
 
 def get_block_number(transactions_processor: TransactionsProcessor) -> str:
@@ -638,7 +1464,10 @@ def get_block_by_number(
     )
 
     if not block_details:
-        raise JSONRPCError(f"Block not found for number: {block_number}")
+        raise NotFoundError(
+            message="Block not found",
+            data={"block_number": block_number},
+        )
 
     return block_details
 
@@ -649,8 +1478,9 @@ def get_gas_price() -> str:
 
 
 def get_gas_estimate(data: Any) -> str:
-    gas_price_in_wei = 30 * 10**6
-    return hex(gas_price_in_wei)
+    # Use zkSync Era's gas limit: 2^32 - 1 (4,294,967,295)
+    gas_limit = 0xFFFFFFFF  # 4,294,967,295
+    return hex(gas_limit)
 
 
 def get_transaction_receipt(
@@ -660,24 +1490,54 @@ def get_transaction_receipt(
 
     transaction = transactions_processor.get_transaction_by_hash(transaction_hash)
 
-    if not transaction:
-        return None
+    event_signature = "NewTransaction(bytes32,address,address)"
+    event_signature_hash = eth_utils.keccak(text=event_signature).hex()
+
+    to_addr = transaction.get("to_address")
+    from_addr = transaction.get("from_address")
+
+    logs = [
+        {
+            "address": to_addr,
+            "topics": [
+                f"0x{event_signature_hash}",
+                transaction_hash,
+                (
+                    "0x000000000000000000000000" + to_addr.replace("0x", "")
+                    if to_addr
+                    else None
+                ),
+                (
+                    "0x000000000000000000000000" + from_addr.replace("0x", "")
+                    if from_addr
+                    else None
+                ),
+            ],
+            "data": "0x",
+            "blockNumber": 0,
+            "transactionHash": transaction_hash,
+            "transactionIndex": 0,
+            "blockHash": transaction_hash,
+            "logIndex": 0,
+            "removed": False,
+        }
+    ]
 
     receipt = {
         "transactionHash": transaction_hash,
         "transactionIndex": hex(0),
         "blockHash": transaction_hash,
         "blockNumber": hex(transaction.get("block_number", 0)),
-        "from": transaction.get("from_address"),
-        "to": transaction.get("to_address") if transaction.get("to_address") else None,
-        "cumulativeGasUsed": hex(transaction.get("gas_used", 21000)),
-        "gasUsed": hex(transaction.get("gas_used", 21000)),
+        "from": from_addr,
+        "to": to_addr,
+        "cumulativeGasUsed": hex(transaction.get("gas_used", 8000000)),
+        "gasUsed": hex(transaction.get("gas_used", 8000000)),
         "contractAddress": (
             transaction.get("contract_address")
             if transaction.get("contract_address")
             else None
         ),
-        "logs": transaction.get("logs", []),
+        "logs": logs,
         "logsBloom": "0x" + "00" * 256,
         "status": hex(1 if transaction.get("status", True) else 0),
     }
@@ -687,17 +1547,17 @@ def get_transaction_receipt(
 
 def get_block_by_hash(
     transactions_processor: TransactionsProcessor,
-    transaction_hash: str,
+    block_hash: str,
     full_tx: bool = False,
 ) -> dict | None:
 
-    transaction = transactions_processor.get_transaction_by_hash(transaction_hash)
+    transaction = transactions_processor.get_transaction_by_hash(block_hash)
 
     if not transaction:
         return None
 
     block_details = {
-        "hash": transaction_hash,
+        "hash": block_hash,
         "parentHash": "0x" + "00" * 32,
         "number": hex(transaction.get("block_number", 0)),
         "timestamp": hex(transaction.get("timestamp", 0)),
@@ -711,7 +1571,7 @@ def get_block_by_hash(
         "size": "0x0",
         "extraData": "0x",
         "gasLimit": hex(transaction.get("gas_limit", 8000000)),
-        "gasUsed": hex(transaction.get("gas_used", 21000)),
+        "gasUsed": hex(transaction.get("gas_used", 8000000)),
         "logsBloom": "0x" + "00" * 256,
         "transactions": [],
     }
@@ -719,7 +1579,7 @@ def get_block_by_hash(
     if full_tx:
         block_details["transactions"].append(transaction)
     else:
-        block_details["transactions"].append(transaction_hash)
+        block_details["transactions"].append(block_hash)
 
     return block_details
 
@@ -738,7 +1598,7 @@ def get_contract(consensus_service: ConsensusService, contract_name: str) -> dic
     contract = consensus_service.load_contract(contract_name)
 
     if contract is None:
-        raise JSONRPCError(
+        raise NotFoundError(
             message=f"Contract {contract_name} not found",
             data={"contract_name": contract_name},
         )
@@ -750,172 +1610,141 @@ def get_contract(consensus_service: ConsensusService, contract_name: str) -> dic
     }
 
 
-def register_all_rpc_endpoints(
-    jsonrpc: JSONRPC,
-    msg_handler: MessageHandler,
-    request_session: Session,
-    accounts_manager: AccountsManager,
-    transactions_processor: TransactionsProcessor,
-    validators_registry: ValidatorsRegistry,
-    llm_provider_registry: LLMProviderRegistry,
-    consensus: ConsensusAlgorithm,
-    consensus_service: ConsensusService,
-    transactions_parser: TransactionParser,
-):
-    register_rpc_endpoint = partial(generate_rpc_endpoint, jsonrpc, msg_handler)
+@check_forbidden_method_in_hosted_studio
+def create_snapshot(
+    snapshot_manager: SnapshotManager,
+) -> int:
+    """Create a new snapshot of the current state and transactions.
 
-    register_rpc_endpoint(ping)
-    register_rpc_endpoint(
-        partial(clear_db_tables, request_session),
-        method_name="sim_clearDbTables",
+    Returns:
+        int: The snapshot ID
+    """
+    snapshot = snapshot_manager.create_snapshot()
+    return snapshot.snapshot_id
+
+
+@check_forbidden_method_in_hosted_studio
+def restore_snapshot(
+    snapshot_manager: SnapshotManager,
+    snapshot_id: int,
+) -> bool:
+    """Restore the database state from a snapshot.
+
+    Args:
+        snapshot_id: ID of the snapshot to restore
+
+    Returns:
+        bool: True if the snapshot was restored, False otherwise
+    """
+    reverted = snapshot_manager.restore_snapshot(snapshot_id)
+    return reverted
+
+
+@check_forbidden_method_in_hosted_studio
+def delete_all_snapshots(
+    snapshot_manager: SnapshotManager,
+) -> dict:
+    """Delete all snapshots from the database.
+
+    Returns:
+        dict: Information about the deletion result
+    """
+    deleted_count = snapshot_manager.delete_all_snapshots()
+    return {"deleted_count": deleted_count}
+
+
+@check_forbidden_method_in_hosted_studio
+def update_transaction_status(
+    session: Session,
+    transaction_hash: str,
+    new_status: str,
+) -> dict:
+    """Update a transaction status using a request-scoped session."""
+    # Validate transaction hash format
+    if not transaction_hash or not isinstance(transaction_hash, str):
+        raise JSONRPCError(
+            code=-32602,
+            message="Invalid transaction hash: must be a non-empty string",
+            data={},
+        )
+
+    if not transaction_hash.startswith("0x") or len(transaction_hash) != 66:
+        raise JSONRPCError(
+            code=-32602,
+            message="Invalid transaction hash format: must be a 66-character hex string starting with '0x'",
+            data={},
+        )
+
+    try:
+        int(transaction_hash, 16)
+    except ValueError:
+        raise JSONRPCError(
+            code=-32602,
+            message="Invalid transaction hash format: contains non-hexadecimal characters",
+            data={},
+        )
+
+    # Validate new status is a valid TransactionStatus enum value
+    if not new_status or not isinstance(new_status, str):
+        raise JSONRPCError(
+            code=-32602, message="Invalid status: must be a non-empty string", data={}
+        )
+
+    try:
+        status_enum = TransactionStatus(new_status)
+    except ValueError:
+        valid_statuses = [status.value for status in TransactionStatus]
+        raise JSONRPCError(
+            code=-32602,
+            message=f"Invalid status '{new_status}': must be one of {valid_statuses}",
+            data={},
+        )
+
+    transactions_processor = TransactionsProcessor(session)
+
+    transactions_processor.update_transaction_status(
+        transaction_hash=transaction_hash,
+        new_status=status_enum,
+        update_current_status_changes=True,
     )
-    register_rpc_endpoint(
-        partial(fund_account, accounts_manager, transactions_processor),
-        method_name="sim_fundAccount",
+
+    # Return the updated transaction
+    updated_transaction = transactions_processor.get_transaction_by_hash(
+        transaction_hash
     )
-    register_rpc_endpoint(
-        partial(get_providers_and_models, llm_provider_registry),
-        method_name="sim_getProvidersAndModels",
-    )
-    register_rpc_endpoint(
-        partial(reset_defaults_llm_providers, llm_provider_registry),
-        method_name="sim_resetDefaultsLlmProviders",
-    )
-    register_rpc_endpoint(
-        partial(add_provider, llm_provider_registry),
-        method_name="sim_addProvider",
-    )
-    register_rpc_endpoint(
-        partial(update_provider, llm_provider_registry),
-        method_name="sim_updateProvider",
-    )
-    register_rpc_endpoint(
-        partial(delete_provider, llm_provider_registry),
-        method_name="sim_deleteProvider",
-    )
-    register_rpc_endpoint(
-        partial(
-            check_forbidden_method_in_hosted_studio(create_validator),
-            validators_registry,
-            accounts_manager,
-        ),
-        method_name="sim_createValidator",
-    )
-    register_rpc_endpoint(
-        partial(
-            create_random_validator,
-            validators_registry,
-            accounts_manager,
-            llm_provider_registry,
-        ),
-        method_name="sim_createRandomValidator",
-    )
-    register_rpc_endpoint(
-        partial(
-            create_random_validators,
-            validators_registry,
-            accounts_manager,
-            llm_provider_registry,
-        ),
-        method_name="sim_createRandomValidators",
-    )
-    register_rpc_endpoint(
-        partial(update_validator, validators_registry, accounts_manager),
-        method_name="sim_updateValidator",
-    )
-    register_rpc_endpoint(
-        partial(delete_validator, validators_registry, accounts_manager),
-        method_name="sim_deleteValidator",
-    )
-    register_rpc_endpoint(
-        partial(delete_all_validators, validators_registry),
-        method_name="sim_deleteAllValidators",
-    )
-    register_rpc_endpoint(
-        partial(get_all_validators, validators_registry),
-        method_name="sim_getAllValidators",
-    )
-    register_rpc_endpoint(
-        partial(get_validator, validators_registry),
-        method_name="sim_getValidator",
-    )
-    register_rpc_endpoint(
-        partial(count_validators, validators_registry),
-        method_name="sim_countValidators",
-    )
-    register_rpc_endpoint(
-        partial(get_contract_schema, accounts_manager, msg_handler),
-        method_name="gen_getContractSchema",
-    )
-    register_rpc_endpoint(
-        partial(get_contract_schema_for_code, msg_handler),
-        method_name="gen_getContractSchemaForCode",
-    )
-    register_rpc_endpoint(
-        partial(get_balance, accounts_manager),
-        method_name="eth_getBalance",
-    )
-    register_rpc_endpoint(
-        partial(get_transaction_by_hash, transactions_processor),
-        method_name="eth_getTransactionByHash",
-    )
-    register_rpc_endpoint(
-        partial(
-            call, request_session, accounts_manager, msg_handler, transactions_parser
-        ),
-        method_name="eth_call",
-    )
-    register_rpc_endpoint(
-        partial(
-            send_raw_transaction,
-            transactions_processor,
-            accounts_manager,
-            transactions_parser,
-            consensus_service,
-        ),
-        method_name="eth_sendRawTransaction",
-    )
-    register_rpc_endpoint(
-        partial(get_transaction_count, transactions_processor),
-        method_name="eth_getTransactionCount",
-    )
-    register_rpc_endpoint(
-        partial(get_transactions_for_address, transactions_processor, accounts_manager),
-        method_name="sim_getTransactionsForAddress",
-    )
-    register_rpc_endpoint(
-        partial(set_transaction_appeal, transactions_processor, msg_handler),
-        method_name="sim_appealTransaction",
-    )
-    register_rpc_endpoint(
-        partial(set_finality_window_time, consensus),
-        method_name="sim_setFinalityWindowTime",
-    )
-    register_rpc_endpoint(
-        partial(get_finality_window_time, consensus),
-        method_name="sim_getFinalityWindowTime",
-    )
-    register_rpc_endpoint(
-        partial(get_contract, consensus_service),
-        method_name="sim_getConsensusContract",
-    )
-    register_rpc_endpoint(get_chain_id, method_name="eth_chainId")
-    register_rpc_endpoint(get_net_version, method_name="net_version")
-    register_rpc_endpoint(
-        partial(get_block_number, transactions_processor),
-        method_name="eth_blockNumber",
-    )
-    register_rpc_endpoint(
-        partial(get_block_by_number, transactions_processor),
-        method_name="eth_getBlockByNumber",
-    )
-    register_rpc_endpoint(get_gas_price, method_name="eth_gasPrice")
-    register_rpc_endpoint(get_gas_estimate, method_name="eth_estimateGas")
-    register_rpc_endpoint(
-        partial(get_transaction_receipt, transactions_processor),
-        method_name="eth_getTransactionReceipt",
-    )
-    register_rpc_endpoint(
-        partial(get_block_by_hash, transactions_processor),
-        method_name="eth_getBlockByHash",
-    )
+    if updated_transaction is None:
+        raise JSONRPCError(
+            code=-32602, message=f"Transaction not found: {transaction_hash}", data={}
+        )
+
+    return updated_transaction
+
+
+def dev_get_pool_status(sqlalchemy_db) -> dict:
+    """
+    Development endpoint to monitor database connection pool status.
+
+    Returns current pool metrics including size, checked out connections,
+    overflow, and maximum allowed connections.
+
+    Args:
+        sqlalchemy_db: The Flask-SQLAlchemy database instance
+
+    Returns:
+        dict: Pool status information including timestamp and metrics
+    """
+    from datetime import datetime
+
+    engine = sqlalchemy_db.engine
+    pool = engine.pool
+
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "pool": {
+            "size": pool.size(),
+            "checked_out": pool.checkedout(),
+            "overflow": pool.overflow(),
+            "max_allowed": pool.size() + pool._max_overflow,
+            "total": pool.size() + pool.overflow(),
+        },
+    }

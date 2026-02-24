@@ -5,13 +5,27 @@ import { defineConfig, loadEnv, UserConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
 import vueJsx from '@vitejs/plugin-vue-jsx';
 import VueDevTools from 'vite-plugin-vue-devtools';
+import { nodePolyfills } from 'vite-plugin-node-polyfills';
 
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd());
   const config: UserConfig = {
     base: '/',
-    plugins: [vue(), svgLoader(), vueJsx(), VueDevTools()],
+    envDir: '..',
+    plugins: [
+      vue({
+        template: {
+          compilerOptions: {
+            isCustomElement: (tag: string) => tag.startsWith('appkit-'),
+          },
+        },
+      }),
+      svgLoader(),
+      vueJsx(),
+      VueDevTools(),
+      nodePolyfills({ globals: { Buffer: true } }),
+    ],
     resolve: {
       alias: {
         '@': fileURLToPath(new URL('./src', import.meta.url)),
@@ -21,9 +35,9 @@ export default defineConfig(({ mode }) => {
       port: 8080,
       strictPort: true,
       allowedHosts: [
-        'studio.genlayer.com',
-        'studio-stage.genlayer.com',
-        'studio-dev.genlayer.com',
+        '.genlayer.com', // match all genlayer.com sub-domains
+        '.genlayerlabs.com', // match all genlayerlabs.com sub-domains
+        '.genlayer.org', // match all genlayer.org sub-domains
       ],
     },
     server: {
@@ -31,20 +45,6 @@ export default defineConfig(({ mode }) => {
       strictPort: true,
       host: true,
       origin: 'http://0.0.0.0:8080',
-      proxy:
-        env.VITE_PROXY_ENABLED !== 'true'
-          ? undefined
-          : {
-              '/api': {
-                target: env.VITE_PROXY_JSON_RPC_SERVER_URL,
-                changeOrigin: true,
-              },
-              '/socket.io': {
-                target: env.VITE_PROXY_WS_SERVER_URL,
-                ws: true,
-                rewriteWsOrigin: true,
-              },
-            },
     },
   };
 

@@ -34,7 +34,7 @@ export default {
     };
   },
   mounted() {
-    // not used becase we want to control the expand from the main props
+    // not used because we want to control the expand from the main props
     // this.expand = this.previewMode || (this.depth >= this.expandDepth ? false : true);
   },
   methods: {
@@ -45,16 +45,16 @@ export default {
         this.$el.dispatchEvent(new Event('resized'));
       } catch (e) {
         // handle IE not supporting Event constructor
-        var evt = document.createEvent('Event');
+        const evt = document.createEvent('Event');
         evt.initEvent('resized', true, false);
         this.$el.dispatchEvent(evt);
       }
     },
   },
   render() {
-    let elements = [];
+    const elements = [];
     let dataType;
-    // We have to check if it's a complex type or not and assing a type
+    // We have to check if it's a complex type or not and assign a type
     // the dataType is used to know which component to render as a child
     if (this.value === null || this.value === undefined) {
       dataType = JsonUndefined;

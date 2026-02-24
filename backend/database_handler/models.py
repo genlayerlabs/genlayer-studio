@@ -13,7 +13,8 @@ from sqlalchemy import (
     func,
     text,
     ForeignKey,
-    Text,
+    LargeBinary,
+    Sequence,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import (
@@ -37,6 +38,8 @@ class TransactionStatus(enum.Enum):
     ACCEPTED = "ACCEPTED"
     FINALIZED = "FINALIZED"
     UNDETERMINED = "UNDETERMINED"
+    LEADER_TIMEOUT = "LEADER_TIMEOUT"
+    VALIDATORS_TIMEOUT = "VALIDATORS_TIMEOUT"
 
 
 # We map them to `DataClass`es in order to have better type hints https://docs.sqlalchemy.org/en/20/orm/dataclasses.html#declarative-dataclass-mapping
@@ -65,7 +68,9 @@ class CurrentState(Base):
 class Transactions(Base):
     __tablename__ = "transactions"
     __table_args__ = (
-        CheckConstraint("type = ANY (ARRAY[0, 1, 2])", name="transactions_type_check"),
+        CheckConstraint(
+            "type = ANY (ARRAY[0, 1, 2, 3])", name="transactions_type_check"
+        ),
         PrimaryKeyConstraint("hash", name="transactions_pkey"),
         CheckConstraint("value >= 0", name="value_unsigned_int"),
     )
@@ -101,6 +106,16 @@ class Transactions(Base):
     appeal_processing_time: Mapped[Optional[int]] = mapped_column(Integer)
     contract_snapshot: Mapped[Optional[dict]] = mapped_column(JSONB)
     config_rotation_rounds: Mapped[Optional[int]] = mapped_column(Integer)
+    num_of_initial_validators: Mapped[Optional[int]] = mapped_column(Integer)
+    last_vote_timestamp: Mapped[Optional[int]] = mapped_column(BigInteger)
+    rotation_count: Mapped[Optional[int]] = mapped_column(Integer)
+    leader_timeout_validators: Mapped[Optional[list]] = mapped_column(JSONB)
+    sim_config: Mapped[Optional[dict]] = mapped_column(
+        JSONB, nullable=True, default=None
+    )
+    triggered_on: Mapped[Optional[str]] = mapped_column(
+        String(20), nullable=True, default=None
+    )  # "accepted" or "finalized" - indicates when this triggered tx was created
 
     # Relationship for triggered transactions
     triggered_by_hash: Mapped[Optional[str]] = mapped_column(
@@ -122,8 +137,19 @@ class Transactions(Base):
     )
     appealed: Mapped[bool] = mapped_column(Boolean, default=False)
     appeal_undetermined: Mapped[bool] = mapped_column(Boolean, default=False)
+    appeal_leader_timeout: Mapped[bool] = mapped_column(Boolean, default=False)
+    appeal_validators_timeout: Mapped[bool] = mapped_column(Boolean, default=False)
     timestamp_awaiting_finalization: Mapped[Optional[int]] = mapped_column(
         BigInteger, default=None
+    )
+    blocked_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), nullable=True, default=None
+    )
+    worker_id: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True, default=None
+    )
+    execution_mode: Mapped[str] = mapped_column(
+        String(30), server_default="NORMAL", nullable=False, default="NORMAL"
     )
 
 
@@ -163,6 +189,7 @@ class LLMProviderDBModel(Base):
     config: Mapped[dict | str] = mapped_column(JSONB)
     plugin: Mapped[str] = mapped_column(String(255), nullable=False)
     plugin_config: Mapped[dict] = mapped_column(JSONB)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(True), server_default=func.current_timestamp(), init=False
     )
@@ -171,4 +198,30 @@ class LLMProviderDBModel(Base):
         init=False,
         server_default=func.current_timestamp(),
         onupdate=func.current_timestamp(),
+    )
+
+
+class Snapshot(Base):
+    __tablename__ = "snapshots"
+    __table_args__ = (
+        PrimaryKeyConstraint("id", name="snapshots_pkey"),
+        UniqueConstraint("snapshot_id", name="snapshots_snapshot_id_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, init=False)
+    snapshot_id: Mapped[int] = mapped_column(
+        Integer,
+        Sequence("snapshot_id_seq", start=1, increment=1),
+        unique=True,
+        nullable=False,
+        init=False,
+    )  # Incremental identifier
+    state_data: Mapped[bytes] = mapped_column(
+        LargeBinary
+    )  # Stores compressed state data as bytes
+    transaction_data: Mapped[bytes] = mapped_column(
+        LargeBinary
+    )  # Stores compressed transaction data as bytes
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(True), server_default=func.current_timestamp(), init=False
     )

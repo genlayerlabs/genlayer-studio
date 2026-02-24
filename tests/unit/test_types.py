@@ -25,4 +25,6 @@ def test_validator_to_dict():
         "config": {"config": "config"},
         "plugin": "plugin",
         "plugin_config": {"plugin_config": "plugin_config"},
+        "private_key": None,
+        "fallback_validator": None,
     }

@@ -187,14 +187,6 @@ export class JsonRpcService implements IJsonRpcService {
     );
   }
 
-  async setTransactionAppeal(tx_address: string): Promise<any> {
-    return this.callRpcMethod<any>(
-      'sim_appealTransaction',
-      [String(tx_address)],
-      'Error setting transaction appeal flag',
-    );
-  }
-
   async setFinalityWindowTime(time: number): Promise<any> {
     return this.callRpcMethod<any>(
       'sim_setFinalityWindowTime',
@@ -209,5 +201,25 @@ export class JsonRpcService implements IJsonRpcService {
       [],
       'Error getting finality window time',
     );
+  }
+
+  async upgradeContractCode(
+    contractAddress: string,
+    newCode: string,
+    signature?: string,
+  ): Promise<{ transaction_hash: string; message: string }> {
+    return this.callRpcMethod<{ transaction_hash: string; message: string }>(
+      'sim_upgradeContractCode',
+      [contractAddress, newCode, signature],
+      'Error upgrading contract code',
+    ) as Promise<{ transaction_hash: string; message: string }>;
+  }
+
+  async getContractNonce(address: string): Promise<number> {
+    return this.callRpcMethod<number>(
+      'gen_getContractNonce',
+      [address],
+      'Error getting contract nonce',
+    ) as Promise<number>;
   }
 }

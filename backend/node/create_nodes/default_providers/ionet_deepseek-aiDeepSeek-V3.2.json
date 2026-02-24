@@ -1,0 +1,10 @@
+{
+  "provider": "ionet",
+  "plugin": "openai-compatible",
+  "model": "deepseek-ai/DeepSeek-V3.2",
+  "config": {},
+  "plugin_config": {
+    "api_key_env_var": "IONETAPIKEY",
+    "api_url": "https://api.intelligence.io.solutions/api"
+  }
+}
