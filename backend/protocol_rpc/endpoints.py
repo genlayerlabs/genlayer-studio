@@ -686,6 +686,133 @@ def admin_upgrade_contract_code(
     }
 
 
+####### CANCEL TRANSACTION ENDPOINTS #######
+def cancel_transaction(
+    session: Session,
+    transaction_hash: str,
+    msg_handler,
+    signature: str | None = None,
+    admin_key: str | None = None,
+) -> dict:
+    """
+    Cancel a pending or activated transaction. Returns immediately with status.
+
+    Access control:
+    - Local (no env vars): open access
+    - Hosted/Self-hosted: admin_key allows ANY transaction, signature allows own transactions
+
+    Args:
+        session: Database session
+        transaction_hash: Hash of the transaction to cancel
+        msg_handler: Message handler for WebSocket notifications
+        signature: Hex-encoded signature from tx sender (required in hosted mode unless admin_key)
+        admin_key: Admin API key for full access to any transaction
+
+    Returns:
+        dict with transaction_hash and status
+    """
+    from backend.database_handler.models import Transactions
+    from eth_account.messages import encode_defunct
+    from eth_account import Account
+    from web3 import Web3
+    import os
+
+    # Validate transaction hash format
+    if (
+        not transaction_hash
+        or not transaction_hash.startswith("0x")
+        or len(transaction_hash) != 66
+    ):
+        raise JSONRPCError(
+            code=-32602,
+            message="Invalid transaction hash format",
+            data={},
+        )
+
+    # Look up the transaction
+    transaction = (
+        session.query(Transactions).filter_by(hash=transaction_hash).one_or_none()
+    )
+    if not transaction:
+        raise NotFoundError(
+            message="Transaction not found",
+            data={"transaction_hash": transaction_hash},
+        )
+
+    is_hosted = os.getenv("VITE_IS_HOSTED") == "true"
+    admin_api_key = os.getenv("ADMIN_API_KEY")
+
+    # Check if authorization is needed (hosted or self-hosted with key configured)
+    needs_auth = is_hosted or admin_api_key
+
+    if needs_auth:
+        # Option 1: Admin key grants full access to ANY transaction
+        if admin_api_key and admin_key == admin_api_key:
+            pass  # Authorized - proceed with cancel
+
+        # Option 2: Signature from tx sender grants access to own transactions
+        elif signature:
+            if not transaction.from_address:
+                raise JSONRPCError(
+                    code=-32000,
+                    message="Transaction has no sender - only admin key can cancel",
+                    data={},
+                )
+
+            try:
+                # Message: keccak256("cancel_transaction" + tx_hash_bytes)
+                # tx_hash is unique, so no nonce needed for replay protection
+                message_hash = Web3.keccak(
+                    b"cancel_transaction" + Web3.to_bytes(hexstr=transaction_hash)
+                )
+                message = encode_defunct(primitive=message_hash)
+                signer = Account.recover_message(message, signature=signature)
+
+                if signer.lower() != transaction.from_address.lower():
+                    raise JSONRPCError(
+                        code=-32000,
+                        message="Only transaction sender can cancel",
+                        data={"signer": signer, "sender": transaction.from_address},
+                    )
+            except JSONRPCError:
+                raise
+            except Exception as e:
+                raise JSONRPCError(
+                    code=-32000,
+                    message=f"Invalid signature: {e!s}",
+                    data={},
+                ) from e
+        else:
+            raise JSONRPCError(
+                code=-32000,
+                message="Cancel requires admin key or sender signature",
+                data={},
+            )
+
+    # Atomic cancel - only succeeds if tx is still pending/activated and not claimed by worker
+    was_cancelled = TransactionsProcessor.cancel_transaction_if_available(
+        session, transaction_hash
+    )
+
+    if not was_cancelled:
+        raise JSONRPCError(
+            code=-32000,
+            message="Transaction cannot be cancelled: already being processed or in a terminal state",
+            data={
+                "transaction_hash": transaction_hash,
+                "status": transaction.status.value,
+            },
+        )
+
+    # Notify frontend via WebSocket
+    msg_handler.send_transaction_status_update(transaction_hash, "CANCELED")
+
+    return {
+        "transaction_hash": transaction_hash,
+        "status": "CANCELED",
+    }
+
+
 ####### GEN ENDPOINTS #######
 async def get_contract_schema(
     accounts_manager: AccountsManager,

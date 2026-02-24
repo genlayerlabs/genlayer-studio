@@ -246,6 +246,23 @@ def upgrade_contract_code(
     )
 
 
+@rpc.method("sim_cancelTransaction")
+def cancel_transaction(
+    transaction_hash: str,
+    signature: str = None,
+    admin_key: str = None,
+    session: Session = Depends(get_db_session),
+    msg_handler=Depends(get_message_handler),
+) -> dict:
+    return impl.cancel_transaction(
+        session=session,
+        transaction_hash=transaction_hash,
+        msg_handler=msg_handler,
+        signature=signature,
+        admin_key=admin_key,
+    )
+
+
 @rpc.method("sim_getTransactionsForAddress", log_policy=LogPolicy.debug())
 def get_transactions_for_address(
     address: str,
