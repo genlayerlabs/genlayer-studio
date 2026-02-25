@@ -104,7 +104,7 @@ jobs:
 
       # Build only backend images with Buildx Bake and enable GHA cache
       - name: Build backend images with cache (buildx bake)
-        uses: docker/bake-action@v5
+        uses: docker/bake-action@v6
         with:
           files: |
             ./docker-compose.yml
