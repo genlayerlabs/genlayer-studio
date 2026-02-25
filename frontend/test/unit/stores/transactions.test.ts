@@ -15,7 +15,6 @@ let mockWebSocketClientGlobal: any = {
 
 vi.mock('@/hooks', () => ({
   useGenlayer: vi.fn(),
-  useRpcClient: vi.fn(),
   useWebSocketClient: vi.fn(() => mockWebSocketClientGlobal),
   useDb: vi.fn(() => ({
     transaction: vi.fn(),
@@ -51,6 +50,7 @@ describe('useTransactionsStore', () => {
   let mockWebSocketClient: any;
   const mockGenlayerClient = {
     getTransaction: vi.fn(),
+    cancelTransaction: vi.fn(),
   };
   const mockDb = {
     transactions: {
@@ -80,6 +80,7 @@ describe('useTransactionsStore', () => {
 
     // Clear mocks before creating store
     mockGenlayerClient.getTransaction.mockClear();
+    mockGenlayerClient.cancelTransaction.mockClear();
     mockWebSocketClient.emit.mockClear();
     mockWebSocketClient.on.mockClear();
     mockWebSocketClient.off.mockClear();
@@ -182,99 +183,33 @@ describe('useTransactionsStore', () => {
   });
 
   describe('cancelTransaction', () => {
-    const mockCancelTransaction = vi.fn().mockResolvedValue({
-      transaction_hash: testTransaction.hash,
-      status: 'CANCELED',
-    });
-    const mockEthereumRequest = vi.fn();
-    let selectedAccount: any = null;
-
     beforeEach(() => {
-      selectedAccount = null;
-      mockEthereumRequest.mockReset();
-
-      vi.doMock('@/hooks/useRpcClient', () => ({
-        useRpcClient: vi.fn(() => ({
-          cancelTransaction: mockCancelTransaction,
-        })),
-      }));
-
-      vi.doMock('@/stores/accounts', () => ({
-        useAccountsStore: vi.fn(() => ({
-          selectedAccount,
-        })),
-      }));
-
-      mockCancelTransaction.mockClear();
-      (window as any).ethereum = { request: mockEthereumRequest };
+      mockGenlayerClient.cancelTransaction.mockResolvedValue({
+        transaction_hash: testTransaction.hash,
+        status: 'CANCELED',
+      });
     });
 
-    it('should call rpcClient.cancelTransaction with hash', async () => {
+    it('should call genlayer client cancelTransaction with hash', async () => {
       await transactionsStore.cancelTransaction(
         testTransaction.hash as `0x${string}`,
       );
 
-      expect(mockCancelTransaction).toHaveBeenCalledWith(
-        testTransaction.hash,
-        undefined,
-      );
+      expect(mockGenlayerClient.cancelTransaction).toHaveBeenCalledWith({
+        hash: testTransaction.hash,
+      });
     });
 
-    it('should send no signature when no account is selected', async () => {
-      await transactionsStore.cancelTransaction(
-        testTransaction.hash as `0x${string}`,
+    it('should propagate errors from genlayer client', async () => {
+      mockGenlayerClient.cancelTransaction.mockRejectedValueOnce(
+        new Error('Cannot cancel'),
       );
-
-      // Second argument should be undefined (no signature)
-      expect(mockCancelTransaction).toHaveBeenCalledWith(
-        testTransaction.hash,
-        undefined,
-      );
-    });
-
-    it('should propagate errors from rpcClient', async () => {
-      mockCancelTransaction.mockRejectedValueOnce(new Error('Cannot cancel'));
 
       await expect(
         transactionsStore.cancelTransaction(
           testTransaction.hash as `0x${string}`,
         ),
       ).rejects.toThrow('Cannot cancel');
-    });
-
-    it('should send raw hash to personal_sign for metamask accounts', async () => {
-      selectedAccount = {
-        type: 'metamask',
-        address: '0x9F0e84243496AcFB3Cd99D02eA59673c05901501',
-      };
-      const mockSignature = '0xmetamasksignature';
-      mockEthereumRequest.mockResolvedValueOnce(mockSignature);
-
-      const { keccak256, toBytes, concat, stringToBytes, toHex } =
-        await import('viem');
-      const expectedMessageHash = keccak256(
-        concat([
-          stringToBytes('cancel_transaction'),
-          toBytes(testTransaction.hash as `0x${string}`),
-        ]),
-      );
-
-      await transactionsStore.cancelTransaction(
-        testTransaction.hash as `0x${string}`,
-      );
-
-      expect(mockEthereumRequest).toHaveBeenCalledWith({
-        method: 'personal_sign',
-        params: [expectedMessageHash, selectedAccount.address],
-      });
-      expect(mockEthereumRequest).not.toHaveBeenCalledWith({
-        method: 'personal_sign',
-        params: [toHex(expectedMessageHash), selectedAccount.address],
-      });
-      expect(mockCancelTransaction).toHaveBeenCalledWith(
-        testTransaction.hash,
-        mockSignature,
-      );
     });
   });
 
