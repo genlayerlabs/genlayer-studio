@@ -507,7 +507,7 @@ def register_endpoints_for_fastapi(
     # GenLayer endpoints
     register(
         partial(
-            endpoints.get_contract_schema, accounts_manager, genvm_manager, msg_handler
+            endpoints.get_contract_schema, request_session, genvm_manager, msg_handler
         ),
         "gen_getContractSchema",
     )

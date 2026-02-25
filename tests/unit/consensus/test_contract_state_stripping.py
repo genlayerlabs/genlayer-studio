@@ -204,7 +204,6 @@ async def test_contract_state_stripped_after_appeal(consensus_algorithm):
                 "id": "to_address",
                 "data": {
                     "state": {"accepted": {}, "finalized": {}},
-                    "code": "contract_code",
                 },
             }
         }
@@ -330,7 +329,6 @@ async def test_contract_state_stripping_preserves_rollback_functionality(
                 "id": "to_address",
                 "data": {
                     "state": {"accepted": {}, "finalized": {}},
-                    "code": "contract_code",
                 },
             }
         }

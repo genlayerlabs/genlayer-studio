@@ -461,7 +461,6 @@ class ContractSnapshotMock:
             contract_account = contract_db.get_contract(contract_address)
             self.contract_address = contract_address
             self.contract_data = contract_account["data"]
-            self.contract_code = self.contract_data["code"]
             self.states = self.contract_data["state"]
             self.contract_db = contract_db
 
@@ -471,7 +470,6 @@ class ContractSnapshotMock:
         memo[id(self)] = new_instance
         new_instance.contract_address = self.contract_address
         new_instance.contract_data = deepcopy(self.contract_data, memo)
-        new_instance.contract_code = self.contract_code
         new_instance.states = deepcopy(self.states, memo)
         new_instance.contract_db = (
             None  # threading event that cannot be copied but not used by nodes
@@ -483,7 +481,6 @@ class ContractSnapshotMock:
             "contract_address": (
                 self.contract_address if self.contract_address else None
             ),
-            "contract_code": self.contract_code if self.contract_code else None,
             "states": self.states if self.states else {"accepted": {}, "finalized": {}},
         }
 
@@ -492,7 +489,6 @@ class ContractSnapshotMock:
         if input:
             instance = cls.__new__(cls)
             instance.contract_address = input.get("contract_address", None)
-            instance.contract_code = input.get("contract_code", None)
             instance.states = input.get("states", {"accepted": {}, "finalized": {}})
             instance.contract_db = None
             return instance
@@ -528,7 +524,6 @@ class ContractProcessorMock:
             ),
         }
         new_contract_data = {
-            "code": contract["data"]["code"],
             "state": new_state,
         }
 
@@ -821,7 +816,6 @@ def setup_test_environment(
                     "id": "to_address",
                     "data": {
                         "state": {"accepted": {}, "finalized": {}},
-                        "code": "contract_code",
                     },
                 }
             }
