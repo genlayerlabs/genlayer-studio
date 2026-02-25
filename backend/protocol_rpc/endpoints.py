@@ -640,7 +640,7 @@ def admin_upgrade_contract_code(
 
     # Validate contract exists and is deployed
     contract = session.query(CurrentState).filter_by(id=contract_address).one_or_none()
-    if not contract or not contract.data or not contract.data.get("code"):
+    if not contract or not contract.data or not contract.data.get("state"):
         raise NotFoundError(
             message="Contract not found",
             data={"contract_address": contract_address},
