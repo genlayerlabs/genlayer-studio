@@ -908,7 +908,15 @@ def assert_transaction_status_match(
     expected_statuses: list[TransactionStatus],
     timeout: int = None,
     interval: float = 0.1,
+    min_history_index: int = None,
 ) -> TransactionStatus:
+    """Wait until the transaction reaches one of the expected statuses.
+
+    When ``min_history_index`` is provided the function **also** checks the
+    recorded status history starting from that index.  This makes it possible
+    to detect transient statuses that the consensus already raced past (common
+    with mock LLMs where processing is near-instantaneous).
+    """
     # Use adaptive timeout based on LLM mode
     if timeout is None:
         timeout = (
@@ -931,6 +939,17 @@ def assert_transaction_status_match(
 
         if current_status in expected_statuses:
             return current_status
+
+        # When min_history_index is set, also look at the status history so
+        # we don't miss transient states that were already passed.
+        if min_history_index is not None:
+            history = transactions_processor.updated_transaction_status_history.get(
+                transaction.hash, []
+            )
+            for status in history[min_history_index:]:
+                status_val = status.value if hasattr(status, "value") else status
+                if status_val in expected_statuses:
+                    return status_val
 
         if current_status != last_status:
             last_status = current_status

@@ -96,9 +96,8 @@ const hasSenderAddress = computed(() =>
 );
 
 const canCancel = computed(() => {
-  const cancellableStatus =
-    props.transaction.statusName === 'PENDING' ||
-    props.transaction.statusName === 'ACTIVATED';
+  const status = String(props.transaction.statusName);
+  const cancellableStatus = status === 'PENDING' || status === 'ACTIVATED';
   const requiresAdminOnly =
     isHosted && props.transaction.type === 'upgrade' && !hasSenderAddress.value;
   return cancellableStatus && !requiresAdminOnly;
