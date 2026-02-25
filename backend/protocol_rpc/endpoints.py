@@ -50,7 +50,9 @@ from backend.consensus.base import ConsensusAlgorithm
 from backend.protocol_rpc.call_interceptor import handle_consensus_data_call
 
 import base64
+import hashlib
 import os
+import secrets as secrets_module
 from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope
 from backend.protocol_rpc.types import DecodedsubmitAppealDataArgs
 from backend.database_handler.snapshot_manager import SnapshotManager
@@ -1875,3 +1877,107 @@ def dev_get_pool_status(sqlalchemy_db) -> dict:
             "total": pool.size() + pool.overflow(),
         },
     }
+
+
+####### ADMIN API KEY RATE LIMITING ENDPOINTS #######
+
+
+@require_admin_access
+def admin_create_tier(
+    session: Session,
+    name: str,
+    rate_limit_minute: int,
+    rate_limit_hour: int,
+    rate_limit_day: int,
+    admin_key: str = None,
+) -> dict:
+    from backend.database_handler.models import ApiTier
+
+    tier = ApiTier(
+        name=name,
+        rate_limit_minute=rate_limit_minute,
+        rate_limit_hour=rate_limit_hour,
+        rate_limit_day=rate_limit_day,
+    )
+    session.add(tier)
+    session.flush()
+    return {"id": tier.id, "name": tier.name}
+
+
+@require_admin_access
+def admin_list_tiers(
+    session: Session,
+    admin_key: str = None,
+) -> list[dict]:
+    from backend.database_handler.models import ApiTier
+
+    tiers = session.query(ApiTier).all()
+    return [
+        {
+            "id": t.id,
+            "name": t.name,
+            "rate_limit_minute": t.rate_limit_minute,
+            "rate_limit_hour": t.rate_limit_hour,
+            "rate_limit_day": t.rate_limit_day,
+        }
+        for t in tiers
+    ]
+
+
+@require_admin_access
+def admin_create_api_key(
+    session: Session,
+    tier_name: str,
+    description: str = None,
+    admin_key: str = None,
+) -> dict:
+    from backend.database_handler.models import ApiKey, ApiTier
+
+    tier = session.query(ApiTier).filter_by(name=tier_name).first()
+    if not tier:
+        raise JSONRPCError(code=-32602, message=f"Tier not found: {tier_name}")
+
+    raw_key = "glk_" + secrets_module.token_hex(32)
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+
+    api_key = ApiKey(
+        key_prefix=raw_key[:8],
+        key_hash=key_hash,
+        tier_id=tier.id,
+        is_active=True,
+        description=description,
+    )
+    session.add(api_key)
+    session.flush()
+    return {
+        "api_key": raw_key,
+        "key_prefix": raw_key[:8],
+        "tier": tier_name,
+        "description": description,
+    }
+
+
+@require_admin_access
+async def admin_deactivate_api_key(
+    session: Session,
+    key_prefix: str,
+    rate_limiter: Any = None,
+    admin_key: str = None,
+) -> dict:
+    from backend.database_handler.models import ApiKey
+
+    api_key = (
+        session.query(ApiKey).filter_by(key_prefix=key_prefix, is_active=True).first()
+    )
+    if not api_key:
+        raise NotFoundError(
+            message=f"Active API key with prefix {key_prefix} not found"
+        )
+
+    api_key.is_active = False
+    session.flush()
+
+    if rate_limiter:
+        await rate_limiter.invalidate_key_cache(api_key.key_hash)
+
+    return {"key_prefix": key_prefix, "deactivated": True}
