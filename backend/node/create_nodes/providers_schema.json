@@ -12,7 +12,8 @@
         "anthropic",
         "xai",
         "google",
-        "openrouter"
+        "openrouter",
+        "morpheus"
       ]
     },
     "model": {
@@ -208,6 +209,25 @@
               "claude-sonnet-4-5",
               "claude-opus-4-5"
             ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "provider": { "const": "morpheus" }
+        }
+      },
+      "then": {
+        "x-models-url": "https://api.mor.org/api/v1/models",
+        "x-plugin-config-defaults": {
+          "api_key_env_var": "MORPHEUSAPIKEY",
+          "api_url": "https://api.mor.org/api/v1"
+        },
+        "properties": {
+          "plugin": {
+            "const": "openai-compatible"
           }
         }
       }

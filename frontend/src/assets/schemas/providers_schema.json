@@ -11,7 +11,8 @@
         "openai",
         "anthropic",
         "xai",
-        "google"
+        "google",
+        "morpheus"
       ]
     },
     "model": {
@@ -146,6 +147,25 @@
               "claude-sonnet-4-20250514",
               "claude-opus-4-20250514"
             ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "provider": { "const": "morpheus" }
+        }
+      },
+      "then": {
+        "x-models-url": "https://api.mor.org/api/v1/models",
+        "x-plugin-config-defaults": {
+          "api_key_env_var": "MORPHEUSAPIKEY",
+          "api_url": "https://api.mor.org/api/v1"
+        },
+        "properties": {
+          "plugin": {
+            "const": "openai-compatible"
           }
         }
       }
