@@ -15,7 +15,6 @@ let mockWebSocketClientGlobal: any = {
 
 vi.mock('@/hooks', () => ({
   useGenlayer: vi.fn(),
-  useRpcClient: vi.fn(),
   useWebSocketClient: vi.fn(() => mockWebSocketClientGlobal),
   useDb: vi.fn(() => ({
     transaction: vi.fn(),
@@ -51,6 +50,7 @@ describe('useTransactionsStore', () => {
   let mockWebSocketClient: any;
   const mockGenlayerClient = {
     getTransaction: vi.fn(),
+    cancelTransaction: vi.fn(),
   };
   const mockDb = {
     transactions: {
@@ -80,6 +80,7 @@ describe('useTransactionsStore', () => {
 
     // Clear mocks before creating store
     mockGenlayerClient.getTransaction.mockClear();
+    mockGenlayerClient.cancelTransaction.mockClear();
     mockWebSocketClient.emit.mockClear();
     mockWebSocketClient.on.mockClear();
     mockWebSocketClient.off.mockClear();
@@ -179,6 +180,37 @@ describe('useTransactionsStore', () => {
     expect(transactionsStore.transactions[0].statusName).toBe(
       TransactionStatus.FINALIZED,
     );
+  });
+
+  describe('cancelTransaction', () => {
+    beforeEach(() => {
+      mockGenlayerClient.cancelTransaction.mockResolvedValue({
+        transaction_hash: testTransaction.hash,
+        status: 'CANCELED',
+      });
+    });
+
+    it('should call genlayer client cancelTransaction with hash', async () => {
+      await transactionsStore.cancelTransaction(
+        testTransaction.hash as `0x${string}`,
+      );
+
+      expect(mockGenlayerClient.cancelTransaction).toHaveBeenCalledWith({
+        hash: testTransaction.hash,
+      });
+    });
+
+    it('should propagate errors from genlayer client', async () => {
+      mockGenlayerClient.cancelTransaction.mockRejectedValueOnce(
+        new Error('Cannot cancel'),
+      );
+
+      await expect(
+        transactionsStore.cancelTransaction(
+          testTransaction.hash as `0x${string}`,
+        ),
+      ).rejects.toThrow('Cannot cancel');
+    });
   });
 
   describe('WebSocket reconnection', () => {

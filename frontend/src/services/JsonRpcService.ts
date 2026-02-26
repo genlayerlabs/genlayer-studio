@@ -222,4 +222,15 @@ export class JsonRpcService implements IJsonRpcService {
       'Error getting contract nonce',
     ) as Promise<number>;
   }
+
+  async cancelTransaction(
+    transactionHash: string,
+    signature?: string,
+  ): Promise<{ transaction_hash: string; status: string }> {
+    return this.callRpcMethod<{ transaction_hash: string; status: string }>(
+      'sim_cancelTransaction',
+      [transactionHash, signature],
+      'Error cancelling transaction',
+    ) as Promise<{ transaction_hash: string; status: string }>;
+  }
 }

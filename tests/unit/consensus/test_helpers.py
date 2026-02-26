@@ -461,7 +461,6 @@ class ContractSnapshotMock:
             contract_account = contract_db.get_contract(contract_address)
             self.contract_address = contract_address
             self.contract_data = contract_account["data"]
-            self.contract_code = self.contract_data["code"]
             self.states = self.contract_data["state"]
             self.contract_db = contract_db
 
@@ -471,7 +470,6 @@ class ContractSnapshotMock:
         memo[id(self)] = new_instance
         new_instance.contract_address = self.contract_address
         new_instance.contract_data = deepcopy(self.contract_data, memo)
-        new_instance.contract_code = self.contract_code
         new_instance.states = deepcopy(self.states, memo)
         new_instance.contract_db = (
             None  # threading event that cannot be copied but not used by nodes
@@ -483,7 +481,6 @@ class ContractSnapshotMock:
             "contract_address": (
                 self.contract_address if self.contract_address else None
             ),
-            "contract_code": self.contract_code if self.contract_code else None,
             "states": self.states if self.states else {"accepted": {}, "finalized": {}},
         }
 
@@ -492,7 +489,6 @@ class ContractSnapshotMock:
         if input:
             instance = cls.__new__(cls)
             instance.contract_address = input.get("contract_address", None)
-            instance.contract_code = input.get("contract_code", None)
             instance.states = input.get("states", {"accepted": {}, "finalized": {}})
             instance.contract_db = None
             return instance
@@ -528,7 +524,6 @@ class ContractProcessorMock:
             ),
         }
         new_contract_data = {
-            "code": contract["data"]["code"],
             "state": new_state,
         }
 
@@ -613,6 +608,8 @@ def node_factory(
     snap: validators.Snapshot,
     timing_callback: Optional[Callable[[str], None]],
     manager: GenVMManager,
+    shared_decoded_value_cache: Optional[dict[str, bytes]],
+    shared_contract_snapshot_cache: Optional[dict[str, ContractSnapshot]],
     vote: Vote,
     timeout: bool,
 ):
@@ -819,7 +816,6 @@ def setup_test_environment(
                     "id": "to_address",
                     "data": {
                         "state": {"accepted": {}, "finalized": {}},
-                        "code": "contract_code",
                     },
                 }
             }
@@ -912,7 +908,15 @@ def assert_transaction_status_match(
     expected_statuses: list[TransactionStatus],
     timeout: int = None,
     interval: float = 0.1,
+    min_history_index: int = None,
 ) -> TransactionStatus:
+    """Wait until the transaction reaches one of the expected statuses.
+
+    When ``min_history_index`` is provided the function **also** checks the
+    recorded status history starting from that index.  This makes it possible
+    to detect transient statuses that the consensus already raced past (common
+    with mock LLMs where processing is near-instantaneous).
+    """
     # Use adaptive timeout based on LLM mode
     if timeout is None:
         timeout = (
@@ -935,6 +939,17 @@ def assert_transaction_status_match(
 
         if current_status in expected_statuses:
             return current_status
+
+        # When min_history_index is set, also look at the status history so
+        # we don't miss transient states that were already passed.
+        if min_history_index is not None:
+            history = transactions_processor.updated_transaction_status_history.get(
+                transaction.hash, []
+            )
+            for status in history[min_history_index:]:
+                status_val = status.value if hasattr(status, "value") else status
+                if status_val in expected_statuses:
+                    return status_val
 
         if current_status != last_status:
             last_status = current_status

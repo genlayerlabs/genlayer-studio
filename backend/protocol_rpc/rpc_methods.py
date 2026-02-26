@@ -15,6 +15,7 @@ from backend.protocol_rpc.dependencies import (
     get_db_session,
     get_llm_provider_registry,
     get_message_handler,
+    get_rate_limiter,
     get_snapshot_manager,
     get_sqlalchemy_db,
     get_transactions_parser,
@@ -245,6 +246,23 @@ def upgrade_contract_code(
     )
 
 
+@rpc.method("sim_cancelTransaction")
+def cancel_transaction(
+    transaction_hash: str,
+    signature: str = None,
+    admin_key: str = None,
+    session: Session = Depends(get_db_session),
+    msg_handler=Depends(get_message_handler),
+) -> dict:
+    return impl.cancel_transaction(
+        session=session,
+        transaction_hash=transaction_hash,
+        msg_handler=msg_handler,
+        signature=signature,
+        admin_key=admin_key,
+    )
+
+
 @rpc.method("sim_getTransactionsForAddress", log_policy=LogPolicy.debug())
 def get_transactions_for_address(
     address: str,
@@ -258,7 +276,7 @@ def get_transactions_for_address(
     )
 
 
-@rpc.method("sim_setFinalityWindowTime")
+@rpc.method("sim_setFinalityWindowTime", log_policy=LogPolicy.debug())
 def set_finality_window_time(
     seconds: int,
     consensus=Depends(get_consensus),
@@ -266,7 +284,7 @@ def set_finality_window_time(
     return impl.set_finality_window_time(consensus, seconds)
 
 
-@rpc.method("sim_getFinalityWindowTime")
+@rpc.method("sim_getFinalityWindowTime", log_policy=LogPolicy.debug())
 def get_finality_window_time(
     consensus=Depends(get_consensus),
 ) -> dict:
@@ -305,7 +323,7 @@ def delete_all_snapshots(
     return impl.delete_all_snapshots(snapshot_manager=snapshot_manager)
 
 
-@rpc.method("sim_lintContract")
+@rpc.method("sim_lintContract", log_policy=LogPolicy.debug())
 def lint_contract(
     source_code: str,
     filename: str = "contract.py",
@@ -321,12 +339,12 @@ def lint_contract(
 @rpc.method("gen_getContractSchema", log_policy=LogPolicy.debug())
 async def get_contract_schema(
     contract_address: str,
-    accounts_manager: AccountsManager = Depends(get_accounts_manager),
+    session: Session = Depends(get_db_session),
     msg_handler=Depends(get_message_handler),
     genvm_manager=Depends(get_genvm_manager),
 ) -> dict:
     return await impl.get_contract_schema(
-        accounts_manager=accounts_manager,
+        session=session,
         genvm_manager=genvm_manager,
         msg_handler=msg_handler,
         contract_address=contract_address,
@@ -346,7 +364,7 @@ async def get_contract_schema_for_code(
     )
 
 
-@rpc.method("gen_getContractCode")
+@rpc.method("gen_getContractCode", log_policy=LogPolicy.debug())
 def get_contract_code(
     contract_address: str,
     session: Session = Depends(get_db_session),
@@ -354,7 +372,7 @@ def get_contract_code(
     return impl.get_contract_code(session=session, contract_address=contract_address)
 
 
-@rpc.method("gen_getContractNonce")
+@rpc.method("gen_getContractNonce", log_policy=LogPolicy.debug())
 def get_contract_nonce(
     contract_address: str,
     session: Session = Depends(get_db_session),
@@ -527,14 +545,14 @@ def net_version() -> str:
     return impl.get_net_version()
 
 
-@rpc.method("eth_blockNumber")
+@rpc.method("eth_blockNumber", log_policy=LogPolicy.debug())
 def eth_block_number(
     transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
 ) -> str:
     return impl.get_block_number(transactions_processor)
 
 
-@rpc.method("eth_getBlockByNumber")
+@rpc.method("eth_getBlockByNumber", log_policy=LogPolicy.debug())
 def eth_get_block_by_number(
     block_number: str,
     full_transactions: bool,
@@ -547,12 +565,12 @@ def eth_get_block_by_number(
     )
 
 
-@rpc.method("eth_gasPrice")
+@rpc.method("eth_gasPrice", log_policy=LogPolicy.debug())
 def eth_gas_price() -> str:
     return impl.get_gas_price()
 
 
-@rpc.method("eth_estimateGas")
+@rpc.method("eth_estimateGas", log_policy=LogPolicy.debug())
 def eth_estimate_gas(
     transaction: dict,
 ) -> str:
@@ -570,7 +588,7 @@ def eth_get_transaction_receipt(
     )
 
 
-@rpc.method("eth_getBlockByHash")
+@rpc.method("eth_getBlockByHash", log_policy=LogPolicy.debug())
 def eth_get_block_by_hash(
     block_hash: str,
     full_transactions: bool,
@@ -606,3 +624,65 @@ def dev_get_pool_status(
     sqlalchemy_db=Depends(get_sqlalchemy_db),
 ) -> dict:
     return impl.dev_get_pool_status(sqlalchemy_db)
+
+
+# ---------------------------------------------------------------------------
+# Admin API key rate limiting endpoints
+# ---------------------------------------------------------------------------
+
+
+@rpc.method("admin_createTier")
+def rpc_admin_create_tier(
+    name: str,
+    rate_limit_minute: int,
+    rate_limit_hour: int,
+    rate_limit_day: int,
+    admin_key: str = None,
+    session: Session = Depends(get_db_session),
+) -> dict:
+    return impl.admin_create_tier(
+        session=session,
+        name=name,
+        rate_limit_minute=rate_limit_minute,
+        rate_limit_hour=rate_limit_hour,
+        rate_limit_day=rate_limit_day,
+        admin_key=admin_key,
+    )
+
+
+@rpc.method("admin_listTiers")
+def rpc_admin_list_tiers(
+    admin_key: str = None,
+    session: Session = Depends(get_db_session),
+) -> list[dict]:
+    return impl.admin_list_tiers(session=session, admin_key=admin_key)
+
+
+@rpc.method("admin_createApiKey")
+def rpc_admin_create_api_key(
+    tier_name: str,
+    description: str = None,
+    admin_key: str = None,
+    session: Session = Depends(get_db_session),
+) -> dict:
+    return impl.admin_create_api_key(
+        session=session,
+        tier_name=tier_name,
+        description=description,
+        admin_key=admin_key,
+    )
+
+
+@rpc.method("admin_deactivateApiKey")
+async def rpc_admin_deactivate_api_key(
+    key_prefix: str,
+    admin_key: str = None,
+    session: Session = Depends(get_db_session),
+    rate_limiter=Depends(get_rate_limiter),
+) -> dict:
+    return await impl.admin_deactivate_api_key(
+        session=session,
+        key_prefix=key_prefix,
+        rate_limiter=rate_limiter,
+        admin_key=admin_key,
+    )

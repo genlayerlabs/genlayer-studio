@@ -61,9 +61,16 @@ def get_simulator_chain_id() -> int:
     return _parse_chain_id()
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _filter_genvm_log_by_level(genvm_log: list[dict]) -> list[dict]:
     """
-    Filter genvm_log entries based on configured LOG_LEVEL with a minimum of WARNING.
+    Filter genvm_log entries based on configured LOG_LEVEL.
     Only includes log entries that meet or exceed the effective threshold.
     """
     # Get configured log level from environment
@@ -80,8 +87,7 @@ def _filter_genvm_log_by_level(genvm_log: list[dict]) -> list[dict]:
     }
 
     # Get numeric threshold for configured level (default to INFO if unknown)
-    # Enforce minimum WARNING level regardless of configuration
-    threshold = max(level_map.get(configured_level, logging.INFO), logging.WARNING)
+    threshold = level_map.get(configured_level, logging.INFO)
 
     # Filter log entries
     filtered_logs = []
@@ -128,33 +134,194 @@ class _SnapshotView(genvmbase.StateProxy):
         snapshot_factory: typing.Callable[[str], ContractSnapshot],
         readonly: bool,
         state_status: str | None = None,
+        shared_decoded_value_cache: dict[str, bytes] | None = None,
+        shared_contract_snapshot_cache: dict[str, ContractSnapshot] | None = None,
+        collect_metrics: bool = False,
     ):
         self.contract_address = Address(snapshot.contract_address)
         self.snapshot = snapshot
         self.snapshot_factory = snapshot_factory
-        self.cached = {}
+        self.cached: dict[str, ContractSnapshot] = {}
         self.readonly = readonly
         self.state_status = state_status if state_status else "accepted"
+        self._shared_decoded_value_cache = shared_decoded_value_cache
+        # Shared immutable cross-contract snapshots for this transaction context.
+        self._shared_contract_snapshot_cache = shared_contract_snapshot_cache
+        self._collect_metrics = collect_metrics
+        # Primary contract fast path:
+        # decode the full primary contract state once and then read by bytes slot key.
+        self._primary_decoded: dict[bytes, bytes] | None = None
+        # Per-contract decoded slot cache:
+        # {contract_address: {base64_slot_key: decoded_value_bytes}}
+        # This is only used for non-primary contract lazy reads.
+        self._decoded_slots: dict[str, dict[str, bytes]] = {}
+        self._slot_keys: dict[bytes, str] = {}
+        # Execution-scoped metrics to quantify cross-contract read cold/warm behavior.
+        if collect_metrics:
+            self._metrics: dict[str, int] | None = {
+                "primary_contract_lookups": 0,
+                "snapshot_cache_hits": 0,
+                "snapshot_cache_misses": 0,
+                "snapshot_shared_cache_hits": 0,
+                "snapshot_shared_cache_misses": 0,
+                "snapshot_factory_ms": 0,
+                "decoded_cache_hits": 0,
+                "decoded_cache_misses": 0,
+                "decoded_build_ms": 0,
+                "decoded_slots_total": 0,
+                "shared_decoded_cache_hits": 0,
+                "shared_decoded_cache_misses": 0,
+            }
+        else:
+            self._metrics = None
 
     def _get_snapshot(self, addr: Address) -> ContractSnapshot:
         if addr == self.contract_address:
             return self.snapshot
-        res = self.cached.get(addr)
+        addr_hex = addr.as_hex.lower()
+        res = self.cached.get(addr_hex)
         if res is not None:
+            metrics = self._metrics
+            if metrics is not None:
+                metrics["snapshot_cache_hits"] += 1
             return res
+        metrics = self._metrics
+        if metrics is not None:
+            metrics["snapshot_cache_misses"] += 1
+        shared_cache = self._shared_contract_snapshot_cache
+        if shared_cache is not None:
+            res = shared_cache.get(addr_hex)
+            if res is not None:
+                if metrics is not None:
+                    metrics["snapshot_shared_cache_hits"] += 1
+                self.cached[addr_hex] = res
+                return res
+            if metrics is not None:
+                metrics["snapshot_shared_cache_misses"] += 1
+        start = time.perf_counter() if metrics is not None else 0.0
         res = self.snapshot_factory(addr.as_hex)
-        self.cached[addr] = res
+        if metrics is not None:
+            metrics["snapshot_factory_ms"] += round(
+                (time.perf_counter() - start) * 1000
+            )
+        self.cached[addr_hex] = res
+        if shared_cache is not None:
+            shared_cache[addr_hex] = res
         return res
+
+    def _slot_key(self, slot: bytes) -> str:
+        slot_key = self._slot_keys.get(slot)
+        if slot_key is None:
+            slot_key = base64.b64encode(slot).decode("ascii")
+            self._slot_keys[slot] = slot_key
+        return slot_key
+
+    def _get_contract_slot_cache(self, snap: ContractSnapshot) -> dict[str, bytes]:
+        return self._decoded_slots.setdefault(snap.contract_address, {})
+
+    def _get_primary_decoded(self) -> dict[bytes, bytes]:
+        decoded = self._primary_decoded
+        if decoded is not None:
+            return decoded
+
+        decoded = {}
+        state = self.snapshot.states.get(self.state_status, {})
+        shared_cache = self._shared_decoded_value_cache
+        for slot_key, raw in state.items():
+            slot = base64.b64decode(slot_key)
+            if shared_cache is None:
+                value = base64.b64decode(raw)
+                metrics = self._metrics
+                if metrics is not None:
+                    metrics["decoded_slots_total"] += 1
+            else:
+                value = shared_cache.get(raw)
+                if value is None:
+                    metrics = self._metrics
+                    if metrics is not None:
+                        metrics["shared_decoded_cache_misses"] += 1
+                    value = base64.b64decode(raw)
+                    shared_cache[raw] = value
+                    if metrics is not None:
+                        metrics["decoded_slots_total"] += 1
+                else:
+                    metrics = self._metrics
+                    if metrics is not None:
+                        metrics["shared_decoded_cache_hits"] += 1
+            decoded[slot] = value
+
+        self._primary_decoded = decoded
+        return decoded
+
+    def _read_primary_slot_value(self, slot: bytes) -> bytes:
+        return self._get_primary_decoded().get(slot, b"")
+
+    def _read_cross_slot_value(self, snap: ContractSnapshot, slot: bytes) -> bytes:
+        slot_cache = self._get_contract_slot_cache(snap)
+        slot_key = self._slot_key(slot)
+        data = slot_cache.get(slot_key)
+        if data is not None:
+            metrics = self._metrics
+            if metrics is not None:
+                metrics["decoded_cache_hits"] += 1
+            return data
+
+        metrics = self._metrics
+        if metrics is not None:
+            metrics["decoded_cache_misses"] += 1
+        raw = snap.states.get(self.state_status, {}).get(slot_key)
+        shared_cache = self._shared_decoded_value_cache
+        if raw is not None and shared_cache is not None:
+            data = shared_cache.get(raw)
+            if data is not None:
+                if metrics is not None:
+                    metrics["shared_decoded_cache_hits"] += 1
+                slot_cache[slot_key] = data
+                return data
+            if metrics is not None:
+                metrics["shared_decoded_cache_misses"] += 1
+
+        start = time.perf_counter() if metrics is not None else 0.0
+        data = base64.b64decode(raw) if raw is not None else b""
+        if metrics is not None:
+            metrics["decoded_build_ms"] += round((time.perf_counter() - start) * 1000)
+        if raw is not None:
+            if metrics is not None:
+                metrics["decoded_slots_total"] += 1
+            if shared_cache is not None:
+                shared_cache[raw] = data
+        slot_cache[slot_key] = data
+        return data
+
+    def get_metrics(self) -> dict[str, int]:
+        metrics = self._metrics
+        if metrics is None:
+            return {}
+        return {
+            **metrics,
+            "cached_contracts": len(self.cached),
+            "decoded_contracts": len(self._decoded_slots),
+        }
 
     def storage_read(
         self, account: Address, slot: bytes, index: int, le: int, /
     ) -> bytes:
-        snap = self._get_snapshot(account)
-        slot_id = base64.b64encode(slot).decode("ascii")
-        for_slot = snap.states[self.state_status].setdefault(slot_id, "")
-        data = bytearray(base64.b64decode(for_slot))
-        data.extend(b"\x00" * (index + le - len(data)))
-        return data[index : index + le]
+        if account == self.contract_address:
+            metrics = self._metrics
+            if metrics is not None:
+                metrics["primary_contract_lookups"] += 1
+            data = self._read_primary_slot_value(slot)
+        else:
+            snap = self._get_snapshot(account)
+            data = self._read_cross_slot_value(snap, slot)
+        end = index + le
+        if end <= len(data):
+            return data[index:end]
+        result = bytearray(le)
+        available = len(data) - index
+        if available > 0:
+            result[:available] = data[index : index + available]
+        return bytes(result)
 
     def storage_write(
         self,
@@ -164,14 +331,20 @@ class _SnapshotView(genvmbase.StateProxy):
         /,
     ) -> None:
         assert not self.readonly
-        snap = self._get_snapshot(self.contract_address)
-        slot_id = base64.b64encode(slot).decode("ascii")
-        for_slot = snap.states[self.state_status].setdefault(slot_id, "")
-        data = bytearray(base64.b64decode(for_slot))
+        slot_key = self._slot_key(slot)
+        state_bucket = self.snapshot.states.setdefault(self.state_status, {})
+        primary_decoded = self._get_primary_decoded()
+        existing = primary_decoded.get(slot, b"")
+        data = bytearray(existing)
         mem = memoryview(got)
         data.extend(b"\x00" * (index + len(mem) - len(data)))
         data[index : index + len(mem)] = mem
-        snap.states[self.state_status][slot_id] = base64.b64encode(data).decode("utf-8")
+        new_value = bytes(data)
+        primary_decoded[slot] = new_value
+        raw_new_value = base64.b64encode(data).decode("utf-8")
+        state_bucket[slot_key] = raw_new_value
+        if self._shared_decoded_value_cache is not None:
+            self._shared_decoded_value_cache[raw_new_value] = new_value
 
     def get_balance(self, addr: Address) -> int:
         snap = self._get_snapshot(addr)
@@ -398,6 +571,8 @@ class Node:
         *,
         manager: Manager,
         logger: genvm_logger.Logger | None = None,
+        shared_decoded_value_cache: dict[str, bytes] | None = None,
+        shared_contract_snapshot_cache: dict[str, ContractSnapshot] | None = None,
     ):
         assert manager is not None
 
@@ -410,6 +585,9 @@ class Node:
         self.contract_snapshot_factory = contract_snapshot_factory
         self.manager = manager
         self.validators_snapshot = validators_snapshot
+        self.shared_decoded_value_cache = shared_decoded_value_cache
+        self.shared_contract_snapshot_cache = shared_contract_snapshot_cache
+        self.collect_state_proxy_metrics = _env_bool("GENVM_STATE_PROXY_METRICS")
         if timing_callback is None:
 
             def _timing_callback(x: str) -> None:
@@ -520,29 +698,39 @@ class Node:
         return enhanced_node_config
 
     def _set_vote(self, receipt: Receipt) -> Receipt:
-        if receipt.result[0] == public_abi.ResultCode.VM_ERROR:
+        result_code = receipt.result[0]
+
+        # 1. Timeout: VM-level timeout or GenVM internal error
+        if result_code == public_abi.ResultCode.VM_ERROR:
             error_message = receipt.result[1:]
-            # Set TIMEOUT for timeout errors and GenVM internal errors
             if error_message == b"timeout" or error_message.startswith(
                 b"GenVM internal error"
             ):
                 receipt.vote = Vote.TIMEOUT
                 return receipt
 
+        # 2. Non-deterministic disagreement signaled by GenVM
+        if receipt.nondet_disagree is not None:
+            receipt.vote = Vote.DISAGREE
+            return receipt
+
+        # 3. VM crash (exit_code, OOM, etc.) — validator couldn't validate
+        if result_code == public_abi.ResultCode.VM_ERROR:
+            receipt.vote = Vote.DISAGREE
+            return receipt
+
+        # 4. Deterministic violation: execution outcome or state diverges from leader
         leader_receipt = self.leader_receipt
         if (
-            leader_receipt.execution_result == receipt.execution_result
-            and leader_receipt.result == receipt.result
-            and leader_receipt.contract_state == receipt.contract_state
-            and leader_receipt.pending_transactions == receipt.pending_transactions
+            leader_receipt.execution_result != receipt.execution_result
+            or leader_receipt.contract_state != receipt.contract_state
+            or leader_receipt.pending_transactions != receipt.pending_transactions
         ):
-            if receipt.nondet_disagree is not None:
-                receipt.vote = Vote.DISAGREE
-            else:
-                receipt.vote = Vote.AGREE
-        else:
             receipt.vote = Vote.DETERMINISTIC_VIOLATION
+            return receipt
 
+        # 5. Valid execution (RETURN or USER_ERROR) with matching state → agree
+        receipt.vote = Vote.AGREE
         return receipt
 
     def _date_from_str(
@@ -624,6 +812,7 @@ class Node:
             calldata,
             readonly=True,
             is_init=False,
+            is_sync=True,
             transaction_datetime=(
                 transaction_datetime
                 if transaction_datetime is not None
@@ -651,10 +840,12 @@ class Node:
             else res.stdout
         )
 
+        # Always log at INFO level - GenVM execution errors are user contract errors,
+        # not infrastructure errors. The error details are in the 'result' data field.
         msg_handler.send_message(
             LogEvent(
                 name="execution_finished",
-                type=(EventType.INFO if not is_error else EventType.ERROR),
+                type=EventType.INFO,
                 scope=EventScope.GENVM,
                 message="execution finished",
                 data={
@@ -697,7 +888,7 @@ class Node:
             extra_args=["--debug-mode"],
             host_data='{"node_address":"0x", "tx_id":"0x"}',
             capture_output=True,
-            is_sync=False,
+            is_sync=True,
             logger=self.logger,
             timeout=30,
             manager_uri=self.manager.url,
@@ -734,6 +925,7 @@ class Node:
         *,
         readonly: bool,
         is_init: bool,
+        is_sync: bool = False,
         transaction_hash: str | None = None,
         transaction_datetime: datetime.datetime | None,
         state_status: str | None = None,
@@ -760,6 +952,9 @@ class Node:
             self.contract_snapshot_factory,
             readonly,
             state_status,
+            self.shared_decoded_value_cache,
+            self.shared_contract_snapshot_cache,
+            self.collect_state_proxy_metrics,
         )
 
         self.timing_callback("SNAPSHOT_CREATION_END")
@@ -829,46 +1024,21 @@ class Node:
                 logger=logger,
             )
         except genvmbase.GenVMInternalError as e:
-            # For leaders: re-raise so worker can reset transaction and restart
-            if self.validator_mode == ExecutionMode.LEADER:
-                e.is_leader = True
-                raise
-
-            # For validators: return error receipt so consensus can continue
-            # with remaining validators
-            self.logger.warning(
-                f"Validator encountered GenVMInternalError",
-                error_code=e.error_code,
-                causes=e.causes,
-                is_fatal=e.is_fatal,
-            )
-            processing_time = int((time.time() - start_time) * 1000)
-            error_message = f"GenVM internal error: {e}"
-            error_result = bytes(
-                [public_abi.ResultCode.VM_ERROR]
-            ) + error_message.encode("utf-8")
-            result = Receipt(
-                result=error_result,
-                gas_used=0,
-                eq_outputs={},
-                pending_transactions=[],
-                vote=Vote.TIMEOUT,
-                execution_result=ExecutionResultStatus.ERROR,
-                contract_state=snapshot_view.snapshot.states.get("accepted", {}),
-                calldata=calldata,
-                mode=self.validator_mode,
-                node_config=self._create_enhanced_node_config(host_data),
-                genvm_result={
-                    "stdout": "",
-                    "stderr": str(e),
-                    "error_code": e.error_code,
-                    "raw_error": {"causes": e.causes, "is_fatal": e.is_fatal},
-                },
-                processing_time=processing_time,
-                nondet_disagree=None,
-            )
-            return self._set_vote(result)
+            e.is_leader = self.validator_mode == ExecutionMode.LEADER
+            raise
         result.processing_time = int((time.time() - start_time) * 1000)
+
+        # State-proxy metrics are opt-in via GENVM_STATE_PROXY_METRICS.
+        # Use the executed state proxy from run_genvm_host, because that object can be
+        # a deep-copied instance created per execution attempt.
+        state_proxy_for_metrics = (
+            result.state if hasattr(result.state, "get_metrics") else snapshot_view
+        )
+        state_proxy_metrics = state_proxy_for_metrics.get_metrics()
+        if state_proxy_metrics:
+            if result.execution_stats is None:
+                result.execution_stats = {}
+            result.execution_stats["state_proxy"] = state_proxy_metrics
 
         await self._execution_finished(result, transaction_hash, from_address)
 
@@ -912,8 +1082,23 @@ class Node:
             },
             processing_time=result.processing_time,
             nondet_disagree=result.nondet_disagree,
+            execution_stats=result.execution_stats,
         )
 
         if self.validator_mode == ExecutionMode.LEADER:
+            # Fatal user errors (infrastructure failures) → raise for consensus-level
+            # replacement. The consensus layer will retry with a replacement leader.
+            raw_error = (result.genvm_result or {}).get("raw_error") or {}
+            if raw_error.get("fatal") is True:
+                raise genvmbase.GenVMInternalError(
+                    message=(
+                        f"Leader fatal error:"
+                        f" {result.genvm_result.get('error_code')}"
+                    ),
+                    error_code=result.genvm_result.get("error_code"),
+                    causes=raw_error.get("causes", []),
+                    is_fatal=True,
+                    is_leader=True,
+                )
             return result
         return self._set_vote(result)

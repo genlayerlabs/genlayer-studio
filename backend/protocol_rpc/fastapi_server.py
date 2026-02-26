@@ -20,7 +20,8 @@ from backend.protocol_rpc.dependencies import (
     websocket_broadcast,
 )
 from backend.protocol_rpc.fastapi_rpc_router import FastAPIRPCRouter
-from backend.protocol_rpc.health import health_router, create_readiness_check_with_state
+from backend.protocol_rpc.health import health_router
+from backend.protocol_rpc.rate_limit_middleware import RateLimitMiddleware
 from backend.protocol_rpc.rpc_endpoint_manager import JSONRPCResponse
 from backend.protocol_rpc.websocket import GLOBAL_CHANNEL, websocket_handler
 
@@ -69,17 +70,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Add rate limiting middleware (executes after CORS, before route handler)
+app.add_middleware(RateLimitMiddleware)
+
 # Include health check endpoints
 app.include_router(health_router)
-
-
-@app.get("/ready")
-async def readiness_check_with_app_state(
-    rpc_router: FastAPIRPCRouter | None = Depends(get_rpc_router_optional),
-):
-    """Enhanced readiness check with access to application state."""
-    readiness_func = create_readiness_check_with_state(rpc_router)
-    return await readiness_func()
 
 
 # JSON-RPC endpoint (supports single and batch requests)

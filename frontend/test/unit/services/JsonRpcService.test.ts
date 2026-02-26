@@ -55,4 +55,62 @@ describe('JsonRprService', () => {
       expect(result).to.deep.equal(mockResponse.result);
     });
   });
+
+  describe('cancelTransaction', () => {
+    const txHash = '0x' + 'a'.repeat(64);
+    const mockCancelResponse = {
+      id: 'test',
+      jsonrpc: '2.0',
+      result: { transaction_hash: txHash, status: 'CANCELED' },
+    };
+
+    it('should call rpc client with correct method and params', async () => {
+      const spy = vi
+        .spyOn(rpcClient, 'call')
+        .mockImplementationOnce(() => Promise.resolve(mockCancelResponse));
+
+      await jsonRpcService.cancelTransaction(txHash);
+      expect(spy.getMockName()).toEqual('call');
+      expect(rpcClient.call).toHaveBeenCalledTimes(1);
+      expect(rpcClient.call).toHaveBeenCalledWith({
+        method: 'sim_cancelTransaction',
+        params: [txHash, undefined],
+      });
+    });
+
+    it('should pass signature when provided', async () => {
+      vi.spyOn(rpcClient, 'call').mockImplementationOnce(() =>
+        Promise.resolve(mockCancelResponse),
+      );
+
+      await jsonRpcService.cancelTransaction(txHash, '0xsignature');
+      expect(rpcClient.call).toHaveBeenCalledWith({
+        method: 'sim_cancelTransaction',
+        params: [txHash, '0xsignature'],
+      });
+    });
+
+    it('should return cancel result', async () => {
+      vi.spyOn(rpcClient, 'call').mockImplementationOnce(() =>
+        Promise.resolve(mockCancelResponse),
+      );
+      const result = await jsonRpcService.cancelTransaction(txHash);
+      expect(result).to.deep.equal({
+        transaction_hash: txHash,
+        status: 'CANCELED',
+      });
+    });
+
+    it('should throw error when rpc returns error', async () => {
+      vi.spyOn(rpcClient, 'call').mockImplementationOnce(() =>
+        Promise.resolve({
+          result: null,
+          error: { code: -32000, message: 'Cannot cancel' },
+        }),
+      );
+      await expect(jsonRpcService.cancelTransaction(txHash)).rejects.toThrow(
+        'Error cancelling transaction',
+      );
+    });
+  });
 });

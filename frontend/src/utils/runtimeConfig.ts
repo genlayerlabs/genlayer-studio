@@ -13,6 +13,7 @@ interface RuntimeConfig {
   VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION?: string;
   VITE_MAX_ROTATIONS?: string;
   VITE_PLAUSIBLE_DOMAIN?: string;
+  VITE_APPKIT_PROJECT_ID?: string;
 }
 
 declare global {

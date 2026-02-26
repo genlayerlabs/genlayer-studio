@@ -276,18 +276,32 @@ class MessageHandler(IMessageHandler):
 
 
 def setup_loguru_config():
-    """Set up unified logging configuration using Loguru."""
+    """Set up unified logging configuration using Loguru.
+
+    Routes logs to stdout/stderr based on severity for proper GCP Cloud Logging:
+    - DEBUG/INFO/WARNING → stdout (GCP labels as INFO/default severity)
+    - ERROR/CRITICAL → stderr (GCP labels as ERROR severity)
+    """
     # Remove default handler
     logger.remove()
 
     # Add custom handler with formatting
     log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    log_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
 
-    # Console handler
+    # Non-error logs to stdout (GCP labels as INFO/default)
+    logger.add(
+        sys.stdout,
+        format=log_format,
+        level=log_level,
+        filter=lambda record: record["level"].no < 40,  # Below ERROR (40)
+        colorize=True,
+    )
+    # Error logs to stderr (GCP labels as ERROR)
     logger.add(
         sys.stderr,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-        level=log_level,
+        format=log_format,
+        level="ERROR",
         colorize=True,
     )
     # File handler (optional)

@@ -81,8 +81,9 @@ class UsageMetricsService:
 
         try:
             # Build base payload
+            mapped_status = self._map_health_status(health_cache.status)
             system_health = {
-                "instanceHealth": self._map_health_status(health_cache.status),
+                "instanceHealth": mapped_status,
                 "genVmStatus": "healthy" if health_cache.genvm_healthy else "down",
                 "uptime": health_cache.uptime_percent,
                 "activeWorkers": health_cache.services.get("consensus", {}).get(
@@ -98,6 +99,9 @@ class UsageMetricsService:
                     "cpu_percent", 0
                 ),
             }
+
+            if mapped_status != "healthy":
+                system_health["instanceHealthReasons"] = health_cache.issues
 
             # Add pending contracts breakdown if available
             pending_contracts = getattr(health_cache, "pending_contracts", [])
@@ -353,6 +357,14 @@ class UsageMetricsService:
                     )
         except asyncio.TimeoutError:
             logger.warning("Timeout sending usage metrics to API")
+        except aiohttp.ClientConnectorError:
+            # Connection errors are expected when API is unavailable - log at debug level
+            logger.debug(
+                f"Could not connect to usage metrics API at {self.api_url} - API may be unavailable"
+            )
+        except aiohttp.ClientError as e:
+            # Other client errors (DNS, SSL, etc.) - log at warning level
+            logger.warning(f"Client error sending usage metrics to API: {e}")
         except Exception as e:
             logger.error(f"Error sending usage metrics to API: {e}")
 

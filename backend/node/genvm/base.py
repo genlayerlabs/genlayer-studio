@@ -45,6 +45,7 @@ from .error_codes import (
     extract_error_code,
     extract_error_code_from_timeout,
     parse_module_error_string,
+    parse_ctx_from_module_error_string,
     GenVMInternalError,
     get_user_friendly_message,
 )
@@ -132,6 +133,7 @@ class ExecutionResult:
     state: StateProxy
     processing_time: int
     nondet_disagree: int | None
+    execution_stats: dict | None = None
 
 
 class Host(genvmhost.IHost):
@@ -206,10 +208,25 @@ class Host(genvmhost.IHost):
                     error_code=error_code,
                 )
         elif res.result_kind == ResultCode.INTERNAL_ERROR:
-            error_str = str(res.result_data)
+            from loguru import logger as _ilog
 
-            # Parse the ModuleError to extract details
-            error_code, causes, is_fatal = parse_module_error_string(error_str)
+            error_ctx = None
+
+            # Try to extract structured data if result_data is a dict
+            if isinstance(res.result_data, dict):
+                error_ctx = res.result_data.get("ctx")
+                error_code = extract_error_code(res.result_data, res.stderr)
+                causes_raw = res.result_data.get("causes", [])
+                causes = list(causes_raw) if isinstance(causes_raw, list) else []
+                is_fatal = bool(res.result_data.get("fatal", False))
+            else:
+                error_str = str(res.result_data)
+                # Parse the ModuleError string to extract details
+                error_code, causes, is_fatal = parse_module_error_string(error_str)
+                # Extract LLM error context (primary_error/fallback_error)
+                # from the Rust debug format string
+                error_ctx = parse_ctx_from_module_error_string(error_str)
+
             message = (
                 f"GenVM internal error: {', '.join(causes)}"
                 if causes
@@ -228,6 +245,8 @@ class Host(genvmhost.IHost):
                 error_code=error_code,
                 causes=causes,
                 is_fatal=is_fatal,
+                ctx=error_ctx,
+                detail=error_str[:1000],
             )
         else:
             raise Exception(f"invalid result {res.result_kind}")
@@ -244,6 +263,7 @@ class Host(genvmhost.IHost):
             state=state,
             processing_time=0,
             nondet_disagree=self._nondet_disagreement,
+            execution_stats=res.execution_stats,
         )
 
     async def loop_enter(self, cancellation) -> socket.socket:
@@ -353,13 +373,31 @@ class Host(genvmhost.IHost):
 async def _copy_state_proxy(state_proxy) -> StateProxy:
     # snapshot_factory cannot be pickled. Temporarily remove the factory to allow deepcopy
     factory = state_proxy.snapshot_factory
+    shared_decoded_value_cache = getattr(
+        state_proxy, "_shared_decoded_value_cache", None
+    )
+    shared_contract_snapshot_cache = getattr(
+        state_proxy, "_shared_contract_snapshot_cache", None
+    )
     try:
         state_proxy.snapshot_factory = None
+        if hasattr(state_proxy, "_shared_decoded_value_cache"):
+            state_proxy._shared_decoded_value_cache = None
+        if hasattr(state_proxy, "_shared_contract_snapshot_cache"):
+            state_proxy._shared_contract_snapshot_cache = None
         state_copy = copy.deepcopy(state_proxy)
         state_copy.snapshot_factory = factory
+        if hasattr(state_copy, "_shared_decoded_value_cache"):
+            state_copy._shared_decoded_value_cache = shared_decoded_value_cache
+        if hasattr(state_copy, "_shared_contract_snapshot_cache"):
+            state_copy._shared_contract_snapshot_cache = shared_contract_snapshot_cache
         return state_copy
     finally:
         state_proxy.snapshot_factory = factory
+        if hasattr(state_proxy, "_shared_decoded_value_cache"):
+            state_proxy._shared_decoded_value_cache = shared_decoded_value_cache
+        if hasattr(state_proxy, "_shared_contract_snapshot_cache"):
+            state_proxy._shared_contract_snapshot_cache = shared_contract_snapshot_cache
 
 
 def _create_timeout_result(
@@ -433,13 +471,17 @@ async def run_genvm_host(
                     int(timeout * 1000),
                 )
 
-            # Create fresh copies of the arguments for each attempt
-            fresh_args = {}
-            for key, value in host_args.items():
-                if key == "state_proxy" and hasattr(value, "snapshot_factory"):
-                    fresh_args[key] = await _copy_state_proxy(value)
-                else:
-                    fresh_args[key] = copy.deepcopy(value)
+            # Avoid expensive state deep-copy on the first attempt. We only need
+            # a clean copy when retrying after a failed execution attempt.
+            if retry_count == 0:
+                fresh_args = dict(host_args)
+            else:
+                fresh_args = {}
+                for key, value in host_args.items():
+                    if key == "state_proxy" and hasattr(value, "snapshot_factory"):
+                        fresh_args[key] = await _copy_state_proxy(value)
+                    else:
+                        fresh_args[key] = copy.deepcopy(value)
 
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock_listener:
                 sock_listener.setblocking(False)

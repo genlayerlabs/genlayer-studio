@@ -1,6 +1,7 @@
 # rpc/endpoints.py
 import random
 import json
+import time
 import eth_utils
 import logging
 from functools import partial, wraps
@@ -49,12 +50,54 @@ from backend.consensus.base import ConsensusAlgorithm
 from backend.protocol_rpc.call_interceptor import handle_consensus_data_call
 
 import base64
+import hashlib
 import os
+import secrets as secrets_module
 from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope
 from backend.protocol_rpc.types import DecodedsubmitAppealDataArgs
 from backend.database_handler.snapshot_manager import SnapshotManager
 from backend.node.base import Manager as GenVMManager
 import asyncio
+
+# Limit concurrent GenVM executions on the jsonrpc path to prevent uvloop fd conflicts.
+# Workers use asyncio.Semaphore(8) in consensus/base.py; gen_call had none, allowing
+# unbounded concurrent GenVM socket operations that cause fd registry collisions.
+_GENVM_CONCURRENCY = int(os.environ.get("GENVM_MAX_CONCURRENT", "8"))
+_genvm_semaphore = asyncio.Semaphore(_GENVM_CONCURRENCY)
+
+# ---------------------------------------------------------------------------
+# Per-address rate limiting for gen_call / sim_call
+# Prevents a single contract from monopolising all GenVM execution slots.
+# ---------------------------------------------------------------------------
+_RATE_LIMIT_WINDOW = float(
+    os.environ.get("GEN_CALL_RATE_LIMIT_WINDOW", "10")
+)  # seconds
+_RATE_LIMIT_MAX = int(
+    os.environ.get("GEN_CALL_RATE_LIMIT_MAX", "20")
+)  # max requests per window per address
+
+_address_request_log: dict[str, list[float]] = {}  # {address: [timestamp, ...]}
+
+_rate_limit_logger = logging.getLogger(__name__ + ".rate_limit")
+
+
+def _check_rate_limit(address: str) -> None:
+    """Reject if address exceeds rate limit. Prunes old entries."""
+    now = time.monotonic()
+    timestamps = _address_request_log.get(address, [])
+    cutoff = now - _RATE_LIMIT_WINDOW
+    timestamps = [t for t in timestamps if t > cutoff]
+    if len(timestamps) >= _RATE_LIMIT_MAX:
+        _rate_limit_logger.warning(
+            f"Rate limit exceeded for {address}: {len(timestamps)} requests in {_RATE_LIMIT_WINDOW}s window"
+        )
+        raise JSONRPCError(
+            code=-32005,
+            message=f"Rate limit exceeded: max {_RATE_LIMIT_MAX} gen_call requests per {_RATE_LIMIT_WINDOW}s per contract address",
+            data={"address": address, "retry_after_seconds": _RATE_LIMIT_WINDOW},
+        )
+    timestamps.append(now)
+    _address_request_log[address] = timestamps
 
 
 ####### ADMIN ACCESS CONTROL #######
@@ -613,7 +656,7 @@ def admin_upgrade_contract_code(
 
     # Validate contract exists and is deployed
     contract = session.query(CurrentState).filter_by(id=contract_address).one_or_none()
-    if not contract or not contract.data or not contract.data.get("code"):
+    if not contract or not contract.data or not contract.data.get("state"):
         raise NotFoundError(
             message="Contract not found",
             data={"contract_address": contract_address},
@@ -657,21 +700,143 @@ def admin_upgrade_contract_code(
     }
 
 
+####### CANCEL TRANSACTION ENDPOINTS #######
+def cancel_transaction(
+    session: Session,
+    transaction_hash: str,
+    msg_handler,
+    signature: str | None = None,
+    admin_key: str | None = None,
+) -> dict:
+    """
+    Cancel a pending or activated transaction. Returns immediately with status.
+
+    Access control:
+    - Local (no env vars): open access
+    - Hosted/Self-hosted: admin_key allows ANY transaction, signature allows own transactions
+
+    Args:
+        session: Database session
+        transaction_hash: Hash of the transaction to cancel
+        msg_handler: Message handler for WebSocket notifications
+        signature: Hex-encoded signature from tx sender (required in hosted mode unless admin_key)
+        admin_key: Admin API key for full access to any transaction
+
+    Returns:
+        dict with transaction_hash and status
+    """
+    from backend.database_handler.models import Transactions
+    from eth_account.messages import encode_defunct
+    from eth_account import Account
+    from web3 import Web3
+    import os
+
+    # Validate transaction hash format
+    if (
+        not transaction_hash
+        or not transaction_hash.startswith("0x")
+        or len(transaction_hash) != 66
+    ):
+        raise JSONRPCError(
+            code=-32602,
+            message="Invalid transaction hash format",
+            data={},
+        )
+
+    # Look up the transaction
+    transaction = (
+        session.query(Transactions).filter_by(hash=transaction_hash).one_or_none()
+    )
+    if not transaction:
+        raise NotFoundError(
+            message="Transaction not found",
+            data={"transaction_hash": transaction_hash},
+        )
+
+    is_hosted = os.getenv("VITE_IS_HOSTED") == "true"
+    admin_api_key = os.getenv("ADMIN_API_KEY")
+
+    # Check if authorization is needed (hosted or self-hosted with key configured)
+    needs_auth = is_hosted or admin_api_key
+
+    if needs_auth:
+        # Option 1: Admin key grants full access to ANY transaction
+        if admin_api_key and admin_key == admin_api_key:
+            pass  # Authorized - proceed with cancel
+
+        # Option 2: Signature from tx sender grants access to own transactions
+        elif signature:
+            if not transaction.from_address:
+                raise JSONRPCError(
+                    code=-32000,
+                    message="Transaction has no sender - only admin key can cancel",
+                    data={},
+                )
+
+            try:
+                # Message: keccak256("cancel_transaction" + tx_hash_bytes)
+                # tx_hash is unique, so no nonce needed for replay protection
+                message_hash = Web3.keccak(
+                    b"cancel_transaction" + Web3.to_bytes(hexstr=transaction_hash)
+                )
+                message = encode_defunct(primitive=message_hash)
+                signer = Account.recover_message(message, signature=signature)
+
+                if signer.lower() != transaction.from_address.lower():
+                    raise JSONRPCError(
+                        code=-32000,
+                        message="Only transaction sender can cancel",
+                        data={"signer": signer, "sender": transaction.from_address},
+                    )
+            except JSONRPCError:
+                raise
+            except Exception as e:
+                raise JSONRPCError(
+                    code=-32000,
+                    message=f"Invalid signature: {e!s}",
+                    data={},
+                ) from e
+        else:
+            raise JSONRPCError(
+                code=-32000,
+                message="Cancel requires admin key or sender signature",
+                data={},
+            )
+
+    # Atomic cancel - only succeeds if tx is still pending/activated and not claimed by worker
+    was_cancelled = TransactionsProcessor.cancel_transaction_if_available(
+        session, transaction_hash
+    )
+
+    if not was_cancelled:
+        raise JSONRPCError(
+            code=-32000,
+            message="Transaction cannot be cancelled: already being processed or in a terminal state",
+            data={
+                "transaction_hash": transaction_hash,
+                "status": transaction.status.value,
+            },
+        )
+
+    # Notify frontend via WebSocket
+    msg_handler.send_transaction_status_update(transaction_hash, "CANCELED")
+
+    return {
+        "transaction_hash": transaction_hash,
+        "status": "CANCELED",
+    }
+
+
 ####### GEN ENDPOINTS #######
 async def get_contract_schema(
-    accounts_manager: AccountsManager,
+    session: Session,
     genvm_manager: GenVMManager,
     msg_handler: IMessageHandler,
     contract_address: str,
 ) -> dict:
-    if not accounts_manager.is_valid_address(contract_address):
-        raise InvalidAddressError(
-            contract_address,
-            "Incorrect address format. Please provide a valid address.",
-        )
-    contract_account = accounts_manager.get_account_or_fail(contract_address)
-
-    if not contract_account["data"] or not contract_account["data"]["code"]:
+    contract_snapshot = ContractSnapshot(contract_address, session)
+    code_b64 = contract_snapshot.extract_deployed_code_b64()
+    if not code_b64:
         raise InvalidAddressError(
             contract_address,
             "Contract not deployed.",
@@ -696,9 +861,7 @@ async def get_contract_schema(
         contract_snapshot_factory=None,
         manager=genvm_manager,
     )
-    schema = await node.get_contract_schema(
-        base64.b64decode(contract_account["data"]["code"])
-    )
+    schema = await node.get_contract_schema(base64.b64decode(code_b64))
     return json.loads(schema)
 
 
@@ -944,6 +1107,9 @@ async def _gen_call_with_validator(
     if not accounts_manager.is_valid_address(to_address):
         raise InvalidAddressError(to_address)
 
+    # Rate limit per contract address — reject early before acquiring resources
+    _check_rate_limit(to_address)
+
     if transaction_hash_variant == "latest-final":
         state_status = "finalized"
     else:
@@ -973,64 +1139,75 @@ async def _gen_call_with_validator(
         sim_config is not None and sim_config.genvm_datetime is not None
     )
 
-    if type == "read":
-        # Pre-parse timestamp override and map errors
-        txn_dt = None
-        if sim_config and override_transaction_datetime:
-            try:
-                txn_dt = sim_config.genvm_datetime_as_datetime
-            except ValueError as e:
-                raise JSONRPCError(
-                    code=-32602,
-                    message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
-                    data={},
-                ) from e
-        decoded_data = transactions_parser.decode_method_call_data(data)
-        receipt = await node.get_contract_data(
-            from_address=from_address,
-            calldata=decoded_data.calldata,
-            state_status=state_status,
-            transaction_datetime=txn_dt,
+    if _genvm_semaphore.locked():
+        _rate_limit_logger.warning(
+            f"GenVM at capacity ({_GENVM_CONCURRENCY} concurrent) — rejecting gen_call to {to_address}"
         )
-    elif type == "write":
-        txn_created_at = None
-        if sim_config and override_transaction_datetime:
-            try:
-                _ = sim_config.genvm_datetime_as_datetime  # validation only
-                txn_created_at = sim_config.genvm_datetime
-            except ValueError as e:
-                raise JSONRPCError(
-                    code=-32602,
-                    message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
-                    data={},
-                ) from e
-        decoded_data = transactions_parser.decode_method_send_data(data)
-        receipt = await node.run_contract(
-            from_address=from_address,
-            calldata=decoded_data.calldata,
-            transaction_created_at=txn_created_at,
+        raise JSONRPCError(
+            code=-32006,
+            message=f"Server busy: all {_GENVM_CONCURRENCY} execution slots occupied, retry later",
+            data={"retry_after_seconds": 2},
         )
-    elif type == "deploy":
-        txn_created_at = None
-        if sim_config and override_transaction_datetime:
-            try:
-                _ = sim_config.genvm_datetime_as_datetime  # validation only
-                txn_created_at = sim_config.genvm_datetime
-            except ValueError as e:
-                raise JSONRPCError(
-                    code=-32602,
-                    message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
-                    data={},
-                ) from e
-        decoded_data = transactions_parser.decode_deployment_data(data)
-        receipt = await node.deploy_contract(
-            from_address=from_address,
-            code_to_deploy=decoded_data.contract_code,
-            calldata=decoded_data.calldata,
-            transaction_created_at=txn_created_at,
-        )
-    else:
-        raise JSONRPCError(f"Invalid type: {type}")
+
+    async with _genvm_semaphore:
+        if type == "read":
+            # Pre-parse timestamp override and map errors
+            txn_dt = None
+            if sim_config and override_transaction_datetime:
+                try:
+                    txn_dt = sim_config.genvm_datetime_as_datetime
+                except ValueError as e:
+                    raise JSONRPCError(
+                        code=-32602,
+                        message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                        data={},
+                    ) from e
+            decoded_data = transactions_parser.decode_method_call_data(data)
+            receipt = await node.get_contract_data(
+                from_address=from_address,
+                calldata=decoded_data.calldata,
+                state_status=state_status,
+                transaction_datetime=txn_dt,
+            )
+        elif type == "write":
+            txn_created_at = None
+            if sim_config and override_transaction_datetime:
+                try:
+                    _ = sim_config.genvm_datetime_as_datetime  # validation only
+                    txn_created_at = sim_config.genvm_datetime
+                except ValueError as e:
+                    raise JSONRPCError(
+                        code=-32602,
+                        message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                        data={},
+                    ) from e
+            decoded_data = transactions_parser.decode_method_send_data(data)
+            receipt = await node.run_contract(
+                from_address=from_address,
+                calldata=decoded_data.calldata,
+                transaction_created_at=txn_created_at,
+            )
+        elif type == "deploy":
+            txn_created_at = None
+            if sim_config and override_transaction_datetime:
+                try:
+                    _ = sim_config.genvm_datetime_as_datetime  # validation only
+                    txn_created_at = sim_config.genvm_datetime
+                except ValueError as e:
+                    raise JSONRPCError(
+                        code=-32602,
+                        message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                        data={},
+                    ) from e
+            decoded_data = transactions_parser.decode_deployment_data(data)
+            receipt = await node.deploy_contract(
+                from_address=from_address,
+                code_to_deploy=decoded_data.contract_code,
+                calldata=decoded_data.calldata,
+                transaction_created_at=txn_created_at,
+            )
+        else:
+            raise JSONRPCError(f"Invalid type: {type}")
 
     # Return the result of the write method
     if receipt.execution_result != ExecutionResultStatus.SUCCESS:
@@ -1117,9 +1294,12 @@ async def eth_call(
     params: dict,
     block_tag: str = "latest",
 ) -> str:
-    to_address = params["to"]
-    from_address = params["from"] if "from" in params else None
-    data = params["data"]
+    to_address = params.get("to")
+    from_address = params.get("from")
+    data = params.get("data")
+
+    if not to_address or not data:
+        return "0x"
 
     # Validate to_address first
     if not accounts_manager.is_valid_address(to_address):
@@ -1704,3 +1884,107 @@ def dev_get_pool_status(sqlalchemy_db) -> dict:
             "total": pool.size() + pool.overflow(),
         },
     }
+
+
+####### ADMIN API KEY RATE LIMITING ENDPOINTS #######
+
+
+@require_admin_access
+def admin_create_tier(
+    session: Session,
+    name: str,
+    rate_limit_minute: int,
+    rate_limit_hour: int,
+    rate_limit_day: int,
+    admin_key: str = None,
+) -> dict:
+    from backend.database_handler.models import ApiTier
+
+    tier = ApiTier(
+        name=name,
+        rate_limit_minute=rate_limit_minute,
+        rate_limit_hour=rate_limit_hour,
+        rate_limit_day=rate_limit_day,
+    )
+    session.add(tier)
+    session.flush()
+    return {"id": tier.id, "name": tier.name}
+
+
+@require_admin_access
+def admin_list_tiers(
+    session: Session,
+    admin_key: str = None,
+) -> list[dict]:
+    from backend.database_handler.models import ApiTier
+
+    tiers = session.query(ApiTier).all()
+    return [
+        {
+            "id": t.id,
+            "name": t.name,
+            "rate_limit_minute": t.rate_limit_minute,
+            "rate_limit_hour": t.rate_limit_hour,
+            "rate_limit_day": t.rate_limit_day,
+        }
+        for t in tiers
+    ]
+
+
+@require_admin_access
+def admin_create_api_key(
+    session: Session,
+    tier_name: str,
+    description: str = None,
+    admin_key: str = None,
+) -> dict:
+    from backend.database_handler.models import ApiKey, ApiTier
+
+    tier = session.query(ApiTier).filter_by(name=tier_name).first()
+    if not tier:
+        raise JSONRPCError(code=-32602, message=f"Tier not found: {tier_name}")
+
+    raw_key = "glk_" + secrets_module.token_hex(32)
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+
+    api_key = ApiKey(
+        key_prefix=raw_key[:8],
+        key_hash=key_hash,
+        tier_id=tier.id,
+        is_active=True,
+        description=description,
+    )
+    session.add(api_key)
+    session.flush()
+    return {
+        "api_key": raw_key,
+        "key_prefix": raw_key[:8],
+        "tier": tier_name,
+        "description": description,
+    }
+
+
+@require_admin_access
+async def admin_deactivate_api_key(
+    session: Session,
+    key_prefix: str,
+    rate_limiter: Any = None,
+    admin_key: str = None,
+) -> dict:
+    from backend.database_handler.models import ApiKey
+
+    api_key = (
+        session.query(ApiKey).filter_by(key_prefix=key_prefix, is_active=True).first()
+    )
+    if not api_key:
+        raise NotFoundError(
+            message=f"Active API key with prefix {key_prefix} not found"
+        )
+
+    api_key.is_active = False
+    session.flush()
+
+    if rate_limiter:
+        await rate_limiter.invalidate_key_cache(api_key.key_hash)
+
+    return {"key_prefix": key_prefix, "deactivated": True}

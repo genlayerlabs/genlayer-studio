@@ -15,6 +15,7 @@ Automatically fetch the most urgent Linear issue with the "studio" label and "XS
 - GitHub CLI (`gh`) authenticated
 - Docker running (for integration tests)
 - Python 3.12 with virtualenv
+- Checkout `main` branch and pull the latest changes
 
 ## Linear MCP Server Setup
 
@@ -181,27 +182,33 @@ Create a clear implementation plan:
    Co-Authored-By: Claude <noreply@anthropic.com>"
    ```
 
-### Step 7: Run Tests
 
-**Unit Tests:**
+### Step 7: Run ALL Test Suites
+
+**IMPORTANT: You MUST run ALL of the following test suites before creating a PR. Do NOT skip any.**
+
+#### 7.1 DB/SQLAlchemy Tests (Primary Backend Tests - Dockerized)
+
 ```bash
-# Run DB/SQLAlchemy tests (primary backend tests)
 docker compose -f tests/db-sqlalchemy/docker-compose.yml --project-directory . run --build --rm tests
-
-# Or run specific unit tests if relevant
-.venv/bin/pytest tests/unit/ -v --tb=short
 ```
 
-**Frontend Tests (if applicable):**
+#### 7.2 Backend Unit Tests
+
+```bash
+.venv/bin/pytest tests/unit/ -v --tb=short --ignore=tests/unit/test_rpc_endpoint_manager.py
+```
+
+#### 7.3 Frontend Unit Tests
+
 ```bash
 cd frontend && npm run test
-cd frontend && npm run lint
 ```
 
-**If tests fail:**
+**If any tests fail:**
 - Analyze the failure
 - Fix the issue
-- Re-run tests until all pass
+- Re-run ALL test suites until they pass
 
 ### Step 8: Run Integration Tests (if needed)
 

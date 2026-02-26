@@ -95,3 +95,12 @@ class NotFoundError(JSONRPCError):
 
     def __init__(self, message: str = "Not found", data: Optional[Any] = None):
         super().__init__(code=-32001, message=message, data=data)
+
+
+class RateLimitExceeded(JSONRPCError):
+    """API key or anonymous rate limit exceeded."""
+
+    def __init__(
+        self, message: str = "Rate limit exceeded", data: Optional[Any] = None
+    ):
+        super().__init__(code=-32029, message=message, data=data)
