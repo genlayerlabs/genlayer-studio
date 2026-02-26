@@ -358,7 +358,6 @@ async def test_validator_appeal_success(consensus_algorithm):
                 "id": "to_address",
                 "data": {
                     "state": {"accepted": {}, "finalized": {}},
-                    "code": "contract_code",
                 },
             }
         }
@@ -1383,7 +1382,6 @@ async def test_leader_appeal(consensus_algorithm):
                 "id": "to_address",
                 "data": {
                     "state": {"accepted": {}, "finalized": {}},
-                    "code": "contract_code",
                 },
             }
         }
@@ -1673,7 +1671,6 @@ async def test_validator_appeal_success_with_rollback_second_tx(
                 "id": "to_address",
                 "data": {
                     "state": {"accepted": {}, "finalized": {}},
-                    "code": "contract_code",
                 },
             }
         }
@@ -1833,7 +1830,6 @@ async def test_leader_appeal_success_with_rollback_second_tx(consensus_algorithm
                 "id": "to_address",
                 "data": {
                     "state": {"accepted": {}, "finalized": {}},
-                    "code": "contract_code",
                 },
             }
         }
@@ -2047,7 +2043,6 @@ async def test_leader_timeout_appeal_success(consensus_algorithm):
                 "id": "to_address",
                 "data": {
                     "state": {"accepted": {}, "finalized": {}},
-                    "code": "contract_code",
                 },
             }
         }
@@ -2211,7 +2206,6 @@ async def test_leader_timeout_during_leader_appeal(consensus_algorithm):
                 "id": "to_address",
                 "data": {
                     "state": {"accepted": {}, "finalized": {}},
-                    "code": "contract_code",
                 },
             }
         }
@@ -2364,7 +2358,6 @@ async def test_leader_timeout_appeal_success_validators_timeout(consensus_algori
                 "id": "to_address",
                 "data": {
                     "state": {"accepted": {}, "finalized": {}},
-                    "code": "contract_code",
                 },
             }
         }
@@ -2657,7 +2650,6 @@ async def validators_timeout_appeal_success(
                 "id": "to_address",
                 "data": {
                     "state": {"accepted": {}, "finalized": {}},
-                    "code": "contract_code",
                 },
             }
         }
@@ -2995,7 +2987,6 @@ async def test_leader_appeal_success_validators_timeout_no_rollback(
                 "id": "to_address",
                 "data": {
                     "state": {"accepted": {}, "finalized": {}},
-                    "code": "contract_code",
                 },
             }
         }

@@ -1084,9 +1084,7 @@ class ConsensusWorker:
             # Update contract data - update BOTH accepted and finalized state
             # Since upgrade transactions bypass consensus and go directly to FINALIZED,
             # both state trees must be updated for reads to see the new code
-            # Note: data["code"] must be base64 encoded (matches deployment format in node/types.py)
             contract.data = {
-                "code": base64.b64encode(code_bytes).decode("ascii"),
                 "state": {
                     "accepted": {
                         **contract.data["state"]["accepted"],
