@@ -8,6 +8,8 @@ import {
   HardDrive,
   Vote,
   FileText,
+  UserPen,
+  UserSearch,
 } from 'lucide-vue-next';
 
 const props = defineProps<{
@@ -31,6 +33,10 @@ const icon = computed(() => {
       return Info;
     case 'success':
       return CheckCircle;
+    case 'Leader':
+      return UserPen;
+    case 'Validator':
+      return UserSearch;
     default:
       return null;
   }
