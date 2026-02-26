@@ -15,6 +15,7 @@ export const useNodeStore = defineStore('nodeStore', () => {
   const rpcClient = useRpcClient();
   const webSocketClient = useWebSocketClient();
   const logs = ref<NodeLog[]>([]);
+  const leaderTxHashes = new Set<string>();
   const nodeProviders = ref<GetProvidersAndModelsData>([]);
   const validators = ref<ValidatorModel[]>([]);
   const isLoadingValidatorData = ref<boolean>(true);
@@ -39,12 +40,25 @@ export const useNodeStore = defineStore('nodeStore', () => {
 
   trackedEvents.forEach((eventName) => {
     webSocketClient.on(eventName, (eventData: any) => {
+      let role: 'leader' | 'validator' | undefined;
+      if (
+        eventData.name === 'execution_finished' &&
+        eventData.transaction_hash
+      ) {
+        if (!leaderTxHashes.has(eventData.transaction_hash)) {
+          leaderTxHashes.add(eventData.transaction_hash);
+          role = 'leader';
+        } else {
+          role = 'validator';
+        }
+      }
       addLog({
         scope: eventData.scope,
         name: eventData.name,
         type: eventData.type,
         message: eventData.message,
         data: eventData.data,
+        role,
       });
     });
   });
@@ -179,6 +193,7 @@ export const useNodeStore = defineStore('nodeStore', () => {
 
   const clearLogs = () => {
     logs.value = [];
+    leaderTxHashes.clear();
   };
 
   const hasAtLeastOneValidator = computed(() => validators.value.length >= 1);
