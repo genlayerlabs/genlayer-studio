@@ -22,7 +22,7 @@ PyYAML==6.0.3
 genvm-linter==0.7.1
 
 # FastAPI and ASGI dependencies
-fastapi==0.133.0
+fastapi==0.133.1
 uvicorn[standard]==0.41.0
 websockets==16.0
 
