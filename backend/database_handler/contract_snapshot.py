@@ -11,11 +11,10 @@ class ContractSnapshot:
     """
     Warning: if you initialize this class with a contract_address:
     - The contract_address must exist in the database.
-    - `self.contract_data`, `self.contract_code` and `self.states` will be loaded from the database **only once** at initialization.
+    - `self.contract_data` and `self.states` will be loaded from the database **only once** at initialization.
     """
 
     contract_address: str
-    contract_code: str
     balance: int
     states: Dict[str, Dict[str, str]]
 
@@ -25,7 +24,6 @@ class ContractSnapshot:
 
             contract_account = self._load_contract_account(session)
             self.contract_data = contract_account.data
-            self.contract_code = self.contract_data["code"]
             self.balance = contract_account.balance
 
             if ("accepted" in self.contract_data["state"]) and (
@@ -41,7 +39,6 @@ class ContractSnapshot:
             "contract_address": (
                 self.contract_address if self.contract_address else None
             ),
-            "contract_code": self.contract_code if self.contract_code else None,
             "states": self.states if self.states else {"accepted": {}, "finalized": {}},
         }
 
@@ -50,7 +47,6 @@ class ContractSnapshot:
         if input:
             instance = cls.__new__(cls)
             instance.contract_address = input.get("contract_address", None)
-            instance.contract_code = input.get("contract_code", None)
             instance.states = input.get("states", {"accepted": {}, "finalized": {}})
             return instance
         else:
