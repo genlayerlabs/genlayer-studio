@@ -14,7 +14,7 @@
     "@openzeppelin/contracts-upgradeable": "^5.1.0",
     "@typechain/hardhat": "^9.0.0",
     "ethers": "^6.4.0",
-    "hardhat": "^2.22.1",
+    "hardhat": "^3.0.0",
     "hardhat-gas-reporter": "^2.3.0",
     "solidity-coverage": "^0.8.0"
   },
