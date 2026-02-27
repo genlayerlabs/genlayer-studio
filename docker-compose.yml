@@ -214,7 +214,7 @@ services:
 
   ollama:
     profiles: ["ollama"]
-    image: ollama/ollama:0.17.1
+    image: ollama/ollama:0.17.4
     ports:
       - 11434:11434
     volumes:
