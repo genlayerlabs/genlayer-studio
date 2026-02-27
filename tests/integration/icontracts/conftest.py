@@ -6,6 +6,41 @@ from tests.common.request import payload, post_request_localhost
 from tests.common.response import has_success_status
 
 
+def get_provider_config():
+    """
+    Returns provider configuration for non-mock integration tests.
+
+    Override via environment variables:
+      TEST_PROVIDER        – provider name  (default: openai)
+      TEST_PROVIDER_MODEL  – model name     (default: gpt-4o)
+
+    Example (local Ollama):
+      TEST_PROVIDER=ollama TEST_PROVIDER_MODEL=llama3 pytest ...
+    """
+    return {
+        "provider": os.getenv("TEST_PROVIDER", "openai"),
+        "model": os.getenv("TEST_PROVIDER_MODEL", "gpt-4o"),
+    }
+
+
+def get_mock_provider_config():
+    """
+    Returns provider configuration for mock (TEST_WITH_MOCK_LLMS=true) tests.
+
+    Override via environment variables:
+      TEST_MOCK_PROVIDER          – provider name      (default: openrouter)
+      TEST_MOCK_MODEL             – model name         (default: @preset/rally-testnet-gpt-5-1)
+      TEST_MOCK_API_KEY_ENV_VAR   – env var holding the API key (default: OPENROUTERAPIKEY)
+      TEST_MOCK_API_URL           – base API URL       (default: https://openrouter.ai/api)
+    """
+    return {
+        "provider": os.getenv("TEST_MOCK_PROVIDER", "openrouter"),
+        "model": os.getenv("TEST_MOCK_MODEL", "@preset/rally-testnet-gpt-5-1"),
+        "api_key_env_var": os.getenv("TEST_MOCK_API_KEY_ENV_VAR", "OPENROUTERAPIKEY"),
+        "api_url": os.getenv("TEST_MOCK_API_URL", "https://openrouter.ai/api"),
+    }
+
+
 @pytest.fixture
 def setup_validators():
     created_validator_addresses = []
@@ -13,19 +48,20 @@ def setup_validators():
     def _setup(mock_response=None):
         nonlocal created_validator_addresses
         if mock_llms():
+            mock_cfg = get_mock_provider_config()
             # Mock mode: create validators with specific mock_response for this test
             for _ in range(5):
                 result = post_request_localhost(
                     payload(
                         "sim_createValidator",
                         8,
-                        "openrouter",
-                        "@preset/rally-testnet-gpt-5-1",
+                        mock_cfg["provider"],
+                        mock_cfg["model"],
                         {"temperature": 0.75, "max_tokens": 500},
                         "openai-compatible",
                         {
-                            "api_key_env_var": "OPENROUTERAPIKEY",
-                            "api_url": "https://openrouter.ai/api",
+                            "api_key_env_var": mock_cfg["api_key_env_var"],
+                            "api_url": mock_cfg["api_url"],
                             "mock_response": mock_response if mock_response else {},
                         },
                     )
@@ -33,6 +69,7 @@ def setup_validators():
                 assert has_success_status(result)
                 created_validator_addresses.append(result["result"]["address"])
         else:
+            cfg = get_provider_config()
             # Non-mock mode: only create validators if not enough exist
             validators_result = post_request_localhost(
                 payload("sim_getAllValidators")
@@ -42,7 +79,12 @@ def setup_validators():
             if len(existing_validators) < 5:
                 result = post_request_localhost(
                     payload(
-                        "sim_createRandomValidators", 5, 8, 12, ["openai"], ["gpt-4o"]
+                        "sim_createRandomValidators",
+                        5,
+                        8,
+                        12,
+                        [cfg["provider"]],
+                        [cfg["model"]],
                     )
                 ).json()
                 assert has_success_status(result)
