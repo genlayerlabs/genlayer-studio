@@ -47,7 +47,7 @@
     "sortablejs": "^1.15.3",
     "splitpanes": "^4.0.0",
     "typescript-parsec": "^0.3.4",
-    "uuid": "^11.0.0",
+    "uuid": "^13.0.0",
     "v-plausible": "^1.2.0",
     "viem": "^2.46.2",
     "vite-svg-loader": "^5.1.0",
