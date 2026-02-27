@@ -1,18 +1,19 @@
 import pytest
 import os
 from dotenv import load_dotenv
+from typing import Any
 
 from tests.common.request import payload, post_request_localhost
 from tests.common.response import has_success_status
 
 
-def get_provider_config():
+def get_provider_config() -> dict[str, str]:
     """
     Returns provider configuration for non-mock integration tests.
 
     Override via environment variables:
-      TEST_PROVIDER        – provider name  (default: openai)
-      TEST_PROVIDER_MODEL  – model name     (default: gpt-4o)
+      TEST_PROVIDER        - provider name  (default: openai)
+      TEST_PROVIDER_MODEL  - model name     (default: gpt-4o)
 
     Example (local Ollama):
       TEST_PROVIDER=ollama TEST_PROVIDER_MODEL=llama3 pytest ...
@@ -23,15 +24,15 @@ def get_provider_config():
     }
 
 
-def get_mock_provider_config():
+def get_mock_provider_config() -> dict[str, str]:
     """
     Returns provider configuration for mock (TEST_WITH_MOCK_LLMS=true) tests.
 
     Override via environment variables:
-      TEST_MOCK_PROVIDER          – provider name      (default: openrouter)
-      TEST_MOCK_MODEL             – model name         (default: @preset/rally-testnet-gpt-5-1)
-      TEST_MOCK_API_KEY_ENV_VAR   – env var holding the API key (default: OPENROUTERAPIKEY)
-      TEST_MOCK_API_URL           – base API URL       (default: https://openrouter.ai/api)
+      TEST_MOCK_PROVIDER          - provider name      (default: openrouter)
+      TEST_MOCK_MODEL             - model name         (default: @preset/rally-testnet-gpt-5-1)
+      TEST_MOCK_API_KEY_ENV_VAR   - env var holding the API key (default: OPENROUTERAPIKEY)
+      TEST_MOCK_API_URL           - base API URL       (default: https://openrouter.ai/api)
     """
     return {
         "provider": os.getenv("TEST_MOCK_PROVIDER", "openrouter"),
@@ -45,7 +46,7 @@ def get_mock_provider_config():
 def setup_validators():
     created_validator_addresses = []
 
-    def _setup(mock_response=None):
+    def _setup(mock_response: Any = None) -> None:
         nonlocal created_validator_addresses
         if mock_llms():
             mock_cfg = get_mock_provider_config()
@@ -70,17 +71,18 @@ def setup_validators():
                 created_validator_addresses.append(result["result"]["address"])
         else:
             cfg = get_provider_config()
-            # Non-mock mode: only create validators if not enough exist
+            # Non-mock mode: only create the validators that are still missing
             validators_result = post_request_localhost(
                 payload("sim_getAllValidators")
             ).json()
             assert has_success_status(validators_result)
             existing_validators = validators_result.get("result", [])
-            if len(existing_validators) < 5:
+            validators_to_create = 5 - len(existing_validators)
+            if validators_to_create > 0:
                 result = post_request_localhost(
                     payload(
                         "sim_createRandomValidators",
-                        5,
+                        validators_to_create,
                         8,
                         12,
                         [cfg["provider"]],
@@ -103,12 +105,10 @@ def setup_validators():
         has_success_status(delete_result)
 
 
-def mock_llms():
+def mock_llms() -> bool:
     env_var = os.getenv("TEST_WITH_MOCK_LLMS", "false")  # default no mocking
-    if env_var == "true":
-        return True
-    return False
+    return env_var == "true"
 
 
-def pytest_configure(config):
+def pytest_configure(config: Any) -> None:
     load_dotenv(override=True)
