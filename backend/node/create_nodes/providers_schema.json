@@ -223,7 +223,7 @@
       "then": {
         "x-models-url": "https://api.mor.org/api/v1/models",
         "x-plugin-config-defaults": {
-          "api_key_env_var": "MORPHEUSAPIKEY",
+          "api_key_env_var": "MORPHEUS_API_KEY",
           "api_url": "https://api.mor.org/api/v1"
         },
         "properties": {
