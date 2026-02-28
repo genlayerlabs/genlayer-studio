@@ -98,6 +98,8 @@ const pluginOptions = ref<string[]>([]);
 const modelOptions = ref<string[]>([]);
 const isPluginLocked = ref(false);
 const customProvider = ref(false);
+const isLoadingModels = ref(false);
+const modelFetchError = ref('');
 const providerOptions = ref<string[]>([]);
 
 const availablePluginOptions = computed(() => {
@@ -201,6 +203,30 @@ function extractDefaults(
   return defaults;
 }
 
+const fetchDynamicModels = async (modelsUrl: string) => {
+  isLoadingModels.value = true;
+  modelFetchError.value = '';
+  try {
+    const response = await fetch(modelsUrl);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const data = await response.json();
+    if (data?.data && Array.isArray(data.data)) {
+      modelOptions.value = data.data
+        .filter((m: any) => !m.modelType || m.modelType === 'LLM')
+        .map((m: any) => m.id);
+      if (modelOptions.value.length > 0 && isCreateMode.value) {
+        newProviderData.model = modelOptions.value[0];
+      }
+    }
+  } catch (err) {
+    console.error('Failed to fetch models:', err);
+    modelFetchError.value =
+      'Could not fetch available models. You can type a model name manually.';
+  } finally {
+    isLoadingModels.value = false;
+  }
+};
+
 const pluginConfigProperties = ref<Record<string, any>>({});
 const configProperties = ref<Record<string, any>>({});
 
@@ -256,6 +282,27 @@ const checkRules = () => {
       if (isCreateMode.value) {
         const pluginConfig = extractDefaults(pluginConfigProperties.value);
         newProviderData.plugin_config = pluginConfig ? { ...pluginConfig } : {};
+      }
+    }
+  });
+
+  // Provider-specific post-processing (x-models-url, x-plugin-config-defaults)
+  schema.allOf.forEach((rule: any) => {
+    if (rule.if?.properties?.provider?.const === newProviderData.provider) {
+      // Override plugin_config with provider-specific defaults
+      if (rule.then?.['x-plugin-config-defaults'] && isCreateMode.value) {
+        Object.assign(
+          newProviderData.plugin_config,
+          rule.then['x-plugin-config-defaults'],
+        );
+      }
+      // Fetch models dynamically for providers with x-models-url
+      if (
+        rule.then?.['x-models-url'] &&
+        modelOptions.value.length === 0 &&
+        isCreateMode.value
+      ) {
+        fetchDynamicModels(rule.then['x-models-url']);
       }
     }
   });
@@ -390,8 +437,15 @@ const configurationError = computed(() => {
 
             <MoreInfo text="The name of the model." />
           </FieldLabel>
+
+          <div v-if="isLoadingModels" class="py-2 text-sm opacity-50">
+            Loading available models...
+          </div>
+
+          <Alert warning v-if="modelFetchError">{{ modelFetchError }}</Alert>
+
           <TextInput
-            v-if="modelOptions.length === 0"
+            v-if="modelOptions.length === 0 && !isLoadingModels"
             id="model"
             name="model"
             v-model="newProviderData.model"
@@ -400,7 +454,7 @@ const configurationError = computed(() => {
             placeholder="i.e. my-model"
           />
           <SelectInput
-            v-if="modelOptions.length > 0"
+            v-if="modelOptions.length > 0 && !isLoadingModels"
             id="plugin"
             name="plugin"
             v-model="newProviderData.model"
