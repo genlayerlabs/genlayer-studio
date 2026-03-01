@@ -1,0 +1,33 @@
+# Local Development Override
+#
+# This file enables access to localhost and internal hosts from GenLayer containers.
+# Use this when you need GenLayer contracts to make RPC calls to local services
+# (e.g., a local Anvil/Hardhat node, or other development services).
+#
+# USAGE:
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#   docker compose up -d
+#
+# SECURITY WARNING:
+#   This override allows containers to access your host machine's network.
+#   DO NOT use in production environments.
+#   DO NOT commit docker-compose.override.yml to version control.
+
+services:
+  jsonrpc:
+    volumes:
+      # Mount local config that allows localhost/internal hosts
+      - ./config-overrides.example/genvm-module-web.yaml:/genvm/config/genvm-module-web.yaml:ro
+    extra_hosts:
+      # Enable host.docker.internal on Linux (already works on Mac/Windows)
+      - "host.docker.internal:host-gateway"
+      # Add any custom service aliases here
+      - "anvil-local:host-gateway"
+
+  consensus-worker:
+    volumes:
+      # Same config override for consensus workers
+      - ./config-overrides.example/genvm-module-web.yaml:/genvm/config/genvm-module-web.yaml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "anvil-local:host-gateway"
