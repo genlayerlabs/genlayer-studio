@@ -1001,6 +1001,9 @@ class Node:
             perms += "ws"  # write/send
 
         start_time = time.time()
+        # Only enforce version restrictions for new deployments (is_init=True)
+        # For running existing contracts, allow debug mode for flexibility
+        extra_args = [] if is_init else ["--debug-mode"]
         try:
             result = await genvmbase.run_genvm_host(
                 functools.partial(
@@ -1013,8 +1016,8 @@ class Node:
                 permissions=perms,
                 capture_output=True,
                 host_data=json.dumps(host_data),
-                extra_args=["--debug-mode"],
-                is_sync=is_sync,
+                extra_args=extra_args,
+                is_sync=False,
                 manager_uri=self.manager.url,
                 timeout=timeout,
                 code=code,

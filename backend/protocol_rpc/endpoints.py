@@ -640,6 +640,20 @@ def admin_upgrade_contract_code(
             data={},
         )
 
+    # Validate runner version is not 'latest' or 'test'
+    from backend.protocol_rpc.contract_linter import (
+        check_invalid_runner_version,
+        INVALID_VERSION_ERROR_MESSAGE,
+    )
+
+    has_invalid_version, version = check_invalid_runner_version(new_code)
+    if has_invalid_version:
+        raise JSONRPCError(
+            code=-32602,
+            message=INVALID_VERSION_ERROR_MESSAGE.format(version=version),
+            data={"invalid_version": version},
+        )
+
     # Validate contract exists and is deployed
     contract = session.query(CurrentState).filter_by(id=contract_address).one_or_none()
     if not contract or not contract.data or not contract.data.get("state"):
