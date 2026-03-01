@@ -4,7 +4,7 @@ flask-socketio==5.6.1
 Flask-Cors==6.0.2
 psycopg2-binary==2.9.11
 requests==2.32.5
-python-dotenv==1.2.1
+python-dotenv==1.2.2
 pydantic==2.12.5
 numpy==1.26.4
 pytest==9.0.2
@@ -22,7 +22,7 @@ PyYAML==6.0.3
 genvm-linter==0.7.1
 
 # FastAPI and ASGI dependencies
-fastapi==0.134.0
+fastapi==0.135.1
 uvicorn[standard]==0.41.0
 websockets==16.0
 
