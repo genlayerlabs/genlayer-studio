@@ -123,7 +123,7 @@ def setup_validators():
 def mock_llms() -> bool:
     """Return True when mock LLM mode is enabled via TEST_WITH_MOCK_LLMS=true."""
     env_var = os.getenv("TEST_WITH_MOCK_LLMS", "false")  # default no mocking
-    return env_var == "true"
+    return env_var.lower() == "true"
 
 
 def pytest_configure(config: Any) -> None:
