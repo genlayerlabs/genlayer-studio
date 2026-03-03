@@ -45,8 +45,8 @@ def get_mock_provider_config() -> dict[str, str]:
 @pytest.fixture
 def setup_validators():
     """
-    Pytest fixture that provisions exactly 5 validators before each test and
-    cleans up only the validators it created after the test completes.
+    Pytest fixture that ensures at least 5 validators exist before each test
+    by topping up to 5, and cleans up only the validators it created after the test completes.
 
     Yields a callable ``_setup(mock_response)`` that the test invokes to
     trigger validator creation in either mock or non-mock mode.
@@ -78,7 +78,7 @@ def setup_validators():
                         {
                             "api_key_env_var": mock_cfg["api_key_env_var"],
                             "api_url": mock_cfg["api_url"],
-                            "mock_response": mock_response if mock_response else {},
+                            "mock_response": mock_response if mock_response is not None else {},
                         },
                     )
                 ).json()
