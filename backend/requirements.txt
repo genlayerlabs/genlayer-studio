@@ -25,7 +25,7 @@ genvm-linter==0.7.1
 fastapi==0.135.1
 python-multipart==0.0.20
 uvicorn[standard]==0.41.0
-websockets==15.0.1
+websockets==16.0
 
 # Production dependencies
 setuptools==82.0.0
