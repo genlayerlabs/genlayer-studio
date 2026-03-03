@@ -44,9 +44,24 @@ def get_mock_provider_config() -> dict[str, str]:
 
 @pytest.fixture
 def setup_validators():
+    """
+    Pytest fixture that provisions exactly 5 validators before each test and
+    cleans up only the validators it created after the test completes.
+
+    Yields a callable ``_setup(mock_response)`` that the test invokes to
+    trigger validator creation in either mock or non-mock mode.
+    """
     created_validator_addresses = []
 
     def _setup(mock_response: Any = None) -> None:
+        """
+        Create validators appropriate for the current test mode.
+
+        In mock mode (TEST_WITH_MOCK_LLMS=true) always creates 5 validators
+        with the configured mock provider and the supplied mock_response.
+        In non-mock mode creates only the validators needed to reach a total
+        of 5, reusing any that already exist.
+        """
         nonlocal created_validator_addresses
         if mock_llms():
             mock_cfg = get_mock_provider_config()
@@ -106,9 +121,11 @@ def setup_validators():
 
 
 def mock_llms() -> bool:
+    """Return True when mock LLM mode is enabled via TEST_WITH_MOCK_LLMS=true."""
     env_var = os.getenv("TEST_WITH_MOCK_LLMS", "false")  # default no mocking
     return env_var == "true"
 
 
 def pytest_configure(config: Any) -> None:
+    """Load .env file at session start so environment variables are available to all tests."""
     load_dotenv(override=True)
