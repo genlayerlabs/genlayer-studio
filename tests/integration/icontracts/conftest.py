@@ -128,4 +128,4 @@ def mock_llms() -> bool:
 
 def pytest_configure(config: Any) -> None:
     """Load .env file at session start so environment variables are available to all tests."""
-    load_dotenv(override=True)
+    load_dotenv(override=False)
