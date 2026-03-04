@@ -642,7 +642,7 @@ def admin_upgrade_contract_code(
 
     # Validate contract exists and is deployed
     contract = session.query(CurrentState).filter_by(id=contract_address).one_or_none()
-    if not contract or not contract.data or not contract.data.get("code"):
+    if not contract or not contract.data or not contract.data.get("state"):
         raise NotFoundError(
             message="Contract not found",
             data={"contract_address": contract_address},
@@ -815,19 +815,14 @@ def cancel_transaction(
 
 ####### GEN ENDPOINTS #######
 async def get_contract_schema(
-    accounts_manager: AccountsManager,
+    session: Session,
     genvm_manager: GenVMManager,
     msg_handler: IMessageHandler,
     contract_address: str,
 ) -> dict:
-    if not accounts_manager.is_valid_address(contract_address):
-        raise InvalidAddressError(
-            contract_address,
-            "Incorrect address format. Please provide a valid address.",
-        )
-    contract_account = accounts_manager.get_account_or_fail(contract_address)
-
-    if not contract_account["data"] or not contract_account["data"]["code"]:
+    contract_snapshot = ContractSnapshot(contract_address, session)
+    code_b64 = contract_snapshot.extract_deployed_code_b64()
+    if not code_b64:
         raise InvalidAddressError(
             contract_address,
             "Contract not deployed.",
@@ -852,9 +847,7 @@ async def get_contract_schema(
         contract_snapshot_factory=None,
         manager=genvm_manager,
     )
-    schema = await node.get_contract_schema(
-        base64.b64decode(contract_account["data"]["code"])
-    )
+    schema = await node.get_contract_schema(base64.b64decode(code_b64))
     return json.loads(schema)
 
 
