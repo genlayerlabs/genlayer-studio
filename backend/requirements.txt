@@ -23,7 +23,7 @@ genvm-linter==0.7.1
 
 # FastAPI and ASGI dependencies
 fastapi==0.135.1
-python-multipart==0.0.20
+python-multipart==0.0.22
 uvicorn[standard]==0.41.0
 websockets==15.0.1
 
