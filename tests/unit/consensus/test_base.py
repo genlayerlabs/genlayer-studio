@@ -1603,8 +1603,6 @@ async def test_leader_appeal(consensus_algorithm):
 
         check_contract_state_with_timeout(contract_db, transaction.to_address, {}, {})
 
-        check_contract_state_with_timeout(contract_db, transaction.to_address, {}, {})
-
         appeal(transaction, transactions_processor)
         assert_transaction_status_match(
             transactions_processor, transaction, [TransactionStatus.FINALIZED.value]

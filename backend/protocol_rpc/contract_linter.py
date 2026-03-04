@@ -4,7 +4,7 @@ Provides validation and linting for GenLayer smart contracts.
 """
 
 from typing import Dict, List, Any, Optional
-from flask_jsonrpc.exceptions import JSONRPCError
+from backend.protocol_rpc.exceptions import JSONRPCError
 
 
 class ContractLinter:

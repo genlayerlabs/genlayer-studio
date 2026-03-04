@@ -1,6 +1,6 @@
 import os
 
-os.environ["TEST_WITH_MOCK_LLMS"] = "true"
+os.environ.setdefault("TEST_WITH_MOCK_LLMS", "true")
 
 from dotenv import load_dotenv
 
