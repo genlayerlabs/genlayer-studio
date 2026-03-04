@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import inspect
 import json
 import traceback
@@ -306,18 +305,13 @@ class RPCEndpointManager:
 
         synthetic_body = bound_arguments or {}
 
-        async with contextlib.AsyncExitStack() as async_exit_stack:
-            fastapi_request.scope["fastapi_inner_astack"] = async_exit_stack
-            fastapi_request.scope["fastapi_function_astack"] = async_exit_stack
-            solved = await solve_dependencies(
-                request=fastapi_request,
-                dependant=registered.dependant,
-                body=synthetic_body,
-                dependency_overrides_provider=self._dependency_overrides_provider,
-                async_exit_stack=async_exit_stack,
-                embed_body_fields=False,
-            )
-        values, errors = solved.values, solved.errors
+        solved = await solve_dependencies(
+            request=fastapi_request,
+            dependant=registered.dependant,
+            body=synthetic_body,
+            dependency_overrides_provider=self._dependency_overrides_provider,
+        )
+        values, errors = solved[0], solved[1]
 
         if errors:
             user_param_names = {param.name for param in registered.user_parameters}

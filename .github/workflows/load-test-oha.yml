@@ -59,6 +59,27 @@ jobs:
           sudo mv oha /usr/local/bin
           oha --version
 
+      - name: Install oha
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl jq
+          # Use the input version or default
+          OHA_VERSION="${{ inputs.oha-version || 'v1.9.0' }}"
+          echo "Installing oha version: $OHA_VERSION"
+
+          # Try to download oha
+          if ! curl -sSfL "https://github.com/hatoo/oha/releases/download/${OHA_VERSION}/oha-linux-amd64" -o oha; then
+            echo "Failed to download oha version $OHA_VERSION, trying latest..."
+            # Fallback to latest version
+            LATEST_VERSION=$(curl -s https://api.github.com/repos/hatoo/oha/releases/latest | jq -r '.tag_name')
+            echo "Using latest version: $LATEST_VERSION"
+            curl -sSfL "https://github.com/hatoo/oha/releases/download/${LATEST_VERSION}/oha-linux-amd64" -o oha
+          fi
+
+          chmod +x oha
+          sudo mv oha /usr/local/bin
+          oha --version
+
       - name: Copy .env file
         run: cp .env.example .env
 

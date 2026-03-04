@@ -50,7 +50,9 @@ from backend.consensus.base import ConsensusAlgorithm
 from backend.protocol_rpc.call_interceptor import handle_consensus_data_call
 
 import base64
+import hashlib
 import os
+import secrets as secrets_module
 from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope
 from backend.protocol_rpc.types import DecodedsubmitAppealDataArgs
 from backend.database_handler.snapshot_manager import SnapshotManager
@@ -487,218 +489,15 @@ def count_validators(validators_registry: ValidatorsRegistry) -> int:
     return validators_registry.count_validators()
 
 
-####### CONTRACT UPGRADE ENDPOINTS #######
-def get_contract_deployer(session: Session, contract_address: str) -> str | None:
-    """Get the address that deployed a contract by looking up the deploy transaction."""
-    from backend.database_handler.models import Transactions
-
-    deploy_tx = (
-        session.query(Transactions)
-        .filter(
-            Transactions.to_address == contract_address,
-            Transactions.type == TransactionType.DEPLOY_CONTRACT.value,
-            Transactions.status == TransactionStatus.FINALIZED,
-        )
-        .first()
-    )
-
-    return deploy_tx.from_address if deploy_tx else None
-
-
-def get_contract_nonce(session: Session, contract_address: str) -> int:
-    """Get contract nonce (tx count TO this contract) for upgrade signatures."""
-    from backend.database_handler.models import Transactions
-
-    try:
-        checksum_address = eth_utils.to_checksum_address(contract_address)
-    except (ValueError, TypeError):
-        checksum_address = contract_address
-
-    count = (
-        session.query(Transactions)
-        .filter(Transactions.to_address == checksum_address)
-        .count()
-    )
-    return count
-
-
-def admin_upgrade_contract_code(
-    session: Session,
-    contract_address: str,
-    new_code: str,
-    signature: str | None = None,
-    admin_key: str | None = None,
-) -> dict:
-    """
-    Queue a contract code upgrade. Returns immediately with tx hash.
-    Upgrade executes when worker processes it (after any pending txs for this contract).
-
-    Access control:
-    - Local (no env vars): open access
-    - Hosted/Self-hosted: admin_key allows ANY contract, signature allows own contracts
-
-    Args:
-        session: Database session
-        contract_address: Address of contract to upgrade
-        new_code: New Python contract source code
-        signature: Hex-encoded signature from deployer (required in hosted mode unless admin_key)
-        admin_key: Admin API key for full access to any contract
-
-    Returns:
-        dict with transaction_hash for polling status
-    """
-    from backend.database_handler.models import (
-        CurrentState,
-        Transactions,
-        TransactionStatus,
-    )
-    from backend.domain.types import TransactionType
-    from eth_account.messages import encode_defunct
-    from eth_account import Account
-    from web3 import Web3
-    import secrets
-
-    # Normalize address to checksum format for consistent comparison
-    # This must match get_contract_nonce() which frontend calls for signing
-    try:
-        contract_address = eth_utils.to_checksum_address(contract_address)
-    except (ValueError, TypeError):
-        pass  # Keep original if invalid - will fail later validation
-
-    is_hosted = os.getenv("VITE_IS_HOSTED") == "true"
-    admin_api_key = os.getenv("ADMIN_API_KEY")
-
-    # Check if authorization is needed (hosted or self-hosted with key configured)
-    needs_auth = is_hosted or admin_api_key
-
-    if needs_auth:
-        # Option 1: Admin key grants full access to ANY contract
-        if admin_api_key and admin_key == admin_api_key:
-            pass  # Authorized - proceed with upgrade
-
-        # Option 2: Signature from deployer grants access to own contracts
-        elif signature:
-            try:
-                # Get transaction count for contract to prevent replay attacks
-                # Each upgrade creates a new tx, so count always increases
-                # Use get_contract_nonce for consistent address normalization
-                tx_count = get_contract_nonce(session, contract_address)
-
-                # Recover signer from signature
-                # Message: keccak256(contract_address + tx_count_bytes + keccak256(new_code))
-                # Including tx_count makes signatures single-use (count increments after each tx)
-                new_code_hash = Web3.keccak(text=new_code)
-                tx_count_bytes = tx_count.to_bytes(32, byteorder="big")
-                message_hash = Web3.keccak(
-                    Web3.to_bytes(hexstr=contract_address)
-                    + tx_count_bytes
-                    + new_code_hash
-                )
-                message = encode_defunct(primitive=message_hash)
-                signer = Account.recover_message(message, signature=signature)
-
-                # Verify signer is deployer
-                deployer = get_contract_deployer(session, contract_address)
-                if not deployer:
-                    raise NotFoundError(
-                        message="Contract not found",
-                        data={"contract_address": contract_address},
-                    )
-                if signer.lower() != deployer.lower():
-                    raise JSONRPCError(
-                        code=-32000,
-                        message="Only contract deployer can upgrade",
-                        data={"signer": signer, "deployer": deployer},
-                    )
-                # Authorized - proceed with upgrade
-            except JSONRPCError:
-                raise
-            except Exception as e:
-                raise JSONRPCError(
-                    code=-32000,
-                    message=f"Invalid signature: {e!s}",
-                    data={},
-                ) from e
-
-        else:
-            # No valid auth provided
-            raise JSONRPCError(
-                code=-32000,
-                message="Upgrade requires admin key or deployer signature",
-                data={},
-            )
-
-    # Local mode (no env vars): allow all - no auth check needed
-
-    # Validate new code is not empty
-    if not new_code or not new_code.strip():
-        raise JSONRPCError(
-            code=-32602,
-            message="Contract code cannot be empty",
-            data={},
-        )
-
-    # Validate contract exists and is deployed
-    contract = session.query(CurrentState).filter_by(id=contract_address).one_or_none()
-    if not contract or not contract.data or not contract.data.get("code"):
-        raise NotFoundError(
-            message="Contract not found",
-            data={"contract_address": contract_address},
-        )
-
-    # Create upgrade transaction
-    tx_hash = "0x" + secrets.token_hex(32)
-    upgrade_tx = Transactions(
-        hash=tx_hash,
-        status=TransactionStatus.PENDING,
-        from_address=None,
-        to_address=contract_address,
-        input_data=None,
-        data={"new_code": new_code},
-        consensus_data=None,
-        nonce=None,
-        value=0,
-        type=TransactionType.UPGRADE_CONTRACT.value,
-        gaslimit=None,
-        leader_only=True,
-        r=None,
-        s=None,
-        v=None,
-        appeal_failed=None,
-        consensus_history=None,
-        timestamp_appeal=None,
-        appeal_processing_time=None,
-        contract_snapshot=None,
-        config_rotation_rounds=None,
-        num_of_initial_validators=None,
-        last_vote_timestamp=None,
-        rotation_count=None,
-        leader_timeout_validators=None,
-    )
-    session.add(upgrade_tx)
-    session.commit()
-
-    return {
-        "transaction_hash": tx_hash,
-        "message": "Upgrade queued. Poll eth_getTransactionReceipt for completion.",
-    }
-
-
 ####### GEN ENDPOINTS #######
 async def get_contract_schema(
     accounts_manager: AccountsManager,
-    genvm_manager: GenVMManager,
-    msg_handler: IMessageHandler,
+    msg_handler: MessageHandler,
     contract_address: str,
 ) -> dict:
-    if not accounts_manager.is_valid_address(contract_address):
-        raise InvalidAddressError(
-            contract_address,
-            "Incorrect address format. Please provide a valid address.",
-        )
-    contract_account = accounts_manager.get_account_or_fail(contract_address)
-
-    if not contract_account["data"] or not contract_account["data"]["code"]:
+    contract_snapshot = ContractSnapshot(contract_address, session)
+    code_b64 = contract_snapshot.extract_deployed_code_b64()
+    if not code_b64:
         raise InvalidAddressError(
             contract_address,
             "Contract not deployed.",
@@ -723,9 +522,7 @@ async def get_contract_schema(
         contract_snapshot_factory=None,
         manager=genvm_manager,
     )
-    schema = await node.get_contract_schema(
-        base64.b64decode(contract_account["data"]["code"])
-    )
+    schema = await node.get_contract_schema(base64.b64decode(code_b64))
     return json.loads(schema)
 
 
@@ -1610,141 +1407,172 @@ def get_contract(consensus_service: ConsensusService, contract_name: str) -> dic
     }
 
 
-@check_forbidden_method_in_hosted_studio
-def create_snapshot(
-    snapshot_manager: SnapshotManager,
-) -> int:
-    """Create a new snapshot of the current state and transactions.
+def register_all_rpc_endpoints(
+    jsonrpc: JSONRPC,
+    msg_handler: MessageHandler,
+    request_session: Session,
+    accounts_manager: AccountsManager,
+    transactions_processor: TransactionsProcessor,
+    validators_registry: ValidatorsRegistry,
+    llm_provider_registry: LLMProviderRegistry,
+    consensus: ConsensusAlgorithm,
+    consensus_service: ConsensusService,
+    transactions_parser: TransactionParser,
+):
+    register_rpc_endpoint = partial(generate_rpc_endpoint, jsonrpc, msg_handler)
 
-    Returns:
-        int: The snapshot ID
-    """
-    snapshot = snapshot_manager.create_snapshot()
-    return snapshot.snapshot_id
-
-
-@check_forbidden_method_in_hosted_studio
-def restore_snapshot(
-    snapshot_manager: SnapshotManager,
-    snapshot_id: int,
-) -> bool:
-    """Restore the database state from a snapshot.
-
-    Args:
-        snapshot_id: ID of the snapshot to restore
-
-    Returns:
-        bool: True if the snapshot was restored, False otherwise
-    """
-    reverted = snapshot_manager.restore_snapshot(snapshot_id)
-    return reverted
-
-
-@check_forbidden_method_in_hosted_studio
-def delete_all_snapshots(
-    snapshot_manager: SnapshotManager,
-) -> dict:
-    """Delete all snapshots from the database.
-
-    Returns:
-        dict: Information about the deletion result
-    """
-    deleted_count = snapshot_manager.delete_all_snapshots()
-    return {"deleted_count": deleted_count}
-
-
-@check_forbidden_method_in_hosted_studio
-def update_transaction_status(
-    session: Session,
-    transaction_hash: str,
-    new_status: str,
-) -> dict:
-    """Update a transaction status using a request-scoped session."""
-    # Validate transaction hash format
-    if not transaction_hash or not isinstance(transaction_hash, str):
-        raise JSONRPCError(
-            code=-32602,
-            message="Invalid transaction hash: must be a non-empty string",
-            data={},
-        )
-
-    if not transaction_hash.startswith("0x") or len(transaction_hash) != 66:
-        raise JSONRPCError(
-            code=-32602,
-            message="Invalid transaction hash format: must be a 66-character hex string starting with '0x'",
-            data={},
-        )
-
-    try:
-        int(transaction_hash, 16)
-    except ValueError:
-        raise JSONRPCError(
-            code=-32602,
-            message="Invalid transaction hash format: contains non-hexadecimal characters",
-            data={},
-        )
-
-    # Validate new status is a valid TransactionStatus enum value
-    if not new_status or not isinstance(new_status, str):
-        raise JSONRPCError(
-            code=-32602, message="Invalid status: must be a non-empty string", data={}
-        )
-
-    try:
-        status_enum = TransactionStatus(new_status)
-    except ValueError:
-        valid_statuses = [status.value for status in TransactionStatus]
-        raise JSONRPCError(
-            code=-32602,
-            message=f"Invalid status '{new_status}': must be one of {valid_statuses}",
-            data={},
-        )
-
-    transactions_processor = TransactionsProcessor(session)
-
-    transactions_processor.update_transaction_status(
-        transaction_hash=transaction_hash,
-        new_status=status_enum,
-        update_current_status_changes=True,
+    register_rpc_endpoint(ping)
+    register_rpc_endpoint(
+        partial(clear_db_tables, request_session),
+        method_name="sim_clearDbTables",
     )
-
-    # Return the updated transaction
-    updated_transaction = transactions_processor.get_transaction_by_hash(
-        transaction_hash
+    register_rpc_endpoint(
+        partial(fund_account, accounts_manager, transactions_processor),
+        method_name="sim_fundAccount",
     )
-    if updated_transaction is None:
-        raise JSONRPCError(
-            code=-32602, message=f"Transaction not found: {transaction_hash}", data={}
-        )
-
-    return updated_transaction
-
-
-def dev_get_pool_status(sqlalchemy_db) -> dict:
-    """
-    Development endpoint to monitor database connection pool status.
-
-    Returns current pool metrics including size, checked out connections,
-    overflow, and maximum allowed connections.
-
-    Args:
-        sqlalchemy_db: The Flask-SQLAlchemy database instance
-
-    Returns:
-        dict: Pool status information including timestamp and metrics
-    """
-    from datetime import datetime
-
-    engine = sqlalchemy_db.engine
-    pool = engine.pool
-
-    return {
-        "timestamp": datetime.now().isoformat(),
-        "pool": {
-            "size": pool.size(),
-            "checked_out": pool.checkedout(),
-            "overflow": pool.overflow(),
-            "max_allowed": pool.size() + pool._max_overflow,
-            "total": pool.size() + pool.overflow(),
-        },
-    }
+    register_rpc_endpoint(
+        partial(get_providers_and_models, llm_provider_registry),
+        method_name="sim_getProvidersAndModels",
+    )
+    register_rpc_endpoint(
+        partial(reset_defaults_llm_providers, llm_provider_registry),
+        method_name="sim_resetDefaultsLlmProviders",
+    )
+    register_rpc_endpoint(
+        partial(add_provider, llm_provider_registry),
+        method_name="sim_addProvider",
+    )
+    register_rpc_endpoint(
+        partial(update_provider, llm_provider_registry),
+        method_name="sim_updateProvider",
+    )
+    register_rpc_endpoint(
+        partial(delete_provider, llm_provider_registry),
+        method_name="sim_deleteProvider",
+    )
+    register_rpc_endpoint(
+        partial(
+            check_forbidden_method_in_hosted_studio(create_validator),
+            validators_registry,
+            accounts_manager,
+        ),
+        method_name="sim_createValidator",
+    )
+    register_rpc_endpoint(
+        partial(
+            create_random_validator,
+            validators_registry,
+            accounts_manager,
+            llm_provider_registry,
+        ),
+        method_name="sim_createRandomValidator",
+    )
+    register_rpc_endpoint(
+        partial(
+            create_random_validators,
+            validators_registry,
+            accounts_manager,
+            llm_provider_registry,
+        ),
+        method_name="sim_createRandomValidators",
+    )
+    register_rpc_endpoint(
+        partial(update_validator, validators_registry, accounts_manager),
+        method_name="sim_updateValidator",
+    )
+    register_rpc_endpoint(
+        partial(delete_validator, validators_registry, accounts_manager),
+        method_name="sim_deleteValidator",
+    )
+    register_rpc_endpoint(
+        partial(delete_all_validators, validators_registry),
+        method_name="sim_deleteAllValidators",
+    )
+    register_rpc_endpoint(
+        partial(get_all_validators, validators_registry),
+        method_name="sim_getAllValidators",
+    )
+    register_rpc_endpoint(
+        partial(get_validator, validators_registry),
+        method_name="sim_getValidator",
+    )
+    register_rpc_endpoint(
+        partial(count_validators, validators_registry),
+        method_name="sim_countValidators",
+    )
+    register_rpc_endpoint(
+        partial(get_contract_schema, accounts_manager, msg_handler),
+        method_name="gen_getContractSchema",
+    )
+    register_rpc_endpoint(
+        partial(get_contract_schema_for_code, msg_handler),
+        method_name="gen_getContractSchemaForCode",
+    )
+    register_rpc_endpoint(
+        partial(get_balance, accounts_manager),
+        method_name="eth_getBalance",
+    )
+    register_rpc_endpoint(
+        partial(get_transaction_by_hash, transactions_processor),
+        method_name="eth_getTransactionByHash",
+    )
+    register_rpc_endpoint(
+        partial(
+            call, request_session, accounts_manager, msg_handler, transactions_parser
+        ),
+        method_name="eth_call",
+    )
+    register_rpc_endpoint(
+        partial(
+            send_raw_transaction,
+            transactions_processor,
+            accounts_manager,
+            transactions_parser,
+            consensus_service,
+        ),
+        method_name="eth_sendRawTransaction",
+    )
+    register_rpc_endpoint(
+        partial(get_transaction_count, transactions_processor),
+        method_name="eth_getTransactionCount",
+    )
+    register_rpc_endpoint(
+        partial(get_transactions_for_address, transactions_processor, accounts_manager),
+        method_name="sim_getTransactionsForAddress",
+    )
+    register_rpc_endpoint(
+        partial(set_transaction_appeal, transactions_processor, msg_handler),
+        method_name="sim_appealTransaction",
+    )
+    register_rpc_endpoint(
+        partial(set_finality_window_time, consensus),
+        method_name="sim_setFinalityWindowTime",
+    )
+    register_rpc_endpoint(
+        partial(get_finality_window_time, consensus),
+        method_name="sim_getFinalityWindowTime",
+    )
+    register_rpc_endpoint(
+        partial(get_contract, consensus_service),
+        method_name="sim_getConsensusContract",
+    )
+    register_rpc_endpoint(get_chain_id, method_name="eth_chainId")
+    register_rpc_endpoint(get_net_version, method_name="net_version")
+    register_rpc_endpoint(
+        partial(get_block_number, transactions_processor),
+        method_name="eth_blockNumber",
+    )
+    register_rpc_endpoint(
+        partial(get_block_by_number, transactions_processor),
+        method_name="eth_getBlockByNumber",
+    )
+    register_rpc_endpoint(get_gas_price, method_name="eth_gasPrice")
+    register_rpc_endpoint(get_gas_estimate, method_name="eth_estimateGas")
+    register_rpc_endpoint(
+        partial(get_transaction_receipt, transactions_processor),
+        method_name="eth_getTransactionReceipt",
+    )
+    register_rpc_endpoint(
+        partial(get_block_by_hash, transactions_processor),
+        method_name="eth_getBlockByHash",
+    )

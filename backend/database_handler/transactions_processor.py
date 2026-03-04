@@ -748,6 +748,31 @@ class TransactionsProcessor:
             for transaction in stuck_transactions
         ]
 
+    @staticmethod
+    def cancel_transaction_if_available(
+        session: Session, transaction_hash: str
+    ) -> bool:
+        """
+        Cancel a transaction only if it is still available to be cancelled.
+
+        Returns:
+            bool: True when the transaction was cancelled, False otherwise.
+        """
+        result = session.execute(
+            text(
+                """
+                UPDATE transactions
+                SET status = CAST('CANCELED' AS transaction_status)
+                WHERE hash = :hash
+                  AND status IN ('PENDING', 'ACTIVATED')
+                  AND blocked_at IS NULL
+                """
+            ),
+            {"hash": transaction_hash},
+        )
+        session.commit()
+        return result.rowcount > 0
+
     def update_transaction_status(
         self,
         transaction_hash: str,
