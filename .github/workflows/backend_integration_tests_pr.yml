@@ -106,6 +106,7 @@ jobs:
       - name: Build backend images with cache (buildx bake)
         uses: docker/bake-action@v6
         with:
+          source: .
           files: |
             ./docker-compose.yml
           targets: |
