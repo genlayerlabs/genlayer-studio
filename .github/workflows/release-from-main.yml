@@ -57,7 +57,7 @@ jobs:
           private_key: ${{ secrets.CI_BOT_SECRET }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Resolve JSONRPC image digest
         id: digest
