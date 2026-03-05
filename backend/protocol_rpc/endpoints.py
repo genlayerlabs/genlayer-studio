@@ -489,10 +489,323 @@ def count_validators(validators_registry: ValidatorsRegistry) -> int:
     return validators_registry.count_validators()
 
 
+def get_contract_deployer(session: Session, contract_address: str) -> str | None:
+    """Get the address that deployed a contract by looking up the deploy transaction."""
+    from backend.database_handler.models import Transactions
+
+    deploy_tx = (
+        session.query(Transactions)
+        .filter(
+            Transactions.to_address == contract_address,
+            Transactions.type == TransactionType.DEPLOY_CONTRACT.value,
+            Transactions.status == TransactionStatus.FINALIZED,
+        )
+        .first()
+    )
+
+    return deploy_tx.from_address if deploy_tx else None
+
+
+def get_contract_nonce(session: Session, contract_address: str) -> int:
+    """Get contract nonce (tx count TO this contract) for upgrade signatures."""
+    from backend.database_handler.models import Transactions
+
+    try:
+        checksum_address = eth_utils.to_checksum_address(contract_address)
+    except (ValueError, TypeError):
+        checksum_address = contract_address
+
+    count = (
+        session.query(Transactions)
+        .filter(Transactions.to_address == checksum_address)
+        .count()
+    )
+    return count
+
+
+def admin_upgrade_contract_code(
+    session: Session,
+    contract_address: str,
+    new_code: str,
+    signature: str | None = None,
+    admin_key: str | None = None,
+) -> dict:
+    """
+    Queue a contract code upgrade. Returns immediately with tx hash.
+    Upgrade executes when worker processes it (after any pending txs for this contract).
+
+    Access control:
+    - Local (no env vars): open access
+    - Hosted/Self-hosted: admin_key allows ANY contract, signature allows own contracts
+
+    Args:
+        session: Database session
+        contract_address: Address of contract to upgrade
+        new_code: New Python contract source code
+        signature: Hex-encoded signature from deployer (required in hosted mode unless admin_key)
+        admin_key: Admin API key for full access to any contract
+
+    Returns:
+        dict with transaction_hash for polling status
+    """
+    from backend.database_handler.models import (
+        CurrentState,
+        Transactions,
+        TransactionStatus,
+    )
+    from backend.domain.types import TransactionType
+    from eth_account.messages import encode_defunct
+    from eth_account import Account
+    from web3 import Web3
+    import secrets
+
+    # Normalize address to checksum format for consistent comparison
+    try:
+        contract_address = eth_utils.to_checksum_address(contract_address)
+    except (ValueError, TypeError):
+        pass  # Keep original if invalid - will fail later validation
+
+    is_hosted = os.getenv("VITE_IS_HOSTED") == "true"
+    admin_api_key = os.getenv("ADMIN_API_KEY")
+
+    # Check if authorization is needed (hosted or self-hosted with key configured)
+    needs_auth = is_hosted or admin_api_key
+
+    if needs_auth:
+        # Option 1: Admin key grants full access to ANY contract
+        if admin_api_key and admin_key == admin_api_key:
+            pass  # Authorized - proceed with upgrade
+
+        # Option 2: Signature from deployer grants access to own contracts
+        elif signature:
+            try:
+                tx_count = get_contract_nonce(session, contract_address)
+
+                # Recover signer from signature
+                new_code_hash = Web3.keccak(text=new_code)
+                tx_count_bytes = tx_count.to_bytes(32, byteorder="big")
+                message_hash = Web3.keccak(
+                    Web3.to_bytes(hexstr=contract_address)
+                    + tx_count_bytes
+                    + new_code_hash
+                )
+                message = encode_defunct(primitive=message_hash)
+                signer = Account.recover_message(message, signature=signature)
+
+                # Verify signer is deployer
+                deployer = get_contract_deployer(session, contract_address)
+                if not deployer:
+                    raise NotFoundError(
+                        message="Contract not found",
+                        data={"contract_address": contract_address},
+                    )
+                if signer.lower() != deployer.lower():
+                    raise JSONRPCError(
+                        code=-32000,
+                        message="Only contract deployer can upgrade",
+                        data={"signer": signer, "deployer": deployer},
+                    )
+            except JSONRPCError:
+                raise
+            except Exception as e:
+                raise JSONRPCError(
+                    code=-32000,
+                    message=f"Invalid signature: {e!s}",
+                    data={},
+                ) from e
+
+        else:
+            raise JSONRPCError(
+                code=-32000,
+                message="Upgrade requires admin key or deployer signature",
+                data={},
+            )
+
+    # Validate new code is not empty
+    if not new_code or not new_code.strip():
+        raise JSONRPCError(
+            code=-32602,
+            message="Contract code cannot be empty",
+            data={},
+        )
+
+    # Validate contract exists and is deployed
+    contract = session.query(CurrentState).filter_by(id=contract_address).one_or_none()
+    if not contract or not contract.data or not contract.data.get("state"):
+        raise NotFoundError(
+            message="Contract not found",
+            data={"contract_address": contract_address},
+        )
+
+    # Create upgrade transaction
+    tx_hash = "0x" + secrets.token_hex(32)
+    upgrade_tx = Transactions(
+        hash=tx_hash,
+        status=TransactionStatus.PENDING,
+        from_address=None,
+        to_address=contract_address,
+        input_data=None,
+        data={"new_code": new_code},
+        consensus_data=None,
+        nonce=None,
+        value=0,
+        type=TransactionType.UPGRADE_CONTRACT.value,
+        gaslimit=None,
+        leader_only=True,
+        r=None,
+        s=None,
+        v=None,
+        appeal_failed=None,
+        consensus_history=None,
+        timestamp_appeal=None,
+        appeal_processing_time=None,
+        contract_snapshot=None,
+        config_rotation_rounds=None,
+        num_of_initial_validators=None,
+        last_vote_timestamp=None,
+        rotation_count=None,
+        leader_timeout_validators=None,
+    )
+    session.add(upgrade_tx)
+    session.commit()
+
+    return {
+        "transaction_hash": tx_hash,
+        "message": "Upgrade queued. Poll eth_getTransactionReceipt for completion.",
+    }
+
+
+def cancel_transaction(
+    session: Session,
+    transaction_hash: str,
+    msg_handler,
+    signature: str | None = None,
+    admin_key: str | None = None,
+) -> dict:
+    """
+    Cancel a pending or activated transaction. Returns immediately with status.
+
+    Access control:
+    - Local (no env vars): open access
+    - Hosted/Self-hosted: admin_key allows ANY transaction, signature allows own transactions
+
+    Args:
+        session: Database session
+        transaction_hash: Hash of the transaction to cancel
+        msg_handler: Message handler for WebSocket notifications
+        signature: Hex-encoded signature from tx sender (required in hosted mode unless admin_key)
+        admin_key: Admin API key for full access to any transaction
+
+    Returns:
+        dict with transaction_hash and status
+    """
+    from backend.database_handler.models import Transactions
+    from eth_account.messages import encode_defunct
+    from eth_account import Account
+    from web3 import Web3
+    import os
+
+    # Validate transaction hash format
+    if (
+        not transaction_hash
+        or not transaction_hash.startswith("0x")
+        or len(transaction_hash) != 66
+    ):
+        raise JSONRPCError(
+            code=-32602,
+            message="Invalid transaction hash format",
+            data={},
+        )
+
+    # Look up the transaction
+    transaction = (
+        session.query(Transactions).filter_by(hash=transaction_hash).one_or_none()
+    )
+    if not transaction:
+        raise NotFoundError(
+            message="Transaction not found",
+            data={"transaction_hash": transaction_hash},
+        )
+
+    is_hosted = os.getenv("VITE_IS_HOSTED") == "true"
+    admin_api_key = os.getenv("ADMIN_API_KEY")
+
+    # Check if authorization is needed (hosted or self-hosted with key configured)
+    needs_auth = is_hosted or admin_api_key
+
+    if needs_auth:
+        # Option 1: Admin key grants full access to ANY transaction
+        if admin_api_key and admin_key == admin_api_key:
+            pass  # Authorized - proceed with cancel
+
+        # Option 2: Signature from tx sender grants access to own transactions
+        elif signature:
+            if not transaction.from_address:
+                raise JSONRPCError(
+                    code=-32000,
+                    message="Transaction has no sender - only admin key can cancel",
+                    data={},
+                )
+
+            try:
+                # Message: keccak256("cancel_transaction" + tx_hash_bytes)
+                # tx_hash is unique, so no nonce needed for replay protection
+                message_hash = Web3.keccak(
+                    b"cancel_transaction" + Web3.to_bytes(hexstr=transaction_hash)
+                )
+                message = encode_defunct(primitive=message_hash)
+                signer = Account.recover_message(message, signature=signature)
+
+                if signer.lower() != transaction.from_address.lower():
+                    raise JSONRPCError(
+                        code=-32000,
+                        message="Only transaction sender can cancel",
+                        data={"signer": signer, "sender": transaction.from_address},
+                    )
+            except JSONRPCError:
+                raise
+            except Exception as e:
+                raise JSONRPCError(
+                    code=-32000,
+                    message=f"Invalid signature: {e!s}",
+                    data={},
+                ) from e
+        else:
+            raise JSONRPCError(
+                code=-32000,
+                message="Cancel requires admin key or sender signature",
+                data={},
+            )
+
+    # Atomic cancel - only succeeds if tx is still pending/activated and not claimed by worker
+    was_cancelled = TransactionsProcessor.cancel_transaction_if_available(
+        session, transaction_hash
+    )
+
+    if not was_cancelled:
+        raise JSONRPCError(
+            code=-32000,
+            message="Transaction cannot be cancelled: already being processed or in a terminal state",
+            data={
+                "transaction_hash": transaction_hash,
+                "status": transaction.status.value,
+            },
+        )
+
+    # Notify frontend via WebSocket
+    msg_handler.send_transaction_status_update(transaction_hash, "CANCELED")
+
+    return {
+        "transaction_hash": transaction_hash,
+        "status": "CANCELED",
+    }
+
+
 ####### GEN ENDPOINTS #######
 async def get_contract_schema(
-    accounts_manager: AccountsManager,
-    msg_handler: MessageHandler,
+    session: Session,
+    genvm_manager: GenVMManager,
+    msg_handler: IMessageHandler,
     contract_address: str,
 ) -> dict:
     contract_snapshot = ContractSnapshot(contract_address, session)
@@ -1405,3 +1718,247 @@ def get_contract(consensus_service: ConsensusService, contract_name: str) -> dic
         "abi": contract["abi"],
         "bytecode": contract["bytecode"],
     }
+
+
+@check_forbidden_method_in_hosted_studio
+def create_snapshot(
+    snapshot_manager: SnapshotManager,
+) -> int:
+    """Create a new snapshot of the current state and transactions.
+
+    Returns:
+        int: The snapshot ID
+    """
+    snapshot = snapshot_manager.create_snapshot()
+    return snapshot.snapshot_id
+
+
+@check_forbidden_method_in_hosted_studio
+def restore_snapshot(
+    snapshot_manager: SnapshotManager,
+    snapshot_id: int,
+) -> bool:
+    """Restore the database state from a snapshot.
+
+    Args:
+        snapshot_id: ID of the snapshot to restore
+
+    Returns:
+        bool: True if the snapshot was restored, False otherwise
+    """
+    reverted = snapshot_manager.restore_snapshot(snapshot_id)
+    return reverted
+
+
+@check_forbidden_method_in_hosted_studio
+def delete_all_snapshots(
+    snapshot_manager: SnapshotManager,
+) -> dict:
+    """Delete all snapshots from the database.
+
+    Returns:
+        dict: Information about the deletion result
+    """
+    deleted_count = snapshot_manager.delete_all_snapshots()
+    return {"deleted_count": deleted_count}
+
+
+@check_forbidden_method_in_hosted_studio
+def update_transaction_status(
+    session: Session,
+    transaction_hash: str,
+    new_status: str,
+) -> dict:
+    """Update a transaction status using a request-scoped session."""
+    # Validate transaction hash format
+    if not transaction_hash or not isinstance(transaction_hash, str):
+        raise JSONRPCError(
+            code=-32602,
+            message="Invalid transaction hash: must be a non-empty string",
+            data={},
+        )
+
+    if not transaction_hash.startswith("0x") or len(transaction_hash) != 66:
+        raise JSONRPCError(
+            code=-32602,
+            message="Invalid transaction hash format: must be a 66-character hex string starting with '0x'",
+            data={},
+        )
+
+    try:
+        int(transaction_hash, 16)
+    except ValueError:
+        raise JSONRPCError(
+            code=-32602,
+            message="Invalid transaction hash format: contains non-hexadecimal characters",
+            data={},
+        )
+
+    # Validate new status is a valid TransactionStatus enum value
+    if not new_status or not isinstance(new_status, str):
+        raise JSONRPCError(
+            code=-32602, message="Invalid status: must be a non-empty string", data={}
+        )
+
+    try:
+        status_enum = TransactionStatus(new_status)
+    except ValueError:
+        valid_statuses = [status.value for status in TransactionStatus]
+        raise JSONRPCError(
+            code=-32602,
+            message=f"Invalid status '{new_status}': must be one of {valid_statuses}",
+            data={},
+        )
+
+    transactions_processor = TransactionsProcessor(session)
+
+    transactions_processor.update_transaction_status(
+        transaction_hash=transaction_hash,
+        new_status=status_enum,
+        update_current_status_changes=True,
+    )
+
+    # Return the updated transaction
+    updated_transaction = transactions_processor.get_transaction_by_hash(
+        transaction_hash
+    )
+    if updated_transaction is None:
+        raise JSONRPCError(
+            code=-32602, message=f"Transaction not found: {transaction_hash}", data={}
+        )
+
+    return updated_transaction
+
+
+def dev_get_pool_status(sqlalchemy_db) -> dict:
+    """
+    Development endpoint to monitor database connection pool status.
+
+    Returns current pool metrics including size, checked out connections,
+    overflow, and maximum allowed connections.
+
+    Args:
+        sqlalchemy_db: The Flask-SQLAlchemy database instance
+
+    Returns:
+        dict: Pool status information including timestamp and metrics
+    """
+    from datetime import datetime
+
+    engine = sqlalchemy_db.engine
+    pool = engine.pool
+
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "pool": {
+            "size": pool.size(),
+            "checked_out": pool.checkedout(),
+            "overflow": pool.overflow(),
+            "max_allowed": pool.size() + pool._max_overflow,
+            "total": pool.size() + pool.overflow(),
+        },
+    }
+
+
+####### ADMIN API KEY RATE LIMITING ENDPOINTS #######
+
+
+@require_admin_access
+def admin_create_tier(
+    session: Session,
+    name: str,
+    rate_limit_minute: int,
+    rate_limit_hour: int,
+    rate_limit_day: int,
+    admin_key: str = None,
+) -> dict:
+    from backend.database_handler.models import ApiTier
+
+    tier = ApiTier(
+        name=name,
+        rate_limit_minute=rate_limit_minute,
+        rate_limit_hour=rate_limit_hour,
+        rate_limit_day=rate_limit_day,
+    )
+    session.add(tier)
+    session.flush()
+    return {"id": tier.id, "name": tier.name}
+
+
+@require_admin_access
+def admin_list_tiers(
+    session: Session,
+    admin_key: str = None,
+) -> list[dict]:
+    from backend.database_handler.models import ApiTier
+
+    tiers = session.query(ApiTier).all()
+    return [
+        {
+            "id": t.id,
+            "name": t.name,
+            "rate_limit_minute": t.rate_limit_minute,
+            "rate_limit_hour": t.rate_limit_hour,
+            "rate_limit_day": t.rate_limit_day,
+        }
+        for t in tiers
+    ]
+
+
+@require_admin_access
+def admin_create_api_key(
+    session: Session,
+    tier_name: str,
+    description: str = None,
+    admin_key: str = None,
+) -> dict:
+    from backend.database_handler.models import ApiKey, ApiTier
+
+    tier = session.query(ApiTier).filter_by(name=tier_name).first()
+    if not tier:
+        raise JSONRPCError(code=-32602, message=f"Tier not found: {tier_name}")
+
+    raw_key = "glk_" + secrets_module.token_hex(32)
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+
+    api_key = ApiKey(
+        key_prefix=raw_key[:8],
+        key_hash=key_hash,
+        tier_id=tier.id,
+        is_active=True,
+        description=description,
+    )
+    session.add(api_key)
+    session.flush()
+    return {
+        "api_key": raw_key,
+        "key_prefix": raw_key[:8],
+        "tier": tier_name,
+        "description": description,
+    }
+
+
+@require_admin_access
+async def admin_deactivate_api_key(
+    session: Session,
+    key_prefix: str,
+    rate_limiter: Any = None,
+    admin_key: str = None,
+) -> dict:
+    from backend.database_handler.models import ApiKey
+
+    api_key = (
+        session.query(ApiKey).filter_by(key_prefix=key_prefix, is_active=True).first()
+    )
+    if not api_key:
+        raise NotFoundError(
+            message=f"Active API key with prefix {key_prefix} not found"
+        )
+
+    api_key.is_active = False
+    session.flush()
+
+    if rate_limiter:
+        await rate_limiter.invalidate_key_cache(api_key.key_hash)
+
+    return {"key_prefix": key_prefix, "deactivated": True}

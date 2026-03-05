@@ -658,16 +658,6 @@ def node_factory(
         mock.exec_transaction = AsyncMock(side_effect=mock_exec_transaction)
         return mock
     else:
-        # Use real node with actual LLM calls (slow, requires API keys)
-        # This would require proper validator setup with real LLM providers
-        # For now, we'll still use mocks but log that real mode was requested
-        print(
-            f"[WARNING] Real LLM mode requested but not fully implemented in unit tests"
-        )
-        print(
-            f"[WARNING] Using mocked responses. For real LLMs, use integration tests."
-        )
-
         # Fall back to mock for now
         mock = Mock(Node)
         mock.validator_mode = mode
