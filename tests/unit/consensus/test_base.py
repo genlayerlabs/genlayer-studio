@@ -1387,6 +1387,10 @@ async def test_leader_appeal(consensus_algorithm):
         }
     )
 
+    # Use a large finality window to prevent the appeal window from
+    # auto-finalizing UNDETERMINED transactions before the test can appeal.
+    consensus_algorithm.finality_window_time = 60
+
     def get_vote():
         """
         Leader disagrees + 4 validators disagree for 5 rounds

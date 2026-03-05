@@ -99,7 +99,6 @@ ENV GENVMROOT=/genvm
 ENV PATH="/genvm/bin:${PATH}"
 
 # Copy necessary files
-COPY ../.env .
 COPY backend $path/backend
 COPY docker/entrypoint-consensus-worker.sh /entrypoint.sh
 

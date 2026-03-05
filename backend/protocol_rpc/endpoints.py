@@ -489,7 +489,6 @@ def count_validators(validators_registry: ValidatorsRegistry) -> int:
     return validators_registry.count_validators()
 
 
-####### CONTRACT UPGRADE ENDPOINTS #######
 def get_contract_deployer(session: Session, contract_address: str) -> str | None:
     """Get the address that deployed a contract by looking up the deploy transaction."""
     from backend.database_handler.models import Transactions
@@ -561,7 +560,6 @@ def admin_upgrade_contract_code(
     import secrets
 
     # Normalize address to checksum format for consistent comparison
-    # This must match get_contract_nonce() which frontend calls for signing
     try:
         contract_address = eth_utils.to_checksum_address(contract_address)
     except (ValueError, TypeError):
@@ -581,14 +579,9 @@ def admin_upgrade_contract_code(
         # Option 2: Signature from deployer grants access to own contracts
         elif signature:
             try:
-                # Get transaction count for contract to prevent replay attacks
-                # Each upgrade creates a new tx, so count always increases
-                # Use get_contract_nonce for consistent address normalization
                 tx_count = get_contract_nonce(session, contract_address)
 
                 # Recover signer from signature
-                # Message: keccak256(contract_address + tx_count_bytes + keccak256(new_code))
-                # Including tx_count makes signatures single-use (count increments after each tx)
                 new_code_hash = Web3.keccak(text=new_code)
                 tx_count_bytes = tx_count.to_bytes(32, byteorder="big")
                 message_hash = Web3.keccak(
@@ -612,7 +605,6 @@ def admin_upgrade_contract_code(
                         message="Only contract deployer can upgrade",
                         data={"signer": signer, "deployer": deployer},
                     )
-                # Authorized - proceed with upgrade
             except JSONRPCError:
                 raise
             except Exception as e:
@@ -623,14 +615,11 @@ def admin_upgrade_contract_code(
                 ) from e
 
         else:
-            # No valid auth provided
             raise JSONRPCError(
                 code=-32000,
                 message="Upgrade requires admin key or deployer signature",
                 data={},
             )
-
-    # Local mode (no env vars): allow all - no auth check needed
 
     # Validate new code is not empty
     if not new_code or not new_code.strip():
@@ -686,7 +675,6 @@ def admin_upgrade_contract_code(
     }
 
 
-####### CANCEL TRANSACTION ENDPOINTS #######
 def cancel_transaction(
     session: Session,
     transaction_hash: str,

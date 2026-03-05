@@ -33,9 +33,9 @@ const deleteAddress = () => {
 };
 
 const props = defineProps<{
-  active?: Boolean;
+  active?: boolean;
   account: AccountInfo;
-  canDelete?: Boolean;
+  canDelete?: boolean;
 }>();
 
 const showConfirmDelete = ref(false);
