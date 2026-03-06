@@ -815,15 +815,18 @@ def setup_test_environment(
     )
     contract_processor_factory = lambda session: ContractProcessorMock(contract_db)
 
+    _node_factory_lock = threading.Lock()
+
     def node_factory_supplier(*args):
-        created_nodes.append(
-            node_factory(
-                *args,
-                vote=get_vote(),
-                timeout=get_timeout() if get_timeout else False,
+        with _node_factory_lock:
+            created_nodes.append(
+                node_factory(
+                    *args,
+                    vote=get_vote(),
+                    timeout=get_timeout() if get_timeout else False,
+                )
             )
-        )
-        return created_nodes[-1]
+            return created_nodes[-1]
 
     # Create a stop event
     stop_event = threading.Event()
