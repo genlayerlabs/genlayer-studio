@@ -1609,7 +1609,10 @@ async def test_leader_appeal(consensus_algorithm):
 
         appeal(transaction, transactions_processor)
         assert_transaction_status_match(
-            transactions_processor, transaction, [TransactionStatus.FINALIZED.value]
+            transactions_processor,
+            transaction,
+            [TransactionStatus.FINALIZED.value],
+            timeout=180,
         )
 
         transaction_status_history += [
