@@ -22,6 +22,7 @@ mkdir -p "${CONFIG_DIR}"
 # Generate runtime config that overrides build-time values
 cat > "${CONFIG_DIR}/runtime-config.js" <<EOF
 window.__RUNTIME_CONFIG__ = {
+  VITE_GENLAYER_NETWORK: "${VITE_GENLAYER_NETWORK:-localnet}",
   VITE_JSON_RPC_SERVER_URL: "${VITE_JSON_RPC_SERVER_URL:-http://127.0.0.1:4000/api}",
   VITE_WS_SERVER_URL: "${VITE_WS_SERVER_URL:-ws://127.0.0.1:4000}",
   VITE_IS_HOSTED: "${VITE_IS_HOSTED:-false}",

@@ -17,7 +17,7 @@
 - `sim_deleteValidator` - Delete a specific validator
 - `sim_fundAccount` - Fund an account with tokens
 - `sim_getAllValidators` - Get list of all validators
-- `sim_getConsensusContract` - Get consensus contract details
+- `sim_getConsensusContract` - Get consensus contract details (deprecated)
 - `sim_getFinalityWindowTime` - Get finality window time
 - `sim_getProvidersAndModels` - Get LLM providers and models
 - `sim_getTransactionsForAddress` - Get transactions for address
