@@ -3,6 +3,7 @@
 import { ConsensusRoundMonitoring } from '@/lib/types';
 import { formatTimestamp, getDuration } from '@/lib/formatters';
 import { getPhaseColor } from '@/lib/consensusUtils';
+import { Card } from '@/components/ui/card';
 
 interface MonitoringTimelineProps {
   monitoring: ConsensusRoundMonitoring;
@@ -21,24 +22,22 @@ export function MonitoringTimeline({ monitoring, title, globalStartTime }: Monit
   return (
     <div className="space-y-4">
       {title && (
-        <h4 className="text-sm font-semibold text-slate-700">{title}</h4>
+        <h4 className="text-sm font-semibold text-foreground">{title}</h4>
       )}
 
-      {/* Summary stats */}
       <div className="flex gap-4 text-sm">
-        <div className="bg-slate-100 px-3 py-1.5 rounded-lg">
-          <span className="text-slate-500">Total Duration: </span>
-          <span className="font-semibold text-slate-800">{getDuration(startTime, endTime)}</span>
+        <div className="bg-muted px-3 py-1.5 rounded-lg">
+          <span className="text-muted-foreground">Total Duration: </span>
+          <span className="font-semibold text-foreground">{getDuration(startTime, endTime)}</span>
         </div>
-        <div className="bg-slate-100 px-3 py-1.5 rounded-lg">
-          <span className="text-slate-500">Events: </span>
-          <span className="font-semibold text-slate-800">{entries.length}</span>
+        <div className="bg-muted px-3 py-1.5 rounded-lg">
+          <span className="text-muted-foreground">Events: </span>
+          <span className="font-semibold text-foreground">{entries.length}</span>
         </div>
       </div>
 
-      {/* Timeline */}
       <div className="relative">
-        <div className="absolute left-3 top-0 bottom-0 w-0.5 bg-slate-200"></div>
+        <div className="absolute left-3 top-0 bottom-0 w-0.5 bg-border"></div>
 
         <div className="space-y-2">
           {entries.map(([key, timestamp], idx) => {
@@ -46,21 +45,21 @@ export function MonitoringTimeline({ monitoring, title, globalStartTime }: Monit
 
             return (
               <div key={key} className="relative pl-8">
-                <div className={`absolute left-1.5 w-3 h-3 rounded-full ${getPhaseColor(key)} ring-2 ring-white`}></div>
+                <div className={`absolute left-1.5 w-3 h-3 rounded-full ${getPhaseColor(key)} ring-2 ring-background`}></div>
 
-                <div className="flex items-center justify-between bg-white border border-slate-200 rounded-lg px-3 py-2 hover:shadow-sm transition-shadow">
+                <Card className="flex items-center justify-between px-3 py-2 hover:shadow-sm transition-shadow">
                   <div className="flex items-center gap-3">
-                    <code className="text-xs font-mono text-slate-700 bg-slate-100 px-2 py-0.5 rounded">
+                    <code className="text-xs font-mono text-foreground bg-muted px-2 py-0.5 rounded">
                       {key}
                     </code>
                     {relativeTime && (
-                      <span className="text-xs text-slate-400">+{relativeTime}</span>
+                      <span className="text-xs text-muted-foreground">+{relativeTime}</span>
                     )}
                   </div>
-                  <span className="text-xs text-slate-500 font-mono">
+                  <span className="text-xs text-muted-foreground font-mono">
                     {formatTimestamp(timestamp)}
                   </span>
-                </div>
+                </Card>
               </div>
             );
           })}

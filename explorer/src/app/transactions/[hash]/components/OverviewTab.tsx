@@ -6,16 +6,92 @@ import { Transaction } from '@/lib/types';
 import { StatusBadge } from '@/components/StatusBadge';
 import { TransactionTypeLabel } from '@/components/TransactionTypeLabel';
 import { InfoRow } from '@/components/InfoRow';
+import { Badge } from '@/components/ui/badge';
+import { JsonViewer } from '@/components/JsonViewer';
 import { getExecutionResult } from '@/lib/transactionUtils';
+import { resultStatusLabel, type DecodedResult } from '@/lib/resultDecoder';
 
 interface OverviewTabProps {
   transaction: Transaction;
+}
+
+function ResultStatusBadge({ status }: { status: string }) {
+  const label = resultStatusLabel(status);
+  switch (status) {
+    case 'return':
+      return (
+        <Badge className="bg-green-50 dark:bg-green-950 text-green-700 dark:text-green-400 border-green-200 dark:border-green-800">
+          {label}
+        </Badge>
+      );
+    case 'rollback':
+      return (
+        <Badge className="bg-orange-50 dark:bg-orange-950 text-orange-700 dark:text-orange-400 border-orange-200 dark:border-orange-800">
+          {label}
+        </Badge>
+      );
+    case 'contract_error':
+    case 'error':
+      return (
+        <Badge className="bg-red-50 dark:bg-red-950 text-red-700 dark:text-red-400 border-red-200 dark:border-red-800">
+          {label}
+        </Badge>
+      );
+    case 'none':
+    case 'no_leaders':
+      return (
+        <Badge className="bg-gray-50 dark:bg-gray-950 text-gray-700 dark:text-gray-400 border-gray-200 dark:border-gray-800">
+          {label}
+        </Badge>
+      );
+    default:
+      return <Badge variant="outline">{label}</Badge>;
+  }
+}
+
+function ResultPayload({ decoded }: { decoded: DecodedResult }) {
+  if (!decoded.payload) return null;
+
+  // Calldata-decoded payload (has .readable)
+  if (
+    typeof decoded.payload === 'object' &&
+    decoded.payload !== null &&
+    'readable' in (decoded.payload as Record<string, unknown>)
+  ) {
+    const readable = (decoded.payload as { readable: string }).readable;
+    return (
+      <div className="bg-muted p-3 rounded-lg mt-2">
+        <div className="text-xs text-muted-foreground mb-1">Return Value</div>
+        <code className="text-sm text-foreground break-all">{readable}</code>
+      </div>
+    );
+  }
+
+  // String payload (error message from rollback/contract_error)
+  if (typeof decoded.payload === 'string' && decoded.payload) {
+    return (
+      <div className="bg-muted p-3 rounded-lg mt-2">
+        <div className="text-xs text-muted-foreground mb-1">
+          {decoded.status === 'rollback' || decoded.status === 'contract_error'
+            ? 'Error Message'
+            : 'Payload'}
+        </div>
+        <code className="text-sm text-destructive break-all">
+          {decoded.payload}
+        </code>
+      </div>
+    );
+  }
+
+  return null;
 }
 
 export function OverviewTab({ transaction: tx }: OverviewTabProps) {
   const execResult = getExecutionResult(tx);
   const executionResult = execResult?.executionResult;
   const genvmResult = execResult?.genvmResult;
+  const decodedResult = execResult?.decodedResult;
+  const eqOutputs = execResult?.eqOutputs;
 
   return (
     <div className="space-y-1">
@@ -26,7 +102,7 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
         label="From"
         value={
           tx.from_address ? (
-            <Link href={`/state/${tx.from_address}`} className="text-blue-600 hover:underline">
+            <Link href={`/state/${tx.from_address}`} className="text-primary hover:underline">
               {tx.from_address}
             </Link>
           ) : (
@@ -40,7 +116,7 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
         label="To"
         value={
           tx.to_address ? (
-            <Link href={`/state/${tx.to_address}`} className="text-blue-600 hover:underline">
+            <Link href={`/state/${tx.to_address}`} className="text-primary hover:underline">
               {tx.to_address}
             </Link>
           ) : (
@@ -61,11 +137,11 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
         label="Execution Mode"
         value={
           tx.execution_mode === 'LEADER_ONLY' ? (
-            <span className="bg-yellow-50 text-yellow-700 px-2.5 py-1 rounded-lg text-xs font-semibold">Leader Only</span>
+            <Badge className="bg-yellow-50 dark:bg-yellow-950 text-yellow-700 dark:text-yellow-400 border-yellow-200 dark:border-yellow-800">Leader Only</Badge>
           ) : tx.execution_mode === 'LEADER_SELF_VALIDATOR' ? (
-            <span className="bg-blue-50 text-blue-700 px-2.5 py-1 rounded-lg text-xs font-semibold">Leader + Self Validator</span>
+            <Badge className="bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-400 border-blue-200 dark:border-blue-800">Leader + Self Validator</Badge>
           ) : (
-            <span className="bg-green-50 text-green-700 px-2.5 py-1 rounded-lg text-xs font-semibold">Normal</span>
+            <Badge className="bg-green-50 dark:bg-green-950 text-green-700 dark:text-green-400 border-green-200 dark:border-green-800">Normal</Badge>
           )
         }
       />
@@ -73,28 +149,37 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
       <InfoRow label="Initial Validators" value={tx.num_of_initial_validators?.toString() || '-'} />
       {tx.worker_id && <InfoRow label="Worker ID" value={tx.worker_id} />}
 
-      {/* GenVM Execution Results */}
-      {(executionResult || genvmResult) && (
+      {/* Execution Result Section */}
+      {(executionResult || genvmResult || decodedResult) && (
         <>
-          <div className="border-t border-gray-200 mt-4 pt-4">
-            <h4 className="text-sm font-semibold text-gray-700 mb-3">GenVM Execution</h4>
+          <div className="border-t border-border mt-4 pt-4">
+            <h4 className="text-sm font-semibold text-foreground mb-3">GenVM Execution</h4>
           </div>
           {executionResult && (
             <InfoRow
               label="Execution Result"
               value={
                 executionResult === 'SUCCESS' ? (
-                  <span className="bg-green-50 text-green-700 px-2.5 py-1 rounded-lg text-xs font-semibold">SUCCESS</span>
+                  <Badge className="bg-green-50 dark:bg-green-950 text-green-700 dark:text-green-400 border-green-200 dark:border-green-800">SUCCESS</Badge>
                 ) : (
-                  <span className="bg-red-50 text-red-700 px-2.5 py-1 rounded-lg text-xs font-semibold">{executionResult}</span>
+                  <Badge className="bg-red-50 dark:bg-red-950 text-red-700 dark:text-red-400 border-red-200 dark:border-red-800">{executionResult}</Badge>
                 )
               }
             />
           )}
+          {decodedResult && (
+            <>
+              <InfoRow
+                label="Result Code"
+                value={<ResultStatusBadge status={decodedResult.status} />}
+              />
+              <ResultPayload decoded={decodedResult} />
+            </>
+          )}
           {genvmResult?.stdout !== undefined && (
             <InfoRow
               label="Stdout"
-              value={genvmResult.stdout || <span className="text-slate-400">(empty)</span>}
+              value={genvmResult.stdout || <span className="text-muted-foreground">(empty)</span>}
               copyable={!!genvmResult.stdout}
               copyText={genvmResult.stdout}
             />
@@ -104,15 +189,51 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
               label="Stderr"
               value={
                 genvmResult.stderr ? (
-                  <span className="text-red-600">{genvmResult.stderr}</span>
+                  <span className="text-destructive">{genvmResult.stderr}</span>
                 ) : (
-                  <span className="text-slate-400">(empty)</span>
+                  <span className="text-muted-foreground">(empty)</span>
                 )
               }
               copyable={!!genvmResult.stderr}
               copyText={genvmResult.stderr}
             />
           )}
+        </>
+      )}
+
+      {/* Equivalence Principle Outputs */}
+      {eqOutputs && Object.keys(eqOutputs).length > 0 && (
+        <>
+          <div className="border-t border-border mt-4 pt-4">
+            <h4 className="text-sm font-semibold text-foreground mb-3">
+              Equivalence Principle Outputs
+            </h4>
+          </div>
+          <div className="space-y-3">
+            {Object.entries(eqOutputs).map(([key, decoded]) => (
+              <div key={key} className="bg-muted rounded-lg p-3">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-sm font-medium text-foreground">{key}</span>
+                  <ResultStatusBadge status={decoded.status} />
+                </div>
+                {decoded.payload != null && (
+                  <div className="text-sm">
+                    {typeof decoded.payload === 'object' &&
+                    decoded.payload !== null &&
+                    'readable' in (decoded.payload as Record<string, unknown>) ? (
+                      <code className="text-foreground break-all">
+                        {(decoded.payload as { readable: string }).readable}
+                      </code>
+                    ) : typeof decoded.payload === 'string' ? (
+                      <code className="text-foreground break-all">{decoded.payload}</code>
+                    ) : (
+                      <JsonViewer data={decoded.payload} />
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         </>
       )}
     </div>
