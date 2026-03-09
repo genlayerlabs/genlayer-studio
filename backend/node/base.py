@@ -30,7 +30,10 @@ from .types import Address
 
 
 def _ensure_dotenv_loaded_for_chain_id() -> None:
-    if os.getenv("HARDHAT_CHAIN_ID") is not None:
+    if (
+        os.getenv("GENLAYER_CHAIN_ID") is not None
+        or os.getenv("HARDHAT_CHAIN_ID") is not None
+    ):
         return
 
     try:
@@ -47,12 +50,12 @@ def _ensure_dotenv_loaded_for_chain_id() -> None:
 
 def _parse_chain_id() -> int:
     _ensure_dotenv_loaded_for_chain_id()
-    raw = os.getenv("HARDHAT_CHAIN_ID", "61127")
+    raw = os.getenv("GENLAYER_CHAIN_ID") or os.getenv("HARDHAT_CHAIN_ID", "61127")
     try:
         return int(raw)
     except ValueError as exc:
         raise ValueError(
-            f"HARDHAT_CHAIN_ID must be decimal digits, got '{raw}'"
+            f"GENLAYER_CHAIN_ID must be decimal digits, got '{raw}'"
         ) from exc
 
 

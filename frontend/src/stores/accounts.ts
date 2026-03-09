@@ -92,7 +92,10 @@ export const useAccountsStore = defineStore('accountsStore', () => {
     );
   }
 
-  function connectExternalWallet(address: Address) {
+  function connectExternalWallet(
+    address: Address,
+    setAsCurrent: boolean = true,
+  ) {
     const externalAccount: AccountInfo = {
       type: 'external',
       address: getAddress(address) as Address,
@@ -107,7 +110,9 @@ export const useAccountsStore = defineStore('accountsStore', () => {
       accounts.value.push(externalAccount);
     }
 
-    setCurrentAccount(externalAccount);
+    if (setAsCurrent) {
+      setCurrentAccount(externalAccount);
+    }
   }
 
   function disconnectExternalWallet() {
