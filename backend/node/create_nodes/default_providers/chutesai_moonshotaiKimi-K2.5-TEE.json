@@ -4,7 +4,7 @@
   "model": "moonshotai/Kimi-K2.5-TEE",
   "config": {},
   "plugin_config": {
-    "api_key_env_var": "CHUTESAIAPIKEY",
+    "api_key_env_var": "CHUTESAI_API_KEY",
     "api_url": "https://llm.chutes.ai"
   }
 }

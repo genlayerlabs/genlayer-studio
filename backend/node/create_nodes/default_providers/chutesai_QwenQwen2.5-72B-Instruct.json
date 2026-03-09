@@ -4,7 +4,7 @@
   "model": "Qwen/Qwen2.5-72B-Instruct",
   "config": {},
   "plugin_config": {
-    "api_key_env_var": "CHUTESAIAPIKEY",
+    "api_key_env_var": "CHUTESAI_API_KEY",
     "api_url": "https://llm.chutes.ai"
   }
 }
