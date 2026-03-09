@@ -37,6 +37,7 @@ function TransactionsContent() {
 
   const fetchTransactions = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const params = new URLSearchParams();
       params.set('page', page.toString());
@@ -180,7 +181,7 @@ function TransactionsContent() {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
               <div className="text-sm text-muted-foreground">
-                Showing <span className="font-medium text-foreground">{((page - 1) * limit) + 1}</span> - <span className="font-medium text-foreground">{Math.min(page * limit, data.pagination.total)}</span> of <span className="font-medium text-foreground">{data.pagination.total}</span> transactions
+                Showing <span className="font-medium text-foreground">{data.pagination.total === 0 ? 0 : ((page - 1) * limit) + 1}</span> - <span className="font-medium text-foreground">{data.pagination.total === 0 ? 0 : Math.min(page * limit, data.pagination.total)}</span> of <span className="font-medium text-foreground">{data.pagination.total}</span> transactions
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-sm text-muted-foreground">Page size:</span>

@@ -31,12 +31,13 @@ function StateContent() {
   const [error, setError] = useState<string | null>(null);
   const [searchInput, setSearchInput] = useState(searchParams.get('search') || '');
 
-  const page = parseInt(searchParams.get('page') || '1');
-  const limit = parseInt(searchParams.get('limit') || '24');
+  const page = parseInt(searchParams.get('page') || '1', 10) || 1;
+  const limit = parseInt(searchParams.get('limit') || '24', 10) || 24;
   const search = searchParams.get('search') || '';
 
   const fetchStates = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const params = new URLSearchParams();
       params.set('page', page.toString());
@@ -161,7 +162,7 @@ function StateContent() {
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-4">
                 <div className="text-sm text-muted-foreground">
-                  Showing <span className="font-medium text-foreground">{((page - 1) * limit) + 1}</span> - <span className="font-medium text-foreground">{Math.min(page * limit, data.pagination.total)}</span> of <span className="font-medium text-foreground">{data.pagination.total}</span> contracts
+                  Showing <span className="font-medium text-foreground">{data.pagination.total === 0 ? 0 : ((page - 1) * limit) + 1}</span> - <span className="font-medium text-foreground">{data.pagination.total === 0 ? 0 : Math.min(page * limit, data.pagination.total)}</span> of <span className="font-medium text-foreground">{data.pagination.total}</span> contracts
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-sm text-muted-foreground">Page size:</span>

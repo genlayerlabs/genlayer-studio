@@ -57,7 +57,9 @@ export function ConsensusRound({ entry, index }: ConsensusRoundProps) {
   return (
     <Card className="overflow-hidden">
       <button
+        type="button"
         onClick={() => setExpanded(!expanded)}
+        aria-expanded={expanded}
         className="w-full px-4 py-3 flex items-center justify-between bg-muted/50 hover:bg-muted transition-colors"
       >
         <div className="flex items-center gap-3">

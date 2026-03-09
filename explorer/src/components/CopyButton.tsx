@@ -30,6 +30,7 @@ export function CopyButton({ text, className = '', iconSize = 'sm' }: CopyButton
           variant="ghost"
           size="icon"
           onClick={copy}
+          aria-label={copied ? 'Copied' : 'Copy to clipboard'}
           className={cn('h-6 w-6 text-muted-foreground hover:text-foreground', className)}
         >
           {copied ? (

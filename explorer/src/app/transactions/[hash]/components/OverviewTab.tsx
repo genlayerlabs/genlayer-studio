@@ -50,7 +50,7 @@ function ResultStatusBadge({ status }: { status: string }) {
 }
 
 function ResultPayload({ decoded }: { decoded: DecodedResult }) {
-  if (!decoded.payload) return null;
+  if (decoded.payload === null || decoded.payload === undefined) return null;
 
   // Calldata-decoded payload (has .readable)
   if (
@@ -68,7 +68,7 @@ function ResultPayload({ decoded }: { decoded: DecodedResult }) {
   }
 
   // String payload (error message from rollback/contract_error)
-  if (typeof decoded.payload === 'string' && decoded.payload) {
+  if (typeof decoded.payload === 'string') {
     return (
       <div className="bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 p-3 rounded-lg mt-2">
         <div className="text-xs text-red-600 dark:text-red-400 mb-1">

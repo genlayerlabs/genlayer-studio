@@ -112,9 +112,7 @@ def _serialize_provider(p: LLMProviderDBModel) -> dict:
 
 # Columns to defer when loading transaction lists (large JSONB blobs that are
 # only needed in the detail view).
-_HEAVY_TX_COLUMNS = (
-    defer(Transactions.contract_snapshot),
-)
+_HEAVY_TX_COLUMNS = (defer(Transactions.contract_snapshot),)
 
 
 # ---------------------------------------------------------------------------
@@ -124,12 +122,8 @@ _HEAVY_TX_COLUMNS = (
 
 def get_stats_counts(session: Session) -> dict:
     """Lightweight counts for the stats bar (no heavy queries)."""
-    total_tx = (
-        session.query(func.count()).select_from(Transactions).scalar() or 0
-    )
-    total_validators = (
-        session.query(func.count()).select_from(Validators).scalar() or 0
-    )
+    total_tx = session.query(func.count()).select_from(Transactions).scalar() or 0
+    total_validators = session.query(func.count()).select_from(Validators).scalar() or 0
     total_contracts = (
         session.query(func.count()).select_from(CurrentState).scalar() or 0
     )
@@ -154,9 +148,7 @@ def get_stats(session: Session) -> dict:
         total += cnt
 
     # Parallel lightweight counts
-    total_validators = (
-        session.query(func.count()).select_from(Validators).scalar() or 0
-    )
+    total_validators = session.query(func.count()).select_from(Validators).scalar() or 0
     total_contracts = (
         session.query(func.count()).select_from(CurrentState).scalar() or 0
     )
@@ -217,7 +209,19 @@ def get_all_transactions_paginated(
 ) -> dict:
     filters = []
     if status:
-        filters.append(Transactions.status == TransactionStatus(status))
+        try:
+            filters.append(Transactions.status == TransactionStatus(status))
+        except ValueError:
+            # Invalid status value — return empty results
+            return {
+                "transactions": [],
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total": 0,
+                    "totalPages": 0,
+                },
+            }
     if search:
         like = f"%{search}%"
         filters.append(
@@ -274,9 +278,7 @@ def get_all_transactions_paginated(
 # ---------------------------------------------------------------------------
 
 
-def get_transaction_with_relations(
-    session: Session, tx_hash: str
-) -> Optional[dict]:
+def get_transaction_with_relations(session: Session, tx_hash: str) -> Optional[dict]:
     tx = session.query(Transactions).filter(Transactions.hash == tx_hash).first()
     if not tx:
         return None
@@ -395,17 +397,13 @@ def _extract_contract_code(session: Session, state_id: str) -> Optional[str]:
         return None
     try:
         return base64.b64decode(code_b64).decode("utf-8")
-    except Exception:
+    except (ValueError, UnicodeDecodeError):
         # If it's already plain text, return as-is
         return code_b64 if isinstance(code_b64, str) else None
 
 
-def get_state_with_transactions(
-    session: Session, state_id: str
-) -> Optional[dict]:
-    state = (
-        session.query(CurrentState).filter(CurrentState.id == state_id).first()
-    )
+def get_state_with_transactions(session: Session, state_id: str) -> Optional[dict]:
+    state = session.query(CurrentState).filter(CurrentState.id == state_id).first()
     if not state:
         return None
 
@@ -427,9 +425,7 @@ def get_state_with_transactions(
 
     return {
         "state": _serialize_state(state),
-        "transactions": [
-            _serialize_tx(tx, include_snapshot=False) for tx in txs
-        ],
+        "transactions": [_serialize_tx(tx, include_snapshot=False) for tx in txs],
         "contract_code": contract_code,
     }
 

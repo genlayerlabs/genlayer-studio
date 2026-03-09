@@ -18,7 +18,7 @@ export function GlobalSearch() {
   };
 
   return (
-    <form onSubmit={handleSubmit} className="relative hidden sm:block">
+    <form onSubmit={handleSubmit} className="relative hidden sm:block" aria-label="Search transactions">
       <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
       <Input
         type="text"

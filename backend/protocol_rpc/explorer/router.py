@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from backend.database_handler.models import Transactions, TransactionStatus
+from backend.database_handler.models import Transactions, TransactionStatus, Validators
 from backend.protocol_rpc.dependencies import get_db_session
 
 from . import queries
@@ -43,9 +43,7 @@ def get_transactions(
     status: Optional[str] = None,
     search: Optional[str] = None,
 ):
-    return queries.get_all_transactions_paginated(
-        session, page, limit, status, search
-    )
+    return queries.get_all_transactions_paginated(session, page, limit, status, search)
 
 
 @explorer_router.get("/transactions/{tx_hash}")
@@ -77,7 +75,7 @@ def update_transaction(
         raise HTTPException(
             status_code=400,
             detail=f"Invalid status. Must be one of: {', '.join(valid)}",
-        )
+        ) from None
 
     # Simple status update (matches current explorer PATCH behaviour)
     result = session.execute(
@@ -93,9 +91,7 @@ def update_transaction(
     session.flush()
 
     # Return the updated transaction
-    tx = (
-        session.query(Transactions).filter(Transactions.hash == tx_hash).first()
-    )
+    tx = session.query(Transactions).filter(Transactions.hash == tx_hash).first()
     return {
         "success": True,
         "message": "Transaction status updated successfully",
@@ -121,8 +117,6 @@ def delete_transaction(
 
 @explorer_router.get("/validators")
 def get_validators(session: Annotated[Session, Depends(get_db_session)]):
-    from backend.database_handler.models import Validators
-
     validators = session.query(Validators).order_by(Validators.id).all()
     return {
         "validators": [queries._serialize_validator(v) for v in validators],

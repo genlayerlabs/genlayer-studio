@@ -109,7 +109,7 @@ table {
 }
 
 /* Focus styles */
-input:focus, select:focus, button:focus-visible {
+input:focus-visible, select:focus-visible, button:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px hsl(var(--ring));
 }
