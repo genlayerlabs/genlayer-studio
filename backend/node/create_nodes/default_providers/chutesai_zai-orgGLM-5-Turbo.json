@@ -1,0 +1,10 @@
+{
+  "provider": "chutesai",
+  "plugin": "openai-compatible",
+  "model": "zai-org/GLM-5-Turbo",
+  "config": {},
+  "plugin_config": {
+    "api_key_env_var": "CHUTESAIAPIKEY",
+    "api_url": "https://llm.chutes.ai"
+  }
+}
