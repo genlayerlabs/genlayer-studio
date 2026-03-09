@@ -77,28 +77,28 @@ services:
       traefik.http.routers.frontend.entrypoints: websecure
       traefik.http.routers.frontend.tls: true
 
-  # explorer:
-  #   build:
-  #     context: ./
-  #     dockerfile: ./docker/Dockerfile.explorer
-  #     target: ${EXPLORER_BUILD_TARGET:-final}
-  #   ports:
-  #     - "${EXPLORER_PORT:-3001}:3000"
-  #   volumes:
-  #     - ./explorer/src:/app/src
-  #   depends_on:
-  #     jsonrpc:
-  #       condition: service_started
-  #   environment:
-  #     - BACKEND_URL=http://jsonrpc:4000
-  #   restart: always
-  #   security_opt:
-  #     - "no-new-privileges=true"
-  #   logging:
-  #     driver: "json-file"
-  #     options:
-  #       max-size: "10m"
-  #       max-file: "3"
+  explorer:
+    build:
+      context: ./
+      dockerfile: ./docker/Dockerfile.explorer
+      target: ${EXPLORER_BUILD_TARGET:-final}
+    ports:
+      - "${EXPLORER_PORT:-3001}:3000"
+    volumes:
+      - ./explorer/src:/app/src
+    depends_on:
+      jsonrpc:
+        condition: service_started
+    environment:
+      - BACKEND_URL=http://jsonrpc:4000
+    restart: always
+    security_opt:
+      - "no-new-privileges=true"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   jsonrpc:
     build:
