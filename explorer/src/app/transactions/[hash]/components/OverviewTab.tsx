@@ -70,13 +70,13 @@ function ResultPayload({ decoded }: { decoded: DecodedResult }) {
   // String payload (error message from rollback/contract_error)
   if (typeof decoded.payload === 'string' && decoded.payload) {
     return (
-      <div className="bg-muted p-3 rounded-lg mt-2">
-        <div className="text-xs text-muted-foreground mb-1">
+      <div className="bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 p-3 rounded-lg mt-2">
+        <div className="text-xs text-red-600 dark:text-red-400 mb-1">
           {decoded.status === 'rollback' || decoded.status === 'contract_error'
             ? 'Error Message'
             : 'Payload'}
         </div>
-        <code className="text-sm text-destructive break-all">
+        <code className="text-sm text-red-800 dark:text-red-300 break-all">
           {decoded.payload}
         </code>
       </div>
