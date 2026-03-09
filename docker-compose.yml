@@ -88,7 +88,7 @@ services:
       - ./explorer/src:/app/src
     depends_on:
       jsonrpc:
-        condition: service_started
+        condition: service_healthy
     environment:
       - BACKEND_URL=http://jsonrpc:4000
     restart: always
