@@ -122,6 +122,24 @@ _HEAVY_TX_COLUMNS = (
 # ---------------------------------------------------------------------------
 
 
+def get_stats_counts(session: Session) -> dict:
+    """Lightweight counts for the stats bar (no heavy queries)."""
+    total_tx = (
+        session.query(func.count()).select_from(Transactions).scalar() or 0
+    )
+    total_validators = (
+        session.query(func.count()).select_from(Validators).scalar() or 0
+    )
+    total_contracts = (
+        session.query(func.count()).select_from(CurrentState).scalar() or 0
+    )
+    return {
+        "totalTransactions": total_tx,
+        "totalValidators": total_validators,
+        "totalContracts": total_contracts,
+    }
+
+
 def get_stats(session: Session) -> dict:
     # Status breakdown — summing gives total, so one fewer query.
     status_rows = (
@@ -143,20 +161,12 @@ def get_stats(session: Session) -> dict:
         session.query(func.count()).select_from(CurrentState).scalar() or 0
     )
 
+    # type 1 = DEPLOY_CONTRACT (see domain/types.py TransactionType)
     deploy_count = (
-        session.execute(
-            text(
-                """
-                SELECT COUNT(*) FROM transactions
-                WHERE type = 0
-                   OR (type IN (1, 2, 3) AND (
-                     contract_snapshot->>'contract_code' IS NOT NULL
-                     OR contract_snapshot->'states'->'finalized'->>'contract_code' IS NOT NULL
-                     OR contract_snapshot->'states'->'accepted'->>'contract_code' IS NOT NULL
-                   ))
-                """
-            )
-        ).scalar()
+        session.query(func.count())
+        .select_from(Transactions)
+        .filter(Transactions.type == 1)
+        .scalar()
         or 0
     )
 

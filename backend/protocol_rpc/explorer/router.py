@@ -25,6 +25,11 @@ def get_stats(session: Annotated[Session, Depends(get_db_session)]):
     return queries.get_stats(session)
 
 
+@explorer_router.get("/stats/counts")
+def get_stats_counts(session: Annotated[Session, Depends(get_db_session)]):
+    return queries.get_stats_counts(session)
+
+
 # ---------------------------------------------------------------------------
 # Transactions
 # ---------------------------------------------------------------------------
