@@ -187,7 +187,7 @@ async def lifespan(app: FastAPI):
     genvm_manager = await create_genvm_manager()
 
     # Wire up GenVM failure tracking callbacks
-    from backend.node.genvm.origin.base_host import set_genvm_callbacks
+    from backend.node.genvm.base import set_genvm_callbacks
 
     set_genvm_callbacks(
         on_success=reset_genvm_failures,
