@@ -1,46 +1,27 @@
 "use client";
 
+import { Badge } from '@/components/ui/badge';
+import { cn } from '@/lib/utils';
+
 interface TransactionTypeLabelProps {
   type: number | null;
 }
 
-export function TransactionTypeLabel({ type }: TransactionTypeLabelProps) {
-  // Transaction types from backend/domain/types.py:
-  // 0 = SEND
-  // 1 = DEPLOY_CONTRACT
-  // 2 = RUN_CONTRACT
-  // 3 = UPGRADE_CONTRACT
+const typeConfig: Record<number, { label: string; className: string }> = {
+  0: { label: 'Send', className: 'bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950 dark:text-blue-400 dark:border-blue-800' },
+  1: { label: 'Deploy', className: 'bg-orange-50 text-orange-700 border-orange-200 dark:bg-orange-950 dark:text-orange-400 dark:border-orange-800' },
+  2: { label: 'Call', className: 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950 dark:text-emerald-400 dark:border-emerald-800' },
+  3: { label: 'Upgrade', className: 'bg-violet-50 text-violet-700 border-violet-200 dark:bg-violet-950 dark:text-violet-400 dark:border-violet-800' },
+};
 
-  switch (type) {
-    case 0:
-      return (
-        <span className="bg-blue-50 text-blue-700 px-2.5 py-1 rounded-lg text-xs font-semibold">
-          Send
-        </span>
-      );
-    case 1:
-      return (
-        <span className="bg-orange-50 text-orange-700 px-2.5 py-1 rounded-lg text-xs font-semibold">
-          Deploy
-        </span>
-      );
-    case 2:
-      return (
-        <span className="bg-emerald-50 text-emerald-700 px-2.5 py-1 rounded-lg text-xs font-semibold">
-          Call
-        </span>
-      );
-    case 3:
-      return (
-        <span className="bg-violet-50 text-violet-700 px-2.5 py-1 rounded-lg text-xs font-semibold">
-          Upgrade
-        </span>
-      );
-    default:
-      return (
-        <span className="bg-slate-100 text-slate-600 px-2.5 py-1 rounded-lg text-xs font-semibold">
-          Unknown
-        </span>
-      );
-  }
+const defaultType = { label: 'Unknown', className: 'bg-muted text-muted-foreground' };
+
+export function TransactionTypeLabel({ type }: TransactionTypeLabelProps) {
+  const config = type !== null && typeConfig[type] ? typeConfig[type] : defaultType;
+
+  return (
+    <Badge variant="outline" className={cn(config.className)}>
+      {config.label}
+    </Badge>
+  );
 }

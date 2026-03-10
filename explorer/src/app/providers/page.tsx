@@ -3,6 +3,9 @@
 import { useEffect, useState } from 'react';
 import { JsonViewer } from '@/components/JsonViewer';
 import { LLMProvider } from '@/lib/types';
+import { Card, CardContent } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Loader2, Cpu, Star, Settings, Clock } from 'lucide-react';
 import { format } from 'date-fns';
 
@@ -31,21 +34,22 @@ export default function ProvidersPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-96">
-        <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
+        <Loader2 className="w-8 h-8 animate-spin text-primary" />
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="bg-red-50 border border-red-200 rounded-lg p-6 text-red-700">
-        <h2 className="font-bold mb-2">Error loading providers</h2>
-        <p>{error}</p>
-      </div>
+      <Card className="border-destructive">
+        <CardContent className="p-6">
+          <h2 className="font-bold mb-2 text-destructive">Error loading providers</h2>
+          <p className="text-destructive/80">{error}</p>
+        </CardContent>
+      </Card>
     );
   }
 
-  // Group providers by provider name
   const groupedProviders = providers.reduce((acc, provider) => {
     if (!acc[provider.provider]) {
       acc[provider.provider] = [];
@@ -57,155 +61,164 @@ export default function ProvidersPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-gray-800">LLM Providers</h1>
-        <p className="text-gray-500 mt-1">Configured language model providers and their settings</p>
+        <h1 className="text-2xl font-bold text-foreground">LLM Providers</h1>
+        <p className="text-muted-foreground mt-1">Configured language model providers and their settings</p>
       </div>
 
-      {/* Summary Stats */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="bg-white rounded-xl shadow-sm p-6">
-          <div className="flex items-center gap-3">
-            <div className="bg-blue-100 p-3 rounded-lg">
-              <Cpu className="w-6 h-6 text-blue-600" />
+        <Card>
+          <CardContent className="p-6">
+            <div className="flex items-center gap-3">
+              <div className="bg-blue-100 dark:bg-blue-950 p-3 rounded-lg">
+                <Cpu className="w-6 h-6 text-blue-600 dark:text-blue-400" />
+              </div>
+              <div>
+                <p className="text-muted-foreground text-sm">Total Providers</p>
+                <p className="text-2xl font-bold text-foreground">{providers.length}</p>
+              </div>
             </div>
-            <div>
-              <p className="text-gray-500 text-sm">Total Providers</p>
-              <p className="text-2xl font-bold">{providers.length}</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-6">
+            <div className="flex items-center gap-3">
+              <div className="bg-purple-100 dark:bg-purple-950 p-3 rounded-lg">
+                <Settings className="w-6 h-6 text-purple-600 dark:text-purple-400" />
+              </div>
+              <div>
+                <p className="text-muted-foreground text-sm">Provider Types</p>
+                <p className="text-2xl font-bold text-foreground">{Object.keys(groupedProviders).length}</p>
+              </div>
             </div>
-          </div>
-        </div>
-        <div className="bg-white rounded-xl shadow-sm p-6">
-          <div className="flex items-center gap-3">
-            <div className="bg-purple-100 p-3 rounded-lg">
-              <Settings className="w-6 h-6 text-purple-600" />
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-6">
+            <div className="flex items-center gap-3">
+              <div className="bg-yellow-100 dark:bg-yellow-950 p-3 rounded-lg">
+                <Star className="w-6 h-6 text-yellow-600 dark:text-yellow-400" />
+              </div>
+              <div>
+                <p className="text-muted-foreground text-sm">Default Providers</p>
+                <p className="text-2xl font-bold text-foreground">{providers.filter(p => p.is_default).length}</p>
+              </div>
             </div>
-            <div>
-              <p className="text-gray-500 text-sm">Provider Types</p>
-              <p className="text-2xl font-bold">{Object.keys(groupedProviders).length}</p>
-            </div>
-          </div>
-        </div>
-        <div className="bg-white rounded-xl shadow-sm p-6">
-          <div className="flex items-center gap-3">
-            <div className="bg-yellow-100 p-3 rounded-lg">
-              <Star className="w-6 h-6 text-yellow-600" />
-            </div>
-            <div>
-              <p className="text-gray-500 text-sm">Default Providers</p>
-              <p className="text-2xl font-bold">{providers.filter(p => p.is_default).length}</p>
-            </div>
-          </div>
-        </div>
+          </CardContent>
+        </Card>
       </div>
 
-      {/* Providers by Group */}
       {Object.entries(groupedProviders).map(([providerName, providerList]) => (
         <div key={providerName} className="space-y-3">
-          <h2 className="text-lg font-semibold text-gray-700 flex items-center gap-2">
+          <h2 className="text-lg font-semibold text-foreground flex items-center gap-2">
             <Cpu className="w-5 h-5" />
             {providerName}
-            <span className="text-sm font-normal text-gray-400">
+            <span className="text-sm font-normal text-muted-foreground">
               ({providerList.length} model{providerList.length !== 1 ? 's' : ''})
             </span>
           </h2>
 
           <div className="space-y-2">
             {providerList.map((provider) => (
-              <div key={provider.id} className="bg-white rounded-xl shadow-sm overflow-hidden">
-                <button
-                  onClick={() => setExpandedId(expandedId === provider.id ? null : provider.id)}
-                  className="w-full px-6 py-4 flex items-center justify-between hover:bg-gray-50 transition-colors"
-                >
-                  <div className="flex items-center gap-4">
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium text-gray-800">{provider.model}</span>
-                      {provider.is_default && (
-                        <span className="bg-yellow-100 text-yellow-800 text-xs px-2 py-0.5 rounded-full flex items-center gap-1">
-                          <Star className="w-3 h-3" />
-                          Default
-                        </span>
-                      )}
+              <Collapsible
+                key={provider.id}
+                open={expandedId === provider.id}
+                onOpenChange={(open) => setExpandedId(open ? provider.id : null)}
+              >
+                <Card>
+                  <CollapsibleTrigger className="w-full px-6 py-4 flex items-center justify-between hover:bg-accent transition-colors cursor-pointer">
+                    <div className="flex items-center gap-4">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-foreground">{provider.model}</span>
+                        {provider.is_default && (
+                          <Badge className="bg-yellow-100 dark:bg-yellow-900 text-yellow-800 dark:text-yellow-300 border-yellow-200 dark:border-yellow-800">
+                            <Star className="w-3 h-3 mr-1" />
+                            Default
+                          </Badge>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                  <div className="flex items-center gap-4 text-sm text-gray-500">
-                    <span className="bg-gray-100 px-2 py-1 rounded">{provider.plugin}</span>
-                    <Settings className={`w-5 h-5 text-gray-400 transition-transform ${expandedId === provider.id ? 'rotate-90' : ''}`} />
-                  </div>
-                </button>
+                    <div className="flex items-center gap-4 text-sm text-muted-foreground">
+                      <Badge variant="secondary">{provider.plugin}</Badge>
+                      <Settings className={`w-5 h-5 text-muted-foreground transition-transform ${expandedId === provider.id ? 'rotate-90' : ''}`} />
+                    </div>
+                  </CollapsibleTrigger>
 
-                {expandedId === provider.id && (
-                  <div className="px-6 pb-6 border-t border-gray-100">
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
-                      <div>
-                        <h4 className="font-medium text-gray-700 mb-2">Details</h4>
-                        <div className="space-y-2 text-sm">
-                          <div className="flex justify-between">
-                            <span className="text-gray-500">ID</span>
-                            <span className="font-mono">{provider.id}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span className="text-gray-500">Provider</span>
-                            <span>{provider.provider}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span className="text-gray-500">Model</span>
-                            <span>{provider.model}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span className="text-gray-500">Plugin</span>
-                            <span>{provider.plugin}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span className="text-gray-500">Default</span>
-                            <span>{provider.is_default ? 'Yes' : 'No'}</span>
-                          </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-gray-500">Created</span>
-                            <span className="flex items-center gap-1">
-                              <Clock className="w-3 h-3" />
-                              {format(new Date(provider.created_at), 'PPpp')}
-                            </span>
-                          </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-gray-500">Updated</span>
-                            <span className="flex items-center gap-1">
-                              <Clock className="w-3 h-3" />
-                              {format(new Date(provider.updated_at), 'PPpp')}
-                            </span>
+                  <CollapsibleContent>
+                    <div className="px-6 pb-6 border-t border-border">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
+                        <div>
+                          <h4 className="font-medium text-foreground mb-2">Details</h4>
+                          <div className="space-y-2 text-sm">
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">ID</span>
+                              <span className="font-mono">{provider.id}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Provider</span>
+                              <span>{provider.provider}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Model</span>
+                              <span>{provider.model}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Plugin</span>
+                              <span>{provider.plugin}</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Default</span>
+                              <span>{provider.is_default ? 'Yes' : 'No'}</span>
+                            </div>
+                            <div className="flex justify-between items-center">
+                              <span className="text-muted-foreground">Created</span>
+                              <span className="flex items-center gap-1">
+                                <Clock className="w-3 h-3" />
+                                {format(new Date(provider.created_at), 'PPpp')}
+                              </span>
+                            </div>
+                            <div className="flex justify-between items-center">
+                              <span className="text-muted-foreground">Updated</span>
+                              <span className="flex items-center gap-1">
+                                <Clock className="w-3 h-3" />
+                                {format(new Date(provider.updated_at), 'PPpp')}
+                              </span>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                      <div className="space-y-4">
-                        {provider.config && (typeof provider.config === 'object' ? Object.keys(provider.config).length > 0 : provider.config) && (
-                          <div>
-                            <h4 className="font-medium text-gray-700 mb-2">Config</h4>
-                            <div className="bg-gray-50 p-3 rounded-lg overflow-auto max-h-48">
-                              <JsonViewer data={provider.config} initialExpanded={false} />
+                        <div className="space-y-4">
+                          {provider.config && (typeof provider.config === 'object' ? Object.keys(provider.config).length > 0 : provider.config) && (
+                            <div>
+                              <h4 className="font-medium text-foreground mb-2">Config</h4>
+                              <div className="bg-muted p-3 rounded-lg overflow-auto max-h-48">
+                                <JsonViewer data={provider.config} initialExpanded={false} />
+                              </div>
                             </div>
-                          </div>
-                        )}
-                        {provider.plugin_config && Object.keys(provider.plugin_config).length > 0 && (
-                          <div>
-                            <h4 className="font-medium text-gray-700 mb-2">Plugin Config</h4>
-                            <div className="bg-gray-50 p-3 rounded-lg overflow-auto max-h-48">
-                              <JsonViewer data={provider.plugin_config} initialExpanded={false} />
+                          )}
+                          {provider.plugin_config && Object.keys(provider.plugin_config).length > 0 && (
+                            <div>
+                              <h4 className="font-medium text-foreground mb-2">Plugin Config</h4>
+                              <div className="bg-muted p-3 rounded-lg overflow-auto max-h-48">
+                                <JsonViewer data={provider.plugin_config} initialExpanded={false} />
+                              </div>
                             </div>
-                          </div>
-                        )}
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                )}
-              </div>
+                  </CollapsibleContent>
+                </Card>
+              </Collapsible>
             ))}
           </div>
         </div>
       ))}
 
       {providers.length === 0 && (
-        <div className="bg-white rounded-xl shadow-sm p-8 text-center text-gray-500">
-          No LLM providers configured
-        </div>
+        <Card>
+          <CardContent className="p-8 text-center text-muted-foreground">
+            No LLM providers configured
+          </CardContent>
+        </Card>
       )}
     </div>
   );

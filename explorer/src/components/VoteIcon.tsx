@@ -10,12 +10,12 @@ interface VoteIconProps {
 export function VoteIcon({ vote, className = 'w-4 h-4' }: VoteIconProps) {
   switch (vote) {
     case 'agree':
-      return <CheckCircle className={`${className} text-green-500`} />;
+      return <CheckCircle className={`${className} text-green-500 dark:text-green-400`} />;
     case 'disagree':
-      return <XCircle className={`${className} text-red-500`} />;
+      return <XCircle className={`${className} text-red-500 dark:text-red-400`} />;
     case 'timeout':
-      return <Clock className={`${className} text-yellow-500`} />;
+      return <Clock className={`${className} text-yellow-500 dark:text-yellow-400`} />;
     default:
-      return <AlertCircle className={`${className} text-gray-400`} />;
+      return <AlertCircle className={`${className} text-muted-foreground`} />;
   }
 }
