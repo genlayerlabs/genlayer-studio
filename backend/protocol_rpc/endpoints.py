@@ -36,6 +36,7 @@ from backend.node.create_nodes.create_nodes import (
 
 from backend.protocol_rpc.transactions_parser import TransactionParser
 from backend.errors.errors import InvalidAddressError, InvalidTransactionError
+from backend.database_handler.errors import ContractNotFoundError
 
 from backend.database_handler.transactions_processor import (
     TransactionAddressFilter,
@@ -808,7 +809,13 @@ async def get_contract_schema(
     msg_handler: IMessageHandler,
     contract_address: str,
 ) -> dict:
-    contract_snapshot = ContractSnapshot(contract_address, session)
+    try:
+        contract_snapshot = ContractSnapshot(contract_address, session)
+    except ContractNotFoundError:
+        raise NotFoundError(
+            message=f"Contract {contract_address} not found",
+            data={"contract_address": contract_address},
+        )
     code_b64 = contract_snapshot.extract_deployed_code_b64()
     if not code_b64:
         raise InvalidAddressError(
@@ -875,7 +882,13 @@ async def get_contract_schema_for_code(
 
 
 def get_contract_code(session: Session, contract_address: str) -> str:
-    contract_snapshot = ContractSnapshot(contract_address, session)
+    try:
+        contract_snapshot = ContractSnapshot(contract_address, session)
+    except ContractNotFoundError:
+        raise NotFoundError(
+            message=f"Contract {contract_address} not found",
+            data={"contract_address": contract_address},
+        )
     code_b64 = contract_snapshot.extract_deployed_code_b64()
     if not code_b64:
         raise InvalidAddressError(
@@ -1096,8 +1109,15 @@ async def _gen_call_with_validator(
         raise JSONRPCError(f"No validators exist to execute the gen_call")
 
     # Create validator node
+    try:
+        contract_snapshot = ContractSnapshot(to_address, session)
+    except ContractNotFoundError:
+        raise NotFoundError(
+            message=f"Contract {to_address} not found",
+            data={"contract_address": to_address},
+        )
     node = Node(
-        contract_snapshot=ContractSnapshot(to_address, session),
+        contract_snapshot=contract_snapshot,
         contract_snapshot_factory=partial(ContractSnapshot, session=session),
         validator_mode=ExecutionMode.LEADER,
         validator=validator,
@@ -1307,8 +1327,15 @@ async def eth_call(
                 data={"reason": "no_validators"},
             )
         as_validator = snapshot.nodes[0].validator
+        try:
+            target_contract_snapshot = ContractSnapshot(to_address, session)
+        except ContractNotFoundError:
+            raise NotFoundError(
+                message=f"Contract {to_address} not found",
+                data={"contract_address": to_address},
+            )
         node = Node(  # Mock node just to get the data from the GenVM
-            contract_snapshot=ContractSnapshot(to_address, session),
+            contract_snapshot=target_contract_snapshot,
             contract_snapshot_factory=partial(ContractSnapshot, session=session),
             validator_mode=ExecutionMode.LEADER,
             validator=as_validator,
@@ -1695,8 +1722,9 @@ def get_block_by_hash(
 
 
 def get_contract(consensus_service: ConsensusService, contract_name: str) -> dict:
-    """
-    Get contract instance by name
+    """Deprecated: consensus contract info is now provided by genlayer-js chain config.
+
+    Get contract instance by name.
 
     Args:
         consensus_service: The consensus service instance

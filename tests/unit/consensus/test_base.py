@@ -4,6 +4,7 @@ from backend.database_handler.models import TransactionStatus
 from backend.node.types import Vote
 from backend.consensus.base import DEFAULT_VALIDATORS_COUNT, ConsensusRound
 from tests.unit.consensus.test_helpers import (
+    DEFAULT_FINALITY_WINDOW,
     TransactionsProcessorMock,
     ContractDB,
     transaction_to_dict,
@@ -1606,6 +1607,13 @@ async def test_leader_appeal(consensus_algorithm):
         assert len(created_nodes) >= nb_created_nodes
 
         check_contract_state_with_timeout(contract_db, transaction.to_address, {}, {})
+
+        # Reduce finality window for the final appeal so that the
+        # UNDETERMINED -> FINALIZED transition does not have to wait the
+        # full 60 seconds.  All intermediate UNDETERMINED states that
+        # needed protection from premature finalization have already been
+        # asserted above.
+        consensus_algorithm.finality_window_time = DEFAULT_FINALITY_WINDOW
 
         appeal(transaction, transactions_processor)
         assert_transaction_status_match(

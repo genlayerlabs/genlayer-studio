@@ -65,8 +65,9 @@ class ConsensusService:
         return to_hex(keccak(to_bytes(hexstr=raw_transaction)))
 
     def load_contract(self, contract_name: str):
-        """
-        Load a contract from deployment data
+        """Deprecated: consensus contract info is now provided by genlayer-js chain config.
+
+        Load a contract from deployment data.
 
         Args:
             contract_name (str): Name of the contract to load

@@ -1,6 +1,7 @@
 import { Transaction } from './types';
 import { isNewConsensusFormat } from './consensusUtils';
 import { formatDuration } from './formatters';
+import { decodeResult, type DecodedResult } from './resultDecoder';
 
 /**
  * Get the time from PENDING to ACCEPTED for a transaction (new consensus format only)
@@ -41,23 +42,55 @@ export function getTimeToFinalized(tx: Transaction): string | null {
 }
 
 /**
- * Get the execution result from a transaction's consensus data
+ * Get the execution result from a transaction's consensus data,
+ * including decoded result payload and equivalence principle outputs.
  */
 export function getExecutionResult(tx: Transaction): {
   executionResult?: string;
   genvmResult?: { stdout?: string; stderr?: string };
+  decodedResult?: DecodedResult;
+  eqOutputs?: Record<string, DecodedResult>;
 } | null {
   const leaderReceipt = (tx.consensus_data as {
     leader_receipt?: Array<{
       execution_result?: string;
       genvm_result?: { stdout?: string; stderr?: string };
+      result?: unknown;
+      eq_outputs?: Record<string, unknown>;
     }>;
   })?.leader_receipt;
 
   if (!leaderReceipt?.[0]) return null;
 
+  const receipt = leaderReceipt[0];
+
+  // Decode the result payload (base64 → status + human-readable payload)
+  let decodedResult: DecodedResult | undefined;
+  if (receipt.result !== undefined && receipt.result !== null) {
+    try {
+      decodedResult = decodeResult(receipt.result);
+    } catch {
+      // Silently ignore decode failures
+    }
+  }
+
+  // Decode equivalence principle outputs
+  let eqOutputs: Record<string, DecodedResult> | undefined;
+  if (receipt.eq_outputs && typeof receipt.eq_outputs === 'object') {
+    eqOutputs = {};
+    for (const [key, value] of Object.entries(receipt.eq_outputs)) {
+      try {
+        eqOutputs[key] = decodeResult(value);
+      } catch {
+        eqOutputs[key] = { raw: value, status: '<unknown>' };
+      }
+    }
+  }
+
   return {
-    executionResult: leaderReceipt[0].execution_result,
-    genvmResult: leaderReceipt[0].genvm_result,
+    executionResult: receipt.execution_result,
+    genvmResult: receipt.genvm_result,
+    decodedResult,
+    eqOutputs,
   };
 }
