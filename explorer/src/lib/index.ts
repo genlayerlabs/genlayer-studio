@@ -5,7 +5,5 @@ export * from './types';
 export * from './formatters';
 export * from './consensusUtils';
 export * from './transactionUtils';
+export * from './resultDecoder';
 export * from './constants';
-
-// Database
-export { default as pool } from './db';

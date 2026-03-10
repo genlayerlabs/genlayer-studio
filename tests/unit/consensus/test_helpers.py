@@ -457,7 +457,6 @@ class ContractSnapshotMock:
             contract_account = contract_db.get_contract(contract_address)
             self.contract_address = contract_address
             self.contract_data = contract_account["data"]
-            self.contract_code = self.contract_data["code"]
             self.states = self.contract_data["state"]
             self.contract_db = contract_db
 
@@ -467,7 +466,6 @@ class ContractSnapshotMock:
         memo[id(self)] = new_instance
         new_instance.contract_address = self.contract_address
         new_instance.contract_data = deepcopy(self.contract_data, memo)
-        new_instance.contract_code = self.contract_code
         new_instance.states = deepcopy(self.states, memo)
         new_instance.contract_db = (
             None  # threading event that cannot be copied but not used by nodes
@@ -479,7 +477,6 @@ class ContractSnapshotMock:
             "contract_address": (
                 self.contract_address if self.contract_address else None
             ),
-            "contract_code": self.contract_code if self.contract_code else None,
             "states": self.states if self.states else {"accepted": {}, "finalized": {}},
         }
 
@@ -488,7 +485,6 @@ class ContractSnapshotMock:
         if input:
             instance = cls.__new__(cls)
             instance.contract_address = input.get("contract_address", None)
-            instance.contract_code = input.get("contract_code", None)
             instance.states = input.get("states", {"accepted": {}, "finalized": {}})
             instance.contract_db = None
             return instance
@@ -524,7 +520,6 @@ class ContractProcessorMock:
             ),
         }
         new_contract_data = {
-            "code": contract["data"]["code"],
             "state": new_state,
         }
 
@@ -659,16 +654,6 @@ def node_factory(
         mock.exec_transaction = AsyncMock(side_effect=mock_exec_transaction)
         return mock
     else:
-        # Use real node with actual LLM calls (slow, requires API keys)
-        # This would require proper validator setup with real LLM providers
-        # For now, we'll still use mocks but log that real mode was requested
-        print(
-            f"[WARNING] Real LLM mode requested but not fully implemented in unit tests"
-        )
-        print(
-            f"[WARNING] Using mocked responses. For real LLMs, use integration tests."
-        )
-
         # Fall back to mock for now
         mock = Mock(Node)
         mock.validator_mode = mode

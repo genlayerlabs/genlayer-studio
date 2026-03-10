@@ -318,7 +318,6 @@ def decide_accepted(
     tx_type_deploy: bool,
     accepted_contract_state: dict | None,
     contract_address: str | None,
-    contract_code: Any | None,
     code_slot_b64: str | None,
     to_address: str,
     leader_node_config: dict,
@@ -419,7 +418,6 @@ def decide_accepted(
                                 )
                             },
                         },
-                        "code": contract_code,
                     },
                 }
                 pre_effects.append(RegisterContractEffect(contract_data=new_contract))

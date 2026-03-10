@@ -215,19 +215,10 @@ def _redact_contract_for_log(contract_dict: dict) -> dict:
         # In case deepcopy fails for any reason, avoid breaking logging
         return {"error": "failed_to_copy_contract_for_log"}
 
-    # Remove data.state and truncate data.code if present
+    # Remove data.state if present
     data = redacted.get("data")
     if isinstance(data, dict):
-        # Remove state entirely
         data.pop("state", None)
-
-        # Truncate code to first 100 chars with indicator
-        if "code" in data and isinstance(data["code"], str):
-            code_len = len(data["code"])
-            if code_len > 100:
-                data["code"] = (
-                    f"{data['code'][:100]}... [truncated, total length: {code_len}]"
-                )
 
     return redacted
 
@@ -2164,9 +2155,6 @@ class AcceptedState(TransactionState):
             accepted_contract_state=accepted_contract_state,
             contract_address=(
                 context.transaction.data.get("contract_address") if is_deploy else None
-            ),
-            contract_code=(
-                context.transaction.data.get("contract_code") if is_deploy else None
             ),
             code_slot_b64=(
                 base64.b64encode(get_code_slot()).decode("ascii") if is_deploy else None

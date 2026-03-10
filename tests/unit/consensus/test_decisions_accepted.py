@@ -70,7 +70,6 @@ def _base_accepted_kwargs(**overrides):
         tx_type_deploy=False,
         accepted_contract_state={"slot1": b"data"},
         contract_address=None,
-        contract_code=None,
         code_slot_b64=None,
         to_address="0xcontract",
         leader_node_config={"address": "0xleader"},
@@ -170,7 +169,6 @@ class TestDecideAcceptedDeploy:
         base = _base_accepted_kwargs(
             tx_type_deploy=True,
             contract_address="0xnewcontract",
-            contract_code="print('hello')",
             code_slot_b64="Y29kZQ==",
             accepted_contract_state={"Y29kZQ==": b"code_data", "other": b"val"},
         )
@@ -182,7 +180,7 @@ class TestDecideAcceptedDeploy:
         e = _find_effect(pre, RegisterContractEffect)
         assert e is not None
         assert e.contract_data["id"] == "0xnewcontract"
-        assert "code" in e.contract_data["data"]
+        assert "state" in e.contract_data["data"]
 
     def test_contract_data_has_correct_state_structure(self):
         pre, _, _, _ = decide_accepted(**self._deploy_kwargs())

@@ -22,11 +22,12 @@ function readDotenvVariable(key) {
 
 function getChainId() {
   const raw =
-    process.env.HARDHAT_CHAIN_ID ?? readDotenvVariable("HARDHAT_CHAIN_ID") ?? "61127";
+    process.env.GENLAYER_CHAIN_ID ?? process.env.HARDHAT_CHAIN_ID ??
+    readDotenvVariable("GENLAYER_CHAIN_ID") ?? readDotenvVariable("HARDHAT_CHAIN_ID") ?? "61127";
   const chainId = Number.parseInt(raw, 10);
   if (Number.isNaN(chainId)) {
     throw new Error(
-      `Invalid HARDHAT_CHAIN_ID '${raw}'. Expected a base-10 integer.`
+      `Invalid GENLAYER_CHAIN_ID '${raw}'. Expected a base-10 integer.`
     );
   }
   return chainId;
