@@ -166,6 +166,7 @@ def decide_leader_timeout(
         effects.append(SetTimestampAwaitingFinalizationEffect(tx_hash=tx_hash))
         effects.append(ResetAppealProcessingTimeEffect(tx_hash=tx_hash))
         effects.append(SetTimestampAppealEffect(tx_hash=tx_hash, value=None))
+        effects.append(SetAppealUndeterminedEffect(tx_hash=tx_hash, value=False))
     elif appeal_leader_timeout:
         consensus_round = ConsensusRound.LEADER_TIMEOUT_APPEAL_FAILED
         effects.append(SetAppealProcessingTimeEffect(tx_hash=tx_hash))

@@ -279,6 +279,14 @@ class TestDecideLeaderTimeout:
         assert ts is not None
         assert ts.value is None
 
+    def test_appeal_undetermined_clears_appeal_undetermined(self):
+        effects, _ = decide_leader_timeout(
+            **self._base_kwargs(appeal_undetermined=True)
+        )
+        au = _find_effect(effects, SetAppealUndeterminedEffect)
+        assert au is not None
+        assert au.value is False
+
     # ── appeal_leader_timeout path ──
 
     def test_appeal_leader_timeout_round(self):
