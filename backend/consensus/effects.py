@@ -1,14 +1,25 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 
 @dataclass(frozen=True)
 class Effect:
-    """Base class for all consensus side effects."""
+    """Base class for all consensus side effects.
 
-    pass
+    Subclasses use ``frozen=True`` to prevent attribute rebinding.  To also
+    prevent *nested* mutation of ``dict`` / ``list`` fields, the base
+    ``__post_init__`` defensively copies every mutable container so the
+    caller's original reference is no longer shared with the effect.
+    """
+
+    def __post_init__(self):
+        for f in fields(self):
+            val = getattr(self, f.name)
+            if isinstance(val, (dict, list)):
+                object.__setattr__(self, f.name, deepcopy(val))
 
 
 # ── Timestamp Effects ──────────────────────────────────────────────

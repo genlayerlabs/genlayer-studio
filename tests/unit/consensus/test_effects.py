@@ -180,3 +180,31 @@ class TestEffectEquality:
         e1 = AddTimestampEffect(tx_hash="0x1", state_name="PENDING")
         e2 = ResetRotationCountEffect(tx_hash="0x1")
         assert e1 != e2
+
+
+class TestEffectDeepImmutability:
+    """Verify that mutable containers are defensively copied on construction."""
+
+    def test_dict_field_is_copied(self):
+        original = {"key": "value"}
+        e = SetContractSnapshotEffect(tx_hash="0x1", snapshot_dict=original)
+        original["key"] = "mutated"
+        assert e.snapshot_dict == {
+            "key": "value"
+        }, "Effect must not share caller's dict"
+
+    def test_nested_dict_is_deep_copied(self):
+        original = {"outer": {"inner": 1}}
+        e = RegisterContractEffect(contract_data=original)
+        original["outer"]["inner"] = 999
+        assert e.contract_data["outer"]["inner"] == 1
+
+    def test_list_field_is_copied(self):
+        original = [{"address": "0xval"}]
+        e = SetLeaderTimeoutValidatorsEffect(tx_hash="0x1", validators=original)
+        original.append({"address": "0xnew"})
+        assert len(e.validators) == 1, "Effect must not share caller's list"
+
+    def test_none_dict_field_is_not_affected(self):
+        e = SetContractSnapshotEffect(tx_hash="0x1", snapshot_dict=None)
+        assert e.snapshot_dict is None

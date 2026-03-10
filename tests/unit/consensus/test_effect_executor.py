@@ -354,7 +354,7 @@ class TestMiscEffects:
             [SetLeaderTimeoutValidatorsEffect(tx_hash="0x1", validators=validators)]
         )
         ctx.transactions_processor.set_leader_timeout_validators.assert_called_once_with(
-            "0x1", validators
+            "0x1", [{"address": "0xval1"}]
         )
 
     async def test_reset_rotation_count(self):
