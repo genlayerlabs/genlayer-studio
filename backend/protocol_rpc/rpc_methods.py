@@ -296,6 +296,7 @@ def get_consensus_contract(
     contract_name: str,
     consensus_service=Depends(get_consensus_service),
 ) -> dict:
+    """Deprecated: consensus contract info is now provided by genlayer-js chain config."""
     return impl.get_contract(consensus_service, contract_name)
 
 
@@ -339,12 +340,12 @@ def lint_contract(
 @rpc.method("gen_getContractSchema", log_policy=LogPolicy.debug())
 async def get_contract_schema(
     contract_address: str,
-    accounts_manager: AccountsManager = Depends(get_accounts_manager),
+    session: Session = Depends(get_db_session),
     msg_handler=Depends(get_message_handler),
     genvm_manager=Depends(get_genvm_manager),
 ) -> dict:
     return await impl.get_contract_schema(
-        accounts_manager=accounts_manager,
+        session=session,
         genvm_manager=genvm_manager,
         msg_handler=msg_handler,
         contract_address=contract_address,

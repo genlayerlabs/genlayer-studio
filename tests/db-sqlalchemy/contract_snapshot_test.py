@@ -8,7 +8,6 @@ from backend.database_handler.contract_processor import ContractProcessor
 def test_contract_snapshot_with_contract(session: Session):
     # Pre-load contract
     contract_address = "0x123456"
-    contract_code = "code"
     contract_state = {
         "accepted": {
             "aaa": "bbb",
@@ -19,9 +18,7 @@ def test_contract_snapshot_with_contract(session: Session):
             "ccc": "ddd",
         },
     }
-    contract = CurrentState(
-        id=contract_address, data={"code": contract_code, "state": contract_state}
-    )
+    contract = CurrentState(id=contract_address, data={"state": contract_state})
 
     session.add(contract)
     session.commit()
@@ -31,7 +28,6 @@ def test_contract_snapshot_with_contract(session: Session):
     contract_processor = ContractProcessor(session)
 
     assert contract_snapshot.contract_address == contract_address
-    assert contract_snapshot.contract_code == contract_code
 
     assert contract_snapshot.states == contract_state
 
@@ -51,7 +47,7 @@ def test_contract_snapshot_with_contract(session: Session):
     actual_contract = session.query(CurrentState).filter_by(id=contract_address).one()
 
     assert actual_contract.data["state"] == new_state
-    assert actual_contract.data["code"] == contract_code
+    assert "code" not in actual_contract.data
 
     new_state = {
         "accepted": {
@@ -69,16 +65,13 @@ def test_contract_snapshot_with_contract(session: Session):
     actual_contract = session.query(CurrentState).filter_by(id=contract_address).one()
 
     assert actual_contract.data["state"] == new_state
-    assert actual_contract.data["code"] == contract_code
+    assert "code" not in actual_contract.data
 
 
 def test_contract_snapshot_without_contract(session: Session):
     contract_address = "0x123456"
-    contract_code = "code"
     contract_state = "state"
-    contract = CurrentState(
-        id=contract_address, data={"code": contract_code, "state": contract_state}
-    )
+    contract = CurrentState(id=contract_address, data={"state": contract_state})
     session.add(contract)
 
     contract_snapshot = ContractSnapshot(None, session)
@@ -86,11 +79,9 @@ def test_contract_snapshot_without_contract(session: Session):
 
     assert "contract_address" not in contract_snapshot.__dict__
     assert "contract_data" not in contract_snapshot.__dict__
-    assert "contract_code" not in contract_snapshot.__dict__
     assert "states" not in contract_snapshot.__dict__
 
     updated_data = {
-        "code": "new_code",
         "state": {"accepted": "new_acc_state", "finalized": "new_fin_state"},
     }
     updated_contract = {"id": contract_address, "data": updated_data}

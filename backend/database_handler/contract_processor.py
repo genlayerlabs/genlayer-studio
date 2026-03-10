@@ -51,7 +51,6 @@ class ContractProcessor:
                 ),
             }
             new_contract_data = {
-                "code": contract.data["code"],
                 "state": new_state,
             }
 

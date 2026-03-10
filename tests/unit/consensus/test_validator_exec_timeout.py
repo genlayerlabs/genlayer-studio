@@ -78,6 +78,7 @@ async def test_committing_times_out_hung_validator_without_blocking(monkeypatch)
         transactions_processor=tx_processor,
         msg_handler=_MessageHandler(),
         consensus_service=consensus_service,
+        contract_processor=MagicMock(),
         node_factory=node_factory,
         contract_snapshot=MagicMock(),
         contract_snapshot_factory=MagicMock(),
