@@ -1,0 +1,10 @@
+{
+  "provider": "chutesai",
+  "plugin": "openai-compatible",
+  "model": "deepseek-ai/DeepSeek-V3.1-TEE",
+  "config": {},
+  "plugin_config": {
+    "api_key_env_var": "CHUTESAI_API_KEY",
+    "api_url": "https://llm.chutes.ai"
+  }
+}

@@ -201,12 +201,26 @@ function extractDefaults(
   return defaults;
 }
 
+function cloneRecord(value: Record<string, any> | undefined): Record<string, any> {
+  return JSON.parse(JSON.stringify(value ?? {}));
+}
+
+const findMatchingPreset = () =>
+  nodeStore.nodeProviders.find(
+    (preset) =>
+      preset.provider === newProviderData.provider &&
+      preset.model === newProviderData.model &&
+      preset.plugin === newProviderData.plugin,
+  );
+
 const pluginConfigProperties = ref<Record<string, any>>({});
 const configProperties = ref<Record<string, any>>({});
 
 const checkRules = () => {
   isPluginLocked.value = false;
   modelOptions.value = [];
+  pluginConfigProperties.value = {};
+  configProperties.value = {};
 
   schema.allOf.forEach((rule) => {
     // Provider rules
@@ -240,7 +254,9 @@ const checkRules = () => {
         }
       }
     }
+  });
 
+  schema.allOf.forEach((rule) => {
     // Plugin rules
     if (rule.if?.properties?.plugin?.const === newProviderData.plugin) {
       pluginConfigProperties.value =
@@ -259,6 +275,15 @@ const checkRules = () => {
       }
     }
   });
+
+  if (isCreateMode.value) {
+    const matchingPreset = findMatchingPreset();
+
+    if (matchingPreset) {
+      newProviderData.config = cloneRecord(matchingPreset.config);
+      newProviderData.plugin_config = cloneRecord(matchingPreset.plugin_config);
+    }
+  }
 };
 
 const toggleCustomProvider = () => {
