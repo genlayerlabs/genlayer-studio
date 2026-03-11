@@ -21,6 +21,7 @@ export function GlobalSearch() {
   const [loading, setLoading] = useState(false);
   const router = useRouter();
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Cmd+K / Ctrl+K listener
@@ -58,12 +59,17 @@ export function GlobalSearch() {
       return;
     }
 
+    // Cancel any in-flight request
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     setLoading(true);
     try {
       const encoded = encodeURIComponent(q.trim());
       const [txRes, stateRes] = await Promise.all([
-        fetch(`/api/transactions?search=${encoded}&limit=5`),
-        fetch(`/api/state?search=${encoded}&limit=5`),
+        fetch(`/api/transactions?search=${encoded}&limit=5`, { signal: controller.signal }),
+        fetch(`/api/state?search=${encoded}&limit=5`, { signal: controller.signal }),
       ]);
 
       const txData = txRes.ok ? await txRes.json() : { transactions: [] };
@@ -73,7 +79,8 @@ export function GlobalSearch() {
         transactions: txData.transactions || [],
         states: stateData.states || [],
       });
-    } catch {
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
       setResults({ transactions: [], states: [] });
     } finally {
       setLoading(false);

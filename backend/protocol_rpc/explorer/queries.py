@@ -125,10 +125,22 @@ _HEAVY_TX_COLUMNS = (defer(Transactions.contract_snapshot),)
 
 
 def _count_deployed_contracts(session: Session) -> int:
-    """Count addresses that have a deploy transaction (type 1) targeting them."""
+    """Count contract states that actually have a deploy transaction."""
+    has_deploy = (
+        session.query(func.count())
+        .select_from(Transactions)
+        .filter(
+            Transactions.to_address == CurrentState.id,
+            Transactions.type == 1,
+        )
+        .correlate(CurrentState)
+        .scalar_subquery()
+        > 0
+    )
     return (
-        session.query(func.count(func.distinct(Transactions.to_address)))
-        .filter(Transactions.type == 1, Transactions.to_address.isnot(None))
+        session.query(func.count())
+        .select_from(CurrentState)
+        .filter(has_deploy)
         .scalar()
         or 0
     )

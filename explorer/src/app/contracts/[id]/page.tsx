@@ -68,7 +68,7 @@ export default function StateDetailPage({ params }: { params: Promise<{ id: stri
         <Button variant="ghost" size="sm" asChild>
           <Link href="/contracts" className="flex items-center gap-2">
             <ArrowLeft className="w-4 h-4" />
-            Back to states
+            Back to contracts
           </Link>
         </Button>
         <Card className="border-destructive">
@@ -91,7 +91,7 @@ export default function StateDetailPage({ params }: { params: Promise<{ id: stri
         <Button variant="ghost" size="sm" asChild className="mb-4">
           <Link href="/contracts" className="flex items-center gap-2">
             <ArrowLeft className="w-4 h-4" />
-            Back to states
+            Back to contracts
           </Link>
         </Button>
         <div className="flex items-start justify-between">

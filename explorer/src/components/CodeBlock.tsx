@@ -33,6 +33,7 @@ export function CodeBlock({ code, language = 'python' }: CodeBlockProps) {
 
   if (html) {
     return (
+      // biome-ignore lint/security/noDangerouslySetInnerHtml: Shiki output is trusted
       <div
         className="overflow-auto max-h-[600px] rounded-lg text-sm [&_pre]:p-4 [&_pre]:m-0"
         dangerouslySetInnerHTML={{ __html: html }}
@@ -42,7 +43,7 @@ export function CodeBlock({ code, language = 'python' }: CodeBlockProps) {
 
   // Loading / fallback: plain pre with pulse animation
   return (
-    <div className="bg-zinc-950 text-zinc-100 rounded-lg overflow-auto max-h-[600px]">
+    <div className="bg-muted text-foreground rounded-lg overflow-auto max-h-[600px]">
       <pre className="text-sm font-mono whitespace-pre p-4 animate-pulse">{code}</pre>
     </div>
   );

@@ -55,11 +55,20 @@ export function ConsensusJourney({ transaction: tx }: ConsensusJourneyProps) {
     // Try to extract timestamps from new consensus format
     if (tx.consensus_history && isNewConsensusFormat(tx.consensus_history)) {
       const history = tx.consensus_history;
-      // Check current_monitoring first, then fall back to first round
-      const monitoring =
-        Object.keys(history.current_monitoring).length > 0
-          ? history.current_monitoring
-          : history.consensus_results[0]?.monitoring;
+      // Check current_monitoring first, then fall back to most recent round
+      let monitoring = Object.keys(history.current_monitoring).length > 0
+        ? history.current_monitoring
+        : undefined;
+      if (!monitoring && history.consensus_results.length > 0) {
+        // Use the last round with a non-empty monitoring object
+        for (let i = history.consensus_results.length - 1; i >= 0; i--) {
+          const m = history.consensus_results[i]?.monitoring;
+          if (m && Object.keys(m).length > 0) {
+            monitoring = m;
+            break;
+          }
+        }
+      }
 
       if (monitoring) {
         for (const step of JOURNEY_STEPS) {
@@ -92,8 +101,10 @@ export function ConsensusJourney({ transaction: tx }: ConsensusJourneyProps) {
           const timestamp = timestamps[step];
 
           const circle = (
-            <div
-              className={`relative w-8 h-8 rounded-full flex items-center justify-center shrink-0 transition-colors ${
+            <button
+              type="button"
+              aria-label={`${phase.label}${timestamp ? ` — ${formatTimestamp(timestamp)}` : ''}`}
+              className={`relative w-8 h-8 rounded-full flex items-center justify-center shrink-0 transition-colors cursor-default ${
                 isFailedStep
                   ? 'bg-red-500 text-white'
                   : isReached
@@ -110,7 +121,7 @@ export function ConsensusJourney({ transaction: tx }: ConsensusJourneyProps) {
               ) : (
                 <span className="text-[10px] font-bold">{idx + 1}</span>
               )}
-            </div>
+            </button>
           );
 
           return (

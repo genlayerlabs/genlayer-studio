@@ -104,5 +104,10 @@ export function DateTimePicker({ value, onChange, placeholder = 'Pick date & tim
 
 function formatToParam(d: Date): string {
   const pad = (n: number) => n.toString().padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const offset = -d.getTimezoneOffset();
+  const sign = offset >= 0 ? '+' : '-';
+  const absOff = Math.abs(offset);
+  const tzH = pad(Math.floor(absOff / 60));
+  const tzM = pad(absOff % 60);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}${sign}${tzH}:${tzM}`;
 }
