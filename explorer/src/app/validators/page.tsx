@@ -7,6 +7,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Loader2, Users, Cpu, Coins, Settings } from 'lucide-react';
 import { format } from 'date-fns';
+import { formatGenValue } from '@/lib/formatters';
 
 export default function ValidatorsPage() {
   const [validators, setValidators] = useState<Validator[]>([]);
@@ -80,7 +81,7 @@ export default function ValidatorsPage() {
               </div>
               <div>
                 <p className="text-muted-foreground text-sm">Total Stake</p>
-                <p className="text-2xl font-bold text-foreground">{totalStake}</p>
+                <p className="text-2xl font-bold text-foreground">{formatGenValue(totalStake)}</p>
               </div>
             </div>
           </CardContent>
@@ -129,7 +130,7 @@ export default function ValidatorsPage() {
                 <div className="flex items-center gap-6">
                   <div className="text-right">
                     <div className="text-sm text-muted-foreground">Stake</div>
-                    <div className="font-medium text-foreground">{validator.stake}</div>
+                    <div className="font-medium text-foreground">{formatGenValue(validator.stake)}</div>
                   </div>
                   <div className="text-right">
                     <div className="text-sm text-muted-foreground">Plugin</div>
@@ -163,7 +164,7 @@ export default function ValidatorsPage() {
                         </div>
                         <div className="flex justify-between">
                           <span className="text-muted-foreground">Stake</span>
-                          <span>{validator.stake}</span>
+                          <span>{formatGenValue(validator.stake)}</span>
                         </div>
                         {validator.address && (
                           <div className="flex justify-between">

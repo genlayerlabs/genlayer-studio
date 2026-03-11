@@ -1,6 +1,6 @@
 """FastAPI router for the explorer API."""
 
-from typing import Annotated, Optional
+from typing import Annotated, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -42,8 +42,12 @@ def get_transactions(
     limit: int = Query(20, ge=1, le=100),
     status: Optional[str] = None,
     search: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
 ):
-    return queries.get_all_transactions_paginated(session, page, limit, status, search)
+    return queries.get_all_transactions_paginated(
+        session, page, limit, status, search, from_date, to_date
+    )
 
 
 @explorer_router.get("/transactions/{tx_hash}")
@@ -134,8 +138,10 @@ def get_states(
     search: Optional[str] = None,
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
+    sort_by: Optional[Literal["tx_count", "created_at", "updated_at"]] = None,
+    sort_order: Literal["asc", "desc"] = "desc",
 ):
-    return queries.get_all_states(session, search, page, limit)
+    return queries.get_all_states(session, search, page, limit, sort_by, sort_order)
 
 
 @explorer_router.get("/state/{state_id}")
