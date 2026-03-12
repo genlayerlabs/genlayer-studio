@@ -103,7 +103,7 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
         label="From"
         value={
           tx.from_address ? (
-            <Link href={`/contracts/${tx.from_address}`} className="text-primary hover:underline">
+            <Link href={`/address/${tx.from_address}`} className="text-primary hover:underline">
               {tx.from_address}
             </Link>
           ) : (
@@ -117,7 +117,7 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
         label="To"
         value={
           tx.to_address ? (
-            <Link href={`/contracts/${tx.to_address}`} className="text-primary hover:underline">
+            <Link href={`/address/${tx.to_address}`} className="text-primary hover:underline">
               {tx.to_address}
             </Link>
           ) : (

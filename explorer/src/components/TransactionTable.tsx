@@ -253,7 +253,7 @@ export function TransactionTable({
                           onMouseEnter={() => setHighlightedAddress(tx.from_address)}
                           onMouseLeave={() => setHighlightedAddress(null)}
                         >
-                          <Link href={`/contracts/${tx.from_address}`} className="hover:text-primary">
+                          <Link href={`/address/${tx.from_address}`} className="hover:text-primary">
                             {truncateAddress(tx.from_address)}
                           </Link>
                           <CopyButton text={tx.from_address} />
@@ -274,7 +274,7 @@ export function TransactionTable({
                           onMouseEnter={() => setHighlightedAddress(tx.to_address)}
                           onMouseLeave={() => setHighlightedAddress(null)}
                         >
-                          <Link href={`/contracts/${tx.to_address}`} className="hover:text-primary">
+                          <Link href={`/address/${tx.to_address}`} className="hover:text-primary">
                             {truncateAddress(tx.to_address)}
                           </Link>
                           <CopyButton text={tx.to_address} />
