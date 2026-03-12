@@ -47,7 +47,7 @@ function StateContent() {
       if (sortBy) params.set('sort_by', sortBy);
       if (sortBy) params.set('sort_order', sortOrder);
 
-      const res = await fetch(`/api/state?${params.toString()}`);
+      const res = await fetch(`/api/contracts?${params.toString()}`);
       if (!res.ok) throw new Error('Failed to fetch states');
       const data = await res.json();
       setData(data);
