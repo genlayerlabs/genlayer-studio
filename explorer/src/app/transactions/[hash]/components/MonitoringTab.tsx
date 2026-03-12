@@ -7,7 +7,6 @@ import { MonitoringTimeline } from '@/components/MonitoringTimeline';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { isNewConsensusFormat, getConsensusRoundCount } from '@/lib/consensusUtils';
-import { ConsensusJourney } from '@/components/ConsensusJourney';
 import {
   Activity,
   Users,
@@ -27,13 +26,6 @@ interface MonitoringTabProps {
 export function MonitoringTab({ transaction: tx }: MonitoringTabProps) {
   return (
     <div className="space-y-6">
-      <Card>
-        <CardContent className="p-5">
-          <h3 className="text-sm font-semibold text-foreground mb-4">Transaction Journey</h3>
-          <ConsensusJourney transaction={tx} />
-        </CardContent>
-      </Card>
-
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <Card className="bg-muted/50">
           <CardContent className="p-4">

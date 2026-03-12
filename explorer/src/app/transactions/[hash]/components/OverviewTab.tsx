@@ -5,6 +5,7 @@ import { format } from 'date-fns';
 import { Transaction } from '@/lib/types';
 import { StatusBadge } from '@/components/StatusBadge';
 import { TransactionTypeLabel } from '@/components/TransactionTypeLabel';
+import { ConsensusJourney } from '@/components/ConsensusJourney';
 import { InfoRow } from '@/components/InfoRow';
 import { Badge } from '@/components/ui/badge';
 import { JsonViewer } from '@/components/JsonViewer';
@@ -96,6 +97,9 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
 
   return (
     <div className="space-y-1">
+      <div className="mb-4">
+        <ConsensusJourney transaction={tx} />
+      </div>
       <InfoRow label="Hash" value={tx.hash} copyable />
       <InfoRow label="Status" value={<StatusBadge status={tx.status} />} />
       <InfoRow label="Type" value={<TransactionTypeLabel type={tx.type} />} />
