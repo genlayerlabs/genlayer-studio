@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { StatusBadge } from '@/components/StatusBadge';
 import { TransactionTable } from '@/components/TransactionTable';
 import { StatCard } from '@/components/StatCard';
+import { SparklineChart } from '@/components/SparklineChart';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Transaction, TransactionStatus } from '@/lib/types';
@@ -18,6 +19,8 @@ import {
   Clock,
   Loader2,
   ChevronRight,
+  Zap,
+  BarChart3,
 } from 'lucide-react';
 
 interface Stats {
@@ -27,6 +30,9 @@ interface Stats {
   totalValidators: number;
   totalContracts: number;
   appealedTransactions: number;
+  finalizedTransactions: number;
+  avgTps24h: number;
+  txVolume14d: { date: string; count: number }[];
   recentTransactions: Transaction[];
 }
 
@@ -84,7 +90,7 @@ export default function Dashboard() {
         <p className="text-muted-foreground mt-1">Overview of GenLayer state and transactions</p>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
         <StatCard
           title="Total Transactions"
           value={stats.totalTransactions.toLocaleString()}
@@ -108,6 +114,13 @@ export default function Dashboard() {
           color="text-violet-600 dark:text-violet-400"
           iconBg="bg-violet-50 dark:bg-violet-950"
           href="/contracts"
+        />
+        <StatCard
+          title="Avg TPS (24h)"
+          value={stats.avgTps24h.toFixed(4)}
+          icon={Zap}
+          color="text-cyan-600 dark:text-cyan-400"
+          iconBg="bg-cyan-50 dark:bg-cyan-950"
         />
         <StatCard
           title="Appealed Transactions"
@@ -194,6 +207,39 @@ export default function Dashboard() {
           </CardContent>
         </Card>
       </div>
+
+      {stats.txVolume14d.length > 0 && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-3">
+              <div className="bg-cyan-50 dark:bg-cyan-950 p-2 rounded-lg">
+                <BarChart3 className="w-5 h-5 text-cyan-600 dark:text-cyan-400" />
+              </div>
+              <div>
+                <CardTitle className="text-lg">Transaction Volume (14 days)</CardTitle>
+                <p className="text-sm text-muted-foreground mt-0.5">
+                  {stats.txVolume14d[0]?.date} — {stats.txVolume14d[stats.txVolume14d.length - 1]?.date}
+                </p>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="text-cyan-600 dark:text-cyan-400">
+              <SparklineChart
+                data={stats.txVolume14d.map(d => d.count)}
+                width={800}
+                height={80}
+                className="w-full"
+              />
+            </div>
+            <div className="flex justify-between mt-2 text-xs text-muted-foreground">
+              <span>{stats.txVolume14d[0]?.date}</span>
+              <span>Total: {stats.txVolume14d.reduce((s, d) => s + d.count, 0).toLocaleString()} txs</span>
+              <span>{stats.txVolume14d[stats.txVolume14d.length - 1]?.date}</span>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <Card className="overflow-hidden">
         <CardHeader className="pb-0">
