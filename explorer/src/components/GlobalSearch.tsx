@@ -2,22 +2,23 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { Search, ArrowRightLeft, Database, Loader2 } from 'lucide-react';
+import { Search, ArrowRightLeft, Database, Loader2, Clock, Users } from 'lucide-react';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { StatusBadge } from '@/components/StatusBadge';
 import { Badge } from '@/components/ui/badge';
 import { truncateHash, truncateAddress } from '@/lib/formatters';
-import type { Transaction, CurrentState, TransactionStatus } from '@/lib/types';
+import type { Transaction, CurrentState, Validator, TransactionStatus } from '@/lib/types';
 
 interface SearchResults {
   transactions: Transaction[];
   states: CurrentState[];
+  validators: Validator[];
 }
 
 export function GlobalSearch() {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState<SearchResults>({ transactions: [], states: [] });
+  const [results, setResults] = useState<SearchResults>({ transactions: [], states: [], validators: [] });
   const [loading, setLoading] = useState(false);
   const router = useRouter();
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -42,7 +43,7 @@ export function GlobalSearch() {
       setTimeout(() => inputRef.current?.focus(), 0);
     } else {
       setQuery('');
-      setResults({ transactions: [], states: [] });
+      setResults({ transactions: [], states: [], validators: [] });
     }
   }, [open]);
 
@@ -54,7 +55,7 @@ export function GlobalSearch() {
 
   const search = useCallback(async (q: string) => {
     if (!q.trim()) {
-      setResults({ transactions: [], states: [] });
+      setResults({ transactions: [], states: [], validators: [] });
       setLoading(false);
       return;
     }
@@ -67,21 +68,24 @@ export function GlobalSearch() {
     setLoading(true);
     try {
       const encoded = encodeURIComponent(q.trim());
-      const [txRes, stateRes] = await Promise.all([
+      const [txRes, stateRes, valRes] = await Promise.all([
         fetch(`/api/transactions?search=${encoded}&limit=5`, { signal: controller.signal }),
-        fetch(`/api/state?search=${encoded}&limit=5`, { signal: controller.signal }),
+        fetch(`/api/contracts?search=${encoded}&limit=5`, { signal: controller.signal }),
+        fetch(`/api/validators?search=${encoded}&limit=5`, { signal: controller.signal }),
       ]);
 
       const txData = txRes.ok ? await txRes.json() : { transactions: [] };
       const stateData = stateRes.ok ? await stateRes.json() : { states: [] };
+      const valData = valRes.ok ? await valRes.json() : { validators: [] };
 
       setResults({
         transactions: txData.transactions || [],
         states: stateData.states || [],
+        validators: valData.validators || [],
       });
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
-      setResults({ transactions: [], states: [] });
+      setResults({ transactions: [], states: [], validators: [] });
     } finally {
       setLoading(false);
     }
@@ -98,7 +102,7 @@ export function GlobalSearch() {
     router.push(path);
   };
 
-  const hasResults = results.transactions.length > 0 || results.states.length > 0;
+  const hasResults = results.transactions.length > 0 || results.states.length > 0 || results.validators.length > 0;
 
   return (
     <>
@@ -128,6 +132,29 @@ export function GlobalSearch() {
             />
             {loading && <Loader2 className="w-4 h-4 animate-spin text-muted-foreground shrink-0" />}
           </div>
+
+          {!query.trim() && (
+            <div className="p-2">
+              <div className="px-3 py-1.5 text-xs font-semibold text-muted-foreground">
+                Quick Links
+              </div>
+              {[
+                { icon: ArrowRightLeft, label: 'All Transactions', href: '/transactions' },
+                { icon: Clock, label: 'In Progress Transactions', href: '/transactions?tab=in_progress' },
+                { icon: Database, label: 'All Contracts', href: '/contracts' },
+                { icon: Users, label: 'All Validators', href: '/validators' },
+              ].map((link) => (
+                <button
+                  key={link.href}
+                  onClick={() => navigate(link.href)}
+                  className="w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm hover:bg-accent transition-colors text-left cursor-pointer"
+                >
+                  <link.icon className="w-4 h-4 text-muted-foreground" />
+                  <span className="text-foreground">{link.label}</span>
+                </button>
+              ))}
+            </div>
+          )}
 
           {query.trim() && (
             <div className="max-h-80 overflow-y-auto p-2">
@@ -165,11 +192,30 @@ export function GlobalSearch() {
                   {results.states.map((state) => (
                     <button
                       key={state.id}
-                      onClick={() => navigate(`/contracts/${state.id}`)}
+                      onClick={() => navigate(`/address/${state.id}`)}
                       className="w-full flex items-center justify-between px-3 py-2 rounded-md text-sm hover:bg-accent transition-colors text-left cursor-pointer"
                     >
                       <span className="font-mono text-foreground">{truncateAddress(state.id)}</span>
                       <Badge variant="secondary">Contract</Badge>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {results.validators.length > 0 && (
+                <div className={(results.transactions.length > 0 || results.states.length > 0) ? 'mt-2' : ''}>
+                  <div className="px-3 py-1.5 text-xs font-semibold text-muted-foreground flex items-center gap-1.5">
+                    <Users className="w-3 h-3" />
+                    Validators
+                  </div>
+                  {results.validators.map((v) => (
+                    <button
+                      key={v.id}
+                      onClick={() => navigate(v.address ? `/address/${v.address}` : '/validators')}
+                      className="w-full flex items-center justify-between px-3 py-2 rounded-md text-sm hover:bg-accent transition-colors text-left cursor-pointer"
+                    >
+                      <span className="font-mono text-foreground">{v.address ? truncateAddress(v.address) : `Validator #${v.id}`}</span>
+                      <Badge variant="secondary">{v.provider}/{v.model}</Badge>
                     </button>
                   ))}
                 </div>
