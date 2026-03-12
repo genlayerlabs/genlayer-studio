@@ -2,7 +2,7 @@
 import { useAccountsStore, type AccountInfo } from '@/stores';
 import { notify } from '@kyvg/vue3-notification';
 import { PowerCircle, Wallet } from 'lucide-vue-next';
-import { ref } from 'vue';
+import { ref, computed } from 'vue';
 import CopyTextButton from '../global/CopyTextButton.vue';
 import { TrashIcon, CheckCircleIcon } from '@heroicons/vue/16/solid';
 const store = useAccountsStore();
@@ -15,11 +15,13 @@ const setCurentAddress = () => {
   });
 };
 
+const isExternal = computed(() => props.account.type === 'external');
+
 const deleteAddress = () => {
   try {
     store.removeAccount(props.account as AccountInfo);
     notify({
-      title: 'Account deleted',
+      title: isExternal.value ? 'Wallet disconnected' : 'Account deleted',
       type: 'success',
     });
   } catch (err) {
@@ -79,7 +81,7 @@ const showConfirmDelete = ref(false);
             v-if="!showConfirmDelete"
             data-testid="account-item-delete"
             @click.stop="showConfirmDelete = true"
-            v-tooltip="'Delete Account'"
+            v-tooltip="isExternal ? 'Disconnect Wallet' : 'Delete Account'"
           >
             <TrashIcon
               class="h-5 w-5 p-[2px] text-slate-400 transition-colors hover:text-slate-800 active:scale-90 dark:hover:text-white"
