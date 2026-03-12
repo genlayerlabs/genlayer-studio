@@ -4,12 +4,13 @@ import { useEffect, useState, useCallback, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { Transaction } from '@/lib/types';
 import { TransactionTable } from '@/components/TransactionTable';
-import { TRANSACTION_STATUS_OPTIONS, PAGE_SIZE_OPTIONS } from '@/lib/constants';
+import { PAGE_SIZE_OPTIONS, TRANSACTION_TABS } from '@/lib/constants';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Search, ChevronLeft, ChevronRight, Loader2, Filter, X } from 'lucide-react';
+import { Search, ChevronLeft, ChevronRight, Loader2, X } from 'lucide-react';
 import { DateTimePicker } from '@/components/DateTimePicker';
 
 interface TransactionsResponse {
@@ -33,10 +34,14 @@ function TransactionsContent() {
 
   const page = parseInt(searchParams.get('page') || '1');
   const limit = parseInt(searchParams.get('limit') || '20');
-  const status = searchParams.get('status') || '';
+  const tab = searchParams.get('tab') || 'all';
   const search = searchParams.get('search') || '';
   const fromDate = searchParams.get('from_date') || '';
   const toDate = searchParams.get('to_date') || '';
+
+  // Derive comma-separated statuses from the active tab
+  const activeTab = TRANSACTION_TABS.find(t => t.id === tab) || TRANSACTION_TABS[0];
+  const statusFilter = activeTab.statuses ? activeTab.statuses.join(',') : '';
 
   const fetchTransactions = useCallback(async () => {
     setLoading(true);
@@ -45,7 +50,7 @@ function TransactionsContent() {
       const params = new URLSearchParams();
       params.set('page', page.toString());
       params.set('limit', limit.toString());
-      if (status) params.set('status', status);
+      if (statusFilter) params.set('status', statusFilter);
       if (search) params.set('search', search);
       if (fromDate) params.set('from_date', fromDate);
       if (toDate) params.set('to_date', toDate);
@@ -59,7 +64,7 @@ function TransactionsContent() {
     } finally {
       setLoading(false);
     }
-  }, [page, limit, status, search, fromDate, toDate]);
+  }, [page, limit, statusFilter, search, fromDate, toDate]);
 
   useEffect(() => {
     fetchTransactions();
@@ -108,6 +113,14 @@ function TransactionsContent() {
         <p className="text-muted-foreground mt-1">Browse and search all transactions</p>
       </div>
 
+      <Tabs value={tab} onValueChange={(value) => updateParams({ tab: value === 'all' ? null : value, page: '1' })}>
+        <TabsList>
+          {TRANSACTION_TABS.map((t) => (
+            <TabsTrigger key={t.id} value={t.id}>{t.label}</TabsTrigger>
+          ))}
+        </TabsList>
+      </Tabs>
+
       <Card>
         <CardContent className="p-4">
           <div className="flex flex-wrap gap-4 items-center">
@@ -125,24 +138,6 @@ function TransactionsContent() {
             </form>
 
             <div className="flex items-center gap-2">
-              <Filter className="w-5 h-5 text-muted-foreground" />
-              <Select
-                value={status || 'all'}
-                onValueChange={(value) => updateParams({ status: value === 'all' ? null : value, page: '1' })}
-              >
-                <SelectTrigger className="w-[180px]">
-                  <SelectValue placeholder="All Statuses" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All Statuses</SelectItem>
-                  {TRANSACTION_STATUS_OPTIONS.map((s) => (
-                    <SelectItem key={s} value={s}>{s.replace(/_/g, ' ')}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="flex items-center gap-2">
               <DateTimePicker
                 value={fromDate}
                 onChange={(v) => updateParams({ from_date: v || null, page: '1' })}
@@ -156,13 +151,13 @@ function TransactionsContent() {
               />
             </div>
 
-            {(status || search || fromDate || toDate) && (
+            {(tab !== 'all' || search || fromDate || toDate) && (
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => {
                   setSearchQuery('');
-                  updateParams({ status: null, search: null, from_date: null, to_date: null, page: '1' });
+                  updateParams({ tab: null, search: null, from_date: null, to_date: null, page: '1' });
                 }}
               >
                 <X className="w-4 h-4 mr-1" />
