@@ -120,7 +120,7 @@ function ContractView({ address, data }: { address: string; data: AddressInfo })
             {state && (
               <>
                 <StatItem icon={<Wallet className="w-5 h-5 text-green-600 dark:text-green-400" />} iconBg="bg-green-100 dark:bg-green-950" label="Balance" value={formatGenValue(state.balance)} />
-                <StatItem icon={<ArrowRightLeft className="w-5 h-5 text-blue-600 dark:text-blue-400" />} iconBg="bg-blue-100 dark:bg-blue-950" label="Transactions" value={String(transactions.length)} />
+                <StatItem icon={<ArrowRightLeft className="w-5 h-5 text-blue-600 dark:text-blue-400" />} iconBg="bg-blue-100 dark:bg-blue-950" label="Transactions" value={String(data.tx_count ?? transactions.length)} />
                 <StatItem icon={<Clock className="w-5 h-5 text-muted-foreground" />} iconBg="bg-muted" label="Last Updated" value={state.updated_at ? formatDistanceToNow(new Date(state.updated_at), { addSuffix: true }) : 'Unknown'} small />
               </>
             )}

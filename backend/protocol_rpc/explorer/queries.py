@@ -664,6 +664,9 @@ def get_address_info(session: Session, address: str) -> Optional[dict]:
             "type": "ACCOUNT",
             "address": address,
             "balance": state.balance,
+            "tx_count": 0,
+            "first_tx_time": None,
+            "last_tx_time": None,
             "transactions": [],
         }
 

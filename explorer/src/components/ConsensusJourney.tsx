@@ -100,19 +100,15 @@ export function ConsensusJourney({ transaction: tx }: ConsensusJourneyProps) {
           const isFailedStep = idx === reachedIndex && isFailed;
           const timestamp = timestamps[step];
 
-          const circle = (
-            <button
-              type="button"
-              aria-label={`${phase.label}${timestamp ? ` — ${formatTimestamp(timestamp)}` : ''}`}
-              className={`relative w-8 h-8 rounded-full flex items-center justify-center shrink-0 transition-colors cursor-default ${
+          const circleClassName = `relative w-8 h-8 rounded-full flex items-center justify-center shrink-0 transition-colors ${
                 isFailedStep
                   ? 'bg-red-500 text-white'
                   : isReached
                   ? `${phase.color} text-white`
                   : 'bg-muted text-muted-foreground border-2 border-border'
-              } ${isCurrent ? 'ring-2 ring-primary ring-offset-2 ring-offset-background' : ''}`}
-            >
-              {isFailedStep ? (
+              } ${isCurrent ? 'ring-2 ring-primary ring-offset-2 ring-offset-background' : ''}`;
+
+          const circleContent = isFailedStep ? (
                 <AlertTriangle className="w-4 h-4" />
               ) : isReached && idx < reachedIndex ? (
                 <Check className="w-4 h-4" />
@@ -120,8 +116,24 @@ export function ConsensusJourney({ transaction: tx }: ConsensusJourneyProps) {
                 <span className="w-2 h-2 rounded-full bg-white animate-pulse" />
               ) : (
                 <span className="text-[10px] font-bold">{idx + 1}</span>
-              )}
+              );
+
+          const circle = timestamp ? (
+            <button
+              type="button"
+              aria-label={`${phase.label} — ${formatTimestamp(timestamp)}`}
+              className={`${circleClassName} cursor-default`}
+            >
+              {circleContent}
             </button>
+          ) : (
+            <span
+              role="img"
+              aria-label={`${phase.label}${isReached ? ' — reached' : ''}`}
+              className={circleClassName}
+            >
+              {circleContent}
+            </span>
           );
 
           return (
