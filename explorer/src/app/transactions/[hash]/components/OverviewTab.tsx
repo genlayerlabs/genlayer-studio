@@ -97,9 +97,6 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
 
   return (
     <div className="space-y-1">
-      <div className="mb-4">
-        <ConsensusJourney transaction={tx} />
-      </div>
       <InfoRow label="Hash" value={tx.hash} copyable />
       <InfoRow label="Status" value={<StatusBadge status={tx.status} />} />
       <InfoRow label="Type" value={<TransactionTypeLabel type={tx.type} />} />
@@ -241,6 +238,11 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
           </div>
         </>
       )}
+
+      {/* Transaction Journey */}
+      <div className="border-t border-border mt-4 pt-4">
+        <ConsensusJourney transaction={tx} />
+      </div>
     </div>
   );
 }
