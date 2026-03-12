@@ -5,7 +5,7 @@ import { Card, CardContent } from '@/components/ui/card';
 
 export default async function ProvidersPage() {
   try {
-    const data = await fetchBackend<{ providers: LLMProvider[] }>('/providers', { revalidate: 60 });
+    const data = await fetchBackend<{ providers: LLMProvider[] }>('/providers');
     return <ProvidersContent providers={data.providers} />;
   } catch (err) {
     return (

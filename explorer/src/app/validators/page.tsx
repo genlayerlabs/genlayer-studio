@@ -5,7 +5,7 @@ import { Card, CardContent } from '@/components/ui/card';
 
 export default async function ValidatorsPage() {
   try {
-    const data = await fetchBackend<{ validators: Validator[] }>('/validators', { revalidate: 30 });
+    const data = await fetchBackend<{ validators: Validator[] }>('/validators');
     return <ValidatorsContent validators={data.validators} />;
   } catch (err) {
     return (

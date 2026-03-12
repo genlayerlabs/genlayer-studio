@@ -7,12 +7,9 @@ const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:4000';
  */
 export async function fetchBackend<T = unknown>(
   path: string,
-  options?: { revalidate?: number | false },
 ): Promise<T> {
   const url = `${BACKEND_URL}/api/explorer${path}`;
-  const res = await fetch(url, {
-    next: { revalidate: options?.revalidate ?? 30 },
-  });
+  const res = await fetch(url, { cache: 'no-store' });
 
   if (!res.ok) {
     throw new Error(`Backend ${path}: ${res.status} ${res.statusText}`);

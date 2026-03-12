@@ -4,7 +4,7 @@ import { Card, CardContent } from '@/components/ui/card';
 
 export default async function DashboardPage() {
   try {
-    const stats = await fetchBackend<Stats>('/stats', { revalidate: 0 });
+    const stats = await fetchBackend<Stats>('/stats');
     return <DashboardContent stats={stats} />;
   } catch (err) {
     return (

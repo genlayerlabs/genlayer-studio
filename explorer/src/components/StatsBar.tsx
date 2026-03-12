@@ -11,7 +11,7 @@ export async function StatsBar() {
   let stats: StatsBarData | null = null;
 
   try {
-    stats = await fetchBackend<StatsBarData>('/stats/counts', { revalidate: 30 });
+    stats = await fetchBackend<StatsBarData>('/stats/counts');
   } catch {
     // Stats bar is non-critical — render nothing on failure
     return null;

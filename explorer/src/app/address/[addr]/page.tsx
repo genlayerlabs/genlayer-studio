@@ -11,7 +11,6 @@ export default async function AddressPage({ params }: { params: Promise<{ addr: 
   try {
     const data = await fetchBackend<AddressInfo>(
       `/address/${encodeURIComponent(addr)}`,
-      { revalidate: 10 },
     );
     return <AddressContent addr={addr} data={data} />;
   } catch (err) {
