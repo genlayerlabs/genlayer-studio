@@ -34,10 +34,6 @@ from backend.domain.types import (
     Validator,
 )
 from backend.node.base import Node
-from backend.node.create_nodes.providers import (
-    get_default_provider_for,
-    validate_provider,
-)
 from backend.node.types import (
     ExecutionMode,
     Receipt,
@@ -54,9 +50,8 @@ from backend.protocol_rpc.message_handler.types import (
 from backend.rollup.consensus_service import ConsensusService
 
 import backend.validators as validators
-from backend.database_handler.validators_registry import ValidatorsRegistry
 from backend.node.genvm.origin.public_abi import ResultCode
-from backend.consensus.types import ConsensusResult, ConsensusRound
+from backend.consensus.types import ConsensusRound
 from backend.consensus.utils import determine_consensus_from_votes
 from backend.consensus.decisions import (
     decide_undetermined,
