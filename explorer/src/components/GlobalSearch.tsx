@@ -109,7 +109,7 @@ export function GlobalSearch() {
         <Search className="w-4 h-4" />
         <span className="hidden lg:inline">Search...</span>
         <kbd className="pointer-events-none hidden lg:inline-flex h-5 select-none items-center gap-1 rounded border border-border bg-muted px-1.5 font-mono text-[10px] font-medium text-muted-foreground">
-          <span className="text-xs">⌘</span>K
+          {typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.userAgent) ? '⌘K' : 'Ctrl+K'}
         </kbd>
       </button>
 

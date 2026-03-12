@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { format, parse } from 'date-fns';
+import { format } from 'date-fns';
 import { Calendar as CalendarIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Calendar } from '@/components/ui/calendar';
@@ -81,6 +81,7 @@ export function DateTimePicker({ value, onChange, placeholder = 'Pick date & tim
             max={23}
             value={hours}
             onChange={(e) => handleTimeChange('hours', e.target.value)}
+            aria-label="Hours"
             className="w-12 h-7 rounded-md border border-input bg-transparent px-2 text-sm text-center outline-none [box-shadow:none!important]"
           />
           <span className="text-muted-foreground">:</span>
@@ -90,6 +91,7 @@ export function DateTimePicker({ value, onChange, placeholder = 'Pick date & tim
             max={59}
             value={minutes}
             onChange={(e) => handleTimeChange('minutes', e.target.value)}
+            aria-label="Minutes"
             className="w-12 h-7 rounded-md border border-input bg-transparent px-2 text-sm text-center outline-none [box-shadow:none!important]"
           />
           <div className="flex-1" />
