@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge';
 import { JsonViewer } from '@/components/JsonViewer';
 import { getExecutionResult } from '@/lib/transactionUtils';
 import { resultStatusLabel, type DecodedResult } from '@/lib/resultDecoder';
+import { formatGenValue } from '@/lib/formatters';
 
 interface OverviewTabProps {
   transaction: Transaction;
@@ -102,7 +103,7 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
         label="From"
         value={
           tx.from_address ? (
-            <Link href={`/state/${tx.from_address}`} className="text-primary hover:underline">
+            <Link href={`/contracts/${tx.from_address}`} className="text-primary hover:underline">
               {tx.from_address}
             </Link>
           ) : (
@@ -116,7 +117,7 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
         label="To"
         value={
           tx.to_address ? (
-            <Link href={`/state/${tx.to_address}`} className="text-primary hover:underline">
+            <Link href={`/contracts/${tx.to_address}`} className="text-primary hover:underline">
               {tx.to_address}
             </Link>
           ) : (
@@ -126,7 +127,7 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
         copyable={!!tx.to_address}
         copyText={tx.to_address || undefined}
       />
-      <InfoRow label="Value" value={tx.value !== null ? tx.value.toString() : '-'} />
+      <InfoRow label="Value" value={formatGenValue(tx.value)} />
       <InfoRow label="Nonce" value={tx.nonce !== null ? tx.nonce.toString() : '-'} />
       <InfoRow label="Gas Limit" value={tx.gaslimit !== null ? tx.gaslimit.toString() : '-'} />
       <InfoRow
