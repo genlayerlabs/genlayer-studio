@@ -256,7 +256,7 @@ class Receipt:
                 node_config=input.get("node_config"),
                 eq_outputs=(
                     {int(k): v for k, v in raw_eq.items()}
-                    if (raw_eq := input.get("eq_outputs"))
+                    if (raw_eq := input.get("eq_outputs")) is not None
                     else None
                 ),
                 pending_transactions=[
