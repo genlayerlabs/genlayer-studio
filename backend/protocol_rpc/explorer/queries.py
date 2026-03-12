@@ -216,8 +216,9 @@ def get_stats(session: Session) -> dict:
     )
     avg_tps_24h = round(tx_last_24h / 86400, 4)
 
-    # 14-day transaction volume (grouped by date)
-    fourteen_days_ago = now - timedelta(days=14)
+    # 14-day transaction volume (grouped by date, filled to today)
+    today = now.date()
+    fourteen_days_ago = now - timedelta(days=13)  # 14 days including today
     volume_rows = (
         session.query(
             func.date(Transactions.created_at).label("date"),
@@ -228,9 +229,13 @@ def get_stats(session: Session) -> dict:
         .order_by(func.date(Transactions.created_at))
         .all()
     )
+    counts_by_date = {row.date: row.count for row in volume_rows}
     tx_volume_14d = [
-        {"date": row.date.isoformat() if row.date else None, "count": row.count}
-        for row in volume_rows
+        {
+            "date": (today - timedelta(days=13 - i)).isoformat(),
+            "count": counts_by_date.get(today - timedelta(days=13 - i), 0),
+        }
+        for i in range(14)
     ]
 
     return {
