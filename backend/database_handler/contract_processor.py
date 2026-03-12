@@ -1,6 +1,5 @@
 # database_handler/contract_processor.py
 from .models import CurrentState
-from .contract_snapshot import ContractSnapshot
 from sqlalchemy.orm import Session
 
 

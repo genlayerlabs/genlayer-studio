@@ -2,7 +2,6 @@
 Tests for worker health degradation based on GenVM consecutive failures
 """
 
-import pytest
 from unittest.mock import patch, MagicMock
 
 # Import the module-level functions and variables

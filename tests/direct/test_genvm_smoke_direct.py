@@ -1,7 +1,5 @@
 from pathlib import Path
 
-import pytest
-
 
 def test_genvm_smoke_direct_mode(direct_vm, direct_deploy, direct_alice):
     """

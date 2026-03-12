@@ -2,8 +2,6 @@
 FastAPI RPC handler that uses the endpoint generator for proper registration.
 """
 
-import asyncio
-import inspect
 from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session

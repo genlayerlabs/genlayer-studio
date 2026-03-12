@@ -7,7 +7,6 @@ This version uses the correct GenLayer deployment format matching the UI.
 import os
 import sys
 import requests
-import json
 from eth_account import Account
 from eth_utils.conversions import to_hex
 from eth_utils.address import to_checksum_address

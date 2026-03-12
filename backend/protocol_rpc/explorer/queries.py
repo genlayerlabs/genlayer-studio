@@ -4,7 +4,7 @@ import base64
 import math
 from typing import Optional
 
-from sqlalchemy import func, or_, text
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, defer
 
 from backend.database_handler.models import (

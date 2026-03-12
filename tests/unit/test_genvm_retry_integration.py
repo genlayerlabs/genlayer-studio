@@ -6,10 +6,8 @@ Note: Tests that import worker_service need to run in Docker (require fastapi).
 Those are in test_worker_health_degradation.py
 """
 
-import asyncio
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch
 import pytest
-import aiohttp
 
 from backend.node.genvm.origin import base_host
 

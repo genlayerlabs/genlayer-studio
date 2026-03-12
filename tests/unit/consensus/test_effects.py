@@ -11,22 +11,12 @@ from backend.consensus.effects import (
     RegisterContractEffect,
     UpdateContractStateEffect,
     InsertTriggeredTransactionEffect,
-    UpdateConsensusHistoryEffect,
-    SetTransactionResultEffect,
     SetAppealEffect,
-    SetAppealUndeterminedEffect,
-    SetAppealLeaderTimeoutEffect,
-    SetAppealValidatorsTimeoutEffect,
     SetAppealFailedEffect,
-    SetAppealProcessingTimeEffect,
-    ResetAppealProcessingTimeEffect,
     SetTimestampAppealEffect,
-    SetTimestampAwaitingFinalizationEffect,
     SetContractSnapshotEffect,
     SetLeaderTimeoutValidatorsEffect,
     ResetRotationCountEffect,
-    IncreaseRotationCountEffect,
-    SetTimestampLastVoteEffect,
 )
 
 

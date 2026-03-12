@@ -9,7 +9,7 @@ from eth_account import Account
 from eth_abi import encode
 from web3 import Web3
 import base64
-from tests.common.transactions import sign_transaction, encode_transaction_data
+from tests.common.transactions import sign_transaction
 
 import backend.node.genvm.origin.calldata as calldata
 

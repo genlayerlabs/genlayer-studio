@@ -3,7 +3,6 @@ Tests for GenVM Manager retry logic in base_host.py
 """
 
 from unittest.mock import patch
-import pytest
 
 from backend.node.genvm.origin import base_host
 

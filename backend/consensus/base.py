@@ -101,8 +101,6 @@ type NodeFactory = Callable[
 class NoValidatorsAvailableError(Exception):
     """Raised when no validators are available to process a transaction."""
 
-    pass
-
 
 def _redact_consensus_data_for_log(consensus_data_dict: dict) -> dict:
     """
@@ -1392,7 +1390,6 @@ class TransactionState(ABC):
         Args:
             context (TransactionContext): The context of the transaction.
         """
-        pass
 
 
 class PendingState(TransactionState):

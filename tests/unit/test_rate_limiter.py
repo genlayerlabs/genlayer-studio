@@ -1,12 +1,9 @@
 """Unit tests for RateLimiterService."""
 
-import hashlib
-import time
-
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from backend.protocol_rpc.rate_limiter import RateLimiterService, TierLimits
+from backend.protocol_rpc.rate_limiter import RateLimiterService
 from backend.protocol_rpc.exceptions import RateLimitExceeded
 
 

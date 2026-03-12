@@ -5,7 +5,6 @@ Tests deployment, gen_call read/write operations to discover Linear issue DXP-60
 """
 
 import sys
-import os
 from datetime import datetime, timezone
 
 # Add genlayer-py to path
@@ -116,7 +115,6 @@ def deploy_campaign_contract(client):
 
         # For GenLayer, we need to get the transaction details to find the contract address
         import requests
-        import json
 
         # Make RPC call to get transaction by hash
         try:

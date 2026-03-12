@@ -5,7 +5,6 @@ Based on the Storage contract test pattern.
 """
 
 import requests
-import json
 from pathlib import Path
 from genlayer_py import create_client, create_account, localnet
 import time

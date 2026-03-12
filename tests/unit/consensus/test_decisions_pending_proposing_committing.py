@@ -3,7 +3,6 @@
 Tests call pure functions directly — no mocks, no async, no context objects.
 """
 
-import pytest
 from backend.consensus.decisions import (
     decide_pending_pre,
     decide_pending_activate,

@@ -1,7 +1,6 @@
 from collections import defaultdict
 from typing import Callable
 from unittest.mock import AsyncMock, Mock, MagicMock
-from pathlib import Path
 import time
 import threading
 import pytest

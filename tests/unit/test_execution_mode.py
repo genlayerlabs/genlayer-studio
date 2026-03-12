@@ -9,7 +9,7 @@ Tests cover:
 """
 
 import pytest
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock
 from rlp import encode
 
 from backend.domain.types import (
@@ -20,8 +20,6 @@ from backend.domain.types import (
 )
 from backend.protocol_rpc.transactions_parser import (
     TransactionParser,
-    DecodedMethodSendData,
-    DecodedDeploymentData,
     EXECUTION_MODE_INT_TO_STR,
     EXECUTION_MODE_STR_TO_INT,
 )
