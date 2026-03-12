@@ -7,11 +7,12 @@ import { formatDistanceToNow, format } from 'date-fns';
 import { CurrentState, Transaction } from '@/lib/types';
 import { StatusBadge } from '@/components/StatusBadge';
 import { JsonViewer } from '@/components/JsonViewer';
+import { CodeBlock } from '@/components/CodeBlock';
 import { CopyButton } from '@/components/CopyButton';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
-import { truncateAddress } from '@/lib/formatters';
+import { truncateAddress, formatGenValue } from '@/lib/formatters';
 import {
   ArrowLeft,
   Loader2,
@@ -65,9 +66,9 @@ export default function StateDetailPage({ params }: { params: Promise<{ id: stri
     return (
       <div className="space-y-4">
         <Button variant="ghost" size="sm" asChild>
-          <Link href="/state" className="flex items-center gap-2">
+          <Link href="/contracts" className="flex items-center gap-2">
             <ArrowLeft className="w-4 h-4" />
-            Back to states
+            Back to contracts
           </Link>
         </Button>
         <Card className="border-destructive">
@@ -88,9 +89,9 @@ export default function StateDetailPage({ params }: { params: Promise<{ id: stri
     <div className="space-y-6">
       <div>
         <Button variant="ghost" size="sm" asChild className="mb-4">
-          <Link href="/state" className="flex items-center gap-2">
+          <Link href="/contracts" className="flex items-center gap-2">
             <ArrowLeft className="w-4 h-4" />
-            Back to states
+            Back to contracts
           </Link>
         </Button>
         <div className="flex items-start justify-between">
@@ -116,7 +117,7 @@ export default function StateDetailPage({ params }: { params: Promise<{ id: stri
               </div>
               <div>
                 <p className="text-muted-foreground text-sm">Balance</p>
-                <p className="text-xl font-bold text-foreground">{state.balance}</p>
+                <p className="text-xl font-bold text-foreground">{formatGenValue(state.balance)}</p>
               </div>
             </div>
           </CardContent>
@@ -162,9 +163,7 @@ export default function StateDetailPage({ params }: { params: Promise<{ id: stri
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="bg-zinc-950 text-zinc-100 p-4 rounded-lg overflow-auto max-h-[600px]">
-              <pre className="text-sm font-mono whitespace-pre">{contract_code}</pre>
-            </div>
+            <CodeBlock code={contract_code} />
           </CardContent>
         </Card>
       )}
@@ -247,7 +246,7 @@ export default function StateDetailPage({ params }: { params: Promise<{ id: stri
                       <TableCell className="font-mono text-sm">
                         {tx.from_address ? (
                           <div className="flex items-center gap-1">
-                            <Link href={`/state/${tx.from_address}`} className="text-primary hover:underline">
+                            <Link href={`/contracts/${tx.from_address}`} className="text-primary hover:underline">
                               {truncateAddress(tx.from_address)}
                             </Link>
                             <CopyButton text={tx.from_address} />
@@ -259,7 +258,7 @@ export default function StateDetailPage({ params }: { params: Promise<{ id: stri
                       <TableCell className="font-mono text-sm">
                         {tx.to_address ? (
                           <div className="flex items-center gap-1">
-                            <Link href={`/state/${tx.to_address}`} className="text-primary hover:underline">
+                            <Link href={`/contracts/${tx.to_address}`} className="text-primary hover:underline">
                               {truncateAddress(tx.to_address)}
                             </Link>
                             <CopyButton text={tx.to_address} />
@@ -272,7 +271,7 @@ export default function StateDetailPage({ params }: { params: Promise<{ id: stri
                         {tx.nonce !== null ? tx.nonce : '-'}
                       </TableCell>
                       <TableCell className="text-sm">
-                        {tx.value !== null ? tx.value : '-'}
+                        {formatGenValue(tx.value)}
                       </TableCell>
                       <TableCell className="text-sm text-muted-foreground">
                         {tx.created_at
