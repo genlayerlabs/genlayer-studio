@@ -163,7 +163,12 @@ class TestGetStats:
     def test_stats_with_transactions(self, session: Session):
         contract_addr = "0xCONTRACT_002"
         _make_state(session, contract_addr)
-        _make_tx(session, to_address=contract_addr, type=1, status=TransactionStatus.FINALIZED)
+        _make_tx(
+            session,
+            to_address=contract_addr,
+            type=1,
+            status=TransactionStatus.FINALIZED,
+        )
         _make_tx(session, status=TransactionStatus.PENDING)
         _make_tx(session, status=TransactionStatus.FINALIZED, appealed=True)
         _make_validator(session)
@@ -230,7 +235,9 @@ class TestGetAllTransactionsPaginated:
         _make_tx(session, status=TransactionStatus.ACCEPTED)
         session.commit()
 
-        result = queries.get_all_transactions_paginated(session, status="PENDING,ACCEPTED")
+        result = queries.get_all_transactions_paginated(
+            session, status="PENDING,ACCEPTED"
+        )
         assert result["pagination"]["total"] == 2
         statuses = {tx["status"] for tx in result["transactions"]}
         assert statuses == {"PENDING", "ACCEPTED"}
@@ -244,7 +251,9 @@ class TestGetAllTransactionsPaginated:
         assert result["pagination"]["total"] == 0
 
     def test_search_by_hash(self, session: Session):
-        unique_hash = "0xABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890"
+        unique_hash = (
+            "0xABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890"
+        )
         tx = _make_tx(session, hash=unique_hash)
         _make_tx(session)
         session.commit()
@@ -269,7 +278,9 @@ class TestGetAllTransactionsPaginated:
         session.commit()
 
         result = queries.get_all_transactions_paginated(session)
-        parent_row = next(tx for tx in result["transactions"] if tx["hash"] == parent.hash)
+        parent_row = next(
+            tx for tx in result["transactions"] if tx["hash"] == parent.hash
+        )
         assert parent_row["triggered_count"] == 2
 
 

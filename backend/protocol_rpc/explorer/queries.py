@@ -594,9 +594,7 @@ def get_address_info(session: Session, address: str) -> Optional[dict]:
             }
 
     # 2. Check if it's a validator
-    validator = (
-        session.query(Validators).filter(Validators.address == address).first()
-    )
+    validator = session.query(Validators).filter(Validators.address == address).first()
     if validator:
         return {
             "type": "VALIDATOR",
