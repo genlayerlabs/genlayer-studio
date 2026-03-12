@@ -1,0 +1,10 @@
+{
+  "provider": "libertai",
+  "plugin": "openai-compatible",
+  "model": "ltai-core",
+  "config": {},
+  "plugin_config": {
+    "api_key_env_var": "LIBERTAI_API_KEY",
+    "api_url": "https://api.libertai.io"
+  }
+}
