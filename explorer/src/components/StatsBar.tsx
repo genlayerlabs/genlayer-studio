@@ -1,7 +1,5 @@
-'use client';
-
-import { useEffect, useState } from 'react';
 import { Separator } from '@/components/ui/separator';
+import { fetchBackend } from '@/lib/fetchBackend';
 
 interface StatsBarData {
   totalTransactions: number;
@@ -9,26 +7,15 @@ interface StatsBarData {
   totalContracts: number;
 }
 
-export function StatsBar() {
-  const [stats, setStats] = useState<StatsBarData | null>(null);
+export async function StatsBar() {
+  let stats: StatsBarData | null = null;
 
-  useEffect(() => {
-    async function fetchStats() {
-      try {
-        const res = await fetch('/api/stats/counts');
-        if (!res.ok) return;
-        const data = await res.json();
-        setStats({
-          totalTransactions: data.totalTransactions,
-          totalValidators: data.totalValidators,
-          totalContracts: data.totalContracts,
-        });
-      } catch {
-        // Silently fail — stats bar is non-critical
-      }
-    }
-    fetchStats();
-  }, []);
+  try {
+    stats = await fetchBackend<StatsBarData>('/stats/counts', { revalidate: 30 });
+  } catch {
+    // Stats bar is non-critical — render nothing on failure
+    return null;
+  }
 
   if (!stats) return null;
 

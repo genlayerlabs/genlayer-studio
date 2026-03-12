@@ -69,22 +69,42 @@ export default function TransactionDetailPage({ params }: { params: Promise<{ ha
   }, [hash]);
 
   // Poll for updates when transaction is not in a terminal state
+  // Pauses polling when the browser tab is hidden
   useEffect(() => {
     if (!data || isTerminalStatus(data.transaction.status)) return;
 
-    const timer = setTimeout(async () => {
-      try {
-        const res = await fetch(`/api/transactions/${hash}`);
-        if (res.ok) {
-          const updated = await res.json();
-          setData(updated);
-        }
-      } catch {
-        // silently ignore polling errors
-      }
-    }, 5000);
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
-    return () => clearTimeout(timer);
+    function schedulePoll() {
+      timer = setTimeout(async () => {
+        if (document.hidden) return; // skip fetch when tab not visible
+        try {
+          const res = await fetch(`/api/transactions/${hash}`);
+          if (res.ok) {
+            const updated = await res.json();
+            setData(updated);
+          }
+        } catch {
+          // silently ignore polling errors
+        }
+      }, 5000);
+    }
+
+    function onVisibilityChange() {
+      if (!document.hidden) {
+        // Tab became visible — resume polling immediately
+        if (timer) clearTimeout(timer);
+        schedulePoll();
+      }
+    }
+
+    schedulePoll();
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      if (timer) clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
   }, [data, hash]);
 
   if (loading) {
