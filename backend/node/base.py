@@ -865,8 +865,8 @@ class Node:
             "contract_address": NO_ADDR,
             "sender_address": NO_ADDR,
             "origin_address": NO_ADDR,
-            "value": None,
-            "chain_id": "0",
+            "value": 0,
+            "chain_id": 0,
         }
         state_proxy = _StateProxyNone(NO_ADDR)
         self._put_code_to(state_proxy, code)
@@ -986,10 +986,8 @@ class Node:
             "origin_address": Address(
                 from_address
             ),  # FIXME: no origin in simulator #751
-            "value": None,
-            "chain_id": str(
-                get_simulator_chain_id()
-            ),  # NOTE: it can overflow u64 so better to wrap it into a string
+            "value": 0,
+            "chain_id": get_simulator_chain_id(),
         }
         if transaction_datetime is not None:
             assert transaction_datetime.tzinfo is not None
@@ -1071,6 +1069,11 @@ class Node:
                 ),
                 "raw_error": (
                     result.result.raw_error
+                    if isinstance(result.result, genvmbase.ExecutionError)
+                    else None
+                ),
+                "error_description": (
+                    result.result.description
                     if isinstance(result.result, genvmbase.ExecutionError)
                     else None
                 ),
