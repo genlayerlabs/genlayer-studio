@@ -84,8 +84,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-buildx-
 
-      - name: Run Docker Compose
+      - name: Run Docker Compose with multiple workers
         run: docker compose up -d
+        env:
+          CONSENSUS_WORKERS: 3
 
       - name: Wait for services to be up
         run: |
@@ -490,6 +492,12 @@ jobs:
           if [ -f api_test_report.html ]; then
             echo "✅ HTML report generated: api_test_report.html"
           fi
+
+      - name: Run State Integrity Test (lost update detection)
+        run: |
+          cd tests/load
+          pip install genlayer-py requests
+          python3 test_state_integrity.py http://localhost:4000/api --txs 20
 
       - name: Shutdown Docker Compose
         if: always()

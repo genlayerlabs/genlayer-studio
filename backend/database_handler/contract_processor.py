@@ -34,6 +34,8 @@ class ContractProcessor:
         contract = (
             self.session.query(CurrentState)
             .filter_by(id=contract_address)
+            .with_for_update()
+            .populate_existing()
             .one_or_none()
         )
 
