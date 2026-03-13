@@ -6,14 +6,16 @@ import { formatDistanceToNow, format } from 'date-fns';
 import { Transaction, Validator, CurrentState } from '@/lib/types';
 import { AddressTransactionTable } from '@/components/AddressTransactionTable';
 import { CopyButton } from '@/components/CopyButton';
+import { AddressDisplay } from '@/components/AddressDisplay';
 import { CodeBlock } from '@/components/CodeBlock';
 import { JsonViewer } from '@/components/JsonViewer';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { formatGenValue, truncateAddress } from '@/lib/formatters';
+import { formatGenValue } from '@/lib/formatters';
 import { ContractInteraction } from '@/components/ContractInteraction';
+import { StatItem } from '@/components/StatItem';
 import {
   ArrowLeft,
   Wallet,
@@ -130,22 +132,21 @@ function ContractView({ address, data }: { address: string; data: AddressInfo })
                 <div>
                   <p className="text-muted-foreground text-sm mb-1">Creator</p>
                   {creator_info.creator_address ? (
-                    <div className="flex items-center gap-1">
-                      <Link href={`/address/${creator_info.creator_address}`} className="text-primary hover:underline font-mono text-sm">
-                        {truncateAddress(creator_info.creator_address)}
-                      </Link>
-                      <CopyButton text={creator_info.creator_address} />
-                    </div>
+                    <AddressDisplay
+                      address={creator_info.creator_address}
+                      href={`/address/${creator_info.creator_address}`}
+                      linkClassName="text-primary hover:underline font-mono text-sm"
+                    />
                   ) : <span className="text-muted-foreground">-</span>}
                 </div>
                 <div>
                   <p className="text-muted-foreground text-sm mb-1">Deploy Tx</p>
-                  <div className="flex items-center gap-1">
-                    <Link href={`/transactions/${creator_info.deployment_tx_hash}`} className="text-primary hover:underline font-mono text-sm">
-                      {creator_info.deployment_tx_hash.slice(0, 10)}...{creator_info.deployment_tx_hash.slice(-8)}
-                    </Link>
-                    <CopyButton text={creator_info.deployment_tx_hash} />
-                  </div>
+                  <AddressDisplay
+                    address={creator_info.deployment_tx_hash}
+                    href={`/transactions/${creator_info.deployment_tx_hash}`}
+                    isHash
+                    linkClassName="text-primary hover:underline font-mono text-sm"
+                  />
                 </div>
                 <div>
                   <p className="text-muted-foreground text-sm mb-1">Created</p>
@@ -293,23 +294,3 @@ function AddressHeader({ title, address, backHref, icon, iconBg }: {
   );
 }
 
-function StatItem({ icon, iconBg, label, value, small }: {
-  icon: React.ReactNode;
-  iconBg: string;
-  label: string;
-  value: string;
-  small?: boolean;
-}) {
-  return (
-    <div className="flex items-center gap-3">
-      <div className={`${iconBg} p-2 rounded-lg`}>{icon}</div>
-      <div>
-        <p className="text-muted-foreground text-sm">{label}</p>
-        {small
-          ? <p className="text-sm font-medium text-foreground">{value}</p>
-          : <p className="text-xl font-bold text-foreground">{value}</p>
-        }
-      </div>
-    </div>
-  );
-}

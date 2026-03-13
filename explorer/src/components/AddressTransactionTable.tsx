@@ -1,15 +1,14 @@
 'use client';
 
-import Link from 'next/link';
 import { formatDistanceToNow } from 'date-fns';
 
 import { Transaction } from '@/lib/types';
 import { StatusBadge } from '@/components/StatusBadge';
 import { TransactionTypeLabel } from '@/components/TransactionTypeLabel';
-import { CopyButton } from '@/components/CopyButton';
+import { AddressDisplay } from '@/components/AddressDisplay';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { CardContent } from '@/components/ui/card';
-import { formatGenValue, truncateAddress } from '@/lib/formatters';
+import { formatGenValue } from '@/lib/formatters';
 import { decodeCalldata } from '@/lib/resultDecoder';
 import { getExecutionResult } from '@/lib/transactionUtils';
 
@@ -58,15 +57,12 @@ export function AddressTransactionTable({ transactions, address }: AddressTransa
           return (
             <TableRow key={tx.hash}>
               <TableCell>
-                <div className="flex items-center gap-1">
-                  <Link
-                    href={`/transactions/${tx.hash}`}
-                    className="text-primary hover:underline font-mono text-sm"
-                  >
-                    {tx.hash.slice(0, 10)}...{tx.hash.slice(-8)}
-                  </Link>
-                  <CopyButton text={tx.hash} />
-                </div>
+                <AddressDisplay
+                  address={tx.hash}
+                  href={`/transactions/${tx.hash}`}
+                  isHash
+                  linkClassName="text-primary hover:underline font-mono text-sm"
+                />
               </TableCell>
               <TableCell>
                 <TransactionTypeLabel type={tx.type} />
@@ -90,24 +86,22 @@ export function AddressTransactionTable({ transactions, address }: AddressTransa
               </TableCell>
               <TableCell className="font-mono text-sm">
                 {tx.from_address ? (
-                  <div className="flex items-center gap-1">
-                    <Link href={`/address/${tx.from_address}`} className="text-primary hover:underline">
-                      {truncateAddress(tx.from_address)}
-                    </Link>
-                    <CopyButton text={tx.from_address} />
-                  </div>
+                  <AddressDisplay
+                    address={tx.from_address}
+                    href={`/address/${tx.from_address}`}
+                    linkClassName="text-primary hover:underline"
+                  />
                 ) : (
                   <span className="text-muted-foreground">-</span>
                 )}
               </TableCell>
               <TableCell className="font-mono text-sm">
                 {tx.to_address ? (
-                  <div className="flex items-center gap-1">
-                    <Link href={`/address/${tx.to_address}`} className="text-primary hover:underline">
-                      {truncateAddress(tx.to_address)}
-                    </Link>
-                    <CopyButton text={tx.to_address} />
-                  </div>
+                  <AddressDisplay
+                    address={tx.to_address}
+                    href={`/address/${tx.to_address}`}
+                    linkClassName="text-primary hover:underline"
+                  />
                 ) : (
                   <span className="text-muted-foreground">-</span>
                 )}
