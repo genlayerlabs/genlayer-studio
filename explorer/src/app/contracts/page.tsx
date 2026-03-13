@@ -4,12 +4,14 @@ import { useEffect, useState, useCallback, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { CurrentState } from '@/lib/types';
+import { CopyButton } from '@/components/CopyButton';
 import { Card, CardContent } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Search, Loader2, Database, Wallet, Clock, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Loader2, ChevronLeft, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
+import { formatGenValue, truncateAddress } from '@/lib/formatters';
 
 interface StatesResponse {
   states: CurrentState[];
@@ -29,11 +31,11 @@ function StateContent() {
   const [data, setData] = useState<StatesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [searchInput, setSearchInput] = useState(searchParams.get('search') || '');
 
   const page = parseInt(searchParams.get('page') || '1', 10) || 1;
   const limit = parseInt(searchParams.get('limit') || '24', 10) || 24;
-  const search = searchParams.get('search') || '';
+  const sortBy = searchParams.get('sort_by') || '';
+  const sortOrder = searchParams.get('sort_order') || 'desc';
 
   const fetchStates = useCallback(async () => {
     setLoading(true);
@@ -42,7 +44,8 @@ function StateContent() {
       const params = new URLSearchParams();
       params.set('page', page.toString());
       params.set('limit', limit.toString());
-      if (search) params.set('search', search);
+      if (sortBy) params.set('sort_by', sortBy);
+      if (sortBy) params.set('sort_order', sortOrder);
 
       const res = await fetch(`/api/state?${params.toString()}`);
       if (!res.ok) throw new Error('Failed to fetch states');
@@ -53,7 +56,7 @@ function StateContent() {
     } finally {
       setLoading(false);
     }
-  }, [page, limit, search]);
+  }, [page, limit, sortBy, sortOrder]);
 
   useEffect(() => {
     fetchStates();
@@ -68,12 +71,22 @@ function StateContent() {
         params.set(key, value);
       }
     });
-    router.push(`/state?${params.toString()}`);
+    router.push(`/contracts?${params.toString()}`);
   };
 
-  const handleSearch = (e: React.FormEvent) => {
-    e.preventDefault();
-    updateParams({ search: searchInput, page: '1' });
+  const toggleSort = (column: string) => {
+    if (sortBy === column) {
+      updateParams({ sort_order: sortOrder === 'desc' ? 'asc' : 'desc', page: '1' });
+    } else {
+      updateParams({ sort_by: column, sort_order: 'desc', page: '1' });
+    }
+  };
+
+  const SortIcon = ({ column }: { column: string }) => {
+    if (sortBy !== column) return <ArrowUpDown className="w-3.5 h-3.5 text-muted-foreground/50" />;
+    return sortOrder === 'asc'
+      ? <ArrowUp className="w-3.5 h-3.5 text-foreground" />
+      : <ArrowDown className="w-3.5 h-3.5 text-foreground" />;
   };
 
   return (
@@ -82,23 +95,6 @@ function StateContent() {
         <h1 className="text-2xl font-bold text-foreground">Contracts</h1>
         <p className="text-muted-foreground mt-1">Browse deployed contracts and account states</p>
       </div>
-
-      <Card>
-        <CardContent className="p-4">
-          <form onSubmit={handleSearch}>
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground w-5 h-5" />
-              <Input
-                type="text"
-                placeholder="Search by address..."
-                value={searchInput}
-                onChange={(e) => setSearchInput(e.target.value)}
-                className="pl-10 h-10"
-              />
-            </div>
-          </form>
-        </CardContent>
-      </Card>
 
       {loading ? (
         <div className="flex items-center justify-center h-64">
@@ -113,49 +109,75 @@ function StateContent() {
         </Card>
       ) : data ? (
         <>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {data.states.length === 0 ? (
-              <div className="col-span-full">
-                <Card>
-                  <CardContent className="p-8 text-center text-muted-foreground">
-                    No states found
-                  </CardContent>
-                </Card>
-              </div>
-            ) : (
-              data.states.map((state) => (
-                <Link key={state.id} href={`/state/${state.id}`}>
-                  <Card className="p-6 hover:shadow-md transition-shadow cursor-pointer h-full">
-                    <div className="flex items-start justify-between mb-4">
-                      <div className="bg-purple-100 dark:bg-purple-950 p-2 rounded-lg">
-                        <Database className="w-5 h-5 text-purple-600 dark:text-purple-400" />
-                      </div>
-                      <div className="flex items-center gap-1 text-muted-foreground text-sm">
-                        <Wallet className="w-4 h-4" />
-                        {state.balance}
-                      </div>
-                    </div>
-                    <div className="font-mono text-sm text-foreground truncate mb-2">
-                      {state.id}
-                    </div>
-                    <div className="flex items-center gap-1 text-muted-foreground text-xs">
-                      <Clock className="w-3 h-3" />
-                      {state.updated_at
-                        ? formatDistanceToNow(new Date(state.updated_at), { addSuffix: true })
-                        : 'Unknown'}
-                    </div>
-                    {state.data && typeof state.data === 'object' && (
-                      <div className="mt-3 pt-3 border-t border-border">
-                        <div className="text-xs text-muted-foreground">
-                          {Object.keys(state.data).length} fields in state
+          <Card>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Address</TableHead>
+                  <TableHead>Balance</TableHead>
+                  <TableHead>
+                    <button onClick={() => toggleSort('tx_count')} className="flex items-center gap-1 hover:text-foreground transition-colors cursor-pointer">
+                      Transactions <SortIcon column="tx_count" />
+                    </button>
+                  </TableHead>
+                  <TableHead>State Fields</TableHead>
+                  <TableHead>
+                    <button onClick={() => toggleSort('created_at')} className="flex items-center gap-1 hover:text-foreground transition-colors cursor-pointer">
+                      Created <SortIcon column="created_at" />
+                    </button>
+                  </TableHead>
+                  <TableHead>
+                    <button onClick={() => toggleSort('updated_at')} className="flex items-center gap-1 hover:text-foreground transition-colors cursor-pointer">
+                      Last Updated <SortIcon column="updated_at" />
+                    </button>
+                  </TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {data.states.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
+                      No contracts found
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  data.states.map((state) => (
+                    <TableRow key={state.id} className="cursor-pointer hover:bg-accent/50">
+                      <TableCell className="font-mono text-sm">
+                        <div className="flex items-center gap-1">
+                          <Link href={`/contracts/${state.id}`} className="text-primary hover:underline">
+                            {truncateAddress(state.id, 10, 8)}
+                          </Link>
+                          <CopyButton text={state.id} />
                         </div>
-                      </div>
-                    )}
-                  </Card>
-                </Link>
-              ))
-            )}
-          </div>
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        {formatGenValue(state.balance)}
+                      </TableCell>
+                      <TableCell className="text-sm text-muted-foreground">
+                        {state.tx_count ?? '-'}
+                      </TableCell>
+                      <TableCell className="text-sm text-muted-foreground">
+                        {state.data && typeof state.data === 'object'
+                          ? Object.keys(state.data).length
+                          : '-'}
+                      </TableCell>
+                      <TableCell className="text-sm text-muted-foreground">
+                        {state.created_at
+                          ? formatDistanceToNow(new Date(state.created_at), { addSuffix: true })
+                          : '-'}
+                      </TableCell>
+                      <TableCell className="text-sm text-muted-foreground">
+                        {state.updated_at
+                          ? formatDistanceToNow(new Date(state.updated_at), { addSuffix: true })
+                          : 'Unknown'}
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </Card>
 
           {/* Pagination */}
           {data.pagination.totalPages > 1 && (

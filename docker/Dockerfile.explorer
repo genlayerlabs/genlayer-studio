@@ -9,8 +9,6 @@ FROM base AS dev
 CMD ["npm", "run", "dev"]
 
 FROM base AS builder
-ARG BACKEND_URL=http://jsonrpc:4000
-ENV BACKEND_URL=${BACKEND_URL}
 RUN npm run build
 
 FROM node:24.1.0-alpine3.20 AS final

@@ -10,6 +10,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Search, ChevronLeft, ChevronRight, Loader2, Filter, X } from 'lucide-react';
+import { DateTimePicker } from '@/components/DateTimePicker';
 
 interface TransactionsResponse {
   transactions: Transaction[];
@@ -34,6 +35,8 @@ function TransactionsContent() {
   const limit = parseInt(searchParams.get('limit') || '20');
   const status = searchParams.get('status') || '';
   const search = searchParams.get('search') || '';
+  const fromDate = searchParams.get('from_date') || '';
+  const toDate = searchParams.get('to_date') || '';
 
   const fetchTransactions = useCallback(async () => {
     setLoading(true);
@@ -44,6 +47,8 @@ function TransactionsContent() {
       params.set('limit', limit.toString());
       if (status) params.set('status', status);
       if (search) params.set('search', search);
+      if (fromDate) params.set('from_date', fromDate);
+      if (toDate) params.set('to_date', toDate);
 
       const res = await fetch(`/api/transactions?${params.toString()}`);
       if (!res.ok) throw new Error('Failed to fetch transactions');
@@ -54,7 +59,7 @@ function TransactionsContent() {
     } finally {
       setLoading(false);
     }
-  }, [page, limit, status, search]);
+  }, [page, limit, status, search, fromDate, toDate]);
 
   useEffect(() => {
     fetchTransactions();
@@ -137,13 +142,27 @@ function TransactionsContent() {
               </Select>
             </div>
 
-            {(status || search) && (
+            <div className="flex items-center gap-2">
+              <DateTimePicker
+                value={fromDate}
+                onChange={(v) => updateParams({ from_date: v || null, page: '1' })}
+                placeholder="From"
+              />
+              <span className="text-muted-foreground text-sm">to</span>
+              <DateTimePicker
+                value={toDate}
+                onChange={(v) => updateParams({ to_date: v || null, page: '1' })}
+                placeholder="To"
+              />
+            </div>
+
+            {(status || search || fromDate || toDate) && (
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => {
                   setSearchQuery('');
-                  updateParams({ status: null, search: null, page: '1' });
+                  updateParams({ status: null, search: null, from_date: null, to_date: null, page: '1' });
                 }}
               >
                 <X className="w-4 h-4 mr-1" />

@@ -11,7 +11,7 @@ const navItems = [
   { href: '/', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/transactions', label: 'Transactions', icon: ArrowRightLeft },
   { href: '/validators', label: 'Validators', icon: Users },
-  { href: '/state', label: 'Contracts', icon: Database },
+  { href: '/contracts', label: 'Contracts', icon: Database },
   { href: '/providers', label: 'Providers', icon: Cpu },
 ];
 
