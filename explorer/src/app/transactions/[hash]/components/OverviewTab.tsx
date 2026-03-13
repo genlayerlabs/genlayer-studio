@@ -11,6 +11,7 @@ import { Badge } from '@/components/ui/badge';
 import { JsonViewer } from '@/components/JsonViewer';
 import { getExecutionResult } from '@/lib/transactionUtils';
 import { resultStatusLabel, type DecodedResult } from '@/lib/resultDecoder';
+import { InputDataPanel } from '@/components/InputDataPanel';
 import { formatGenValue } from '@/lib/formatters';
 
 interface OverviewTabProps {
@@ -95,6 +96,10 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
   const decodedResult = execResult?.decodedResult;
   const eqOutputs = execResult?.eqOutputs;
 
+  const calldataB64 = (tx.type === 1 || tx.type === 2) && tx.data && typeof tx.data === 'object'
+    ? (tx.data as Record<string, unknown>).calldata as string | undefined
+    : undefined;
+
   return (
     <div className="space-y-1">
       <InfoRow label="Hash" value={tx.hash} copyable />
@@ -150,6 +155,13 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
       <InfoRow label="Rotation Count" value={tx.rotation_count?.toString() || '-'} />
       <InfoRow label="Initial Validators" value={tx.num_of_initial_validators?.toString() || '-'} />
       {tx.worker_id && <InfoRow label="Worker ID" value={tx.worker_id} />}
+
+      {calldataB64 && (
+        <div className="border-t border-border mt-4 pt-4">
+          <h4 className="text-sm font-semibold text-foreground mb-3">Input Data</h4>
+          <InputDataPanel calldataB64={calldataB64} />
+        </div>
+      )}
 
       {/* Execution Result Section */}
       {(executionResult || genvmResult || decodedResult) && (
