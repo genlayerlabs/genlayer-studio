@@ -21,11 +21,9 @@ import json
 import base64
 import asyncio
 import socket
-import logging
 import backend.node.genvm.origin.base_host as genvmhost
 import collections.abc
 import functools
-import datetime
 import abc
 import time
 import copy
@@ -197,7 +195,7 @@ class Host(genvmhost.IHost):
                     error_code=error_code,
                 )
         elif res.result_kind == ResultCode.INTERNAL_ERROR:
-            from loguru import logger as _ilog
+            pass
 
             error_ctx = None
 

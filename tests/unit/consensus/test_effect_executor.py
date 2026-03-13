@@ -1,7 +1,7 @@
 """Tests for EffectExecutor — verifies effects are dispatched to the correct service methods."""
 
 import pytest
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import MagicMock, AsyncMock
 from types import SimpleNamespace
 
 from backend.consensus.effects import (

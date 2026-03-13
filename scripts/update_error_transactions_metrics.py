@@ -46,7 +46,7 @@ import argparse
 import json
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 
 import psycopg2

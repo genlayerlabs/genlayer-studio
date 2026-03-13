@@ -9,7 +9,7 @@ import typing
 import collections.abc
 import dataclasses
 import base64
-from functools import partial, wraps
+from functools import partial
 from typing import Callable, Dict, Any, Optional
 
 from backend.protocol_rpc.message_handler.fastapi_handler import MessageHandler

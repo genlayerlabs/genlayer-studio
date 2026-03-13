@@ -1,6 +1,5 @@
 """Unit tests for GenVM error code extraction."""
 
-import pytest
 from backend.node.genvm.error_codes import (
     GenVMErrorCode,
     extract_error_code,

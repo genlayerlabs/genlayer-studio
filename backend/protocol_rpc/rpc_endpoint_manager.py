@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-import json
 import traceback
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field

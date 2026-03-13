@@ -110,7 +110,7 @@ async def initialize_validators(
 
     # Import necessary dependencies for validator creation
     from backend.database_handler.accounts_manager import AccountsManager
-    from backend.domain.types import Validator, LLMProvider
+    from backend.domain.types import Validator
     from backend.node.create_nodes.providers import get_default_provider_for
 
     accounts_manager = AccountsManager(db_session)

@@ -7,11 +7,9 @@ This version properly encodes the deployment with the correct function selector 
 import os
 import sys
 import requests
-import json
 from eth_account import Account
 from eth_utils.conversions import to_hex
 from eth_utils.address import to_checksum_address
-from web3 import Web3
 import rlp
 from pathlib import Path
 

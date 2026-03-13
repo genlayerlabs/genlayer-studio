@@ -1,7 +1,6 @@
 # This file is auto-generated. Do not edit!
 
-from enum import IntEnum, StrEnum
-import typing
+from enum import IntEnum
 
 
 class Methods(IntEnum):

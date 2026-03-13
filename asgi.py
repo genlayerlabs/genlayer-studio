@@ -4,7 +4,6 @@ ASGI entry point for FastAPI with native WebSocket support.
 """
 
 import os
-import sys
 
 # Set production environment
 os.environ.setdefault("UVICORN_WORKER", "true")

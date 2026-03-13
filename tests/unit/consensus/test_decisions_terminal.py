@@ -4,7 +4,6 @@ These tests call pure functions directly — no mocks, no async, no context obje
 Each test verifies the exact list of effects returned for a specific branch.
 """
 
-import pytest
 from backend.consensus.decisions import (
     decide_undetermined,
     decide_leader_timeout,

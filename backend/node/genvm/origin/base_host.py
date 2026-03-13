@@ -3,7 +3,6 @@ import typing
 import collections.abc
 import asyncio
 import os
-import sys
 import abc
 import json
 import time
@@ -12,7 +11,6 @@ import aiohttp
 
 from dataclasses import dataclass
 
-from pathlib import Path
 
 from . import calldata as gvm_calldata
 from . import host_fns

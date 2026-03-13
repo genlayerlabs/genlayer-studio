@@ -3,21 +3,14 @@
 import os
 import asyncio
 import time
-import traceback
-import threading
 import uuid
 from contextlib import asynccontextmanager
 from typing import Callable, Optional, Any
-from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from backend.database_handler.models import Transactions, TransactionStatus
 from backend.database_handler.transactions_processor import TransactionsProcessor
-from backend.database_handler.chain_snapshot import ChainSnapshot
-from backend.database_handler.contract_snapshot import ContractSnapshot
-from backend.database_handler.contract_processor import ContractProcessor
-from backend.database_handler.accounts_manager import AccountsManager
 from backend.database_handler.errors import ContractNotFoundError
 from backend.domain.types import Transaction
 from backend.node.genvm.error_codes import GenVMInternalError

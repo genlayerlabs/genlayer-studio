@@ -1,7 +1,7 @@
 # database_handler/chain_snapshot.py
 
 from typing import List
-from sqlalchemy.orm import Session, selectinload, load_only
+from sqlalchemy.orm import Session, selectinload
 from collections import defaultdict
 
 from backend.database_handler.transactions_processor import (
@@ -9,7 +9,6 @@ from backend.database_handler.transactions_processor import (
     Transactions,
 )
 from .transactions_processor import TransactionsProcessor
-from backend.database_handler.validators_registry import ValidatorsRegistry
 
 
 class ChainSnapshot:
