@@ -1,14 +1,17 @@
 'use client';
 
 import Link from 'next/link';
-import { format } from 'date-fns';
+import { formatDistanceToNow } from 'date-fns';
 
 import { Transaction } from '@/lib/types';
 import { StatusBadge } from '@/components/StatusBadge';
+import { TransactionTypeLabel } from '@/components/TransactionTypeLabel';
 import { CopyButton } from '@/components/CopyButton';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { CardContent } from '@/components/ui/card';
 import { formatGenValue, truncateAddress } from '@/lib/formatters';
+import { decodeCalldata } from '@/lib/resultDecoder';
+import { getExecutionResult } from '@/lib/transactionUtils';
 
 interface AddressTransactionTableProps {
   transactions: Transaction[];
@@ -29,10 +32,13 @@ export function AddressTransactionTable({ transactions, address }: AddressTransa
       <TableHeader>
         <TableRow className="bg-muted/50">
           <TableHead>Hash</TableHead>
+          <TableHead>Type</TableHead>
           <TableHead>Status</TableHead>
           <TableHead>Direction</TableHead>
           <TableHead>From</TableHead>
           <TableHead>To</TableHead>
+          <TableHead className="w-32 max-w-32">Method</TableHead>
+          <TableHead>GenVM Result</TableHead>
           <TableHead>Value</TableHead>
           <TableHead>Time</TableHead>
         </TableRow>
@@ -41,6 +47,13 @@ export function AddressTransactionTable({ transactions, address }: AddressTransa
         {transactions.map((tx) => {
           const isIncoming = tx.to_address === address;
           const isOutgoing = tx.from_address === address;
+          const calldataB64 = (tx.type === 1 || tx.type === 2) && tx.data && typeof tx.data === 'object'
+            ? (tx.data as Record<string, unknown>).calldata as string | undefined
+            : undefined;
+          const decodedInput = calldataB64 ? decodeCalldata(calldataB64) : null;
+          const methodName = decodedInput?.methodName ?? (decodedInput && !decodedInput.methodName ? '(constructor)' : undefined);
+          const execResult = getExecutionResult(tx);
+          const executionResult = execResult?.executionResult;
 
           return (
             <TableRow key={tx.hash}>
@@ -54,6 +67,9 @@ export function AddressTransactionTable({ transactions, address }: AddressTransa
                   </Link>
                   <CopyButton text={tx.hash} />
                 </div>
+              </TableCell>
+              <TableCell>
+                <TransactionTypeLabel type={tx.type} />
               </TableCell>
               <TableCell>
                 <StatusBadge status={tx.status} />
@@ -96,12 +112,28 @@ export function AddressTransactionTable({ transactions, address }: AddressTransa
                   <span className="text-muted-foreground">-</span>
                 )}
               </TableCell>
+              <TableCell className="text-sm font-mono w-32 max-w-32 truncate" title={methodName || undefined}>
+                {methodName
+                  ? <span className="text-foreground">{methodName}</span>
+                  : <span className="text-muted-foreground">-</span>}
+              </TableCell>
+              <TableCell className="text-sm">
+                {executionResult ? (
+                  executionResult === 'SUCCESS' ? (
+                    <span className="bg-green-50 dark:bg-green-950 text-green-700 dark:text-green-400 px-2 py-1 rounded-lg text-xs font-semibold">SUCCESS</span>
+                  ) : (
+                    <span className="bg-red-50 dark:bg-red-950 text-red-700 dark:text-red-400 px-2 py-1 rounded-lg text-xs font-semibold">{executionResult}</span>
+                  )
+                ) : (
+                  <span className="text-muted-foreground">-</span>
+                )}
+              </TableCell>
               <TableCell className="text-sm">
                 {formatGenValue(tx.value)}
               </TableCell>
               <TableCell className="text-sm text-muted-foreground">
                 {tx.created_at
-                  ? format(new Date(tx.created_at), 'PPpp')
+                  ? formatDistanceToNow(new Date(tx.created_at), { addSuffix: true })
                   : '-'}
               </TableCell>
             </TableRow>

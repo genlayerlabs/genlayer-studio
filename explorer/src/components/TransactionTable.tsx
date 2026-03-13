@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import { formatDistanceToNow } from 'date-fns';
 import { ArrowUpRight, ArrowDownRight, Settings2 } from 'lucide-react';
@@ -13,6 +13,7 @@ import { Button } from '@/components/ui/button';
 import { Transaction } from '@/lib/types';
 import { getTimeToAccepted, getTimeToFinalized, getExecutionResult } from '@/lib/transactionUtils';
 import { truncateHash, truncateAddress } from '@/lib/formatters';
+import { decodeCalldata } from '@/lib/resultDecoder';
 import { cn } from '@/lib/utils';
 
 const STORAGE_KEY = 'explorer:tx-table-columns';
@@ -26,15 +27,16 @@ interface ColumnDef {
 
 const OPTIONAL_COLUMNS: ColumnDef[] = [
   { id: 'hash', label: 'Hash', defaultVisible: true, alwaysVisible: true },
-  { id: 'relations', label: 'Relations', defaultVisible: true },
   { id: 'type', label: 'Type', defaultVisible: true },
   { id: 'status', label: 'Status', defaultVisible: true },
   { id: 'from', label: 'From', defaultVisible: true },
   { id: 'to', label: 'To', defaultVisible: true },
+  { id: 'method', label: 'Method', defaultVisible: true },
   { id: 'genvmResult', label: 'GenVM Result', defaultVisible: true },
   { id: 'time', label: 'Time', defaultVisible: true },
-  { id: 'accepted', label: 'Accepted', defaultVisible: true },
-  { id: 'finalized', label: 'Finalized', defaultVisible: true },
+  { id: 'relations', label: 'Relations', defaultVisible: true },
+  { id: 'accepted', label: 'Accepted', defaultVisible: false },
+  { id: 'finalized', label: 'Finalized', defaultVisible: false },
   { id: 'blockedAt', label: 'Blocked At', defaultVisible: false },
   { id: 'worker', label: 'Worker', defaultVisible: false },
 ];
@@ -83,6 +85,18 @@ export function TransactionTable({
   const [highlightedAddress, setHighlightedAddress] = useState<string | null>(null);
   const [columnVisibility, setColumnVisibility] = useState<Record<string, boolean>>(getDefaultVisibility);
   const [showColumnPicker, setShowColumnPicker] = useState(false);
+  const columnPickerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!showColumnPicker) return;
+    const handler = (e: MouseEvent) => {
+      if (columnPickerRef.current && !columnPickerRef.current.contains(e.target as Node)) {
+        setShowColumnPicker(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showColumnPicker]);
 
   // Load from localStorage on mount
   useEffect(() => {
@@ -121,9 +135,7 @@ export function TransactionTable({
             Columns
           </Button>
           {showColumnPicker && (
-            <>
-              <div className="fixed inset-0 z-40" onClick={() => setShowColumnPicker(false)} />
-              <div className="absolute right-0 top-full mt-1 z-50 bg-popover border border-border rounded-lg shadow-lg p-2 min-w-[160px]">
+              <div ref={columnPickerRef} className="absolute right-0 top-full mt-1 z-50 bg-popover border border-border rounded-lg shadow-lg p-2 min-w-[160px] max-h-72 overflow-y-auto">
                 {OPTIONAL_COLUMNS.filter(c => c.id === 'relations' ? showRelations : true).map(col => (
                   <label
                     key={col.id}
@@ -143,7 +155,6 @@ export function TransactionTable({
                   </label>
                 ))}
               </div>
-            </>
           )}
         </div>
       </div>
@@ -152,13 +163,14 @@ export function TransactionTable({
         <TableHeader>
           <TableRow className="bg-muted/50">
             {isVisible('hash') && <TableHead>Hash</TableHead>}
-            {isVisible('relations') && <TableHead title="Parent and triggered transactions">Relations</TableHead>}
             {isVisible('type') && <TableHead>Type</TableHead>}
             {isVisible('status') && <TableHead>Status</TableHead>}
             {isVisible('from') && <TableHead>From</TableHead>}
             {isVisible('to') && <TableHead>To</TableHead>}
+            {isVisible('method') && <TableHead className="w-32 max-w-32">Method</TableHead>}
             {isVisible('genvmResult') && <TableHead>GenVM Result</TableHead>}
             {isVisible('time') && <TableHead>Time</TableHead>}
+            {isVisible('relations') && <TableHead title="Parent and triggered transactions">Relations</TableHead>}
             {isVisible('accepted') && <TableHead title="Time from PENDING to ACCEPTED">Accepted</TableHead>}
             {isVisible('finalized') && <TableHead title="Time from PENDING to FINALIZED">Finalized</TableHead>}
             {isVisible('blockedAt') && <TableHead title="When the transaction was blocked">Blocked At</TableHead>}
@@ -178,6 +190,11 @@ export function TransactionTable({
               const executionResult = execResult?.executionResult;
               const timeToAccepted = getTimeToAccepted(tx);
               const timeToFinalized = getTimeToFinalized(tx);
+              const calldataB64 = (tx.type === 1 || tx.type === 2) && tx.data && typeof tx.data === 'object'
+                ? (tx.data as Record<string, unknown>).calldata as string | undefined
+                : undefined;
+              const decodedInput = calldataB64 ? decodeCalldata(calldataB64) : null;
+              const methodName = decodedInput?.methodName ?? (decodedInput && !decodedInput.methodName ? '(constructor)' : undefined);
 
               return (
                 <TableRow
@@ -196,39 +213,6 @@ export function TransactionTable({
                           {truncateHash(tx.hash)}
                         </Link>
                         <CopyButton text={tx.hash} />
-                      </div>
-                    </TableCell>
-                  )}
-                  {isVisible('relations') && (
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        {tx.triggered_by_hash && (
-                          <Link
-                            href={`/transactions/${tx.triggered_by_hash}`}
-                            className="flex items-center gap-1 bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-400 px-2 py-1 rounded-lg text-xs font-medium hover:bg-amber-100 dark:hover:bg-amber-900 transition-colors"
-                            title={`Parent: ${tx.triggered_by_hash}`}
-                            onMouseEnter={() => onHighlightParent?.(tx.triggered_by_hash)}
-                            onMouseLeave={onClearHighlights}
-                          >
-                            <ArrowUpRight className="w-3 h-3" />
-                            Parent
-                          </Link>
-                        )}
-                        {tx.triggered_count !== undefined && tx.triggered_count > 0 && (
-                          <Link
-                            href={`/transactions?search=${tx.hash}`}
-                            className="flex items-center gap-1 bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-400 px-2 py-1 rounded-lg text-xs font-medium hover:bg-blue-100 dark:hover:bg-blue-900 transition-colors"
-                            title={`${tx.triggered_count} triggered transaction(s)`}
-                            onMouseEnter={() => onHighlightChildren?.(tx.hash)}
-                            onMouseLeave={onClearHighlights}
-                          >
-                            <ArrowDownRight className="w-3 h-3" />
-                            {tx.triggered_count}
-                          </Link>
-                        )}
-                        {!tx.triggered_by_hash && (!tx.triggered_count || tx.triggered_count === 0) && (
-                          <span className="text-muted-foreground">-</span>
-                        )}
                       </div>
                     </TableCell>
                   )}
@@ -284,6 +268,13 @@ export function TransactionTable({
                       )}
                     </TableCell>
                   )}
+                  {isVisible('method') && (
+                    <TableCell className="text-sm font-mono w-32 max-w-32 truncate" title={methodName || undefined}>
+                      {methodName
+                        ? <span className="text-foreground">{methodName}</span>
+                        : <span className="text-muted-foreground">-</span>}
+                    </TableCell>
+                  )}
                   {isVisible('genvmResult') && (
                     <TableCell className="text-sm">
                       {executionResult ? (
@@ -302,6 +293,39 @@ export function TransactionTable({
                       {tx.created_at
                         ? formatDistanceToNow(new Date(tx.created_at), { addSuffix: true })
                         : <span className="text-muted-foreground">-</span>}
+                    </TableCell>
+                  )}
+                  {isVisible('relations') && (
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        {tx.triggered_by_hash && (
+                          <Link
+                            href={`/transactions/${tx.triggered_by_hash}`}
+                            className="flex items-center gap-1 bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-400 px-2 py-1 rounded-lg text-xs font-medium hover:bg-amber-100 dark:hover:bg-amber-900 transition-colors"
+                            title={`Parent: ${tx.triggered_by_hash}`}
+                            onMouseEnter={() => onHighlightParent?.(tx.triggered_by_hash)}
+                            onMouseLeave={onClearHighlights}
+                          >
+                            <ArrowUpRight className="w-3 h-3" />
+                            Parent
+                          </Link>
+                        )}
+                        {tx.triggered_count !== undefined && tx.triggered_count > 0 && (
+                          <Link
+                            href={`/transactions?search=${tx.hash}`}
+                            className="flex items-center gap-1 bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-400 px-2 py-1 rounded-lg text-xs font-medium hover:bg-blue-100 dark:hover:bg-blue-900 transition-colors"
+                            title={`${tx.triggered_count} triggered transaction(s)`}
+                            onMouseEnter={() => onHighlightChildren?.(tx.hash)}
+                            onMouseLeave={onClearHighlights}
+                          >
+                            <ArrowDownRight className="w-3 h-3" />
+                            {tx.triggered_count}
+                          </Link>
+                        )}
+                        {!tx.triggered_by_hash && (!tx.triggered_count || tx.triggered_count === 0) && (
+                          <span className="text-muted-foreground">-</span>
+                        )}
+                      </div>
                     </TableCell>
                   )}
                   {isVisible('accepted') && (
