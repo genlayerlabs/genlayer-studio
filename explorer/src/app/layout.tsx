@@ -18,7 +18,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Studio Explorer - GenLayer State Browser",
+  title: "GenLayer Studio Explorer",
   description: "Browse and explore GenLayer transaction and consensus data",
 };
 
