@@ -2,6 +2,7 @@
 
 import base64
 import math
+from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import func, or_, text
@@ -73,13 +74,16 @@ def _serialize_tx(
     return d
 
 
-def _serialize_state(state: CurrentState) -> dict:
-    return {
+def _serialize_state(state: CurrentState, *, tx_count: int | None = None) -> dict:
+    d = {
         "id": state.id,
         "data": state.data,
         "balance": state.balance,
         "updated_at": state.updated_at.isoformat() if state.updated_at else None,
     }
+    if tx_count is not None:
+        d["tx_count"] = tx_count
+    return d
 
 
 def _serialize_validator(v: Validators) -> dict:
@@ -120,13 +124,33 @@ _HEAVY_TX_COLUMNS = (defer(Transactions.contract_snapshot),)
 # ---------------------------------------------------------------------------
 
 
+def _count_deployed_contracts(session: Session) -> int:
+    """Count contract states that actually have a deploy transaction."""
+    has_deploy = (
+        session.query(func.count())
+        .select_from(Transactions)
+        .filter(
+            Transactions.to_address == CurrentState.id,
+            Transactions.type == 1,
+        )
+        .correlate(CurrentState)
+        .scalar_subquery()
+        > 0
+    )
+    return (
+        session.query(func.count())
+        .select_from(CurrentState)
+        .filter(has_deploy)
+        .scalar()
+        or 0
+    )
+
+
 def get_stats_counts(session: Session) -> dict:
     """Lightweight counts for the stats bar (no heavy queries)."""
     total_tx = session.query(func.count()).select_from(Transactions).scalar() or 0
     total_validators = session.query(func.count()).select_from(Validators).scalar() or 0
-    total_contracts = (
-        session.query(func.count()).select_from(CurrentState).scalar() or 0
-    )
+    total_contracts = _count_deployed_contracts(session)
     return {
         "totalTransactions": total_tx,
         "totalValidators": total_validators,
@@ -149,9 +173,7 @@ def get_stats(session: Session) -> dict:
 
     # Parallel lightweight counts
     total_validators = session.query(func.count()).select_from(Validators).scalar() or 0
-    total_contracts = (
-        session.query(func.count()).select_from(CurrentState).scalar() or 0
-    )
+    total_contracts = _count_deployed_contracts(session)
 
     # type 1 = DEPLOY_CONTRACT (see domain/types.py TransactionType)
     deploy_count = (
@@ -206,6 +228,8 @@ def get_all_transactions_paginated(
     limit: int = 20,
     status: Optional[str] = None,
     search: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
 ) -> dict:
     filters = []
     if status:
@@ -231,6 +255,18 @@ def get_all_transactions_paginated(
                 Transactions.to_address.ilike(like),
             )
         )
+    if from_date:
+        try:
+            dt = datetime.fromisoformat(from_date)
+            filters.append(Transactions.created_at >= dt)
+        except ValueError:
+            pass
+    if to_date:
+        try:
+            dt = datetime.fromisoformat(to_date)
+            filters.append(Transactions.created_at <= dt)
+        except ValueError:
+            pass
 
     count_q = session.query(func.count()).select_from(Transactions)
     if filters:
@@ -355,21 +391,79 @@ def get_all_states(
     search: Optional[str] = None,
     page: int = 1,
     limit: int = 20,
+    sort_by: Optional[str] = None,
+    sort_order: Optional[str] = "desc",
 ) -> dict:
-    q = session.query(CurrentState)
+    # Subquery: count transactions where to_address or from_address matches state id
+    tx_filter = or_(
+        Transactions.to_address == CurrentState.id,
+        Transactions.from_address == CurrentState.id,
+    )
+    tx_count_sq = (
+        session.query(func.count())
+        .select_from(Transactions)
+        .filter(tx_filter)
+        .correlate(CurrentState)
+        .scalar_subquery()
+    )
+
+    # Subquery: earliest transaction timestamp (proxy for contract creation time)
+    created_at_sq = (
+        session.query(func.min(Transactions.created_at))
+        .filter(tx_filter)
+        .correlate(CurrentState)
+        .scalar_subquery()
+    )
+
+    # Only show addresses that have a deploy transaction (type 1) targeting them
+    has_deploy = (
+        session.query(func.count())
+        .select_from(Transactions)
+        .filter(
+            Transactions.to_address == CurrentState.id,
+            Transactions.type == 1,
+        )
+        .correlate(CurrentState)
+        .scalar_subquery()
+        > 0
+    )
+
+    q = session.query(
+        CurrentState,
+        tx_count_sq.label("tx_count"),
+        created_at_sq.label("created_at"),
+    ).filter(has_deploy)
     if search:
         q = q.filter(CurrentState.id.ilike(f"%{search}%"))
     total = q.count()
-    q = q.order_by(CurrentState.updated_at.desc())
+
+    # Determine sort column
+    sort_columns = {
+        "tx_count": tx_count_sq,
+        "created_at": created_at_sq,
+        "updated_at": CurrentState.updated_at,
+    }
+    sort_col = sort_columns.get(sort_by, CurrentState.updated_at)
+    if sort_order == "asc":
+        q = q.order_by(sort_col.asc())
+    else:
+        q = q.order_by(sort_col.desc())
+
     q = q.offset((page - 1) * limit).limit(limit)
-    states = q.all()
+    rows = q.all()
     return {
-        "states": [_serialize_state(s) for s in states],
+        "states": [
+            {
+                **_serialize_state(state, tx_count=tx_count),
+                "created_at": created_at.isoformat() if created_at else None,
+            }
+            for state, tx_count, created_at in rows
+        ],
         "pagination": {
             "page": page,
             "limit": limit,
             "total": total,
-            "totalPages": max(1, (total + limit - 1) // limit),
+            "totalPages": (total + limit - 1) // limit if total > 0 else 0,
         },
     }
 

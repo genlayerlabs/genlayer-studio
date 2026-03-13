@@ -2,6 +2,7 @@
 
 import { Transaction } from '@/lib/types';
 import { JsonViewer } from '@/components/JsonViewer';
+import { DataDecodePanel } from '@/components/DataDecodePanel';
 import { User, FileCode } from 'lucide-react';
 
 interface DataTabProps {
@@ -30,7 +31,7 @@ export function DataTab({ transaction: tx }: DataTabProps) {
             Transaction Data
           </h4>
           <div className="bg-muted p-4 rounded-lg overflow-auto max-h-96">
-            <JsonViewer data={tx.data} />
+            <DataDecodePanel data={tx.data} />
           </div>
         </div>
       )}
