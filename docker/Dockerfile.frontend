@@ -14,6 +14,7 @@ RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 
 FROM base AS builder
+ENV NODE_OPTIONS=--max-old-space-size=4096
 RUN npm run build
 
 FROM alpine:latest AS final
