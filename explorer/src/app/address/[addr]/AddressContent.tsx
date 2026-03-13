@@ -13,6 +13,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { formatGenValue, truncateAddress } from '@/lib/formatters';
+import { ContractInteraction } from '@/components/ContractInteraction';
 import {
   ArrowLeft,
   Wallet,
@@ -164,12 +165,10 @@ function ContractView({ address, data }: { address: string; data: AddressInfo })
             <ArrowRightLeft className="w-4 h-4" />
             Transactions ({transactions.length})
           </TabsTrigger>
-          {contract_code && (
-            <TabsTrigger value="code" className="flex items-center gap-1.5">
-              <FileCode className="w-4 h-4" />
-              Contract
-            </TabsTrigger>
-          )}
+          <TabsTrigger value="contract" className="flex items-center gap-1.5">
+            <FileCode className="w-4 h-4" />
+            Contract
+          </TabsTrigger>
           {state?.data && Object.keys(state.data).length > 0 && (
             <TabsTrigger value="state" className="flex items-center gap-1.5">
               <Database className="w-4 h-4" />
@@ -184,15 +183,9 @@ function ContractView({ address, data }: { address: string; data: AddressInfo })
           </Card>
         </TabsContent>
 
-        {contract_code && (
-          <TabsContent value="code">
-            <Card>
-              <CardContent className="p-6">
-                <CodeBlock code={contract_code} />
-              </CardContent>
-            </Card>
-          </TabsContent>
-        )}
+        <TabsContent value="contract">
+          <ContractInteraction address={address} code={contract_code ?? null} />
+        </TabsContent>
 
         {state?.data && Object.keys(state.data).length > 0 && (
           <TabsContent value="state">
