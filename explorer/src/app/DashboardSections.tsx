@@ -9,14 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { TRANSACTION_STATUS_DISPLAY_ORDER } from '@/lib/constants';
 import { Transaction, TransactionStatus } from '@/lib/types';
-import {
-  ArrowRightLeft,
-  Users,
-  Database,
-  AlertTriangle,
-  ChevronRight,
-  Zap,
-} from 'lucide-react';
+import { ChevronRight } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
 // Cached fetcher — React cache() deduplicates within a single render pass,
@@ -50,7 +43,7 @@ export async function StatCardsSection() {
       <StatCard
         title="Total Transactions"
         value={stats.totalTransactions.toLocaleString()}
-        icon={ArrowRightLeft}
+        icon="ArrowRightLeft"
         color="text-blue-600 dark:text-blue-400"
         iconBg="bg-blue-50 dark:bg-blue-950"
         href="/transactions"
@@ -58,7 +51,7 @@ export async function StatCardsSection() {
       <StatCard
         title="Active Validators"
         value={stats.totalValidators.toLocaleString()}
-        icon={Users}
+        icon="Users"
         color="text-emerald-600 dark:text-emerald-400"
         iconBg="bg-emerald-50 dark:bg-emerald-950"
         href="/validators"
@@ -66,7 +59,7 @@ export async function StatCardsSection() {
       <StatCard
         title="Contracts"
         value={stats.totalContracts.toLocaleString()}
-        icon={Database}
+        icon="Database"
         color="text-violet-600 dark:text-violet-400"
         iconBg="bg-violet-50 dark:bg-violet-950"
         href="/contracts"
@@ -74,14 +67,14 @@ export async function StatCardsSection() {
       <StatCard
         title="Avg TPS (24h)"
         value={stats.avgTps24h.toFixed(4)}
-        icon={Zap}
+        icon="Zap"
         color="text-cyan-600 dark:text-cyan-400"
         iconBg="bg-cyan-50 dark:bg-cyan-950"
       />
       <StatCard
         title="Appealed Transactions"
         value={stats.appealedTransactions.toLocaleString()}
-        icon={AlertTriangle}
+        icon="AlertTriangle"
         color="text-amber-600 dark:text-amber-400"
         iconBg="bg-amber-50 dark:bg-amber-950"
       />
