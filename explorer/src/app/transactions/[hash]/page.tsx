@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useState, use } from 'react';
+import { useEffect, useState, useCallback, use } from 'react';
 import Link from 'next/link';
 import { Transaction } from '@/lib/types';
+import { useTransactionPolling } from '@/hooks/useTransactionPolling';
 import { StatusBadge } from '@/components/StatusBadge';
 import { TransactionTypeLabel } from '@/components/TransactionTypeLabel';
 import { CopyButton } from '@/components/CopyButton';
@@ -70,49 +71,8 @@ export default function TransactionDetailPage({ params }: { params: Promise<{ ha
 
   // Poll for updates when transaction is not in a terminal state
   // Pauses polling when the browser tab is hidden
-  useEffect(() => {
-    if (!data || isTerminalStatus(data.transaction.status)) return;
-
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let active = true;
-
-    function schedulePoll() {
-      if (!active) return;
-      timer = setTimeout(async () => {
-        if (document.hidden || !active) return;
-        try {
-          const res = await fetch(`/api/transactions/${hash}`);
-          if (res.ok) {
-            const updated = await res.json();
-            if (active) setData(updated);
-            // Effect re-runs on setData, so don't self-schedule on success
-            return;
-          }
-        } catch {
-          // silently ignore polling errors
-        }
-        // Reschedule on error/non-ok so polling doesn't die
-        schedulePoll();
-      }, 5000);
-    }
-
-    function onVisibilityChange() {
-      if (!document.hidden) {
-        // Tab became visible — resume polling immediately
-        if (timer) clearTimeout(timer);
-        schedulePoll();
-      }
-    }
-
-    schedulePoll();
-    document.addEventListener('visibilitychange', onVisibilityChange);
-
-    return () => {
-      active = false;
-      if (timer) clearTimeout(timer);
-      document.removeEventListener('visibilitychange', onVisibilityChange);
-    };
-  }, [data, hash]);
+  const stableSetData = useCallback((d: TransactionDetail) => setData(d), []);
+  useTransactionPolling(hash, data, stableSetData);
 
   if (loading) {
     return (

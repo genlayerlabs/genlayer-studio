@@ -1,29 +1,23 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { formatDistanceToNow } from 'date-fns';
 import { ArrowUpRight, ArrowDownRight, Settings2 } from 'lucide-react';
 
 import { StatusBadge } from '@/components/StatusBadge';
-import { CopyButton } from '@/components/CopyButton';
+import { AddressDisplay } from '@/components/AddressDisplay';
 import { TransactionTypeLabel } from '@/components/TransactionTypeLabel';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Transaction } from '@/lib/types';
 import { getTimeToAccepted, getTimeToFinalized, getExecutionResult } from '@/lib/transactionUtils';
-import { truncateHash, truncateAddress } from '@/lib/formatters';
 import { decodeCalldata } from '@/lib/resultDecoder';
 import { cn } from '@/lib/utils';
+import { useColumnVisibility } from '@/hooks/useColumnVisibility';
+import type { ColumnDef } from '@/hooks/useColumnVisibility';
 
 const STORAGE_KEY = 'explorer:tx-table-columns';
-
-interface ColumnDef {
-  id: string;
-  label: string;
-  defaultVisible: boolean;
-  alwaysVisible?: boolean;
-}
 
 const OPTIONAL_COLUMNS: ColumnDef[] = [
   { id: 'hash', label: 'Hash', defaultVisible: true, alwaysVisible: true },
@@ -40,30 +34,6 @@ const OPTIONAL_COLUMNS: ColumnDef[] = [
   { id: 'blockedAt', label: 'Blocked At', defaultVisible: false },
   { id: 'worker', label: 'Worker', defaultVisible: false },
 ];
-
-function getDefaultVisibility(): Record<string, boolean> {
-  const defaults: Record<string, boolean> = {};
-  for (const col of OPTIONAL_COLUMNS) {
-    defaults[col.id] = col.defaultVisible;
-  }
-  return defaults;
-}
-
-function loadColumnVisibility(): Record<string, boolean> {
-  if (typeof window === 'undefined') return getDefaultVisibility();
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) {
-      const parsed = JSON.parse(stored);
-      // Merge with defaults so new columns get their default value
-      const defaults = getDefaultVisibility();
-      return { ...defaults, ...parsed };
-    }
-  } catch {
-    // ignore
-  }
-  return getDefaultVisibility();
-}
 
 interface TransactionTableProps {
   transactions: Transaction[];
@@ -83,8 +53,12 @@ export function TransactionTable({
   highlightedHashes = new Set(),
 }: TransactionTableProps) {
   const [highlightedAddress, setHighlightedAddress] = useState<string | null>(null);
-  const [columnVisibility, setColumnVisibility] = useState<Record<string, boolean>>(getDefaultVisibility);
-  const [showColumnPicker, setShowColumnPicker] = useState(false);
+  const {
+    isVisible: isColumnVisible,
+    showColumnPicker,
+    setShowColumnPicker,
+    toggleColumn,
+  } = useColumnVisibility(STORAGE_KEY, OPTIONAL_COLUMNS);
   const columnPickerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -96,24 +70,11 @@ export function TransactionTable({
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
-  }, [showColumnPicker]);
-
-  // Load from localStorage on mount
-  useEffect(() => {
-    setColumnVisibility(loadColumnVisibility());
-  }, []);
-
-  const toggleColumn = useCallback((columnId: string) => {
-    setColumnVisibility(prev => {
-      const next = { ...prev, [columnId]: !prev[columnId] };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-      return next;
-    });
-  }, []);
+  }, [showColumnPicker, setShowColumnPicker]);
 
   const isVisible = (columnId: string) => {
     if (columnId === 'relations' && !showRelations) return false;
-    return columnVisibility[columnId] !== false;
+    return isColumnVisible(columnId);
   };
 
   const visibleCount = OPTIONAL_COLUMNS.filter(c =>
@@ -205,15 +166,12 @@ export function TransactionTable({
                 >
                   {isVisible('hash') && (
                     <TableCell>
-                      <div className="flex items-center gap-1">
-                        <Link
-                          href={`/transactions/${tx.hash}`}
-                          className="text-primary hover:underline font-mono text-sm"
-                        >
-                          {truncateHash(tx.hash)}
-                        </Link>
-                        <CopyButton text={tx.hash} />
-                      </div>
+                      <AddressDisplay
+                        address={tx.hash}
+                        href={`/transactions/${tx.hash}`}
+                        isHash
+                        linkClassName="text-primary hover:underline font-mono text-sm"
+                      />
                     </TableCell>
                   )}
                   {isVisible('type') && (
@@ -229,19 +187,13 @@ export function TransactionTable({
                   {isVisible('from') && (
                     <TableCell className="font-mono text-sm text-muted-foreground">
                       {tx.from_address ? (
-                        <div
-                          className={cn(
-                            'inline-flex items-center gap-1 px-1 -mx-1 rounded transition-colors',
-                            highlightedAddress === tx.from_address && 'bg-cyan-100 dark:bg-cyan-900/40'
-                          )}
+                        <AddressDisplay
+                          address={tx.from_address}
+                          href={`/address/${tx.from_address}`}
+                          highlight={highlightedAddress === tx.from_address}
                           onMouseEnter={() => setHighlightedAddress(tx.from_address)}
                           onMouseLeave={() => setHighlightedAddress(null)}
-                        >
-                          <Link href={`/address/${tx.from_address}`} className="hover:text-primary">
-                            {truncateAddress(tx.from_address)}
-                          </Link>
-                          <CopyButton text={tx.from_address} />
-                        </div>
+                        />
                       ) : (
                         <span className="text-muted-foreground">-</span>
                       )}
@@ -250,19 +202,13 @@ export function TransactionTable({
                   {isVisible('to') && (
                     <TableCell className="font-mono text-sm text-muted-foreground">
                       {tx.to_address ? (
-                        <div
-                          className={cn(
-                            'inline-flex items-center gap-1 px-1 -mx-1 rounded transition-colors',
-                            highlightedAddress === tx.to_address && 'bg-cyan-100 dark:bg-cyan-900/40'
-                          )}
+                        <AddressDisplay
+                          address={tx.to_address}
+                          href={`/address/${tx.to_address}`}
+                          highlight={highlightedAddress === tx.to_address}
                           onMouseEnter={() => setHighlightedAddress(tx.to_address)}
                           onMouseLeave={() => setHighlightedAddress(null)}
-                        >
-                          <Link href={`/address/${tx.to_address}`} className="hover:text-primary">
-                            {truncateAddress(tx.to_address)}
-                          </Link>
-                          <CopyButton text={tx.to_address} />
-                        </div>
+                        />
                       ) : (
                         <span className="text-muted-foreground">-</span>
                       )}

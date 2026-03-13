@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useState, useCallback, Suspense } from 'react';
-import { useSearchParams, useRouter } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
+import { usePagination } from '@/hooks/usePagination';
 import { Transaction } from '@/lib/types';
 import { TransactionTable } from '@/components/TransactionTable';
 import { PAGE_SIZE_OPTIONS, TRANSACTION_TABS } from '@/lib/constants';
@@ -24,16 +25,14 @@ interface TransactionsResponse {
 }
 
 function TransactionsContent() {
-  const router = useRouter();
   const searchParams = useSearchParams();
+  const { page, limit, updateParams } = usePagination(searchParams, 20);
   const [data, setData] = useState<TransactionsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState(searchParams.get('search') || '');
   const [highlightedHashes, setHighlightedHashes] = useState<Set<string>>(new Set());
 
-  const page = parseInt(searchParams.get('page') || '1');
-  const limit = parseInt(searchParams.get('limit') || '20');
   const tab = searchParams.get('tab') || 'all';
   const search = searchParams.get('search') || '';
   const fromDate = searchParams.get('from_date') || '';
@@ -69,18 +68,6 @@ function TransactionsContent() {
   useEffect(() => {
     fetchTransactions();
   }, [fetchTransactions]);
-
-  const updateParams = (updates: Record<string, string | null>) => {
-    const params = new URLSearchParams(searchParams.toString());
-    Object.entries(updates).forEach(([key, value]) => {
-      if (value === null || value === '') {
-        params.delete(key);
-      } else {
-        params.set(key, value);
-      }
-    });
-    router.push(`/transactions?${params.toString()}`);
-  };
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();

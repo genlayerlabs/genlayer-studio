@@ -1,17 +1,17 @@
 'use client';
 
 import { useEffect, useState, useCallback, Suspense } from 'react';
-import { useSearchParams, useRouter } from 'next/navigation';
-import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
+import { usePagination } from '@/hooks/usePagination';
 import { CurrentState } from '@/lib/types';
-import { CopyButton } from '@/components/CopyButton';
+import { AddressDisplay } from '@/components/AddressDisplay';
 import { Card, CardContent } from '@/components/ui/card';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Loader2, ChevronLeft, ChevronRight, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
-import { formatGenValue, truncateAddress } from '@/lib/formatters';
+import { formatGenValue } from '@/lib/formatters';
 
 interface StatesResponse {
   states: CurrentState[];
@@ -26,14 +26,12 @@ interface StatesResponse {
 const PAGE_SIZE_OPTIONS = [12, 24, 48, 96] as const;
 
 function StateContent() {
-  const router = useRouter();
   const searchParams = useSearchParams();
+  const { page, limit, updateParams } = usePagination(searchParams, 24);
   const [data, setData] = useState<StatesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const page = parseInt(searchParams.get('page') || '1', 10) || 1;
-  const limit = parseInt(searchParams.get('limit') || '24', 10) || 24;
   const sortBy = searchParams.get('sort_by') || '';
   const sortOrder = searchParams.get('sort_order') || 'desc';
 
@@ -61,18 +59,6 @@ function StateContent() {
   useEffect(() => {
     fetchStates();
   }, [fetchStates]);
-
-  const updateParams = (updates: Record<string, string | null>) => {
-    const params = new URLSearchParams(searchParams.toString());
-    Object.entries(updates).forEach(([key, value]) => {
-      if (value === null || value === '') {
-        params.delete(key);
-      } else {
-        params.set(key, value);
-      }
-    });
-    router.push(`/contracts?${params.toString()}`);
-  };
 
   const toggleSort = (column: string) => {
     if (sortBy === column) {
@@ -144,12 +130,13 @@ function StateContent() {
                   data.states.map((state) => (
                     <TableRow key={state.id} className="cursor-pointer hover:bg-accent/50">
                       <TableCell className="font-mono text-sm">
-                        <div className="flex items-center gap-1">
-                          <Link href={`/contracts/${state.id}`} className="text-primary hover:underline">
-                            {truncateAddress(state.id, 10, 8)}
-                          </Link>
-                          <CopyButton text={state.id} />
-                        </div>
+                        <AddressDisplay
+                          address={state.id}
+                          href={`/contracts/${state.id}`}
+                          truncateStart={10}
+                          truncateEnd={8}
+                          linkClassName="text-primary hover:underline"
+                        />
                       </TableCell>
                       <TableCell className="text-sm">
                         {formatGenValue(state.balance)}
