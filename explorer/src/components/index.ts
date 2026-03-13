@@ -19,3 +19,8 @@ export { ConsensusViewer } from './ConsensusViewer';
 export { ConsensusRound } from './ConsensusRound';
 export { VoteIcon } from './VoteIcon';
 export { MonitoringTimeline } from './MonitoringTimeline';
+
+// Feature Components
+export { CodeBlock } from './CodeBlock';
+export { DataDecodePanel } from './DataDecodePanel';
+export { ConsensusJourney } from './ConsensusJourney';

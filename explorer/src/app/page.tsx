@@ -107,7 +107,7 @@ export default function Dashboard() {
           icon={Database}
           color="text-violet-600 dark:text-violet-400"
           iconBg="bg-violet-50 dark:bg-violet-950"
-          href="/state"
+          href="/contracts"
         />
         <StatCard
           title="Appealed Transactions"
