@@ -66,7 +66,7 @@ export async function StatCardsSection() {
       />
       <StatCard
         title="Avg TPS (24h)"
-        value={stats.avgTps24h.toFixed(4)}
+        value={(stats.avgTps24h ?? 0).toFixed(4)}
         icon="Zap"
         color="text-cyan-600 dark:text-cyan-400"
         iconBg="bg-cyan-50 dark:bg-cyan-950"
