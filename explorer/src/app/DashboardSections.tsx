@@ -161,7 +161,7 @@ export async function ChartsSection() {
         </CardContent>
       </Card>
 
-      {stats.txVolume14d.length > 0 && (
+      {stats.txVolume14d && stats.txVolume14d.length > 0 && (
         <Card className="py-4">
           <CardHeader className="px-4 pb-2 pt-0">
             <div className="flex items-center justify-between">

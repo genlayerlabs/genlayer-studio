@@ -135,14 +135,14 @@ export function ProvidersContent({ providers }: { providers: LLMProvider[] }) {
                               <span className="text-muted-foreground">Created</span>
                               <span className="flex items-center gap-1">
                                 <Clock className="w-3 h-3" />
-                                {format(new Date(provider.created_at), 'PPpp')}
+                                {provider.created_at ? format(new Date(provider.created_at), 'PPpp') : '-'}
                               </span>
                             </div>
                             <div className="flex justify-between items-center">
                               <span className="text-muted-foreground">Updated</span>
                               <span className="flex items-center gap-1">
                                 <Clock className="w-3 h-3" />
-                                {format(new Date(provider.updated_at), 'PPpp')}
+                                {provider.updated_at ? format(new Date(provider.updated_at), 'PPpp') : '-'}
                               </span>
                             </div>
                           </div>

@@ -88,7 +88,7 @@ function AccountView({ address, data }: { address: string; data: AddressInfo }) 
         <TabsList>
           <TabsTrigger value="transactions" className="flex items-center gap-1.5">
             <ArrowRightLeft className="w-4 h-4" />
-            Transactions ({txs.length})
+            Transactions ({data.tx_count ?? txs.length})
           </TabsTrigger>
         </TabsList>
         <TabsContent value="transactions">
@@ -163,7 +163,7 @@ function ContractView({ address, data }: { address: string; data: AddressInfo })
         <TabsList>
           <TabsTrigger value="transactions" className="flex items-center gap-1.5">
             <ArrowRightLeft className="w-4 h-4" />
-            Transactions ({transactions.length})
+            Transactions ({data.tx_count ?? transactions.length})
           </TabsTrigger>
           <TabsTrigger value="contract" className="flex items-center gap-1.5">
             <FileCode className="w-4 h-4" />
