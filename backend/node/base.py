@@ -717,12 +717,7 @@ class Node:
             receipt.vote = Vote.DISAGREE
             return receipt
 
-        # 3. VM crash (exit_code, OOM, etc.) — validator couldn't validate
-        if result_code == public_abi.ResultCode.VM_ERROR:
-            receipt.vote = Vote.DISAGREE
-            return receipt
-
-        # 4. Deterministic violation: execution outcome or state diverges from leader
+        # 3. Deterministic violation: execution outcome or state diverges from leader
         leader_receipt = self.leader_receipt
         if (
             leader_receipt.execution_result != receipt.execution_result
@@ -732,7 +727,7 @@ class Node:
             receipt.vote = Vote.DETERMINISTIC_VIOLATION
             return receipt
 
-        # 5. Valid execution (RETURN or USER_ERROR) with matching state → agree
+        # 4. Valid execution with matching state → agree
         receipt.vote = Vote.AGREE
         return receipt
 
