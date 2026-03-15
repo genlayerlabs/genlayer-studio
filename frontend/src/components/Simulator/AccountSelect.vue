@@ -53,7 +53,7 @@ const connectWallet = () => {
           :key="account.address"
           :account="account"
           :active="account.address === store.selectedAccount?.address"
-          :canDelete="true"
+          :canDelete="account.type === 'local'"
           v-close-popper
         />
       </div>
