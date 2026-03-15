@@ -2,7 +2,7 @@
 
 import base64
 import math
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import func, or_, text
@@ -201,6 +201,43 @@ def get_stats(session: Session) -> dict:
         .all()
     )
 
+    # Finalized count from the status breakdown
+    finalized_count = by_status.get("FINALIZED", 0)
+
+    # Average TPS over the last 24 hours
+    now = datetime.now(timezone.utc)
+    day_ago = now - timedelta(hours=24)
+    tx_last_24h = (
+        session.query(func.count())
+        .select_from(Transactions)
+        .filter(Transactions.created_at >= day_ago)
+        .scalar()
+        or 0
+    )
+    avg_tps_24h = round(tx_last_24h / 86400, 4)
+
+    # 14-day transaction volume (grouped by date, filled to today)
+    today = now.date()
+    fourteen_days_ago = now - timedelta(days=13)  # 14 days including today
+    volume_rows = (
+        session.query(
+            func.date(Transactions.created_at).label("date"),
+            func.count().label("count"),
+        )
+        .filter(Transactions.created_at >= fourteen_days_ago)
+        .group_by(func.date(Transactions.created_at))
+        .order_by(func.date(Transactions.created_at))
+        .all()
+    )
+    counts_by_date = {row.date: row.count for row in volume_rows}
+    tx_volume_14d = [
+        {
+            "date": (today - timedelta(days=13 - i)).isoformat(),
+            "count": counts_by_date.get(today - timedelta(days=13 - i), 0),
+        }
+        for i in range(14)
+    ]
+
     return {
         "totalTransactions": total,
         "transactionsByStatus": by_status,
@@ -211,6 +248,9 @@ def get_stats(session: Session) -> dict:
         "totalValidators": total_validators,
         "totalContracts": total_contracts,
         "appealedTransactions": appealed,
+        "finalizedTransactions": finalized_count,
+        "avgTps24h": avg_tps_24h,
+        "txVolume14d": tx_volume_14d,
         "recentTransactions": [
             _serialize_tx(tx, include_snapshot=False) for tx in recent
         ],
@@ -233,8 +273,14 @@ def get_all_transactions_paginated(
 ) -> dict:
     filters = []
     if status:
+        # Support comma-separated status values for multi-status filtering
+        status_values = [s.strip() for s in status.split(",") if s.strip()]
         try:
-            filters.append(Transactions.status == TransactionStatus(status))
+            parsed = [TransactionStatus(s) for s in status_values]
+            if len(parsed) == 1:
+                filters.append(Transactions.status == parsed[0])
+            else:
+                filters.append(Transactions.status.in_(parsed))
         except ValueError:
             # Invalid status value — return empty results
             return {
@@ -351,34 +397,6 @@ def get_transaction_with_relations(session: Session, tx_hash: str) -> Optional[d
 # ---------------------------------------------------------------------------
 # Delete transaction
 # ---------------------------------------------------------------------------
-
-
-def delete_transaction(session: Session, tx_hash: str) -> Optional[dict]:
-    tx = session.query(Transactions).filter(Transactions.hash == tx_hash).first()
-    if not tx:
-        return None
-
-    child_count = (
-        session.query(func.count())
-        .select_from(Transactions)
-        .filter(Transactions.triggered_by_hash == tx_hash)
-        .scalar()
-        or 0
-    )
-
-    if child_count > 0:
-        session.query(Transactions).filter(
-            Transactions.triggered_by_hash == tx_hash
-        ).update({"triggered_by_hash": None}, synchronize_session=False)
-
-    session.delete(tx)
-    session.flush()
-
-    return {
-        "success": True,
-        "message": "Transaction deleted successfully",
-        "childTransactionsUpdated": child_count,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -517,16 +535,160 @@ def get_state_with_transactions(session: Session, state_id: str) -> Optional[dic
 
     contract_code = _extract_contract_code(session, state_id)
 
+    # Find the deploy transaction to get creator info
+    creator_info = None
+    deploy_tx = (
+        session.query(Transactions)
+        .filter(
+            Transactions.to_address == state_id,
+            Transactions.type == 1,
+        )
+        .order_by(Transactions.created_at.asc())
+        .first()
+    )
+    if deploy_tx:
+        creator_info = {
+            "creator_address": deploy_tx.from_address,
+            "deployment_tx_hash": deploy_tx.hash,
+            "creation_timestamp": (
+                deploy_tx.created_at.isoformat() if deploy_tx.created_at else None
+            ),
+        }
+
     return {
         "state": _serialize_state(state),
         "transactions": [_serialize_tx(tx, include_snapshot=False) for tx in txs],
         "contract_code": contract_code,
+        "creator_info": creator_info,
     }
 
 
 # ---------------------------------------------------------------------------
 # Providers
 # ---------------------------------------------------------------------------
+
+
+def get_address_info(session: Session, address: str) -> Optional[dict]:
+    """Resolve an address to its type (CONTRACT, VALIDATOR, or ACCOUNT) and return
+    relevant data."""
+
+    # 1. Check if it's a contract (exists in CurrentState with a deploy tx)
+    state = session.query(CurrentState).filter(CurrentState.id == address).first()
+    if state:
+        deploy_tx = (
+            session.query(Transactions)
+            .filter(
+                Transactions.to_address == address,
+                Transactions.type == 1,
+            )
+            .order_by(Transactions.created_at.asc())
+            .first()
+        )
+        if deploy_tx:
+            # Return full contract detail inline
+            contract_detail = get_state_with_transactions(session, address)
+            return {
+                "type": "CONTRACT",
+                "address": address,
+                **(contract_detail or {}),
+            }
+
+    # 2. Check if it's a validator
+    validator = session.query(Validators).filter(Validators.address == address).first()
+    if validator:
+        return {
+            "type": "VALIDATOR",
+            "address": address,
+            "validator": _serialize_validator(validator),
+        }
+
+    # 3. Check if there are any transactions involving this address
+    tx_count = (
+        session.query(func.count())
+        .select_from(Transactions)
+        .filter(
+            or_(
+                Transactions.from_address == address,
+                Transactions.to_address == address,
+            )
+        )
+        .scalar()
+        or 0
+    )
+    if tx_count > 0:
+        # Get the account's balance from CurrentState if it exists
+        balance = state.balance if state else 0
+
+        addr_filter = or_(
+            Transactions.from_address == address,
+            Transactions.to_address == address,
+        )
+
+        recent_txs = (
+            session.query(Transactions)
+            .options(*_HEAVY_TX_COLUMNS)
+            .filter(addr_filter)
+            .order_by(Transactions.created_at.desc())
+            .limit(50)
+            .all()
+        )
+
+        first_tx_time = (
+            session.query(func.min(Transactions.created_at))
+            .filter(addr_filter)
+            .scalar()
+        )
+        last_tx_time = (
+            session.query(func.max(Transactions.created_at))
+            .filter(addr_filter)
+            .scalar()
+        )
+
+        return {
+            "type": "ACCOUNT",
+            "address": address,
+            "balance": balance,
+            "tx_count": tx_count,
+            "first_tx_time": first_tx_time.isoformat() if first_tx_time else None,
+            "last_tx_time": last_tx_time.isoformat() if last_tx_time else None,
+            "transactions": [
+                _serialize_tx(tx, include_snapshot=False) for tx in recent_txs
+            ],
+        }
+
+    # Also check if it exists as a CurrentState entry without deploy tx (EOA with state)
+    if state:
+        return {
+            "type": "ACCOUNT",
+            "address": address,
+            "balance": state.balance,
+            "tx_count": 0,
+            "first_tx_time": None,
+            "last_tx_time": None,
+            "transactions": [],
+        }
+
+    return None
+
+
+def get_all_validators(
+    session: Session,
+    search: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> dict:
+    q = session.query(Validators).order_by(Validators.id)
+    if search:
+        like = f"%{search}%"
+        q = q.filter(
+            or_(
+                Validators.address.ilike(like),
+                Validators.provider.ilike(like),
+                Validators.model.ilike(like),
+            )
+        )
+    if limit:
+        q = q.limit(limit)
+    return {"validators": [_serialize_validator(v) for v in q.all()]}
 
 
 def get_all_providers(session: Session) -> dict:
