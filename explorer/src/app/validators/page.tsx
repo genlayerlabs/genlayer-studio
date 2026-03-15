@@ -3,8 +3,11 @@
 import { useEffect, useState } from 'react';
 import { JsonViewer } from '@/components/JsonViewer';
 import { Validator } from '@/lib/types';
+import { Card, CardContent } from '@/components/ui/card';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Loader2, Users, Cpu, Coins, Settings } from 'lucide-react';
 import { format } from 'date-fns';
+import { formatGenValue } from '@/lib/formatters';
 
 export default function ValidatorsPage() {
   const [validators, setValidators] = useState<Validator[]>([]);
@@ -31,17 +34,19 @@ export default function ValidatorsPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-96">
-        <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
+        <Loader2 className="w-8 h-8 animate-spin text-primary" />
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="bg-red-50 border border-red-200 rounded-lg p-6 text-red-700">
-        <h2 className="font-bold mb-2">Error loading validators</h2>
-        <p>{error}</p>
-      </div>
+      <Card className="border-destructive">
+        <CardContent className="p-6">
+          <h2 className="font-bold mb-2 text-destructive">Error loading validators</h2>
+          <p className="text-destructive/80">{error}</p>
+        </CardContent>
+      </Card>
     );
   }
 
@@ -50,153 +55,162 @@ export default function ValidatorsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-gray-800">Validators</h1>
-        <p className="text-gray-500 mt-1">Active validators in the network</p>
+        <h1 className="text-2xl font-bold text-foreground">Validators</h1>
+        <p className="text-muted-foreground mt-1">Active validators in the network</p>
       </div>
 
-      {/* Summary Stats */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="bg-white rounded-xl shadow-sm p-6">
-          <div className="flex items-center gap-3">
-            <div className="bg-blue-100 p-3 rounded-lg">
-              <Users className="w-6 h-6 text-blue-600" />
+        <Card>
+          <CardContent className="p-6">
+            <div className="flex items-center gap-3">
+              <div className="bg-blue-100 dark:bg-blue-950 p-3 rounded-lg">
+                <Users className="w-6 h-6 text-blue-600 dark:text-blue-400" />
+              </div>
+              <div>
+                <p className="text-muted-foreground text-sm">Total Validators</p>
+                <p className="text-2xl font-bold text-foreground">{validators.length}</p>
+              </div>
             </div>
-            <div>
-              <p className="text-gray-500 text-sm">Total Validators</p>
-              <p className="text-2xl font-bold">{validators.length}</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-6">
+            <div className="flex items-center gap-3">
+              <div className="bg-green-100 dark:bg-green-950 p-3 rounded-lg">
+                <Coins className="w-6 h-6 text-green-600 dark:text-green-400" />
+              </div>
+              <div>
+                <p className="text-muted-foreground text-sm">Total Stake</p>
+                <p className="text-2xl font-bold text-foreground">{formatGenValue(totalStake)}</p>
+              </div>
             </div>
-          </div>
-        </div>
-        <div className="bg-white rounded-xl shadow-sm p-6">
-          <div className="flex items-center gap-3">
-            <div className="bg-green-100 p-3 rounded-lg">
-              <Coins className="w-6 h-6 text-green-600" />
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-6">
+            <div className="flex items-center gap-3">
+              <div className="bg-purple-100 dark:bg-purple-950 p-3 rounded-lg">
+                <Cpu className="w-6 h-6 text-purple-600 dark:text-purple-400" />
+              </div>
+              <div>
+                <p className="text-muted-foreground text-sm">Unique Providers</p>
+                <p className="text-2xl font-bold text-foreground">
+                  {new Set(validators.map(v => v.provider)).size}
+                </p>
+              </div>
             </div>
-            <div>
-              <p className="text-gray-500 text-sm">Total Stake</p>
-              <p className="text-2xl font-bold">{totalStake}</p>
-            </div>
-          </div>
-        </div>
-        <div className="bg-white rounded-xl shadow-sm p-6">
-          <div className="flex items-center gap-3">
-            <div className="bg-purple-100 p-3 rounded-lg">
-              <Cpu className="w-6 h-6 text-purple-600" />
-            </div>
-            <div>
-              <p className="text-gray-500 text-sm">Unique Providers</p>
-              <p className="text-2xl font-bold">
-                {new Set(validators.map(v => v.provider)).size}
-              </p>
-            </div>
-          </div>
-        </div>
+          </CardContent>
+        </Card>
       </div>
 
-      {/* Validators List */}
       <div className="space-y-4">
         {validators.map((validator) => (
-          <div key={validator.id} className="bg-white rounded-xl shadow-sm overflow-hidden">
-            <button
-              onClick={() => setExpandedId(expandedId === validator.id ? null : validator.id)}
-              className="w-full px-6 py-4 flex items-center justify-between hover:bg-gray-50 transition-colors"
-            >
-              <div className="flex items-center gap-4">
-                <div className="bg-gray-100 rounded-full w-12 h-12 flex items-center justify-center font-bold text-gray-600">
-                  #{validator.id}
-                </div>
-                <div className="text-left">
-                  <div className="font-medium text-gray-800">
-                    {validator.provider} / {validator.model}
+          <Collapsible
+            key={validator.id}
+            open={expandedId === validator.id}
+            onOpenChange={(open) => setExpandedId(open ? validator.id : null)}
+          >
+            <Card>
+              <CollapsibleTrigger className="w-full px-6 py-4 flex items-center justify-between hover:bg-accent transition-colors cursor-pointer">
+                <div className="flex items-center gap-4">
+                  <div className="bg-muted rounded-full w-12 h-12 flex items-center justify-center font-bold text-muted-foreground">
+                    #{validator.id}
                   </div>
-                  {validator.address && (
-                    <div className="text-sm text-gray-500 font-mono">
-                      {validator.address.slice(0, 12)}...{validator.address.slice(-10)}
+                  <div className="text-left">
+                    <div className="font-medium text-foreground">
+                      {validator.provider} / {validator.model}
                     </div>
-                  )}
+                    {validator.address && (
+                      <div className="text-sm text-muted-foreground font-mono">
+                        {validator.address.slice(0, 12)}...{validator.address.slice(-10)}
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-              <div className="flex items-center gap-6">
-                <div className="text-right">
-                  <div className="text-sm text-gray-500">Stake</div>
-                  <div className="font-medium text-gray-800">{validator.stake}</div>
+                <div className="flex items-center gap-6">
+                  <div className="text-right">
+                    <div className="text-sm text-muted-foreground">Stake</div>
+                    <div className="font-medium text-foreground">{formatGenValue(validator.stake)}</div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-sm text-muted-foreground">Plugin</div>
+                    <div className="font-medium text-foreground">{validator.plugin}</div>
+                  </div>
+                  <Settings className={`w-5 h-5 text-muted-foreground transition-transform ${expandedId === validator.id ? 'rotate-90' : ''}`} />
                 </div>
-                <div className="text-right">
-                  <div className="text-sm text-gray-500">Plugin</div>
-                  <div className="font-medium text-gray-800">{validator.plugin}</div>
-                </div>
-                <Settings className={`w-5 h-5 text-gray-400 transition-transform ${expandedId === validator.id ? 'rotate-90' : ''}`} />
-              </div>
-            </button>
+              </CollapsibleTrigger>
 
-            {expandedId === validator.id && (
-              <div className="px-6 pb-6 border-t border-gray-100">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
-                  <div>
-                    <h4 className="font-medium text-gray-700 mb-2">Details</h4>
-                    <div className="space-y-2 text-sm">
-                      <div className="flex justify-between">
-                        <span className="text-gray-500">ID</span>
-                        <span className="font-mono">{validator.id}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-gray-500">Provider</span>
-                        <span>{validator.provider}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-gray-500">Model</span>
-                        <span>{validator.model}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-gray-500">Plugin</span>
-                        <span>{validator.plugin}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-gray-500">Stake</span>
-                        <span>{validator.stake}</span>
-                      </div>
-                      {validator.address && (
+              <CollapsibleContent>
+                <div className="px-6 pb-6 border-t border-border">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
+                    <div>
+                      <h4 className="font-medium text-foreground mb-2">Details</h4>
+                      <div className="space-y-2 text-sm">
                         <div className="flex justify-between">
-                          <span className="text-gray-500">Address</span>
-                          <span className="font-mono text-xs">{validator.address}</span>
+                          <span className="text-muted-foreground">ID</span>
+                          <span className="font-mono">{validator.id}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Provider</span>
+                          <span>{validator.provider}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Model</span>
+                          <span>{validator.model}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Plugin</span>
+                          <span>{validator.plugin}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Stake</span>
+                          <span>{formatGenValue(validator.stake)}</span>
+                        </div>
+                        {validator.address && (
+                          <div className="flex justify-between">
+                            <span className="text-muted-foreground">Address</span>
+                            <span className="font-mono text-xs">{validator.address}</span>
+                          </div>
+                        )}
+                        {validator.created_at && (
+                          <div className="flex justify-between">
+                            <span className="text-muted-foreground">Created</span>
+                            <span>{format(new Date(validator.created_at), 'PPpp')}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="space-y-4">
+                      {validator.config && Object.keys(validator.config).length > 0 && (
+                        <div>
+                          <h4 className="font-medium text-foreground mb-2">Config</h4>
+                          <div className="bg-muted p-3 rounded-lg overflow-auto max-h-48">
+                            <JsonViewer data={validator.config} initialExpanded={false} />
+                          </div>
                         </div>
                       )}
-                      {validator.created_at && (
-                        <div className="flex justify-between">
-                          <span className="text-gray-500">Created</span>
-                          <span>{format(new Date(validator.created_at), 'PPpp')}</span>
+                      {validator.plugin_config && Object.keys(validator.plugin_config).length > 0 && (
+                        <div>
+                          <h4 className="font-medium text-foreground mb-2">Plugin Config</h4>
+                          <div className="bg-muted p-3 rounded-lg overflow-auto max-h-48">
+                            <JsonViewer data={validator.plugin_config} initialExpanded={false} />
+                          </div>
                         </div>
                       )}
                     </div>
                   </div>
-                  <div className="space-y-4">
-                    {validator.config && Object.keys(validator.config).length > 0 && (
-                      <div>
-                        <h4 className="font-medium text-gray-700 mb-2">Config</h4>
-                        <div className="bg-gray-50 p-3 rounded-lg overflow-auto max-h-48">
-                          <JsonViewer data={validator.config} initialExpanded={false} />
-                        </div>
-                      </div>
-                    )}
-                    {validator.plugin_config && Object.keys(validator.plugin_config).length > 0 && (
-                      <div>
-                        <h4 className="font-medium text-gray-700 mb-2">Plugin Config</h4>
-                        <div className="bg-gray-50 p-3 rounded-lg overflow-auto max-h-48">
-                          <JsonViewer data={validator.plugin_config} initialExpanded={false} />
-                        </div>
-                      </div>
-                    )}
-                  </div>
                 </div>
-              </div>
-            )}
-          </div>
+              </CollapsibleContent>
+            </Card>
+          </Collapsible>
         ))}
 
         {validators.length === 0 && (
-          <div className="bg-white rounded-xl shadow-sm p-8 text-center text-gray-500">
-            No validators found
-          </div>
+          <Card>
+            <CardContent className="p-8 text-center text-muted-foreground">
+              No validators found
+            </CardContent>
+          </Card>
         )}
       </div>
     </div>

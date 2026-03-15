@@ -296,6 +296,7 @@ def get_consensus_contract(
     contract_name: str,
     consensus_service=Depends(get_consensus_service),
 ) -> dict:
+    """Deprecated: consensus contract info is now provided by genlayer-js chain config."""
     return impl.get_contract(consensus_service, contract_name)
 
 

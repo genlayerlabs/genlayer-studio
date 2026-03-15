@@ -30,7 +30,10 @@ from .types import Address
 
 
 def _ensure_dotenv_loaded_for_chain_id() -> None:
-    if os.getenv("HARDHAT_CHAIN_ID") is not None:
+    if (
+        os.getenv("GENLAYER_CHAIN_ID") is not None
+        or os.getenv("HARDHAT_CHAIN_ID") is not None
+    ):
         return
 
     try:
@@ -47,12 +50,12 @@ def _ensure_dotenv_loaded_for_chain_id() -> None:
 
 def _parse_chain_id() -> int:
     _ensure_dotenv_loaded_for_chain_id()
-    raw = os.getenv("HARDHAT_CHAIN_ID", "61127")
+    raw = os.getenv("GENLAYER_CHAIN_ID") or os.getenv("HARDHAT_CHAIN_ID", "61127")
     try:
         return int(raw)
     except ValueError as exc:
         raise ValueError(
-            f"HARDHAT_CHAIN_ID must be decimal digits, got '{raw}'"
+            f"GENLAYER_CHAIN_ID must be decimal digits, got '{raw}'"
         ) from exc
 
 
@@ -714,12 +717,7 @@ class Node:
             receipt.vote = Vote.DISAGREE
             return receipt
 
-        # 3. VM crash (exit_code, OOM, etc.) — validator couldn't validate
-        if result_code == public_abi.ResultCode.VM_ERROR:
-            receipt.vote = Vote.DISAGREE
-            return receipt
-
-        # 4. Deterministic violation: execution outcome or state diverges from leader
+        # 3. Deterministic violation: execution outcome or state diverges from leader
         leader_receipt = self.leader_receipt
         if (
             leader_receipt.execution_result != receipt.execution_result
@@ -729,7 +727,7 @@ class Node:
             receipt.vote = Vote.DETERMINISTIC_VIOLATION
             return receipt
 
-        # 5. Valid execution (RETURN or USER_ERROR) with matching state → agree
+        # 4. Valid execution with matching state → agree
         receipt.vote = Vote.AGREE
         return receipt
 
@@ -867,8 +865,8 @@ class Node:
             "contract_address": NO_ADDR,
             "sender_address": NO_ADDR,
             "origin_address": NO_ADDR,
-            "value": None,
-            "chain_id": "0",
+            "value": 0,
+            "chain_id": 0,
         }
         state_proxy = _StateProxyNone(NO_ADDR)
         self._put_code_to(state_proxy, code)
@@ -988,10 +986,8 @@ class Node:
             "origin_address": Address(
                 from_address
             ),  # FIXME: no origin in simulator #751
-            "value": None,
-            "chain_id": str(
-                get_simulator_chain_id()
-            ),  # NOTE: it can overflow u64 so better to wrap it into a string
+            "value": 0,
+            "chain_id": get_simulator_chain_id(),
         }
         if transaction_datetime is not None:
             assert transaction_datetime.tzinfo is not None
@@ -1073,6 +1069,11 @@ class Node:
                 ),
                 "raw_error": (
                     result.result.raw_error
+                    if isinstance(result.result, genvmbase.ExecutionError)
+                    else None
+                ),
+                "error_description": (
+                    result.result.description
                     if isinstance(result.result, genvmbase.ExecutionError)
                     else None
                 ),

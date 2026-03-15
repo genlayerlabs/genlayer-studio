@@ -119,6 +119,8 @@ export interface CurrentState {
   data: Record<string, unknown>;
   balance: number;
   updated_at: string | null;
+  tx_count?: number;
+  created_at?: string | null;
 }
 
 export interface LLMProvider {

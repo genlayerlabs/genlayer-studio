@@ -36,6 +36,7 @@ from backend.node.create_nodes.create_nodes import (
 
 from backend.protocol_rpc.transactions_parser import TransactionParser
 from backend.errors.errors import InvalidAddressError, InvalidTransactionError
+from backend.database_handler.errors import ContractNotFoundError
 
 from backend.database_handler.transactions_processor import (
     TransactionAddressFilter,
@@ -489,7 +490,6 @@ def count_validators(validators_registry: ValidatorsRegistry) -> int:
     return validators_registry.count_validators()
 
 
-####### CONTRACT UPGRADE ENDPOINTS #######
 def get_contract_deployer(session: Session, contract_address: str) -> str | None:
     """Get the address that deployed a contract by looking up the deploy transaction."""
     from backend.database_handler.models import Transactions
@@ -561,7 +561,6 @@ def admin_upgrade_contract_code(
     import secrets
 
     # Normalize address to checksum format for consistent comparison
-    # This must match get_contract_nonce() which frontend calls for signing
     try:
         contract_address = eth_utils.to_checksum_address(contract_address)
     except (ValueError, TypeError):
@@ -581,14 +580,9 @@ def admin_upgrade_contract_code(
         # Option 2: Signature from deployer grants access to own contracts
         elif signature:
             try:
-                # Get transaction count for contract to prevent replay attacks
-                # Each upgrade creates a new tx, so count always increases
-                # Use get_contract_nonce for consistent address normalization
                 tx_count = get_contract_nonce(session, contract_address)
 
                 # Recover signer from signature
-                # Message: keccak256(contract_address + tx_count_bytes + keccak256(new_code))
-                # Including tx_count makes signatures single-use (count increments after each tx)
                 new_code_hash = Web3.keccak(text=new_code)
                 tx_count_bytes = tx_count.to_bytes(32, byteorder="big")
                 message_hash = Web3.keccak(
@@ -612,7 +606,6 @@ def admin_upgrade_contract_code(
                         message="Only contract deployer can upgrade",
                         data={"signer": signer, "deployer": deployer},
                     )
-                # Authorized - proceed with upgrade
             except JSONRPCError:
                 raise
             except Exception as e:
@@ -623,14 +616,11 @@ def admin_upgrade_contract_code(
                 ) from e
 
         else:
-            # No valid auth provided
             raise JSONRPCError(
                 code=-32000,
                 message="Upgrade requires admin key or deployer signature",
                 data={},
             )
-
-    # Local mode (no env vars): allow all - no auth check needed
 
     # Validate new code is not empty
     if not new_code or not new_code.strip():
@@ -686,7 +676,6 @@ def admin_upgrade_contract_code(
     }
 
 
-####### CANCEL TRANSACTION ENDPOINTS #######
 def cancel_transaction(
     session: Session,
     transaction_hash: str,
@@ -820,7 +809,13 @@ async def get_contract_schema(
     msg_handler: IMessageHandler,
     contract_address: str,
 ) -> dict:
-    contract_snapshot = ContractSnapshot(contract_address, session)
+    try:
+        contract_snapshot = ContractSnapshot(contract_address, session)
+    except ContractNotFoundError:
+        raise NotFoundError(
+            message=f"Contract {contract_address} not found",
+            data={"contract_address": contract_address},
+        )
     code_b64 = contract_snapshot.extract_deployed_code_b64()
     if not code_b64:
         raise InvalidAddressError(
@@ -887,7 +882,13 @@ async def get_contract_schema_for_code(
 
 
 def get_contract_code(session: Session, contract_address: str) -> str:
-    contract_snapshot = ContractSnapshot(contract_address, session)
+    try:
+        contract_snapshot = ContractSnapshot(contract_address, session)
+    except ContractNotFoundError:
+        raise NotFoundError(
+            message=f"Contract {contract_address} not found",
+            data={"contract_address": contract_address},
+        )
     code_b64 = contract_snapshot.extract_deployed_code_b64()
     if not code_b64:
         raise InvalidAddressError(
@@ -1108,8 +1109,15 @@ async def _gen_call_with_validator(
         raise JSONRPCError(f"No validators exist to execute the gen_call")
 
     # Create validator node
+    try:
+        contract_snapshot = ContractSnapshot(to_address, session)
+    except ContractNotFoundError:
+        raise NotFoundError(
+            message=f"Contract {to_address} not found",
+            data={"contract_address": to_address},
+        )
     node = Node(
-        contract_snapshot=ContractSnapshot(to_address, session),
+        contract_snapshot=contract_snapshot,
         contract_snapshot_factory=partial(ContractSnapshot, session=session),
         validator_mode=ExecutionMode.LEADER,
         validator=validator,
@@ -1319,8 +1327,15 @@ async def eth_call(
                 data={"reason": "no_validators"},
             )
         as_validator = snapshot.nodes[0].validator
+        try:
+            target_contract_snapshot = ContractSnapshot(to_address, session)
+        except ContractNotFoundError:
+            raise NotFoundError(
+                message=f"Contract {to_address} not found",
+                data={"contract_address": to_address},
+            )
         node = Node(  # Mock node just to get the data from the GenVM
-            contract_snapshot=ContractSnapshot(to_address, session),
+            contract_snapshot=target_contract_snapshot,
             contract_snapshot_factory=partial(ContractSnapshot, session=session),
             validator_mode=ExecutionMode.LEADER,
             validator=as_validator,
@@ -1707,8 +1722,9 @@ def get_block_by_hash(
 
 
 def get_contract(consensus_service: ConsensusService, contract_name: str) -> dict:
-    """
-    Get contract instance by name
+    """Deprecated: consensus contract info is now provided by genlayer-js chain config.
+
+    Get contract instance by name.
 
     Args:
         consensus_service: The consensus service instance

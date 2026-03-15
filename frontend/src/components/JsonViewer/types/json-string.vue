@@ -1,6 +1,6 @@
 <script>
 // const REG_LINK = /^\w+:\/\//;
-// eslint-disable-next-line no-useless-escape
+
 const REG_LINK =
   /^([hH][tT]{2}[pP]:\/\/|[hH][tT]{2}[pP][sS]:\/\/)(([A-Za-z0-9-~]+)\.)+([A-Za-z0-9-~/])+$/;
 import { h } from 'vue';
