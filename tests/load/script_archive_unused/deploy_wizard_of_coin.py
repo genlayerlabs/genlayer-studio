@@ -6,10 +6,8 @@ Tests deployment, read/write operations similar to deploy_contract_example.py
 
 import sys
 import os
-import json
 import time
 import requests
-from datetime import datetime
 
 # Import genlayer_py
 from genlayer_py import create_client, create_account

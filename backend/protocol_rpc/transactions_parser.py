@@ -1,7 +1,7 @@
 # rpc/transaction_utils.py
 
 import rlp
-from rlp.sedes import text, binary, big_endian_int
+from rlp.sedes import binary, big_endian_int
 from rlp.exceptions import DeserializationError, SerializationError
 from eth_account import Account
 from eth_account._utils.legacy_transactions import Transaction

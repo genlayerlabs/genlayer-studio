@@ -44,7 +44,6 @@ class ContractLinter:
 
     def __init__(self):
         """Initialize the ContractLinter."""
-        pass
 
     def _check_invalid_runner_version(
         self, source_code: str, filename: str
@@ -104,7 +103,6 @@ class ContractLinter:
 
         try:
             from genvm_linter.linter import GenVMLinter
-            from genvm_linter.rules import Severity
 
             linter = GenVMLinter()
             results = linter.lint_source(source_code, filename)

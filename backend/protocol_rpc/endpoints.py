@@ -27,7 +27,6 @@ from backend.protocol_rpc.message_handler.base import (
 from backend.database_handler.accounts_manager import AccountsManager
 from backend.database_handler.validators_registry import (
     ValidatorsRegistry,
-    ModifiableValidatorsRegistry,
 )
 
 from backend.node.create_nodes.create_nodes import (
@@ -36,6 +35,7 @@ from backend.node.create_nodes.create_nodes import (
 
 from backend.protocol_rpc.transactions_parser import TransactionParser
 from backend.errors.errors import InvalidAddressError, InvalidTransactionError
+from backend.database_handler.errors import ContractNotFoundError
 
 from backend.database_handler.transactions_processor import (
     TransactionAddressFilter,
@@ -489,7 +489,6 @@ def count_validators(validators_registry: ValidatorsRegistry) -> int:
     return validators_registry.count_validators()
 
 
-####### CONTRACT UPGRADE ENDPOINTS #######
 def get_contract_deployer(session: Session, contract_address: str) -> str | None:
     """Get the address that deployed a contract by looking up the deploy transaction."""
     from backend.database_handler.models import Transactions
@@ -561,7 +560,6 @@ def admin_upgrade_contract_code(
     import secrets
 
     # Normalize address to checksum format for consistent comparison
-    # This must match get_contract_nonce() which frontend calls for signing
     try:
         contract_address = eth_utils.to_checksum_address(contract_address)
     except (ValueError, TypeError):
@@ -581,14 +579,9 @@ def admin_upgrade_contract_code(
         # Option 2: Signature from deployer grants access to own contracts
         elif signature:
             try:
-                # Get transaction count for contract to prevent replay attacks
-                # Each upgrade creates a new tx, so count always increases
-                # Use get_contract_nonce for consistent address normalization
                 tx_count = get_contract_nonce(session, contract_address)
 
                 # Recover signer from signature
-                # Message: keccak256(contract_address + tx_count_bytes + keccak256(new_code))
-                # Including tx_count makes signatures single-use (count increments after each tx)
                 new_code_hash = Web3.keccak(text=new_code)
                 tx_count_bytes = tx_count.to_bytes(32, byteorder="big")
                 message_hash = Web3.keccak(
@@ -612,7 +605,6 @@ def admin_upgrade_contract_code(
                         message="Only contract deployer can upgrade",
                         data={"signer": signer, "deployer": deployer},
                     )
-                # Authorized - proceed with upgrade
             except JSONRPCError:
                 raise
             except Exception as e:
@@ -623,14 +615,11 @@ def admin_upgrade_contract_code(
                 ) from e
 
         else:
-            # No valid auth provided
             raise JSONRPCError(
                 code=-32000,
                 message="Upgrade requires admin key or deployer signature",
                 data={},
             )
-
-    # Local mode (no env vars): allow all - no auth check needed
 
     # Validate new code is not empty
     if not new_code or not new_code.strip():
@@ -700,7 +689,6 @@ def admin_upgrade_contract_code(
     }
 
 
-####### CANCEL TRANSACTION ENDPOINTS #######
 def cancel_transaction(
     session: Session,
     transaction_hash: str,
@@ -834,7 +822,13 @@ async def get_contract_schema(
     msg_handler: IMessageHandler,
     contract_address: str,
 ) -> dict:
-    contract_snapshot = ContractSnapshot(contract_address, session)
+    try:
+        contract_snapshot = ContractSnapshot(contract_address, session)
+    except ContractNotFoundError:
+        raise NotFoundError(
+            message=f"Contract {contract_address} not found",
+            data={"contract_address": contract_address},
+        )
     code_b64 = contract_snapshot.extract_deployed_code_b64()
     if not code_b64:
         raise InvalidAddressError(
@@ -901,7 +895,13 @@ async def get_contract_schema_for_code(
 
 
 def get_contract_code(session: Session, contract_address: str) -> str:
-    contract_snapshot = ContractSnapshot(contract_address, session)
+    try:
+        contract_snapshot = ContractSnapshot(contract_address, session)
+    except ContractNotFoundError:
+        raise NotFoundError(
+            message=f"Contract {contract_address} not found",
+            data={"contract_address": contract_address},
+        )
     code_b64 = contract_snapshot.extract_deployed_code_b64()
     if not code_b64:
         raise InvalidAddressError(
@@ -1122,8 +1122,15 @@ async def _gen_call_with_validator(
         raise JSONRPCError(f"No validators exist to execute the gen_call")
 
     # Create validator node
+    try:
+        contract_snapshot = ContractSnapshot(to_address, session)
+    except ContractNotFoundError:
+        raise NotFoundError(
+            message=f"Contract {to_address} not found",
+            data={"contract_address": to_address},
+        )
     node = Node(
-        contract_snapshot=ContractSnapshot(to_address, session),
+        contract_snapshot=contract_snapshot,
         contract_snapshot_factory=partial(ContractSnapshot, session=session),
         validator_mode=ExecutionMode.LEADER,
         validator=validator,
@@ -1150,64 +1157,70 @@ async def _gen_call_with_validator(
         )
 
     async with _genvm_semaphore:
-        if type == "read":
-            # Pre-parse timestamp override and map errors
-            txn_dt = None
-            if sim_config and override_transaction_datetime:
-                try:
-                    txn_dt = sim_config.genvm_datetime_as_datetime
-                except ValueError as e:
-                    raise JSONRPCError(
-                        code=-32602,
-                        message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
-                        data={},
-                    ) from e
-            decoded_data = transactions_parser.decode_method_call_data(data)
-            receipt = await node.get_contract_data(
-                from_address=from_address,
-                calldata=decoded_data.calldata,
-                state_status=state_status,
-                transaction_datetime=txn_dt,
-            )
-        elif type == "write":
-            txn_created_at = None
-            if sim_config and override_transaction_datetime:
-                try:
-                    _ = sim_config.genvm_datetime_as_datetime  # validation only
-                    txn_created_at = sim_config.genvm_datetime
-                except ValueError as e:
-                    raise JSONRPCError(
-                        code=-32602,
-                        message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
-                        data={},
-                    ) from e
-            decoded_data = transactions_parser.decode_method_send_data(data)
-            receipt = await node.run_contract(
-                from_address=from_address,
-                calldata=decoded_data.calldata,
-                transaction_created_at=txn_created_at,
-            )
-        elif type == "deploy":
-            txn_created_at = None
-            if sim_config and override_transaction_datetime:
-                try:
-                    _ = sim_config.genvm_datetime_as_datetime  # validation only
-                    txn_created_at = sim_config.genvm_datetime
-                except ValueError as e:
-                    raise JSONRPCError(
-                        code=-32602,
-                        message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
-                        data={},
-                    ) from e
-            decoded_data = transactions_parser.decode_deployment_data(data)
-            receipt = await node.deploy_contract(
-                from_address=from_address,
-                code_to_deploy=decoded_data.contract_code,
-                calldata=decoded_data.calldata,
-                transaction_created_at=txn_created_at,
-            )
-        else:
-            raise JSONRPCError(f"Invalid type: {type}")
+        try:
+            if type == "read":
+                # Pre-parse timestamp override and map errors
+                txn_dt = None
+                if sim_config and override_transaction_datetime:
+                    try:
+                        txn_dt = sim_config.genvm_datetime_as_datetime
+                    except ValueError as e:
+                        raise JSONRPCError(
+                            code=-32602,
+                            message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                            data={},
+                        ) from e
+                decoded_data = transactions_parser.decode_method_call_data(data)
+                receipt = await node.get_contract_data(
+                    from_address=from_address,
+                    calldata=decoded_data.calldata,
+                    state_status=state_status,
+                    transaction_datetime=txn_dt,
+                )
+            elif type == "write":
+                txn_created_at = None
+                if sim_config and override_transaction_datetime:
+                    try:
+                        _ = sim_config.genvm_datetime_as_datetime  # validation only
+                        txn_created_at = sim_config.genvm_datetime
+                    except ValueError as e:
+                        raise JSONRPCError(
+                            code=-32602,
+                            message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                            data={},
+                        ) from e
+                decoded_data = transactions_parser.decode_method_send_data(data)
+                receipt = await node.run_contract(
+                    from_address=from_address,
+                    calldata=decoded_data.calldata,
+                    transaction_created_at=txn_created_at,
+                )
+            elif type == "deploy":
+                txn_created_at = None
+                if sim_config and override_transaction_datetime:
+                    try:
+                        _ = sim_config.genvm_datetime_as_datetime  # validation only
+                        txn_created_at = sim_config.genvm_datetime
+                    except ValueError as e:
+                        raise JSONRPCError(
+                            code=-32602,
+                            message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                            data={},
+                        ) from e
+                decoded_data = transactions_parser.decode_deployment_data(data)
+                receipt = await node.deploy_contract(
+                    from_address=from_address,
+                    code_to_deploy=decoded_data.contract_code,
+                    calldata=decoded_data.calldata,
+                    transaction_created_at=txn_created_at,
+                )
+            else:
+                raise JSONRPCError(f"Invalid type: {type}")
+        except ContractNotFoundError as e:
+            raise NotFoundError(
+                message=f"Contract {e.address} not found",
+                data={"contract_address": e.address},
+            ) from e
 
     # Return the result of the write method
     if receipt.execution_result != ExecutionResultStatus.SUCCESS:
@@ -1333,8 +1346,15 @@ async def eth_call(
                 data={"reason": "no_validators"},
             )
         as_validator = snapshot.nodes[0].validator
+        try:
+            target_contract_snapshot = ContractSnapshot(to_address, session)
+        except ContractNotFoundError:
+            raise NotFoundError(
+                message=f"Contract {to_address} not found",
+                data={"contract_address": to_address},
+            )
         node = Node(  # Mock node just to get the data from the GenVM
-            contract_snapshot=ContractSnapshot(to_address, session),
+            contract_snapshot=target_contract_snapshot,
             contract_snapshot_factory=partial(ContractSnapshot, session=session),
             validator_mode=ExecutionMode.LEADER,
             validator=as_validator,
@@ -1344,10 +1364,16 @@ async def eth_call(
             manager=genvm_manager,
         )
 
-        receipt = await node.get_contract_data(
-            from_address=as_validator.address,
-            calldata=decoded_data.calldata,
-        )
+        try:
+            receipt = await node.get_contract_data(
+                from_address=as_validator.address,
+                calldata=decoded_data.calldata,
+            )
+        except ContractNotFoundError as e:
+            raise NotFoundError(
+                message=f"Contract {e.address} not found",
+                data={"contract_address": e.address},
+            ) from e
 
     if receipt.execution_result != ExecutionResultStatus.SUCCESS:
         raise JSONRPCError(
@@ -1721,8 +1747,9 @@ def get_block_by_hash(
 
 
 def get_contract(consensus_service: ConsensusService, contract_name: str) -> dict:
-    """
-    Get contract instance by name
+    """Deprecated: consensus contract info is now provided by genlayer-js chain config.
+
+    Get contract instance by name.
 
     Args:
         consensus_service: The consensus service instance

@@ -175,8 +175,8 @@ async def test_validator_fatal_error_returns_receipt():
         mode=ExecutionMode.LEADER,
         contract_state={},
         node_config={},
-        eq_outputs={},
         execution_result=ExecutionResultStatus.SUCCESS,
+        eq_outputs={},
         vote=None,
         genvm_result=None,
     )

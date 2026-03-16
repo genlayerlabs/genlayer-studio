@@ -28,7 +28,7 @@ class _FakeHost:
         self.sock = None
         self._kwargs = kwargs
 
-    def provide_result(self, _res, state):
+    def provide_result(self, _res, state, _ctx=None):
         return ExecutionResult(
             result=ExecutionReturn(ret=b"\x00"),
             eq_outputs={},

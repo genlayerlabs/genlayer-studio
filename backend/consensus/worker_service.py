@@ -20,7 +20,6 @@ from backend.protocol_rpc.message_handler.redis_worker_handler import (
 from backend.protocol_rpc.configuration import GlobalConfiguration
 from backend.rollup.consensus_service import ConsensusService
 import backend.validators as validators
-from backend.database_handler.models import Base
 from loguru import logger
 
 from backend.protocol_rpc.app_lifespan import create_genvm_manager
@@ -187,7 +186,7 @@ async def lifespan(app: FastAPI):
     genvm_manager = await create_genvm_manager()
 
     # Wire up GenVM failure tracking callbacks
-    from backend.node.genvm.origin.base_host import set_genvm_callbacks
+    from backend.node.genvm.base import set_genvm_callbacks
 
     set_genvm_callbacks(
         on_success=reset_genvm_failures,
@@ -609,7 +608,6 @@ def health_check():
                 except Exception as e:
                     # Log the error but don't fail the health check
                     logger.error(f"Error parsing blocked_at timestamp: {e}")
-                    pass
             current_txs.append(tx)
 
     return {

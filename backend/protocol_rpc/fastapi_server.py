@@ -8,7 +8,6 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Request, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 
 # Load environment variables early so SENTRY_DSN is available for initialization
@@ -20,6 +19,7 @@ from backend.protocol_rpc.dependencies import (
     websocket_broadcast,
 )
 from backend.protocol_rpc.fastapi_rpc_router import FastAPIRPCRouter
+from backend.protocol_rpc.explorer.router import explorer_router
 from backend.protocol_rpc.health import health_router
 from backend.protocol_rpc.rate_limit_middleware import RateLimitMiddleware
 from backend.protocol_rpc.rpc_endpoint_manager import JSONRPCResponse
@@ -75,6 +75,9 @@ app.add_middleware(RateLimitMiddleware)
 
 # Include health check endpoints
 app.include_router(health_router)
+
+# Include explorer API endpoints
+app.include_router(explorer_router)
 
 
 # JSON-RPC endpoint (supports single and batch requests)

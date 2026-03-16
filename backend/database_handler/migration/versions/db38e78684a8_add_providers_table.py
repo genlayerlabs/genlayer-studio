@@ -10,10 +10,8 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.orm import sessionmaker
 from sqlalchemy.dialects import postgresql
 
-from backend.database_handler.llm_providers import LLMProviderRegistry
 
 # revision identifiers, used by Alembic.
 revision: str = "db38e78684a8"

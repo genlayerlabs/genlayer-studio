@@ -9,6 +9,11 @@ repos:
       - id: check-merge-conflict
       - id: no-commit-to-branch
         args: ["--branch", "main"]
+  - repo: https://github.com/PyCQA/autoflake
+    rev: v2.3.1
+    hooks:
+      - id: autoflake
+        args: ["--remove-all-unused-imports", "--in-place"]
   # Copied from https://black.readthedocs.io/en/stable/integrations/source_version_control.html
   - repo: https://github.com/psf/black-pre-commit-mirror
     rev: 24.4.2

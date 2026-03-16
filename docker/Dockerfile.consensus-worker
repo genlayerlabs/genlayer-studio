@@ -4,7 +4,7 @@ FROM ubuntu:24.04 AS base
 ARG TARGETPLATFORM
 ARG TARGETARCH
 
-ARG GENVM_TAG=v0.2.12
+ARG GENVM_TAG=v0.2.16
 ENV GENVM_TAG=$GENVM_TAG
 
 ARG path=/app
@@ -99,7 +99,6 @@ ENV GENVMROOT=/genvm
 ENV PATH="/genvm/bin:${PATH}"
 
 # Copy necessary files
-COPY ../.env .
 COPY backend $path/backend
 COPY docker/entrypoint-consensus-worker.sh /entrypoint.sh
 

@@ -3,7 +3,6 @@ import typing
 from backend.node.base import LLMConfig
 import pytest
 from unittest.mock import AsyncMock, Mock
-from pathlib import Path
 import types
 
 import backend.domain.types as domain

@@ -5,7 +5,6 @@ Run this after starting the backend to verify the linter integration works
 """
 
 import requests
-import json
 
 # Test contract with various issues
 TEST_CONTRACT_WITH_ISSUES = """# Missing magic comment
