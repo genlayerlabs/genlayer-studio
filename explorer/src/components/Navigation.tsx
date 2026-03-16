@@ -1,8 +1,9 @@
 'use client';
 
 import Link from 'next/link';
+import Image from 'next/image';
 import { usePathname } from 'next/navigation';
-import { LayoutDashboard, ArrowRightLeft, Users, Database, Cpu, Layers } from 'lucide-react';
+import { LayoutDashboard, ArrowRightLeft, Users, Database, Cpu } from 'lucide-react';
 import { GlobalSearch } from './GlobalSearch';
 import { ThemeToggle } from './ThemeToggle';
 import { cn } from '@/lib/utils';
@@ -24,10 +25,8 @@ export function Navigation() {
         <div className="flex h-14 items-center justify-between gap-4">
           {/* Logo */}
           <Link href="/" className="flex items-center gap-2 shrink-0">
-            <div className="bg-primary p-1.5 rounded-lg">
-              <Layers className="w-4 h-4 text-primary-foreground" />
-            </div>
-            <span className="font-bold text-foreground hidden sm:inline">Studio Explorer</span>
+            <Image src="/genlayer-logo.svg" alt="GenLayer Logo" width={28} height={28} className="dark:invert" />
+            <span className="font-bold text-foreground hidden sm:inline" style={{ fontFamily: 'Switzer, sans-serif' }}>GenLayer Studio Explorer</span>
           </Link>
 
           {/* Nav Links */}

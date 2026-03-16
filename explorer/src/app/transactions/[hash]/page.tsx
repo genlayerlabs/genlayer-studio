@@ -1,30 +1,15 @@
 'use client';
 
-import { useEffect, useState, use } from 'react';
+import { useEffect, useState, useCallback, use } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
 import { Transaction } from '@/lib/types';
+import { useTransactionPolling } from '@/hooks/useTransactionPolling';
 import { StatusBadge } from '@/components/StatusBadge';
 import { TransactionTypeLabel } from '@/components/TransactionTypeLabel';
 import { CopyButton } from '@/components/CopyButton';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-  DialogFooter,
-} from '@/components/ui/dialog';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 import {
   OverviewTab,
   MonitoringTab,
@@ -42,10 +27,8 @@ import {
   Hash,
   Cpu,
   Activity,
-  Trash2,
-  Edit2,
 } from 'lucide-react';
-import { TransactionStatus } from '@/lib/types';
+import { isTerminalStatus } from '@/lib/constants';
 
 interface TransactionDetail {
   transaction: Transaction;
@@ -63,14 +46,9 @@ const TABS = [
 
 export default function TransactionDetailPage({ params }: { params: Promise<{ hash: string }> }) {
   const { hash } = use(params);
-  const router = useRouter();
   const [data, setData] = useState<TransactionDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const [updatingStatus, setUpdatingStatus] = useState(false);
-  const [showStatusEdit, setShowStatusEdit] = useState(false);
 
   useEffect(() => {
     async function fetchTransaction() {
@@ -91,61 +69,10 @@ export default function TransactionDetailPage({ params }: { params: Promise<{ ha
     fetchTransaction();
   }, [hash]);
 
-  const handleDelete = async () => {
-    setDeleting(true);
-    try {
-      const res = await fetch(`/api/transactions/${hash}`, {
-        method: 'DELETE',
-      });
-
-      if (!res.ok) {
-        const errorData = await res.json();
-        throw new Error(errorData.error || 'Failed to delete transaction');
-      }
-
-      router.push('/transactions');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete transaction');
-      setDeleting(false);
-      setShowDeleteConfirm(false);
-    }
-  };
-
-  const handleStatusUpdate = async (newStatus: TransactionStatus) => {
-    setUpdatingStatus(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/transactions/${hash}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ status: newStatus }),
-      });
-
-      if (!res.ok) {
-        const errorData = await res.json();
-        throw new Error(errorData.error || 'Failed to update transaction status');
-      }
-
-      const fetchRes = await fetch(`/api/transactions/${hash}`);
-      if (fetchRes.ok) {
-        const updatedData = await fetchRes.json();
-        setData(updatedData);
-      }
-      setShowStatusEdit(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update transaction status');
-    } finally {
-      setUpdatingStatus(false);
-    }
-  };
-
-  const validStatuses: TransactionStatus[] = [
-    'PENDING', 'ACTIVATED', 'CANCELED', 'PROPOSING', 'COMMITTING',
-    'REVEALING', 'ACCEPTED', 'FINALIZED', 'UNDETERMINED',
-    'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT',
-  ];
+  // Poll for updates when transaction is not in a terminal state
+  // Pauses polling when the browser tab is hidden
+  const stableSetData = useCallback((d: TransactionDetail) => setData(d), []);
+  useTransactionPolling(hash, data, stableSetData);
 
   if (loading) {
     return (
@@ -197,107 +124,21 @@ export default function TransactionDetailPage({ params }: { params: Promise<{ ha
           </div>
         </div>
         <div className="flex flex-col items-end gap-2">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setShowDeleteConfirm(true)}
-            className="text-destructive hover:text-destructive hover:bg-destructive/10"
-          >
-            <Trash2 className="w-4 h-4 mr-1" />
-            Delete
-          </Button>
           <div className="flex items-center gap-2">
-            {showStatusEdit ? (
-              <div className="flex items-center gap-2">
-                <Select
-                  value={tx.status}
-                  onValueChange={(value) => handleStatusUpdate(value as TransactionStatus)}
-                  disabled={updatingStatus}
-                >
-                  <SelectTrigger className="w-[180px] h-8">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {validStatuses.map((status) => (
-                      <SelectItem key={status} value={status}>{status}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8"
-                  onClick={() => setShowStatusEdit(false)}
-                  disabled={updatingStatus}
-                >
-                  <span className="text-muted-foreground">✕</span>
-                </Button>
-                {updatingStatus && <Loader2 className="w-4 h-4 animate-spin text-primary" />}
-              </div>
-            ) : (
-              <div className="flex items-center gap-2">
-                <StatusBadge status={tx.status} />
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-6 w-6"
-                  onClick={() => setShowStatusEdit(true)}
-                  title="Update transaction status"
-                >
-                  <Edit2 className="w-3.5 h-3.5" />
-                </Button>
-              </div>
+            <StatusBadge status={tx.status} />
+            {!isTerminalStatus(tx.status) && (
+              <span className="flex items-center gap-1.5 text-xs font-medium text-green-600 dark:text-green-400">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
+                </span>
+                Live
+              </span>
             )}
           </div>
           <TransactionTypeLabel type={tx.type} />
         </div>
       </div>
-
-      {/* Delete Confirmation Dialog */}
-      <Dialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Delete Transaction</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to delete this transaction?
-            </DialogDescription>
-          </DialogHeader>
-          <p className="text-sm text-muted-foreground font-mono break-all">{tx.hash}</p>
-          {triggeredTransactions.length > 0 && (
-            <Card className="border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950">
-              <CardContent className="p-3">
-                <p className="text-sm text-amber-800 dark:text-amber-300">
-                  <strong>Note:</strong> This transaction has {triggeredTransactions.length} child transaction(s).
-                  Their parent reference will be removed.
-                </p>
-              </CardContent>
-            </Card>
-          )}
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setShowDeleteConfirm(false)}
-              disabled={deleting}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={handleDelete}
-              disabled={deleting}
-            >
-              {deleting ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin mr-1" />
-                  Deleting...
-                </>
-              ) : (
-                'Delete'
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       {/* Alert Badges */}
       <AlertBadges transaction={tx} />

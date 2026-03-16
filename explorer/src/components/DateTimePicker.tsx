@@ -17,8 +17,9 @@ interface DateTimePickerProps {
 export function DateTimePicker({ value, onChange, placeholder = 'Pick date & time' }: DateTimePickerProps) {
   const [open, setOpen] = useState(false);
 
-  // Parse current value
-  const date = value ? new Date(value) : undefined;
+  // Parse current value (guard against invalid date strings)
+  const parsedDate = value ? new Date(value) : undefined;
+  const date = parsedDate && !Number.isNaN(parsedDate.getTime()) ? parsedDate : undefined;
   const hours = date ? date.getHours().toString().padStart(2, '0') : '00';
   const minutes = date ? date.getMinutes().toString().padStart(2, '0') : '00';
 
