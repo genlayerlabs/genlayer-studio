@@ -1802,7 +1802,6 @@ class CommittingState(TransactionState):
                 mode=ExecutionMode.VALIDATOR,
                 contract_state={},
                 node_config=validator_dict,
-                eq_outputs={},
                 execution_result=ExecutionResultStatus.ERROR,
                 vote=None,
                 genvm_result={
@@ -1835,7 +1834,6 @@ class CommittingState(TransactionState):
                 mode=ExecutionMode.VALIDATOR,
                 contract_state={},
                 node_config=validator_dict,
-                eq_outputs={},
                 execution_result=ExecutionResultStatus.ERROR,
                 vote=Vote.TIMEOUT,
                 genvm_result={

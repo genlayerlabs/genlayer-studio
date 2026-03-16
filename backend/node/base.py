@@ -933,7 +933,7 @@ class Node:
         self.timing_callback("GENVM_PREPARATION_START")
 
         leader_res: None | dict[int, bytes]
-        if self.leader_receipt is None:
+        if self.leader_receipt is None or not self.leader_receipt.eq_outputs:
             leader_res = None
         else:
             leader_res = {
@@ -1046,10 +1046,14 @@ class Node:
         result = Receipt(
             result=genvmbase.encode_result_to_bytes(result.result),
             gas_used=0,
-            eq_outputs={
-                k: base64.b64encode(v).decode("ascii")
-                for k, v in result.eq_outputs.items()
-            },
+            eq_outputs=(
+                {
+                    k: base64.b64encode(v).decode("ascii")
+                    for k, v in result.eq_outputs.items()
+                }
+                if self.validator_mode == ExecutionMode.LEADER
+                else None
+            ),
             pending_transactions=result.pending_transactions,
             vote=None,
             execution_result=result_exec_code,

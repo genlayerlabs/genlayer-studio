@@ -635,8 +635,8 @@ def node_factory(
                 "address": node["address"],
                 "private_key": node["private_key"],
             },
-            eq_outputs={},
             execution_result=ExecutionResultStatus.SUCCESS,
+            eq_outputs={} if mode == ExecutionMode.LEADER else None,
         )
 
     if USE_MOCK_LLMS:

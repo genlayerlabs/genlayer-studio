@@ -14,6 +14,9 @@ import { createPlausible } from 'v-plausible/vue';
 import { getRuntimeConfig } from '@/utils/runtimeConfig';
 import { initAppKit, wagmiAdapterRef } from '@/hooks/useAppKit';
 import { WagmiPlugin } from '@wagmi/vue';
+import { installApiKeyFetchInterceptor } from '@/utils/apiKey';
+
+installApiKeyFetchInterceptor();
 
 async function bootstrap() {
   const app = createApp(App);

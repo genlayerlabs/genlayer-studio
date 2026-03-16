@@ -49,7 +49,6 @@ def _make_receipt(
         mode=ExecutionMode.VALIDATOR,
         contract_state=contract_state or {},
         node_config={},
-        eq_outputs={},
         execution_result=execution_result,
         vote=None,
         genvm_result={
@@ -69,8 +68,8 @@ def _make_success_receipt() -> Receipt:
         mode=ExecutionMode.LEADER,
         contract_state={"slot": "data"},
         node_config={},
-        eq_outputs={},
         execution_result=ExecutionResultStatus.SUCCESS,
+        eq_outputs={},
         vote=None,
         genvm_result=None,
     )
@@ -191,7 +190,6 @@ def test_no_genvm_result_does_not_crash():
         mode=ExecutionMode.VALIDATOR,
         contract_state={},
         node_config={},
-        eq_outputs={},
         execution_result=ExecutionResultStatus.ERROR,
         vote=None,
         genvm_result=None,

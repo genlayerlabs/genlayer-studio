@@ -23,7 +23,6 @@ def _make_receipt(address: str, vote: Vote) -> Receipt:
         mode=ExecutionMode.VALIDATOR,
         contract_state={},
         node_config={"address": address},
-        eq_outputs={},
         execution_result=ExecutionResultStatus.SUCCESS,
         vote=vote,
         genvm_result={"raw_error": {"fatal": False}},
