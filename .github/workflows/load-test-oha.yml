@@ -493,6 +493,36 @@ jobs:
             echo "✅ HTML report generated: api_test_report.html"
           fi
 
+      - name: Re-setup validators for state integrity test
+        run: |
+          echo "Re-creating validators (previous step cleaned them up)..."
+          for i in {1..5}; do
+            echo "Creating validator $i/5..."
+            response=$(curl -s -X POST http://localhost:4000/api \
+              -H "Content-Type: application/json" \
+              -d '{
+                "jsonrpc": "2.0",
+                "method": "sim_createRandomValidator",
+                "params": [1],
+                "id": '"$i"'
+              }')
+            if echo "$response" | grep -q '"result"'; then
+              echo "✅ Validator $i created"
+            else
+              echo "❌ Failed to create validator $i: $response"
+            fi
+            sleep 2
+          done
+
+          echo "Waiting 10 seconds for validators to be registered..."
+          sleep 10
+
+          # Verify validators exist
+          response=$(curl -s -X POST http://localhost:4000/api \
+            -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","method":"sim_countValidators","params":[],"id":100}')
+          echo "Validator count: $response"
+
       - name: Run State Integrity Test (lost update detection)
         run: |
           cd tests/load
