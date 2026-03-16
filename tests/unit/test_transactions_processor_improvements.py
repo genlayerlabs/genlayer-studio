@@ -148,34 +148,28 @@ class TestSetTransactionAppealProcessingTime:
         self.processor.session = self.mock_session
 
     def test_appeal_processing_time_with_none_timestamp(self):
-        """Test set_transaction_appeal_processing_time with None timestamp_appeal"""
-        # Setup
-        mock_transaction = Mock(spec=Transactions)
-        mock_transaction.timestamp_appeal = None
-        mock_transaction.appeal_processing_time = 0
-
-        mock_query = Mock()
-        mock_query.filter_by.return_value = mock_query
-        mock_query.first.return_value = mock_transaction
-        self.mock_session.query.return_value = mock_query
+        """Test set_transaction_appeal_processing_time when timestamp_appeal is NULL (raw SQL WHERE filters it out)"""
+        # Setup - raw SQL UPDATE with WHERE timestamp_appeal IS NOT NULL
+        # When timestamp_appeal is NULL, rowcount == 0
+        mock_result = Mock()
+        mock_result.rowcount = 0
+        self.mock_session.execute.return_value = mock_result
 
         # Execute
         with patch("builtins.print") as mock_print:
             self.processor.set_transaction_appeal_processing_time("test_hash")
 
-        # Verify - should not update and should print message
-        assert mock_transaction.appeal_processing_time == 0  # Unchanged
+        # Verify - should not commit and should print message
         self.mock_session.commit.assert_not_called()
         mock_print.assert_called_once()
-        assert "has no timestamp_appeal" in str(mock_print.call_args)
+        assert "not found or has no timestamp_appeal" in str(mock_print.call_args)
 
     def test_appeal_processing_time_transaction_not_found(self):
         """Test set_transaction_appeal_processing_time when transaction doesn't exist"""
-        # Setup
-        mock_query = Mock()
-        mock_query.filter_by.return_value = mock_query
-        mock_query.first.return_value = None
-        self.mock_session.query.return_value = mock_query
+        # Setup - raw SQL UPDATE returns rowcount 0 when tx doesn't exist
+        mock_result = Mock()
+        mock_result.rowcount = 0
+        self.mock_session.execute.return_value = mock_result
 
         # Execute
         with patch("builtins.print") as mock_print:
@@ -184,4 +178,4 @@ class TestSetTransactionAppealProcessingTime:
         # Verify
         self.mock_session.commit.assert_not_called()
         mock_print.assert_called_once()
-        assert "not found" in str(mock_print.call_args)
+        assert "not found or has no timestamp_appeal" in str(mock_print.call_args)

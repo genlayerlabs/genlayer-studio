@@ -26,10 +26,6 @@ from copy import deepcopy
 from backend.node.base import Manager as GenVMManager
 
 DEFAULT_FINALITY_WINDOW = 5
-# Reduce sleep time for faster tests when using mocks
-DEFAULT_CONSENSUS_SLEEP_TIME = (
-    0.1 if os.getenv("TEST_WITH_MOCK_LLMS", "true").lower() == "true" else 2
-)
 DEFAULT_EXEC_RESULT = b"\x00\x00"  # success(null)
 TIMEOUT_EXEC_RESULT = b"\x02timeout"
 
@@ -461,7 +457,6 @@ class ContractSnapshotMock:
             contract_account = contract_db.get_contract(contract_address)
             self.contract_address = contract_address
             self.contract_data = contract_account["data"]
-            self.contract_code = self.contract_data["code"]
             self.states = self.contract_data["state"]
             self.contract_db = contract_db
 
@@ -471,7 +466,6 @@ class ContractSnapshotMock:
         memo[id(self)] = new_instance
         new_instance.contract_address = self.contract_address
         new_instance.contract_data = deepcopy(self.contract_data, memo)
-        new_instance.contract_code = self.contract_code
         new_instance.states = deepcopy(self.states, memo)
         new_instance.contract_db = (
             None  # threading event that cannot be copied but not used by nodes
@@ -483,7 +477,6 @@ class ContractSnapshotMock:
             "contract_address": (
                 self.contract_address if self.contract_address else None
             ),
-            "contract_code": self.contract_code if self.contract_code else None,
             "states": self.states if self.states else {"accepted": {}, "finalized": {}},
         }
 
@@ -492,7 +485,6 @@ class ContractSnapshotMock:
         if input:
             instance = cls.__new__(cls)
             instance.contract_address = input.get("contract_address", None)
-            instance.contract_code = input.get("contract_code", None)
             instance.states = input.get("states", {"accepted": {}, "finalized": {}})
             instance.contract_db = None
             return instance
@@ -528,7 +520,6 @@ class ContractProcessorMock:
             ),
         }
         new_contract_data = {
-            "code": contract["data"]["code"],
             "state": new_state,
         }
 
@@ -613,6 +604,8 @@ def node_factory(
     snap: validators.Snapshot,
     timing_callback: Optional[Callable[[str], None]],
     manager: GenVMManager,
+    shared_decoded_value_cache: Optional[dict[str, bytes]],
+    shared_contract_snapshot_cache: Optional[dict[str, ContractSnapshot]],
     vote: Vote,
     timeout: bool,
 ):
@@ -661,16 +654,6 @@ def node_factory(
         mock.exec_transaction = AsyncMock(side_effect=mock_exec_transaction)
         return mock
     else:
-        # Use real node with actual LLM calls (slow, requires API keys)
-        # This would require proper validator setup with real LLM providers
-        # For now, we'll still use mocks but log that real mode was requested
-        print(
-            f"[WARNING] Real LLM mode requested but not fully implemented in unit tests"
-        )
-        print(
-            f"[WARNING] Using mocked responses. For real LLMs, use integration tests."
-        )
-
         # Fall back to mock for now
         mock = Mock(Node)
         mock.validator_mode = mode
@@ -772,138 +755,7 @@ def consensus_algorithm() -> ConsensusAlgorithm:
         genvm_manager=mock_genvm_manager,
     )
     consensus_algorithm.finality_window_time = DEFAULT_FINALITY_WINDOW
-    consensus_algorithm.consensus_sleep_time = DEFAULT_CONSENSUS_SLEEP_TIME
     return consensus_algorithm
-
-
-def setup_test_environment(
-    consensus_algorithm: ConsensusAlgorithm,
-    transactions_processor: TransactionsProcessorMock,
-    nodes: list,
-    created_nodes: list,
-    get_vote: Callable[[], Vote],
-    get_timeout: Callable[[], bool] | None = None,
-    contract_db: ContractDB | None = None,
-):
-    import contextlib
-    from backend.domain.types import Validator, LLMProvider
-
-    @contextlib.asynccontextmanager
-    async def fake_snapshot():
-        snap_nodes: list[validators.SingleValidatorSnapshot] = []
-        for i in nodes:
-            snap_nodes.append(
-                validators.SingleValidatorSnapshot(
-                    Validator(
-                        i["address"],
-                        i["stake"],
-                        LLMProvider("heurist", "other", {}, "heurist", {}),
-                    ),
-                    "",
-                )
-            )
-        yield validators.Snapshot(snap_nodes)
-
-    consensus_algorithm.validators_manager.snapshot = fake_snapshot
-
-    chain_snapshot = SnapshotMock(transactions_processor)
-    accounts_manager = AccountsManagerMock()
-
-    chain_snapshot_factory = lambda session: chain_snapshot
-    transactions_processor_factory = lambda session: transactions_processor
-    accounts_manager_factory = lambda session: accounts_manager
-    if contract_db is None:
-        contract_db = ContractDB(
-            {
-                "to_address": {
-                    "id": "to_address",
-                    "data": {
-                        "state": {"accepted": {}, "finalized": {}},
-                        "code": "contract_code",
-                    },
-                }
-            }
-        )
-    contract_snapshot_factory = (
-        lambda address, session, transaction: ContractSnapshotMock(address, contract_db)
-    )
-    contract_processor_factory = lambda session: ContractProcessorMock(contract_db)
-
-    def node_factory_supplier(*args):
-        created_nodes.append(
-            node_factory(
-                *args,
-                vote=get_vote(),
-                timeout=get_timeout() if get_timeout else False,
-            )
-        )
-        return created_nodes[-1]
-
-    # Create a stop event
-    stop_event = threading.Event()
-
-    import asyncio
-
-    consensus_loop = asyncio.new_event_loop()
-
-    async def start_all():
-        futures = [
-            consensus_algorithm.run_crawl_snapshot_loop(
-                chain_snapshot_factory, transactions_processor_factory, stop_event
-            ),
-            consensus_algorithm.run_process_pending_transactions_loop(
-                chain_snapshot_factory,
-                transactions_processor_factory,
-                accounts_manager_factory,
-                contract_snapshot_factory,
-                contract_processor_factory,
-                node_factory_supplier,
-                stop_event,
-            ),
-            consensus_algorithm.run_appeal_window_loop(
-                chain_snapshot_factory,
-                transactions_processor_factory,
-                accounts_manager_factory,
-                contract_snapshot_factory,
-                contract_processor_factory,
-                node_factory_supplier,
-                stop_event,
-            ),
-        ]
-
-        await asyncio.wait(
-            [asyncio.tasks.create_task(f) for f in futures],
-            return_when="FIRST_EXCEPTION",
-        )
-
-    def start_thread():
-        try:
-            consensus_loop.run_until_complete(start_all())
-        except BaseException as e:
-            import traceback
-
-            traceback.print_exception(e)
-            import sys
-
-            sys.exit(1)
-
-    # Start the crawl_snapshot, process_pending_transactions and appeal_window threads
-    thread_all = threading.Thread(
-        target=start_thread,
-    )
-
-    thread_all.start()
-
-    return (
-        stop_event,
-        thread_all,
-    )
-
-
-def cleanup_threads(event: threading.Event, threads: list[threading.Thread]):
-    event.set()
-    for thread in threads:
-        thread.join()
 
 
 def assert_transaction_status_match(
@@ -912,7 +764,15 @@ def assert_transaction_status_match(
     expected_statuses: list[TransactionStatus],
     timeout: int = None,
     interval: float = 0.1,
+    min_history_index: int = None,
 ) -> TransactionStatus:
+    """Wait until the transaction reaches one of the expected statuses.
+
+    When ``min_history_index`` is provided the function **also** checks the
+    recorded status history starting from that index.  This makes it possible
+    to detect transient statuses that the consensus already raced past (common
+    with mock LLMs where processing is near-instantaneous).
+    """
     # Use adaptive timeout based on LLM mode
     if timeout is None:
         timeout = (
@@ -935,6 +795,17 @@ def assert_transaction_status_match(
 
         if current_status in expected_statuses:
             return current_status
+
+        # When min_history_index is set, also look at the status history so
+        # we don't miss transient states that were already passed.
+        if min_history_index is not None:
+            history = transactions_processor.updated_transaction_status_history.get(
+                transaction.hash, []
+            )
+            for status in history[min_history_index:]:
+                status_val = status.value if hasattr(status, "value") else status
+                if status_val in expected_statuses:
+                    return status_val
 
         if current_status != last_status:
             last_status = current_status

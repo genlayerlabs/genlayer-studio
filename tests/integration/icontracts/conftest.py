@@ -19,13 +19,13 @@ def setup_validators():
                     payload(
                         "sim_createValidator",
                         8,
-                        "openai",
-                        "gpt-4o",
+                        "openrouter",
+                        "@preset/rally-testnet-gpt-5-1",
                         {"temperature": 0.75, "max_tokens": 500},
                         "openai-compatible",
                         {
-                            "api_key_env_var": "OPENAIKEY",
-                            "api_url": "https://api.openai.com",
+                            "api_key_env_var": "OPENROUTERAPIKEY",
+                            "api_url": "https://openrouter.ai/api",
                             "mock_response": mock_response if mock_response else {},
                         },
                     )

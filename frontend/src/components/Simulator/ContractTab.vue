@@ -7,8 +7,8 @@ import { onMounted, ref, watch } from 'vue';
 
 const props = defineProps<{
   contract?: ContractFile;
-  isHomeTab?: Boolean;
-  isActive: Boolean;
+  isHomeTab?: boolean;
+  isActive: boolean;
 }>();
 
 const emit = defineEmits(['closeContract', 'selectContract']);

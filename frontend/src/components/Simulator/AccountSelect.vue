@@ -5,14 +5,15 @@ import { Dropdown } from 'floating-vue';
 import { Wallet } from 'lucide-vue-next';
 import { PlusIcon } from '@heroicons/vue/16/solid';
 import { notify } from '@kyvg/vue3-notification';
-import { useEventTracking } from '@/hooks';
+import { useEventTracking, useWallet } from '@/hooks';
 import { computed } from 'vue';
 
 const store = useAccountsStore();
 const { trackEvent } = useEventTracking();
+const { connect } = useWallet();
 
-const hasMetaMaskAccount = computed(() =>
-  store.accounts.some((account) => account.type === 'metamask'),
+const hasExternalAccount = computed(() =>
+  store.accounts.some((account) => account.type === 'external'),
 );
 
 const handleCreateNewAccount = async () => {
@@ -33,8 +34,8 @@ const handleCreateNewAccount = async () => {
   }
 };
 
-const connectMetaMask = async () => {
-  await store.fetchMetaMaskAccount();
+const connectWallet = () => {
+  connect();
 };
 </script>
 
@@ -49,7 +50,7 @@ const connectMetaMask = async () => {
       <div class="divide-y divide-gray-200 dark:divide-gray-800">
         <AccountItem
           v-for="account in store.accounts"
-          :key="account.privateKey"
+          :key="account.address"
           :account="account"
           :active="account.address === store.selectedAccount?.address"
           :canDelete="account.type === 'local'"
@@ -69,12 +70,12 @@ const connectMetaMask = async () => {
           New account
         </Btn>
         <Btn
-          v-if="!hasMetaMaskAccount"
-          @click="connectMetaMask"
+          v-if="!hasExternalAccount"
+          @click="connectWallet"
           secondary
           class="w-full"
         >
-          Connect MetaMask
+          Connect Wallet
         </Btn>
       </div>
     </template>

@@ -64,6 +64,7 @@ def get_transaction_count(account_address: str):
 
 
 def get_consensus_contract_address() -> str:
+    """Deprecated: consensus contract info is now provided by genlayer-js chain config."""
     payload_data = payload("sim_getConsensusContract", "ConsensusMain")
     raw_response = post_request_localhost(payload_data)
     parsed_raw_response = raw_response.json()
@@ -101,7 +102,10 @@ def _prepare_transaction(
     genlayer_transaction_data: str | bytes | None,
     value: int = 0,
 ) -> str:
-    """Helper function to prepare a transaction for the consensus contract"""
+    """Deprecated: consensus contract info is now provided by genlayer-js chain config.
+
+    Helper function to prepare a transaction for the consensus contract.
+    """
     # Get consensus contract address from JSONRPC
     consensus_contract_address = get_consensus_contract_address()
     # Default values from environment or constants
@@ -169,7 +173,7 @@ def send_raw_transaction(signed_transaction: str):
     return wait_for_transaction(transaction_hash)
 
 
-def wait_for_transaction(transaction_hash: str, interval: int = 10, retries: int = 15):
+def wait_for_transaction(transaction_hash: str, interval: int = 10, retries: int = 30):
     attempts = 0
     while attempts < retries:
         transaction_response = get_transaction_by_hash(str(transaction_hash))

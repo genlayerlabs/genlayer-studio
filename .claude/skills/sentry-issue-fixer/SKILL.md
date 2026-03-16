@@ -14,6 +14,7 @@ Automatically fetch the most important open Sentry issue, analyze it, implement 
 - GitHub CLI (`gh`) authenticated
 - Docker running (for integration tests)
 - Python 3.12 with virtualenv
+- Checkout `main` branch and pull the latest changes
 
 ## MCP Server Configuration
 
@@ -122,27 +123,34 @@ Before implementing, create a plan:
    Co-Authored-By: Claude <noreply@anthropic.com>"
    ```
 
-### Step 5: Run Unit Tests
+### Step 5: Run ALL Test Suites
 
-Follow the unit-tests skill:
+**IMPORTANT: You MUST run ALL of the following test suites before creating a PR. Do NOT skip any.**
+
+#### 5.1 DB/SQLAlchemy Tests (Primary Backend Tests - Dockerized)
 
 ```bash
-source .venv/bin/activate
-export PYTHONPATH="$(pwd)"
-
-# Run all unit tests
-gltest --contracts-dir . tests/unit
-
-# Or run specific tests related to the fix
-gltest --contracts-dir . tests/unit/test_<relevant>.py -v
+docker compose -f tests/db-sqlalchemy/docker-compose.yml --project-directory . run --build --rm tests
 ```
 
-**If tests fail:**
+#### 5.2 Backend Unit Tests
+
+```bash
+.venv/bin/pytest tests/unit/ -v --tb=short --ignore=tests/unit/test_rpc_endpoint_manager.py
+```
+
+#### 5.3 Frontend Unit Tests
+
+```bash
+cd frontend && npm run test
+```
+
+**If any tests fail:**
 - Analyze the failure
 - Fix the issue
-- Re-run tests until all pass
+- Re-run ALL test suites until they pass
 
-### Step 6: Run Integration Tests
+### Step 6: Run Integration Tests (Optional - if Docker services are running)
 
 Follow the integration-tests skill:
 

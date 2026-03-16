@@ -25,6 +25,7 @@ export interface NodeLog {
   type: 'error' | 'warning' | 'info' | 'success';
   message: string;
   data?: any;
+  role?: 'leader' | 'validator';
 }
 
 export interface TransactionItem {

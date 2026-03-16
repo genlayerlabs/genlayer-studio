@@ -97,6 +97,7 @@ class Vote(Enum):
     DISAGREE = "disagree"
     TIMEOUT = "timeout"
     DETERMINISTIC_VIOLATION = "deterministic_violation"
+    IDLE = "idle"
 
     @classmethod
     def from_string(cls, value: str) -> "Vote":
@@ -112,6 +113,7 @@ class Vote(Enum):
             Vote.DISAGREE: 2,
             Vote.TIMEOUT: 3,
             Vote.DETERMINISTIC_VIOLATION: 4,
+            Vote.IDLE: 5,
         }
         return values[self]
 
@@ -206,6 +208,7 @@ class Receipt:
     genvm_result: dict[str, str] | None = None
     processing_time: Optional[int] = None
     nondet_disagree: int | None = None
+    execution_stats: dict | None = None
 
     def to_dict(self, strip_contract_state: bool = False):
         """Convert Receipt to dict.
@@ -234,6 +237,7 @@ class Receipt:
             "genvm_result": self.genvm_result,
             "processing_time": self.processing_time,
             "nondet_disagree": self.nondet_disagree,
+            "execution_stats": self.execution_stats,
         }
 
     @classmethod
@@ -258,6 +262,7 @@ class Receipt:
                 genvm_result=input.get("genvm_result"),
                 processing_time=input.get("processing_time"),
                 nondet_disagree=input.get("nondet_disagree"),
+                execution_stats=input.get("execution_stats"),
             )
         else:
             return None

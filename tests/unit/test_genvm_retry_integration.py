@@ -11,7 +11,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 import pytest
 import aiohttp
 
-from backend.node.genvm.origin import base_host
+import backend.node.genvm.base as base_host
 
 
 class MockAsyncContextManager:

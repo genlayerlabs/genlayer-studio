@@ -1,5 +1,5 @@
 # v0.1.0
-# { "Depends": "py-genlayer:latest" }
+# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 # Always put above lines as first in the contract file
 # v0.1.2 is genvm ABI version, lower versions may restrict some calls that were introduced in newer version (i.e. events)

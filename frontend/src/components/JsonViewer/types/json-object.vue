@@ -63,14 +63,14 @@ export default {
         this.$el.dispatchEvent(new Event('resized'));
       } catch (e) {
         // handle IE not supporting Event constructor
-        var evt = document.createEvent('Event');
+        const evt = document.createEvent('Event');
         evt.initEvent('resized', true, false);
         this.$el.dispatchEvent(evt);
       }
     },
   },
   render() {
-    let elements = [];
+    const elements = [];
     if (!this.previewMode && !this.keyName) {
       elements.push(
         h('span', {
@@ -94,10 +94,9 @@ export default {
     );
 
     if (this.expand) {
-      for (let key in this.ordered) {
-        // eslint-disable-next-line no-prototype-builtins
+      for (const key in this.ordered) {
         if (this.ordered.hasOwnProperty(key)) {
-          let value = this.ordered[key];
+          const value = this.ordered[key];
 
           elements.push(
             h(JsonBox, {
