@@ -145,6 +145,37 @@ export function decodeResult(input: unknown): DecodedResult {
 }
 
 /**
+ * Decode input calldata for a call transaction.
+ * The calldata binary encodes [method_name, arg1, arg2, ...].
+ */
+export function decodeCalldata(b64: string): { methodName: string | null; args: unknown[] } | null {
+  try {
+    const bytes = b64ToArray(b64);
+    if (bytes.length === 0) return null;
+    const decoded = abi.calldata.decode(bytes);
+
+    // Map format: { method?: string, args: unknown[] }
+    if (decoded instanceof Map) {
+      const methodName = decoded.get('method');
+      const args = decoded.get('args');
+      return {
+        methodName: typeof methodName === 'string' ? methodName : null,
+        args: Array.isArray(args) ? args : [],
+      };
+    }
+
+    // Array format: [method_name, arg1, arg2, ...]
+    if (Array.isArray(decoded) && decoded.length > 0) {
+      return { methodName: decoded[0] as string, args: decoded.slice(1) };
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Human-readable label for a result status code.
  */
 export function resultStatusLabel(status: string): string {
