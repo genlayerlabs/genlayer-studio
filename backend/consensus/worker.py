@@ -1242,6 +1242,7 @@ class ConsensusWorker:
                     TransactionStatus.FINALIZED,
                     self.msg_handler,
                 )
+                error_session.commit()
 
             logger.info(
                 f"[Worker {self.worker_id}] Transaction {tx_hash} marked as FINALIZED due to contract not found during finalization"
@@ -1345,6 +1346,7 @@ class ConsensusWorker:
                     TransactionStatus.FINALIZED,
                     self.msg_handler,
                 )
+                error_session.commit()
 
             logger.info(
                 f"[Worker {self.worker_id}] Transaction {tx_hash} marked as FINALIZED due to contract not found during appeal"
