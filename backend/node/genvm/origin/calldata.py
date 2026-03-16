@@ -1,4 +1,35 @@
 from ...types import Address
+
+"""
+This module is responsible for working with genvm calldata
+
+Calldata natively supports following types:
+
+#. Primitive types:
+
+	#. python built-in: :py:class:`bool`, :py:obj:`None`, :py:class:`int`, :py:class:`str`, :py:class:`bytes`
+	#. :py:meth:`~genlayer.py.types.Address` type
+
+#. Composite types:
+
+	#. :py:class:`list` (and any other :py:class:`collections.abc.Sequence`)
+	#. :py:class:`dict` with :py:class:`str` keys (and any other :py:class:`collections.abc.Mapping` with :py:class:`str` keys)
+
+For full calldata specification see `genvm repo <https://github.com/yeagerai/genvm/blob/main/doc/calldata.md>`_
+"""
+
+__all__ = (
+    "encode",
+    "decode",
+    "to_str",
+    "Encodable",
+    "Encodable",
+    "EncodableWithDefault",
+    "Decoded",
+    "CalldataEncodable",
+    "DecodingError",
+)
+
 import typing
 import collections.abc
 import dataclasses
@@ -22,13 +53,78 @@ SPECIAL_ADDR = (3 << BITS_IN_TYPE) | TYPE_SPECIAL
 
 
 class CalldataEncodable(metaclass=abc.ABCMeta):
+    """
+    Abstract class to support calldata encoding for custom types
+
+    Can be used to simplify code
+    """
+
     @abc.abstractmethod
-    def __to_calldata__(self) -> typing.Any: ...
+    def __to_calldata__(self) -> "Encodable":
+        """
+        Override this method to return calldata-compatible type
+
+        .. warning::
+                returning ``self`` may lead to an infinite loop or an exception
+        """
+        raise NotImplementedError()
 
 
-def encode(
-    x: typing.Any, *, default: typing.Callable[[typing.Any], typing.Any] = lambda x: x
+type Decoded = None | int | str | bytes | list[Decoded] | dict[str, Decoded]
+"""
+Type that represents what type is coerced to after ``decode . encode``
+"""
+
+type Encodable = (
+    None
+    | int
+    | str
+    | Address
+    | bool
+    | bytes
+    | collections.abc.Sequence[Encodable]
+    | collections.abc.Mapping[str, Encodable]
+    | CalldataEncodable
+)
+"""
+Type that can be encoded into calldata
+"""
+
+type EncodableWithDefault[T] = Encodable | T
+"""
+Type that can be encoded into calldata, provided ``default`` function ``T -> Encodable``
+"""
+
+
+def encode_default_parameter(b):
+    if not dataclasses.is_dataclass(b):
+        return b
+    assert not isinstance(b, type)
+
+    return {field.name: getattr(b, field.name) for field in dataclasses.fields(b)}
+
+
+def encode[
+    T
+](
+    x: EncodableWithDefault[T],
+    *,
+    default: typing.Callable[
+        [EncodableWithDefault[T]], Encodable
+    ] = encode_default_parameter,
 ) -> bytes:
+    """
+    Encodes python object into calldata bytes
+
+    :param default: function to be applied to each object recursively, it must return object encodable to calldata
+
+    .. warning::
+            All composite types in the end are coerced to :py:class:`dict` and :py:class:`list`, so custom type information is *not* be preserved.
+            Such types include:
+
+            #. :py:class:`CalldataEncodable`
+            #. :py:mod:`dataclasses`
+    """
     mem = bytearray()
 
     def append_uleb128(i):
@@ -50,13 +146,13 @@ def encode(
         append_uleb128(le)
         for k in keys:
             if not isinstance(k, str):
-                raise Exception(f"key is not string {type(k)}")
+                raise TypeError(f"key is not string `{repr(k)}`")
             bts = k.encode("utf-8")
             append_uleb128(len(bts))
             mem.extend(bts)
             impl(b[k])
 
-    def impl(b: typing.Any):
+    def impl(b: EncodableWithDefault[T]):
         b = default(b)
         if isinstance(b, CalldataEncodable):
             b = b.__to_calldata__()
@@ -77,11 +173,13 @@ def encode(
         elif isinstance(b, Address):
             mem.append(SPECIAL_ADDR)
             mem.extend(b.as_bytes)
-        elif isinstance(b, bytes):
+        elif isinstance(b, (bytes, bytearray)):
             lb = len(b)
             lb = (lb << 3) | TYPE_BYTES
             append_uleb128(lb)
             mem.extend(b)
+        elif isinstance(b, memoryview):
+            mem.extend(b.tolist())
         elif isinstance(b, str):
             b = b.encode("utf-8")
             lb = len(b)
@@ -96,30 +194,50 @@ def encode(
                 impl(x)
         elif isinstance(b, collections.abc.Mapping):
             impl_dict(b)
-        elif dataclasses.is_dataclass(b):
-            assert not isinstance(b, type)
-            impl_dict(dataclasses.asdict(b))
         else:
-            raise Exception(f"invalid type {type(b)}")
+            raise TypeError(f"not calldata encodable {b!r}: {type(b)}")
 
     impl(x)
     return bytes(mem)
 
 
-def decode(mem0: collections.abc.Buffer) -> typing.Any:
+class DecodingError(ValueError):
+    pass
+
+
+def decode(
+    mem0: collections.abc.Buffer,
+    *,
+    memview2bytes: typing.Callable[[memoryview], typing.Any] = bytes,
+) -> Decoded:
+    """
+    Decodes calldata encoded bytes into python DSL
+
+    Out of composite types it will contain only :py:class:`dict` and :py:class:`list`
+    """
     mem: memoryview = memoryview(mem0)
+
+    def fetch_mem(cnt: int) -> memoryview:
+        nonlocal mem
+
+        if len(mem) < cnt:
+            raise DecodingError("unexpected end of memory")
+        ret = mem[:cnt]
+        mem = mem[cnt:]
+        return ret
 
     def read_uleb128() -> int:
         nonlocal mem
         ret = 0
         off = 0
         while True:
-            m = mem[0]
+            m = fetch_mem(1)[0]
             ret = ret | ((m & 0x7F) << off)
-            off += 7
-            mem = mem[1:]
             if (m & 0x80) == 0:
+                if m == 0 and off != 0:
+                    raise DecodingError("most significant octet can not be zero")
                 break
+            off += 7
         return ret
 
     def impl() -> typing.Any:
@@ -134,23 +252,17 @@ def decode(mem0: collections.abc.Buffer) -> typing.Any:
             if code == SPECIAL_TRUE:
                 return True
             if code == SPECIAL_ADDR:
-                ret_addr = mem[: Address.SIZE]
-                mem = mem[Address.SIZE :]
-                return Address(ret_addr)
-            raise Exception(f"Unknown special {bin(code)} {hex(code)}")
+                return Address(fetch_mem(Address.SIZE))
+            raise DecodingError(f"Unknown special {bin(code)} {hex(code)}")
         code = code >> 3
         if typ == TYPE_PINT:
             return code
         elif typ == TYPE_NINT:
             return -code - 1
         elif typ == TYPE_BYTES:
-            ret_bytes = mem[:code]
-            mem = mem[code:]
-            return ret_bytes
+            return memview2bytes(fetch_mem(code))
         elif typ == TYPE_STR:
-            ret_str = mem[:code]
-            mem = mem[code:]
-            return str(ret_str, encoding="utf-8")
+            return str(fetch_mem(code), encoding="utf-8")
         elif typ == TYPE_ARR:
             ret_arr = []
             for _i in range(code):
@@ -161,26 +273,31 @@ def decode(mem0: collections.abc.Buffer) -> typing.Any:
             prev = None
             for _i in range(code):
                 le = read_uleb128()
-                key = str(mem[:le], encoding="utf-8")
-                mem = mem[le:]
+                key = str(fetch_mem(le), encoding="utf-8")
                 if prev is not None:
-                    assert prev < key
+                    if prev >= key:
+                        raise DecodingError(
+                            f"unordered calldata keys: `{prev}` >= `{key}`"
+                        )
                 prev = key
                 assert key not in ret_dict
                 ret_dict[key] = impl()
             return ret_dict
-        raise Exception(f"invalid type {typ}")
+        raise DecodingError(f"invalid type {typ}")
 
     res = impl()
     if len(mem) != 0:
-        raise Exception(f"unparsed end {bytes(mem[:5])!r}... (decoded {res})")
+        raise DecodingError(f"unparsed end {bytes(mem[:5])!r}... (decoded {res})")
     return res
 
 
-def to_str(d: typing.Any) -> str:
+def to_str(d: Encodable) -> str:
+    """
+    Transforms calldata DSL into human readable json-like format, should be used for debug purposes only
+    """
     buf: list[str] = []
 
-    def impl(d: typing.Any) -> None:
+    def impl(d: Encodable) -> None:
         if d is None:
             buf.append("null")
         elif d is True:
@@ -189,7 +306,10 @@ def to_str(d: typing.Any) -> str:
             buf.append("false")
         elif isinstance(d, str):
             buf.append(json.dumps(d))
-        elif isinstance(d, bytes):
+        elif isinstance(d, (bytes, bytearray)):
+            buf.append("b#")
+            buf.append(d.hex())
+        elif isinstance(d, memoryview):
             buf.append("b#")
             buf.append(d.hex())
         elif isinstance(d, int):
@@ -197,7 +317,7 @@ def to_str(d: typing.Any) -> str:
         elif isinstance(d, Address):
             buf.append("addr#")
             buf.append(d.as_bytes.hex())
-        elif isinstance(d, dict):
+        elif isinstance(d, collections.abc.Mapping):
             buf.append("{")
             comma = False
             for k, v in d.items():
@@ -208,7 +328,7 @@ def to_str(d: typing.Any) -> str:
                 buf.append(":")
                 impl(v)
             buf.append("}")
-        elif isinstance(d, list):
+        elif isinstance(d, collections.abc.Sequence):
             buf.append("[")
             comma = False
             for v in d:
@@ -217,8 +337,10 @@ def to_str(d: typing.Any) -> str:
                 comma = True
                 impl(v)
             buf.append("]")
+        elif isinstance(d, CalldataEncodable):
+            impl(d.__to_calldata__())
         else:
-            raise Exception(f"can't encode {d} to calldata")
+            raise DecodingError(f"can't encode {d} to calldata")
 
     impl(d)
     return "".join(buf)

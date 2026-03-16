@@ -200,6 +200,7 @@ class ConsensusWorker:
                             AND t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
                             AND t2.hash != t.hash
                     )
+                    AND pg_try_advisory_xact_lock(hashtext(t.to_address))
                 ORDER BY t.created_at ASC
                 FOR UPDATE SKIP LOCKED
             ),
@@ -305,6 +306,7 @@ class ConsensusWorker:
                             AND t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
                             AND t2.hash != t.hash
                     )
+                    AND pg_try_advisory_xact_lock(hashtext(t.to_address))
                 ORDER BY t.created_at ASC
                 FOR UPDATE SKIP LOCKED
             ),
@@ -410,6 +412,10 @@ class ConsensusWorker:
                             AND t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
                             AND t2.hash != t.hash
                     )
+                    -- Atomic per-contract lock to close TOCTOU window in NOT EXISTS.
+                    -- Under READ COMMITTED, two workers can both pass NOT EXISTS before
+                    -- either commits blocked_at. This advisory lock prevents that race.
+                    AND pg_try_advisory_xact_lock(hashtext(t.to_address))
                 ORDER BY CASE WHEN t.type = 3 THEN 0 ELSE 1 END, t.created_at ASC
                 FOR UPDATE SKIP LOCKED
             ),
@@ -1242,6 +1248,7 @@ class ConsensusWorker:
                     TransactionStatus.FINALIZED,
                     self.msg_handler,
                 )
+                error_session.commit()
 
             logger.info(
                 f"[Worker {self.worker_id}] Transaction {tx_hash} marked as FINALIZED due to contract not found during finalization"
@@ -1257,74 +1264,98 @@ class ConsensusWorker:
         """
         tx_hash = appeal_data.get("hash")
 
-        async with self._transaction_context(tx_hash, appeal_data, session, "appeal"):
-            # Convert to Transaction domain object
-            transaction = Transaction.from_dict(appeal_data)
+        try:
+            async with self._transaction_context(
+                tx_hash, appeal_data, session, "appeal"
+            ):
+                # Convert to Transaction domain object
+                transaction = Transaction.from_dict(appeal_data)
+
+                logger.info(
+                    f"[Worker {self.worker_id}] Processing appeal for transaction {transaction.hash} with status {appeal_data['status']}"
+                )
+
+                # Import factories
+                from backend.consensus.base import (
+                    contract_snapshot_factory,
+                    contract_processor_factory,
+                    transactions_processor_factory,
+                    accounts_manager_factory,
+                    node_factory,
+                )
+
+                # Process the appeal based on status
+                transactions_processor = transactions_processor_factory(session)
+                accounts_manager = accounts_manager_factory(session)
+
+                async with self.validators_manager.snapshot() as validators_snapshot:
+                    if transaction.status == TransactionStatus.UNDETERMINED:
+                        # Leader appeal
+                        await self.consensus_algorithm.process_leader_appeal(
+                            transaction,
+                            transactions_processor,
+                            None,  # chain_snapshot not used by state handlers
+                            accounts_manager,
+                            lambda contract_address: contract_snapshot_factory(
+                                contract_address, session, transaction
+                            ),
+                            contract_processor_factory(session),
+                            node_factory,
+                            validators_snapshot,
+                        )
+                    elif transaction.status == TransactionStatus.LEADER_TIMEOUT:
+                        # Leader timeout appeal
+                        await self.consensus_algorithm.process_leader_timeout_appeal(
+                            transaction,
+                            transactions_processor,
+                            None,  # chain_snapshot not used by state handlers
+                            accounts_manager,
+                            lambda contract_address: contract_snapshot_factory(
+                                contract_address, session, transaction
+                            ),
+                            contract_processor_factory(session),
+                            node_factory,
+                            validators_snapshot,
+                        )
+                    else:
+                        # Validator appeal (ACCEPTED or VALIDATORS_TIMEOUT)
+                        await self.consensus_algorithm.process_validator_appeal(
+                            transaction,
+                            transactions_processor,
+                            None,  # chain_snapshot not used by state handlers
+                            accounts_manager,
+                            lambda contract_address: contract_snapshot_factory(
+                                contract_address, session, transaction
+                            ),
+                            contract_processor_factory(session),
+                            node_factory,
+                            validators_snapshot,
+                        )
+
+                session.commit()
+                logger.info(
+                    f"[Worker {self.worker_id}] Successfully processed appeal for transaction {transaction.hash}"
+                )
+
+        except ContractNotFoundError as e:
+            logger.error(
+                f"[Worker {self.worker_id}] Contract not found during appeal {tx_hash}: {e}"
+            )
+            session.rollback()
+
+            with self.get_session() as error_session:
+                transactions_processor = TransactionsProcessor(error_session)
+
+                await ConsensusAlgorithm.dispatch_transaction_status_update(
+                    transactions_processor,
+                    tx_hash,
+                    TransactionStatus.FINALIZED,
+                    self.msg_handler,
+                )
+                error_session.commit()
 
             logger.info(
-                f"[Worker {self.worker_id}] Processing appeal for transaction {transaction.hash} with status {appeal_data['status']}"
-            )
-
-            # Import factories
-            from backend.consensus.base import (
-                contract_snapshot_factory,
-                contract_processor_factory,
-                transactions_processor_factory,
-                accounts_manager_factory,
-                node_factory,
-            )
-
-            # Process the appeal based on status
-            transactions_processor = transactions_processor_factory(session)
-            accounts_manager = accounts_manager_factory(session)
-
-            async with self.validators_manager.snapshot() as validators_snapshot:
-                if transaction.status == TransactionStatus.UNDETERMINED:
-                    # Leader appeal
-                    await self.consensus_algorithm.process_leader_appeal(
-                        transaction,
-                        transactions_processor,
-                        None,  # chain_snapshot not used by state handlers
-                        accounts_manager,
-                        lambda contract_address: contract_snapshot_factory(
-                            contract_address, session, transaction
-                        ),
-                        contract_processor_factory(session),
-                        node_factory,
-                        validators_snapshot,
-                    )
-                elif transaction.status == TransactionStatus.LEADER_TIMEOUT:
-                    # Leader timeout appeal
-                    await self.consensus_algorithm.process_leader_timeout_appeal(
-                        transaction,
-                        transactions_processor,
-                        None,  # chain_snapshot not used by state handlers
-                        accounts_manager,
-                        lambda contract_address: contract_snapshot_factory(
-                            contract_address, session, transaction
-                        ),
-                        contract_processor_factory(session),
-                        node_factory,
-                        validators_snapshot,
-                    )
-                else:
-                    # Validator appeal (ACCEPTED or VALIDATORS_TIMEOUT)
-                    await self.consensus_algorithm.process_validator_appeal(
-                        transaction,
-                        transactions_processor,
-                        None,  # chain_snapshot not used by state handlers
-                        accounts_manager,
-                        lambda contract_address: contract_snapshot_factory(
-                            contract_address, session, transaction
-                        ),
-                        contract_processor_factory(session),
-                        node_factory,
-                        validators_snapshot,
-                    )
-
-            session.commit()
-            logger.info(
-                f"[Worker {self.worker_id}] Successfully processed appeal for transaction {transaction.hash}"
+                f"[Worker {self.worker_id}] Transaction {tx_hash} marked as FINALIZED due to contract not found during appeal"
             )
 
     def _log_query_result(

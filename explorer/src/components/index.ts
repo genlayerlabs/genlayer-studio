@@ -1,4 +1,5 @@
 // Core UI Components
+export { AddressDisplay } from './AddressDisplay';
 export { CopyButton } from './CopyButton';
 export { InfoRow } from './InfoRow';
 export { JsonViewer } from './JsonViewer';
