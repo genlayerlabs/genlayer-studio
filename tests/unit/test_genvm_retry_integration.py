@@ -9,7 +9,7 @@ Those are in test_worker_health_degradation.py
 from unittest.mock import patch
 import pytest
 
-from backend.node.genvm.origin import base_host
+import backend.node.genvm.base as base_host
 
 
 class MockAsyncContextManager:

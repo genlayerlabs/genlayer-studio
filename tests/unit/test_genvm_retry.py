@@ -4,7 +4,7 @@ Tests for GenVM Manager retry logic in base_host.py
 
 from unittest.mock import patch
 
-from backend.node.genvm.origin import base_host
+import backend.node.genvm.base as base_host
 
 
 class TestGenVMCallbacks:

@@ -251,7 +251,7 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
     genvm_manager = await create_genvm_manager()
 
     # Wire GenVM execution failure tracking callbacks (same pattern as worker_service.py)
-    from backend.node.genvm.origin.base_host import set_genvm_callbacks
+    from backend.node.genvm.base import set_genvm_callbacks
 
     set_genvm_callbacks(
         on_success=record_genvm_execution_success,

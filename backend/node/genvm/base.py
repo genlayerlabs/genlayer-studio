@@ -10,9 +10,12 @@ __all__ = (
     "ExecutionResult",
     "apply_storage_changes",
     "GenVMInternalError",
+    "Context",
+    "set_genvm_callbacks",
 )
 
 import math
+import os
 import typing
 import tempfile
 from pathlib import Path
@@ -54,6 +57,7 @@ class ExecutionError:
     kind: typing.Literal[ResultCode.USER_ERROR, ResultCode.VM_ERROR]
     error_code: str | None = None  # Standardized error code (e.g., LLM_RATE_LIMITED)
     raw_error: dict | None = None  # Full Lua error structure (causes, fatal, ctx)
+    description: str | None = None
 
     def __repr__(self):
         data = {"kind": self.kind.name, "message": self.message}
@@ -119,6 +123,106 @@ def apply_storage_changes(
         state.storage_write(slot_id, index, v)
 
 
+# Callbacks for tracking GenVM Manager failures (moved from base_host)
+_on_genvm_success: typing.Callable[[], None] | None = None
+_on_genvm_failure: typing.Callable[[], None] | None = None
+
+
+def set_genvm_callbacks(
+    on_success: typing.Callable[[], None] | None = None,
+    on_failure: typing.Callable[[], None] | None = None,
+):
+    """Set callbacks for GenVM Manager success/failure tracking."""
+    global _on_genvm_success, _on_genvm_failure
+    _on_genvm_success = on_success
+    _on_genvm_failure = on_failure
+
+
+def _get_env_float(env_key: str, default: float) -> float:
+    raw = os.getenv(env_key)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+_get_timeout_seconds = _get_env_float
+
+
+def _get_int(env_key: str, default: int) -> int:
+    raw = os.getenv(env_key)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+class Context(base_host.Context):
+    def __init__(self, logger: genvm_logger.Logger | None = None):
+        self.logger: genvm_logger.Logger = logger or genvm_logger.NoLogger()
+        self.stats: dict[str, typing.Any] = {}
+
+    def on_genvm_success(self):
+        if _on_genvm_success is not None:
+            _on_genvm_success()
+
+    def on_genvm_failure(self):
+        if _on_genvm_failure is not None:
+            _on_genvm_failure()
+
+    def add_stat(self, key: str, value: typing.Any, /):
+        self.stats[key] = value
+
+    def get_timeout(
+        self,
+        action: base_host.TimeoutAction,
+        type: base_host.TimeoutType,
+        /,
+    ) -> float | None:
+        TA = base_host.TimeoutAction
+        TT = base_host.TimeoutType
+
+        if action == TA.GenVMRun:
+            total = _get_env_float("GENVM_MANAGER_RUN_HTTP_TIMEOUT_SECONDS", 10.0)
+            if type == TT.TOTAL_S:
+                return total
+            if type == TT.CONNECT_S:
+                return min(5.0, total)
+            if type == TT.SOCK_READ_S:
+                return total
+        elif action == TA.GenVMGet:
+            total = _get_env_float("GENVM_MANAGER_STATUS_HTTP_TIMEOUT_SECONDS", 10.0)
+            if type == TT.TOTAL_S:
+                return total
+            if type == TT.CONNECT_S:
+                return min(3.0, total)
+            if type == TT.SOCK_READ_S:
+                return total
+        elif action == TA.GenVMDelete:
+            if type == TT.TOTAL_S:
+                return _get_env_float("GENVM_MANAGER_DELETE_HTTP_TIMEOUT_SECONDS", 3.0)
+            if type == TT.CONNECT_S:
+                return 1.5
+            if type == TT.SOCK_READ_S:
+                return 1.5
+            if type == TT.DELETE_HTTP_GRACEFUL_TIMEOUT_MS:
+                return 20.0
+        return None
+
+    def retry_delay(
+        self, action: base_host.TimeoutAction, attempt_no: int, /
+    ) -> float | None:
+        max_retries = _get_int("GENVM_MANAGER_RUN_RETRIES", 3)
+        if attempt_no >= max_retries - 1:
+            return None
+        base_delay = _get_env_float("GENVM_MANAGER_RUN_RETRY_DELAY_SECONDS", 1.0)
+        return base_delay * (2**attempt_no)
+
+
 @dataclass
 class ExecutionResult:
     result: ExecutionReturn | ExecutionError
@@ -139,7 +243,6 @@ class Host(genvmhost.IHost):
     """
 
     _result: ExecutionReturn | ExecutionError | None
-    _eq_outputs: dict[int, bytes]
     _pending_transactions: list[PendingTransaction]
     _nondet_disagreement: None | int = None
 
@@ -151,7 +254,6 @@ class Host(genvmhost.IHost):
         state_proxy: StateProxy,
         leader_results: None | dict[int, bytes],
     ):
-        self._eq_outputs = {}
         self._pending_transactions = []
         self._result = None
 
@@ -162,7 +264,10 @@ class Host(genvmhost.IHost):
         self._leader_results = leader_results
 
     def provide_result(
-        self, res: genvmhost.RunHostAndProgramRes, state: StateProxyWritable
+        self,
+        res: genvmhost.RunHostAndProgramRes,
+        state: StateProxyWritable,
+        ctx: Context,
     ) -> ExecutionResult:
         # Decode result from RunHostAndProgramRes
         if res.result_kind == ResultCode.RETURN:
@@ -185,6 +290,7 @@ class Host(genvmhost.IHost):
                     res.result_kind,
                     error_code=error_code,
                     raw_error=raw_error if raw_error else None,
+                    description=res.vm_error_description,
                 )
             else:
                 # String error - try to extract error code from message
@@ -198,6 +304,7 @@ class Host(genvmhost.IHost):
             pass
 
             error_ctx = None
+            error_str = str(res.result_data)
 
             # Try to extract structured data if result_data is a dict
             if isinstance(res.result_data, dict):
@@ -207,7 +314,6 @@ class Host(genvmhost.IHost):
                 causes = list(causes_raw) if isinstance(causes_raw, list) else []
                 is_fatal = bool(res.result_data.get("fatal", False))
             else:
-                error_str = str(res.result_data)
                 # Parse the ModuleError string to extract details
                 error_code, causes, is_fatal = parse_module_error_string(error_str)
                 # Extract LLM error context (primary_error/fallback_error)
@@ -221,10 +327,7 @@ class Host(genvmhost.IHost):
             )
 
             # Increment failure counter to trigger unhealthy status
-            from backend.node.genvm.origin.base_host import _on_genvm_failure
-
-            if _on_genvm_failure is not None:
-                _on_genvm_failure()
+            ctx.on_genvm_failure()
 
             # Raise exception - worker will release transaction and restart
             raise GenVMInternalError(
@@ -240,9 +343,39 @@ class Host(genvmhost.IHost):
 
         apply_storage_changes(res.result_storage_changes, state)
 
+        # Extract pending_transactions from result_emissions
+        pending_transactions = []
+        for emission in res.result_emissions:
+            match emission["type"]:
+                case "PostMessage":
+                    pending_transactions.append(
+                        PendingTransaction(
+                            emission["address"].as_hex,
+                            gvm_calldata.encode(emission["calldata"]),
+                            code=None,
+                            salt_nonce=0,
+                            value=emission["value"],
+                            on=emission["on"],
+                        )
+                    )
+                case "DeployContract":
+                    pending_transactions.append(
+                        PendingTransaction(
+                            address="0x",
+                            calldata=gvm_calldata.encode(emission["calldata"]),
+                            code=emission["code"],
+                            salt_nonce=emission["salt_nonce"],
+                            value=emission["value"],
+                            on=emission["on"],
+                        )
+                    )
+
+        # Extract eq_outputs from result_nondet_results
+        eq_outputs = {i: data for i, data in enumerate(res.result_nondet_results)}
+
         return ExecutionResult(
-            eq_outputs=self._eq_outputs,
-            pending_transactions=self._pending_transactions,
+            eq_outputs=eq_outputs,
+            pending_transactions=pending_transactions,
             stdout=res.stdout,
             stderr=res.stderr,
             genvm_log=res.genvm_log,
@@ -250,7 +383,7 @@ class Host(genvmhost.IHost):
             state=state,
             processing_time=0,
             nondet_disagree=self._nondet_disagreement,
-            execution_stats=res.execution_stats,
+            execution_stats=ctx.stats,
         )
 
     async def loop_enter(self, cancellation) -> socket.socket:
@@ -279,69 +412,8 @@ class Host(genvmhost.IHost):
         assert type != StorageType.LATEST_FINAL
         return self._state_proxy.storage_read(Address(account), slot, index, le)
 
-    async def get_leader_nondet_result(self, call_no: int, /) -> collections.abc.Buffer:
-        leader_results = self._leader_results
-        if leader_results is None:
-            raise genvmhost.HostException(Errors.I_AM_LEADER)
-        res = leader_results.get(call_no, None)
-        if res is None:
-            raise genvmhost.HostException(Errors.ABSENT)
-        return res
-
-    async def post_nondet_result(
-        self, call_no: int, data: collections.abc.Buffer, /
-    ) -> None:
-        self._eq_outputs[call_no] = bytes(data)
-
-    async def post_message(
-        self, account: bytes, calldata: bytes, data: genvmhost.DefaultTransactionData, /
-    ) -> None:
-        on = data.get("on", "finalized")
-        value = int(data.get("value", "0x0"), 16)
-        self._pending_transactions.append(
-            PendingTransaction(
-                Address(account).as_hex,
-                calldata,
-                code=None,
-                salt_nonce=0,
-                value=value,
-                on=on,
-            )
-        )
-
     async def consume_gas(self, gas: int, /) -> None:
         pass
-
-    async def deploy_contract(
-        self,
-        calldata: bytes,
-        code: bytes,
-        data: genvmhost.DeployDefaultTransactionData,
-        /,
-    ) -> None:
-        on = data.get("on", "finalized")
-        value = int(data.get("value", "0x0"), 16)
-        salt_nonce = int(data.get("salt_nonce", "0x0"), 16)
-        self._pending_transactions.append(
-            PendingTransaction(
-                address="0x",
-                calldata=calldata,
-                code=code,
-                salt_nonce=salt_nonce,
-                value=value,
-                on=on,
-            )
-        )
-
-    async def eth_send(
-        self,
-        account: bytes,
-        calldata: bytes,
-        data: genvmhost.DefaultEthTransactionData,
-        /,
-    ) -> None:
-        # FIXME(core-team): #748
-        assert False
 
     async def eth_call(self, account: bytes, calldata: bytes, /) -> bytes:
         # FIXME(core-team): #748
@@ -417,6 +489,18 @@ def _create_timeout_result(
     )
 
 
+def _leader_results_to_list(
+    leader_results: dict[int, bytes] | None,
+) -> list[bytes] | None:
+    """Convert dict[int, bytes] keyed by call_no to ordered list[bytes]."""
+    if leader_results is None:
+        return None
+    if not leader_results:
+        return []
+    max_key = max(leader_results.keys())
+    return [leader_results.get(i, b"") for i in range(max_key + 1)]
+
+
 async def run_genvm_host(
     host_supplier: typing.Callable[[socket.socket], Host],
     *,
@@ -433,6 +517,7 @@ async def run_genvm_host(
 ) -> ExecutionResult:
     if logger is None:
         logger = genvm_logger.NoLogger()
+    ctx = Context(logger=logger)
     tmpdir = Path(tempfile.mkdtemp())
     try:
         base_delay = 5  # seconds
@@ -486,6 +571,11 @@ async def run_genvm_host(
                 )
                 host: Host = fresh_host_supplier(sock_listener)
 
+                leader_results = fresh_args.get(
+                    "leader_results", host_args.get("leader_results")
+                )
+                leader_nondet_results = _leader_results_to_list(leader_results)
+
                 try:
                     res = await base_host.run_genvm(
                         host,
@@ -495,18 +585,20 @@ async def run_genvm_host(
                         capture_output=capture_output,
                         is_sync=is_sync,
                         host_data=host_data,
-                        logger=logger,
+                        ctx=ctx,
                         host=f"unix://{sock_path}",
                         extra_args=extra_args,
                         code=code,
                         calldata=fresh_args.get(
                             "calldata_bytes", host_args.get("calldata_bytes", b"")
                         ),
+                        leader_nondet_results=leader_nondet_results,
                     )
 
                     execution_result = host.provide_result(
                         res,
                         fresh_args.get("state_proxy", host_args.get("state_proxy")),
+                        ctx,
                     )
 
                     execution_result.processing_time = math.ceil(
