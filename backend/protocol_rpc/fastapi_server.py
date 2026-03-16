@@ -8,7 +8,6 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Request, Response, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 
 # Load environment variables early so SENTRY_DSN is available for initialization

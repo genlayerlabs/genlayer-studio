@@ -8,19 +8,14 @@ This module is a part of GenVM source code. When updating
 import enum
 import socket
 import typing
-import collections.abc
 import asyncio
-import os
-import sys
 import abc
-import json
 import time
 
 import aiohttp
 
 from dataclasses import dataclass
 
-from pathlib import Path
 
 from .calldata import Address
 from . import calldata as gvm_calldata

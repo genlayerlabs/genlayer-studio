@@ -3,7 +3,6 @@ Uvicorn configuration for production deployment.
 """
 
 import os
-import multiprocessing
 
 # Server socket
 bind = f"0.0.0.0:{os.getenv('RPCPORT', '4000')}"

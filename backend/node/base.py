@@ -1,5 +1,3 @@
-from contextlib import redirect_stdout
-from dataclasses import asdict
 import datetime
 import functools
 import json
@@ -22,7 +20,6 @@ import backend.node.genvm.origin.calldata as calldata
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.node.types import Receipt, ExecutionMode, Vote, ExecutionResultStatus
 from backend.protocol_rpc.message_handler.base import IMessageHandler
-from .genvm.origin import base_host
 from .genvm.origin import logger as genvm_logger
 from .genvm.origin import public_abi
 

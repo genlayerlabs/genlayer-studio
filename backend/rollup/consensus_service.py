@@ -1,6 +1,4 @@
 import json
-import os
-from web3 import Web3
 from eth_utils import keccak, to_bytes, to_hex
 from typing import Optional, Dict, Any
 from pathlib import Path

@@ -24,11 +24,9 @@ import json
 import base64
 import asyncio
 import socket
-import logging
 import backend.node.genvm.origin.base_host as genvmhost
 import collections.abc
 import functools
-import datetime
 import abc
 import time
 import copy
@@ -41,7 +39,6 @@ import backend.node.genvm.origin.calldata as gvm_calldata
 from dataclasses import dataclass
 
 from .origin.public_abi import *
-from .origin.host_fns import Errors
 from .origin import base_host
 from .origin import logger as genvm_logger
 from .error_codes import (
@@ -303,7 +300,7 @@ class Host(genvmhost.IHost):
                     error_code=error_code,
                 )
         elif res.result_kind == ResultCode.INTERNAL_ERROR:
-            from loguru import logger as _ilog
+            pass
 
             error_ctx = None
             error_str = str(res.result_data)

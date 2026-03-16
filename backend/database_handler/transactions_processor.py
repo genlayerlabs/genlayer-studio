@@ -15,7 +15,6 @@ import base64
 import time
 from backend.domain.types import TransactionType
 from web3 import Web3
-import os
 from backend.consensus.types import ConsensusRound
 from backend.consensus.utils import determine_consensus_from_votes
 from backend.rollup.web3_pool import Web3ConnectionPool

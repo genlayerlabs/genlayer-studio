@@ -1,7 +1,6 @@
 from eth_account import Account
 from eth_utils import to_hex
 import rlp
-from eth_account._utils.legacy_transactions import Transaction
 
 
 def serialize_one(data: bytes | str) -> bytes:

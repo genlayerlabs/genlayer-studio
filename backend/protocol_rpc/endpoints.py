@@ -27,7 +27,6 @@ from backend.protocol_rpc.message_handler.base import (
 from backend.database_handler.accounts_manager import AccountsManager
 from backend.database_handler.validators_registry import (
     ValidatorsRegistry,
-    ModifiableValidatorsRegistry,
 )
 
 from backend.node.create_nodes.create_nodes import (

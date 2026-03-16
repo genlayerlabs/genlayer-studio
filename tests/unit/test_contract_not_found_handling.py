@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch, AsyncMock
 from sqlalchemy.orm import Session
 
 from backend.database_handler.errors import ContractNotFoundError
-from backend.database_handler.models import Transactions, TransactionStatus
+from backend.database_handler.models import TransactionStatus
 
 
 class TestContractNotFoundError:
