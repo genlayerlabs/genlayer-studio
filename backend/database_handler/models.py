@@ -225,3 +225,43 @@ class Snapshot(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(True), server_default=func.current_timestamp(), init=False
     )
+
+
+class ApiTier(Base):
+    __tablename__ = "api_tiers"
+    __table_args__ = (
+        PrimaryKeyConstraint("id", name="api_tiers_pkey"),
+        UniqueConstraint("name", name="api_tiers_name_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, init=False)
+    name: Mapped[str] = mapped_column(String(50), unique=True)
+    rate_limit_minute: Mapped[int] = mapped_column(Integer)
+    rate_limit_hour: Mapped[int] = mapped_column(Integer)
+    rate_limit_day: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), server_default=func.current_timestamp(), init=False
+    )
+
+
+class ApiKey(Base):
+    __tablename__ = "api_keys"
+    __table_args__ = (
+        PrimaryKeyConstraint("id", name="api_keys_pkey"),
+        UniqueConstraint("key_hash", name="api_keys_key_hash_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, init=False)
+    key_prefix: Mapped[str] = mapped_column(String(8))
+    key_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    tier_id: Mapped[int] = mapped_column(Integer, ForeignKey("api_tiers.id"))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    description: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True, default=None
+    )
+    created_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), server_default=func.current_timestamp(), init=False
+    )
+    last_used_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), nullable=True, init=False
+    )

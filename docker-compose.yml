@@ -54,6 +54,7 @@ services:
     expose:
       - "${FRONTEND_PORT}"
     environment:
+      - VITE_GENLAYER_NETWORK=${VITE_GENLAYER_NETWORK}
       - VITE_JSON_RPC_SERVER_URL=${VITE_JSON_RPC_SERVER_URL}
       - VITE_WS_SERVER_URL=${VITE_WS_SERVER_URL}
       - VITE_IS_HOSTED=${VITE_IS_HOSTED}
@@ -61,6 +62,7 @@ services:
       - VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION=${VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION}
       - VITE_MAX_ROTATIONS=${VITE_MAX_ROTATIONS}
       - VITE_PLAUSIBLE_DOMAIN=${VITE_PLAUSIBLE_DOMAIN}
+      - VITE_APPKIT_PROJECT_ID=${VITE_APPKIT_PROJECT_ID}
     restart: always
     security_opt:
       - "no-new-privileges=true"
@@ -85,14 +87,10 @@ services:
     volumes:
       - ./explorer/src:/app/src
     depends_on:
-      database-migration:
-        condition: service_completed_successfully
+      jsonrpc:
+        condition: service_healthy
     environment:
-      - DB_HOST=${DBHOST}
-      - DB_NAME=${DBNAME}
-      - DB_USER=${DBUSER}
-      - DB_PASSWORD=${DBPASSWORD}
-      - DB_PORT=${DBPORT}
+      - BACKEND_URL=http://jsonrpc:4000
     restart: always
     security_opt:
       - "no-new-privileges=true"
@@ -117,7 +115,10 @@ services:
       - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-10}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - GENVMROOT=/genvm
-      - GENVM_TAG=v0.2.11
+      - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-false}
+      - RATE_LIMIT_ANON_PER_MINUTE=${RATE_LIMIT_ANON_PER_MINUTE:-30}
+      - RATE_LIMIT_ANON_PER_HOUR=${RATE_LIMIT_ANON_PER_HOUR:-500}
+      - RATE_LIMIT_ANON_PER_DAY=${RATE_LIMIT_ANON_PER_DAY:-5000}
     ports:
       - "${RPCPORT}:${RPCPORT}"
     expose:
@@ -147,8 +148,8 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:${RPCPORT}/health"]
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 40s
+      retries: 5
+      start_period: 300s
     restart: always
     security_opt:
       - "no-new-privileges=true"
@@ -214,7 +215,7 @@ services:
 
   ollama:
     profiles: ["ollama"]
-    image: ollama/ollama:0.14.1
+    image: ollama/ollama:0.17.6
     ports:
       - 11434:11434
     volumes:
@@ -309,7 +310,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 180s
     mem_limit:  ${COMPOSE_WORKER_MEM_LIMIT:-8g}
     mem_reservation: ${COMPOSE_WORKER_MEM_RESERVATION:-2g}
     memswap_limit: ${COMPOSE_WORKER_MEM_SWAP_LIMIT:-8g}
@@ -361,7 +362,7 @@ services:
   #   # For local dev, hardhat is accessed directly on its port
 
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     ports:
       - "6379:6379"
     volumes:
@@ -382,7 +383,7 @@ services:
 
   vector:
     profiles: ["monitoring"]  # Only run when monitoring is needed
-    image: timberio/vector:0.42.0-alpine
+    image: timberio/vector:0.53.0-alpine
     container_name: vector
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/etc/vector/gcp_credentials.json

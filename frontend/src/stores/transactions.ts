@@ -104,6 +104,12 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
     });
   }
 
+  async function cancelTransaction(txHash: `0x${string}`) {
+    await genlayerClient.value?.cancelTransaction({
+      hash: txHash as TransactionHash,
+    });
+  }
+
   function subscribe(topics: string[]) {
     topics.forEach((topic) => {
       subscriptions.add(topic);
@@ -138,6 +144,7 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
     updateTransaction,
     clearTransactionsForContract,
     setTransactionAppeal,
+    cancelTransaction,
     refreshPendingTransactions,
     initSubscriptions,
     resetStorage,

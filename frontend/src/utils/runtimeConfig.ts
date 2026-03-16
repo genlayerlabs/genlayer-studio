@@ -6,6 +6,7 @@
  */
 
 interface RuntimeConfig {
+  VITE_GENLAYER_NETWORK?: string;
   VITE_JSON_RPC_SERVER_URL?: string;
   VITE_WS_SERVER_URL?: string;
   VITE_IS_HOSTED?: string;
@@ -13,6 +14,7 @@ interface RuntimeConfig {
   VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION?: string;
   VITE_MAX_ROTATIONS?: string;
   VITE_PLAUSIBLE_DOMAIN?: string;
+  VITE_APPKIT_PROJECT_ID?: string;
 }
 
 declare global {

@@ -16,8 +16,8 @@ const defaultContractName = 'New Contract.py';
 
 const props = defineProps<{
   contract?: ContractFile;
-  isActive?: Boolean;
-  isNewFile?: Boolean;
+  isActive?: boolean;
+  isNewFile?: boolean;
 }>();
 
 const emit = defineEmits(['save', 'cancel']);

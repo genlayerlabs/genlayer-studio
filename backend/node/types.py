@@ -20,7 +20,15 @@ class Address:
         self._as_hex = None
         if isinstance(val, str):
             if len(val) == 2 + Address.SIZE * 2 and val.startswith("0x"):
+                # 0x-prefixed hex string (42 chars)
                 val = bytes.fromhex(val[2:])
+            elif len(val) == Address.SIZE * 2:
+                # Hex string without 0x prefix (40 chars) - try hex first
+                try:
+                    val = bytes.fromhex(val)
+                except ValueError:
+                    # Not valid hex, try base64
+                    val = base64.b64decode(val)
             elif len(val) > Address.SIZE:
                 val = base64.b64decode(val)
         else:
@@ -89,6 +97,7 @@ class Vote(Enum):
     DISAGREE = "disagree"
     TIMEOUT = "timeout"
     DETERMINISTIC_VIOLATION = "deterministic_violation"
+    IDLE = "idle"
 
     @classmethod
     def from_string(cls, value: str) -> "Vote":
@@ -104,6 +113,7 @@ class Vote(Enum):
             Vote.DISAGREE: 2,
             Vote.TIMEOUT: 3,
             Vote.DETERMINISTIC_VIOLATION: 4,
+            Vote.IDLE: 5,
         }
         return values[self]
 
@@ -191,13 +201,14 @@ class Receipt:
     mode: ExecutionMode
     contract_state: dict[str, str]
     node_config: dict
-    eq_outputs: dict[int, str]
     execution_result: ExecutionResultStatus
+    eq_outputs: dict[int, str] | None = None
     vote: Optional[Vote] = None
     pending_transactions: Iterable[PendingTransaction] = ()
     genvm_result: dict[str, str] | None = None
     processing_time: Optional[int] = None
     nondet_disagree: int | None = None
+    execution_stats: dict | None = None
 
     def to_dict(self, strip_contract_state: bool = False):
         """Convert Receipt to dict.
@@ -218,7 +229,7 @@ class Receipt:
             "mode": self.mode.value,
             "contract_state": {} if strip_contract_state else self.contract_state,
             "node_config": self.node_config,
-            "eq_outputs": self.eq_outputs,
+            **({"eq_outputs": self.eq_outputs} if self.eq_outputs is not None else {}),
             "pending_transactions": [
                 pending_transaction.to_dict()
                 for pending_transaction in self.pending_transactions
@@ -226,6 +237,7 @@ class Receipt:
             "genvm_result": self.genvm_result,
             "processing_time": self.processing_time,
             "nondet_disagree": self.nondet_disagree,
+            "execution_stats": self.execution_stats,
         }
 
     @classmethod
@@ -242,7 +254,11 @@ class Receipt:
                 mode=ExecutionMode.from_string(input.get("mode")),
                 contract_state=input.get("contract_state"),
                 node_config=input.get("node_config"),
-                eq_outputs={int(k): v for k, v in input.get("eq_outputs", {}).items()},
+                eq_outputs=(
+                    {int(k): v for k, v in raw_eq.items()}
+                    if (raw_eq := input.get("eq_outputs")) is not None
+                    else None
+                ),
                 pending_transactions=[
                     PendingTransaction.from_dict(pending_transaction)
                     for pending_transaction in input.get("pending_transactions", [])
@@ -250,6 +266,7 @@ class Receipt:
                 genvm_result=input.get("genvm_result"),
                 processing_time=input.get("processing_time"),
                 nondet_disagree=input.get("nondet_disagree"),
+                execution_stats=input.get("execution_stats"),
             )
         else:
             return None

@@ -57,8 +57,14 @@ export PYTHONPATH="$(pwd)"
 source .venv/bin/activate
 export PYTHONPATH="$(pwd)"
 
-# Run all integration tests
+# Run all integration tests (serial)
 gltest --contracts-dir . tests/integration
+
+# Run tests in parallel (4 workers) - excludes test_validators.py
+gltest --contracts-dir . tests/integration -n 4 --ignore=tests/integration/test_validators.py
+
+# Run validator CRUD tests separately (must run serially)
+gltest --contracts-dir . tests/integration/test_validators.py
 
 # Run faster with leader-only mode (skips validator consensus)
 gltest --contracts-dir . tests/integration --leader-only
@@ -72,6 +78,12 @@ gltest --contracts-dir . tests/integration -v
 # Run specific test function
 gltest --contracts-dir . tests/integration/test_file.py::test_function_name
 ```
+
+### Parallel Execution Notes
+
+- Use `-n 4` to run tests in parallel with 4 workers (pytest-xdist)
+- `test_validators.py` must be excluded from parallel runs (`--ignore`) because it tests validator CRUD operations and needs exclusive access to the validator state
+- Run `test_validators.py` separately after parallel tests complete
 
 ## Quick Commands
 
@@ -95,6 +107,13 @@ gltest --contracts-dir . tests/integration
 ### Quick Run (after initial setup, studio already running)
 ```bash
 source .venv/bin/activate && export PYTHONPATH="$(pwd)" && gltest --contracts-dir . tests/integration
+```
+
+### Parallel Run (4 workers)
+```bash
+source .venv/bin/activate && export PYTHONPATH="$(pwd)" && \
+gltest --contracts-dir . tests/integration -n 4 --ignore=tests/integration/test_validators.py && \
+gltest --contracts-dir . tests/integration/test_validators.py
 ```
 
 ### Fast Run (leader-only mode)

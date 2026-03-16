@@ -20,7 +20,6 @@ from backend.protocol_rpc.message_handler.redis_worker_handler import (
 from backend.protocol_rpc.configuration import GlobalConfiguration
 from backend.rollup.consensus_service import ConsensusService
 import backend.validators as validators
-from backend.database_handler.models import Base
 from loguru import logger
 
 from backend.protocol_rpc.app_lifespan import create_genvm_manager
@@ -46,37 +45,6 @@ logger.add(
     format=log_format,
     level="ERROR",
 )
-
-
-# region agent log
-def _agent_log(hypothesis_id: str, location: str, message: str, data: dict):
-    """Best-effort NDJSON log for debug mode; never raises. Avoid secrets."""
-    import json as _json
-    import os as _os
-    import time as _time
-
-    payload = {
-        "sessionId": "debug-session",
-        "runId": _os.getenv("AGENT_DEBUG_RUN_ID", "pre-fix"),
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": int(_time.time() * 1000),
-    }
-    try:
-        log_path = _os.getenv("AGENT_DEBUG_LOG_PATH", "/tmp/agent_debug.log")
-        with open(log_path, "a") as f:
-            f.write(_json.dumps(payload) + "\n")
-    except Exception:
-        try:
-            print("AGENT_DEBUG " + _json.dumps(payload), flush=True)
-        except Exception:
-            pass
-
-
-# endregion
-
 
 # Load environment variables
 load_dotenv()
@@ -156,17 +124,6 @@ async def lifespan(app: FastAPI):
     # These zombie processes can consume gigabytes of memory outside Docker limits
     logger.info("Cleaning up orphaned GenVM processes from previous crashes...")
     _pkill_rc = os.system("pkill -9 -f 'genvm (llm|web)' 2>/dev/null || true")
-    _agent_log(
-        "H3",
-        "backend/consensus/worker_service.py:pkill_startup",
-        "pkill cleanup executed",
-        {
-            "rc": int(_pkill_rc),
-            "GENVMROOT": os.getenv("GENVMROOT"),
-            "GENVM_TAG": os.getenv("GENVM_TAG"),
-            "PATH_has_genvm": "/genvm/bin" in (os.getenv("PATH") or ""),
-        },
-    )
     logger.info("GenVM cleanup complete")
 
     # Database setup
@@ -229,7 +186,7 @@ async def lifespan(app: FastAPI):
     genvm_manager = await create_genvm_manager()
 
     # Wire up GenVM failure tracking callbacks
-    from backend.node.genvm.origin.base_host import set_genvm_callbacks
+    from backend.node.genvm.base import set_genvm_callbacks
 
     set_genvm_callbacks(
         on_success=reset_genvm_failures,
@@ -237,28 +194,11 @@ async def lifespan(app: FastAPI):
     )
     logger.info("GenVM failure tracking callbacks configured")
 
-    _agent_log(
-        "H1",
-        "backend/consensus/worker_service.py:genvm_manager_ready",
-        "genvm_manager created",
-        {
-            "manager_url": getattr(genvm_manager, "url", None),
-            "GENVMROOT": os.getenv("GENVMROOT"),
-            "GENVM_TAG": os.getenv("GENVM_TAG"),
-        },
-    )
-
     # Initialize validators manager (MUST use global to prevent garbage collection)
     global validators_manager  # Declare before assignment to use the global variable
     validators_manager = validators.Manager(SessionLocal(), genvm_manager)
     await validators_manager.restart()
     logger.info("Validators manager initialized and restarted")
-    _agent_log(
-        "H4",
-        "backend/consensus/worker_service.py:validators_restarted",
-        "validators_manager.restart finished",
-        {"ok": True},
-    )
 
     # Subscribe to validator change events
     async def handle_validator_change(event_data):
@@ -375,50 +315,51 @@ async def lifespan(app: FastAPI):
         logger.info("Shutting down Consensus Worker Service...")
         print("Shutting down Consensus Worker Service...")
 
-        # Wait for current transaction to complete (graceful shutdown)
-        if worker and worker.current_transaction:
-            tx_hash = worker.current_transaction.get("hash", "unknown")
+        # Wait for current transactions to complete (graceful shutdown)
+        if worker and (worker.current_transactions or worker._active_tasks):
+            tx_count = len(worker.current_transactions)
+            task_count = len(worker._active_tasks)
             logger.info(
-                f"Waiting for current transaction {tx_hash} to complete before shutdown..."
+                f"Waiting for {tx_count} transactions / {task_count} tasks to complete before shutdown..."
             )
 
             # Get graceful shutdown timeout from env (default: 180 seconds)
-            # This gives the transaction time to finish before we force-stop
+            # This gives the transactions time to finish before we force-stop
             graceful_timeout = int(
                 os.environ.get("WORKER_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS", "180")
             )
             start_time = time.time()
 
-            while (
-                worker.current_transaction
-                and (time.time() - start_time) < graceful_timeout
-            ):
+            while (worker.current_transactions or worker._active_tasks) and (
+                time.time() - start_time
+            ) < graceful_timeout:
                 await asyncio.sleep(1)
                 elapsed = int(time.time() - start_time)
                 if elapsed % 10 == 0:  # Log every 10 seconds
                     logger.info(
-                        f"Still waiting for transaction {tx_hash} to complete ({elapsed}s elapsed)..."
+                        f"Still waiting for {len(worker.current_transactions)} transactions / "
+                        f"{len(worker._active_tasks)} tasks to complete ({elapsed}s elapsed)..."
                     )
 
-            if worker.current_transaction:
+            if worker.current_transactions:
                 logger.warning(
                     f"Graceful shutdown timeout ({graceful_timeout}s) reached. "
-                    f"Transaction {tx_hash} will be released back to the queue."
+                    f"{len(worker.current_transactions)} transactions will be released back to the queue."
                 )
-                # Actually release the transaction to free the DB lock
-                try:
-                    with worker.get_session() as release_session:
-                        worker.release_transaction(release_session, tx_hash)
-                    logger.info(
-                        f"Successfully released transaction {tx_hash} during shutdown"
-                    )
-                except Exception as e:
-                    logger.exception(
-                        f"Failed to release transaction {tx_hash} during shutdown: {e}"
-                    )
-                finally:
-                    # Clear worker state to be consistent with other code paths
-                    worker.current_transaction = None
+                # Actually release the transactions to free the DB locks
+                for tx_hash in list(worker.current_transactions.keys()):
+                    try:
+                        with worker.get_session() as release_session:
+                            worker.release_transaction(release_session, tx_hash)
+                        logger.info(
+                            f"Successfully released transaction {tx_hash} during shutdown"
+                        )
+                    except Exception as e:
+                        logger.exception(
+                            f"Failed to release transaction {tx_hash} during shutdown: {e}"
+                        )
+                # Clear worker state
+                worker.current_transactions.clear()
 
         if worker:
             worker.stop()
@@ -456,23 +397,48 @@ async def lifespan(app: FastAPI):
         await genvm_manager.close()
 
 
+SENTRY_DSN = os.getenv("SENTRY_DSN", None)
+if SENTRY_DSN:
+    import sentry_sdk
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        # Add data like request headers and IP for users,
+        # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
+        send_default_pii=True,
+        # Set traces_sample_rate to 1.0 to capture 100%
+        # of transactions for tracing.
+        traces_sample_rate=1.0,
+        # Set profile_session_sample_rate to 1.0 to profile 100%
+        # of profile sessions.
+        profile_session_sample_rate=1.0,
+        # Set profile_lifecycle to "trace" to automatically
+        # run the profiler on when there is an active transaction
+        profile_lifecycle="trace",
+    )
+
 # Create FastAPI app
 app = FastAPI(title="Consensus Worker Service", version="1.0.0", lifespan=lifespan)
 start_time = time.time()
 
 
 @app.get("/health")
-async def health_check():
-    """Health check endpoint for the worker."""
+def health_check():
+    """Health check endpoint for the worker.
+
+    This is intentionally a sync (def) endpoint so FastAPI runs it in a
+    threadpool, independent of the asyncio event loop.  This guarantees
+    the liveness probe can respond even when the event loop is blocked by
+    long-running synchronous DB operations in the consensus worker.
+    """
     import psutil
     from datetime import datetime
     from fastapi.responses import JSONResponse
-    import aiohttp
+    from urllib.request import urlopen, Request
+    from urllib.error import URLError
 
     global worker, worker_task, worker_restart_count, worker_permanently_failed
     global _genvm_health_last_check, _genvm_health_last_ok, _genvm_health_last_error
-
-    endpoint_start = time.time()
 
     if worker is None:
         return {"status": "initializing", "worker_id": None}
@@ -531,10 +497,8 @@ async def health_check():
     except:
         pass
 
-    # Optional: probe local GenVM manager responsiveness.
-    # This catches the exact failure mode you described: /health looks fine, but GenVM's
-    # HTTP server (127.0.0.1:3999) is wedged and never responds, so consensus execution hangs.
-    #
+    # Probe local GenVM manager responsiveness.
+    # Uses urllib (sync) instead of aiohttp since this runs in a threadpool.
     try:
         now = time.time()
         probe_interval_s = float(
@@ -547,34 +511,19 @@ async def health_check():
             )
             timeout_s = float(os.getenv("GENVM_MANAGER_HEALTH_TIMEOUT_SECONDS", "2"))
             try:
-                async with aiohttp.request(
-                    "GET",
-                    status_url,
-                    timeout=aiohttp.ClientTimeout(total=timeout_s),
-                ) as resp:
-                    if resp.status != 200:
-                        _genvm_health_last_ok = False
-                        _genvm_health_last_error = (
-                            f"genvm_manager_status_http_{resp.status}"
-                        )
-                    else:
-                        _genvm_health_last_ok = True
-                        _genvm_health_last_error = None
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                resp = urlopen(Request(status_url), timeout=timeout_s)
+                if resp.status != 200:
+                    _genvm_health_last_ok = False
+                    _genvm_health_last_error = (
+                        f"genvm_manager_status_http_{resp.status}"
+                    )
+                else:
+                    _genvm_health_last_ok = True
+                    _genvm_health_last_error = None
+                resp.close()
+            except (URLError, OSError, TimeoutError) as exc:
                 _genvm_health_last_ok = False
                 _genvm_health_last_error = f"genvm_manager_status_error: {exc}"
-
-            _agent_log(
-                "H5",
-                "backend/consensus/worker_service.py:health_genvm_probe",
-                "genvm manager health probe executed",
-                {
-                    "status_url": status_url,
-                    "timeout_s": timeout_s,
-                    "ok": _genvm_health_last_ok,
-                    "error": _genvm_health_last_error,
-                },
-            )
 
         if not _genvm_health_last_ok:
             return JSONResponse(
@@ -603,70 +552,76 @@ async def health_check():
             },
         )
 
-    # Get current transaction info with time calculation
-    current_tx = None
-    if worker.current_transaction:
-        tx = worker.current_transaction.copy()
-        if tx.get("blocked_at"):
-            try:
-                blocked_at = tx["blocked_at"]
+    # Get current transactions info with time calculation
+    # Check if ANY transaction is blocked for too long
+    current_txs = []
+    if worker.current_transactions:
+        # Get unhealthy threshold from env
+        try:
+            blocked_tx_unhealthy_after_minutes = int(
+                os.getenv("WORKER_BLOCKED_TX_UNHEALTHY_AFTER_MINUTES", "14")
+            )
+        except ValueError:
+            blocked_tx_unhealthy_after_minutes = 14
+        if blocked_tx_unhealthy_after_minutes <= 0:
+            blocked_tx_unhealthy_after_minutes = 14
 
-                # Handle both datetime objects and ISO strings
-                if isinstance(blocked_at, str):
-                    blocked_at = datetime.fromisoformat(
-                        blocked_at.replace("Z", "+00:00")
-                    )
+        blocked_tx_unhealthy_after_seconds = blocked_tx_unhealthy_after_minutes * 60
 
-                # Convert to naive UTC datetime for comparison
-                if blocked_at.tzinfo is not None:
-                    blocked_at = blocked_at.replace(tzinfo=None)
-
-                elapsed = datetime.utcnow() - blocked_at
-
-                # Check if blocked for too long - pod is unhealthy
-                # Env override: WORKER_BLOCKED_TX_UNHEALTHY_AFTER_MINUTES (default: 14 minutes)
+        for tx_hash, tx_info in worker.current_transactions.items():
+            tx = tx_info.copy()
+            if tx.get("blocked_at"):
                 try:
-                    blocked_tx_unhealthy_after_minutes = int(
-                        os.getenv("WORKER_BLOCKED_TX_UNHEALTHY_AFTER_MINUTES", "14")
-                    )
-                except ValueError:
-                    blocked_tx_unhealthy_after_minutes = 14
-                if blocked_tx_unhealthy_after_minutes <= 0:
-                    blocked_tx_unhealthy_after_minutes = 14
+                    blocked_at = tx["blocked_at"]
 
-                blocked_tx_unhealthy_after_seconds = (
-                    blocked_tx_unhealthy_after_minutes * 60
-                )
+                    # Handle both datetime objects and ISO strings
+                    if isinstance(blocked_at, str):
+                        blocked_at = datetime.fromisoformat(
+                            blocked_at.replace("Z", "+00:00")
+                        )
 
-                if elapsed.total_seconds() > blocked_tx_unhealthy_after_seconds:
-                    return JSONResponse(
-                        status_code=500,
-                        content={
-                            "status": "unhealthy",
-                            "worker_id": worker.worker_id,
-                            "error": f"Transaction blocked for more than {blocked_tx_unhealthy_after_minutes} minutes",
-                            "blocked_duration_seconds": elapsed.total_seconds(),
-                        },
-                    )
+                    # Convert to naive UTC datetime for comparison
+                    if blocked_at.tzinfo is not None:
+                        blocked_at = blocked_at.replace(tzinfo=None)
 
-                # Format as human-readable time ago
-                minutes = int(elapsed.total_seconds() / 60)
-                if minutes < 60:
-                    tx["blocked_at"] = f"{minutes}m ago"
-                else:
-                    hours = minutes // 60
-                    tx["blocked_at"] = f"{hours}h ago"
-            except Exception as e:
-                # Log the error but don't fail the health check
-                logger.error(f"Error parsing blocked_at timestamp: {e}")
-                pass
-        current_tx = tx
+                    elapsed = datetime.utcnow() - blocked_at
+
+                    # Check if blocked for too long - pod is unhealthy
+                    if elapsed.total_seconds() > blocked_tx_unhealthy_after_seconds:
+                        return JSONResponse(
+                            status_code=500,
+                            content={
+                                "status": "unhealthy",
+                                "worker_id": worker.worker_id,
+                                "error": f"Transaction {tx_hash} blocked for more than {blocked_tx_unhealthy_after_minutes} minutes",
+                                "blocked_duration_seconds": elapsed.total_seconds(),
+                            },
+                        )
+
+                    # Format as human-readable time ago
+                    minutes = int(elapsed.total_seconds() / 60)
+                    if minutes < 60:
+                        tx["blocked_at"] = f"{minutes}m ago"
+                    else:
+                        hours = minutes // 60
+                        tx["blocked_at"] = f"{hours}h ago"
+                except Exception as e:
+                    # Log the error but don't fail the health check
+                    logger.error(f"Error parsing blocked_at timestamp: {e}")
+            current_txs.append(tx)
 
     return {
         "status": "healthy" if worker.running else "stopping",
         "worker_id": worker.worker_id,
-        "current_transaction": current_tx,
+        "current_transactions": current_txs,
+        "active_task_count": len(worker._active_tasks),
+        "max_parallel_txs": worker.max_parallel_txs,
         "restart_count": worker_restart_count,
+        "generic_error_retries": (
+            len(worker._generic_error_retries)
+            if hasattr(worker, "_generic_error_retries")
+            else 0
+        ),
         **metrics,
     }
 
@@ -684,6 +639,9 @@ async def worker_status():
         "running": worker.running,
         "poll_interval": worker.poll_interval,
         "transaction_timeout_minutes": worker.transaction_timeout_minutes,
+        "max_parallel_txs": worker.max_parallel_txs,
+        "active_task_count": len(worker._active_tasks),
+        "current_transaction_count": len(worker.current_transactions),
         "restart_count": worker_restart_count,
         "last_crash_time": worker_last_crash_time,
         "permanently_failed": worker_permanently_failed,

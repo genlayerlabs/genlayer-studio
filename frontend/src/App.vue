@@ -6,12 +6,13 @@ import TutorialContainer from '@/components/Tutorial/TutorialContainer.vue';
 import ConnectionStatusBanner from '@/components/ConnectionStatusBanner.vue';
 import { useUIStore } from '@/stores/ui';
 import { onBeforeMount, onMounted, nextTick, watch } from 'vue';
-import { useSetupStores } from '@/hooks';
+import { useSetupStores, useWalletSync } from '@/hooks';
 import { useContractImport } from '@/composables/useContractImport';
 import { notify } from '@kyvg/vue3-notification';
 
 const uiStore = useUIStore();
 const { setupStores } = useSetupStores();
+useWalletSync();
 const router = useRouter();
 const route = useRoute();
 const { importContract } = useContractImport();

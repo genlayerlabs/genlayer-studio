@@ -10,7 +10,6 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.orm import Session
 from sqlalchemy import table, column
 from backend.node.create_nodes.providers import get_default_providers
 

@@ -9,7 +9,7 @@ import typing
 import collections.abc
 import dataclasses
 import base64
-from functools import partial, wraps
+from functools import partial
 from typing import Callable, Dict, Any, Optional
 
 from backend.protocol_rpc.message_handler.fastapi_handler import MessageHandler
@@ -507,7 +507,7 @@ def register_endpoints_for_fastapi(
     # GenLayer endpoints
     register(
         partial(
-            endpoints.get_contract_schema, accounts_manager, genvm_manager, msg_handler
+            endpoints.get_contract_schema, request_session, genvm_manager, msg_handler
         ),
         "gen_getContractSchema",
     )

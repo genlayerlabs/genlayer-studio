@@ -4,7 +4,6 @@ Simplified WizardOfCoin test - just deploy and read initial state.
 """
 
 import requests
-import json
 from pathlib import Path
 from genlayer_py import create_client, create_account, localnet
 import time

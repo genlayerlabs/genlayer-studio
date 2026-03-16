@@ -1,0 +1,10 @@
+{
+  "provider": "openrouter",
+  "plugin": "openai-compatible",
+  "model": "@preset/rally-testnet-gemini-3-flash",
+  "config": {},
+  "plugin_config": {
+    "api_key_env_var": "OPENROUTERAPIKEY",
+    "api_url": "https://openrouter.ai/api"
+  }
+}

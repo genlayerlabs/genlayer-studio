@@ -3,23 +3,21 @@
 import os
 import asyncio
 import time
-import traceback
-import threading
 import uuid
+from contextlib import asynccontextmanager
 from typing import Callable, Optional, Any
-from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from backend.database_handler.models import Transactions, TransactionStatus
 from backend.database_handler.transactions_processor import TransactionsProcessor
-from backend.database_handler.chain_snapshot import ChainSnapshot
-from backend.database_handler.contract_snapshot import ContractSnapshot
-from backend.database_handler.contract_processor import ContractProcessor
-from backend.database_handler.accounts_manager import AccountsManager
 from backend.database_handler.errors import ContractNotFoundError
 from backend.domain.types import Transaction
-from backend.consensus.base import ConsensusAlgorithm
+from backend.node.genvm.error_codes import GenVMInternalError
+from backend.consensus.base import ConsensusAlgorithm, NoValidatorsAvailableError
+
+# Alias for use in context manager (avoids circular import issues)
+_NoValidatorsError = NoValidatorsAvailableError
 from backend.protocol_rpc.message_handler.base import MessageHandler
 from backend.rollup.consensus_service import ConsensusService
 import backend.validators as validators
@@ -34,6 +32,8 @@ class ConsensusWorker:
     Each worker claims transactions from the database and processes them independently.
     This reuses the exec_transaction logic from ConsensusAlgorithm.
     """
+
+    MAX_GENERIC_ERROR_RETRIES = 3
 
     def __init__(
         self,
@@ -68,7 +68,13 @@ class ConsensusWorker:
         self.poll_interval = poll_interval
         self.transaction_timeout_minutes = transaction_timeout_minutes
         self.running = True
-        self.current_transaction = None  # Track currently processing transaction
+
+        # Parallel transaction processing configuration
+        self.max_parallel_txs: int = self._parse_max_parallel_txs()
+        self.current_transactions: dict[str, dict] = (
+            {}
+        )  # Track currently processing transactions by hash
+        self._active_tasks: set[asyncio.Task] = set()  # Track active processing tasks
 
         # Callback for graceful shutdown during K8s scale-down
         self.should_shutdown = should_shutdown
@@ -112,8 +118,46 @@ class ConsensusWorker:
             os.environ.get("NO_VALIDATORS_BASE_BACKOFF_SECONDS", "30")
         )
 
+        # Track retry counts for transactions that failed due to generic errors
+        # Key: transaction_hash, Value: {"count": int, "last_attempt": float, "last_error": str}
+        self._generic_error_retries: dict[str, dict] = {}
+        self._generic_error_base_backoff = float(
+            os.environ.get("GENERIC_ERROR_BASE_BACKOFF_SECONDS", "10")
+        )
+
         # Initialize usage metrics service for reporting transaction metrics
         self.usage_metrics_service = UsageMetricsService()
+
+    def _parse_max_parallel_txs(self) -> int:
+        """
+        Parse MAX_PARALLEL_TXS_PER_WORKER from environment with validation.
+
+        Returns:
+            Parsed value (minimum 1) or default of 1 on invalid input.
+        """
+        default_value = 1
+        env_value = os.environ.get("MAX_PARALLEL_TXS_PER_WORKER")
+
+        if env_value is None:
+            return default_value
+
+        try:
+            parsed = int(env_value)
+        except (ValueError, TypeError):
+            logger.warning(
+                f"[Worker {self.worker_id}] Invalid MAX_PARALLEL_TXS_PER_WORKER value "
+                f"'{env_value}', using default {default_value}"
+            )
+            return default_value
+
+        if parsed < 1:
+            logger.warning(
+                f"[Worker {self.worker_id}] MAX_PARALLEL_TXS_PER_WORKER must be >= 1, "
+                f"got {parsed}, using minimum value 1"
+            )
+            return 1
+
+        return parsed
 
     async def claim_next_finalization(self, session: Session) -> Optional[dict]:
         """
@@ -149,6 +193,7 @@ class ConsensusWorker:
                             AND t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
                             AND t2.hash != t.hash
                     )
+                    AND pg_try_advisory_xact_lock(hashtext(t.to_address))
                 ORDER BY t.created_at ASC
                 FOR UPDATE SKIP LOCKED
             ),
@@ -176,7 +221,7 @@ class ConsensusWorker:
                       transactions.data, transactions.value, transactions.type, transactions.nonce,
                       transactions.gaslimit, transactions.r, transactions.s, transactions.v,
                       transactions.leader_only, transactions.execution_mode, transactions.sim_config,
-                      transactions.contract_snapshot, transactions.status, transactions.consensus_data,
+                      transactions.status, transactions.consensus_data,
                       transactions.input_data, transactions.created_at, transactions.timestamp_awaiting_finalization,
                       transactions.appeal_failed, transactions.blocked_at;
         """
@@ -215,7 +260,6 @@ class ConsensusWorker:
                 "leader_only": result.leader_only,
                 "execution_mode": result.execution_mode,
                 "sim_config": result.sim_config,
-                "contract_snapshot": result.contract_snapshot,
                 "status": result.status,
                 "consensus_data": result.consensus_data,
                 "input_data": result.input_data,
@@ -240,7 +284,7 @@ class ConsensusWorker:
         query = text(
             """
             WITH locked_appeals AS (
-                SELECT t.*
+                SELECT t.hash, t.to_address, t.created_at
                 FROM transactions t
                 WHERE t.appealed = true
                     AND t.status IN ('ACCEPTED', 'UNDETERMINED', 'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT')
@@ -255,6 +299,7 @@ class ConsensusWorker:
                             AND t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
                             AND t2.hash != t.hash
                     )
+                    AND pg_try_advisory_xact_lock(hashtext(t.to_address))
                 ORDER BY t.created_at ASC
                 FOR UPDATE SKIP LOCKED
             ),
@@ -282,7 +327,7 @@ class ConsensusWorker:
                       transactions.data, transactions.value, transactions.type, transactions.nonce,
                       transactions.gaslimit, transactions.r, transactions.s, transactions.v,
                       transactions.leader_only, transactions.execution_mode, transactions.sim_config,
-                      transactions.contract_snapshot, transactions.status, transactions.consensus_data,
+                      transactions.status, transactions.consensus_data,
                       transactions.input_data, transactions.created_at, transactions.appealed,
                       transactions.appeal_failed, transactions.timestamp_appeal,
                       transactions.appeal_undetermined, transactions.appeal_leader_timeout,
@@ -318,7 +363,6 @@ class ConsensusWorker:
                 "leader_only": result.leader_only,
                 "execution_mode": result.execution_mode,
                 "sim_config": result.sim_config,
-                "contract_snapshot": result.contract_snapshot,
                 "status": result.status,
                 "consensus_data": result.consensus_data,
                 "input_data": result.input_data,
@@ -348,7 +392,7 @@ class ConsensusWorker:
         query = text(
             """
             WITH candidate_transactions AS (
-                SELECT t.*
+                SELECT t.hash, t.to_address, t.type, t.created_at
                 FROM transactions t
                 WHERE t.status IN ('PENDING', 'ACTIVATED')
                     AND (t.blocked_at IS NULL
@@ -361,22 +405,28 @@ class ConsensusWorker:
                             AND t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
                             AND t2.hash != t.hash
                     )
-                ORDER BY t.created_at ASC
+                    -- Atomic per-contract lock to close TOCTOU window in NOT EXISTS.
+                    -- Under READ COMMITTED, two workers can both pass NOT EXISTS before
+                    -- either commits blocked_at. This advisory lock prevents that race.
+                    AND pg_try_advisory_xact_lock(hashtext(t.to_address))
+                ORDER BY CASE WHEN t.type = 3 THEN 0 ELSE 1 END, t.created_at ASC
                 FOR UPDATE SKIP LOCKED
             ),
             oldest_per_contract AS (
                 SELECT *, ROW_NUMBER() OVER (
                     PARTITION BY to_address
-                    ORDER BY created_at ASC
+                    ORDER BY CASE WHEN type = 3 THEN 0 ELSE 1 END,
+                             created_at ASC
                 ) as rn
                 FROM candidate_transactions
             ),
             single_transaction AS (
                 -- Select only ONE transaction (oldest across all contracts)
+                -- Upgrade transactions (type=3) are prioritized ahead of regular txs
                 SELECT *
                 FROM oldest_per_contract
                 WHERE rn = 1
-                ORDER BY created_at ASC
+                ORDER BY CASE WHEN type = 3 THEN 0 ELSE 1 END, created_at ASC
                 LIMIT 1
             )
             UPDATE transactions
@@ -388,7 +438,7 @@ class ConsensusWorker:
                       transactions.data, transactions.value, transactions.type, transactions.nonce,
                       transactions.gaslimit, transactions.r, transactions.s, transactions.v,
                       transactions.leader_only, transactions.execution_mode, transactions.sim_config,
-                      transactions.contract_snapshot, transactions.status, transactions.consensus_data,
+                      transactions.status, transactions.consensus_data,
                       transactions.input_data, transactions.created_at, transactions.blocked_at;
         """
         )
@@ -422,7 +472,6 @@ class ConsensusWorker:
                 "leader_only": result.leader_only,
                 "execution_mode": result.execution_mode,
                 "sim_config": result.sim_config,
-                "contract_snapshot": result.contract_snapshot,
                 "status": result.status,
                 "consensus_data": result.consensus_data,
                 "input_data": result.input_data,
@@ -482,6 +531,156 @@ class ConsensusWorker:
                 )
             raise
 
+    def reset_transaction(self, session: Session, transaction_hash: str):
+        """
+        Fully reset a transaction back to PENDING status after a GenVM internal error.
+
+        This clears all processing state so the transaction can be picked up and
+        reprocessed from scratch by another worker.
+
+        Args:
+            session: Database session (should be a fresh, valid session)
+            transaction_hash: Hash of the transaction to reset
+        """
+        update_query = text(
+            """
+            UPDATE transactions
+            SET blocked_at = NULL,
+                worker_id = NULL,
+                consensus_data = NULL,
+                consensus_history = NULL,
+                status = 'PENDING'
+            WHERE hash = :hash
+              AND worker_id = :worker_id
+            RETURNING hash, status, blocked_at, worker_id
+        """
+        )
+
+        try:
+            result = session.execute(
+                update_query,
+                {"hash": transaction_hash, "worker_id": self.worker_id},
+            )
+            row = result.first()
+            session.commit()
+
+            if row:
+                logger.info(
+                    f"[Worker {self.worker_id}] Reset transaction {transaction_hash} to PENDING after GenVM internal error"
+                )
+            else:
+                logger.warning(
+                    f"[Worker {self.worker_id}] Transaction {transaction_hash} not found or owned by another worker when resetting"
+                )
+        except Exception as e:
+            logger.error(
+                f"[Worker {self.worker_id}] Failed to reset transaction {transaction_hash}: {e}",
+                exc_info=True,
+            )
+            try:
+                session.rollback()
+            except Exception as rollback_error:
+                logger.error(
+                    f"[Worker {self.worker_id}] Rollback failed while resetting {transaction_hash}: {rollback_error}",
+                    exc_info=True,
+                )
+            raise
+
+    @asynccontextmanager
+    async def _transaction_context(
+        self,
+        tx_hash: str,
+        tx_data: dict,
+        session: Session,
+        tx_type: str = "transaction",
+    ):
+        """
+        Async context manager for transaction processing with unified exception handling.
+
+        Handles:
+        - Tracking current transactions for health monitoring
+        - GenVMInternalError with transaction reset and optional worker stop
+        - ContractNotFoundError (re-raised for specific handling by caller)
+        - Generic exceptions with rollback
+        - Cleanup (release or reset based on error type)
+
+        Args:
+            tx_hash: Transaction hash
+            tx_data: Transaction data dictionary
+            session: Database session
+            tx_type: Type of transaction for logging ("transaction", "finalization", "appeal")
+
+        Yields:
+            Control to the processing logic
+        """
+        transaction_reset = False
+        try:
+            # Track current transaction for health monitoring
+            self.current_transactions[tx_hash] = {
+                "hash": tx_hash,
+                "blocked_at": tx_data.get("blocked_at"),
+            }
+            yield
+        except GenVMInternalError as e:
+            # Handle GenVM internal errors with specific recovery logic
+            logger.error(
+                f"[Worker {self.worker_id}] GenVM internal error during {tx_type} {tx_hash}: "
+                f"code={e.error_code}, causes={e.causes}, is_fatal={e.is_fatal}, "
+                f"is_leader={e.is_leader}, message={e}, detail={e.detail}, ctx={e.ctx}"
+            )
+            session.rollback()
+
+            # Only reset transaction and stop worker for leader errors (or unknown origin)
+            # Validator errors can be handled by the consensus algorithm
+            # (continue with remaining validators)
+            if e.is_leader is False:
+                # Validator error - don't reset, consensus will continue with remaining validators
+                logger.warning(
+                    f"[Worker {self.worker_id}] GenVM internal error in validator for {tx_hash}, "
+                    f"consensus will continue with remaining validators"
+                )
+            else:
+                # Leader error (or unknown) - reset transaction for reprocessing
+                try:
+                    with self.get_session() as reset_session:
+                        self.reset_transaction(reset_session, tx_hash)
+                        transaction_reset = True
+                except Exception as reset_error:
+                    logger.error(
+                        f"[Worker {self.worker_id}] Failed to reset {tx_type} {tx_hash}: {reset_error}",
+                        exc_info=True,
+                    )
+
+                # For fatal leader errors, stop the worker to trigger K8s restart via health check
+                if e.is_fatal:
+                    logger.warning(
+                        f"[Worker {self.worker_id}] Fatal GenVM error in leader - stopping worker. "
+                        f"{tx_type.capitalize()} {tx_hash} will be reset for another worker."
+                    )
+                    self.running = False
+        except (ContractNotFoundError, _NoValidatorsError):
+            # Re-raise for specific handling by caller
+            raise
+        except Exception as e:
+            logger.exception(
+                f"[Worker {self.worker_id}] Error processing {tx_type} {tx_hash}: {e}"
+            )
+            session.rollback()
+            await self._handle_generic_error_retry(tx_hash, e)
+        finally:
+            # Clear current transaction tracking
+            self.current_transactions.pop(tx_hash, None)
+            # Release the transaction if not already reset
+            if not transaction_reset:
+                try:
+                    with self.get_session() as release_session:
+                        self.release_transaction(release_session, tx_hash)
+                except Exception as release_error:
+                    logger.error(
+                        f"[Worker {self.worker_id}] Failed to release {tx_type} {tx_hash}: {release_error}",
+                        exc_info=True,
+                    )
+
     async def recover_stuck_transactions(self, session: Session) -> int:
         """
         Recover transactions that have been stuck for too long.
@@ -540,115 +739,115 @@ class ConsensusWorker:
             transaction_data: Transaction data dictionary
             session: Database session
         """
-        # Import NoValidatorsAvailableError here to avoid circular imports
-        from backend.consensus.base import NoValidatorsAvailableError
+        tx_hash = transaction_data.get("hash")
 
         try:
-            # Track current transaction for health monitoring
-            self.current_transaction = {
-                "hash": transaction_data.get("hash"),
-                "blocked_at": transaction_data.get("blocked_at"),
-            }
+            async with self._transaction_context(
+                tx_hash, transaction_data, session, "transaction"
+            ):
+                # Handle upgrade transactions specially (no consensus needed)
+                from backend.domain.types import TransactionType
 
-            # Handle upgrade transactions specially (no consensus needed)
-            from backend.domain.types import TransactionType
+                if (
+                    transaction_data.get("type")
+                    == TransactionType.UPGRADE_CONTRACT.value
+                ):
+                    await self._process_upgrade_transaction(transaction_data, session)
+                    return
 
-            if transaction_data.get("type") == TransactionType.UPGRADE_CONTRACT.value:
-                await self._process_upgrade_transaction(transaction_data, session)
-                return
+                # Convert to Transaction domain object
+                transaction = Transaction.from_dict(transaction_data)
 
-            # Convert to Transaction domain object
-            transaction = Transaction.from_dict(transaction_data)
+                # Import factories here to avoid circular imports
+                from backend.consensus.base import (
+                    contract_snapshot_factory,
+                    contract_processor_factory,
+                    transactions_processor_factory,
+                    accounts_manager_factory,
+                    node_factory,
+                )
 
-            # Import factories here to avoid circular imports
-            from backend.consensus.base import (
-                contract_snapshot_factory,
-                contract_processor_factory,
-                chain_snapshot_factory,
-                transactions_processor_factory,
-                accounts_manager_factory,
-                node_factory,
-            )
-
-            # Get or create validators snapshot based on sim_config
-            virtual_validators = []
-            if transaction.sim_config and transaction.sim_config.validators:
-                # Handle virtual validators for simulation
-                for validator in transaction.sim_config.validators:
-                    from backend.node.create_nodes.providers import (
-                        get_default_provider_for,
-                        validate_provider,
-                    )
-                    from backend.domain.types import LLMProvider, Validator
-
-                    provider = validator.provider
-                    model = validator.model
-                    config = validator.config
-                    plugin = validator.plugin
-                    plugin_config = validator.plugin_config
-
-                    if config is None or plugin is None or plugin_config is None:
-                        llm_provider = get_default_provider_for(provider, model)
-                    else:
-                        llm_provider = LLMProvider(
-                            provider=provider,
-                            model=model,
-                            config=config,
-                            plugin=plugin,
-                            plugin_config=plugin_config,
+                # Get or create validators snapshot based on sim_config
+                virtual_validators = []
+                if transaction.sim_config and transaction.sim_config.validators:
+                    # Handle virtual validators for simulation
+                    for validator in transaction.sim_config.validators:
+                        from backend.node.create_nodes.providers import (
+                            get_default_provider_for,
+                            validate_provider,
                         )
-                        validate_provider(llm_provider)
+                        from backend.domain.types import LLMProvider, Validator
 
-                    account = accounts_manager_factory(session).create_new_account()
-                    virtual_validators.append(
-                        Validator(
-                            address=account.address,
-                            private_key=account.key.to_0x_hex(),
-                            stake=validator.stake,
-                            llmprovider=llm_provider,
+                        provider = validator.provider
+                        model = validator.model
+                        config = validator.config
+                        plugin = validator.plugin
+                        plugin_config = validator.plugin_config
+
+                        if config is None or plugin is None or plugin_config is None:
+                            llm_provider = get_default_provider_for(provider, model)
+                        else:
+                            llm_provider = LLMProvider(
+                                provider=provider,
+                                model=model,
+                                config=config,
+                                plugin=plugin,
+                                plugin_config=plugin_config,
+                            )
+                            validate_provider(llm_provider)
+
+                        account = accounts_manager_factory(session).create_new_account()
+                        virtual_validators.append(
+                            Validator(
+                                address=account.address,
+                                private_key=account.key.to_0x_hex(),
+                                stake=validator.stake,
+                                llmprovider=llm_provider,
+                            )
                         )
-                    )
 
-            # Use appropriate validators snapshot
-            if virtual_validators:
-                async with self.validators_manager.temporal_snapshot(
-                    virtual_validators
-                ) as validators_snapshot:
-                    await self.consensus_algorithm.exec_transaction(
-                        transaction,
-                        transactions_processor_factory(session),
-                        chain_snapshot_factory(session),
-                        accounts_manager_factory(session),
-                        lambda contract_address: contract_snapshot_factory(
-                            contract_address, session, transaction
-                        ),
-                        contract_processor_factory(session),
-                        node_factory,
-                        validators_snapshot,
-                    )
-            else:
-                async with self.validators_manager.snapshot() as validators_snapshot:
-                    await self.consensus_algorithm.exec_transaction(
-                        transaction,
-                        transactions_processor_factory(session),
-                        chain_snapshot_factory(session),
-                        accounts_manager_factory(session),
-                        lambda contract_address: contract_snapshot_factory(
-                            contract_address, session, transaction
-                        ),
-                        contract_processor_factory(session),
-                        node_factory,
-                        validators_snapshot,
-                    )
+                # Use appropriate validators snapshot
+                if virtual_validators:
+                    async with self.validators_manager.temporal_snapshot(
+                        virtual_validators
+                    ) as validators_snapshot:
+                        await self.consensus_algorithm.exec_transaction(
+                            transaction,
+                            transactions_processor_factory(session),
+                            None,  # chain_snapshot not used by state handlers
+                            accounts_manager_factory(session),
+                            lambda contract_address: contract_snapshot_factory(
+                                contract_address, session, transaction
+                            ),
+                            contract_processor_factory(session),
+                            node_factory,
+                            validators_snapshot,
+                        )
+                else:
+                    async with self.validators_manager.snapshot() as validators_snapshot:
+                        await self.consensus_algorithm.exec_transaction(
+                            transaction,
+                            transactions_processor_factory(session),
+                            None,  # chain_snapshot not used by state handlers
+                            accounts_manager_factory(session),
+                            lambda contract_address: contract_snapshot_factory(
+                                contract_address, session, transaction
+                            ),
+                            contract_processor_factory(session),
+                            node_factory,
+                            validators_snapshot,
+                        )
 
-            session.commit()
-            logger.info(
-                f"[Worker {self.worker_id}] Successfully processed transaction {transaction.hash}"
-            )
+                session.commit()
+                logger.info(
+                    f"[Worker {self.worker_id}] Successfully processed transaction {transaction.hash}"
+                )
 
-            # Clean up retry tracking on success
-            if transaction.hash in self._no_validators_retries:
-                del self._no_validators_retries[transaction.hash]
+                # Clean up retry tracking on success
+                if transaction.hash in self._no_validators_retries:
+                    del self._no_validators_retries[transaction.hash]
+                if transaction.hash in self._generic_error_retries:
+                    del self._generic_error_retries[transaction.hash]
 
         except NoValidatorsAvailableError:
             # Handle no-validators case with retry logic and backoff
@@ -660,7 +859,6 @@ class ConsensusWorker:
         except ContractNotFoundError as e:
             # Handle contract not found - mark as ACCEPTED with ERROR execution result
             # This allows the transaction to go through finalization properly
-            tx_hash = transaction_data["hash"]
             logger.error(
                 f"[Worker {self.worker_id}] Contract not found for transaction {tx_hash}: {e}"
             )
@@ -701,8 +899,6 @@ class ConsensusWorker:
                 error_session.commit()
 
                 # Send WebSocket notification
-                from backend.consensus.base import ConsensusAlgorithm
-
                 await ConsensusAlgorithm.dispatch_transaction_status_update(
                     TransactionsProcessor(error_session),
                     tx_hash,
@@ -713,24 +909,6 @@ class ConsensusWorker:
             logger.info(
                 f"[Worker {self.worker_id}] Transaction {tx_hash} marked as ACCEPTED (with ERROR result) due to contract not found"
             )
-
-        except Exception as e:
-            logger.exception(
-                f"[Worker {self.worker_id}] Error processing transaction {transaction_data['hash']}: {e}"
-            )
-            session.rollback()
-        finally:
-            # Clear current transaction tracking
-            self.current_transaction = None
-            # Always release the transaction when done - use fresh session since current one may be closed
-            try:
-                with self.get_session() as release_session:
-                    self.release_transaction(release_session, transaction_data["hash"])
-            except Exception as release_error:
-                logger.error(
-                    f"[Worker {self.worker_id}] Failed to release transaction {transaction_data['hash']} in finally block: {release_error}",
-                    exc_info=True,
-                )
 
     async def _handle_no_validators_retry(
         self, transaction_data: dict, session: Session
@@ -786,6 +964,59 @@ class ConsensusWorker:
                 f"[Worker {self.worker_id}] No validators for {tx_hash}, "
                 f"retry {retry_info['count']}/{self._max_no_validators_retries}, "
                 f"next attempt in {backoff}s"
+            )
+
+    async def _handle_generic_error_retry(self, tx_hash: str, error: Exception):
+        """
+        Handle retry logic for generic errors during transaction processing.
+        Implements exponential backoff and cancels after MAX_GENERIC_ERROR_RETRIES.
+
+        Args:
+            tx_hash: Transaction hash
+            error: The exception that occurred
+        """
+        retry_info = self._generic_error_retries.get(
+            tx_hash, {"count": 0, "last_attempt": 0, "last_error": ""}
+        )
+        retry_info["count"] += 1
+        retry_info["last_attempt"] = time.time()
+        retry_info["last_error"] = str(error)
+        self._generic_error_retries[tx_hash] = retry_info
+
+        if retry_info["count"] >= self.MAX_GENERIC_ERROR_RETRIES:
+            # Cancel the transaction after max retries
+            logger.error(
+                f"[Worker {self.worker_id}] Transaction {tx_hash} canceled after "
+                f"{retry_info['count']} generic error retries - last error: {error}"
+            )
+            with self.get_session() as cancel_session:
+                tx = cancel_session.query(Transactions).filter_by(hash=tx_hash).one()
+                tx.status = TransactionStatus.CANCELED
+                tx.consensus_data = {
+                    "error": "max_generic_retries_exceeded",
+                    "last_error": str(error),
+                    "retries": retry_info["count"],
+                }
+                cancel_session.commit()
+
+                # Send WebSocket notification
+                await ConsensusAlgorithm.dispatch_transaction_status_update(
+                    TransactionsProcessor(cancel_session),
+                    tx_hash,
+                    TransactionStatus.CANCELED,
+                    self.msg_handler,
+                )
+
+            # Clean up retry tracking
+            del self._generic_error_retries[tx_hash]
+        else:
+            backoff = self._generic_error_base_backoff * (
+                2 ** (retry_info["count"] - 1)
+            )
+            logger.warning(
+                f"[Worker {self.worker_id}] Generic error for {tx_hash}, "
+                f"retry {retry_info['count']}/{self.MAX_GENERIC_ERROR_RETRIES}, "
+                f"next attempt in {backoff}s - error: {error}"
             )
 
     async def _process_upgrade_transaction(
@@ -852,9 +1083,7 @@ class ConsensusWorker:
             # Update contract data - update BOTH accepted and finalized state
             # Since upgrade transactions bypass consensus and go directly to FINALIZED,
             # both state trees must be updated for reads to see the new code
-            # Note: data["code"] must be base64 encoded (matches deployment format in node/types.py)
             contract.data = {
-                "code": base64.b64encode(code_bytes).decode("ascii"),
                 "state": {
                     "accepted": {
                         **contract.data["state"]["accepted"],
@@ -915,7 +1144,7 @@ class ConsensusWorker:
 
         finally:
             # Clear current transaction tracking
-            self.current_transaction = None
+            self.current_transactions.pop(tx_hash, None)
             # Release the transaction
             try:
                 with self.get_session() as release_session:
@@ -934,65 +1163,68 @@ class ConsensusWorker:
             finalization_data: Transaction data dictionary
             session: Database session
         """
+        tx_hash = finalization_data.get("hash")
+
         try:
-            # Convert to Transaction domain object
-            transaction = Transaction.from_dict(finalization_data)
+            async with self._transaction_context(
+                tx_hash, finalization_data, session, "finalization"
+            ):
+                # Convert to Transaction domain object
+                transaction = Transaction.from_dict(finalization_data)
 
-            # Check if the appeal window has passed
-            from backend.consensus.base import (
-                contract_snapshot_factory,
-                contract_processor_factory,
-                chain_snapshot_factory,
-                transactions_processor_factory,
-                accounts_manager_factory,
-                node_factory,
-            )
-
-            transactions_processor = transactions_processor_factory(session)
-
-            # Check if can finalize (appeal window expired)
-            can_finalize = self.consensus_algorithm.can_finalize_transaction(
-                transactions_processor,
-                transaction,
-                0,  # index in queue (not used in our case)
-                [finalization_data],  # mock queue with just this transaction
-            )
-
-            if can_finalize:
-                logger.info(
-                    f"[Worker {self.worker_id}] Finalizing transaction {transaction.hash}"
-                )
-
-                await self.consensus_algorithm.process_finalization(
-                    transaction,
-                    transactions_processor,
-                    chain_snapshot_factory(session),
-                    accounts_manager_factory(session),
-                    lambda contract_address: contract_snapshot_factory(
-                        contract_address, session, transaction
-                    ),
-                    contract_processor_factory(session),
+                # Check if the appeal window has passed
+                from backend.consensus.base import (
+                    contract_snapshot_factory,
+                    contract_processor_factory,
+                    transactions_processor_factory,
+                    accounts_manager_factory,
                     node_factory,
                 )
 
-                session.commit()
-                logger.info(
-                    f"[Worker {self.worker_id}] Successfully finalized transaction {transaction.hash}"
+                transactions_processor = transactions_processor_factory(session)
+
+                # Check if can finalize (appeal window expired)
+                can_finalize = self.consensus_algorithm.can_finalize_transaction(
+                    transactions_processor,
+                    transaction,
+                    0,  # index in queue (not used in our case)
+                    [finalization_data],  # mock queue with just this transaction
                 )
 
-                # Send usage metrics to external API (non-blocking)
-                await self.usage_metrics_service.send_finalized_transaction_metrics(
-                    transaction, finalization_data
-                )
-            else:
-                logger.debug(
-                    f"[Worker {self.worker_id}] Transaction {transaction.hash} not ready for finalization yet (appeal window active)"
-                )
+                if can_finalize:
+                    logger.info(
+                        f"[Worker {self.worker_id}] Finalizing transaction {transaction.hash}"
+                    )
+
+                    await self.consensus_algorithm.process_finalization(
+                        transaction,
+                        transactions_processor,
+                        None,  # chain_snapshot not needed for finalization
+                        accounts_manager_factory(session),
+                        lambda contract_address: contract_snapshot_factory(
+                            contract_address, session, transaction
+                        ),
+                        contract_processor_factory(session),
+                        node_factory,
+                    )
+
+                    session.commit()
+                    logger.info(
+                        f"[Worker {self.worker_id}] Successfully finalized transaction {transaction.hash}"
+                    )
+
+                    # Send usage metrics to external API (non-blocking)
+                    await self.usage_metrics_service.send_finalized_transaction_metrics(
+                        transaction, finalization_data
+                    )
+                else:
+                    logger.debug(
+                        f"[Worker {self.worker_id}] Transaction {transaction.hash} not ready for finalization yet (appeal window active)"
+                    )
 
         except ContractNotFoundError as e:
             # Handle contract not found during finalization - mark as FINALIZED
             # This prevents infinite retry loop for transactions targeting non-existent contracts
-            tx_hash = finalization_data["hash"]
             logger.error(
                 f"[Worker {self.worker_id}] Contract not found during finalization {tx_hash}: {e}"
             )
@@ -1003,34 +1235,17 @@ class ConsensusWorker:
                 transactions_processor = TransactionsProcessor(error_session)
 
                 # Send WebSocket notification to mark as FINALIZED
-                from backend.consensus.base import ConsensusAlgorithm
-
                 await ConsensusAlgorithm.dispatch_transaction_status_update(
                     transactions_processor,
                     tx_hash,
                     TransactionStatus.FINALIZED,
                     self.msg_handler,
                 )
+                error_session.commit()
 
             logger.info(
                 f"[Worker {self.worker_id}] Transaction {tx_hash} marked as FINALIZED due to contract not found during finalization"
             )
-
-        except Exception as e:
-            logger.exception(
-                f"[Worker {self.worker_id}] Error processing finalization {finalization_data['hash']}: {e}"
-            )
-            session.rollback()
-        finally:
-            # Always release the transaction when done - use fresh session since current one may be closed
-            try:
-                with self.get_session() as release_session:
-                    self.release_transaction(release_session, finalization_data["hash"])
-            except Exception as release_error:
-                logger.error(
-                    f"[Worker {self.worker_id}] Failed to release finalization {finalization_data['hash']} in finally block: {release_error}",
-                    exc_info=True,
-                )
 
     async def process_appeal(self, appeal_data: dict, session: Session):
         """
@@ -1040,93 +1255,101 @@ class ConsensusWorker:
             appeal_data: Appeal transaction data dictionary
             session: Database session
         """
+        tx_hash = appeal_data.get("hash")
+
         try:
-            # Convert to Transaction domain object
-            transaction = Transaction.from_dict(appeal_data)
+            async with self._transaction_context(
+                tx_hash, appeal_data, session, "appeal"
+            ):
+                # Convert to Transaction domain object
+                transaction = Transaction.from_dict(appeal_data)
 
-            logger.info(
-                f"[Worker {self.worker_id}] Processing appeal for transaction {transaction.hash} with status {appeal_data['status']}"
-            )
+                logger.info(
+                    f"[Worker {self.worker_id}] Processing appeal for transaction {transaction.hash} with status {appeal_data['status']}"
+                )
 
-            # Import factories
-            from backend.consensus.base import (
-                contract_snapshot_factory,
-                contract_processor_factory,
-                chain_snapshot_factory,
-                transactions_processor_factory,
-                accounts_manager_factory,
-                node_factory,
-            )
+                # Import factories
+                from backend.consensus.base import (
+                    contract_snapshot_factory,
+                    contract_processor_factory,
+                    transactions_processor_factory,
+                    accounts_manager_factory,
+                    node_factory,
+                )
 
-            # Process the appeal based on status
-            transactions_processor = transactions_processor_factory(session)
-            chain_snapshot = chain_snapshot_factory(session)
-            accounts_manager = accounts_manager_factory(session)
+                # Process the appeal based on status
+                transactions_processor = transactions_processor_factory(session)
+                accounts_manager = accounts_manager_factory(session)
 
-            async with self.validators_manager.snapshot() as validators_snapshot:
-                if transaction.status == TransactionStatus.UNDETERMINED:
-                    # Leader appeal
-                    await self.consensus_algorithm.process_leader_appeal(
-                        transaction,
-                        transactions_processor,
-                        chain_snapshot,
-                        accounts_manager,
-                        lambda contract_address: contract_snapshot_factory(
-                            contract_address, session, transaction
-                        ),
-                        contract_processor_factory(session),
-                        node_factory,
-                        validators_snapshot,
-                    )
-                elif transaction.status == TransactionStatus.LEADER_TIMEOUT:
-                    # Leader timeout appeal
-                    await self.consensus_algorithm.process_leader_timeout_appeal(
-                        transaction,
-                        transactions_processor,
-                        chain_snapshot,
-                        accounts_manager,
-                        lambda contract_address: contract_snapshot_factory(
-                            contract_address, session, transaction
-                        ),
-                        contract_processor_factory(session),
-                        node_factory,
-                        validators_snapshot,
-                    )
-                else:
-                    # Validator appeal (ACCEPTED or VALIDATORS_TIMEOUT)
-                    await self.consensus_algorithm.process_validator_appeal(
-                        transaction,
-                        transactions_processor,
-                        chain_snapshot,
-                        accounts_manager,
-                        lambda contract_address: contract_snapshot_factory(
-                            contract_address, session, transaction
-                        ),
-                        contract_processor_factory(session),
-                        node_factory,
-                        validators_snapshot,
-                    )
+                async with self.validators_manager.snapshot() as validators_snapshot:
+                    if transaction.status == TransactionStatus.UNDETERMINED:
+                        # Leader appeal
+                        await self.consensus_algorithm.process_leader_appeal(
+                            transaction,
+                            transactions_processor,
+                            None,  # chain_snapshot not used by state handlers
+                            accounts_manager,
+                            lambda contract_address: contract_snapshot_factory(
+                                contract_address, session, transaction
+                            ),
+                            contract_processor_factory(session),
+                            node_factory,
+                            validators_snapshot,
+                        )
+                    elif transaction.status == TransactionStatus.LEADER_TIMEOUT:
+                        # Leader timeout appeal
+                        await self.consensus_algorithm.process_leader_timeout_appeal(
+                            transaction,
+                            transactions_processor,
+                            None,  # chain_snapshot not used by state handlers
+                            accounts_manager,
+                            lambda contract_address: contract_snapshot_factory(
+                                contract_address, session, transaction
+                            ),
+                            contract_processor_factory(session),
+                            node_factory,
+                            validators_snapshot,
+                        )
+                    else:
+                        # Validator appeal (ACCEPTED or VALIDATORS_TIMEOUT)
+                        await self.consensus_algorithm.process_validator_appeal(
+                            transaction,
+                            transactions_processor,
+                            None,  # chain_snapshot not used by state handlers
+                            accounts_manager,
+                            lambda contract_address: contract_snapshot_factory(
+                                contract_address, session, transaction
+                            ),
+                            contract_processor_factory(session),
+                            node_factory,
+                            validators_snapshot,
+                        )
 
-            session.commit()
-            logger.info(
-                f"[Worker {self.worker_id}] Successfully processed appeal for transaction {transaction.hash}"
-            )
+                session.commit()
+                logger.info(
+                    f"[Worker {self.worker_id}] Successfully processed appeal for transaction {transaction.hash}"
+                )
 
-        except Exception as e:
-            logger.exception(
-                f"[Worker {self.worker_id}] Error processing appeal {appeal_data['hash']}: {e}"
+        except ContractNotFoundError as e:
+            logger.error(
+                f"[Worker {self.worker_id}] Contract not found during appeal {tx_hash}: {e}"
             )
             session.rollback()
-        finally:
-            # Always release the transaction when done - use fresh session since current one may be closed
-            try:
-                with self.get_session() as release_session:
-                    self.release_transaction(release_session, appeal_data["hash"])
-            except Exception as release_error:
-                logger.error(
-                    f"[Worker {self.worker_id}] Failed to release appeal {appeal_data['hash']} in finally block: {release_error}",
-                    exc_info=True,
+
+            with self.get_session() as error_session:
+                transactions_processor = TransactionsProcessor(error_session)
+
+                await ConsensusAlgorithm.dispatch_transaction_status_update(
+                    transactions_processor,
+                    tx_hash,
+                    TransactionStatus.FINALIZED,
+                    self.msg_handler,
                 )
+                error_session.commit()
+
+            logger.info(
+                f"[Worker {self.worker_id}] Transaction {tx_hash} marked as FINALIZED due to contract not found during appeal"
+            )
 
     def _log_query_result(
         self,
@@ -1155,21 +1378,147 @@ class ConsensusWorker:
         state["last_log"] = now_monotonic
         state["polls"] = 0
 
+    def _is_in_backoff(self, transaction_data: dict) -> bool:
+        """
+        Check if a transaction is in backoff due to no validators or generic errors.
+
+        Args:
+            transaction_data: Transaction data dictionary
+
+        Returns:
+            True if transaction is in backoff period, False otherwise
+        """
+        tx_hash = transaction_data["hash"]
+
+        # Check no-validators backoff
+        retry_info = self._no_validators_retries.get(tx_hash)
+        if retry_info:
+            backoff = self._no_validators_base_backoff * (
+                2 ** (retry_info["count"] - 1)
+            )
+            time_since_last = time.time() - retry_info["last_attempt"]
+            if time_since_last < backoff:
+                logger.debug(
+                    f"[Worker {self.worker_id}] Transaction {tx_hash} in no-validators backoff "
+                    f"({time_since_last:.1f}s < {backoff}s)"
+                )
+                return True
+
+        # Check generic error backoff
+        generic_info = self._generic_error_retries.get(tx_hash)
+        if generic_info:
+            backoff = self._generic_error_base_backoff * (
+                2 ** (generic_info["count"] - 1)
+            )
+            time_since_last = time.time() - generic_info["last_attempt"]
+            if time_since_last < backoff:
+                logger.debug(
+                    f"[Worker {self.worker_id}] Transaction {tx_hash} in generic-error backoff "
+                    f"({time_since_last:.1f}s < {backoff}s)"
+                )
+                return True
+
+        return False
+
+    async def _process_transaction_task(self, transaction_data: dict):
+        """Task wrapper for processing a transaction with its own session."""
+        with self.get_session() as session:
+            await self.process_transaction(transaction_data, session)
+
+    async def _process_finalization_task(self, finalization_data: dict):
+        """Task wrapper for processing a finalization with its own session."""
+        with self.get_session() as session:
+            await self.process_finalization(finalization_data, session)
+
+    async def _process_appeal_task(self, appeal_data: dict):
+        """Task wrapper for processing an appeal with its own session."""
+        with self.get_session() as session:
+            await self.process_appeal(appeal_data, session)
+
+    async def _try_claim_work(self, session: Session) -> bool:
+        """
+        Try to claim and spawn task for next work item.
+
+        Args:
+            session: Database session for claiming work
+
+        Returns:
+            True if work was claimed and task spawned, False otherwise
+        """
+        # Priority: appeals > finalizations > transactions
+
+        appeal_data = await self.claim_next_appeal(session)
+        if appeal_data:
+            logger.debug(
+                f"[Worker {self.worker_id}] Claimed appeal for transaction {appeal_data['hash']}"
+            )
+            task = asyncio.create_task(self._process_appeal_task(appeal_data))
+            self._active_tasks.add(task)
+            return True
+
+        finalization_data = await self.claim_next_finalization(session)
+        if finalization_data:
+            logger.debug(
+                f"[Worker {self.worker_id}] Claimed finalization for transaction {finalization_data['hash']}"
+            )
+            task = asyncio.create_task(
+                self._process_finalization_task(finalization_data)
+            )
+            self._active_tasks.add(task)
+            return True
+
+        transaction_data = await self.claim_next_transaction(session)
+        if transaction_data:
+            tx_hash = transaction_data["hash"]
+            # Check backoff for no-validators retry
+            if not self._is_in_backoff(transaction_data):
+                logger.debug(f"[Worker {self.worker_id}] Claimed transaction {tx_hash}")
+                task = asyncio.create_task(
+                    self._process_transaction_task(transaction_data)
+                )
+                self._active_tasks.add(task)
+                return True
+            else:
+                # Release transaction if in backoff
+                self.release_transaction(session, tx_hash)
+
+        return False
+
     async def run(self):
         """
         Main worker loop that continuously claims and processes transactions, appeals, and finalizations.
+        Supports parallel processing when MAX_PARALLEL_TXS_PER_WORKER > 1.
         """
-        logger.info(f"[Worker {self.worker_id}] Starting consensus worker")
+        logger.info(
+            f"[Worker {self.worker_id}] Starting consensus worker "
+            f"(max_parallel_txs={self.max_parallel_txs})"
+        )
 
         recovery_counter = 0
 
         while self.running:
             try:
+                # Cleanup completed tasks and handle any exceptions
+                done_tasks = {t for t in self._active_tasks if t.done()}
+                for task in done_tasks:
+                    self._active_tasks.discard(task)
+                    # Handle any exceptions from completed tasks
+                    try:
+                        task.result()
+                    except Exception as e:
+                        logger.exception(f"[Worker {self.worker_id}] Task failed: {e}")
+
                 # Check if shutdown has been requested (graceful shutdown during K8s scale-down)
                 if self.should_shutdown and self.should_shutdown():
                     logger.info(
-                        f"[Worker {self.worker_id}] Shutdown requested, stopping after current transaction completes"
+                        f"[Worker {self.worker_id}] Shutdown requested, waiting for "
+                        f"{len(self._active_tasks)} active tasks to complete"
                     )
+                    # Wait for active tasks to complete
+                    if self._active_tasks:
+                        await asyncio.gather(
+                            *self._active_tasks, return_exceptions=True
+                        )
                     self.running = False
                     break
 
@@ -1184,82 +1533,32 @@ class ConsensusWorker:
                                 f"[Worker {self.worker_id}] Recovered {recovered} stuck transactions"
                             )
 
-                    # Priority order: appeals > finalizations > regular transactions
-
-                    # Try to claim an appeal first (highest priority)
-                    appeal_data = await self.claim_next_appeal(session)
-
-                    if appeal_data:
-                        logger.debug(
-                            f"[Worker {self.worker_id}] Claimed appeal for transaction {appeal_data['hash']}"
-                        )
-                        # Process in a new session
-                        with self.get_session() as process_session:
-                            await self.process_appeal(appeal_data, process_session)
-                        # Continue to next iteration to ensure fresh session state
-                        continue
-                    else:
-                        # No appeals, try to claim a finalization
-                        finalization_data = await self.claim_next_finalization(session)
-
-                        if finalization_data:
-                            logger.debug(
-                                f"[Worker {self.worker_id}] Claimed finalization for transaction {finalization_data['hash']}"
-                            )
-                            # Process in a new session
-                            with self.get_session() as process_session:
-                                await self.process_finalization(
-                                    finalization_data, process_session
-                                )
-                            # Continue to next iteration to ensure fresh session state
+                    # Claim and process while we have capacity
+                    if len(self._active_tasks) < self.max_parallel_txs:
+                        claimed = await self._try_claim_work(session)
+                        if claimed:
+                            # Try to claim more immediately if we have capacity
                             continue
-                        else:
-                            # No finalizations, try to claim a regular transaction
-                            transaction_data = await self.claim_next_transaction(
-                                session
-                            )
 
-                            if transaction_data:
-                                tx_hash = transaction_data["hash"]
-
-                                # Check if transaction is in backoff due to no validators
-                                retry_info = self._no_validators_retries.get(tx_hash)
-                                if retry_info:
-                                    backoff = self._no_validators_base_backoff * (
-                                        2 ** (retry_info["count"] - 1)
-                                    )
-                                    time_since_last = (
-                                        time.time() - retry_info["last_attempt"]
-                                    )
-                                    if time_since_last < backoff:
-                                        # Still in backoff period, release and skip
-                                        logger.debug(
-                                            f"[Worker {self.worker_id}] Transaction {tx_hash} in backoff "
-                                            f"({time_since_last:.1f}s < {backoff}s), releasing"
-                                        )
-                                        self.release_transaction(session, tx_hash)
-                                        await asyncio.sleep(1)
-                                        continue
-
-                                logger.debug(
-                                    f"[Worker {self.worker_id}] Claimed transaction {tx_hash}"
-                                )
-                                # Process in a new session
-                                with self.get_session() as process_session:
-                                    await self.process_transaction(
-                                        transaction_data, process_session
-                                    )
-                                # Continue to next iteration to ensure fresh session state
-                                continue
-                            else:
-                                # No work available, wait before polling again
-                                await asyncio.sleep(self.poll_interval)
+                # Wait for a task to complete or poll interval
+                if self._active_tasks:
+                    done, _ = await asyncio.wait(
+                        self._active_tasks,
+                        timeout=self.poll_interval,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                else:
+                    # No active tasks, wait before polling again
+                    await asyncio.sleep(self.poll_interval)
 
             except Exception as e:
                 logger.exception(f"[Worker {self.worker_id}] Error in main loop: {e}")
                 await asyncio.sleep(self.poll_interval)
 
     def stop(self):
-        """Stop the worker gracefully."""
-        logger.info(f"[Worker {self.worker_id}] Stopping consensus worker")
+        """Stop the worker gracefully. Active tasks will complete naturally in run() shutdown logic."""
+        logger.info(
+            f"[Worker {self.worker_id}] Stopping consensus worker "
+            f"({len(self._active_tasks)} active tasks)"
+        )
         self.running = False
