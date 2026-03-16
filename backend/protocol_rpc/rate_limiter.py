@@ -6,10 +6,12 @@ import hashlib
 import logging
 import os
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 import redis.asyncio as aioredis
+from redis.exceptions import NoScriptError
 from sqlalchemy.orm import Session
 
 from backend.database_handler.models import ApiKey, ApiTier
@@ -18,6 +20,43 @@ from backend.protocol_rpc.exceptions import RateLimitExceeded
 logger = logging.getLogger(__name__)
 
 TIER_CACHE_TTL = 300  # 5 minutes
+
+# Lua script that atomically prunes, checks, and records in one round-trip.
+# This eliminates the TOCTOU race where concurrent requests could all read the
+# same stale count before any of them recorded, bypassing the limit.
+#
+# KEYS: [minute_key, hour_key, day_key]
+# ARGV: [now, member, minute_window, minute_limit, hour_window, hour_limit,
+#         day_window, day_limit]
+#
+# Returns: [0] on success, or [1, window_name, limit, count, retry_after] on denial.
+_CHECK_AND_RECORD_LUA = """
+local now = tonumber(ARGV[1])
+local member = ARGV[2]
+
+local windows = {
+    {key = KEYS[1], seconds = tonumber(ARGV[3]), limit = tonumber(ARGV[4]), name = "minute"},
+    {key = KEYS[2], seconds = tonumber(ARGV[5]), limit = tonumber(ARGV[6]), name = "hour"},
+    {key = KEYS[3], seconds = tonumber(ARGV[7]), limit = tonumber(ARGV[8]), name = "day"},
+}
+
+-- Phase 1: Prune expired entries and check counts
+for _, w in ipairs(windows) do
+    redis.call('ZREMRANGEBYSCORE', w.key, 0, now - w.seconds)
+    local count = redis.call('ZCARD', w.key)
+    if count >= w.limit then
+        return {1, w.name, w.limit, count, w.seconds}
+    end
+end
+
+-- Phase 2: Record this request (only reached if all windows are under limit)
+for _, w in ipairs(windows) do
+    redis.call('ZADD', w.key, now, member)
+    redis.call('EXPIRE', w.key, w.seconds + 60)
+end
+
+return {0}
+"""
 
 
 @dataclass(frozen=True)
@@ -49,6 +88,7 @@ class RateLimiterService:
             rate_limit_hour=anon_per_hour,
             rate_limit_day=anon_per_day,
         )
+        self._lua_sha: Optional[str] = None
 
     @classmethod
     def from_environment(
@@ -137,49 +177,58 @@ class RateLimiterService:
         finally:
             session.close()
 
+    async def _ensure_lua_loaded(self) -> str:
+        """Load the Lua script into Redis and cache the SHA."""
+        if self._lua_sha is None:
+            self._lua_sha = await self._redis.script_load(_CHECK_AND_RECORD_LUA)
+        return self._lua_sha
+
     async def _check_windows(self, identity: str, limits: TierLimits) -> None:
-        """Check sliding window counters for minute/hour/day."""
+        """Atomically prune, check, and record using a Lua script."""
         now = time.time()
-        windows = [
-            ("minute", 60, limits.rate_limit_minute),
-            ("hour", 3600, limits.rate_limit_hour),
-            ("day", 86400, limits.rate_limit_day),
+        member = f"{now}:{uuid.uuid4().hex[:8]}"
+
+        keys = [
+            f"ratelimit:{identity}:minute",
+            f"ratelimit:{identity}:hour",
+            f"ratelimit:{identity}:day",
+        ]
+        args = [
+            str(now),
+            member,
+            "60",
+            str(limits.rate_limit_minute),
+            "3600",
+            str(limits.rate_limit_hour),
+            "86400",
+            str(limits.rate_limit_day),
         ]
 
-        # Phase 1: Prune old entries and count current in a single pipeline
-        pipe = self._redis.pipeline()
-        keys = []
-        for window_name, window_seconds, _ in windows:
-            key = f"ratelimit:{identity}:{window_name}"
-            keys.append(key)
-            cutoff = now - window_seconds
-            pipe.zremrangebyscore(key, 0, cutoff)
-            pipe.zcard(key)
+        sha = await self._ensure_lua_loaded()
+        try:
+            result = await self._redis.evalsha(sha, len(keys), *keys, *args)
+        except NoScriptError:
+            # Script was evicted from Redis cache, reload it
+            self._lua_sha = None
+            sha = await self._ensure_lua_loaded()
+            result = await self._redis.evalsha(sha, len(keys), *keys, *args)
 
-        results = await pipe.execute()
-
-        # Check counts (results alternate: zremrangebyscore result, zcard result)
-        for i, (window_name, window_seconds, max_requests) in enumerate(windows):
-            count = results[i * 2 + 1]  # zcard result
-            if count >= max_requests:
-                raise RateLimitExceeded(
-                    message=f"Rate limit exceeded: {max_requests} requests per {window_name}",
-                    data={
-                        "window": window_name,
-                        "limit": max_requests,
-                        "current": count,
-                        "retry_after_seconds": window_seconds,
-                    },
-                )
-
-        # Phase 2: Record this request in all windows
-        pipe2 = self._redis.pipeline()
-        member = f"{now}"
-        for i, (window_name, window_seconds, _) in enumerate(windows):
-            key = keys[i]
-            pipe2.zadd(key, {member: now})
-            pipe2.expire(key, window_seconds + 60)
-        await pipe2.execute()
+        if result[0] == 1:
+            window_name = (
+                result[1].decode() if isinstance(result[1], bytes) else result[1]
+            )
+            max_requests = int(result[2])
+            count = int(result[3])
+            retry_after = int(result[4])
+            raise RateLimitExceeded(
+                message=f"Rate limit exceeded: {max_requests} requests per {window_name}",
+                data={
+                    "window": window_name,
+                    "limit": max_requests,
+                    "current": count,
+                    "retry_after_seconds": retry_after,
+                },
+            )
 
     async def invalidate_key_cache(self, key_hash: str) -> None:
         """Invalidate cached tier for an API key (call after deactivation)."""
