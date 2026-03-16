@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Navigation } from "@/components/Navigation";
@@ -17,7 +18,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Studio Explorer - GenLayer State Browser",
+  title: "GenLayer Studio Explorer",
   description: "Browse and explore GenLayer transaction and consensus data",
 };
 
@@ -34,7 +35,9 @@ export default function RootLayout({
         <ThemeProvider attribute="class" defaultTheme="light" enableSystem>
           <TooltipProvider>
             <Navigation />
-            <StatsBar />
+            <Suspense>
+              <StatsBar />
+            </Suspense>
             <main className="container mx-auto px-4 py-6 min-h-screen">
               {children}
             </main>

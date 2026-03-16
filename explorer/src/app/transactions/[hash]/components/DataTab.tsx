@@ -3,6 +3,7 @@
 import { Transaction } from '@/lib/types';
 import { JsonViewer } from '@/components/JsonViewer';
 import { DataDecodePanel } from '@/components/DataDecodePanel';
+import { InputDataPanel } from '@/components/InputDataPanel';
 import { User, FileCode } from 'lucide-react';
 
 interface DataTabProps {
@@ -10,6 +11,10 @@ interface DataTabProps {
 }
 
 export function DataTab({ transaction: tx }: DataTabProps) {
+  const calldataB64 = (tx.type === 1 || tx.type === 2) && tx.data && typeof tx.data === 'object'
+    ? (tx.data as Record<string, unknown>).calldata as string | undefined
+    : undefined;
+
   return (
     <div className="space-y-6">
       {tx.input_data && (
@@ -24,7 +29,19 @@ export function DataTab({ transaction: tx }: DataTabProps) {
         </div>
       )}
 
-      {tx.data && (
+      {/* Etherscan-style input data panel for call transactions */}
+      {calldataB64 && (
+        <div>
+          <h4 className="font-medium text-foreground mb-2 flex items-center gap-2">
+            <FileCode className="w-4 h-4" />
+            Input Data
+          </h4>
+          <InputDataPanel calldataB64={calldataB64} />
+        </div>
+      )}
+
+      {/* Generic data panel for non-call transactions */}
+      {tx.data && !calldataB64 && (
         <div>
           <h4 className="font-medium text-foreground mb-2 flex items-center gap-2">
             <FileCode className="w-4 h-4" />

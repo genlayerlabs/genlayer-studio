@@ -1,14 +1,31 @@
 'use client';
 
 import Link from 'next/link';
-import { ChevronRight } from 'lucide-react';
+import {
+  ArrowRightLeft,
+  Users,
+  Database,
+  AlertTriangle,
+  Zap,
+  ChevronRight,
+} from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
+
+const ICON_MAP = {
+  ArrowRightLeft,
+  Users,
+  Database,
+  AlertTriangle,
+  Zap,
+} as const;
+
+export type StatCardIcon = keyof typeof ICON_MAP;
 
 interface StatCardProps {
   title: string;
   value: number | string;
-  icon: React.ComponentType<{ className?: string }>;
+  icon: StatCardIcon;
   color: string;
   iconBg: string;
   href?: string;
@@ -17,11 +34,12 @@ interface StatCardProps {
 export function StatCard({
   title,
   value,
-  icon: Icon,
+  icon,
   color,
   iconBg,
   href,
 }: StatCardProps) {
+  const Icon = ICON_MAP[icon];
   const content = (
     <Card className={cn('hover:shadow-md transition-all duration-200 group', href && 'cursor-pointer')}>
       <CardContent className="p-5">
