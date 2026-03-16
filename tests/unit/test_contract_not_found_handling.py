@@ -282,6 +282,89 @@ class TestGenCallContractNotFoundHandling:
                             assert contract_address in str(exc_info.value)
 
 
+class TestEthCallContractNotFoundHandling:
+    """Test that eth_call properly handles ContractNotFoundError from execution"""
+
+    @pytest.mark.asyncio
+    async def test_eth_call_catches_contract_not_found_during_execution(self):
+        """
+        When ContractNotFoundError is raised during eth_call GenVM execution
+        (e.g., cross-contract call to a non-existent contract), it should be
+        caught and converted to a NotFoundError JSON-RPC response.
+        """
+        from backend.protocol_rpc.endpoints import eth_call
+        from backend.protocol_rpc.exceptions import NotFoundError
+
+        mock_session = MagicMock(spec=Session)
+        mock_accounts_manager = MagicMock()
+        mock_accounts_manager.is_valid_address.return_value = True
+        mock_msg_handler = MagicMock()
+        mock_msg_handler.with_client_session = MagicMock(return_value=mock_msg_handler)
+        mock_transactions_parser = MagicMock()
+        mock_genvm_manager = MagicMock()
+        mock_transactions_processor = MagicMock()
+
+        mock_decoded = MagicMock()
+        mock_decoded.calldata = b"test"
+        mock_transactions_parser.decode_method_call_data.return_value = mock_decoded
+
+        contract_address = "0xnonexistent_cross_contract"
+
+        to_address = "0x" + "ab" * 20
+        from_address = "0x" + "cd" * 20
+        params = {
+            "to": to_address,
+            "from": from_address,
+            "data": "0x1234",
+        }
+
+        # Mock validators_manager.snapshot() async context manager
+        mock_validator = MagicMock()
+        mock_validator.validator = MagicMock()
+        mock_validator.validator.address = from_address
+        mock_snapshot = MagicMock()
+        mock_snapshot.nodes = [mock_validator]
+        mock_validators_manager = MagicMock()
+        mock_snapshot_cm = AsyncMock()
+        mock_snapshot_cm.__aenter__ = AsyncMock(return_value=mock_snapshot)
+        mock_snapshot_cm.__aexit__ = AsyncMock(return_value=False)
+        mock_validators_manager.snapshot = MagicMock(return_value=mock_snapshot_cm)
+
+        with patch(
+            "backend.protocol_rpc.endpoints.ContractSnapshot"
+        ) as mock_snapshot_cls:
+            mock_snapshot_cls.return_value = MagicMock()
+
+            with patch("backend.protocol_rpc.endpoints.Node") as mock_node_cls:
+                mock_node = MagicMock()
+                mock_node.get_contract_data = AsyncMock(
+                    side_effect=ContractNotFoundError(contract_address)
+                )
+                mock_node_cls.return_value = mock_node
+
+                with patch(
+                    "backend.protocol_rpc.endpoints.handle_consensus_data_call",
+                    return_value=None,
+                ):
+                    with patch(
+                        "backend.protocol_rpc.endpoints.get_client_session_id",
+                        return_value="test-session",
+                    ):
+                        with pytest.raises(NotFoundError) as exc_info:
+                            await eth_call(
+                                mock_session,
+                                mock_accounts_manager,
+                                mock_msg_handler,
+                                mock_transactions_parser,
+                                mock_validators_manager,
+                                mock_genvm_manager,
+                                mock_transactions_processor,
+                                params,
+                            )
+
+                        assert contract_address in str(exc_info.value)
+
+
 class TestContractSnapshotRaisesCorrectError:
     """Test that ContractSnapshot raises ContractNotFoundError"""
 

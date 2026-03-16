@@ -1351,10 +1351,16 @@ async def eth_call(
             manager=genvm_manager,
         )
 
-        receipt = await node.get_contract_data(
-            from_address=as_validator.address,
-            calldata=decoded_data.calldata,
-        )
+        try:
+            receipt = await node.get_contract_data(
+                from_address=as_validator.address,
+                calldata=decoded_data.calldata,
+            )
+        except ContractNotFoundError as e:
+            raise NotFoundError(
+                message=f"Contract {e.address} not found",
+                data={"contract_address": e.address},
+            ) from e
 
     if receipt.execution_result != ExecutionResultStatus.SUCCESS:
         raise JSONRPCError(
