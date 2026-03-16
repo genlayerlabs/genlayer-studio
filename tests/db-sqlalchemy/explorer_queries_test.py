@@ -7,7 +7,6 @@ the explorer endpoints won't break.
 
 import base64
 
-import pytest
 from sqlalchemy.orm import Session
 
 from backend.database_handler.models import (
