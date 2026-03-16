@@ -201,8 +201,8 @@ class Receipt:
     mode: ExecutionMode
     contract_state: dict[str, str]
     node_config: dict
-    eq_outputs: dict[int, str]
     execution_result: ExecutionResultStatus
+    eq_outputs: dict[int, str] | None = None
     vote: Optional[Vote] = None
     pending_transactions: Iterable[PendingTransaction] = ()
     genvm_result: dict[str, str] | None = None
@@ -229,7 +229,7 @@ class Receipt:
             "mode": self.mode.value,
             "contract_state": {} if strip_contract_state else self.contract_state,
             "node_config": self.node_config,
-            "eq_outputs": self.eq_outputs,
+            **({"eq_outputs": self.eq_outputs} if self.eq_outputs is not None else {}),
             "pending_transactions": [
                 pending_transaction.to_dict()
                 for pending_transaction in self.pending_transactions
@@ -254,7 +254,11 @@ class Receipt:
                 mode=ExecutionMode.from_string(input.get("mode")),
                 contract_state=input.get("contract_state"),
                 node_config=input.get("node_config"),
-                eq_outputs={int(k): v for k, v in input.get("eq_outputs", {}).items()},
+                eq_outputs=(
+                    {int(k): v for k, v in raw_eq.items()}
+                    if (raw_eq := input.get("eq_outputs")) is not None
+                    else None
+                ),
                 pending_transactions=[
                     PendingTransaction.from_dict(pending_transaction)
                     for pending_transaction in input.get("pending_transactions", [])
