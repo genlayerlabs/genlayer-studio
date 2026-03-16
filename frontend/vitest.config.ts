@@ -10,6 +10,10 @@ export default defineConfig((env) =>
         environment: 'jsdom',
         exclude: [...configDefaults.exclude, 'test/e2e/**'],
         root: fileURLToPath(new URL('./', import.meta.url)),
+        alias: {
+          '@/assets/examples/': new URL('./test/__mocks__/assets/examples/', import.meta.url)
+            .pathname,
+        },
       },
     }),
   ),
