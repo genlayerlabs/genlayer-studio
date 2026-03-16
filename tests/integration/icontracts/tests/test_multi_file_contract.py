@@ -1,5 +1,4 @@
 from gltest import get_contract_factory
-from gltest.assertions import tx_execution_succeeded
 from gltest.types import TransactionStatus
 
 

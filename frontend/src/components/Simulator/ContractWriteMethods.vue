@@ -5,8 +5,10 @@ import PageSection from '@/components/Simulator/PageSection.vue';
 import ContractMethodItem from '@/components/Simulator/ContractMethodItem.vue';
 import EmptyListPlaceholder from '@/components/Simulator/EmptyListPlaceholder.vue';
 import type { ContractSchema } from 'genlayer-js/types';
+import type { ExecutionMode } from '@/types';
+
 const props = defineProps<{
-  leaderOnly: boolean;
+  executionMode: ExecutionMode;
   consensusMaxRotations: number;
 }>();
 
@@ -52,7 +54,7 @@ const simulationMode = ref(false);
         :key="method[0]"
         :method="method[1]"
         methodType="write"
-        :leaderOnly="props.leaderOnly"
+        :executionMode="props.executionMode"
         :consensusMaxRotations="consensusMaxRotations"
         :simulationMode="simulationMode"
       />

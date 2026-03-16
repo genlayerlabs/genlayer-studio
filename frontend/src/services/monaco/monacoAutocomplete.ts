@@ -9,7 +9,7 @@
  * - Common GenLayer patterns and constructs
  */
 
-import * as Monaco from 'monaco-editor/esm/vs/editor/editor.api';
+import * as Monaco from 'monaco-editor';
 import {
   methodSignatures,
   moduleDescriptions,
@@ -124,7 +124,7 @@ export class GenVMCompletionProvider
 
     // Case 4: Other variable completions (simple heuristic)
     const varMatch = linePrefix.match(/(\w+)\.(\s*)$/);
-    if (varMatch) {
+    if (varMatch && varMatch[1]) {
       const varName = varMatch[1];
       if (varName.includes('addr') || varName.includes('address')) {
         items.push(...this.createAddressMethodCompletions());
@@ -164,7 +164,7 @@ export class GenVMCompletionProvider
     name: string,
     description: string,
   ): Monaco.languages.CompletionItem {
-    const sigInfo = methodSignatures[name];
+    const sigInfo = methodSignatures[name as keyof typeof methodSignatures];
 
     const item: Monaco.languages.CompletionItem = {
       label: sigInfo?.params ? `${name}${sigInfo.params}` : name,
@@ -708,7 +708,7 @@ export class GenVMCompletionProvider
     linePrefix: string,
   ): boolean {
     const varMatch = linePrefix.match(/(\w+)\.(\s*)$/);
-    if (!varMatch) return false;
+    if (!varMatch || !varMatch[1]) return false;
 
     const varName = varMatch[1];
 
@@ -754,8 +754,12 @@ export function setupGenVMAutocomplete(
 
   // Register with trigger characters to auto-show on dot
   const disposable = monaco.languages.registerCompletionItemProvider('python', {
-    provideCompletionItems: (model, position, context, token) =>
-      provider.provideCompletionItems(model, position, context, token),
+    provideCompletionItems: (
+      model: Monaco.editor.ITextModel,
+      position: Monaco.Position,
+      context: Monaco.languages.CompletionContext,
+      token: Monaco.CancellationToken,
+    ) => provider.provideCompletionItems(model, position, context, token),
     triggerCharacters: ['.'],
   });
 

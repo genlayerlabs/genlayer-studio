@@ -17,6 +17,16 @@ const inputMap = useInputMap();
 
 const args = ref<ArgData | undefined>(undefined);
 
+// Helper to safely get args value for template usage
+// Used in v-else branch where args is guaranteed to be defined
+function getArg(index: number) {
+  return args.value!.args[index]!;
+}
+
+function getKwarg(key: string) {
+  return args.value!.kwargs[key]!;
+}
+
 const getDefaultValueForType = (type: ContractParamsSchema) => {
   switch (type) {
     case 'bool':
@@ -101,7 +111,7 @@ onMounted(() => {
     >
       <component
         :is="inputMap.getComponent(paramType)"
-        v-model="args.args[i].val"
+        v-model="getArg(i).val"
         :name="paramName"
         :placeholder="`${paramType}`"
         :label="paramName"
@@ -115,7 +125,7 @@ onMounted(() => {
     >
       <component
         :is="inputMap.getComponent(paramType)"
-        v-model="args.kwargs[paramName].val"
+        v-model="getKwarg(paramName).val"
         :name="paramName"
         :placeholder="`${paramType}`"
         :label="paramName"

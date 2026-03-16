@@ -194,3 +194,7 @@ def get_llm_provider_registry(
     session: Annotated[Session, Depends(get_db_session)],
 ) -> LLMProviderRegistry:
     return LLMProviderRegistry(session)
+
+
+def get_rate_limiter(request: Request):
+    return _peek_state_attr(_get_app_state(request), "rate_limiter")

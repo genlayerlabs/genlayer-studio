@@ -31,6 +31,7 @@ def transaction_parser():
             DecodedMethodSendData(
                 calldata=b"\x16\x04args\rDJohn Doe\x06methodD__init__",
                 leader_only=False,
+                execution_mode="NORMAL",
             ),
         ),
         (
@@ -38,6 +39,7 @@ def transaction_parser():
             DecodedMethodSendData(
                 calldata=b"\x16\x04args\rDJohn Doe\x06methodD__init__",
                 leader_only=True,
+                execution_mode="LEADER_ONLY",
             ),
         ),
         (
@@ -47,6 +49,7 @@ def transaction_parser():
             DecodedMethodSendData(
                 calldata=b"\x16\x04args\rDJohn Doe\x06methodD__init__",
                 leader_only=False,
+                execution_mode="NORMAL",
             ),
         ),
     ],
@@ -69,6 +72,7 @@ def test_decode_method_send_data(transaction_parser, data, expected_result):
                 contract_code=b"class Test(name: str)",
                 calldata=b"\x16\x04args\rDJohn Doe\x06methodD__init__",
                 leader_only=False,
+                execution_mode="NORMAL",
             ),
         ),
         (
@@ -81,6 +85,7 @@ def test_decode_method_send_data(transaction_parser, data, expected_result):
                 contract_code=b"class Test(name: str)",
                 calldata=b"\x16\x04args\rDJohn Doe\x06methodD__init__",
                 leader_only=True,
+                execution_mode="LEADER_ONLY",
             ),
         ),
         (
@@ -89,6 +94,7 @@ def test_decode_method_send_data(transaction_parser, data, expected_result):
                 contract_code=b"class Test(name: str)",
                 calldata=b"\x16\x04args\rDJohn Doe\x06methodD__init__",
                 leader_only=False,
+                execution_mode="NORMAL",
             ),
         ),
     ],

@@ -1,4 +1,3 @@
-import asyncio
 from typing import Callable, Awaitable
 import pytest
 from backend.domain.types import LLMProvider

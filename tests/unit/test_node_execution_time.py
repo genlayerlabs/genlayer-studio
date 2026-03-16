@@ -1,6 +1,4 @@
 from datetime import datetime, timezone
-import functools
-import json
 from unittest.mock import Mock, patch, AsyncMock
 import pytest
 from backend.node.types import (
@@ -11,7 +9,6 @@ from backend.node.genvm.base import (
     ExecutionResult,
     ExecutionReturn,
 )
-import backend.node.genvm.base as genvm_base
 import backend.node.base as node_base
 from backend.node.base import Node
 from backend.domain.types import Validator, LLMProvider
@@ -106,13 +103,11 @@ class TestExecutionTimeEdgeCases(WithNode):
         """Test handling of very long execution times"""
         long_execution_time = 10.0  # seconds
         # Provide enough time.time() values for all calls in _run_genvm:
-        # 1. _agent_log call (consumes first value)
         # 2. start_time = time.time()
         # 3. time.time() for processing_time calculation
         with patch(
             "backend.node.base.time.time",
             side_effect=[
-                6000.0,  # consumed by _agent_log
                 6000.0,  # consumed by start_time
                 6000.0 + long_execution_time,  # consumed by final time.time()
             ],

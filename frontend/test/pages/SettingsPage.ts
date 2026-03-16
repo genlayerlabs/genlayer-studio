@@ -3,7 +3,7 @@ import { Select } from 'selenium-webdriver/lib/select';
 import { BasePage } from './BasePage';
 
 export class SettingsPage extends BasePage {
-  override baseurl = 'http://localhost:8080/settings';
+  override path = '/settings';
   override visibleLocator: Locator = By.xpath(
     "//*[@data-testid='settings-page-title']",
   );

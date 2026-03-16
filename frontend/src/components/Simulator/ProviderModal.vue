@@ -188,6 +188,7 @@ function extractDefaults(
 
   Object.keys(properties).forEach((key) => {
     const prop = properties[key];
+    if (!prop) return;
 
     if ('default' in prop) {
       defaults[key] = prop.default;
@@ -229,9 +230,10 @@ const checkRules = () => {
           );
 
           if (availableModel) {
-            newProviderData.model = availableModel || modelOptions.value[0];
+            newProviderData.model =
+              availableModel || modelOptions.value[0] || '';
           } else {
-            newProviderData.model = rule.then?.properties?.model?.enum[0];
+            newProviderData.model = rule.then?.properties?.model?.enum[0] || '';
           }
         } else {
           newProviderData.model = '';

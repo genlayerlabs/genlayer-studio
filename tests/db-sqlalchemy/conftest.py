@@ -84,3 +84,9 @@ def session(engine: Engine) -> Iterable[Session]:
 @pytest.fixture
 def transactions_processor(session: Session) -> Iterable[TransactionsProcessor]:
     yield TransactionsProcessor(session)
+
+
+@pytest.fixture
+def tp(transactions_processor: TransactionsProcessor) -> TransactionsProcessor:
+    """Short alias for transactions_processor."""
+    return transactions_processor

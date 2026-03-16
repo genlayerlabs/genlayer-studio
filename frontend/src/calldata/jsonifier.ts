@@ -45,7 +45,7 @@ const RESULT_CODES = new Map([
 function arrayToB64(bytes: Uint8Array): string {
   let binary = '';
   for (let i = 0; i < bytes.length; i++)
-    binary += String.fromCharCode(bytes[i]);
+    binary += String.fromCharCode(bytes[i]!);
   // btoa throws on non-Latin1; bytes are arbitrary here but safe for btoa
   return encodeBase64(binary);
 }
@@ -94,7 +94,7 @@ export function resultToUserFriendlyJson(input: unknown): any {
     return { raw: input, status: '<unknown>', payload: null };
   }
 
-  const codeByte = bytes[0];
+  const codeByte = bytes[0]!;
   const code = RESULT_CODES.get(codeByte);
   const status: string = code ?? '<unknown>';
   let payload: any = null;

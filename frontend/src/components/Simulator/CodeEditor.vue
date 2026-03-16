@@ -105,7 +105,7 @@ function initEditor() {
       monaco.KeyMod.Alt | monaco.KeyCode.Space, // Alt+Space
       monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyI, // Cmd+I on Mac, Ctrl+I on Windows
     ],
-    run: (editor) => {
+    run: (editor: monaco.editor.ICodeEditor) => {
       editor.trigger('genvm', 'editor.action.triggerSuggest', {});
     },
   });

@@ -21,7 +21,7 @@ secondary consumer contracts would plug into the "chainlink" contract to consume
 ## Lottery
 
 would require allowance
-stardard ERC20
+standard ERC20
 
 ## Proxy for upgrades
 

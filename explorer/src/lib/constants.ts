@@ -1,6 +1,44 @@
 import { TransactionStatus } from "./types";
 
 /**
+ * Terminal statuses — transactions that have reached a final state
+ */
+export const TERMINAL_STATUSES: TransactionStatus[] = [
+  "ACCEPTED",
+  "FINALIZED",
+  "UNDETERMINED",
+  "LEADER_TIMEOUT",
+  "VALIDATORS_TIMEOUT",
+  "CANCELED",
+];
+
+export function isTerminalStatus(status: TransactionStatus): boolean {
+  return TERMINAL_STATUSES.includes(status);
+}
+
+/**
+ * Tab configuration for transaction list filtering
+ */
+export const TRANSACTION_TABS = [
+  { id: "all", label: "All", statuses: null },
+  {
+    id: "in_progress",
+    label: "In Progress",
+    statuses: ["PENDING", "ACTIVATED", "PROPOSING", "COMMITTING", "REVEALING"] as TransactionStatus[],
+  },
+  {
+    id: "completed",
+    label: "Completed",
+    statuses: ["ACCEPTED", "FINALIZED"] as TransactionStatus[],
+  },
+  {
+    id: "failed",
+    label: "Failed",
+    statuses: ["UNDETERMINED", "LEADER_TIMEOUT", "VALIDATORS_TIMEOUT", "CANCELED"] as TransactionStatus[],
+  },
+] as const;
+
+/**
  * All possible transaction statuses in order of workflow
  */
 export const TRANSACTION_STATUS_OPTIONS: TransactionStatus[] = [

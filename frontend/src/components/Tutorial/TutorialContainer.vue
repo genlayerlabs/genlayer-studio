@@ -177,9 +177,9 @@ async function start(startStep?: number) {
 
   // Wait for the DOM to be loaded, then start the tour
   startStep = startStep ? parseInt(`${startStep}`, 10) : 0;
-  let step = steps.value[startStep];
+  const step = steps.value[startStep];
 
-  let process = () =>
+  const process = () =>
     new Promise((resolve) => {
       setTimeout(() => {
         currentStep.value = startStep;
@@ -200,11 +200,11 @@ async function start(startStep?: number) {
 }
 
 async function previousStep() {
-  let futureStep = currentStep.value - 1;
+  const futureStep = currentStep.value - 1;
 
-  let process = () =>
+  const process = () =>
     new Promise((resolve) => {
-      const cb = steps.value[futureStep].onNextStep;
+      const cb = steps.value[futureStep]?.onNextStep;
       if (cb) {
         cb().then(() => {
           currentStep.value = futureStep;
@@ -219,7 +219,7 @@ async function previousStep() {
     });
 
   if (futureStep > -1) {
-    let step = steps.value[futureStep];
+    const step = steps.value[futureStep];
     if ((step as any).before) {
       try {
         await (step as any).before('previous');
@@ -234,11 +234,11 @@ async function previousStep() {
 }
 
 async function nextStep() {
-  let futureStep = currentStep.value + 1;
+  const futureStep = currentStep.value + 1;
 
-  let process = () =>
+  const process = () =>
     new Promise((resolve) => {
-      const cb = steps.value[currentStep.value].onNextStep;
+      const cb = steps.value[currentStep.value]?.onNextStep;
       if (cb) {
         cb().then(() => {
           currentStep.value = futureStep;
@@ -253,7 +253,7 @@ async function nextStep() {
     });
 
   if (futureStep < numberOfSteps.value && currentStep.value !== -1) {
-    let step = steps.value[futureStep];
+    const step = steps.value[futureStep];
     if ((step as any).before) {
       try {
         await (step as any).before('next');

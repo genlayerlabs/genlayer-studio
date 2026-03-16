@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import inspect
-import json
 import traceback
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -305,59 +305,64 @@ class RPCEndpointManager:
 
         synthetic_body = bound_arguments or {}
 
-        solved = await solve_dependencies(
-            request=fastapi_request,
-            dependant=registered.dependant,
-            body=synthetic_body,
-            dependency_overrides_provider=self._dependency_overrides_provider,
-        )
-        values, errors = solved[0], solved[1]
+        async with AsyncExitStack() as async_exit_stack:
+            fastapi_request.scope["fastapi_inner_astack"] = async_exit_stack
+            fastapi_request.scope["fastapi_function_astack"] = async_exit_stack
+            solved = await solve_dependencies(
+                request=fastapi_request,
+                dependant=registered.dependant,
+                body=synthetic_body,
+                dependency_overrides_provider=self._dependency_overrides_provider,
+                async_exit_stack=async_exit_stack,
+                embed_body_fields=False,
+            )
+            values, errors = solved.values, solved.errors
 
-        if errors:
-            user_param_names = {param.name for param in registered.user_parameters}
-            filtered_errors = []
-            for error in errors:
-                loc = error.get("loc") if isinstance(error, dict) else None
-                if isinstance(loc, (tuple, list)) and loc:
-                    location_scope = loc[0]
-                    parameter_name = loc[-1] if len(loc) > 1 else None
-                    if location_scope in {"query", "body", "form"} and (
-                        parameter_name in user_param_names or len(loc) == 1
-                    ):
-                        continue
-                filtered_errors.append(error)
+            if errors:
+                user_param_names = {param.name for param in registered.user_parameters}
+                filtered_errors = []
+                for error in errors:
+                    loc = error.get("loc") if isinstance(error, dict) else None
+                    if isinstance(loc, (tuple, list)) and loc:
+                        location_scope = loc[0]
+                        parameter_name = loc[-1] if len(loc) > 1 else None
+                        if location_scope in {"query", "body", "form"} and (
+                            parameter_name in user_param_names or len(loc) == 1
+                        ):
+                            continue
+                    filtered_errors.append(error)
 
-            if filtered_errors:
-                session_logger.send_message(
-                    LogEvent(
-                        name="invalid_params_dependency",
-                        type=EventType.ERROR,
-                        scope=EventScope.RPC,
-                        message=f"Dependency resolution failed for {request.method}",
-                        data={
-                            "method": request.method,
-                            "errors": filtered_errors,
-                            "params": request.params,
-                        },
-                        account_address=extract_account_address_from_rpc(
-                            request.method, request.params
-                        ),
-                        client_session_id=client_session_id,
+                if filtered_errors:
+                    session_logger.send_message(
+                        LogEvent(
+                            name="invalid_params_dependency",
+                            type=EventType.ERROR,
+                            scope=EventScope.RPC,
+                            message=f"Dependency resolution failed for {request.method}",
+                            data={
+                                "method": request.method,
+                                "errors": filtered_errors,
+                                "params": request.params,
+                            },
+                            account_address=extract_account_address_from_rpc(
+                                request.method, request.params
+                            ),
+                            client_session_id=client_session_id,
+                        )
                     )
-                )
-                raise InvalidParams(message=str(filtered_errors))
+                    raise InvalidParams(message=str(filtered_errors))
 
-        call_kwargs = dict(values)
-        if "msg_handler" in call_kwargs:
-            call_kwargs["msg_handler"] = session_logger
-        call_kwargs.update(bound_arguments)
-        if "msg_handler" in call_kwargs:
-            call_kwargs["msg_handler"] = session_logger
+            call_kwargs = dict(values)
+            if "msg_handler" in call_kwargs:
+                call_kwargs["msg_handler"] = session_logger
+            call_kwargs.update(bound_arguments)
+            if "msg_handler" in call_kwargs:
+                call_kwargs["msg_handler"] = session_logger
 
-        result = registered.dependant.call(**call_kwargs)
-        if inspect.isawaitable(result):
-            result = await result
-        return result
+            result = registered.dependant.call(**call_kwargs)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
 
     def _bind_rpc_arguments(
         self,

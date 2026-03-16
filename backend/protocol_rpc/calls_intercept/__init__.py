@@ -8,9 +8,7 @@ class CallHandler(ABC):
     @abstractmethod
     def can_handle(self, data: str) -> bool:
         """Check if this handler can process the given call data."""
-        pass
 
     @abstractmethod
     def handle(self, transactions_processor: TransactionsProcessor, data: str) -> str:
         """Handle the contract call and return the result."""
-        pass

@@ -6,6 +6,7 @@ import { useTimeAgo } from '@vueuse/core';
 import ModalSection from '@/components/Simulator/ModalSection.vue';
 import JsonViewer from '@/components/JsonViewer/json-viewer.vue';
 import { useUIStore, useNodeStore, useTransactionsStore } from '@/stores';
+import { notify } from '@kyvg/vue3-notification';
 import {
   CheckCircleIcon,
   XCircleIcon,
@@ -18,7 +19,10 @@ import {
   b64ToArray,
   calldataToUserFriendlyJson,
 } from '@/calldata/jsonifier';
-import { getRuntimeConfigNumber } from '@/utils/runtimeConfig';
+import {
+  getRuntimeConfigBoolean,
+  getRuntimeConfigNumber,
+} from '@/utils/runtimeConfig';
 
 const uiStore = useUIStore();
 const nodeStore = useNodeStore();
@@ -84,6 +88,36 @@ const handleSetTransactionAppeal = async () => {
 };
 
 const isAppealed = computed(() => props.transaction.data.appealed);
+const isHosted = getRuntimeConfigBoolean('VITE_IS_HOSTED', false);
+const hasSenderAddress = computed(() =>
+  Boolean(
+    props.transaction.data?.from_address || props.transaction.data?.sender,
+  ),
+);
+
+const canCancel = computed(() => {
+  const status = String(props.transaction.statusName);
+  const cancellableStatus = status === 'PENDING' || status === 'ACTIVATED';
+  const requiresAdminOnly =
+    isHosted && props.transaction.type === 'upgrade' && !hasSenderAddress.value;
+  return cancellableStatus && !requiresAdminOnly;
+});
+const isCancelling = ref(false);
+const handleCancelTransaction = async () => {
+  isCancelling.value = true;
+  try {
+    await transactionsStore.cancelTransaction(props.transaction.hash);
+  } catch (e: any) {
+    notify({
+      type: 'error',
+      title: 'Error cancelling transaction',
+      text: e?.message ?? 'Unable to cancel transaction',
+    });
+    console.error('Error cancelling transaction', e);
+  } finally {
+    isCancelling.value = false;
+  }
+};
 
 function prettifyTxData(x: any): any {
   const oldResult = x?.consensus_data?.leader_receipt?.[0].result;
@@ -218,9 +252,27 @@ const badgeColorClass = computed(() => {
           transaction.statusName !== 'ACCEPTED' &&
           transaction.statusName !== 'UNDETERMINED' &&
           transaction.statusName !== 'LEADER_TIMEOUT' &&
-          transaction.statusName !== 'VALIDATORS_TIMEOUT'
+          transaction.statusName !== 'VALIDATORS_TIMEOUT' &&
+          transaction.statusName !== 'CANCELED'
         "
       />
+
+      <div @click.stop="">
+        <Btn
+          v-if="canCancel"
+          @click="handleCancelTransaction"
+          tiny
+          class="!h-[18px] !px-[4px] !py-[1px] !text-[9px] !font-medium"
+          :data-testid="`cancel-transaction-btn-${transaction.hash}`"
+          :loading="isCancelling"
+          :disabled="isCancelling"
+        >
+          <div class="flex items-center gap-1">
+            {{ isCancelling ? 'CANCELLING...' : 'CANCEL' }}
+            <XCircleIcon class="h-2.5 w-2.5" />
+          </div>
+        </Btn>
+      </div>
 
       <div @click.stop="">
         <Btn
@@ -290,80 +342,41 @@ const badgeColorClass = computed(() => {
       </template>
 
       <div class="flex flex-col gap-4">
-        <div class="mt-2 flex flex-col">
-          <p
-            class="text-md mb-1 flex flex-row items-center gap-2 font-semibold"
-          >
-            Status:
-            <Loader
-              :size="15"
-              v-if="
-                transaction.statusName !== 'FINALIZED' &&
-                transaction.statusName !== 'ACCEPTED' &&
-                transaction.statusName !== 'UNDETERMINED' &&
-                transaction.statusName !== 'LEADER_TIMEOUT' &&
-                transaction.statusName !== 'VALIDATORS_TIMEOUT'
-              "
-            />
-            <TransactionStatusBadge
-              :class="['px-[4px] py-[1px] text-[9px]', badgeColorClass]"
-            >
-              {{ transaction.statusName }}
-            </TransactionStatusBadge>
-          </p>
-        </div>
+        <ModalSection>
+          <template #title>Execution</template>
 
-        <ModalSection v-if="leaderReceipt">
-          <template #title>
-            Execution
-            <TransactionStatusBadge
-              :class="
-                leaderReceipt.execution_result === 'ERROR'
-                  ? '!bg-red-500'
-                  : '!bg-green-500'
-              "
-            >
-              {{ leaderReceipt.execution_result }}
-            </TransactionStatusBadge>
-          </template>
-
-          <span class="text-sm font-semibold">Leader:</span>
-
-          <div class="flex flex-row items-start gap-4 text-xs">
-            <div>
-              <div>
-                <span class="font-medium">Gas used:</span>
-                {{ leaderReceipt.gas_used }}
-              </div>
-              <div>
-                <span class="font-medium"
-                  >Stake: {{ leaderReceipt.node_config.stake }}</span
-                >
-              </div>
+          <div class="flex flex-row gap-2 text-sm">
+            <div class="flex items-center gap-2">
+              <span class="font-medium">Status:</span>
+              <Loader
+                :size="15"
+                v-if="
+                  transaction.statusName !== 'FINALIZED' &&
+                  transaction.statusName !== 'ACCEPTED' &&
+                  transaction.statusName !== 'UNDETERMINED' &&
+                  transaction.statusName !== 'LEADER_TIMEOUT' &&
+                  transaction.statusName !== 'VALIDATORS_TIMEOUT' &&
+                  transaction.statusName !== 'CANCELED'
+                "
+              />
+              <TransactionStatusBadge
+                :class="['px-[4px] py-[1px] text-[9px]', badgeColorClass]"
+              >
+                {{ transaction.statusName }}
+              </TransactionStatusBadge>
             </div>
 
-            <div>
-              <div class="mb-1 font-medium">LLM-0:</div>
-              <div>
-                <span class="font-medium">Model:</span>
-                {{ leaderReceipt.node_config.primary_model?.model }}
-              </div>
-              <div>
-                <span class="font-medium">Provider:</span>
-                {{ leaderReceipt.node_config.primary_model?.provider }}
-              </div>
-            </div>
-
-            <div v-if="leaderReceipt.node_config.secondary_model">
-              <div class="mb-1 font-medium">LLM-1:</div>
-              <div>
-                <span class="font-medium">Model:</span>
-                {{ leaderReceipt.node_config.secondary_model.model }}
-              </div>
-              <div>
-                <span class="font-medium">Provider:</span>
-                {{ leaderReceipt.node_config.secondary_model.provider }}
-              </div>
+            <div v-if="leaderReceipt" class="flex items-center gap-2">
+              <span class="font-medium">Result:</span>
+              <TransactionStatusBadge
+                :class="
+                  leaderReceipt.execution_result === 'ERROR'
+                    ? '!bg-red-500'
+                    : '!bg-green-500'
+                "
+              >
+                {{ leaderReceipt.execution_result }}
+              </TransactionStatusBadge>
             </div>
           </div>
         </ModalSection>
@@ -388,7 +401,7 @@ const badgeColorClass = computed(() => {
           <div>
             <pre
               class="overflow-x-auto whitespace-pre rounded bg-gray-200 p-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
-              >{{ transaction.data.result || 'None' }}</pre
+              >{{ leaderReceipt?.result?.payload?.readable || 'None' }}</pre
             >
           </div>
         </ModalSection>
@@ -425,7 +438,10 @@ const badgeColorClass = computed(() => {
           >
             <div class="mb-2 flex flex-col gap-1">
               <span class="font-medium italic">
-                {{ history?.consensus_round || `Consensus Round ${index + 1}` }}
+                {{
+                  history?.consensus_round ||
+                  `Consensus Round ${Number(index) + 1}`
+                }}
               </span>
               <div
                 class="flex items-center gap-2 text-[10px] text-gray-600 dark:text-gray-400"
@@ -436,29 +452,66 @@ const badgeColorClass = computed(() => {
                 >
                   <span>{{ status }}</span>
                   <span
-                    v-if="sIndex < history.status_changes.length - 1"
+                    v-if="Number(sIndex) < history.status_changes.length - 1"
                     class="text-gray-400"
                     >→</span
                   >
                 </template>
               </div>
             </div>
+          </div>
+        </ModalSection>
+        <ModalSection
+          v-if="transaction.data.consensus_history?.consensus_results?.length"
+        >
+          <template #title>Validator Set</template>
 
-            <div
-              class="divide-y overflow-hidden rounded border dark:border-gray-600"
+          <div
+            class="divide-y overflow-hidden rounded border dark:border-gray-600"
+          >
+            <template
+              v-for="(history, index) in transaction.data.consensus_history
+                .consensus_results || []"
+              :key="index"
             >
+              <!-- Leader row -->
               <div
                 v-if="history?.leader_result"
                 class="flex flex-row items-center justify-between p-2 text-xs dark:border-gray-600"
               >
-                <div class="flex items-center gap-1">
-                  <UserPen class="h-4 w-4" />
-                  <span class="font-mono text-xs">{{
-                    history.leader_result[0].node_config.address
-                  }}</span>
+                <div class="flex flex-col gap-0.5">
+                  <div class="flex items-center gap-1">
+                    <UserPen class="h-4 w-4" />
+                    <span class="font-mono text-xs">{{
+                      history.leader_result[0].node_config.address
+                    }}</span>
+                  </div>
+                  <div
+                    v-if="history.leader_result[0].node_config.primary_model"
+                    class="ml-5 text-[10px] text-gray-500 dark:text-gray-400"
+                  >
+                    {{
+                      history.leader_result[0].node_config.primary_model
+                        .provider
+                    }}
+                    /
+                    {{
+                      history.leader_result[0].node_config.primary_model.model
+                    }}
+                  </div>
                 </div>
                 <div class="flex flex-row items-center gap-1 capitalize">
-                  <template v-if="history.leader_result.length === 1">
+                  <!-- LEADER_ONLY mode: single receipt means successful execution, not timeout -->
+                  <template
+                    v-if="
+                      history.leader_result.length === 1 &&
+                      transaction.data.execution_mode === 'LEADER_ONLY'
+                    "
+                  >
+                    <CheckCircleIcon class="h-4 w-4 text-green-500" />
+                    Leader Only
+                  </template>
+                  <template v-else-if="history.leader_result.length === 1">
                     <EllipsisHorizontalCircleIcon
                       class="h-4 w-4 text-yellow-500"
                     />
@@ -487,16 +540,26 @@ const badgeColorClass = computed(() => {
                 </div>
               </div>
 
+              <!-- Validator rows -->
               <div
-                v-for="(validator, vIndex) in history?.validator_results || []"
-                :key="vIndex"
+                v-for="(validator, vIndex) in history.validator_results || []"
+                :key="`${index}-${vIndex}`"
                 class="flex flex-row items-center justify-between p-2 text-xs dark:border-gray-600"
               >
-                <div class="flex items-center gap-1">
-                  <UserSearch class="h-4 w-4" />
-                  <span class="font-mono text-xs">{{
-                    validator.node_config.address
-                  }}</span>
+                <div class="flex flex-col gap-0.5">
+                  <div class="flex items-center gap-1">
+                    <UserSearch class="h-4 w-4" />
+                    <span class="font-mono text-xs">{{
+                      validator.node_config.address
+                    }}</span>
+                  </div>
+                  <div
+                    v-if="validator.node_config.primary_model"
+                    class="ml-5 text-[10px] text-gray-500 dark:text-gray-400"
+                  >
+                    {{ validator.node_config.primary_model.provider }} /
+                    {{ validator.node_config.primary_model.model }}
+                  </div>
                 </div>
                 <div class="flex flex-row items-center gap-1 capitalize">
                   <template v-if="validator.vote === 'agree'">
@@ -515,7 +578,7 @@ const badgeColorClass = computed(() => {
                   </template>
                 </div>
               </div>
-            </div>
+            </template>
           </div>
         </ModalSection>
 

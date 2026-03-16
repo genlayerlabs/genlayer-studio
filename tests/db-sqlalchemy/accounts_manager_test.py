@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 
 from backend.database_handler.accounts_manager import AccountsManager
 from backend.database_handler.errors import AccountNotFoundError
-from backend.database_handler.transactions_processor import TransactionsProcessor
 
 
 @pytest.fixture

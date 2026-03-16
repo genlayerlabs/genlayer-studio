@@ -9,7 +9,7 @@ import {
 import { useDebounceFn } from '@vueuse/core';
 import { notify } from '@kyvg/vue3-notification';
 import { useMockContractData } from './useMockContractData';
-import { useEventTracking, useGenlayer } from '@/hooks';
+import { useEventTracking, useGenlayer, useWallet } from '@/hooks';
 import type {
   Address,
   TransactionHash,
@@ -17,12 +17,14 @@ import type {
   TransactionHashVariant,
 } from 'genlayer-js/types';
 import { TransactionStatus } from 'genlayer-js/types';
+import type { ExecutionMode } from '@/types';
 
 const schema = ref<any>();
 
 export function useContractQueries() {
   const genlayer = useGenlayer();
   const genlayerClient = computed(() => genlayer.client.value);
+  const wallet = useWallet();
   const accountsStore = useAccountsStore();
   const transactionsStore = useTransactionsStore();
   const contractsStore = useContractsStore();
@@ -88,10 +90,14 @@ export function useContractQueries() {
       args: CalldataEncodable[];
       kwargs: { [key: string]: CalldataEncodable };
     },
-    leaderOnly: boolean,
+    executionMode: ExecutionMode,
     consensusMaxRotations: number,
   ) {
     isDeploying.value = true;
+
+    // Map executionMode to leaderOnly for backward compatibility with genlayer-js SDK
+    // TODO: Update genlayer-js SDK to support executionMode directly
+    const leaderOnly = executionMode !== 'NORMAL';
 
     try {
       if (!contract.value || !accountsStore.selectedAccount) {
@@ -197,7 +203,7 @@ export function useContractQueries() {
   async function callWriteMethod({
     method,
     args,
-    leaderOnly,
+    executionMode,
     consensusMaxRotations,
   }: {
     method: string;
@@ -205,9 +211,12 @@ export function useContractQueries() {
       args: CalldataEncodable[];
       kwargs: { [key: string]: CalldataEncodable };
     };
-    leaderOnly: boolean;
+    executionMode: ExecutionMode;
     consensusMaxRotations?: number;
   }) {
+    // Map executionMode to leaderOnly for backward compatibility with genlayer-js SDK
+    const leaderOnly = executionMode !== 'NORMAL';
+
     try {
       if (!accountsStore.selectedAccount) {
         throw new Error('Error writing to contract');
@@ -244,15 +253,12 @@ export function useContractQueries() {
   async function simulateWriteMethod({
     method,
     args,
-    consensusMaxRotations,
   }: {
     method: string;
     args: {
       args: CalldataEncodable[];
       kwargs: { [key: string]: CalldataEncodable };
     };
-    leaderOnly: boolean;
-    consensusMaxRotations?: number;
   }) {
     try {
       const result = await genlayerClient.value?.simulateWriteContract({
@@ -338,7 +344,7 @@ export function useContractQueries() {
           concat([
             toBytes(contractAddress as `0x${string}`),
             toBytes(nonceBytes),
-            newCodeHash,
+            toBytes(newCodeHash),
           ]),
         );
 
@@ -350,12 +356,12 @@ export function useContractQueries() {
           signature = await signer.signMessage({
             message: { raw: messageHash },
           });
-        } else if (account.type === 'metamask' && window.ethereum) {
-          // MetaMask - request signature
-          signature = await window.ethereum.request({
+        } else if (account.type === 'external' && wallet.walletProvider.value) {
+          // External wallet - request signature via AppKit provider
+          signature = (await wallet.walletProvider.value.request({
             method: 'personal_sign',
             params: [toHex(messageHash), account.address],
-          });
+          })) as string;
         } else {
           console.warn(
             `Unsupported account type '${account.type}' for signing - upgrade will proceed without signature`,

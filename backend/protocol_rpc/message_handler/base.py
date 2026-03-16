@@ -106,7 +106,18 @@ class MessageHandler(IMessageHandler):
         if log_event.data:
             try:
                 data_to_log = self._apply_log_level_truncation(log_event.data)
-                data_str = json.dumps(data_to_log, default=lambda o: o.__dict__)
+
+                def json_serializer(o):
+                    if isinstance(o, bytes):
+                        try:
+                            return o.decode("utf-8")
+                        except UnicodeDecodeError:
+                            import base64
+
+                            return base64.b64encode(o).decode("ascii")
+                    return o.__dict__
+
+                data_str = json.dumps(data_to_log, default=json_serializer)
                 log_message += f" {gray}{data_str}{reset}"
             except TypeError as e:
                 log_message += (

@@ -8,8 +8,7 @@ import {
   TrashIcon,
   ArrowDownOnSquareIcon,
 } from '@heroicons/vue/16/solid';
-import { nextTick } from 'process';
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, nextTick } from 'vue';
 import { notify } from '@kyvg/vue3-notification';
 
 const store = useContractsStore();
@@ -17,8 +16,8 @@ const defaultContractName = 'New Contract.py';
 
 const props = defineProps<{
   contract?: ContractFile;
-  isActive?: Boolean;
-  isNewFile?: Boolean;
+  isActive?: boolean;
+  isNewFile?: boolean;
 }>();
 
 const emit = defineEmits(['save', 'cancel']);

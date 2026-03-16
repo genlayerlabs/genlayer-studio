@@ -51,9 +51,11 @@ watch(y, () => {
 
 const scopes = ref(['RPC', 'GenVM', 'Consensus', 'Contract']);
 const statuses = ref(['info', 'success', 'error']);
+const roles = ref(['Leader', 'Validator']);
 
 const selectedScopes = ref(scopes.value);
 const selectedStatuses = ref(['info', 'success', 'error']);
+const selectedRoles = ref(['Leader', 'Validator']);
 
 const toggleCategory = (category: string) => {
   if (selectedScopes.value.includes(category)) {
@@ -68,6 +70,14 @@ const toggleStatus = (status: string) => {
     selectedStatuses.value = selectedStatuses.value.filter((s) => s !== status);
   } else {
     selectedStatuses.value.push(status);
+  }
+};
+
+const toggleRole = (role: string) => {
+  if (selectedRoles.value.includes(role)) {
+    selectedRoles.value = selectedRoles.value.filter((r) => r !== role);
+  } else {
+    selectedRoles.value.push(role);
   }
 };
 
@@ -96,6 +106,10 @@ const parseStdoutLogs = (log: NodeLog): NodeLog[] => {
 };
 
 const filteredLogs = computed(() => {
+  const allRolesSelected =
+    selectedRoles.value.length === roles.value.length ||
+    selectedRoles.value.length === 0;
+
   return nodeStore.logs.flatMap(parseStdoutLogs).filter((log) => {
     const categoryMatch =
       selectedScopes.value.length === 0 ||
@@ -105,6 +119,12 @@ const filteredLogs = computed(() => {
       selectedStatuses.value.length === 0 ||
       selectedStatuses.value.includes(log.type);
 
+    const roleMatch =
+      allRolesSelected ||
+      !log.role ||
+      (log.role === 'leader' && selectedRoles.value.includes('Leader')) ||
+      (log.role === 'validator' && selectedRoles.value.includes('Validator'));
+
     const searchLower = nodeStore.searchFilter.toLowerCase();
     const searchMatch =
       log.message.toLowerCase().includes(searchLower) ||
@@ -113,7 +133,7 @@ const filteredLogs = computed(() => {
       (log.data &&
         JSON.stringify(log.data).toLowerCase().includes(searchLower));
 
-    return categoryMatch && statusMatch && searchMatch;
+    return categoryMatch && statusMatch && roleMatch && searchMatch;
   });
 });
 
@@ -132,7 +152,8 @@ const isAnyFilterActive = computed(() => {
   return (
     nodeStore.searchFilter.length > 0 ||
     selectedScopes.value.length !== scopes.value.length ||
-    selectedStatuses.value.length !== statuses.value.length
+    selectedStatuses.value.length !== statuses.value.length ||
+    selectedRoles.value.length !== roles.value.length
   );
 });
 
@@ -140,6 +161,7 @@ const resetFilters = () => {
   nodeStore.searchFilter = '';
   selectedScopes.value = scopes.value;
   selectedStatuses.value = statuses.value;
+  selectedRoles.value = roles.value;
 };
 </script>
 
@@ -176,6 +198,18 @@ const resetFilters = () => {
           >
             <X class="h-3 w-3 text-gray-300" aria-hidden="true" />
           </div>
+        </div>
+
+        <div class="flex flex-row gap-1">
+          <LogFilterBtn
+            v-for="role in roles"
+            :key="role"
+            :active="selectedRoles.includes(role)"
+            :icon="role"
+            @click="toggleRole(role)"
+          >
+            {{ role }}
+          </LogFilterBtn>
         </div>
 
         <div class="flex flex-row gap-1">

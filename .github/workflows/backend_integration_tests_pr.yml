@@ -38,7 +38,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Copy .env file
         run: cp .env.example .env
@@ -59,6 +59,9 @@ jobs:
           sed -i "s/COMPOSE_WORKER_MEM_LIMIT=\".*\"/COMPOSE_WORKER_MEM_LIMIT=\"6gb\"/" .env
           sed -i "s/COMPOSE_RPC_MEM_RESERVATION=\".*\"/COMPOSE_RPC_MEM_RESERVATION=\"2gb\"/" .env
           sed -i "s/COMPOSE_WORKER_MEM_RESERVATION=\".*\"/COMPOSE_WORKER_MEM_RESERVATION=\"2gb\"/" .env
+          sed -i "s/JSONRPC_REPLICAS=\".*\"/JSONRPC_REPLICAS=\"1\"/" .env
+          sed -i "s/CONSENSUS_WORKERS=\".*\"/CONSENSUS_WORKERS=\"3\"/" .env
+          sed -i "s/MAX_PARALLEL_TXS_PER_WORKER=\".*\"/MAX_PARALLEL_TXS_PER_WORKER=\"2\"/" .env
           echo >> .env
           if [[ "${{ needs.triggers.outputs.is_pull_request_review_approved }}" == "true" ]]; then
             echo "TEST_WITH_MOCK_LLMS=false" >> .env
@@ -66,12 +69,42 @@ jobs:
             echo "TEST_WITH_MOCK_LLMS=true" >> .env
           fi
 
+      # Set up Python + pip early so it overlaps with Docker build
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements.test.txt
+            backend/requirements.txt
+
+      - name: Install Python dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements.test.txt
+          pip install -r backend/requirements.txt
+
+      - name: Extract GenVM version for cache key
+        id: genvm
+        run: echo "tag=$(grep -m1 'ARG GENVM_TAG=' docker/Dockerfile.backend | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore GenVM precompile cache
+        uses: actions/cache@v5
+        with:
+          path: /tmp/genvm-cache
+          key: genvm-precompile-${{ steps.genvm.outputs.tag }}-amd64
+
+      - name: Prepare GenVM cache directory
+        run: mkdir -p /tmp/genvm-cache/pc && chmod -R 0777 /tmp/genvm-cache
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       # Build only backend images with Buildx Bake and enable GHA cache
       - name: Build backend images with cache (buildx bake)
-        uses: docker/bake-action@v5
+        uses: docker/bake-action@v6
         with:
           files: |
             ./docker-compose.yml
@@ -87,9 +120,9 @@ jobs:
             consensus-worker.tags=genlayer-studio-consensus-worker:latest
           load: true
 
-      # Start services without rebuilding images
+      # Start services without rebuilding images; CI override mounts GenVM precompile cache
       - name: Run Docker Compose
-        run: docker compose up -d --no-build database-migration jsonrpc consensus-worker
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --no-build database-migration jsonrpc consensus-worker
 
       - name: Wait for services to be up
         timeout-minutes: 5
@@ -97,35 +130,27 @@ jobs:
           timeout=60
           counter=0
           while [[ "$counter" -lt "$timeout" ]]; do
-            if curl -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}' http://0.0.0.0:4000/api | grep -q "OK"; then
+            if curl -sS -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}' http://0.0.0.0:4000/api 2>/dev/null | grep -q "OK"; then
               echo "RPC server is up!"
               break
             else
               echo "Waiting for RPC server... ($counter/$timeout)"
-              sleep 5
+              sleep 2
               counter=$((counter+1))
             fi
           done
-          # Fail if the service didn't start within the timeout
           if [[ "$counter" -ge "$timeout" ]]; then
             echo "Error: Timeout while waiting for RPC server"
             exit 1
           fi
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: 3.14.2
+      - name: Run tests (parallel)
+        run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/ -svv -n 8 --ignore=tests/integration/test_validators.py
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r requirements.test.txt
-          pip install -r backend/requirements.txt
-
-      - name: Run tests
-        run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/ -svv
+      # Validator smoke test runs serial (GenVM LLM module restarts on each CRUD op).
+      # Full CRUD coverage is in db-sqlalchemy/validators_registry_test.py (<1s).
+      - name: Run validator smoke test (serial)
+        run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/test_validators.py -svv
 
       - name: Dump Docker Compose logs
         run: docker compose logs
@@ -143,13 +168,13 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Cache Docker layers
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/.buildx-cache
           key: ${{ runner.os }}-buildx-${{ github.sha }}

@@ -97,6 +97,7 @@ export const useContractsStore = defineStore('contractsStore', () => {
   function moveOpenedFile(oldIndex: number, newIndex: number) {
     const files = openedFiles.value;
     const file = files[oldIndex];
+    if (!file) return;
     files.splice(oldIndex, 1);
     files.splice(newIndex, 0, file);
     openedFiles.value = [...files];

@@ -7,7 +7,6 @@ from datetime import datetime
 import aiohttp
 from loguru import logger
 
-from backend.database_handler.models import TransactionStatus
 from backend.database_handler.types import ConsensusData
 from backend.domain.types import Transaction, TransactionType
 
@@ -70,6 +69,62 @@ class UsageMetricsService:
                 f"Failed to send usage metrics for transaction {transaction.hash}: {e}"
             )
 
+    async def send_system_health_metrics(self, health_cache) -> None:
+        """
+        Send system health metrics from cache to external API.
+
+        Args:
+            health_cache: The HealthCache object with current health data
+        """
+        if not self._enabled:
+            return
+
+        try:
+            # Build base payload
+            mapped_status = self._map_health_status(health_cache.status)
+            system_health = {
+                "instanceHealth": mapped_status,
+                "genVmStatus": "healthy" if health_cache.genvm_healthy else "down",
+                "uptime": health_cache.uptime_percent,
+                "activeWorkers": health_cache.services.get("consensus", {}).get(
+                    "active_workers", 0
+                ),
+                "pendingTransactions": health_cache.pending_transactions,
+                "decisions": health_cache.total_decisions,
+                "users": health_cache.total_users,
+                "memoryUsage": health_cache.services.get("memory", {}).get(
+                    "percent", 0
+                ),
+                "cpuUsage": health_cache.services.get("memory", {}).get(
+                    "cpu_percent", 0
+                ),
+            }
+
+            if mapped_status != "healthy":
+                system_health["instanceHealthReasons"] = health_cache.issues
+
+            # Add pending contracts breakdown if available
+            pending_contracts = getattr(health_cache, "pending_contracts", [])
+            if pending_contracts:
+                system_health["pendingContracts"] = pending_contracts
+
+            payload = {"systemHealth": system_health}
+            await self._send_to_api(payload)
+            logger.debug("System health metrics sent successfully")
+        except Exception as e:
+            logger.error(f"Failed to send system health metrics: {e}")
+
+    def _map_health_status(self, status: str) -> str:
+        """Map internal status to API enum."""
+        status_map = {
+            "healthy": "healthy",
+            "degraded": "degraded",
+            "unhealthy": "down",
+            "error": "down",
+            "initializing": "degraded",
+        }
+        return status_map.get(status, "down")
+
     def _build_decision_payload(
         self, transaction: Transaction, finalization_data: dict
     ) -> dict:
@@ -77,8 +132,8 @@ class UsageMetricsService:
         # Map transaction type
         tx_type = self._map_transaction_type(transaction.type)
 
-        # Map transaction status
-        tx_status = self._map_transaction_status(transaction.status)
+        # Status is always "success" since we only report finalized transactions
+        tx_status = "success"
 
         # Calculate processing time in milliseconds
         processing_time_ms = self._calculate_processing_time_ms(finalization_data)
@@ -88,6 +143,12 @@ class UsageMetricsService:
 
         # Build ISO8601 timestamp from created_at
         created_at_iso = self._format_created_at(finalization_data.get("created_at"))
+
+        # Extract execution result from original status, consensus_data, and consensus_history
+        # Result can be: success, error, timeout, undetermined
+        execution_result = self._extract_execution_result(
+            finalization_data, transaction.consensus_data, transaction.consensus_history
+        )
 
         return {
             "externalId": transaction.hash,
@@ -99,6 +160,7 @@ class UsageMetricsService:
             "processingTimeMs": processing_time_ms,
             "createdAt": created_at_iso,
             "llmCalls": llm_calls,
+            "result": execution_result,
         }
 
     def _map_transaction_type(self, tx_type: TransactionType) -> str:
@@ -112,17 +174,6 @@ class UsageMetricsService:
         if isinstance(tx_type, int):
             tx_type = TransactionType(tx_type)
         return type_map.get(tx_type, "write")
-
-    def _map_transaction_status(self, status: TransactionStatus) -> str:
-        """Map internal TransactionStatus to API status string."""
-        status_map = {
-            TransactionStatus.ACCEPTED: "success",
-            TransactionStatus.FINALIZED: "success",
-            TransactionStatus.LEADER_TIMEOUT: "timeout",
-            TransactionStatus.VALIDATORS_TIMEOUT: "timeout",
-            TransactionStatus.UNDETERMINED: "undetermined",
-        }
-        return status_map.get(status, "undetermined")
 
     def _calculate_processing_time_ms(self, finalization_data: dict) -> int:
         """
@@ -157,6 +208,58 @@ class UsageMetricsService:
         except Exception as e:
             logger.warning(f"Failed to calculate processing time: {e}")
             return 0
+
+    def _extract_execution_result(
+        self,
+        finalization_data: dict,
+        consensus_data: Optional[ConsensusData],
+        consensus_history: Optional[dict],
+    ) -> str:
+        """
+        Extract execution result from original status, consensus_data, and consensus_history.
+
+        Returns one of: "success", "error", "timeout", "undetermined"
+
+        Priority:
+        1. Original status timeout (LEADER_TIMEOUT, VALIDATORS_TIMEOUT) -> "timeout"
+        2. Original status undetermined (UNDETERMINED) -> "undetermined"
+        3. consensus_history.consensus_results[-1].consensus_round == "Undetermined" -> "undetermined"
+        4. execution_result from consensus_data.leader_receipt[0] -> "success" or "error"
+        5. Default -> "success"
+        """
+        # Check original status from finalization_data for timeout/undetermined
+        original_status = finalization_data.get("status")
+        if original_status in ("LEADER_TIMEOUT", "VALIDATORS_TIMEOUT"):
+            return "timeout"
+        if original_status == "UNDETERMINED":
+            return "undetermined"
+
+        # Check if consensus was undetermined from consensus_history
+        if (
+            consensus_history is not None
+            and "consensus_results" in consensus_history
+            and len(consensus_history["consensus_results"]) > 0
+        ):
+            last_round = consensus_history["consensus_results"][-1]
+            if last_round.get("consensus_round") == "Undetermined":
+                return "undetermined"
+
+        # Try to get execution_result from leader receipt
+        if consensus_data is not None and consensus_data.leader_receipt:
+            first_receipt = consensus_data.leader_receipt[0]
+            if first_receipt is not None:
+                execution_result = getattr(first_receipt, "execution_result", None)
+                if execution_result is not None:
+                    # Handle both enum and string values
+                    if hasattr(execution_result, "value"):
+                        # It's an enum (ExecutionResultStatus)
+                        return execution_result.value.lower()
+                    else:
+                        # It's already a string
+                        return str(execution_result).lower()
+
+        # Default to success
+        return "success"
 
     def _extract_llm_calls(self, consensus_data: Optional[ConsensusData]) -> list:
         """
@@ -254,6 +357,14 @@ class UsageMetricsService:
                     )
         except asyncio.TimeoutError:
             logger.warning("Timeout sending usage metrics to API")
+        except aiohttp.ClientConnectorError:
+            # Connection errors are expected when API is unavailable - log at debug level
+            logger.debug(
+                f"Could not connect to usage metrics API at {self.api_url} - API may be unavailable"
+            )
+        except aiohttp.ClientError as e:
+            # Other client errors (DNS, SSL, etc.) - log at warning level
+            logger.warning(f"Client error sending usage metrics to API: {e}")
         except Exception as e:
             logger.error(f"Error sending usage metrics to API: {e}")
 

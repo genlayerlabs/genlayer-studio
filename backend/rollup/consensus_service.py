@@ -1,6 +1,4 @@
 import json
-import os
-from web3 import Web3
 from eth_utils import keccak, to_bytes, to_hex
 from typing import Optional, Dict, Any
 from pathlib import Path
@@ -65,8 +63,9 @@ class ConsensusService:
         return to_hex(keccak(to_bytes(hexstr=raw_transaction)))
 
     def load_contract(self, contract_name: str):
-        """
-        Load a contract from deployment data
+        """Deprecated: consensus contract info is now provided by genlayer-js chain config.
+
+        Load a contract from deployment data.
 
         Args:
             contract_name (str): Name of the contract to load

@@ -1,7 +1,7 @@
 # database_handler/chain_snapshot.py
 
 from typing import List
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from collections import defaultdict
 
 from backend.database_handler.transactions_processor import (
@@ -9,7 +9,6 @@ from backend.database_handler.transactions_processor import (
     Transactions,
 )
 from .transactions_processor import TransactionsProcessor
-from backend.database_handler.validators_registry import ValidatorsRegistry
 
 
 class ChainSnapshot:
@@ -28,6 +27,11 @@ class ChainSnapshot:
         pending_transactions = (
             self.session.query(Transactions)
             .filter(Transactions.status == TransactionStatus.PENDING)
+            .options(
+                selectinload(Transactions.triggered_transactions).load_only(
+                    Transactions.hash
+                )
+            )
             .order_by(Transactions.created_at)
             .all()
         )
@@ -51,6 +55,11 @@ class ChainSnapshot:
                 | (Transactions.status == TransactionStatus.UNDETERMINED)
                 | (Transactions.status == TransactionStatus.LEADER_TIMEOUT)
                 | (Transactions.status == TransactionStatus.VALIDATORS_TIMEOUT)
+            )
+            .options(
+                selectinload(Transactions.triggered_transactions).load_only(
+                    Transactions.hash
+                )
             )
             .order_by(Transactions.created_at)
             .all()
