@@ -1,6 +1,42 @@
 import { format } from 'date-fns';
 
 /**
+ * Format a wei value to a human-readable GEN string.
+ * Uses BigInt for precision. Returns "X.XX GEN" (2–6 decimals), "-" for null, "0 GEN" for zero.
+ */
+export function formatGenValue(value: number | string | null | undefined): string {
+  if (value === null || value === undefined) return '-';
+
+  const ZERO = BigInt(0);
+  const WEI_PER_GEN = BigInt('1000000000000000000'); // 10^18
+
+  let wei: bigint;
+  try {
+    wei = BigInt(value);
+  } catch {
+    return String(value);
+  }
+
+  if (wei === ZERO) return '0 GEN';
+
+  const negative = wei < ZERO;
+  const absWei = negative ? -wei : wei;
+  const whole = absWei / WEI_PER_GEN;
+  const remainder = absWei % WEI_PER_GEN;
+  const sign = negative ? '-' : '';
+
+  if (remainder === ZERO) return `${sign}${whole} GEN`;
+
+  // Pad remainder to 18 digits, then trim trailing zeros but keep at least 2
+  const fracStr = remainder.toString().padStart(18, '0');
+  const trimmed = fracStr.replace(/0+$/, '');
+  const decimals = Math.max(2, Math.min(6, trimmed.length));
+  const finalFrac = fracStr.slice(0, decimals);
+
+  return `${sign}${whole}.${finalFrac} GEN`;
+}
+
+/**
  * Format a duration in seconds to a human-readable string
  */
 export function formatDuration(durationSeconds: number): string {

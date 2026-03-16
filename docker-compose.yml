@@ -87,14 +87,10 @@ services:
     volumes:
       - ./explorer/src:/app/src
     depends_on:
-      database-migration:
-        condition: service_completed_successfully
+      jsonrpc:
+        condition: service_healthy
     environment:
-      - DB_HOST=${DBHOST}
-      - DB_NAME=${DBNAME}
-      - DB_USER=${DBUSER}
-      - DB_PASSWORD=${DBPASSWORD}
-      - DB_PORT=${DBPORT}
+      - BACKEND_URL=http://jsonrpc:4000
     restart: always
     security_opt:
       - "no-new-privileges=true"
