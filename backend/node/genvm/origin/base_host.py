@@ -8,11 +8,8 @@ This module is a part of GenVM source code. When updating
 import enum
 import socket
 import typing
-import collections.abc
 import asyncio
-import os
 import abc
-import json
 import time
 
 import aiohttp

@@ -39,7 +39,6 @@ import backend.node.genvm.origin.calldata as gvm_calldata
 from dataclasses import dataclass
 
 from .origin.public_abi import *
-from .origin.host_fns import Errors
 from .origin import base_host
 from .origin import logger as genvm_logger
 from .error_codes import (
