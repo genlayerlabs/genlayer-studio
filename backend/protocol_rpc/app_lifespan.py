@@ -372,6 +372,7 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
         resources.background_tasks.append(monitor_task)
 
     # Initialize Redis subscriber - REQUIRED for distributed worker architecture
+    # Connects in background so Uvicorn can start serving health probes immediately.
     redis_url = os.environ.get("REDIS_URL")
     if not redis_url:
         error_msg = (
@@ -383,42 +384,24 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
         logger.error(error_msg)
         raise RuntimeError(error_msg)
 
-    try:
-        redis_subscriber = RedisEventSubscriber(
-            redis_url=redis_url,
-            broadcast=broadcast,
-            instance_id=f"rpc-{os.getpid()}",
-        )
-        await redis_subscriber.connect()
-        await redis_subscriber.start()
+    redis_subscriber = RedisEventSubscriber(
+        redis_url=redis_url,
+        broadcast=broadcast,
+        instance_id=f"rpc-{os.getpid()}",
+    )
 
-        # Register handler for validator change events
-        async def handle_validator_change(event_data):
-            """Reload validators when they change."""
-            logger.info(f"RPC worker reloading validators due to change event")
-            await validators_manager.restart()
+    # Register handler for validator change events (before connect — handlers are
+    # stored locally and will fire once the subscriber is listening).
+    async def handle_validator_change(event_data):
+        """Reload validators when they change."""
+        logger.info(f"RPC worker reloading validators due to change event")
+        await validators_manager.restart()
 
-        redis_subscriber.register_handler("validator_created", handle_validator_change)
-        redis_subscriber.register_handler("validator_updated", handle_validator_change)
-        redis_subscriber.register_handler("validator_deleted", handle_validator_change)
-        redis_subscriber.register_handler(
-            "all_validators_deleted", handle_validator_change
-        )
-        redis_subscriber.register_handler(
-            "validators_replaced", handle_validator_change
-        )
-
-        logger.info(
-            f"[STARTUP] Redis subscriber connected at {redis_url} for worker event broadcasting"
-        )
-    except Exception as e:
-        error_msg = (
-            f"FATAL: Failed to connect to Redis at {redis_url}. "
-            f"Redis is required for receiving events from consensus workers. "
-            f"Ensure Redis is running and accessible. Error: {e}"
-        )
-        logger.error(error_msg)
-        raise RuntimeError(error_msg) from e
+    redis_subscriber.register_handler("validator_created", handle_validator_change)
+    redis_subscriber.register_handler("validator_updated", handle_validator_change)
+    redis_subscriber.register_handler("validator_deleted", handle_validator_change)
+    redis_subscriber.register_handler("all_validators_deleted", handle_validator_change)
+    redis_subscriber.register_handler("validators_replaced", handle_validator_change)
 
     # Initialize rate limiter with a dedicated Redis client
     rate_limit_redis = aioredis.from_url(redis_url, decode_responses=True)
@@ -427,7 +410,39 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
         get_session=lambda: db_manager.open_session(),
     )
     app_state.rate_limiter = rate_limiter
-    logger.info(f"[STARTUP] Rate limiter initialized (enabled={rate_limiter.enabled})")
+
+    async def _connect_redis_subscriber():
+        """Connect Redis subscriber in background so Uvicorn starts serving immediately."""
+        try:
+            await redis_subscriber.connect()
+            await redis_subscriber.start()
+            logger.info(
+                f"[STARTUP] Redis subscriber connected at {redis_url} for worker event broadcasting"
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to connect Redis subscriber at {redis_url}: {e}. "
+                f"Worker events will not be received. Retrying in 5s..."
+            )
+            await asyncio.sleep(5)
+            try:
+                await redis_subscriber.connect()
+                await redis_subscriber.start()
+                logger.info(
+                    f"[STARTUP] Redis subscriber connected at {redis_url} (retry succeeded)"
+                )
+            except Exception as retry_err:
+                logger.error(
+                    f"Redis subscriber retry failed: {retry_err}. "
+                    f"Worker events will NOT be forwarded to WebSocket clients."
+                )
+
+    redis_task = asyncio.create_task(_connect_redis_subscriber())
+    background_tasks.append(redis_task)
+    logger.info(
+        f"[STARTUP] Redis subscriber connecting in background, "
+        f"rate limiter initialized (enabled={rate_limiter.enabled})"
+    )
 
     try:
         yield app_state
