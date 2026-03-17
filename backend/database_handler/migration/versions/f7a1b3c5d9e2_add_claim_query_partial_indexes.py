@@ -1,13 +1,14 @@
 """add claim query partial indexes and explorer indexes
 
 Revision ID: f7a1b3c5d9e2
-Revises: e4f8a2b7c913
+Revises: c3d7f2a8b104
 Create Date: 2026-03-17 16:00:00.000000
 
 """
 
 from typing import Sequence, Union
 
+import sqlalchemy as sa
 from alembic import op
 
 
@@ -19,6 +20,12 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Commit prior migrations so that enum values added earlier
+    # (e.g. LEADER_TIMEOUT, VALIDATORS_TIMEOUT) are available for use
+    # in partial index WHERE clauses. Without this, a fresh "alembic upgrade head"
+    # fails with UnsafeNewEnumValueUsage.
+    op.execute(sa.text("COMMIT"))
+
     # Partial index for claim_next_finalization:
     # Covers the WHERE clause filtering on status + appealed + timestamp_awaiting_finalization
     # Orders by created_at to support the ORDER BY in the query
