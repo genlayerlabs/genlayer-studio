@@ -38,8 +38,15 @@ const connectWallet = () => {
   connect();
 };
 
-const disconnectWallet = () => {
-  disconnect();
+const disconnectWallet = async () => {
+  try {
+    await disconnect();
+  } catch {
+    notify({
+      title: 'Error disconnecting wallet',
+      type: 'error',
+    });
+  }
 };
 </script>
 
