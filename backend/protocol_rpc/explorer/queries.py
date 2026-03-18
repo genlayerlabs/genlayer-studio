@@ -5,7 +5,7 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, defer
 
 from backend.database_handler.models import (
@@ -126,21 +126,16 @@ _HEAVY_TX_COLUMNS = (defer(Transactions.contract_snapshot),)
 
 def _count_deployed_contracts(session: Session) -> int:
     """Count contract states that actually have a deploy transaction."""
-    has_deploy = (
-        session.query(func.count())
-        .select_from(Transactions)
-        .filter(
-            Transactions.to_address == CurrentState.id,
-            Transactions.type == 1,
-        )
-        .correlate(CurrentState)
-        .scalar_subquery()
-        > 0
+    deploy_addresses = (
+        session.query(Transactions.to_address)
+        .filter(Transactions.type == 1)
+        .distinct()
+        .subquery()
     )
     return (
         session.query(func.count())
         .select_from(CurrentState)
-        .filter(has_deploy)
+        .filter(CurrentState.id.in_(select(deploy_addresses.c.to_address)))
         .scalar()
         or 0
     )
@@ -434,23 +429,18 @@ def get_all_states(
     )
 
     # Only show addresses that have a deploy transaction (type 1) targeting them
-    has_deploy = (
-        session.query(func.count())
-        .select_from(Transactions)
-        .filter(
-            Transactions.to_address == CurrentState.id,
-            Transactions.type == 1,
-        )
-        .correlate(CurrentState)
-        .scalar_subquery()
-        > 0
+    deploy_addresses = (
+        session.query(Transactions.to_address)
+        .filter(Transactions.type == 1)
+        .distinct()
+        .subquery()
     )
 
     q = session.query(
         CurrentState,
         tx_count_sq.label("tx_count"),
         created_at_sq.label("created_at"),
-    ).filter(has_deploy)
+    ).filter(CurrentState.id.in_(select(deploy_addresses.c.to_address)))
     if search:
         q = q.filter(CurrentState.id.ilike(f"%{search}%"))
     total = q.count()
