@@ -442,8 +442,12 @@ class TransactionContext:
         self.shared_contract_snapshot_cache: dict[str, ContractSnapshot] = {}
 
         if self.transaction.type != TransactionType.SEND:
-            if self.transaction.contract_snapshot:
-                self.contract_snapshot = self.transaction.contract_snapshot
+            saved = self.transaction.contract_snapshot
+            has_real_state = (
+                saved and hasattr(saved, "states") and saved.states.get("accepted")
+            )
+            if has_real_state:
+                self.contract_snapshot = saved
             else:
                 self.contract_snapshot = self.contract_snapshot_factory(
                     self.transaction.to_address
