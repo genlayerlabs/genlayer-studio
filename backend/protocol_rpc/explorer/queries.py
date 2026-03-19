@@ -20,16 +20,8 @@ from backend.database_handler.models import (
 def _serialize_tx(
     tx: Transactions,
     triggered_count: int | None = None,
-    *,
-    include_snapshot: bool = True,
 ) -> dict:
-    """Serialize a Transactions ORM object to a dict matching the raw SQL column output.
-
-    When *include_snapshot* is False the heavy ``contract_snapshot`` column is
-    omitted (set to ``None``).  Callers should pair this with
-    ``defer(Transactions.contract_snapshot)`` on the query to avoid loading the
-    blob at all.
-    """
+    """Serialize a Transactions ORM object to a dict for the explorer API."""
     d = {
         "hash": tx.hash,
         "status": tx.status.value if tx.status else None,
@@ -52,7 +44,6 @@ def _serialize_tx(
         "consensus_history": tx.consensus_history,
         "timestamp_appeal": tx.timestamp_appeal,
         "appeal_processing_time": tx.appeal_processing_time,
-        "contract_snapshot": tx.contract_snapshot if include_snapshot else None,
         "config_rotation_rounds": tx.config_rotation_rounds,
         "num_of_initial_validators": tx.num_of_initial_validators,
         "last_vote_timestamp": tx.last_vote_timestamp,
@@ -253,7 +244,7 @@ def get_stats(session: Session) -> dict:
         "avgTps24h": avg_tps_24h,
         "txVolume14d": tx_volume_14d,
         "recentTransactions": [
-            _serialize_tx(tx, include_snapshot=False) for tx in recent
+            _serialize_tx(tx, ) for tx in recent
         ],
     }
 
@@ -344,7 +335,7 @@ def get_all_transactions_paginated(
 
     return {
         "transactions": [
-            _serialize_tx(tx, triggered_counts.get(tx.hash, 0), include_snapshot=False)
+            _serialize_tx(tx, triggered_counts.get(tx.hash, 0), )
             for tx in txs
         ],
         "pagination": {
@@ -362,11 +353,14 @@ def get_all_transactions_paginated(
 
 
 def get_transaction_with_relations(session: Session, tx_hash: str) -> Optional[dict]:
-    tx = session.query(Transactions).filter(Transactions.hash == tx_hash).first()
+    tx = (
+        session.query(Transactions)
+        .options(*_HEAVY_TX_COLUMNS)
+        .filter(Transactions.hash == tx_hash)
+        .first()
+    )
     if not tx:
         return None
-
-    # Triggered/parent don't need the snapshot blob either.
     triggered = (
         session.query(Transactions)
         .options(*_HEAVY_TX_COLUMNS)
@@ -387,10 +381,10 @@ def get_transaction_with_relations(session: Session, tx_hash: str) -> Optional[d
     return {
         "transaction": _serialize_tx(tx),
         "triggeredTransactions": [
-            _serialize_tx(t, include_snapshot=False) for t in triggered
+            _serialize_tx(t, ) for t in triggered
         ],
         "parentTransaction": (
-            _serialize_tx(parent, include_snapshot=False) if parent else None
+            _serialize_tx(parent, ) if parent else None
         ),
     }
 
@@ -650,7 +644,7 @@ def get_state_with_transactions(session: Session, state_id: str) -> Optional[dic
 
     return {
         "state": _serialize_state(state),
-        "transactions": [_serialize_tx(tx, include_snapshot=False) for tx in txs],
+        "transactions": [_serialize_tx(tx, ) for tx in txs],
         "contract_code": contract_code,
         "creator_info": creator_info,
     }
@@ -745,7 +739,7 @@ def get_address_info(session: Session, address: str) -> Optional[dict]:
             "first_tx_time": first_tx_time.isoformat() if first_tx_time else None,
             "last_tx_time": last_tx_time.isoformat() if last_tx_time else None,
             "transactions": [
-                _serialize_tx(tx, include_snapshot=False) for tx in recent_txs
+                _serialize_tx(tx, ) for tx in recent_txs
             ],
         }
 
