@@ -53,8 +53,6 @@ jobs:
           sed -i "s/VITE_FINALITY_WINDOW=\".*\"/VITE_FINALITY_WINDOW=\"10\"/" .env
           sed -i "s/COMPOSE_RPC_CPU_LIMIT=\".*\"/COMPOSE_RPC_CPU_LIMIT=\"4\"/" .env
           sed -i "s/COMPOSE_WORKER_CPU_LIMIT=\".*\"/COMPOSE_WORKER_CPU_LIMIT=\"4\"/" .env
-          sed -i "s/COMPOSE_RPC_MEM_RESERVATION=\".*\"/COMPOSE_RPC_MEM_RESERVATION=\"1\"/" .env
-          sed -i "s/COMPOSE_WORKER_MEM_RESERVATION=\".*\"/COMPOSE_WORKER_MEM_RESERVATION=\"1\"/" .env
           sed -i "s/COMPOSE_RPC_MEM_LIMIT=\".*\"/COMPOSE_RPC_MEM_LIMIT=\"6gb\"/" .env
           sed -i "s/COMPOSE_WORKER_MEM_LIMIT=\".*\"/COMPOSE_WORKER_MEM_LIMIT=\"6gb\"/" .env
           sed -i "s/COMPOSE_RPC_MEM_RESERVATION=\".*\"/COMPOSE_RPC_MEM_RESERVATION=\"2gb\"/" .env
