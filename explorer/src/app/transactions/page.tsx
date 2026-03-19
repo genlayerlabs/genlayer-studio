@@ -37,6 +37,7 @@ function TransactionsContent() {
   const search = searchParams.get('search') || '';
   const fromDate = searchParams.get('from_date') || '';
   const toDate = searchParams.get('to_date') || '';
+  const addressFilter = searchParams.get('address') || '';
 
   // Derive comma-separated statuses from the active tab
   const activeTab = TRANSACTION_TABS.find(t => t.id === tab) || TRANSACTION_TABS[0];
@@ -53,6 +54,7 @@ function TransactionsContent() {
       if (search) params.set('search', search);
       if (fromDate) params.set('from_date', fromDate);
       if (toDate) params.set('to_date', toDate);
+      if (addressFilter) params.set('address', addressFilter);
 
       const res = await fetch(`/api/transactions?${params.toString()}`);
       if (!res.ok) throw new Error('Failed to fetch transactions');
@@ -63,7 +65,7 @@ function TransactionsContent() {
     } finally {
       setLoading(false);
     }
-  }, [page, limit, statusFilter, search, fromDate, toDate]);
+  }, [page, limit, statusFilter, search, fromDate, toDate, addressFilter]);
 
   useEffect(() => {
     fetchTransactions();
@@ -97,7 +99,11 @@ function TransactionsContent() {
     <div className="space-y-6 animate-fade-in">
       <div>
         <h1 className="text-2xl font-bold text-foreground">Transactions</h1>
-        <p className="text-muted-foreground mt-1">Browse and search all transactions</p>
+        <p className="text-muted-foreground mt-1">
+          {addressFilter
+            ? <>Transactions for address <code className="text-xs bg-muted px-1.5 py-0.5 rounded font-mono">{addressFilter}</code></>
+            : 'Browse and search all transactions'}
+        </p>
       </div>
 
       <Tabs value={tab} onValueChange={(value) => updateParams({ tab: value === 'all' ? null : value, page: '1' })}>
@@ -138,13 +144,13 @@ function TransactionsContent() {
               />
             </div>
 
-            {(tab !== 'all' || search || fromDate || toDate) && (
+            {(tab !== 'all' || search || fromDate || toDate || addressFilter) && (
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => {
                   setSearchQuery('');
-                  updateParams({ tab: null, search: null, from_date: null, to_date: null, page: '1' });
+                  updateParams({ tab: null, search: null, from_date: null, to_date: null, address: null, page: '1' });
                 }}
               >
                 <X className="w-4 h-4 mr-1" />

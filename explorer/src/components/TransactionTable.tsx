@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import Link from 'next/link';
+import Link from '@/components/AppLink';
 import { formatDistanceToNow } from 'date-fns';
 import { ArrowUpRight, ArrowDownRight, Settings2 } from 'lucide-react';
 

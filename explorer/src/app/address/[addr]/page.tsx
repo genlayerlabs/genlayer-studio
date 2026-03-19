@@ -1,4 +1,4 @@
-import Link from 'next/link';
+import Link from '@/components/AppLink';
 import { fetchBackend } from '@/lib/fetchBackend';
 import { AddressContent, type AddressInfo } from './AddressContent';
 import { Card, CardContent } from '@/components/ui/card';

@@ -53,15 +53,6 @@ export function DataTab({ transaction: tx }: DataTabProps) {
         </div>
       )}
 
-      {tx.contract_snapshot && (
-        <div>
-          <h4 className="font-medium text-foreground mb-2">Contract Snapshot</h4>
-          <div className="bg-muted p-4 rounded-lg overflow-auto max-h-96">
-            <JsonViewer data={tx.contract_snapshot} />
-          </div>
-        </div>
-      )}
-
       {(tx.r !== null || tx.s !== null || tx.v !== null) && (
         <div>
           <h4 className="font-medium text-foreground mb-2">Signature</h4>

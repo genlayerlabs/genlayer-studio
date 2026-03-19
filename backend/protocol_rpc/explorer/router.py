@@ -41,9 +41,10 @@ def get_transactions(
     search: Optional[str] = None,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
+    address: Optional[str] = None,
 ):
     return queries.get_all_transactions_paginated(
-        session, page, limit, status, search, from_date, to_date
+        session, page, limit, status, search, from_date, to_date, address
     )
 
 

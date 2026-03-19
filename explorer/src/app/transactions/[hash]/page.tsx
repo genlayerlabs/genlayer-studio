@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback, use } from 'react';
-import Link from 'next/link';
+import Link from '@/components/AppLink';
 import { Transaction } from '@/lib/types';
 import { useTransactionPolling } from '@/hooks/useTransactionPolling';
 import { StatusBadge } from '@/components/StatusBadge';

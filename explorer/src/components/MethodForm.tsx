@@ -83,18 +83,18 @@ export function MethodForm({
           {method.params.map(([pName, pType]) => (
             <div key={pName}>
               <label className="text-xs text-muted-foreground block mb-1">
-                {pName} <span className="text-muted-foreground/60">({pType})</span>
+                {pName} <span className="text-muted-foreground/60">({typeof pType === 'string' ? pType : JSON.stringify(pType)})</span>
               </label>
               {executable ? (
                 <Input
                   value={inputs[pName] || ''}
                   onChange={(e) => setInputs((prev) => ({ ...prev, [pName]: e.target.value }))}
-                  placeholder={pType === 'bool' ? 'true / false' : pType}
+                  placeholder={pType === 'bool' ? 'true / false' : typeof pType === 'string' ? pType : JSON.stringify(pType)}
                   className="font-mono text-sm h-8"
                 />
               ) : (
                 <div className="bg-muted rounded-md px-3 py-1.5 text-sm font-mono text-muted-foreground">
-                  {pType}
+                  {typeof pType === 'string' ? pType : JSON.stringify(pType)}
                 </div>
               )}
             </div>
@@ -103,7 +103,7 @@ export function MethodForm({
           {/* Return type */}
           {method.ret && (
             <div className="text-xs text-muted-foreground">
-              Returns: <code className="bg-muted px-1.5 py-0.5 rounded">{method.ret}</code>
+              Returns: <code className="bg-muted px-1.5 py-0.5 rounded">{typeof method.ret === 'string' ? method.ret : JSON.stringify(method.ret)}</code>
             </div>
           )}
 
