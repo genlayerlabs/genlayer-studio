@@ -63,7 +63,7 @@ def setup_validators():
                         {
                             "api_key_env_var": mock_cfg["api_key_env_var"],
                             "api_url": mock_cfg["api_url"],
-                            "mock_response": mock_response if mock_response else {},
+                            "mock_response": mock_response if mock_response is not None else {},
                         },
                     )
                 ).json()
@@ -107,7 +107,7 @@ def setup_validators():
 
 def mock_llms() -> bool:
     env_var = os.getenv("TEST_WITH_MOCK_LLMS", "false")  # default no mocking
-    return env_var == "true"
+    return env_var.lower() == "true"
 
 
 def pytest_configure(config: Any) -> None:
