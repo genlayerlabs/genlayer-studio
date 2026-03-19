@@ -96,12 +96,10 @@ function AccountView({ address, data }: { address: string; data: AddressInfo }) 
         </TabsList>
         <TabsContent value="transactions">
           <Card className="overflow-hidden">
-            {txCount > txs.length && (
-              <div className="px-6 pt-4 text-sm text-muted-foreground">
-                Latest {txs.length} from a total of{' '}
-                <span className="font-medium text-foreground">{txCount.toLocaleString()}</span> transactions
-              </div>
-            )}
+            <div className="px-6 pt-4 text-sm text-muted-foreground">
+              Latest {txs.length} from a total of{' '}
+              <span className="font-medium text-foreground">{txCount.toLocaleString()}</span> transactions
+            </div>
             <AddressTransactionTable transactions={txs} address={address} />
             {txCount > txs.length && (
               <div className="border-t px-6 py-3 text-center">
@@ -195,12 +193,10 @@ function ContractView({ address, data }: { address: string; data: AddressInfo })
 
         <TabsContent value="transactions">
           <Card className="overflow-hidden">
-            {txCount > transactions.length && (
-              <div className="px-6 pt-4 text-sm text-muted-foreground">
-                Latest {transactions.length} from a total of{' '}
-                <span className="font-medium text-foreground">{txCount.toLocaleString()}</span> transactions
-              </div>
-            )}
+            <div className="px-6 pt-4 text-sm text-muted-foreground">
+              Latest {transactions.length} from a total of{' '}
+              <span className="font-medium text-foreground">{txCount.toLocaleString()}</span> transactions
+            </div>
             <AddressTransactionTable transactions={transactions} address={address} />
             {txCount > transactions.length && (
               <div className="border-t px-6 py-3 text-center">
