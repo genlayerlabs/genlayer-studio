@@ -132,15 +132,34 @@ def main():
         print("ERROR: Deployment failed")
         return 1
 
-    time.sleep(3)  # Wait for indexing
-
-    contract_address = get_contract_address(api_url, deploy_hash)
+    # Wait for indexing with retry instead of a fixed sleep.
+    contract_address = None
+    for attempt in range(10):
+        time.sleep(3)
+        try:
+            contract_address = get_contract_address(api_url, deploy_hash)
+            break
+        except RuntimeError:
+            print(f"  Waiting for contract indexing (attempt {attempt + 1}/10)...")
+    if contract_address is None:
+        print("ERROR: Contract address not found after retries")
+        return 1
     print(f"  Contract: {contract_address}")
 
-    # --- Verify initial state ---
-    initial_count = client.read_contract(
-        address=contract_address, function_name="get_count"
-    )
+    # --- Verify initial state (retry in case state isn't indexed yet) ---
+    initial_count = None
+    for attempt in range(10):
+        try:
+            initial_count = client.read_contract(
+                address=contract_address, function_name="get_count"
+            )
+            break
+        except Exception as exc:
+            print(f"  Waiting for contract state (attempt {attempt + 1}/10): {exc}")
+            time.sleep(3)
+    if initial_count is None:
+        print("ERROR: Could not read initial contract state after retries")
+        return 1
     print(f"  Initial count: {initial_count}")
     assert initial_count == 0, f"Expected initial count 0, got {initial_count}"
     print()
