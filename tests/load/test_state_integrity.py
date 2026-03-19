@@ -133,13 +133,16 @@ def main():
         return 1
 
     # Wait for indexing with retry instead of a fixed sleep.
+    # Contract registration happens asynchronously after tx reaches ACCEPTED,
+    # so we need generous retries under CI load.
     contract_address = None
-    for attempt in range(20):
+    max_index_retries = 40
+    for attempt in range(max_index_retries):
         try:
             contract_address = get_contract_address(api_url, deploy_hash)
             break
         except RuntimeError:
-            print(f"  Waiting for contract indexing (attempt {attempt + 1}/20)...")
+            print(f"  Waiting for contract indexing (attempt {attempt + 1}/{max_index_retries})...")
             time.sleep(5)
     if contract_address is None:
         print("ERROR: Contract address not found after retries")
@@ -148,7 +151,7 @@ def main():
 
     # --- Verify initial state (retry in case state isn't indexed yet) ---
     initial_count = None
-    max_state_retries = 20
+    max_state_retries = 40
     state_retry_delay = 5
     for attempt in range(max_state_retries):
         try:

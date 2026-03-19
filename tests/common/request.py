@@ -182,7 +182,7 @@ class TransactionTerminalError(TimeoutError):
     """Raised when a transaction reaches a terminal failure status."""
 
 
-def wait_for_transaction(transaction_hash: str, interval: int = 10, retries: int = 30):
+def wait_for_transaction(transaction_hash: str, interval: int = 10, retries: int = 140):
     attempts = 0
     last_status = None
     while attempts < retries:
