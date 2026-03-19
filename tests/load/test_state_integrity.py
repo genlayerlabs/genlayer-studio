@@ -148,15 +148,24 @@ def main():
 
     # --- Verify initial state (retry in case state isn't indexed yet) ---
     initial_count = None
-    for attempt in range(20):
+    max_state_retries = 20
+    state_retry_delay = 5
+    for attempt in range(max_state_retries):
         try:
             initial_count = client.read_contract(
                 address=contract_address, function_name="get_count"
             )
             break
         except Exception as exc:
-            print(f"  Waiting for contract state (attempt {attempt + 1}/20): {exc}")
-            time.sleep(5)
+            remaining = max_state_retries - attempt - 1
+            print(
+                f"  [{time.strftime('%H:%M:%S')}] Contract state not ready "
+                f"(attempt {attempt + 1}/{max_state_retries}, "
+                f"{remaining} retries left): {exc}",
+                flush=True,
+            )
+            if remaining > 0:
+                time.sleep(state_retry_delay)
     if initial_count is None:
         print("ERROR: Could not read initial contract state after retries")
         return 1
