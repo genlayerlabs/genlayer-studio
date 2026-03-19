@@ -522,22 +522,15 @@ def get_all_states(
     page_ids = [s.id for s in states]
     stats_map = _batch_contract_stats(session, page_ids)
 
+    def _build_state_row(state: CurrentState) -> dict:
+        tx_count, created_at = stats_map.get(state.id, (0, None))
+        return {
+            **_serialize_state(state, tx_count=tx_count, include_data=False),
+            "created_at": created_at.isoformat() if created_at else None,
+        }
+
     return {
-        "states": [
-            {
-                **_serialize_state(
-                    state,
-                    tx_count=stats_map.get(state.id, (0, None))[0],
-                    include_data=False,
-                ),
-                "created_at": (
-                    stats_map.get(state.id, (0, None))[1].isoformat()
-                    if stats_map.get(state.id, (0, None))[1]
-                    else None
-                ),
-            }
-            for state in states
-        ],
+        "states": [_build_state_row(state) for state in states],
         "pagination": _pagination(page, limit, total),
     }
 
