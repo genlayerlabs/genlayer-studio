@@ -178,6 +178,10 @@ _TERMINAL_FAILURE_STATUSES = frozenset(
 )
 
 
+class TransactionTerminalError(TimeoutError):
+    """Raised when a transaction reaches a terminal failure status."""
+
+
 def wait_for_transaction(transaction_hash: str, interval: int = 10, retries: int = 30):
     attempts = 0
     last_status = None
@@ -188,7 +192,7 @@ def wait_for_transaction(transaction_hash: str, interval: int = 10, retries: int
         if status == "FINALIZED":
             return transaction_response
         if status in _TERMINAL_FAILURE_STATUSES:
-            raise RuntimeError(
+            raise TransactionTerminalError(
                 f"Transaction {transaction_hash} reached terminal failure status: {status}"
             )
         time.sleep(interval)

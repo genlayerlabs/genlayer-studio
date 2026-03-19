@@ -5,7 +5,7 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import asc, desc, func, or_, select, union_all
+from sqlalchemy import asc, desc, func, or_, select, union
 from sqlalchemy.orm import Session, defer
 
 from backend.database_handler.models import (
@@ -450,7 +450,8 @@ def get_all_states(
 
     if sort_by in ("tx_count", "created_at"):
         # Pre-aggregate tx stats per contract in one pass (no correlated subqueries).
-        # Count to_address and from_address matches separately, then combine.
+        # Count to_address and from_address matches separately, subtract overlap
+        # (txs where to == from) to avoid double-counting.
         to_stats = (
             session.query(
                 Transactions.to_address.label("addr"),
@@ -469,9 +470,21 @@ def get_all_states(
             .group_by(Transactions.from_address)
             .subquery()
         )
+        # Overlap: txs where to_address == from_address (self-referencing).
+        overlap_stats = (
+            session.query(
+                Transactions.to_address.label("addr"),
+                func.count().label("cnt"),
+            )
+            .filter(Transactions.to_address == Transactions.from_address)
+            .group_by(Transactions.to_address)
+            .subquery()
+        )
 
-        tx_count_col = func.coalesce(to_stats.c.cnt, 0) + func.coalesce(
-            from_stats.c.cnt, 0
+        tx_count_col = (
+            func.coalesce(to_stats.c.cnt, 0)
+            + func.coalesce(from_stats.c.cnt, 0)
+            - func.coalesce(overlap_stats.c.cnt, 0)
         )
         created_at_col = func.least(
             func.coalesce(to_stats.c.min_ts, from_stats.c.min_ts),
@@ -486,13 +499,14 @@ def get_all_states(
             )
             .outerjoin(to_stats, CurrentState.id == to_stats.c.addr)
             .outerjoin(from_stats, CurrentState.id == from_stats.c.addr)
+            .outerjoin(overlap_stats, CurrentState.id == overlap_stats.c.addr)
             .filter(base_filter)
         )
         if search:
             q = q.filter(CurrentState.id.ilike(f"%{search}%"))
 
         sort_col = tx_count_col if sort_by == "tx_count" else created_at_col
-        q = q.order_by(order_dir(sort_col))
+        q = q.order_by(order_dir(sort_col), order_dir(CurrentState.id))
         q = q.offset((page - 1) * limit).limit(limit)
         rows = q.all()
 
@@ -511,7 +525,7 @@ def get_all_states(
     q = session.query(CurrentState).filter(base_filter)
     if search:
         q = q.filter(CurrentState.id.ilike(f"%{search}%"))
-    q = q.order_by(order_dir(CurrentState.updated_at))
+    q = q.order_by(order_dir(CurrentState.updated_at), order_dir(CurrentState.id))
     q = q.offset((page - 1) * limit).limit(limit)
     states = q.all()
 
@@ -542,31 +556,28 @@ def _batch_contract_stats(
 
     Returns a dict mapping contract_id -> (tx_count, created_at).
     """
-    to_q = (
-        session.query(
-            Transactions.to_address.label("addr"),
-            func.count().label("cnt"),
-            func.min(Transactions.created_at).label("min_ts"),
-        )
-        .filter(Transactions.to_address.in_(contract_ids))
-        .group_by(Transactions.to_address)
-    )
-    from_q = (
-        session.query(
-            Transactions.from_address.label("addr"),
-            func.count().label("cnt"),
-            func.min(Transactions.created_at).label("min_ts"),
-        )
-        .filter(Transactions.from_address.in_(contract_ids))
-        .group_by(Transactions.from_address)
-    )
+    # Use union (not union_all) of to/from to deduplicate txs where
+    # to_address == from_address for the same contract.
+    to_q = session.query(
+        Transactions.hash.label("tx_hash"),
+        Transactions.to_address.label("addr"),
+        Transactions.created_at.label("created_at"),
+    ).filter(Transactions.to_address.in_(contract_ids))
 
-    combined = union_all(to_q, from_q).subquery()
+    from_q = session.query(
+        Transactions.hash.label("tx_hash"),
+        Transactions.from_address.label("addr"),
+        Transactions.created_at.label("created_at"),
+    ).filter(Transactions.from_address.in_(contract_ids))
+
+    # union (not union_all) deduplicates rows with same (hash, addr, created_at),
+    # preventing double-count when to_address == from_address for the same tx.
+    combined = union(to_q, from_q).subquery()
     rows = (
         session.query(
             combined.c.addr,
-            func.sum(combined.c.cnt).label("tx_count"),
-            func.min(combined.c.min_ts).label("created_at"),
+            func.count().label("tx_count"),
+            func.min(combined.c.created_at).label("created_at"),
         )
         .group_by(combined.c.addr)
         .all()

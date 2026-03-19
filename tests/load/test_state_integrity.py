@@ -135,12 +135,12 @@ def main():
     # Wait for indexing with retry instead of a fixed sleep.
     contract_address = None
     for attempt in range(20):
-        time.sleep(5)
         try:
             contract_address = get_contract_address(api_url, deploy_hash)
             break
         except RuntimeError:
             print(f"  Waiting for contract indexing (attempt {attempt + 1}/20)...")
+            time.sleep(5)
     if contract_address is None:
         print("ERROR: Contract address not found after retries")
         return 1
