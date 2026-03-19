@@ -1,10 +1,22 @@
-# CI-only overrides: mount host GenVM precompile cache into containers
-# Usage: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d ...
+# CI-only overrides: mount host GenVM precompile cache and use fast healthcheck timings.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --wait ...
 services:
   jsonrpc:
     volumes:
       - ${GENVM_CACHE_DIR:-/tmp/genvm-cache}:/genvm-cache
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${RPCPORT:-4000}/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
 
   consensus-worker:
     volumes:
       - ${GENVM_CACHE_DIR:-/tmp/genvm-cache}:/genvm-cache
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4001/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s

@@ -120,29 +120,18 @@ jobs:
             consensus-worker.tags=genlayer-studio-consensus-worker:latest
           load: true
 
-      # Start services without rebuilding images; CI override mounts GenVM precompile cache
+      # Start services without rebuilding images; CI override provides fast healthcheck timings.
+      # --wait blocks until all healthchecks pass (jsonrpc /ready + consensus-worker /health).
       - name: Run Docker Compose
-        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --no-build database-migration jsonrpc consensus-worker
+        timeout-minutes: 3
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --no-build --wait database-migration jsonrpc consensus-worker
 
-      - name: Wait for services to be up
-        timeout-minutes: 5
+      - name: Verify services are ready
         run: |
-          timeout=60
-          counter=0
-          while [[ "$counter" -lt "$timeout" ]]; do
-            if curl -sS -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}' http://0.0.0.0:4000/api 2>/dev/null | grep -q "OK"; then
-              echo "RPC server is up!"
-              break
-            else
-              echo "Waiting for RPC server... ($counter/$timeout)"
-              sleep 2
-              counter=$((counter+1))
-            fi
-          done
-          if [[ "$counter" -ge "$timeout" ]]; then
-            echo "Error: Timeout while waiting for RPC server"
-            exit 1
-          fi
+          echo "Services passed healthchecks, verifying RPC endpoint..."
+          curl -sS -X POST -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}' \
+            http://0.0.0.0:4000/api
 
       - name: Run tests (parallel)
         run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/ -svv -n 8 --ignore=tests/integration/test_validators.py
