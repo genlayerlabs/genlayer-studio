@@ -123,7 +123,7 @@ jobs:
       # Start services without rebuilding images; CI override provides fast healthcheck timings.
       # --wait blocks until all healthchecks pass (jsonrpc /ready + consensus-worker /health).
       - name: Run Docker Compose
-        timeout-minutes: 3
+        timeout-minutes: 5
         run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --no-build --wait database-migration jsonrpc consensus-worker
 
       - name: Verify services are ready

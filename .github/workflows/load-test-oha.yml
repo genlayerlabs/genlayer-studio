@@ -85,7 +85,7 @@ jobs:
             ${{ runner.os }}-buildx-
 
       - name: Run Docker Compose with multiple workers
-        timeout-minutes: 3
+        timeout-minutes: 10
         run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --wait
         env:
           CONSENSUS_WORKERS: 3

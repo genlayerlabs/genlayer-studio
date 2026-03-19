@@ -8,8 +8,8 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:${RPCPORT:-4000}/ready"]
       interval: 5s
       timeout: 5s
-      retries: 24
-      start_period: 10s
+      retries: 36
+      start_period: 30s
 
   consensus-worker:
     volumes:
