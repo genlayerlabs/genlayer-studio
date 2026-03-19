@@ -59,7 +59,12 @@ def get_contract_address(api_url: str, tx_hash: str) -> str:
 
 def wait_for_tx_finalized(api_url: str, tx_hash: str, timeout: int = 300) -> bool:
     """Wait for a transaction to reach FINALIZED status via RPC polling."""
-    terminal_failures = {"CANCELED", "UNDETERMINED", "LEADER_TIMEOUT", "VALIDATORS_TIMEOUT"}
+    terminal_failures = {
+        "CANCELED",
+        "UNDETERMINED",
+        "LEADER_TIMEOUT",
+        "VALIDATORS_TIMEOUT",
+    }
     deadline = time.time() + timeout
     while time.time() < deadline:
         data = rpc_call(api_url, "eth_getTransactionByHash", [tx_hash])
