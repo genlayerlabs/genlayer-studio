@@ -1,6 +1,6 @@
 'use client';
 
-import Link from 'next/link';
+import Link from '@/components/AppLink';
 import { format } from 'date-fns';
 import { Transaction } from '@/lib/types';
 import { StatusBadge } from '@/components/StatusBadge';

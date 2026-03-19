@@ -5,7 +5,7 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import asc, desc, func, or_, select, union_all
 from sqlalchemy.orm import Session, defer
 
 from backend.database_handler.models import (
@@ -74,13 +74,19 @@ def _serialize_tx(
     return d
 
 
-def _serialize_state(state: CurrentState, *, tx_count: int | None = None) -> dict:
+def _serialize_state(
+    state: CurrentState,
+    *,
+    tx_count: int | None = None,
+    include_data: bool = True,
+) -> dict:
     d = {
         "id": state.id,
-        "data": state.data,
         "balance": state.balance,
         "updated_at": state.updated_at.isoformat() if state.updated_at else None,
     }
+    if include_data:
+        d["data"] = state.data
     if tx_count is not None:
         d["tx_count"] = tx_count
     return d
@@ -407,27 +413,6 @@ def get_all_states(
     sort_by: Optional[str] = None,
     sort_order: Optional[str] = "desc",
 ) -> dict:
-    # Subquery: count transactions where to_address or from_address matches state id
-    tx_filter = or_(
-        Transactions.to_address == CurrentState.id,
-        Transactions.from_address == CurrentState.id,
-    )
-    tx_count_sq = (
-        session.query(func.count())
-        .select_from(Transactions)
-        .filter(tx_filter)
-        .correlate(CurrentState)
-        .scalar_subquery()
-    )
-
-    # Subquery: earliest transaction timestamp (proxy for contract creation time)
-    created_at_sq = (
-        session.query(func.min(Transactions.created_at))
-        .filter(tx_filter)
-        .correlate(CurrentState)
-        .scalar_subquery()
-    )
-
     # Only show addresses that have a deploy transaction (type 1) targeting them
     deploy_addresses = (
         session.query(Transactions.to_address)
@@ -435,45 +420,163 @@ def get_all_states(
         .distinct()
         .subquery()
     )
+    base_filter = CurrentState.id.in_(select(deploy_addresses.c.to_address))
 
-    q = session.query(
-        CurrentState,
-        tx_count_sq.label("tx_count"),
-        created_at_sq.label("created_at"),
-    ).filter(CurrentState.id.in_(select(deploy_addresses.c.to_address)))
+    # --- Total count (lightweight, no correlated subqueries) ---
+    count_q = (
+        session.query(func.count())
+        .select_from(CurrentState)
+        .filter(base_filter)
+    )
+    if search:
+        count_q = count_q.filter(CurrentState.id.ilike(f"%{search}%"))
+    total = count_q.scalar() or 0
+
+    if total == 0:
+        return _empty_page(page, limit)
+
+    order_dir = asc if sort_order == "asc" else desc
+
+    if sort_by in ("tx_count", "created_at"):
+        # Pre-aggregate tx stats per contract in one pass (no correlated subqueries).
+        # Count to_address and from_address matches separately, then combine.
+        to_stats = (
+            session.query(
+                Transactions.to_address.label("addr"),
+                func.count().label("cnt"),
+                func.min(Transactions.created_at).label("min_ts"),
+            )
+            .group_by(Transactions.to_address)
+            .subquery()
+        )
+        from_stats = (
+            session.query(
+                Transactions.from_address.label("addr"),
+                func.count().label("cnt"),
+                func.min(Transactions.created_at).label("min_ts"),
+            )
+            .group_by(Transactions.from_address)
+            .subquery()
+        )
+
+        tx_count_col = (
+            func.coalesce(to_stats.c.cnt, 0) + func.coalesce(from_stats.c.cnt, 0)
+        )
+        created_at_col = func.least(
+            func.coalesce(to_stats.c.min_ts, from_stats.c.min_ts),
+            func.coalesce(from_stats.c.min_ts, to_stats.c.min_ts),
+        )
+
+        q = (
+            session.query(
+                CurrentState,
+                tx_count_col.label("tx_count"),
+                created_at_col.label("created_at"),
+            )
+            .outerjoin(to_stats, CurrentState.id == to_stats.c.addr)
+            .outerjoin(from_stats, CurrentState.id == from_stats.c.addr)
+            .filter(base_filter)
+        )
+        if search:
+            q = q.filter(CurrentState.id.ilike(f"%{search}%"))
+
+        sort_col = tx_count_col if sort_by == "tx_count" else created_at_col
+        q = q.order_by(order_dir(sort_col))
+        q = q.offset((page - 1) * limit).limit(limit)
+        rows = q.all()
+
+        return {
+            "states": [
+                {
+                    **_serialize_state(state, tx_count=tx_count, include_data=False),
+                    "created_at": created_at.isoformat() if created_at else None,
+                }
+                for state, tx_count, created_at in rows
+            ],
+            "pagination": _pagination(page, limit, total),
+        }
+
+    # Default: sort by updated_at — paginate first (fast), then batch-fetch stats.
+    q = session.query(CurrentState).filter(base_filter)
     if search:
         q = q.filter(CurrentState.id.ilike(f"%{search}%"))
-    total = q.count()
-
-    # Determine sort column
-    sort_columns = {
-        "tx_count": tx_count_sq,
-        "created_at": created_at_sq,
-        "updated_at": CurrentState.updated_at,
-    }
-    sort_col = sort_columns.get(sort_by, CurrentState.updated_at)
-    if sort_order == "asc":
-        q = q.order_by(sort_col.asc())
-    else:
-        q = q.order_by(sort_col.desc())
-
+    q = q.order_by(order_dir(CurrentState.updated_at))
     q = q.offset((page - 1) * limit).limit(limit)
-    rows = q.all()
+    states = q.all()
+
+    if not states:
+        return _empty_page(page, limit, total)
+
+    # Batch-fetch tx stats for just this page of contracts.
+    page_ids = [s.id for s in states]
+    stats_map = _batch_contract_stats(session, page_ids)
+
     return {
         "states": [
             {
-                **_serialize_state(state, tx_count=tx_count),
-                "created_at": created_at.isoformat() if created_at else None,
+                **_serialize_state(state, tx_count=stats_map.get(state.id, (0, None))[0], include_data=False),
+                "created_at": (
+                    stats_map.get(state.id, (0, None))[1].isoformat()
+                    if stats_map.get(state.id, (0, None))[1]
+                    else None
+                ),
             }
-            for state, tx_count, created_at in rows
+            for state in states
         ],
-        "pagination": {
-            "page": page,
-            "limit": limit,
-            "total": total,
-            "totalPages": (total + limit - 1) // limit if total > 0 else 0,
-        },
+        "pagination": _pagination(page, limit, total),
     }
+
+
+def _batch_contract_stats(
+    session: Session, contract_ids: list[str]
+) -> dict[str, tuple[int, Optional[datetime]]]:
+    """Fetch tx_count and earliest created_at for a batch of contract addresses.
+
+    Returns a dict mapping contract_id -> (tx_count, created_at).
+    """
+    to_q = (
+        session.query(
+            Transactions.to_address.label("addr"),
+            func.count().label("cnt"),
+            func.min(Transactions.created_at).label("min_ts"),
+        )
+        .filter(Transactions.to_address.in_(contract_ids))
+        .group_by(Transactions.to_address)
+    )
+    from_q = (
+        session.query(
+            Transactions.from_address.label("addr"),
+            func.count().label("cnt"),
+            func.min(Transactions.created_at).label("min_ts"),
+        )
+        .filter(Transactions.from_address.in_(contract_ids))
+        .group_by(Transactions.from_address)
+    )
+
+    combined = union_all(to_q, from_q).subquery()
+    rows = (
+        session.query(
+            combined.c.addr,
+            func.sum(combined.c.cnt).label("tx_count"),
+            func.min(combined.c.min_ts).label("created_at"),
+        )
+        .group_by(combined.c.addr)
+        .all()
+    )
+    return {row.addr: (int(row.tx_count), row.created_at) for row in rows}
+
+
+def _pagination(page: int, limit: int, total: int) -> dict:
+    return {
+        "page": page,
+        "limit": limit,
+        "total": total,
+        "totalPages": (total + limit - 1) // limit if total > 0 else 0,
+    }
+
+
+def _empty_page(page: int, limit: int, total: int = 0) -> dict:
+    return {"states": [], "pagination": _pagination(page, limit, total)}
 
 
 def _extract_contract_code(session: Session, state_id: str) -> Optional[str]:

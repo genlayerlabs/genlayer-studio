@@ -1,6 +1,6 @@
 'use client';
 
-import Link from 'next/link';
+import Link from '@/components/AppLink';
 import { formatDistanceToNow, format } from 'date-fns';
 
 import { Transaction, Validator, CurrentState } from '@/lib/types';
