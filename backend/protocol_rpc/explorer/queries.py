@@ -262,8 +262,16 @@ def get_all_transactions_paginated(
     search: Optional[str] = None,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
+    address: Optional[str] = None,
 ) -> dict:
     filters = []
+    if address:
+        filters.append(
+            or_(
+                Transactions.from_address == address,
+                Transactions.to_address == address,
+            )
+        )
     if status:
         # Support comma-separated status values for multi-status filtering
         status_values = [s.strip() for s in status.split(",") if s.strip()]
@@ -606,15 +614,23 @@ def get_state_with_transactions(session: Session, state_id: str) -> Optional[dic
     if not state:
         return None
 
+    addr_filter = or_(
+        Transactions.to_address == state_id,
+        Transactions.from_address == state_id,
+    )
+
+    tx_count = (
+        session.query(func.count())
+        .select_from(Transactions)
+        .filter(addr_filter)
+        .scalar()
+        or 0
+    )
+
     txs = (
         session.query(Transactions)
         .options(*_HEAVY_TX_COLUMNS)
-        .filter(
-            or_(
-                Transactions.to_address == state_id,
-                Transactions.from_address == state_id,
-            )
-        )
+        .filter(addr_filter)
         .order_by(Transactions.created_at.desc())
         .limit(50)
         .all()
@@ -644,7 +660,8 @@ def get_state_with_transactions(session: Session, state_id: str) -> Optional[dic
 
     return {
         "state": _serialize_state(state),
-        "transactions": [_serialize_tx(tx, ) for tx in txs],
+        "tx_count": tx_count,
+        "transactions": [_serialize_tx(tx) for tx in txs],
         "contract_code": contract_code,
         "creator_info": creator_info,
     }
