@@ -244,7 +244,10 @@ def get_stats(session: Session) -> dict:
         "avgTps24h": avg_tps_24h,
         "txVolume14d": tx_volume_14d,
         "recentTransactions": [
-            _serialize_tx(tx, ) for tx in recent
+            _serialize_tx(
+                tx,
+            )
+            for tx in recent
         ],
     }
 
@@ -343,7 +346,10 @@ def get_all_transactions_paginated(
 
     return {
         "transactions": [
-            _serialize_tx(tx, triggered_counts.get(tx.hash, 0), )
+            _serialize_tx(
+                tx,
+                triggered_counts.get(tx.hash, 0),
+            )
             for tx in txs
         ],
         "pagination": {
@@ -389,10 +395,17 @@ def get_transaction_with_relations(session: Session, tx_hash: str) -> Optional[d
     return {
         "transaction": _serialize_tx(tx),
         "triggeredTransactions": [
-            _serialize_tx(t, ) for t in triggered
+            _serialize_tx(
+                t,
+            )
+            for t in triggered
         ],
         "parentTransaction": (
-            _serialize_tx(parent, ) if parent else None
+            _serialize_tx(
+                parent,
+            )
+            if parent
+            else None
         ),
     }
 
@@ -425,11 +438,7 @@ def get_all_states(
     base_filter = CurrentState.id.in_(select(deploy_addresses.c.to_address))
 
     # --- Total count (lightweight, no correlated subqueries) ---
-    count_q = (
-        session.query(func.count())
-        .select_from(CurrentState)
-        .filter(base_filter)
-    )
+    count_q = session.query(func.count()).select_from(CurrentState).filter(base_filter)
     if search:
         count_q = count_q.filter(CurrentState.id.ilike(f"%{search}%"))
     total = count_q.scalar() or 0
@@ -461,8 +470,8 @@ def get_all_states(
             .subquery()
         )
 
-        tx_count_col = (
-            func.coalesce(to_stats.c.cnt, 0) + func.coalesce(from_stats.c.cnt, 0)
+        tx_count_col = func.coalesce(to_stats.c.cnt, 0) + func.coalesce(
+            from_stats.c.cnt, 0
         )
         created_at_col = func.least(
             func.coalesce(to_stats.c.min_ts, from_stats.c.min_ts),
@@ -516,7 +525,11 @@ def get_all_states(
     return {
         "states": [
             {
-                **_serialize_state(state, tx_count=stats_map.get(state.id, (0, None))[0], include_data=False),
+                **_serialize_state(
+                    state,
+                    tx_count=stats_map.get(state.id, (0, None))[0],
+                    include_data=False,
+                ),
                 "created_at": (
                     stats_map.get(state.id, (0, None))[1].isoformat()
                     if stats_map.get(state.id, (0, None))[1]
@@ -756,7 +769,10 @@ def get_address_info(session: Session, address: str) -> Optional[dict]:
             "first_tx_time": first_tx_time.isoformat() if first_tx_time else None,
             "last_tx_time": last_tx_time.isoformat() if last_tx_time else None,
             "transactions": [
-                _serialize_tx(tx, ) for tx in recent_txs
+                _serialize_tx(
+                    tx,
+                )
+                for tx in recent_txs
             ],
         }
 
