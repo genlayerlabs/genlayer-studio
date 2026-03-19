@@ -198,3 +198,35 @@ def get_llm_provider_registry(
 
 def get_rate_limiter(request: Request):
     return _peek_state_attr(_get_app_state(request), "rate_limiter")
+
+
+def require_admin_key(request: Request) -> None:
+    """FastAPI dependency that enforces ADMIN_API_KEY for explorer admin routes.
+
+    Same logic as the JSON-RPC ``require_admin_access`` decorator:
+    - ADMIN_API_KEY set -> requires matching ``X-Admin-Key`` header
+    - VITE_IS_HOSTED=true without ADMIN_API_KEY -> blocked entirely
+    - Neither set -> open access (local dev)
+    """
+    import os
+
+    admin_api_key = os.getenv("ADMIN_API_KEY")
+    is_hosted = os.getenv("VITE_IS_HOSTED") == "true"
+
+    if admin_api_key:
+        request_key = request.headers.get("X-Admin-Key")
+        if request_key == admin_api_key:
+            return
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing admin key",
+        )
+
+    if is_hosted:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Operation not available in hosted mode",
+        )
+
+    # Local dev = open access
+    return

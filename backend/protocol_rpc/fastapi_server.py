@@ -20,6 +20,7 @@ from backend.protocol_rpc.dependencies import (
 )
 from backend.protocol_rpc.fastapi_rpc_router import FastAPIRPCRouter
 from backend.protocol_rpc.explorer.router import explorer_router
+from backend.protocol_rpc.explorer.admin_router import explorer_admin_router
 from backend.protocol_rpc.health import health_router
 from backend.protocol_rpc.rate_limit_middleware import RateLimitMiddleware
 from backend.protocol_rpc.rpc_endpoint_manager import JSONRPCResponse
@@ -78,6 +79,7 @@ app.include_router(health_router)
 
 # Include explorer API endpoints
 app.include_router(explorer_router)
+app.include_router(explorer_admin_router)
 
 
 # JSON-RPC endpoint (supports single and batch requests)
