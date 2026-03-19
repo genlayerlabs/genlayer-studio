@@ -84,6 +84,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-buildx-
 
+      - name: Prepare GenVM cache directory
+        run: mkdir -p /tmp/genvm-cache/pc && chmod -R 0777 /tmp/genvm-cache
+
       - name: Run Docker Compose with multiple workers
         timeout-minutes: 10
         run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --wait
