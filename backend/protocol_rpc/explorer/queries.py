@@ -659,7 +659,7 @@ def get_state_with_transactions(session: Session, state_id: str) -> Optional[dic
         }
 
     return {
-        "state": _serialize_state(state),
+        "state": _serialize_state(state, include_data=False),
         "tx_count": tx_count,
         "transactions": [_serialize_tx(tx) for tx in txs],
         "contract_code": contract_code,

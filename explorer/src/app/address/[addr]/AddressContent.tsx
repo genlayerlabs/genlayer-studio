@@ -18,6 +18,7 @@ import { ContractInteraction } from '@/components/ContractInteraction';
 import { StatItem } from '@/components/StatItem';
 import {
   ArrowLeft,
+  ArrowDownNarrowWide,
   Wallet,
   Users,
   ArrowRightLeft,
@@ -183,17 +184,12 @@ function ContractView({ address, data }: { address: string; data: AddressInfo })
             <FileCode className="w-4 h-4" />
             Contract
           </TabsTrigger>
-          {state?.data && Object.keys(state.data).length > 0 && (
-            <TabsTrigger value="state" className="flex items-center gap-1.5">
-              <Database className="w-4 h-4" />
-              State
-            </TabsTrigger>
-          )}
         </TabsList>
 
         <TabsContent value="transactions">
           <Card className="overflow-hidden">
-            <div className="px-6 pt-4 text-sm text-muted-foreground">
+            <div className="px-6 py-4 text-sm text-muted-foreground flex items-center gap-1.5">
+              <ArrowDownNarrowWide className="w-4 h-4" />
               Latest {transactions.length} from a total of{' '}
               <span className="font-medium text-foreground">{txCount.toLocaleString()}</span> transactions
             </div>
@@ -212,17 +208,6 @@ function ContractView({ address, data }: { address: string; data: AddressInfo })
           <ContractInteraction address={address} code={contract_code ?? null} />
         </TabsContent>
 
-        {state?.data && Object.keys(state.data).length > 0 && (
-          <TabsContent value="state">
-            <Card>
-              <CardContent className="p-6">
-                <div className="bg-muted p-4 rounded-lg overflow-auto max-h-[500px]">
-                  <JsonViewer data={state.data} />
-                </div>
-              </CardContent>
-            </Card>
-          </TabsContent>
-        )}
       </Tabs>
     </div>
   );
