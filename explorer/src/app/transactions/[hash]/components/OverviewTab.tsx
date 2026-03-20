@@ -9,7 +9,8 @@ import { ConsensusJourney } from '@/components/ConsensusJourney';
 import { InfoRow } from '@/components/InfoRow';
 import { Badge } from '@/components/ui/badge';
 import { JsonViewer } from '@/components/JsonViewer';
-import { getExecutionResult } from '@/lib/transactionUtils';
+import { getExecutionResult, getConsensusRoundResult } from '@/lib/transactionUtils';
+import { ConsensusResultBadge } from '@/components/ConsensusResultBadge';
 import { resultStatusLabel, type DecodedResult } from '@/lib/resultDecoder';
 import { InputDataPanel } from '@/components/InputDataPanel';
 import { formatGenValue } from '@/lib/formatters';
@@ -93,6 +94,7 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
   const execResult = getExecutionResult(tx);
   const executionResult = execResult?.executionResult;
   const genvmResult = execResult?.genvmResult;
+  const consensusRound = getConsensusRoundResult(tx);
   const decodedResult = execResult?.decodedResult;
   const eqOutputs = execResult?.eqOutputs;
 
@@ -154,6 +156,10 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
       />
       <InfoRow label="Rotation Count" value={tx.rotation_count?.toString() || '-'} />
       <InfoRow label="Initial Validators" value={tx.num_of_initial_validators?.toString() || '-'} />
+      <InfoRow
+        label="Consensus Result"
+        value={consensusRound ? <ConsensusResultBadge result={consensusRound} variant="badge" /> : '-'}
+      />
       {tx.worker_id && <InfoRow label="Worker ID" value={tx.worker_id} />}
 
       {calldataB64 && (

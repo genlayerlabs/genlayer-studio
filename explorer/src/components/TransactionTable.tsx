@@ -11,11 +11,13 @@ import { TransactionTypeLabel } from '@/components/TransactionTypeLabel';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Transaction } from '@/lib/types';
-import { getTimeToAccepted, getTimeToFinalized, getExecutionResult } from '@/lib/transactionUtils';
+import { getTimeToAccepted, getTimeToFinalized, getExecutionResult, getConsensusRoundResult } from '@/lib/transactionUtils';
 import { decodeCalldata } from '@/lib/resultDecoder';
 import { cn } from '@/lib/utils';
 import { useColumnVisibility } from '@/hooks/useColumnVisibility';
 import type { ColumnDef } from '@/hooks/useColumnVisibility';
+import { ColumnHeaderWithTooltip, COLUMN_TOOLTIPS } from '@/components/ColumnHeaderWithTooltip';
+import { ConsensusResultBadge } from '@/components/ConsensusResultBadge';
 
 const STORAGE_KEY = 'explorer:tx-table-columns';
 
@@ -27,6 +29,7 @@ const OPTIONAL_COLUMNS: ColumnDef[] = [
   { id: 'to', label: 'To', defaultVisible: true },
   { id: 'method', label: 'Method', defaultVisible: true },
   { id: 'genvmResult', label: 'GenVM Result', defaultVisible: true },
+  { id: 'consensusResult', label: 'Consensus Result', defaultVisible: true },
   { id: 'time', label: 'Time', defaultVisible: true },
   { id: 'relations', label: 'Relations', defaultVisible: true },
   { id: 'accepted', label: 'Accepted', defaultVisible: false },
@@ -125,11 +128,12 @@ export function TransactionTable({
           <TableRow className="bg-muted/50">
             {isVisible('hash') && <TableHead>Hash</TableHead>}
             {isVisible('type') && <TableHead>Type</TableHead>}
-            {isVisible('status') && <TableHead>Status</TableHead>}
+            {isVisible('status') && <TableHead><ColumnHeaderWithTooltip label="Status" tooltip={COLUMN_TOOLTIPS.status} /></TableHead>}
             {isVisible('from') && <TableHead>From</TableHead>}
             {isVisible('to') && <TableHead>To</TableHead>}
             {isVisible('method') && <TableHead className="w-32 max-w-32">Method</TableHead>}
-            {isVisible('genvmResult') && <TableHead>GenVM Result</TableHead>}
+            {isVisible('genvmResult') && <TableHead><ColumnHeaderWithTooltip label="GenVM Result" tooltip={COLUMN_TOOLTIPS.genvmResult} /></TableHead>}
+            {isVisible('consensusResult') && <TableHead><ColumnHeaderWithTooltip label="Consensus Result" tooltip={COLUMN_TOOLTIPS.consensusResult} /></TableHead>}
             {isVisible('time') && <TableHead>Time</TableHead>}
             {isVisible('relations') && <TableHead title="Parent and triggered transactions">Relations</TableHead>}
             {isVisible('accepted') && <TableHead title="Time from PENDING to ACCEPTED">Accepted</TableHead>}
@@ -149,6 +153,7 @@ export function TransactionTable({
             transactions.map((tx) => {
               const execResult = getExecutionResult(tx);
               const executionResult = execResult?.executionResult;
+              const consensusRound = getConsensusRoundResult(tx);
               const timeToAccepted = getTimeToAccepted(tx);
               const timeToFinalized = getTimeToFinalized(tx);
               const calldataB64 = (tx.type === 1 || tx.type === 2) && tx.data && typeof tx.data === 'object'
@@ -229,6 +234,15 @@ export function TransactionTable({
                         ) : (
                           <span className="bg-red-50 dark:bg-red-950 text-red-700 dark:text-red-400 px-2 py-1 rounded-lg text-xs font-semibold">{executionResult}</span>
                         )
+                      ) : (
+                        <span className="text-muted-foreground">-</span>
+                      )}
+                    </TableCell>
+                  )}
+                  {isVisible('consensusResult') && (
+                    <TableCell className="text-sm">
+                      {consensusRound ? (
+                        <ConsensusResultBadge result={consensusRound} />
                       ) : (
                         <span className="text-muted-foreground">-</span>
                       )}

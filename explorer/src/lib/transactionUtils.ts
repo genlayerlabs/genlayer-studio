@@ -42,6 +42,21 @@ export function getTimeToFinalized(tx: Transaction): string | null {
 }
 
 /**
+ * Get the consensus round result (e.g. "Accepted", "Majority Disagree", "Leader Rotation")
+ * from the last consensus round in the transaction's history.
+ */
+export function getConsensusRoundResult(tx: Transaction): string | null {
+  if (!tx.consensus_history || !isNewConsensusFormat(tx.consensus_history)) {
+    return null;
+  }
+
+  const results = tx.consensus_history.consensus_results;
+  if (!results.length) return null;
+
+  return results[results.length - 1].consensus_round || null;
+}
+
+/**
  * Get the execution result from a transaction's consensus data,
  * including decoded result payload and equivalence principle outputs.
  */
