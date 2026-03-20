@@ -4,15 +4,15 @@ from genlayer import *
 
 
 class Counter(gl.Contract):
-    count: int
+    count: bigint
 
     def __init__(self):
-        self.count = 0
+        self.count = bigint(0)
 
     @gl.public.write
     def increment(self) -> None:
-        self.count += 1
+        self.count += bigint(1)
 
     @gl.public.view
-    def get_count(self) -> int:
+    def get_count(self) -> bigint:
         return self.count

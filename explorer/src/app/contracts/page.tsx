@@ -106,7 +106,6 @@ function StateContent() {
                       Transactions <SortIcon column="tx_count" />
                     </button>
                   </TableHead>
-                  <TableHead>State Fields</TableHead>
                   <TableHead>
                     <button onClick={() => toggleSort('created_at')} className="flex items-center gap-1 hover:text-foreground transition-colors cursor-pointer">
                       Created <SortIcon column="created_at" />
@@ -122,7 +121,7 @@ function StateContent() {
               <TableBody>
                 {data.states.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
+                    <TableCell colSpan={5} className="text-center text-muted-foreground py-8">
                       No contracts found
                     </TableCell>
                   </TableRow>
@@ -143,11 +142,6 @@ function StateContent() {
                       </TableCell>
                       <TableCell className="text-sm text-muted-foreground">
                         {state.tx_count ?? '-'}
-                      </TableCell>
-                      <TableCell className="text-sm text-muted-foreground">
-                        {state.data && typeof state.data === 'object'
-                          ? Object.keys(state.data).length
-                          : '-'}
                       </TableCell>
                       <TableCell className="text-sm text-muted-foreground">
                         {state.created_at

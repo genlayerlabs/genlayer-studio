@@ -173,18 +173,34 @@ def send_raw_transaction(signed_transaction: str):
     return wait_for_transaction(transaction_hash)
 
 
-def wait_for_transaction(transaction_hash: str, interval: int = 10, retries: int = 30):
+_TERMINAL_FAILURE_STATUSES = frozenset(
+    {"CANCELED", "UNDETERMINED", "LEADER_TIMEOUT", "VALIDATORS_TIMEOUT"}
+)
+
+
+class TransactionTerminalError(TimeoutError):
+    """Raised when a transaction reaches a terminal failure status."""
+
+
+def wait_for_transaction(transaction_hash: str, interval: int = 10, retries: int = 140):
     attempts = 0
+    last_status = None
     while attempts < retries:
         transaction_response = get_transaction_by_hash(str(transaction_hash))
         status = transaction_response["status"]
+        last_status = status
         if status == "FINALIZED":
             return transaction_response
+        if status in _TERMINAL_FAILURE_STATUSES:
+            raise TransactionTerminalError(
+                f"Transaction {transaction_hash} reached terminal failure status: {status}"
+            )
         time.sleep(interval)
         attempts += 1
 
     raise TimeoutError(
-        f"Transaction {transaction_hash} not finalized after {retries} retries"
+        f"Transaction {transaction_hash} not finalized after {retries} retries "
+        f"(last status: {last_status})"
     )
 
 
