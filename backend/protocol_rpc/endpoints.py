@@ -1081,6 +1081,7 @@ async def _gen_call_with_validator(
     data = params["data"]
     to_address = params["to"]
     from_address = params["from"]
+    call_value = int(params.get("value", "0x0"), 16) if params.get("value") else 0
     transaction_hash_variant = (
         params["transaction_hash_variant"]
         if "transaction_hash_variant" in params
@@ -1180,6 +1181,7 @@ async def _gen_call_with_validator(
                     from_address=from_address,
                     calldata=decoded_data.calldata,
                     transaction_created_at=txn_created_at,
+                    value=call_value,
                 )
             elif type == "deploy":
                 txn_created_at = None
@@ -1462,9 +1464,6 @@ def send_raw_transaction(
                 )
 
         if genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT:
-            if value > 0:
-                raise InvalidTransactionError("Deploy Transaction can't send value")
-
             if (
                 rollup_transaction_details is None
                 or not "recipient" in rollup_transaction_details

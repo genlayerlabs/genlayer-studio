@@ -148,6 +148,7 @@ class _SnapshotView(genvmbase.StateProxy):
         # Shared immutable cross-contract snapshots for this transaction context.
         self._shared_contract_snapshot_cache = shared_contract_snapshot_cache
         self._collect_metrics = collect_metrics
+        self._balance_override: int | None = None
         # Primary contract fast path:
         # decode the full primary contract state once and then read by bytes slot key.
         self._primary_decoded: dict[bytes, bytes] | None = None
@@ -347,6 +348,8 @@ class _SnapshotView(genvmbase.StateProxy):
             self._shared_decoded_value_cache[raw_new_value] = new_value
 
     def get_balance(self, addr: Address) -> int:
+        if self._balance_override is not None and addr == self.contract_address:
+            return self._balance_override
         snap = self._get_snapshot(addr)
         return snap.balance
 
@@ -627,6 +630,7 @@ class Node:
                 calldata,
                 transaction.hash,
                 transaction_created_at,
+                value=transaction.value or 0,
             )
 
             self.timing_callback("DEPLOY_END")
@@ -642,6 +646,7 @@ class Node:
                 calldata,
                 transaction.hash,
                 transaction_created_at,
+                value=transaction.value or 0,
             )
 
             self.timing_callback("RUN_END")
@@ -762,6 +767,7 @@ class Node:
         calldata: bytes,
         transaction_hash: str | None = None,
         transaction_created_at: str | None = None,
+        value: int = 0,
     ) -> Receipt:
         assert self.contract_snapshot is not None
 
@@ -777,6 +783,7 @@ class Node:
             transaction_hash=transaction_hash,
             transaction_datetime=transaction_datetime,
             code=code_to_deploy,
+            value=value,
         )
 
     async def run_contract(
@@ -785,6 +792,7 @@ class Node:
         calldata: bytes,
         transaction_hash: str | None = None,
         transaction_created_at: str | None = None,
+        value: int = 0,
     ) -> Receipt:
         return await self._run_genvm(
             from_address,
@@ -793,6 +801,7 @@ class Node:
             is_init=False,
             transaction_hash=transaction_hash,
             transaction_datetime=self._date_from_str(transaction_created_at),
+            value=value,
         )
 
     async def get_contract_data(
@@ -926,6 +935,7 @@ class Node:
         state_status: str | None = None,
         timeout: float = 10 * 60,
         code: bytes | None = None,
+        value: int = 0,
     ) -> Receipt:
         self.timing_callback("GENVM_PREPARATION_START")
 
@@ -951,6 +961,8 @@ class Node:
             self.shared_contract_snapshot_cache,
             self.collect_state_proxy_metrics,
         )
+        if value > 0:
+            snapshot_view._balance_override = self.contract_snapshot.balance + value
 
         self.timing_callback("SNAPSHOT_CREATION_END")
 
@@ -983,7 +995,7 @@ class Node:
             "origin_address": Address(
                 from_address
             ),  # FIXME: no origin in simulator #751
-            "value": 0,
+            "value": value,
             "chain_id": get_simulator_chain_id(),
         }
         if transaction_datetime is not None:

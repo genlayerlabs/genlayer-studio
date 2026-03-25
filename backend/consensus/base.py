@@ -1443,6 +1443,28 @@ class PendingState(TransactionState):
             )
             return None
 
+        # Sender balance pre-check for top-level payable calls
+        tx_value = context.transaction.value or 0
+        is_child_tx = context.transaction.triggered_by_hash is not None
+        if tx_value > 0 and not is_child_tx:
+            sender_balance = context.accounts_manager.get_account_balance(
+                context.transaction.from_address
+            )
+            if sender_balance < tx_value:
+                await ConsensusAlgorithm.dispatch_transaction_status_update(
+                    context.transactions_processor,
+                    context.transaction.hash,
+                    TransactionStatus.UNDETERMINED,
+                    context.msg_handler,
+                )
+                return None
+
+        # Credit target contract on child tx activation (value from parent message)
+        if tx_value > 0 and is_child_tx:
+            context.accounts_manager.credit_account_balance(
+                context.transaction.to_address, tx_value
+            )
+
         # Get all validators
         if context.validators_snapshot is None:
             all_validators = None
@@ -2162,7 +2184,8 @@ class AcceptedState(TransactionState):
         await executor.execute(pre_effects)
 
         # Impure: triggered transaction processing (needs DB reads for nonce/accounts)
-        if not context.transaction.appealed and execution_success:
+        # Cumulative: child emission happens on every acceptance round (including appeal re-acceptance)
+        if execution_success:
             internal_messages_data, insert_transactions_data = _get_messages_data(
                 context,
                 leader_receipt.pending_transactions,
@@ -2179,6 +2202,36 @@ class AcceptedState(TransactionState):
             _emit_messages(
                 context, insert_transactions_data, rollup_receipt, "accepted"
             )
+
+            # Balance accounting for accepted messages
+            total_msg_debit = sum(
+                pt.value
+                for pt in leader_receipt.pending_transactions
+                if pt.on == "accepted" and pt.value > 0
+            )
+
+            # Credit incoming value on first acceptance only (not on appeal re-acceptance)
+            tx_value = context.transaction.value or 0
+            incoming_credit = 0
+            if not context.transaction.appealed and tx_value > 0:
+                incoming_credit = tx_value
+                # Debit sender EOA
+                context.accounts_manager.debit_account_balance(
+                    context.transaction.from_address, tx_value
+                )
+
+            # Apply net balance change to contract
+            net_delta = incoming_credit - total_msg_debit
+            if net_delta != 0:
+                contract_addr = context.transaction.to_address
+                if net_delta > 0:
+                    context.accounts_manager.credit_account_balance(
+                        contract_addr, net_delta
+                    )
+                else:
+                    context.accounts_manager.debit_account_balance(
+                        contract_addr, abs(net_delta)
+                    )
 
         # Execute post-effects (status update + appeal cleanup)
         await executor.execute(post_effects)
@@ -2349,6 +2402,17 @@ class FinalizingState(TransactionState):
                 context, insert_transactions_data, rollup_receipt, "finalized"
             )
 
+            # Balance debit for on_finalized messages
+            total_finalized_debit = sum(
+                pt.value
+                for pt in leader_receipt.pending_transactions
+                if pt.on == "finalized" and pt.value > 0
+            )
+            if total_finalized_debit > 0:
+                context.accounts_manager.debit_account_balance(
+                    context.transaction.to_address, total_finalized_debit
+                )
+
         await executor.execute(post_effects)
 
 
@@ -2359,10 +2423,13 @@ def _get_messages_data(
 ):
     insert_transactions_data = []
     internal_messages_data = []
+    base_nonce = context.transactions_processor.get_transaction_count(
+        context.transaction.to_address
+    )
+    nonce_offset = 0
     for pending_transaction in filter(lambda t: t.on == on, pending_transactions):
-        nonce = context.transactions_processor.get_transaction_count(
-            context.transaction.to_address
-        )
+        nonce = base_nonce + nonce_offset
+        nonce_offset += 1
         data: dict
         transaction_type: TransactionType
         if pending_transaction.is_deploy():
@@ -2402,7 +2469,13 @@ def _get_messages_data(
             }
 
         insert_transactions_data.append(
-            [pending_transaction.address, data, transaction_type.value, nonce]
+            [
+                pending_transaction.address,
+                data,
+                transaction_type.value,
+                nonce,
+                pending_transaction.value,
+            ]
         )
 
         serializable_data = data.copy()
@@ -2449,7 +2522,7 @@ def _emit_messages(
             context.transaction.to_address,  # new calls are done by the contract
             insert_transaction_data[0],
             insert_transaction_data[1],
-            value=0,  # we only handle EOA transfers at the moment, so no value gets transferred
+            value=insert_transaction_data[4],
             type=insert_transaction_data[2],
             nonce=insert_transaction_data[3],
             leader_only=leader_only,  # Backward compat

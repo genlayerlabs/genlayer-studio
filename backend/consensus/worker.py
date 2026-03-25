@@ -223,7 +223,7 @@ class ConsensusWorker:
                       transactions.leader_only, transactions.execution_mode, transactions.sim_config,
                       transactions.status, transactions.consensus_data,
                       transactions.input_data, transactions.created_at, transactions.timestamp_awaiting_finalization,
-                      transactions.appeal_failed, transactions.blocked_at;
+                      transactions.appeal_failed, transactions.blocked_at, transactions.triggered_by_hash;
         """
         )
 
@@ -267,6 +267,7 @@ class ConsensusWorker:
                 "timestamp_awaiting_finalization": result.timestamp_awaiting_finalization,
                 "appeal_failed": result.appeal_failed,
                 "blocked_at": result.blocked_at,
+                "triggered_by": result.triggered_by_hash,
             }
 
         return None
@@ -331,7 +332,8 @@ class ConsensusWorker:
                       transactions.input_data, transactions.created_at, transactions.appealed,
                       transactions.appeal_failed, transactions.timestamp_appeal,
                       transactions.appeal_undetermined, transactions.appeal_leader_timeout,
-                      transactions.appeal_validators_timeout, transactions.blocked_at;
+                      transactions.appeal_validators_timeout, transactions.blocked_at,
+                      transactions.triggered_by_hash;
         """
         )
 
@@ -374,6 +376,7 @@ class ConsensusWorker:
                 "appeal_leader_timeout": result.appeal_leader_timeout,
                 "appeal_validators_timeout": result.appeal_validators_timeout,
                 "blocked_at": result.blocked_at,
+                "triggered_by": result.triggered_by_hash,
             }
 
         return None
@@ -439,7 +442,8 @@ class ConsensusWorker:
                       transactions.gaslimit, transactions.r, transactions.s, transactions.v,
                       transactions.leader_only, transactions.execution_mode, transactions.sim_config,
                       transactions.status, transactions.consensus_data,
-                      transactions.input_data, transactions.created_at, transactions.blocked_at;
+                      transactions.input_data, transactions.created_at, transactions.blocked_at,
+                      transactions.triggered_by_hash;
         """
         )
 
@@ -477,6 +481,7 @@ class ConsensusWorker:
                 "input_data": result.input_data,
                 "created_at": result.created_at,
                 "blocked_at": result.blocked_at,
+                "triggered_by": result.triggered_by_hash,
             }
 
         return None

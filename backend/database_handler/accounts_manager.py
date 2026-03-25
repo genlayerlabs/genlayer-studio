@@ -7,6 +7,7 @@ from .models import CurrentState
 from backend.database_handler.errors import AccountNotFoundError
 
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 
 class AccountsManager:
@@ -80,3 +81,32 @@ class AccountsManager:
             self.create_new_account_with_address(account_address)
             to_account = self.get_account(account_address)
         to_account.balance = new_balance
+
+    def debit_account_balance(self, account_address: str, amount: int) -> bool:
+        """Atomic conditional debit. Returns False if insufficient balance."""
+        if amount <= 0:
+            return True
+        result = self.session.execute(
+            text(
+                "UPDATE current_state SET balance = balance - :amount "
+                "WHERE id = :addr AND balance >= :amount"
+            ),
+            {"amount": amount, "addr": account_address},
+        )
+        return result.rowcount > 0
+
+    def credit_account_balance(self, account_address: str, amount: int):
+        """Atomic credit. Creates account if it doesn't exist."""
+        if amount <= 0:
+            return
+        account = self.get_account(account_address)
+        if account is None:
+            self.create_new_account_with_address(account_address)
+            account = self.get_account(account_address)
+        self.session.execute(
+            text(
+                "UPDATE current_state SET balance = balance + :amount "
+                "WHERE id = :addr"
+            ),
+            {"amount": amount, "addr": account_address},
+        )

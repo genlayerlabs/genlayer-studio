@@ -443,15 +443,9 @@ def decide_accepted(
             # emitTransactionAccepted rollup + _emit_messages) happens in
             # handle() between pre_effects and post_effects execution.
     else:
-        # Appeal failed: emit rollup with empty messages
-        pre_effects.append(
-            EmitRollupEventEffect(
-                event_name="emitTransactionAccepted",
-                account=leader_node_config,
-                tx_hash=tx_hash,
-                extra_args=([],),
-            )
-        )
+        # Appeal re-acceptance: child emission and rollup event now handled
+        # uniformly in AcceptedState.handle() for cumulative message semantics
+        pass
 
     # ── Post effects ──
     post_effects.append(
