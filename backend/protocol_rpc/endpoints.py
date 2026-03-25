@@ -1497,12 +1497,20 @@ def send_raw_transaction(
             transaction_data = {"calldata": genlayer_transaction.data.calldata}
 
         # Debit sender for payable transactions at submission time
-        # Value goes "into" the transaction; credited to target on activation
-        if value > 0 and from_address:
-            if not accounts_manager.debit_account_balance(from_address, value):
-                raise InvalidTransactionError(
-                    f"Insufficient balance: sender {from_address} cannot cover value {value}"
-                )
+        # Skip for SEND (execute_transfer handles it) and duplicates
+        if (
+            value > 0
+            and from_address
+            and genlayer_transaction.type != TransactionType.SEND
+        ):
+            is_duplicate = transactions_processor.get_transaction_by_hash(
+                transaction_hash
+            )
+            if is_duplicate is None:
+                if not accounts_manager.debit_account_balance(from_address, value):
+                    raise InvalidTransactionError(
+                        f"Insufficient balance: sender {from_address} cannot cover value {value}"
+                    )
 
         # Insert transaction into the database
         transactions_processor.insert_transaction(

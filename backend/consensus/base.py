@@ -448,6 +448,10 @@ class TransactionContext:
             )
             if has_real_state:
                 self.contract_snapshot = saved
+                # Hydrate balance from DB — saved snapshots don't carry balance
+                if not hasattr(saved, "balance") or saved.balance is None:
+                    fresh = self.contract_snapshot_factory(self.transaction.to_address)
+                    self.contract_snapshot.balance = fresh.balance
             else:
                 self.contract_snapshot = self.contract_snapshot_factory(
                     self.transaction.to_address
@@ -2180,18 +2184,21 @@ class AcceptedState(TransactionState):
                 for pt in leader_receipt.pending_transactions
                 if pt.on == "accepted" and pt.value > 0
             )
+            debit_ok = True
             if total_msg_debit > 0:
-                if not context.accounts_manager.debit_account_balance(
+                debit_ok = context.accounts_manager.debit_account_balance(
                     context.transaction.to_address, total_msg_debit
-                ):
+                )
+                if not debit_ok:
                     from loguru import logger
 
                     logger.error(
                         f"Contract balance debit failed for {context.transaction.to_address}, "
-                        f"amount={total_msg_debit}, tx={context.transaction.hash}"
+                        f"amount={total_msg_debit}, tx={context.transaction.hash}. "
+                        f"Skipping value-bearing child emission."
                     )
 
-            # Emit child messages
+            # Emit child messages (skip value-bearing children if debit failed)
             internal_messages_data, insert_transactions_data = _get_messages_data(
                 context,
                 leader_receipt.pending_transactions,
