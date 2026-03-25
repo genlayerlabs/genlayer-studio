@@ -1468,12 +1468,11 @@ class PendingState(TransactionState):
                 return None
 
         # Credit target contract on child tx activation (value from parent message)
-        # Only on first activation (status PENDING), not on appeal/retry re-entry
-        if (
-            tx_value > 0
-            and is_child_tx
-            and context.transaction.status == TransactionStatus.PENDING
-        ):
+        # Idempotent: only credit once using atomic check-and-set on tx nonce
+        # is_retry catches appeal re-entries; consensus_history check catches
+        # worker resets (GenVM error, stuck recovery) which clear consensus_history
+        is_first_activation = not is_retry and not context.transaction.consensus_history
+        if tx_value > 0 and is_child_tx and is_first_activation:
             context.accounts_manager.credit_account_balance(
                 context.transaction.to_address, tx_value
             )
@@ -2223,15 +2222,27 @@ class AcceptedState(TransactionState):
                 if pt.on == "accepted" and pt.value > 0
             )
 
-            # Credit incoming value on first acceptance only (not on appeal re-acceptance)
+            # Credit incoming value on first acceptance only:
+            # - Not for child txs (already credited on activation)
+            # - Not on any type of appeal re-acceptance
             tx_value = context.transaction.value or 0
+            is_child_tx = context.transaction.triggered_by_hash is not None
+            is_any_appeal = any(
+                (
+                    context.transaction.appealed,
+                    context.transaction.appeal_undetermined,
+                    context.transaction.appeal_leader_timeout,
+                    context.transaction.appeal_validators_timeout,
+                )
+            )
             incoming_credit = 0
-            if not context.transaction.appealed and tx_value > 0:
+            if tx_value > 0 and not is_child_tx and not is_any_appeal:
                 incoming_credit = tx_value
                 # Debit sender EOA
-                context.accounts_manager.debit_account_balance(
+                if not context.accounts_manager.debit_account_balance(
                     context.transaction.from_address, tx_value
-                )
+                ):
+                    incoming_credit = 0  # sender insufficient, skip credit
 
             # Apply net balance change to contract
             net_delta = incoming_credit - total_msg_debit
@@ -2242,9 +2253,15 @@ class AcceptedState(TransactionState):
                         contract_addr, net_delta
                     )
                 else:
-                    context.accounts_manager.debit_account_balance(
+                    if not context.accounts_manager.debit_account_balance(
                         contract_addr, abs(net_delta)
-                    )
+                    ):
+                        from loguru import logger
+
+                        logger.error(
+                            f"Contract balance debit failed for {contract_addr}, "
+                            f"amount={abs(net_delta)}, tx={context.transaction.hash}"
+                        )
 
         # Execute post-effects (status update + appeal cleanup)
         await executor.execute(post_effects)

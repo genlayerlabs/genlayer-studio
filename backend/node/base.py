@@ -961,7 +961,9 @@ class Node:
             self.shared_contract_snapshot_cache,
             self.collect_state_proxy_metrics,
         )
-        if value > 0:
+        # For non-deploy txs, override balance to include incoming value transiently.
+        # Deploy snapshots already have balance = transaction.value from contract_snapshot_factory.
+        if value > 0 and not is_init:
             snapshot_view._balance_override = self.contract_snapshot.balance + value
 
         self.timing_callback("SNAPSHOT_CREATION_END")
