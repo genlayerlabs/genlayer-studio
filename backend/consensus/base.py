@@ -2198,24 +2198,7 @@ class AcceptedState(TransactionState):
         # Impure: triggered transaction processing (needs DB reads for nonce/accounts)
         # Cumulative: child emission happens on every acceptance round (including appeal re-acceptance)
         if execution_success:
-            internal_messages_data, insert_transactions_data = _get_messages_data(
-                context,
-                leader_receipt.pending_transactions,
-                "accepted",
-            )
-
-            rollup_receipt = context.consensus_service.emit_transaction_event(
-                "emitTransactionAccepted",
-                leader_receipt.node_config,
-                context.transaction.hash,
-                internal_messages_data,
-            )
-
-            _emit_messages(
-                context, insert_transactions_data, rollup_receipt, "accepted"
-            )
-
-            # Balance accounting for accepted messages
+            # Step 1: Balance accounting BEFORE child emission
             total_msg_debit = sum(
                 pt.value
                 for pt in leader_receipt.pending_transactions
@@ -2244,10 +2227,10 @@ class AcceptedState(TransactionState):
                 ):
                     incoming_credit = 0  # sender insufficient, skip credit
 
-            # Apply net balance change to contract
+            # Apply net balance change to contract (debit before emitting children)
+            contract_addr = context.transaction.to_address
             net_delta = incoming_credit - total_msg_debit
             if net_delta != 0:
-                contract_addr = context.transaction.to_address
                 if net_delta > 0:
                     context.accounts_manager.credit_account_balance(
                         contract_addr, net_delta
@@ -2260,8 +2243,29 @@ class AcceptedState(TransactionState):
 
                         logger.error(
                             f"Contract balance debit failed for {contract_addr}, "
-                            f"amount={abs(net_delta)}, tx={context.transaction.hash}"
+                            f"amount={abs(net_delta)}, tx={context.transaction.hash}. "
+                            f"Skipping child message emission."
                         )
+                        # Skip child emission if contract can't cover the value
+                        total_msg_debit = 0  # reset to skip emission below
+
+            # Step 2: Emit child messages only after successful balance accounting
+            internal_messages_data, insert_transactions_data = _get_messages_data(
+                context,
+                leader_receipt.pending_transactions,
+                "accepted",
+            )
+
+            rollup_receipt = context.consensus_service.emit_transaction_event(
+                "emitTransactionAccepted",
+                leader_receipt.node_config,
+                context.transaction.hash,
+                internal_messages_data,
+            )
+
+            _emit_messages(
+                context, insert_transactions_data, rollup_receipt, "accepted"
+            )
 
         # Execute post-effects (status update + appeal cleanup)
         await executor.execute(post_effects)
@@ -2415,6 +2419,23 @@ class FinalizingState(TransactionState):
                 finalized_state=accepted_state,
             )
 
+            # Balance debit BEFORE child emission
+            total_finalized_debit = sum(
+                pt.value
+                for pt in leader_receipt.pending_transactions
+                if pt.on == "finalized" and pt.value > 0
+            )
+            if total_finalized_debit > 0:
+                if not context.accounts_manager.debit_account_balance(
+                    context.transaction.to_address, total_finalized_debit
+                ):
+                    from loguru import logger
+
+                    logger.error(
+                        f"Contract finalization debit failed for {context.transaction.to_address}, "
+                        f"amount={total_finalized_debit}, tx={context.transaction.hash}"
+                    )
+
             internal_messages_data, insert_transactions_data = _get_messages_data(
                 context,
                 leader_receipt.pending_transactions,
@@ -2431,17 +2452,6 @@ class FinalizingState(TransactionState):
             _emit_messages(
                 context, insert_transactions_data, rollup_receipt, "finalized"
             )
-
-            # Balance debit for on_finalized messages
-            total_finalized_debit = sum(
-                pt.value
-                for pt in leader_receipt.pending_transactions
-                if pt.on == "finalized" and pt.value > 0
-            )
-            if total_finalized_debit > 0:
-                context.accounts_manager.debit_account_balance(
-                    context.transaction.to_address, total_finalized_debit
-                )
 
         await executor.execute(post_effects)
 
