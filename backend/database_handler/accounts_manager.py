@@ -114,3 +114,38 @@ class AccountsManager:
             ),
             {"amount": amount, "addr": account_address},
         )
+
+    def credit_tx_value_once(
+        self, tx_hash: str, target_address: str, amount: int
+    ) -> bool:
+        """Idempotent activation credit: credits target only if tx not already credited.
+        Sets value_credited=true atomically. Returns True if credit was applied."""
+        if amount <= 0:
+            return False
+        # Ensure target account exists
+        self.session.execute(
+            text(
+                "INSERT INTO current_state (id, data, balance) "
+                "VALUES (:addr, '{}'::jsonb, 0) "
+                "ON CONFLICT (id) DO NOTHING"
+            ),
+            {"addr": target_address},
+        )
+        # Atomic: set value_credited and credit balance in one operation
+        result = self.session.execute(
+            text(
+                "UPDATE transactions SET value_credited = true "
+                "WHERE hash = :hash AND value_credited = false AND value > 0"
+            ),
+            {"hash": tx_hash},
+        )
+        if result.rowcount > 0:
+            self.session.execute(
+                text(
+                    "UPDATE current_state SET balance = balance + :amount "
+                    "WHERE id = :addr"
+                ),
+                {"amount": amount, "addr": target_address},
+            )
+            return True
+        return False

@@ -1443,38 +1443,14 @@ class PendingState(TransactionState):
             )
             return None
 
-        # Sender balance pre-check for top-level payable calls (first execution only)
+        # Credit target contract on activation (value from transaction)
+        # Idempotent via value_credited flag — safe across retries/resets
         tx_value = context.transaction.value or 0
-        is_child_tx = context.transaction.triggered_by_hash is not None
-        is_retry = any(
-            (
-                context.transaction.appealed,
-                context.transaction.appeal_undetermined,
-                context.transaction.appeal_leader_timeout,
-                context.transaction.appeal_validators_timeout,
-            )
-        )
-        if tx_value > 0 and not is_child_tx and not is_retry:
-            sender_balance = context.accounts_manager.get_account_balance(
-                context.transaction.from_address
-            )
-            if sender_balance < tx_value:
-                await ConsensusAlgorithm.dispatch_transaction_status_update(
-                    context.transactions_processor,
-                    context.transaction.hash,
-                    TransactionStatus.UNDETERMINED,
-                    context.msg_handler,
-                )
-                return None
-
-        # Credit target contract on child tx activation (value from parent message)
-        # Idempotent: only credit once using atomic check-and-set on tx nonce
-        # is_retry catches appeal re-entries; consensus_history check catches
-        # worker resets (GenVM error, stuck recovery) which clear consensus_history
-        is_first_activation = not is_retry and not context.transaction.consensus_history
-        if tx_value > 0 and is_child_tx and is_first_activation:
-            context.accounts_manager.credit_account_balance(
-                context.transaction.to_address, tx_value
+        if tx_value > 0:
+            context.accounts_manager.credit_tx_value_once(
+                context.transaction.hash,
+                context.transaction.to_address,
+                tx_value,
             )
 
         # Get all validators
@@ -2198,58 +2174,24 @@ class AcceptedState(TransactionState):
         # Impure: triggered transaction processing (needs DB reads for nonce/accounts)
         # Cumulative: child emission happens on every acceptance round (including appeal re-acceptance)
         if execution_success:
-            # Step 1: Balance accounting BEFORE child emission
+            # Balance debit for on_accepted messages BEFORE child emission
             total_msg_debit = sum(
                 pt.value
                 for pt in leader_receipt.pending_transactions
                 if pt.on == "accepted" and pt.value > 0
             )
-
-            # Credit incoming value on first acceptance only:
-            # - Not for child txs (already credited on activation)
-            # - Not on any type of appeal re-acceptance
-            tx_value = context.transaction.value or 0
-            is_child_tx = context.transaction.triggered_by_hash is not None
-            is_any_appeal = any(
-                (
-                    context.transaction.appealed,
-                    context.transaction.appeal_undetermined,
-                    context.transaction.appeal_leader_timeout,
-                    context.transaction.appeal_validators_timeout,
-                )
-            )
-            incoming_credit = 0
-            if tx_value > 0 and not is_child_tx and not is_any_appeal:
-                incoming_credit = tx_value
-                # Debit sender EOA
+            if total_msg_debit > 0:
                 if not context.accounts_manager.debit_account_balance(
-                    context.transaction.from_address, tx_value
+                    context.transaction.to_address, total_msg_debit
                 ):
-                    incoming_credit = 0  # sender insufficient, skip credit
+                    from loguru import logger
 
-            # Apply net balance change to contract (debit before emitting children)
-            contract_addr = context.transaction.to_address
-            net_delta = incoming_credit - total_msg_debit
-            if net_delta != 0:
-                if net_delta > 0:
-                    context.accounts_manager.credit_account_balance(
-                        contract_addr, net_delta
+                    logger.error(
+                        f"Contract balance debit failed for {context.transaction.to_address}, "
+                        f"amount={total_msg_debit}, tx={context.transaction.hash}"
                     )
-                else:
-                    if not context.accounts_manager.debit_account_balance(
-                        contract_addr, abs(net_delta)
-                    ):
-                        from loguru import logger
 
-                        logger.error(
-                            f"Contract balance debit failed for {contract_addr}, "
-                            f"amount={abs(net_delta)}, tx={context.transaction.hash}. "
-                            f"Skipping child message emission."
-                        )
-                        # Skip child emission if contract can't cover the value
-                        total_msg_debit = 0  # reset to skip emission below
-
-            # Step 2: Emit child messages only after successful balance accounting
+            # Emit child messages
             internal_messages_data, insert_transactions_data = _get_messages_data(
                 context,
                 leader_receipt.pending_transactions,

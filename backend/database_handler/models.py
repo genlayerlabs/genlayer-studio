@@ -151,6 +151,9 @@ class Transactions(Base):
     execution_mode: Mapped[str] = mapped_column(
         String(30), server_default="NORMAL", nullable=False, default="NORMAL"
     )
+    value_credited: Mapped[bool] = mapped_column(
+        Boolean, server_default="false", nullable=False, default=False
+    )
 
 
 class Validators(Base):

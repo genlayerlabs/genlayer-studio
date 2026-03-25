@@ -148,7 +148,6 @@ class _SnapshotView(genvmbase.StateProxy):
         # Shared immutable cross-contract snapshots for this transaction context.
         self._shared_contract_snapshot_cache = shared_contract_snapshot_cache
         self._collect_metrics = collect_metrics
-        self._balance_override: int | None = None
         # Primary contract fast path:
         # decode the full primary contract state once and then read by bytes slot key.
         self._primary_decoded: dict[bytes, bytes] | None = None
@@ -348,8 +347,6 @@ class _SnapshotView(genvmbase.StateProxy):
             self._shared_decoded_value_cache[raw_new_value] = new_value
 
     def get_balance(self, addr: Address) -> int:
-        if self._balance_override is not None and addr == self.contract_address:
-            return self._balance_override
         snap = self._get_snapshot(addr)
         # Deserialized snapshots (from_dict) don't have balance — use 0 as fallback.
         # Balance is not part of the snapshot by design; it persists in DB independently.
@@ -612,19 +609,6 @@ class Node:
         transaction_data = transaction.data
         assert transaction.from_address is not None
 
-        # Detect if this is a first execution vs appeal/retry replay
-        is_first_execution = (
-            not any(
-                (
-                    transaction.appealed,
-                    transaction.appeal_undetermined,
-                    getattr(transaction, "appeal_leader_timeout", False),
-                    getattr(transaction, "appeal_validators_timeout", False),
-                )
-            )
-            and not transaction.consensus_history
-        )
-
         # Override transaction timestamp
         sim_config = transaction.sim_config
         transaction_created_at = transaction.created_at
@@ -646,7 +630,6 @@ class Node:
                 transaction.hash,
                 transaction_created_at,
                 value=transaction.value or 0,
-                is_first_execution=is_first_execution,
             )
 
             self.timing_callback("DEPLOY_END")
@@ -663,7 +646,6 @@ class Node:
                 transaction.hash,
                 transaction_created_at,
                 value=transaction.value or 0,
-                is_first_execution=is_first_execution,
             )
 
             self.timing_callback("RUN_END")
@@ -785,7 +767,6 @@ class Node:
         transaction_hash: str | None = None,
         transaction_created_at: str | None = None,
         value: int = 0,
-        is_first_execution: bool = True,
     ) -> Receipt:
         assert self.contract_snapshot is not None
 
@@ -802,7 +783,6 @@ class Node:
             transaction_datetime=transaction_datetime,
             code=code_to_deploy,
             value=value,
-            is_first_execution=is_first_execution,
         )
 
     async def run_contract(
@@ -812,7 +792,6 @@ class Node:
         transaction_hash: str | None = None,
         transaction_created_at: str | None = None,
         value: int = 0,
-        is_first_execution: bool = True,
     ) -> Receipt:
         return await self._run_genvm(
             from_address,
@@ -822,7 +801,6 @@ class Node:
             transaction_hash=transaction_hash,
             transaction_datetime=self._date_from_str(transaction_created_at),
             value=value,
-            is_first_execution=is_first_execution,
         )
 
     async def get_contract_data(
@@ -957,7 +935,6 @@ class Node:
         timeout: float = 10 * 60,
         code: bytes | None = None,
         value: int = 0,
-        is_first_execution: bool = True,
     ) -> Receipt:
         self.timing_callback("GENVM_PREPARATION_START")
 
@@ -983,14 +960,6 @@ class Node:
             self.shared_contract_snapshot_cache,
             self.collect_state_proxy_metrics,
         )
-        # For non-deploy first executions, override balance to include incoming value
-        # transiently. Deploy snapshots already have balance = transaction.value.
-        # On appeal/retry (is_first_execution=False), DB balance already includes
-        # the credit from first acceptance, so no override needed.
-        if value > 0 and not is_init and is_first_execution:
-            snapshot_view._balance_override = (
-                getattr(self.contract_snapshot, "balance", 0) + value
-            )
 
         self.timing_callback("SNAPSHOT_CREATION_END")
 
