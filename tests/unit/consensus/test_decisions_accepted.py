@@ -326,12 +326,11 @@ class TestDecideAcceptedAppealed:
         e = _find_effect(pre, UpdateConsensusHistoryEffect)
         assert e.leader_receipt is None
 
-    def test_emits_rollup_with_empty_messages(self):
+    def test_no_rollup_event_on_appeal_reacceptance(self):
+        """Rollup event is now emitted uniformly in AcceptedState.handle() for cumulative semantics."""
         pre, _, _, _ = decide_accepted(**self._kwargs())
         e = _find_effect(pre, EmitRollupEventEffect)
-        assert e is not None
-        assert e.event_name == "emitTransactionAccepted"
-        assert e.extra_args == ([],)
+        assert e is None
 
     def test_no_contract_write_effects(self):
         pre, _, _, _ = decide_accepted(**self._kwargs())
