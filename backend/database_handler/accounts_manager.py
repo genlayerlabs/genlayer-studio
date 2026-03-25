@@ -99,10 +99,14 @@ class AccountsManager:
         """Atomic credit. Creates account if it doesn't exist."""
         if amount <= 0:
             return
-        account = self.get_account(account_address)
-        if account is None:
-            self.create_new_account_with_address(account_address)
-            account = self.get_account(account_address)
+        self.session.execute(
+            text(
+                "INSERT INTO current_state (id, data, balance) "
+                "VALUES (:addr, '{}'::jsonb, 0) "
+                "ON CONFLICT (id) DO NOTHING"
+            ),
+            {"addr": account_address},
+        )
         self.session.execute(
             text(
                 "UPDATE current_state SET balance = balance + :amount "

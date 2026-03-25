@@ -85,4 +85,10 @@ def test_payable_withdraw_emit_transfer(setup_validators):
     assert contract.get_deposited(args=[]).call() == 0
     assert contract.get_balance(args=[]).call() == 0
 
+    # Verify the triggered child transaction was created with value
+    # (recipient EOA balance check requires RPC — not available in gltest integration mode)
+    assert tx_execution_succeeded(
+        tx2
+    ), "withdraw transaction should succeed and create child tx"
+
     # NOTE: test_payable_deploy_with_value deferred — gltest.deploy() doesn't accept value yet

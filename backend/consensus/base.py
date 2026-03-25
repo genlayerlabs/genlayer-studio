@@ -1443,10 +1443,18 @@ class PendingState(TransactionState):
             )
             return None
 
-        # Sender balance pre-check for top-level payable calls
+        # Sender balance pre-check for top-level payable calls (first execution only)
         tx_value = context.transaction.value or 0
         is_child_tx = context.transaction.triggered_by_hash is not None
-        if tx_value > 0 and not is_child_tx:
+        is_retry = any(
+            (
+                context.transaction.appealed,
+                context.transaction.appeal_undetermined,
+                context.transaction.appeal_leader_timeout,
+                context.transaction.appeal_validators_timeout,
+            )
+        )
+        if tx_value > 0 and not is_child_tx and not is_retry:
             sender_balance = context.accounts_manager.get_account_balance(
                 context.transaction.from_address
             )
@@ -1460,7 +1468,12 @@ class PendingState(TransactionState):
                 return None
 
         # Credit target contract on child tx activation (value from parent message)
-        if tx_value > 0 and is_child_tx:
+        # Only on first activation (status PENDING), not on appeal/retry re-entry
+        if (
+            tx_value > 0
+            and is_child_tx
+            and context.transaction.status == TransactionStatus.PENDING
+        ):
             context.accounts_manager.credit_account_balance(
                 context.transaction.to_address, tx_value
             )
