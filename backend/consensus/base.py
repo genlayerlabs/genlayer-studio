@@ -1451,11 +1451,18 @@ class PendingState(TransactionState):
         # Idempotent via value_credited flag — safe across retries/resets
         tx_value = context.transaction.value or 0
         if tx_value > 0:
-            context.accounts_manager.credit_tx_value_once(
+            credited = context.accounts_manager.credit_tx_value_once(
                 context.transaction.hash,
                 context.transaction.to_address,
                 tx_value,
             )
+            # Refresh snapshot balance so GenVM sees post-credit balance
+            if credited and context.contract_snapshot is not None:
+                context.contract_snapshot.balance = (
+                    context.accounts_manager.get_account_balance(
+                        context.transaction.to_address
+                    )
+                )
 
         # Get all validators
         if context.validators_snapshot is None:
@@ -2198,10 +2205,19 @@ class AcceptedState(TransactionState):
                         f"Skipping value-bearing child emission."
                     )
 
-            # Emit child messages (skip value-bearing children if debit failed)
+            # Emit child messages — filter out value-bearing children if debit failed
+            if debit_ok:
+                pending_to_emit = leader_receipt.pending_transactions
+            else:
+                pending_to_emit = [
+                    pt
+                    for pt in leader_receipt.pending_transactions
+                    if pt.on != "accepted" or pt.value <= 0
+                ]
+
             internal_messages_data, insert_transactions_data = _get_messages_data(
                 context,
-                leader_receipt.pending_transactions,
+                pending_to_emit,
                 "accepted",
             )
 
@@ -2374,10 +2390,12 @@ class FinalizingState(TransactionState):
                 for pt in leader_receipt.pending_transactions
                 if pt.on == "finalized" and pt.value > 0
             )
+            finalize_debit_ok = True
             if total_finalized_debit > 0:
-                if not context.accounts_manager.debit_account_balance(
+                finalize_debit_ok = context.accounts_manager.debit_account_balance(
                     context.transaction.to_address, total_finalized_debit
-                ):
+                )
+                if not finalize_debit_ok:
                     from loguru import logger
 
                     logger.error(
@@ -2385,9 +2403,19 @@ class FinalizingState(TransactionState):
                         f"amount={total_finalized_debit}, tx={context.transaction.hash}"
                     )
 
+            # Filter out value-bearing children if debit failed
+            if finalize_debit_ok:
+                pending_to_finalize = leader_receipt.pending_transactions
+            else:
+                pending_to_finalize = [
+                    pt
+                    for pt in leader_receipt.pending_transactions
+                    if pt.on != "finalized" or pt.value <= 0
+                ]
+
             internal_messages_data, insert_transactions_data = _get_messages_data(
                 context,
-                leader_receipt.pending_transactions,
+                pending_to_finalize,
                 "finalized",
             )
 

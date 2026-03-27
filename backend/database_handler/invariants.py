@@ -14,8 +14,7 @@ def get_in_transit_value(session: Session) -> int:
         text(
             """
             SELECT COALESCE(SUM(value), 0) FROM transactions
-            WHERE triggered_by_hash IS NOT NULL
-            AND value > 0
+            WHERE value > 0
             AND status IN ('PENDING', 'ACTIVATED')
             """
         )

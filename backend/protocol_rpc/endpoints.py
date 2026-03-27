@@ -1496,21 +1496,8 @@ def send_raw_transaction(
 
             transaction_data = {"calldata": genlayer_transaction.data.calldata}
 
-        # Debit sender for payable transactions at submission time
-        # Skip for SEND (execute_transfer handles it) and duplicates
-        if (
-            value > 0
-            and from_address
-            and genlayer_transaction.type != TransactionType.SEND
-        ):
-            is_duplicate = transactions_processor.get_transaction_by_hash(
-                transaction_hash
-            )
-            if is_duplicate is None:
-                if not accounts_manager.debit_account_balance(from_address, value):
-                    raise InvalidTransactionError(
-                        f"Insufficient balance: sender {from_address} cannot cover value {value}"
-                    )
+        # Check for duplicate before insert+debit to avoid TOCTOU races
+        is_duplicate = transactions_processor.get_transaction_by_hash(transaction_hash)
 
         # Insert transaction into the database
         transactions_processor.insert_transaction(
@@ -1529,6 +1516,19 @@ def send_raw_transaction(
             None,  # triggered_on
             execution_mode,
         )
+
+        # Debit sender AFTER insert to prevent TOCTOU double-debit
+        # Skip for SEND (execute_transfer handles it) and duplicates
+        if (
+            value > 0
+            and from_address
+            and genlayer_transaction.type != TransactionType.SEND
+            and is_duplicate is None
+        ):
+            if not accounts_manager.debit_account_balance(from_address, value):
+                raise InvalidTransactionError(
+                    f"Insufficient balance: sender {from_address} cannot cover value {value}"
+                )
 
         # Post-insert verification: ensure the transaction is visible immediately
         try:
