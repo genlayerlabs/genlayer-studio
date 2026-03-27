@@ -27,7 +27,6 @@ from backend.protocol_rpc.message_handler.base import (
 from backend.database_handler.accounts_manager import AccountsManager
 from backend.database_handler.validators_registry import (
     ValidatorsRegistry,
-    ModifiableValidatorsRegistry,
 )
 
 from backend.node.create_nodes.create_nodes import (
@@ -1144,64 +1143,70 @@ async def _gen_call_with_validator(
         )
 
     async with _genvm_semaphore:
-        if type == "read":
-            # Pre-parse timestamp override and map errors
-            txn_dt = None
-            if sim_config and override_transaction_datetime:
-                try:
-                    txn_dt = sim_config.genvm_datetime_as_datetime
-                except ValueError as e:
-                    raise JSONRPCError(
-                        code=-32602,
-                        message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
-                        data={},
-                    ) from e
-            decoded_data = transactions_parser.decode_method_call_data(data)
-            receipt = await node.get_contract_data(
-                from_address=from_address,
-                calldata=decoded_data.calldata,
-                state_status=state_status,
-                transaction_datetime=txn_dt,
-            )
-        elif type == "write":
-            txn_created_at = None
-            if sim_config and override_transaction_datetime:
-                try:
-                    _ = sim_config.genvm_datetime_as_datetime  # validation only
-                    txn_created_at = sim_config.genvm_datetime
-                except ValueError as e:
-                    raise JSONRPCError(
-                        code=-32602,
-                        message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
-                        data={},
-                    ) from e
-            decoded_data = transactions_parser.decode_method_send_data(data)
-            receipt = await node.run_contract(
-                from_address=from_address,
-                calldata=decoded_data.calldata,
-                transaction_created_at=txn_created_at,
-            )
-        elif type == "deploy":
-            txn_created_at = None
-            if sim_config and override_transaction_datetime:
-                try:
-                    _ = sim_config.genvm_datetime_as_datetime  # validation only
-                    txn_created_at = sim_config.genvm_datetime
-                except ValueError as e:
-                    raise JSONRPCError(
-                        code=-32602,
-                        message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
-                        data={},
-                    ) from e
-            decoded_data = transactions_parser.decode_deployment_data(data)
-            receipt = await node.deploy_contract(
-                from_address=from_address,
-                code_to_deploy=decoded_data.contract_code,
-                calldata=decoded_data.calldata,
-                transaction_created_at=txn_created_at,
-            )
-        else:
-            raise JSONRPCError(f"Invalid type: {type}")
+        try:
+            if type == "read":
+                # Pre-parse timestamp override and map errors
+                txn_dt = None
+                if sim_config and override_transaction_datetime:
+                    try:
+                        txn_dt = sim_config.genvm_datetime_as_datetime
+                    except ValueError as e:
+                        raise JSONRPCError(
+                            code=-32602,
+                            message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                            data={},
+                        ) from e
+                decoded_data = transactions_parser.decode_method_call_data(data)
+                receipt = await node.get_contract_data(
+                    from_address=from_address,
+                    calldata=decoded_data.calldata,
+                    state_status=state_status,
+                    transaction_datetime=txn_dt,
+                )
+            elif type == "write":
+                txn_created_at = None
+                if sim_config and override_transaction_datetime:
+                    try:
+                        _ = sim_config.genvm_datetime_as_datetime  # validation only
+                        txn_created_at = sim_config.genvm_datetime
+                    except ValueError as e:
+                        raise JSONRPCError(
+                            code=-32602,
+                            message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                            data={},
+                        ) from e
+                decoded_data = transactions_parser.decode_method_send_data(data)
+                receipt = await node.run_contract(
+                    from_address=from_address,
+                    calldata=decoded_data.calldata,
+                    transaction_created_at=txn_created_at,
+                )
+            elif type == "deploy":
+                txn_created_at = None
+                if sim_config and override_transaction_datetime:
+                    try:
+                        _ = sim_config.genvm_datetime_as_datetime  # validation only
+                        txn_created_at = sim_config.genvm_datetime
+                    except ValueError as e:
+                        raise JSONRPCError(
+                            code=-32602,
+                            message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                            data={},
+                        ) from e
+                decoded_data = transactions_parser.decode_deployment_data(data)
+                receipt = await node.deploy_contract(
+                    from_address=from_address,
+                    code_to_deploy=decoded_data.contract_code,
+                    calldata=decoded_data.calldata,
+                    transaction_created_at=txn_created_at,
+                )
+            else:
+                raise JSONRPCError(f"Invalid type: {type}")
+        except ContractNotFoundError as e:
+            raise NotFoundError(
+                message=f"Contract {e.address} not found",
+                data={"contract_address": e.address},
+            ) from e
 
     # Return the result of the write method
     if receipt.execution_result != ExecutionResultStatus.SUCCESS:
@@ -1345,10 +1350,16 @@ async def eth_call(
             manager=genvm_manager,
         )
 
-        receipt = await node.get_contract_data(
-            from_address=as_validator.address,
-            calldata=decoded_data.calldata,
-        )
+        try:
+            receipt = await node.get_contract_data(
+                from_address=as_validator.address,
+                calldata=decoded_data.calldata,
+            )
+        except ContractNotFoundError as e:
+            raise NotFoundError(
+                message=f"Contract {e.address} not found",
+                data={"contract_address": e.address},
+            ) from e
 
     if receipt.execution_result != ExecutionResultStatus.SUCCESS:
         raise JSONRPCError(

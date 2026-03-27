@@ -13,7 +13,8 @@
         "anthropic",
         "xai",
         "google",
-        "openrouter"
+        "openrouter",
+        "libertai"
       ]
     },
     "model": {
@@ -148,6 +149,10 @@
               "@preset/rally-testnet-gpt-5-1",
               "@preset/rally-testnet-sonnet-4-5",
               "@preset/rally-testnet-gemini-3-flash",
+              "@preset/rally-testnet-qwen-3-5",
+              "@preset/rally-testnet-deepseek-3-2",
+              "@preset/rally-testnet-kimi-2-5",
+              "@preset/rally-testnet-glm-5",
               "openai/gpt-5.2",
               "openai/gpt-5.1",
               "openai/gpt-5-mini",
@@ -162,6 +167,26 @@
               "mistralai/mistral-large-2512",
               "meta-llama/llama-4-maverick",
               "nvidia/llama-3.1-nemotron-ultra-253b-v1"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "provider": { "const": "libertai" }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "const": "openai-compatible"
+          },
+          "model": {
+            "enum": [
+              "ltai-fast",
+              "ltai-core"
             ]
           }
         }

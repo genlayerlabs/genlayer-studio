@@ -3,7 +3,7 @@ Contract linting service for GenVM contracts.
 Provides validation and linting for GenLayer smart contracts.
 """
 
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any
 from backend.protocol_rpc.exceptions import JSONRPCError
 
 
@@ -12,7 +12,6 @@ class ContractLinter:
 
     def __init__(self):
         """Initialize the ContractLinter."""
-        pass
 
     def lint_contract(
         self, source_code: str, filename: str = "contract.py"
@@ -38,7 +37,6 @@ class ContractLinter:
 
         try:
             from genvm_linter.linter import GenVMLinter
-            from genvm_linter.rules import Severity
 
             linter = GenVMLinter()
             results = linter.lint_source(source_code, filename)

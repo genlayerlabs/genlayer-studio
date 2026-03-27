@@ -49,7 +49,6 @@ def _make_receipt(
         mode=ExecutionMode.VALIDATOR,
         contract_state=contract_state or {},
         node_config={},
-        eq_outputs={},
         execution_result=execution_result,
         vote=None,
         genvm_result={
@@ -69,8 +68,8 @@ def _make_success_receipt() -> Receipt:
         mode=ExecutionMode.LEADER,
         contract_state={"slot": "data"},
         node_config={},
-        eq_outputs={},
         execution_result=ExecutionResultStatus.SUCCESS,
+        eq_outputs={},
         vote=None,
         genvm_result=None,
     )
@@ -191,7 +190,6 @@ def test_no_genvm_result_does_not_crash():
         mode=ExecutionMode.VALIDATOR,
         contract_state={},
         node_config={},
-        eq_outputs={},
         execution_result=ExecutionResultStatus.ERROR,
         vote=None,
         genvm_result=None,
@@ -218,11 +216,11 @@ def test_none_error_code_not_timeout():
     assert result.vote == Vote.DETERMINISTIC_VIOLATION
 
 
-# --- VM crash (non-timeout) → DISAGREE ---
+# --- VM error (non-timeout) → compared like any other result ---
 
 
-def test_vm_error_exit_code_votes_disagree():
-    """VM crash (exit_code) should be DISAGREE — validator couldn't validate."""
+def test_vm_error_exit_code_mismatching_leader_votes_deterministic_violation():
+    """VM error with different result from leader should be DETERMINISTIC_VIOLATION."""
     leader_receipt = _make_success_receipt()
     node = _make_node(leader_receipt)
 
@@ -232,11 +230,11 @@ def test_vm_error_exit_code_votes_disagree():
     )
 
     result = node._set_vote(receipt)
-    assert result.vote == Vote.DISAGREE
+    assert result.vote == Vote.DETERMINISTIC_VIOLATION
 
 
-def test_vm_error_oom_votes_disagree():
-    """VM OOM should be DISAGREE."""
+def test_vm_error_oom_mismatching_leader_votes_deterministic_violation():
+    """VM OOM with different result from leader should be DETERMINISTIC_VIOLATION."""
     leader_receipt = _make_success_receipt()
     node = _make_node(leader_receipt)
 
@@ -246,11 +244,11 @@ def test_vm_error_oom_votes_disagree():
     )
 
     result = node._set_vote(receipt)
-    assert result.vote == Vote.DISAGREE
+    assert result.vote == Vote.DETERMINISTIC_VIOLATION
 
 
-def test_vm_error_matching_leader_still_disagree():
-    """Even if leader and validator crash with same VM error, validator votes DISAGREE."""
+def test_vm_error_matching_leader_votes_agree():
+    """If leader and validator both get same VM error with same state, validator votes AGREE."""
     leader_receipt = _make_receipt(
         ResultCode.VM_ERROR,
         b"exit_code 1",
@@ -267,7 +265,7 @@ def test_vm_error_matching_leader_still_disagree():
     )
 
     result = node._set_vote(validator_receipt)
-    assert result.vote == Vote.DISAGREE
+    assert result.vote == Vote.AGREE
 
 
 # --- Nondet disagree takes precedence ---

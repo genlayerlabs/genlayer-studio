@@ -201,7 +201,9 @@ function extractDefaults(
   return defaults;
 }
 
-function cloneRecord(value: Record<string, any> | undefined): Record<string, any> {
+function cloneRecord(
+  value: Record<string, any> | undefined,
+): Record<string, any> {
   return JSON.parse(JSON.stringify(value ?? {}));
 }
 

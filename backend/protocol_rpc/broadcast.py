@@ -6,7 +6,6 @@ import asyncio
 from collections import defaultdict
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from types import SimpleNamespace
 from typing import Dict, Iterable
 
 

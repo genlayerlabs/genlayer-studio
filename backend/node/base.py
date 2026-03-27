@@ -1,5 +1,3 @@
-from contextlib import redirect_stdout
-from dataclasses import asdict
 import datetime
 import functools
 import json
@@ -22,7 +20,6 @@ import backend.node.genvm.origin.calldata as calldata
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.node.types import Receipt, ExecutionMode, Vote, ExecutionResultStatus
 from backend.protocol_rpc.message_handler.base import IMessageHandler
-from .genvm.origin import base_host
 from .genvm.origin import logger as genvm_logger
 from .genvm.origin import public_abi
 
@@ -717,12 +714,7 @@ class Node:
             receipt.vote = Vote.DISAGREE
             return receipt
 
-        # 3. VM crash (exit_code, OOM, etc.) — validator couldn't validate
-        if result_code == public_abi.ResultCode.VM_ERROR:
-            receipt.vote = Vote.DISAGREE
-            return receipt
-
-        # 4. Deterministic violation: execution outcome or state diverges from leader
+        # 3. Deterministic violation: execution outcome or state diverges from leader
         leader_receipt = self.leader_receipt
         if (
             leader_receipt.execution_result != receipt.execution_result
@@ -732,7 +724,7 @@ class Node:
             receipt.vote = Vote.DETERMINISTIC_VIOLATION
             return receipt
 
-        # 5. Valid execution (RETURN or USER_ERROR) with matching state → agree
+        # 4. Valid execution with matching state → agree
         receipt.vote = Vote.AGREE
         return receipt
 
@@ -870,8 +862,8 @@ class Node:
             "contract_address": NO_ADDR,
             "sender_address": NO_ADDR,
             "origin_address": NO_ADDR,
-            "value": None,
-            "chain_id": "0",
+            "value": 0,
+            "chain_id": 0,
         }
         state_proxy = _StateProxyNone(NO_ADDR)
         self._put_code_to(state_proxy, code)
@@ -938,7 +930,7 @@ class Node:
         self.timing_callback("GENVM_PREPARATION_START")
 
         leader_res: None | dict[int, bytes]
-        if self.leader_receipt is None:
+        if self.leader_receipt is None or not self.leader_receipt.eq_outputs:
             leader_res = None
         else:
             leader_res = {
@@ -991,10 +983,8 @@ class Node:
             "origin_address": Address(
                 from_address
             ),  # FIXME: no origin in simulator #751
-            "value": None,
-            "chain_id": str(
-                get_simulator_chain_id()
-            ),  # NOTE: it can overflow u64 so better to wrap it into a string
+            "value": 0,
+            "chain_id": get_simulator_chain_id(),
         }
         if transaction_datetime is not None:
             assert transaction_datetime.tzinfo is not None
@@ -1053,10 +1043,14 @@ class Node:
         result = Receipt(
             result=genvmbase.encode_result_to_bytes(result.result),
             gas_used=0,
-            eq_outputs={
-                k: base64.b64encode(v).decode("ascii")
-                for k, v in result.eq_outputs.items()
-            },
+            eq_outputs=(
+                {
+                    k: base64.b64encode(v).decode("ascii")
+                    for k, v in result.eq_outputs.items()
+                }
+                if self.validator_mode == ExecutionMode.LEADER
+                else None
+            ),
             pending_transactions=result.pending_transactions,
             vote=None,
             execution_result=result_exec_code,
@@ -1076,6 +1070,11 @@ class Node:
                 ),
                 "raw_error": (
                     result.result.raw_error
+                    if isinstance(result.result, genvmbase.ExecutionError)
+                    else None
+                ),
+                "error_description": (
+                    result.result.description
                     if isinstance(result.result, genvmbase.ExecutionError)
                     else None
                 ),

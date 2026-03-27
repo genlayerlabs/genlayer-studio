@@ -12,7 +12,8 @@
         "openai",
         "anthropic",
         "xai",
-        "google"
+        "google",
+        "libertai"
       ]
     },
     "model": {
@@ -125,6 +126,23 @@
               "Qwen/Qwen3-32B",
               "Qwen/Qwen2.5-72B-Instruct"
             ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "provider": { "const": "libertai" }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "const": "openai-compatible"
+          },
+          "model": {
+            "enum": ["ltai-fast", "ltai-core"]
           }
         }
       }

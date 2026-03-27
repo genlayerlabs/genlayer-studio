@@ -1,6 +1,4 @@
 from datetime import datetime, timezone
-import functools
-import json
 from unittest.mock import Mock, patch, AsyncMock
 import pytest
 from backend.node.types import (
@@ -11,7 +9,6 @@ from backend.node.genvm.base import (
     ExecutionResult,
     ExecutionReturn,
 )
-import backend.node.genvm.base as genvm_base
 import backend.node.base as node_base
 from backend.node.base import Node
 from backend.domain.types import Validator, LLMProvider

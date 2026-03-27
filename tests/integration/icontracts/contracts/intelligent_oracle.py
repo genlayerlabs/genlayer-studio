@@ -3,7 +3,7 @@
 
 import json
 from enum import Enum
-from datetime import datetime, timezone
+from datetime import datetime
 from urllib.parse import urlparse
 from genlayer import *
 

@@ -4,7 +4,6 @@ Deploy WizardOfCoin contract and save the address.
 """
 
 import requests
-import json
 import sys
 from pathlib import Path
 from genlayer_py import create_client, create_account, localnet

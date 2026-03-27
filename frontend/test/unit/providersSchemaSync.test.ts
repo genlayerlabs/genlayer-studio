@@ -4,8 +4,7 @@ import frontendSchema from '../../src/assets/schemas/providers_schema.json';
 
 function getProviderRule(schema: any, providerName: string) {
   return schema.allOf.find(
-    (rule: any) =>
-      rule.if?.properties?.provider?.const === providerName,
+    (rule: any) => rule.if?.properties?.provider?.const === providerName,
   );
 }
 

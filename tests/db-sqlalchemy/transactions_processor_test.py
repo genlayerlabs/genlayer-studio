@@ -1,4 +1,3 @@
-from sqlalchemy.orm import Session
 from sqlalchemy import text
 import pytest
 from unittest.mock import patch, MagicMock
@@ -8,8 +7,6 @@ from datetime import datetime
 from web3 import Web3
 from web3.providers import BaseProvider
 
-from backend.database_handler.chain_snapshot import ChainSnapshot
-from backend.database_handler.models import Transactions
 from backend.database_handler.transactions_processor import (
     TransactionStatus,
     TransactionsProcessor,
@@ -105,8 +102,6 @@ def test_transactions_processor(
 ):
     # Override the web3 instance in the transactions_processor with our mock
     transactions_processor.web3 = mock_env_and_web3_connected
-
-    import time
 
     from_address = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
     to_address = "0xAcec3A6d871C25F591aBd4fC24054e524BBbF794"
@@ -205,7 +200,7 @@ def test_transactions_processor(
 
 
 def test_get_highest_timestamp(transactions_processor: TransactionsProcessor):
-    import time
+    pass
 
     # Initially should return 0 when no transactions exist
     assert transactions_processor.get_highest_timestamp() == 0

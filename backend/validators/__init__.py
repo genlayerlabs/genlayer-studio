@@ -4,12 +4,10 @@ import asyncio
 import typing
 import contextlib
 import dataclasses
-import logging
 import os
 import random
 
 from copy import deepcopy
-from pathlib import Path
 
 import backend.database_handler.validators_registry as vr
 from sqlalchemy.orm import Session
@@ -277,8 +275,6 @@ class Manager:
             await self._change_providers_from_snapshot_locked(snap)
 
     async def _change_providers_from_snapshot_locked(self, snap: Snapshot):
-        self._cached_snapshot = None
-
         new_providers: dict[str, LLMConfig] = {}
 
         for i in snap.nodes:
@@ -308,12 +304,25 @@ class Manager:
                 "key": f"${{ENV[{key_env}]}}",
             }
 
-        await self.genvm_manager.stop_module("llm")
-        new_llm_config = deepcopy(self.genvm_manager.llm_config_base)
-        new_llm_config["backends"] = new_providers
-        await self.genvm_manager.start_module(
-            "llm", new_llm_config, {"allow_empty_backends": True}
-        )
+        # Invalidate snapshot only after building config, not before.
+        # If start_module fails, we preserve the previous snapshot so the
+        # worker can keep processing transactions instead of going idle.
+        previous_snapshot = self._cached_snapshot
+        self._cached_snapshot = None
+        try:
+            await self.genvm_manager.stop_module("llm")
+            new_llm_config = deepcopy(self.genvm_manager.llm_config_base)
+            new_llm_config["backends"] = new_providers
+            await self.genvm_manager.start_module(
+                "llm", new_llm_config, {"allow_empty_backends": True}
+            )
+        except Exception:
+            # Restore previous snapshot so the worker isn't permanently broken
+            self._cached_snapshot = previous_snapshot
+            logger.exception(
+                "Failed to restart LLM module — restoring previous snapshot"
+            )
+            raise
 
         self._cached_snapshot = snap
 

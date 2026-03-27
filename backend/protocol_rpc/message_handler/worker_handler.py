@@ -5,7 +5,6 @@ which then broadcasts them to subscribed WebSocket clients.
 """
 
 import os
-import json
 import asyncio
 from typing import Optional
 import aiohttp

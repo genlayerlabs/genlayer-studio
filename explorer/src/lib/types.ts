@@ -35,7 +35,6 @@ export interface Transaction {
   consensus_history: ConsensusHistoryData | null;
   timestamp_appeal: number | null;
   appeal_processing_time: number | null;
-  contract_snapshot: Record<string, unknown> | null;
   config_rotation_rounds: number | null;
   num_of_initial_validators: number | null;
   last_vote_timestamp: number | null;
@@ -119,6 +118,8 @@ export interface CurrentState {
   data: Record<string, unknown>;
   balance: number;
   updated_at: string | null;
+  tx_count?: number;
+  created_at?: string | null;
 }
 
 export interface LLMProvider {

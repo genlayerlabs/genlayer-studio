@@ -4,7 +4,6 @@
 
 from dataclasses import dataclass, field
 import datetime
-import decimal
 from enum import Enum, IntEnum
 import os
 from backend.database_handler.models import TransactionStatus
