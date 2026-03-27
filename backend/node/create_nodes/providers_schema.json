@@ -12,7 +12,8 @@
         "anthropic",
         "xai",
         "google",
-        "openrouter"
+        "openrouter",
+        "libertai"
       ]
     },
     "model": {
@@ -139,6 +140,26 @@
               "mistralai/mistral-large-2512",
               "meta-llama/llama-4-maverick",
               "nvidia/llama-3.1-nemotron-ultra-253b-v1"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "provider": { "const": "libertai" }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "const": "openai-compatible"
+          },
+          "model": {
+            "enum": [
+              "ltai-fast",
+              "ltai-core"
             ]
           }
         }
