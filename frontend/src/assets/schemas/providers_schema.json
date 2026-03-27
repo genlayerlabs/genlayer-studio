@@ -59,9 +59,6 @@
         "properties": {
           "plugin": {
             "const": "openai-compatible"
-          },
-          "model": {
-            "enum": ["grok-3"]
           }
         }
       }
@@ -78,13 +75,6 @@
         "properties": {
           "plugin": {
             "const": "google"
-          },
-          "model": {
-            "enum": [
-              "gemini-2.0-flash-lite-001",
-              "gemini-2.5-flash-lite",
-              "gemini-2.5-flash"
-            ]
           }
         }
       }
@@ -101,13 +91,6 @@
         "properties": {
           "plugin": {
             "const": "openai-compatible"
-          },
-          "model": {
-            "enum": [
-              "deepseek/deepseek-v3",
-              "mistralai/mixtral-8x7b-instruct",
-              "meta-llama/llama-3.3-70b-instruct"
-            ]
           }
         }
       }
@@ -124,18 +107,6 @@
         "properties": {
           "plugin": {
             "const": "openai-compatible"
-          },
-          "model": {
-            "enum": [
-              "zai-org/GLM-5-Turbo",
-              "zai-org/GLM-4.7-TEE",
-              "moonshotai/Kimi-K2.5-TEE",
-              "MiniMaxAI/MiniMax-M2.5-TEE",
-              "Qwen/Qwen3.5-397B-A17B-TEE",
-              "deepseek-ai/DeepSeek-V3.1-TEE",
-              "Qwen/Qwen3-32B",
-              "Qwen/Qwen2.5-72B-Instruct"
-            ]
           }
         }
       }
@@ -152,9 +123,6 @@
         "properties": {
           "plugin": {
             "const": "openai-compatible"
-          },
-          "model": {
-            "enum": ["ltai-fast", "ltai-core"]
           }
         }
       }
@@ -171,18 +139,6 @@
         "properties": {
           "plugin": {
             "const": "openai-compatible"
-          },
-          "model": {
-            "enum": [
-              "gpt-4-1106-preview",
-              "gpt-4o",
-              "gpt-4.1-mini",
-              "gpt-4.1-nano",
-              "gpt-4.1",
-              "gpt-5",
-              "gpt-5-mini",
-              "gpt-5-nano"
-            ]
           }
         }
       }
@@ -199,14 +155,6 @@
         "properties": {
           "plugin": {
             "const": "anthropic"
-          },
-          "model": {
-            "enum": [
-              "claude-3-7-sonnet-20250219",
-              "claude-3-5-haiku-20241022",
-              "claude-sonnet-4-20250514",
-              "claude-opus-4-20250514"
-            ]
           }
         }
       }
