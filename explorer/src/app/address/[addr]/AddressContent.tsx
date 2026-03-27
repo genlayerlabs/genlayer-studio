@@ -1,6 +1,6 @@
 'use client';
 
-import Link from 'next/link';
+import Link from '@/components/AppLink';
 import { formatDistanceToNow, format } from 'date-fns';
 
 import { Transaction, Validator, CurrentState } from '@/lib/types';
@@ -18,6 +18,7 @@ import { ContractInteraction } from '@/components/ContractInteraction';
 import { StatItem } from '@/components/StatItem';
 import {
   ArrowLeft,
+  ArrowDownNarrowWide,
   Wallet,
   Users,
   ArrowRightLeft,
@@ -60,6 +61,7 @@ export function AddressContent({ addr, data }: { addr: string; data: AddressInfo
 
 function AccountView({ address, data }: { address: string; data: AddressInfo }) {
   const txs = data.transactions || [];
+  const txCount = data.tx_count ?? txs.length;
 
   return (
     <div className="space-y-6">
@@ -69,7 +71,7 @@ function AccountView({ address, data }: { address: string; data: AddressInfo }) 
         <CardContent className="p-6">
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
             <StatItem icon={<Wallet className="w-5 h-5 text-green-600 dark:text-green-400" />} iconBg="bg-green-100 dark:bg-green-950" label="Balance" value={formatGenValue(data.balance ?? 0)} />
-            <StatItem icon={<ArrowRightLeft className="w-5 h-5 text-blue-600 dark:text-blue-400" />} iconBg="bg-blue-100 dark:bg-blue-950" label="Transactions" value={String(data.tx_count ?? txs.length)} />
+            <StatItem icon={<ArrowRightLeft className="w-5 h-5 text-blue-600 dark:text-blue-400" />} iconBg="bg-blue-100 dark:bg-blue-950" label="Transactions" value={txCount.toLocaleString()} />
             <div>
               <p className="text-muted-foreground text-sm mb-1">First Tx</p>
               <p className="text-sm text-foreground">
@@ -90,12 +92,23 @@ function AccountView({ address, data }: { address: string; data: AddressInfo }) 
         <TabsList>
           <TabsTrigger value="transactions" className="flex items-center gap-1.5">
             <ArrowRightLeft className="w-4 h-4" />
-            Transactions ({data.tx_count ?? txs.length})
+            Transactions ({txCount.toLocaleString()})
           </TabsTrigger>
         </TabsList>
         <TabsContent value="transactions">
           <Card className="overflow-hidden">
+            <div className="px-6 pt-4 text-sm text-muted-foreground">
+              Latest {txs.length} from a total of{' '}
+              <span className="font-medium text-foreground">{txCount.toLocaleString()}</span> transactions
+            </div>
             <AddressTransactionTable transactions={txs} address={address} />
+            {txCount > txs.length && (
+              <div className="border-t px-6 py-3 text-center">
+                <Link href={`/transactions?address=${address}`} className="text-sm font-medium text-primary hover:underline">
+                  VIEW ALL TRANSACTIONS &rarr;
+                </Link>
+              </div>
+            )}
           </Card>
         </TabsContent>
       </Tabs>
@@ -110,6 +123,7 @@ function AccountView({ address, data }: { address: string; data: AddressInfo }) 
 function ContractView({ address, data }: { address: string; data: AddressInfo }) {
   const state = data.state;
   const transactions = data.transactions || [];
+  const txCount = data.tx_count ?? transactions.length;
   const contract_code = data.contract_code;
   const creator_info = data.creator_info;
 
@@ -123,7 +137,7 @@ function ContractView({ address, data }: { address: string; data: AddressInfo })
             {state && (
               <>
                 <StatItem icon={<Wallet className="w-5 h-5 text-green-600 dark:text-green-400" />} iconBg="bg-green-100 dark:bg-green-950" label="Balance" value={formatGenValue(state.balance)} />
-                <StatItem icon={<ArrowRightLeft className="w-5 h-5 text-blue-600 dark:text-blue-400" />} iconBg="bg-blue-100 dark:bg-blue-950" label="Transactions" value={String(data.tx_count ?? transactions.length)} />
+                <StatItem icon={<ArrowRightLeft className="w-5 h-5 text-blue-600 dark:text-blue-400" />} iconBg="bg-blue-100 dark:bg-blue-950" label="Transactions" value={txCount.toLocaleString()} />
                 <StatItem icon={<Clock className="w-5 h-5 text-muted-foreground" />} iconBg="bg-muted" label="Last Updated" value={state.updated_at ? formatDistanceToNow(new Date(state.updated_at), { addSuffix: true }) : 'Unknown'} small />
               </>
             )}
@@ -164,23 +178,29 @@ function ContractView({ address, data }: { address: string; data: AddressInfo })
         <TabsList>
           <TabsTrigger value="transactions" className="flex items-center gap-1.5">
             <ArrowRightLeft className="w-4 h-4" />
-            Transactions ({data.tx_count ?? transactions.length})
+            Transactions ({txCount.toLocaleString()})
           </TabsTrigger>
           <TabsTrigger value="contract" className="flex items-center gap-1.5">
             <FileCode className="w-4 h-4" />
             Contract
           </TabsTrigger>
-          {state?.data && Object.keys(state.data).length > 0 && (
-            <TabsTrigger value="state" className="flex items-center gap-1.5">
-              <Database className="w-4 h-4" />
-              State
-            </TabsTrigger>
-          )}
         </TabsList>
 
         <TabsContent value="transactions">
           <Card className="overflow-hidden">
+            <div className="px-6 py-4 text-sm text-muted-foreground flex items-center gap-1.5">
+              <ArrowDownNarrowWide className="w-4 h-4" />
+              Latest {transactions.length} from a total of{' '}
+              <span className="font-medium text-foreground">{txCount.toLocaleString()}</span> transactions
+            </div>
             <AddressTransactionTable transactions={transactions} address={address} />
+            {txCount > transactions.length && (
+              <div className="border-t px-6 py-3 text-center">
+                <Link href={`/transactions?address=${address}`} className="text-sm font-medium text-primary hover:underline">
+                  VIEW ALL TRANSACTIONS &rarr;
+                </Link>
+              </div>
+            )}
           </Card>
         </TabsContent>
 
@@ -188,17 +208,6 @@ function ContractView({ address, data }: { address: string; data: AddressInfo })
           <ContractInteraction address={address} code={contract_code ?? null} />
         </TabsContent>
 
-        {state?.data && Object.keys(state.data).length > 0 && (
-          <TabsContent value="state">
-            <Card>
-              <CardContent className="p-6">
-                <div className="bg-muted p-4 rounded-lg overflow-auto max-h-[500px]">
-                  <JsonViewer data={state.data} />
-                </div>
-              </CardContent>
-            </Card>
-          </TabsContent>
-        )}
       </Tabs>
     </div>
   );

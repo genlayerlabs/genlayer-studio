@@ -188,12 +188,12 @@ class ConsensusWorker:
                     AND NOT EXISTS (
                         -- Ensure no other transaction for same contract is being processed
                         SELECT 1 FROM transactions t2
-                        WHERE t2.to_address = t.to_address
+                        WHERE t2.to_address IS NOT DISTINCT FROM t.to_address
                             AND t2.blocked_at IS NOT NULL
                             AND t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
                             AND t2.hash != t.hash
                     )
-                    AND pg_try_advisory_xact_lock(hashtext(t.to_address))
+                    AND pg_try_advisory_xact_lock(hashtext(COALESCE(t.to_address, t.hash)))
                 ORDER BY t.created_at ASC
                 FOR UPDATE SKIP LOCKED
             ),
@@ -294,13 +294,13 @@ class ConsensusWorker:
                     AND NOT EXISTS (
                         -- Ensure no other appeal for same contract is being processed
                         SELECT 1 FROM transactions t2
-                        WHERE t2.to_address = t.to_address
+                        WHERE t2.to_address IS NOT DISTINCT FROM t.to_address
                             AND t2.appealed = true
                             AND t2.blocked_at IS NOT NULL
                             AND t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
                             AND t2.hash != t.hash
                     )
-                    AND pg_try_advisory_xact_lock(hashtext(t.to_address))
+                    AND pg_try_advisory_xact_lock(hashtext(COALESCE(t.to_address, t.hash)))
                 ORDER BY t.created_at ASC
                 FOR UPDATE SKIP LOCKED
             ),
@@ -403,7 +403,7 @@ class ConsensusWorker:
                     AND NOT EXISTS (
                         -- Ensure no other transaction for same contract is being processed
                         SELECT 1 FROM transactions t2
-                        WHERE t2.to_address = t.to_address
+                        WHERE t2.to_address IS NOT DISTINCT FROM t.to_address
                             AND t2.blocked_at IS NOT NULL
                             AND t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
                             AND t2.hash != t.hash
@@ -411,7 +411,9 @@ class ConsensusWorker:
                     -- Atomic per-contract lock to close TOCTOU window in NOT EXISTS.
                     -- Under READ COMMITTED, two workers can both pass NOT EXISTS before
                     -- either commits blocked_at. This advisory lock prevents that race.
-                    AND pg_try_advisory_xact_lock(hashtext(t.to_address))
+                    -- COALESCE handles NULL to_address (e.g. burn transactions) by
+                    -- falling back to the tx hash, giving each such tx its own lock.
+                    AND pg_try_advisory_xact_lock(hashtext(COALESCE(t.to_address, t.hash)))
                 ORDER BY CASE WHEN t.type = 3 THEN 0 ELSE 1 END, t.created_at ASC
                 FOR UPDATE SKIP LOCKED
             ),

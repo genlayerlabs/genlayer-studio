@@ -10,7 +10,7 @@ import { computed } from 'vue';
 
 const store = useAccountsStore();
 const { trackEvent } = useEventTracking();
-const { connect } = useWallet();
+const { connect, disconnect } = useWallet();
 
 const hasExternalAccount = computed(() =>
   store.accounts.some((account) => account.type === 'external'),
@@ -36,6 +36,17 @@ const handleCreateNewAccount = async () => {
 
 const connectWallet = () => {
   connect();
+};
+
+const disconnectWallet = async () => {
+  try {
+    await disconnect();
+  } catch {
+    notify({
+      title: 'Error disconnecting wallet',
+      type: 'error',
+    });
+  }
 };
 </script>
 
@@ -76,6 +87,14 @@ const connectWallet = () => {
           class="w-full"
         >
           Connect Wallet
+        </Btn>
+        <Btn
+          v-if="hasExternalAccount"
+          @click="disconnectWallet"
+          secondary
+          class="w-full"
+        >
+          Disconnect Wallet
         </Btn>
       </div>
     </template>

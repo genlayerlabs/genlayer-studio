@@ -1,4 +1,4 @@
-# v0.1.0
+# v0.2.16
 # {
 #   "Seq": [
 #     { "Depends": "py-lib-genlayer-embeddings:09h0i209wrzh4xzq86f79c60x0ifs7xcjwl53ysrnw06i54ddxyi" },

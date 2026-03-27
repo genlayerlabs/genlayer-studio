@@ -57,14 +57,27 @@ def get_contract_address(api_url: str, tx_hash: str) -> str:
     raise RuntimeError(f"No contract address found in tx {tx_hash}")
 
 
-def wait_for_tx(client, tx_hash: str, timeout: int = 300) -> bool:
-    """Wait for a transaction receipt. Returns True if successful."""
-    try:
-        receipt = client.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=timeout)
-        return receipt.status == 1
-    except Exception as e:
-        print(f"  tx {tx_hash[:16]}... failed: {e}")
-        return False
+def wait_for_tx_finalized(api_url: str, tx_hash: str, timeout: int = 300) -> bool:
+    """Wait for a transaction to reach FINALIZED status via RPC polling."""
+    terminal_failures = {
+        "CANCELED",
+        "UNDETERMINED",
+        "LEADER_TIMEOUT",
+        "VALIDATORS_TIMEOUT",
+    }
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        data = rpc_call(api_url, "eth_getTransactionByHash", [tx_hash])
+        if "result" in data and data["result"]:
+            status = data["result"].get("status", "")
+            if status == "FINALIZED":
+                return True
+            if status in terminal_failures:
+                print(f"  tx {tx_hash[:16]}... terminal status: {status}")
+                return False
+        time.sleep(5)
+    print(f"  tx {tx_hash[:16]}... timed out after {timeout}s")
+    return False
 
 
 def main():
@@ -125,22 +138,40 @@ def main():
     deploy_hash = client.deploy_contract(code=contract_code, args=[])
     print(f"  Deploy tx: {deploy_hash}")
 
-    receipt = client.w3.eth.wait_for_transaction_receipt(
-        deploy_hash, timeout=tx_timeout
-    )
-    if receipt.status != 1:
-        print("ERROR: Deployment failed")
+    # Wait for FINALIZED status — contract state is only committed to DB
+    # when the worker session commits after all effects (including
+    # RegisterContractEffect) have executed.
+    if not wait_for_tx_finalized(api_url, deploy_hash, timeout=tx_timeout):
+        print("ERROR: Deployment failed or timed out")
         return 1
 
-    time.sleep(3)  # Wait for indexing
-
+    # Extract contract address from the finalized transaction
     contract_address = get_contract_address(api_url, deploy_hash)
     print(f"  Contract: {contract_address}")
 
-    # --- Verify initial state ---
-    initial_count = client.read_contract(
-        address=contract_address, function_name="get_count"
-    )
+    # --- Verify initial state (brief retry in case of read-replica lag) ---
+    initial_count = None
+    max_state_retries = 10
+    state_retry_delay = 3
+    for attempt in range(max_state_retries):
+        try:
+            initial_count = client.read_contract(
+                address=contract_address, function_name="get_count"
+            )
+            break
+        except Exception as exc:
+            remaining = max_state_retries - attempt - 1
+            print(
+                f"  [{time.strftime('%H:%M:%S')}] Contract state not ready "
+                f"(attempt {attempt + 1}/{max_state_retries}, "
+                f"{remaining} retries left): {exc}",
+                flush=True,
+            )
+            if remaining > 0:
+                time.sleep(state_retry_delay)
+    if initial_count is None:
+        print("ERROR: Could not read initial contract state after retries")
+        return 1
     print(f"  Initial count: {initial_count}")
     assert initial_count == 0, f"Expected initial count 0, got {initial_count}"
     print()
@@ -186,10 +217,10 @@ def main():
     succeeded = 0
     failed = 0
 
-    # Wait for receipts in parallel
+    # Wait for all transactions to reach FINALIZED via RPC polling
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
         futures = {
-            pool.submit(wait_for_tx, client, tx_hash, tx_timeout): tx_hash
+            pool.submit(wait_for_tx_finalized, api_url, tx_hash, tx_timeout): tx_hash
             for tx_hash in tx_hashes
         }
         for future in concurrent.futures.as_completed(futures):

@@ -8,9 +8,10 @@ import { TransactionTypeLabel } from '@/components/TransactionTypeLabel';
 import { AddressDisplay } from '@/components/AddressDisplay';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { CardContent } from '@/components/ui/card';
-import { formatGenValue } from '@/lib/formatters';
 import { decodeCalldata } from '@/lib/resultDecoder';
-import { getExecutionResult } from '@/lib/transactionUtils';
+import { getExecutionResult, getConsensusRoundResult } from '@/lib/transactionUtils';
+import { ColumnHeaderWithTooltip, COLUMN_TOOLTIPS } from '@/components/ColumnHeaderWithTooltip';
+import { ConsensusResultBadge } from '@/components/ConsensusResultBadge';
 
 interface AddressTransactionTableProps {
   transactions: Transaction[];
@@ -32,13 +33,13 @@ export function AddressTransactionTable({ transactions, address }: AddressTransa
         <TableRow className="bg-muted/50">
           <TableHead>Hash</TableHead>
           <TableHead>Type</TableHead>
-          <TableHead>Status</TableHead>
-          <TableHead>Direction</TableHead>
+          <TableHead><ColumnHeaderWithTooltip label="Status" tooltip={COLUMN_TOOLTIPS.status} /></TableHead>
+          <TableHead className="w-12"></TableHead>
           <TableHead>From</TableHead>
           <TableHead>To</TableHead>
           <TableHead className="w-32 max-w-32">Method</TableHead>
-          <TableHead>GenVM Result</TableHead>
-          <TableHead>Value</TableHead>
+          <TableHead><ColumnHeaderWithTooltip label="GenVM Result" tooltip={COLUMN_TOOLTIPS.genvmResult} /></TableHead>
+          <TableHead><ColumnHeaderWithTooltip label="Consensus Result" tooltip={COLUMN_TOOLTIPS.consensusResult} /></TableHead>
           <TableHead>Time</TableHead>
         </TableRow>
       </TableHeader>
@@ -53,6 +54,7 @@ export function AddressTransactionTable({ transactions, address }: AddressTransa
           const methodName = decodedInput?.methodName ?? (decodedInput && !decodedInput.methodName ? '(constructor)' : undefined);
           const execResult = getExecutionResult(tx);
           const executionResult = execResult?.executionResult;
+          const consensusRound = getConsensusRoundResult(tx);
 
           return (
             <TableRow key={tx.hash}>
@@ -123,7 +125,11 @@ export function AddressTransactionTable({ transactions, address }: AddressTransa
                 )}
               </TableCell>
               <TableCell className="text-sm">
-                {formatGenValue(tx.value)}
+                {consensusRound ? (
+                  <ConsensusResultBadge result={consensusRound} />
+                ) : (
+                  <span className="text-muted-foreground">-</span>
+                )}
               </TableCell>
               <TableCell className="text-sm text-muted-foreground">
                 {tx.created_at

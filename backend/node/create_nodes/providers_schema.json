@@ -8,11 +8,13 @@
       "examples": [
         "ollama",
         "heuristai",
+        "chutesai",
         "openai",
         "anthropic",
         "xai",
         "google",
-        "openrouter"
+        "openrouter",
+        "libertai"
       ]
     },
     "model": {
@@ -23,7 +25,13 @@
     },
     "plugin": {
       "$comment": "Plugin to be loaded by the Studio to interact with the provider",
-      "enum": ["openai-compatible", "ollama", "anthropic", "google", "custom"]
+      "enum": [
+        "openai-compatible",
+        "ollama",
+        "anthropic",
+        "google",
+        "custom"
+      ]
     },
     "plugin_config": {
       "type": "object"
@@ -33,7 +41,9 @@
     {
       "if": {
         "properties": {
-          "provider": { "const": "ollama" }
+          "provider": {
+            "const": "ollama"
+          }
         }
       },
       "then": {
@@ -47,7 +57,9 @@
     {
       "if": {
         "properties": {
-          "provider": { "const": "xai" }
+          "provider": {
+            "const": "xai"
+          }
         }
       },
       "then": {
@@ -56,7 +68,9 @@
             "const": "openai-compatible"
           },
           "model": {
-            "enum": ["grok-3"]
+            "enum": [
+              "grok-3"
+            ]
           }
         }
       }
@@ -64,7 +78,9 @@
     {
       "if": {
         "properties": {
-          "provider": { "const": "google" }
+          "provider": {
+            "const": "google"
+          }
         }
       },
       "then": {
@@ -87,7 +103,9 @@
     {
       "if": {
         "properties": {
-          "provider": { "const": "heuristai" }
+          "provider": {
+            "const": "heuristai"
+          }
         }
       },
       "then": {
@@ -108,7 +126,37 @@
     {
       "if": {
         "properties": {
-          "provider": { "const": "openrouter" }
+          "provider": {
+            "const": "chutesai"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "const": "openai-compatible"
+          },
+          "model": {
+            "enum": [
+              "zai-org/GLM-5-Turbo",
+              "zai-org/GLM-4.7-TEE",
+              "moonshotai/Kimi-K2.5-TEE",
+              "MiniMaxAI/MiniMax-M2.5-TEE",
+              "Qwen/Qwen3.5-397B-A17B-TEE",
+              "deepseek-ai/DeepSeek-V3.1-TEE",
+              "Qwen/Qwen3-32B",
+              "Qwen/Qwen2.5-72B-Instruct"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "provider": {
+            "const": "openrouter"
+          }
         }
       },
       "then": {
@@ -147,7 +195,31 @@
     {
       "if": {
         "properties": {
-          "provider": { "const": "ionet" }
+          "provider": {
+            "const": "libertai"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "const": "openai-compatible"
+          },
+          "model": {
+            "enum": [
+              "ltai-fast",
+              "ltai-core"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "provider": {
+            "const": "ionet"
+          }
         }
       },
       "then": {
@@ -167,7 +239,9 @@
     {
       "if": {
         "properties": {
-          "provider": { "const": "openai" }
+          "provider": {
+            "const": "openai"
+          }
         }
       },
       "then": {
@@ -195,7 +269,9 @@
     {
       "if": {
         "properties": {
-          "provider": { "const": "anthropic" }
+          "provider": {
+            "const": "anthropic"
+          }
         }
       },
       "then": {
@@ -219,7 +295,9 @@
     {
       "if": {
         "properties": {
-          "plugin": { "const": "ollama" }
+          "plugin": {
+            "const": "ollama"
+          }
         }
       },
       "then": {
@@ -235,15 +313,17 @@
                 "minLength": 1
               },
               "api_url": {
-                "type": ["string", "null"],
+                "type": [
+                  "string",
+                  "null"
+                ],
                 "$comment": "URL of the API endpoint"
               }
             }
           },
-
           "config": {
             "type": "object",
-            "additionalProperties": false,
+            "additionalProperties": true,
             "properties": {
               "mirostat": {
                 "type": "integer",
@@ -251,7 +331,6 @@
                 "maximum": 2,
                 "default": 0
               },
-
               "mirostat_eta": {
                 "type": "number",
                 "minimum": 0,
@@ -267,7 +346,12 @@
                 "default": 5
               },
               "num_ctx": {
-                "enum": [512, 1028, 2048, 4096],
+                "enum": [
+                  512,
+                  1028,
+                  2048,
+                  4096
+                ],
                 "default": 2048,
                 "$comment": "this needs to be a per model value"
               },
@@ -290,7 +374,18 @@
                 "default": 2
               },
               "repeat_last_n": {
-                "enum": [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096],
+                "enum": [
+                  8,
+                  16,
+                  32,
+                  64,
+                  128,
+                  256,
+                  512,
+                  1024,
+                  2048,
+                  4096
+                ],
                 "default": 64
               },
               "repeat_penalty": {
@@ -325,7 +420,15 @@
                 "default": 1.0
               },
               "num_predict": {
-                "enum": [-2, -1, 32, 64, 128, 256, 512],
+                "enum": [
+                  -2,
+                  -1,
+                  32,
+                  64,
+                  128,
+                  256,
+                  512
+                ],
                 "default": 128
               },
               "top_k": {
@@ -367,7 +470,9 @@
     {
       "if": {
         "properties": {
-          "plugin": { "const": "openai-compatible" }
+          "plugin": {
+            "const": "openai-compatible"
+          }
         }
       },
       "then": {
@@ -383,7 +488,10 @@
                 "minLength": 1
               },
               "api_url": {
-                "type": ["string", "null"],
+                "type": [
+                  "string",
+                  "null"
+                ],
                 "$comment": "URL of the API endpoint. Leave empty to use the official OpenAI API endpoint."
               },
               "mock_response": {
@@ -395,11 +503,14 @@
                 "$comment": "Mock web responses"
               }
             },
-            "required": ["api_key_env_var", "api_url"]
+            "required": [
+              "api_key_env_var",
+              "api_url"
+            ]
           },
           "config": {
             "type": "object",
-            "additionalProperties": false,
+            "additionalProperties": true,
             "properties": {
               "temperature": {
                 "type": "number",
@@ -427,7 +538,9 @@
     {
       "if": {
         "properties": {
-          "plugin": { "const": "google" }
+          "plugin": {
+            "const": "google"
+          }
         }
       },
       "then": {
@@ -443,15 +556,21 @@
                 "minLength": 1
               },
               "api_url": {
-                "type": ["string", "null"],
+                "type": [
+                  "string",
+                  "null"
+                ],
                 "$comment": "URL of the API endpoint"
               }
             },
-            "required": ["api_key_env_var", "api_url"]
+            "required": [
+              "api_key_env_var",
+              "api_url"
+            ]
           },
           "config": {
             "type": "object",
-            "additionalProperties": false,
+            "additionalProperties": true,
             "properties": {
               "temperature": {
                 "type": "number",
@@ -475,7 +594,9 @@
     {
       "if": {
         "properties": {
-          "plugin": { "const": "anthropic" }
+          "plugin": {
+            "const": "anthropic"
+          }
         }
       },
       "then": {
@@ -491,15 +612,21 @@
                 "minLength": 1
               },
               "api_url": {
-                "type": ["string", "null"],
+                "type": [
+                  "string",
+                  "null"
+                ],
                 "$comment": "URL of the API endpoint. Leave empty to use the official anthropic endpoint."
               }
             },
-            "required": ["api_key_env_var", "api_url"]
+            "required": [
+              "api_key_env_var",
+              "api_url"
+            ]
           },
           "config": {
             "type": "object",
-            "additionalProperties": false,
+            "additionalProperties": true,
             "properties": {
               "temperature": {
                 "type": "number",
@@ -549,7 +676,9 @@
     {
       "if": {
         "properties": {
-          "plugin": { "const": "custom" }
+          "plugin": {
+            "const": "custom"
+          }
         }
       },
       "then": {
@@ -564,15 +693,21 @@
                 "minLength": 1
               },
               "api_url": {
-                "type": ["string", "null"],
+                "type": [
+                  "string",
+                  "null"
+                ],
                 "$comment": "URL of the API endpoint"
               }
             },
-            "required": ["api_key_env_var", "api_url"]
+            "required": [
+              "api_key_env_var",
+              "api_url"
+            ]
           },
           "config": {
             "type": "object",
-            "additionalProperties": false,
+            "additionalProperties": true,
             "properties": {
               "temperature": {
                 "type": "number",
@@ -594,6 +729,12 @@
       }
     }
   ],
-  "required": ["provider", "model", "config", "plugin", "plugin_config"],
+  "required": [
+    "provider",
+    "model",
+    "config",
+    "plugin",
+    "plugin_config"
+  ],
   "additionalProperties": false
 }

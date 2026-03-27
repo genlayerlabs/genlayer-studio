@@ -35,7 +35,6 @@ export interface Transaction {
   consensus_history: ConsensusHistoryData | null;
   timestamp_appeal: number | null;
   appeal_processing_time: number | null;
-  contract_snapshot: Record<string, unknown> | null;
   config_rotation_rounds: number | null;
   num_of_initial_validators: number | null;
   last_vote_timestamp: number | null;

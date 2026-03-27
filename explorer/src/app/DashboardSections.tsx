@@ -1,5 +1,5 @@
 import { cache } from 'react';
-import Link from 'next/link';
+import Link from '@/components/AppLink';
 import { fetchBackend } from '@/lib/fetchBackend';
 import { StatCard } from '@/components/StatCard';
 import { SparklineChart } from '@/components/SparklineChart';
