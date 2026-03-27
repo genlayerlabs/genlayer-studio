@@ -29,6 +29,11 @@ def upgrade() -> None:
             nullable=False,
         ),
     )
+    # Backfill: mark historical valued transactions that already processed as credited
+    op.execute(
+        "UPDATE transactions SET value_credited = true "
+        "WHERE value > 0 AND status NOT IN ('PENDING', 'ACTIVATED')"
+    )
 
 
 def downgrade() -> None:

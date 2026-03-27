@@ -147,5 +147,7 @@ class AccountsManager:
                 ),
                 {"amount": amount, "addr": target_address},
             )
+            # Expire ORM cache so subsequent reads see post-credit balances
+            self.session.expire_all()
             return True
         return False

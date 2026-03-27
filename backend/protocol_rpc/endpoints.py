@@ -1201,6 +1201,7 @@ async def _gen_call_with_validator(
                     code_to_deploy=decoded_data.contract_code,
                     calldata=decoded_data.calldata,
                     transaction_created_at=txn_created_at,
+                    value=call_value,
                 )
             else:
                 raise JSONRPCError(f"Invalid type: {type}")
@@ -1496,8 +1497,21 @@ def send_raw_transaction(
 
             transaction_data = {"calldata": genlayer_transaction.data.calldata}
 
-        # Check for duplicate before insert+debit to avoid TOCTOU races
+        # Check for duplicate before debit+insert to avoid TOCTOU races
         is_duplicate = transactions_processor.get_transaction_by_hash(transaction_hash)
+
+        # Debit sender BEFORE insert so insufficient balance prevents insertion.
+        # Skip for SEND (execute_transfer handles it) and duplicates.
+        if (
+            value > 0
+            and from_address
+            and genlayer_transaction.type != TransactionType.SEND
+            and is_duplicate is None
+        ):
+            if not accounts_manager.debit_account_balance(from_address, value):
+                raise InvalidTransactionError(
+                    f"Insufficient balance: sender {from_address} cannot cover value {value}"
+                )
 
         # Insert transaction into the database
         transactions_processor.insert_transaction(
@@ -1516,19 +1530,6 @@ def send_raw_transaction(
             None,  # triggered_on
             execution_mode,
         )
-
-        # Debit sender AFTER insert to prevent TOCTOU double-debit
-        # Skip for SEND (execute_transfer handles it) and duplicates
-        if (
-            value > 0
-            and from_address
-            and genlayer_transaction.type != TransactionType.SEND
-            and is_duplicate is None
-        ):
-            if not accounts_manager.debit_account_balance(from_address, value):
-                raise InvalidTransactionError(
-                    f"Insufficient balance: sender {from_address} cannot cover value {value}"
-                )
 
         # Post-insert verification: ensure the transaction is visible immediately
         try:
