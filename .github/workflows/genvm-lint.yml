@@ -1,0 +1,58 @@
+name: GenVM Contract Lint
+
+on:
+  pull_request:
+    paths:
+      - "examples/contracts/**"
+      - "tests/load/contracts/**"
+      - "tests/direct/contracts/**"
+      - "tests/integration/icontracts/contracts/**"
+  push:
+    branches:
+      - main
+    paths:
+      - "examples/contracts/**"
+      - "tests/load/contracts/**"
+      - "tests/direct/contracts/**"
+      - "tests/integration/icontracts/contracts/**"
+
+jobs:
+  lint-contracts:
+    name: Lint Intelligent Contracts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install genvm-linter
+        run: pip install genvm-linter
+
+      - name: Lint example contracts
+        run: |
+          failed=0
+          for f in examples/contracts/*.py; do
+            echo "::group::$f"
+            if ! genvm-lint check "$f"; then
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $failed
+
+      - name: Lint test contracts
+        run: |
+          failed=0
+          for f in tests/load/contracts/*.py tests/direct/contracts/*.py; do
+            [ -f "$f" ] || continue
+            echo "::group::$f"
+            if ! genvm-lint check "$f"; then
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $failed
