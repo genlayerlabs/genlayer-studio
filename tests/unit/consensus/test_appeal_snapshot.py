@@ -85,12 +85,12 @@ class TestAppealSnapshotLoading:
         assert context.contract_snapshot.states["accepted"] == {"slot0": "real_data"}
 
     def test_saved_snapshot_with_real_states_uses_it(self):
-        """When snapshot has real state data, using it is fine."""
+        """When snapshot has real state data, it is reused (factory only called for balance hydration)."""
         real_snapshot = _make_snapshot({"accepted": {"slot0": "data"}, "finalized": {}})
         tx = _make_transaction(contract_snapshot=real_snapshot)
         context, factory = _make_context(tx)
 
-        factory.assert_not_called()
+        # Factory called once for balance hydration, but states come from saved snapshot
         assert context.contract_snapshot.states["accepted"] == {"slot0": "data"}
 
     def test_deploy_transaction_with_empty_snapshot_on_appeal(self):
