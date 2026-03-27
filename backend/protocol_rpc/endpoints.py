@@ -792,6 +792,12 @@ def cancel_transaction(
             },
         )
 
+    # Refund sender for payable transactions that were never activated
+    if transaction.value and transaction.value > 0 and transaction.from_address:
+        AccountsManager(session).refund_tx_value(
+            transaction_hash, transaction.from_address
+        )
+
     # Notify frontend via WebSocket
     msg_handler.send_transaction_status_update(transaction_hash, "CANCELED")
 

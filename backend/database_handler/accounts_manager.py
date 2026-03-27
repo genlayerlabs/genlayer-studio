@@ -151,3 +151,20 @@ class AccountsManager:
             self.session.expire_all()
             return True
         return False
+
+    def refund_tx_value(self, tx_hash: str, sender_address: str) -> bool:
+        """Refund sender for a canceled/failed payable tx if value not yet credited to target.
+        Returns True if refund was applied."""
+        result = self.session.execute(
+            text(
+                "SELECT value, value_credited FROM transactions " "WHERE hash = :hash"
+            ),
+            {"hash": tx_hash},
+        )
+        row = result.first()
+        if row is None or row.value is None or row.value <= 0:
+            return False
+        if row.value_credited:
+            return False  # target already received funds, can't refund
+        self.credit_account_balance(sender_address, row.value)
+        return True

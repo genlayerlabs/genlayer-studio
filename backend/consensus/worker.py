@@ -946,6 +946,11 @@ class ConsensusWorker:
                 "error": "no_validators_available",
                 "retries": retry_info["count"],
             }
+            # Refund sender for payable tx that was never activated
+            if tx.value and tx.value > 0 and tx.from_address:
+                from backend.database_handler.accounts_manager import AccountsManager
+
+                AccountsManager(session).refund_tx_value(tx_hash, tx.from_address)
             session.commit()
 
             # Clean up retry tracking
@@ -1002,6 +1007,15 @@ class ConsensusWorker:
                     "last_error": str(error),
                     "retries": retry_info["count"],
                 }
+                # Refund sender for payable tx that was never activated
+                if tx.value and tx.value > 0 and tx.from_address:
+                    from backend.database_handler.accounts_manager import (
+                        AccountsManager,
+                    )
+
+                    AccountsManager(cancel_session).refund_tx_value(
+                        tx_hash, tx.from_address
+                    )
                 cancel_session.commit()
 
                 # Send WebSocket notification
