@@ -592,11 +592,15 @@ watch(configProperties, () => {
             class="flex flex-row items-start gap-2"
           >
             <TextInput
+              :id="`extra-key-${index}`"
+              :name="`extra-key-${index}`"
               v-model="param.key"
               placeholder="key (e.g. models)"
               class="flex-1"
             />
             <TextInput
+              :id="`extra-value-${index}`"
+              :name="`extra-value-${index}`"
               v-model="param.value"
               placeholder='value (e.g. ["openai/gpt-4o","anthropic/claude-sonnet-4"])'
               class="flex-[2]"
