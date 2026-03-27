@@ -1408,9 +1408,9 @@ def send_raw_transaction(
             from_address, f"Invalid address from_address: {from_address}"
         )
 
-    # Auto-fund sender account on first use (like Hardhat pre-funded accounts)
+    # Ensure sender account exists
     if accounts_manager.get_account(from_address) is None:
-        accounts_manager.create_new_account_with_address(from_address, funded=True)
+        accounts_manager.create_new_account_with_address(from_address)
 
     transaction_signature_valid = transactions_parser.transaction_has_valid_signature(
         signed_rollup_transaction, decoded_rollup_transaction
@@ -1511,7 +1511,7 @@ def send_raw_transaction(
         # Check for duplicate before debit+insert to avoid TOCTOU races
         is_duplicate = transactions_processor.get_transaction_by_hash(transaction_hash)
 
-        # Debit sender BEFORE insert so insufficient balance prevents insertion.
+        # Debit sender BEFORE insert. Mint on demand if insufficient (Studio sandbox).
         # Skip for SEND (execute_transfer handles it) and duplicates.
         if (
             value > 0
@@ -1519,10 +1519,11 @@ def send_raw_transaction(
             and genlayer_transaction.type != TransactionType.SEND
             and is_duplicate is None
         ):
-            if not accounts_manager.debit_account_balance(from_address, value):
-                raise InvalidTransactionError(
-                    f"Insufficient balance: sender {from_address} cannot cover value {value}"
-                )
+            sender_balance = accounts_manager.get_account_balance(from_address)
+            if sender_balance < value:
+                shortfall = value - sender_balance
+                accounts_manager.credit_account_balance(from_address, shortfall)
+            accounts_manager.debit_account_balance(from_address, value)
 
         # Insert transaction into the database
         transactions_processor.insert_transaction(

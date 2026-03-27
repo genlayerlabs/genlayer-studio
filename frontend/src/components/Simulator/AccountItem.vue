@@ -2,37 +2,10 @@
 import { useAccountsStore, type AccountInfo } from '@/stores';
 import { notify } from '@kyvg/vue3-notification';
 import { PowerCircle, Wallet } from 'lucide-vue-next';
-import { ref, onMounted } from 'vue';
+import { ref } from 'vue';
 import CopyTextButton from '../global/CopyTextButton.vue';
 import { TrashIcon, CheckCircleIcon } from '@heroicons/vue/16/solid';
-import { useGenlayer } from '@/hooks';
 const store = useAccountsStore();
-const { client: genlayerClient } = useGenlayer();
-const balance = ref<string | null>(null);
-
-const fetchBalance = async () => {
-  try {
-    const result = (await genlayerClient.value?.request({
-      method: 'eth_getBalance',
-      params: [props.account.address, 'latest'],
-    })) as string;
-    if (result !== undefined && result !== null) {
-      const wei = BigInt(result);
-      const WEI_PER_GEN = BigInt('1000000000000000000');
-      const whole = wei / WEI_PER_GEN;
-      const remainder = wei % WEI_PER_GEN;
-      if (remainder === BigInt(0)) {
-        balance.value = `${whole} GEN`;
-      } else {
-        const frac = remainder.toString().padStart(18, '0').slice(0, 2);
-        balance.value = `${whole}.${frac} GEN`;
-      }
-    }
-  } catch {
-    balance.value = null;
-  }
-};
-onMounted(fetchBalance);
 
 const setCurentAddress = () => {
   store.setCurrentAccount(props.account as AccountInfo);
@@ -83,17 +56,12 @@ const showConfirmDelete = ref(false);
         <PowerCircle class="h-4 w-4 text-green-500" v-if="active" />
       </div>
 
-      <div class="flex grow flex-col truncate" :class="[!active && 'opacity-50']">
-        <span class="truncate font-mono text-xs font-semibold">
-          {{ account.address }}
-        </span>
-        <span
-          v-if="balance !== null"
-          class="text-[10px] text-slate-400 dark:text-slate-500"
-        >
-          {{ balance }}
-        </span>
-      </div>
+      <span
+        class="flex grow flex-row truncate font-mono text-xs font-semibold"
+        :class="[!active && 'opacity-50']"
+      >
+        {{ account.address }}
+      </span>
 
       <Wallet
         v-if="account.type === 'external'"
