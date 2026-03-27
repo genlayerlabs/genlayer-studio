@@ -343,6 +343,61 @@ const configurationError = computed(() => {
     (!props.provider?.is_available || !props.provider?.is_model_available)
   );
 });
+
+// Extra parameters: arbitrary key-value pairs beyond schema-defined config fields
+const extraParams = ref<{ key: string; value: string }[]>([]);
+
+const syncExtraParamsToConfig = () => {
+  // Remove old extra keys from config
+  const knownKeys = new Set(Object.keys(configProperties.value));
+  for (const key of Object.keys(newProviderData.config)) {
+    if (!knownKeys.has(key)) {
+      delete newProviderData.config[key];
+    }
+  }
+  // Add current extra params
+  for (const param of extraParams.value) {
+    if (param.key.trim()) {
+      try {
+        newProviderData.config[param.key.trim()] = JSON.parse(param.value);
+      } catch {
+        newProviderData.config[param.key.trim()] = param.value;
+      }
+    }
+  }
+};
+
+const addExtraParam = () => {
+  extraParams.value.push({ key: '', value: '' });
+};
+
+const removeExtraParam = (index: number) => {
+  extraParams.value.splice(index, 1);
+  syncExtraParamsToConfig();
+};
+
+watch(extraParams, syncExtraParamsToConfig, { deep: true });
+
+// Load existing extra params when editing a provider
+const loadExtraParams = () => {
+  if (!props.provider?.config) return;
+  const knownKeys = new Set(Object.keys(configProperties.value));
+  for (const [key, value] of Object.entries(props.provider.config)) {
+    if (!knownKeys.has(key)) {
+      extraParams.value.push({
+        key,
+        value: typeof value === 'string' ? value : JSON.stringify(value),
+      });
+    }
+  }
+};
+
+watch(configProperties, () => {
+  if (!isCreateMode.value) {
+    extraParams.value = [];
+    loadExtraParams();
+  }
+});
 </script>
 
 <template>
@@ -516,6 +571,49 @@ const configurationError = computed(() => {
             v-model="newProviderData.config[key]"
             :error="fieldError('config', key)"
           />
+        </div>
+      </div>
+
+      <div v-if="showConfig">
+        <div class="flex flex-row items-center gap-2">
+          <FieldLabel
+            >Extra API Parameters:
+            <MoreInfo
+              text="Additional parameters forwarded to the LLM API request body. Use this for provider-specific features like OpenRouter fallback models."
+          /></FieldLabel>
+        </div>
+
+        <div
+          class="flex flex-col gap-2 rounded-md bg-slate-100 px-2 py-2 dark:bg-black dark:bg-opacity-10"
+        >
+          <div
+            v-for="(param, index) in extraParams"
+            :key="index"
+            class="flex flex-row items-start gap-2"
+          >
+            <TextInput
+              v-model="param.key"
+              placeholder="key (e.g. models)"
+              class="flex-1"
+            />
+            <TextInput
+              v-model="param.value"
+              placeholder='value (e.g. ["openai/gpt-4o","anthropic/claude-sonnet-4"])'
+              class="flex-[2]"
+            />
+            <GhostBtn
+              @click="removeExtraParam(index)"
+              class="mt-1 text-red-500"
+            >
+              &times;
+            </GhostBtn>
+          </div>
+          <button
+            @click="addExtraParam"
+            class="self-start text-xs opacity-50 hover:opacity-70"
+          >
+            + Add parameter
+          </button>
         </div>
       </div>
 
