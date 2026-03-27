@@ -178,8 +178,13 @@ const handleCallWriteMethod = async () => {
       @click="isExpanded = !isExpanded"
       :data-testid="`expand-method-btn-${name}`"
     >
-      <div class="truncate">
-        {{ name }}
+      <div class="flex items-center gap-1.5 truncate">
+        <span>{{ name }}</span>
+        <span
+          v-if="method.payable"
+          class="rounded bg-yellow-100 px-1.5 py-0.5 text-[10px] font-medium text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300"
+          >payable</span
+        >
       </div>
 
       <ChevronDownIcon
