@@ -35,10 +35,13 @@ def _make_transaction(*, tx_type=TransactionType.RUN_CONTRACT, contract_snapshot
 
 def _make_context(transaction, factory_snapshot=None):
     """Create a TransactionContext with mocked dependencies."""
-    factory = Mock(
-        return_value=factory_snapshot
-        or _make_snapshot({"accepted": {"slot0": "real_data"}, "finalized": {}})
+    default_snapshot = factory_snapshot or _make_snapshot(
+        {"accepted": {"slot0": "real_data"}, "finalized": {}}
     )
+    # Factory snapshots need balance for hydration
+    if not hasattr(default_snapshot, "balance"):
+        default_snapshot.balance = 0
+    factory = Mock(return_value=default_snapshot)
     context = TransactionContext(
         transaction=transaction,
         transactions_processor=Mock(),

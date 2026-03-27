@@ -793,7 +793,8 @@ def cancel_transaction(
         )
 
     # Refund sender for payable transactions that were never activated
-    if transaction.value and transaction.value > 0 and transaction.from_address:
+    tx_val = transaction.value if isinstance(transaction.value, int) else 0
+    if tx_val > 0 and transaction.from_address:
         AccountsManager(session).refund_tx_value(
             transaction_hash, transaction.from_address
         )
