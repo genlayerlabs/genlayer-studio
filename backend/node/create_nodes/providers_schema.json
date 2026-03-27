@@ -66,11 +66,6 @@
         "properties": {
           "plugin": {
             "const": "openai-compatible"
-          },
-          "model": {
-            "enum": [
-              "grok-3"
-            ]
           }
         }
       }
@@ -87,15 +82,6 @@
         "properties": {
           "plugin": {
             "const": "google"
-          },
-          "model": {
-            "enum": [
-              "gemini-2.0-flash-lite-001",
-              "gemini-2.5-flash-lite",
-              "gemini-2.5-flash",
-              "gemini-3.0-flash",
-              "gemini-2.5-flash-lite"
-            ]
           }
         }
       }
@@ -112,13 +98,6 @@
         "properties": {
           "plugin": {
             "const": "openai-compatible"
-          },
-          "model": {
-            "enum": [
-              "deepseek/deepseek-v3",
-              "mistralai/mixtral-8x7b-instruct",
-              "meta-llama/llama-3.3-70b-instruct"
-            ]
           }
         }
       }
@@ -135,18 +114,6 @@
         "properties": {
           "plugin": {
             "const": "openai-compatible"
-          },
-          "model": {
-            "enum": [
-              "zai-org/GLM-5-Turbo",
-              "zai-org/GLM-4.7-TEE",
-              "moonshotai/Kimi-K2.5-TEE",
-              "MiniMaxAI/MiniMax-M2.5-TEE",
-              "Qwen/Qwen3.5-397B-A17B-TEE",
-              "deepseek-ai/DeepSeek-V3.1-TEE",
-              "Qwen/Qwen3-32B",
-              "Qwen/Qwen2.5-72B-Instruct"
-            ]
           }
         }
       }
@@ -163,31 +130,6 @@
         "properties": {
           "plugin": {
             "const": "openai-compatible"
-          },
-          "model": {
-            "enum": [
-              "@preset/rally-testnet-gpt-5-1",
-              "@preset/rally-testnet-sonnet-4-5",
-              "@preset/rally-testnet-gemini-3-flash",
-              "@preset/rally-testnet-qwen-3-5",
-              "@preset/rally-testnet-deepseek-3-2",
-              "@preset/rally-testnet-kimi-2-5",
-              "@preset/rally-testnet-glm-5",
-              "openai/gpt-5.2",
-              "openai/gpt-5.1",
-              "openai/gpt-5-mini",
-              "z-ai/glm-4.7",
-              "moonshotai/kimi-k2-0905",
-              "moonshotai/kimi-k2.5",
-              "deepseek/deepseek-v3.2",
-              "qwen/qwen3-235b-a22b-2507",
-              "anthropic/claude-sonnet-4.5",
-              "google/gemini-3-flash-preview",
-              "x-ai/grok-4",
-              "mistralai/mistral-large-2512",
-              "meta-llama/llama-4-maverick",
-              "nvidia/llama-3.1-nemotron-ultra-253b-v1"
-            ]
           }
         }
       }
@@ -204,12 +146,6 @@
         "properties": {
           "plugin": {
             "const": "openai-compatible"
-          },
-          "model": {
-            "enum": [
-              "ltai-fast",
-              "ltai-core"
-            ]
           }
         }
       }
@@ -226,12 +162,6 @@
         "properties": {
           "plugin": {
             "const": "openai-compatible"
-          },
-          "model": {
-            "enum": [
-              "deepseek-ai/DeepSeek-V3.2",
-              "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
-            ]
           }
         }
       }
@@ -248,20 +178,6 @@
         "properties": {
           "plugin": {
             "const": "openai-compatible"
-          },
-          "model": {
-            "enum": [
-              "gpt-4-1106-preview",
-              "gpt-4o",
-              "gpt-4.1-mini",
-              "gpt-4.1-nano",
-              "gpt-4.1",
-              "gpt-5",
-              "gpt-5-mini",
-              "gpt-5-nano",
-              "gpt-5.1",
-              "gpt-5.1-nano"
-            ]
           }
         }
       }
@@ -278,16 +194,6 @@
         "properties": {
           "plugin": {
             "const": "anthropic"
-          },
-          "model": {
-            "enum": [
-              "claude-3-7-sonnet-20250219",
-              "claude-3-5-haiku-20241022",
-              "claude-sonnet-4-20250514",
-              "claude-opus-4-20250514",
-              "claude-sonnet-4-5",
-              "claude-opus-4-5"
-            ]
           }
         }
       }

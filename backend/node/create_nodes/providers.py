@@ -104,6 +104,19 @@ def get_default_provider_for(provider: str, model: str) -> LLMProvider:
         if llm_provider.provider == provider and llm_provider.model == model
     ]
     if not matches:
+        # Fallback: use any existing provider config as template for the same provider
+        provider_templates = [lp for lp in llm_providers if lp.provider == provider]
+        if provider_templates:
+            template = provider_templates[0]
+            return LLMProvider(
+                provider=provider,
+                model=model,
+                config=template.config.copy() if template.config else {},
+                plugin=template.plugin,
+                plugin_config=(
+                    template.plugin_config.copy() if template.plugin_config else {}
+                ),
+            )
         raise ValueError(f"No default provider found for {provider} and {model}")
     if len(matches) > 1:
         raise ValueError(f"Multiple default providers found for {provider} and {model}")
