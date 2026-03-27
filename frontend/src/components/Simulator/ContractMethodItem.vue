@@ -130,9 +130,11 @@ const handleCallWriteMethod = async () => {
       });
     } else {
       // Real transaction mode
+      // User inputs GEN, convert to wei (1 GEN = 10^18 wei)
+      const WEI_PER_GEN = BigInt('1000000000000000000');
       const txValue =
         props.method.payable && payableValue.value
-          ? BigInt(payableValue.value)
+          ? BigInt(payableValue.value) * WEI_PER_GEN
           : BigInt(0);
       await callWriteMethod({
         method: props.name,

@@ -56,7 +56,7 @@ class CurrentState(Base):
 
     id: Mapped[str] = mapped_column(String(255), primary_key=True)
     data: Mapped[dict] = mapped_column(JSONB)
-    balance: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    balance: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     updated_at: Mapped[Optional[datetime.datetime]] = mapped_column(
         DateTime(True),
         init=False,
@@ -90,7 +90,7 @@ class Transactions(Base):
     data: Mapped[Optional[dict]] = mapped_column(JSONB)
     consensus_data: Mapped[Optional[dict]] = mapped_column(JSONB)
     nonce: Mapped[Optional[int]] = mapped_column(Integer)
-    value: Mapped[Optional[int]] = mapped_column(Integer)
+    value: Mapped[Optional[int]] = mapped_column(BigInteger)
     type: Mapped[Optional[int]] = mapped_column(Integer)
     gaslimit: Mapped[Optional[int]] = mapped_column(BigInteger)
     created_at: Mapped[Optional[datetime.datetime]] = mapped_column(
