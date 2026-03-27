@@ -66,13 +66,19 @@ jobs:
       - name: Changing URL for rpc server to localhost
         run: sed -i "s/'jsonrpc'/'localhost'/g" .env
 
-      - name: Remove OPENAIKEY from the .env file so it can be loaded from the environment
-        run: sed -i "/^OPENAIKEY *= *'<add_your_api_key_here>'$/d" .env
-
-      - name: Adding OPENAIKEY to the .env file
+      - name: Configure LLM provider
         env:
-          OPENAIKEY: ${{ secrets.OPENAIKEY }}
-        run: printf "\nOPENAIKEY='$OPENAIKEY'\n" >> .env
+          OPENROUTERAPIKEY: ${{ secrets.OPENROUTERAPIKEY }}
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'openrouter' }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'deepseek/deepseek-v3.2' }}
+        run: |
+          # Inject OpenRouter API key
+          sed -i "/^OPENROUTERAPIKEY *= *'<add_your_openrouter_api_key_here>'$/d" .env
+          printf "\nOPENROUTERAPIKEY='$OPENROUTERAPIKEY'\n" >> .env
+
+          # Override validators config with configured provider/model
+          sed -i "/^VALIDATORS_CONFIG_JSON=/,/^]'/d" .env
+          printf "\nVALIDATORS_CONFIG_JSON='[\n  {\"stake\": 100, \"provider\": \"$LLM_PROVIDER\", \"model\": \"$LLM_MODEL\", \"amount\": 5}\n]'\n" >> .env
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
