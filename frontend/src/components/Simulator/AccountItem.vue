@@ -7,7 +7,7 @@ import CopyTextButton from '../global/CopyTextButton.vue';
 import { TrashIcon, CheckCircleIcon } from '@heroicons/vue/16/solid';
 import { useGenlayer } from '@/hooks';
 const store = useAccountsStore();
-const { genlayerClient } = useGenlayer();
+const { client: genlayerClient } = useGenlayer();
 const balance = ref<string | null>(null);
 
 const fetchBalance = async () => {
