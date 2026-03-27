@@ -56,8 +56,9 @@ describe('useConsensusStore', () => {
   });
 
   it('should initialize with default values from environment variables', () => {
-    // getRuntimeConfigNumber provides fallback values (10 for finality window, 3 for max rotations)
-    expect(consensusStore.finalityWindow).toBe(10);
+    // Uses getRuntimeConfigNumber('VITE_FINALITY_WINDOW', 10) — value depends on env
+    const expectedFinality = Number(import.meta.env.VITE_FINALITY_WINDOW) || 10;
+    expect(consensusStore.finalityWindow).toBe(expectedFinality);
     expect(consensusStore.isLoading).toBe(true); // Loading starts as true
     expect(consensusStore.maxRotations).toBe(3); // Fallback from getRuntimeConfigNumber
   });

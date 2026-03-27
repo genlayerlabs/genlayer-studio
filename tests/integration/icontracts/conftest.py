@@ -63,7 +63,9 @@ def setup_validators():
                         {
                             "api_key_env_var": mock_cfg["api_key_env_var"],
                             "api_url": mock_cfg["api_url"],
-                            "mock_response": mock_response if mock_response is not None else {},
+                            "mock_response": (
+                                mock_response if mock_response is not None else {}
+                            ),
                         },
                     )
                 ).json()

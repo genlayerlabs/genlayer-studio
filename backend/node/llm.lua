@@ -166,6 +166,17 @@ local function try_provider(ctx, args, mapped_prompt, provider_id)
 		mapped_prompt.prompt.temperature = model_data.value.meta.config.temperature
 	end
 
+	-- Collect extra parameters from config (anything beyond known fields)
+	local known_config_keys = {temperature = true, max_tokens = true, use_max_completion_tokens = true}
+	local extra = {}
+	if model_data.value.meta.config ~= nil then
+		for k, v in pairs(model_data.value.meta.config) do
+			if not known_config_keys[k] then
+				extra[k] = v
+			end
+		end
+	end
+
 	local success, result
 	local request
 	if ctx.host_data.custom_plugin_data then
@@ -177,6 +188,11 @@ local function try_provider(ctx, args, mapped_prompt, provider_id)
 			prompt = mapped_prompt.prompt,
 			format = mapped_prompt.format,
 		}
+
+		-- Forward extra parameters to the API request body via GenVM's extra field
+		if next(extra) ~= nil then
+			mapped_prompt.prompt.extra = extra
+		end
 
 		success, result = pcall(function ()
 			return llm.rs.exec_prompt_in_provider(

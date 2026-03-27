@@ -34,7 +34,9 @@
     {
       "if": {
         "properties": {
-          "provider": { "const": "ollama" }
+          "provider": {
+            "const": "ollama"
+          }
         }
       },
       "then": {
@@ -48,7 +50,9 @@
     {
       "if": {
         "properties": {
-          "provider": { "const": "xai" }
+          "provider": {
+            "const": "xai"
+          }
         }
       },
       "then": {
@@ -65,7 +69,9 @@
     {
       "if": {
         "properties": {
-          "provider": { "const": "google" }
+          "provider": {
+            "const": "google"
+          }
         }
       },
       "then": {
@@ -86,7 +92,9 @@
     {
       "if": {
         "properties": {
-          "provider": { "const": "heuristai" }
+          "provider": {
+            "const": "heuristai"
+          }
         }
       },
       "then": {
@@ -107,7 +115,9 @@
     {
       "if": {
         "properties": {
-          "provider": { "const": "chutesai" }
+          "provider": {
+            "const": "chutesai"
+          }
         }
       },
       "then": {
@@ -133,7 +143,9 @@
     {
       "if": {
         "properties": {
-          "provider": { "const": "libertai" }
+          "provider": {
+            "const": "libertai"
+          }
         }
       },
       "then": {
@@ -150,7 +162,9 @@
     {
       "if": {
         "properties": {
-          "provider": { "const": "openai" }
+          "provider": {
+            "const": "openai"
+          }
         }
       },
       "then": {
@@ -176,7 +190,9 @@
     {
       "if": {
         "properties": {
-          "provider": { "const": "anthropic" }
+          "provider": {
+            "const": "anthropic"
+          }
         }
       },
       "then": {
@@ -198,7 +214,9 @@
     {
       "if": {
         "properties": {
-          "plugin": { "const": "ollama" }
+          "plugin": {
+            "const": "ollama"
+          }
         }
       },
       "then": {
@@ -219,10 +237,9 @@
               }
             }
           },
-
           "config": {
             "type": "object",
-            "additionalProperties": false,
+            "additionalProperties": true,
             "properties": {
               "mirostat": {
                 "type": "integer",
@@ -230,7 +247,6 @@
                 "maximum": 2,
                 "default": 0
               },
-
               "mirostat_eta": {
                 "type": "number",
                 "minimum": 0,
@@ -346,7 +362,9 @@
     {
       "if": {
         "properties": {
-          "plugin": { "const": "openai-compatible" }
+          "plugin": {
+            "const": "openai-compatible"
+          }
         }
       },
       "then": {
@@ -370,7 +388,7 @@
           },
           "config": {
             "type": "object",
-            "additionalProperties": false,
+            "additionalProperties": true,
             "properties": {
               "temperature": {
                 "type": "number",
@@ -394,7 +412,9 @@
     {
       "if": {
         "properties": {
-          "plugin": { "const": "google" }
+          "plugin": {
+            "const": "google"
+          }
         }
       },
       "then": {
@@ -418,7 +438,7 @@
           },
           "config": {
             "type": "object",
-            "additionalProperties": false,
+            "additionalProperties": true,
             "properties": {
               "temperature": {
                 "type": "number",
@@ -442,7 +462,9 @@
     {
       "if": {
         "properties": {
-          "plugin": { "const": "anthropic" }
+          "plugin": {
+            "const": "anthropic"
+          }
         }
       },
       "then": {
@@ -466,7 +488,7 @@
           },
           "config": {
             "type": "object",
-            "additionalProperties": false,
+            "additionalProperties": true,
             "properties": {
               "temperature": {
                 "type": "number",
@@ -517,7 +539,9 @@
     {
       "if": {
         "properties": {
-          "plugin": { "const": "custom" }
+          "plugin": {
+            "const": "custom"
+          }
         }
       },
       "then": {
@@ -540,7 +564,7 @@
           },
           "config": {
             "type": "object",
-            "additionalProperties": false,
+            "additionalProperties": true,
             "properties": {
               "temperature": {
                 "type": "number",
