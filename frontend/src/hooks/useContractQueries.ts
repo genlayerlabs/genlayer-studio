@@ -205,6 +205,7 @@ export function useContractQueries() {
     args,
     executionMode,
     consensusMaxRotations,
+    value = BigInt(0),
   }: {
     method: string;
     args: {
@@ -213,6 +214,7 @@ export function useContractQueries() {
     };
     executionMode: ExecutionMode;
     consensusMaxRotations?: number;
+    value?: bigint;
   }) {
     // Map executionMode to leaderOnly for backward compatibility with genlayer-js SDK
     const leaderOnly = executionMode !== 'NORMAL';
@@ -226,7 +228,7 @@ export function useContractQueries() {
         address: address.value as Address,
         functionName: method,
         args: args.args,
-        value: BigInt(0),
+        value,
         leaderOnly,
         consensusMaxRotations,
       });

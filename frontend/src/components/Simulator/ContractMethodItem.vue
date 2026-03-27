@@ -32,6 +32,7 @@ const responseMessageAccepted = ref('');
 const responseMessageFinalized = ref('');
 
 const calldataArguments = ref<ArgData>({ args: [], kwargs: {} });
+const payableValue = ref('');
 
 const formatResponseIfNeeded = (response: string): string => {
   if (!response) {
@@ -129,6 +130,10 @@ const handleCallWriteMethod = async () => {
       });
     } else {
       // Real transaction mode
+      const txValue =
+        props.method.payable && payableValue.value
+          ? BigInt(payableValue.value)
+          : BigInt(0);
       await callWriteMethod({
         method: props.name,
         executionMode: props.executionMode,
@@ -137,6 +142,7 @@ const handleCallWriteMethod = async () => {
           args: calldataArguments.value.args,
           kwargs: calldataArguments.value.kwargs,
         }),
+        value: txValue,
       });
 
       notify({
@@ -190,6 +196,24 @@ const handleCallWriteMethod = async () => {
             }
           "
         />
+
+        <div
+          v-if="methodType === 'write' && method.payable"
+          class="flex w-full flex-col"
+        >
+          <label class="mb-1 text-xs text-slate-500 dark:text-slate-400"
+            >Value (wei)</label
+          >
+          <input
+            v-model="payableValue"
+            type="number"
+            min="0"
+            step="1"
+            placeholder="0"
+            class="rounded border border-slate-300 bg-white px-2 py-1 text-xs dark:border-slate-500 dark:bg-slate-600"
+            :data-testid="`payable-value-input-${name}`"
+          />
+        </div>
 
         <div>
           <Btn
