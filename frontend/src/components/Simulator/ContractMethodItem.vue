@@ -202,7 +202,7 @@ const handleCallWriteMethod = async () => {
           class="flex w-full flex-col"
         >
           <label class="mb-1 text-xs text-slate-500 dark:text-slate-400"
-            >Value (wei)</label
+            >Value (GEN)</label
           >
           <input
             v-model="payableValue"
