@@ -1408,6 +1408,10 @@ def send_raw_transaction(
             from_address, f"Invalid address from_address: {from_address}"
         )
 
+    # Auto-fund sender account on first use (like Hardhat pre-funded accounts)
+    if accounts_manager.get_account(from_address) is None:
+        accounts_manager.create_new_account_with_address(from_address, funded=True)
+
     transaction_signature_valid = transactions_parser.transaction_has_valid_signature(
         signed_rollup_transaction, decoded_rollup_transaction
     )

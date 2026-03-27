@@ -14,6 +14,7 @@ from sqlalchemy import (
     text,
     ForeignKey,
     LargeBinary,
+    Numeric,
     Sequence,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -56,7 +57,9 @@ class CurrentState(Base):
 
     id: Mapped[str] = mapped_column(String(255), primary_key=True)
     data: Mapped[dict] = mapped_column(JSONB)
-    balance: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    balance: Mapped[int] = mapped_column(
+        Numeric(precision=78, scale=0), default=0, nullable=False
+    )
     updated_at: Mapped[Optional[datetime.datetime]] = mapped_column(
         DateTime(True),
         init=False,
@@ -90,7 +93,7 @@ class Transactions(Base):
     data: Mapped[Optional[dict]] = mapped_column(JSONB)
     consensus_data: Mapped[Optional[dict]] = mapped_column(JSONB)
     nonce: Mapped[Optional[int]] = mapped_column(Integer)
-    value: Mapped[Optional[int]] = mapped_column(BigInteger)
+    value: Mapped[Optional[int]] = mapped_column(Numeric(precision=78, scale=0))
     type: Mapped[Optional[int]] = mapped_column(Integer)
     gaslimit: Mapped[Optional[int]] = mapped_column(BigInteger)
     created_at: Mapped[Optional[datetime.datetime]] = mapped_column(

@@ -31,7 +31,12 @@ class AccountsManager:
         self.create_new_account_with_address(account.address)
         return account
 
-    def create_new_account_with_address(self, address: str) -> Account:
+    # Default funding for new EOA accounts: 10000 GEN in wei (like Hardhat)
+    DEFAULT_EOA_BALANCE = 10000 * 10**18
+
+    def create_new_account_with_address(
+        self, address: str, funded: bool = False
+    ) -> Account:
         # Check if account already exists
         if not is_address(address):
             raise ValueError(f"Invalid address: {address}")
@@ -43,7 +48,8 @@ class AccountsManager:
             return existing_account
 
         # If account doesn't exist, create it
-        account = CurrentState(id=address, data={}, balance=0)
+        initial_balance = self.DEFAULT_EOA_BALANCE if funded else 0
+        account = CurrentState(id=address, data={}, balance=initial_balance)
         self.session.add(account)
         self.session.commit()
         return account

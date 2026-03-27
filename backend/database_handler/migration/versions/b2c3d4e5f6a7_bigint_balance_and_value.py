@@ -23,13 +23,13 @@ def upgrade() -> None:
     op.alter_column(
         "current_state",
         "balance",
-        type_=sa.BigInteger(),
+        type_=sa.Numeric(precision=78, scale=0),
         existing_type=sa.Integer(),
     )
     op.alter_column(
         "transactions",
         "value",
-        type_=sa.BigInteger(),
+        type_=sa.Numeric(precision=78, scale=0),
         existing_type=sa.Integer(),
     )
 
@@ -39,11 +39,11 @@ def downgrade() -> None:
         "transactions",
         "value",
         type_=sa.Integer(),
-        existing_type=sa.BigInteger(),
+        existing_type=sa.Numeric(precision=78, scale=0),
     )
     op.alter_column(
         "current_state",
         "balance",
         type_=sa.Integer(),
-        existing_type=sa.BigInteger(),
+        existing_type=sa.Numeric(precision=78, scale=0),
     )
