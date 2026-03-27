@@ -9,6 +9,7 @@ from sqlalchemy import (
     Integer,
     PrimaryKeyConstraint,
     String,
+    TypeDecorator,
     UniqueConstraint,
     func,
     text,
@@ -18,6 +19,23 @@ from sqlalchemy import (
     Sequence,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+
+
+class IntNumeric(TypeDecorator):
+    """Numeric column that returns Python int instead of Decimal."""
+
+    impl = Numeric
+    cache_ok = True
+
+    def __init__(self):
+        super().__init__(precision=78, scale=0)
+
+    def process_result_value(self, value, dialect):
+        if value is not None:
+            return int(value)
+        return value
+
+
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
@@ -57,9 +75,7 @@ class CurrentState(Base):
 
     id: Mapped[str] = mapped_column(String(255), primary_key=True)
     data: Mapped[dict] = mapped_column(JSONB)
-    balance: Mapped[int] = mapped_column(
-        Numeric(precision=78, scale=0), default=0, nullable=False
-    )
+    balance: Mapped[int] = mapped_column(IntNumeric(), default=0, nullable=False)
     updated_at: Mapped[Optional[datetime.datetime]] = mapped_column(
         DateTime(True),
         init=False,
@@ -93,7 +109,7 @@ class Transactions(Base):
     data: Mapped[Optional[dict]] = mapped_column(JSONB)
     consensus_data: Mapped[Optional[dict]] = mapped_column(JSONB)
     nonce: Mapped[Optional[int]] = mapped_column(Integer)
-    value: Mapped[Optional[int]] = mapped_column(Numeric(precision=78, scale=0))
+    value: Mapped[Optional[int]] = mapped_column(IntNumeric())
     type: Mapped[Optional[int]] = mapped_column(Integer)
     gaslimit: Mapped[Optional[int]] = mapped_column(BigInteger)
     created_at: Mapped[Optional[datetime.datetime]] = mapped_column(
