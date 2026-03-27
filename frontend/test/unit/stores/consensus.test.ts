@@ -56,10 +56,11 @@ describe('useConsensusStore', () => {
   });
 
   it('should initialize with default values from environment variables', () => {
-    // getRuntimeConfigNumber provides fallback values (10 for finality window, 3 for max rotations)
-    expect(consensusStore.finalityWindow).toBe(10);
+    // getRuntimeConfigNumber reads from env vars first, then falls back
+    // VITE_FINALITY_WINDOW=3 from .env, VITE_MAX_ROTATIONS not set so uses fallback of 3
+    expect(consensusStore.finalityWindow).toBe(3);
     expect(consensusStore.isLoading).toBe(true); // Loading starts as true
-    expect(consensusStore.maxRotations).toBe(3); // Fallback from getRuntimeConfigNumber
+    expect(consensusStore.maxRotations).toBe(3);
   });
 
   it('should set up event listeners on initialization', () => {

@@ -54,7 +54,6 @@ services:
     expose:
       - "${FRONTEND_PORT}"
     environment:
-      - VITE_GENLAYER_NETWORK=${VITE_GENLAYER_NETWORK}
       - VITE_JSON_RPC_SERVER_URL=${VITE_JSON_RPC_SERVER_URL}
       - VITE_WS_SERVER_URL=${VITE_WS_SERVER_URL}
       - VITE_IS_HOSTED=${VITE_IS_HOSTED}
@@ -87,10 +86,14 @@ services:
     volumes:
       - ./explorer/src:/app/src
     depends_on:
-      jsonrpc:
-        condition: service_healthy
+      database-migration:
+        condition: service_completed_successfully
     environment:
-      - BACKEND_URL=http://jsonrpc:4000
+      - DB_HOST=${DBHOST}
+      - DB_NAME=${DBNAME}
+      - DB_USER=${DBUSER}
+      - DB_PASSWORD=${DBPASSWORD}
+      - DB_PORT=${DBPORT}
     restart: always
     security_opt:
       - "no-new-privileges=true"
@@ -116,9 +119,9 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - GENVMROOT=/genvm
       - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-false}
-      - RATE_LIMIT_ANON_PER_MINUTE=${RATE_LIMIT_ANON_PER_MINUTE:-30}
-      - RATE_LIMIT_ANON_PER_HOUR=${RATE_LIMIT_ANON_PER_HOUR:-500}
-      - RATE_LIMIT_ANON_PER_DAY=${RATE_LIMIT_ANON_PER_DAY:-5000}
+      - RATE_LIMIT_ANON_PER_MINUTE=${RATE_LIMIT_ANON_PER_MINUTE:-10}
+      - RATE_LIMIT_ANON_PER_HOUR=${RATE_LIMIT_ANON_PER_HOUR:-100}
+      - RATE_LIMIT_ANON_PER_DAY=${RATE_LIMIT_ANON_PER_DAY:-1000}
     ports:
       - "${RPCPORT}:${RPCPORT}"
     expose:
@@ -186,7 +189,7 @@ services:
       traefik.http.routers.jsonrpc-health.service: jsonrpc
 
   webdriver:
-    image: yeagerai/genlayer-genvm-webdriver:0.0.9
+    image: yeagerai/genlayer-genvm-webdriver:0.0.10
     shm_size: 2gb
     environment:
       - PORT=${WEBDRIVERPORT:-4444}
@@ -215,7 +218,7 @@ services:
 
   ollama:
     profiles: ["ollama"]
-    image: ollama/ollama:0.17.6
+    image: ollama/ollama:0.17.7
     ports:
       - 11434:11434
     volumes:
