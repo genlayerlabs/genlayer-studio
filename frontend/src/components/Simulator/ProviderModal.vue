@@ -233,8 +233,11 @@ const checkRules = () => {
       }
 
       if (isCreateMode.value) {
-        if (rule.then?.properties?.model?.enum) {
-          modelOptions.value = rule.then?.properties?.model?.enum;
+        const thenProps = rule.then?.properties as
+          | Record<string, any>
+          | undefined;
+        if (thenProps?.model?.enum) {
+          modelOptions.value = thenProps.model.enum;
 
           const availableModel = modelOptions.value.find(
             (model) =>
@@ -249,7 +252,7 @@ const checkRules = () => {
             newProviderData.model =
               availableModel || modelOptions.value[0] || '';
           } else {
-            newProviderData.model = rule.then?.properties?.model?.enum[0] || '';
+            newProviderData.model = thenProps.model.enum[0] || '';
           }
         } else {
           newProviderData.model = '';
