@@ -350,7 +350,8 @@ class _SnapshotView(genvmbase.StateProxy):
         snap = self._get_snapshot(addr)
         # Deserialized snapshots (from_dict) don't have balance — use 0 as fallback.
         # Balance is not part of the snapshot by design; it persists in DB independently.
-        return getattr(snap, "balance", 0)
+        bal = getattr(snap, "balance", 0)
+        return int(bal) if bal is not None else 0
 
 
 import aiohttp
@@ -992,7 +993,7 @@ class Node:
             "origin_address": Address(
                 from_address
             ),  # FIXME: no origin in simulator #751
-            "value": value,
+            "value": int(value),
             "chain_id": get_simulator_chain_id(),
         }
         if transaction_datetime is not None:
