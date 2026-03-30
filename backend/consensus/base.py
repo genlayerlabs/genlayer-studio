@@ -1452,24 +1452,8 @@ class PendingState(TransactionState):
             )
             return None
 
-        # Credit target contract on activation (value from transaction)
-        # Idempotent via value_credited flag — safe across retries/resets
-        tx_value = context.transaction.value or 0
-        if tx_value > 0:
-            credited = context.accounts_manager.credit_tx_value_once(
-                context.transaction.hash,
-                context.transaction.to_address,
-                tx_value,
-            )
-            # Refresh snapshot balance so GenVM sees post-credit balance
-            if credited and context.contract_snapshot is not None:
-                context.contract_snapshot.balance = (
-                    context.accounts_manager.get_account_balance(
-                        context.transaction.to_address
-                    )
-                )
-
-        # Get all validators
+        # Get all validators BEFORE crediting — if no validators, tx will be
+        # canceled and we must not credit (otherwise refund_tx_value can't refund)
         if context.validators_snapshot is None:
             all_validators = None
         else:
@@ -1587,6 +1571,23 @@ class PendingState(TransactionState):
             else:
                 context.involved_validators = get_validators_for_transaction(
                     all_validators, context.transaction.num_of_initial_validators
+                )
+
+        # Credit target contract on activation (value from transaction)
+        # Placed AFTER validator check — if no validators, tx gets canceled
+        # and refund_tx_value must be able to refund (requires value_credited=false)
+        tx_value = context.transaction.value or 0
+        if tx_value > 0:
+            credited = context.accounts_manager.credit_tx_value_once(
+                context.transaction.hash,
+                context.transaction.to_address,
+                tx_value,
+            )
+            if credited and context.contract_snapshot is not None:
+                context.contract_snapshot.balance = (
+                    context.accounts_manager.get_account_balance(
+                        context.transaction.to_address
+                    )
                 )
 
         activate = decide_pending_activate(

@@ -15,6 +15,7 @@ def get_in_transit_value(session: Session) -> int:
             """
             SELECT COALESCE(SUM(value), 0) FROM transactions
             WHERE value > 0
+            AND value_credited = false
             AND status IN ('PENDING', 'ACTIVATED')
             """
         )
