@@ -28,7 +28,9 @@ export class JsonRpcService implements IJsonRpcService {
     });
     if (error) {
       console.error(error.message, error.code);
-      throw new Error(errorMessage);
+      // Preserve the server's error message instead of a generic fallback
+      const detail = error.message || errorMessage;
+      throw new Error(detail);
     }
     return result;
   }

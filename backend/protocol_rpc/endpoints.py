@@ -1003,7 +1003,10 @@ async def _execute_call_with_snapshot(
 
     async with snapshot_func(*args) as snapshot:
         if len(snapshot.nodes) == 0:
-            raise JSONRPCError("No validators exist to execute the call")
+            raise JSONRPCError(
+                code=-32002,
+                message="No validators available to execute the call",
+            )
 
         receipt = await _gen_call_with_validator(
             session,
@@ -1113,7 +1116,10 @@ async def _gen_call_with_validator(
     if len(validators_snapshot.nodes) > 0:
         validator = validators_snapshot.nodes[0].validator
     else:
-        raise JSONRPCError(f"No validators exist to execute the gen_call")
+        raise JSONRPCError(
+            code=-32002,
+            message="No validators available to execute the gen_call",
+        )
 
     # Create validator node
     try:
@@ -1211,7 +1217,10 @@ async def _gen_call_with_validator(
                     value=call_value,
                 )
             else:
-                raise JSONRPCError(f"Invalid type: {type}")
+                raise JSONRPCError(
+                    code=-32602,
+                    message=f"Invalid type '{type}': must be 'read', 'write', or 'deploy'",
+                )
         except ContractNotFoundError as e:
             raise NotFoundError(
                 message=f"Contract {e.address} not found",
@@ -1221,7 +1230,8 @@ async def _gen_call_with_validator(
     # Return the result of the write method
     if receipt.execution_result != ExecutionResultStatus.SUCCESS:
         raise JSONRPCError(
-            message="running contract failed",
+            code=-32000,
+            message="execution failed",
             data={"receipt": receipt.to_dict(), "params": params},
         )
 
@@ -1373,7 +1383,7 @@ async def eth_call(
 
     if receipt.execution_result != ExecutionResultStatus.SUCCESS:
         raise JSONRPCError(
-            message="running contract failed", data={"receipt": receipt.to_dict()}
+            code=-32000, message="execution failed", data={"receipt": receipt.to_dict()}
         )
     return eth_utils.hexadecimal.encode_hex(receipt.result[1:])
 
@@ -1633,7 +1643,10 @@ def get_block_by_number(
         try:
             block_number_int = int(block_number, 16)
         except ValueError:
-            raise JSONRPCError(f"Invalid block number format: {block_number}")
+            raise JSONRPCError(
+                code=-32602,
+                message=f"Invalid block number format: {block_number}",
+            )
 
     block_details = transactions_processor.get_transactions_for_block(
         block_number_int, include_full_tx=full_tx
