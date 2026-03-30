@@ -70,11 +70,17 @@ def _make_mock_node(receipt: Receipt):
 
 
 def _make_node_factory(receipt: Receipt):
-    """Create a node_factory that returns a mock Node."""
+    """Create a node_factory that returns a mock Node.
+    Also captures the snapshot balance each node sees."""
+    observed_balances = []
 
     def factory(*args, **kwargs):
+        # args[2] is the contract_snapshot (deepcopy'd)
+        if len(args) > 2 and hasattr(args[2], "balance"):
+            observed_balances.append(args[2].balance)
         return _make_mock_node(receipt)
 
+    factory.observed_balances = observed_balances
     return factory
 
 
@@ -194,6 +200,7 @@ class TestPayableAppealFlow:
         def contract_snapshot_factory(addr):
             return ContractSnapshot(addr, session)
 
+        node_factory_r1 = _make_node_factory(receipt1)
         await consensus.exec_transaction(
             transaction=transaction,
             transactions_processor=transactions_processor,
@@ -201,9 +208,15 @@ class TestPayableAppealFlow:
             accounts_manager=accounts_manager,
             contract_snapshot_factory=contract_snapshot_factory,
             contract_processor=contract_processor,
-            node_factory=_make_node_factory(receipt1),
+            node_factory=node_factory_r1,
             validators_snapshot=_make_validators_snapshot(),
         )
+
+        # Verify all nodes (leader + validators) saw pre-debit balance
+        for observed in node_factory_r1.observed_balances:
+            assert (
+                observed == 10 * WEI_PER_GEN
+            ), f"Node should see balance=10 GEN before debit, got {observed / WEI_PER_GEN} GEN"
 
         # Verify Round 1 results
         session.expire_all()
@@ -235,6 +248,7 @@ class TestPayableAppealFlow:
         tx_data2 = transactions_processor.get_transaction_by_hash(tx_hash)
         transaction2 = Transaction.from_dict(tx_data2)
 
+        node_factory_r2 = _make_node_factory(receipt2)
         await consensus.exec_transaction(
             transaction=transaction2,
             transactions_processor=transactions_processor,
@@ -242,9 +256,16 @@ class TestPayableAppealFlow:
             accounts_manager=accounts_manager,
             contract_snapshot_factory=contract_snapshot_factory,
             contract_processor=contract_processor,
-            node_factory=_make_node_factory(receipt2),
+            node_factory=node_factory_r2,
             validators_snapshot=_make_validators_snapshot(),
         )
+
+        # Verify all nodes in Round 2 saw post-R1-debit balance (7 GEN, not 10)
+        for observed in node_factory_r2.observed_balances:
+            assert observed == 7 * WEI_PER_GEN, (
+                f"Appeal round nodes should see balance=7 GEN (post-R1 debit), "
+                f"got {observed / WEI_PER_GEN} GEN"
+            )
 
         # Verify Round 2 results
         session.expire_all()
