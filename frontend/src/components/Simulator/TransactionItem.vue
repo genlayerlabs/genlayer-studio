@@ -189,20 +189,22 @@ function prettifyTxData(x: any): any {
 }
 
 const badgeColorClass = computed(() => {
-  if (props.transaction.statusName !== 'FINALIZED') {
+  const status = props.transaction.statusName;
+  if (status !== 'FINALIZED' && status !== 'ACCEPTED') {
     return '';
-  } else {
-    const executionResult =
-      props.transaction.data?.last_round?.result || leaderReceipt.value?.result;
-    if (
-      executionResult === 6 &&
-      leaderReceipt.value?.execution_result !== 'ERROR'
-    ) {
-      return '!bg-green-500';
-    } else {
-      return '!bg-red-500';
-    }
   }
+  const executionResult =
+    props.transaction.data?.last_round?.result || leaderReceipt.value?.result;
+  if (
+    leaderReceipt.value?.execution_result === 'ERROR'
+  ) {
+    return '!bg-red-500';
+  } else if (executionResult === 6) {
+    return '!bg-green-500';
+  } else if (status === 'FINALIZED') {
+    return '!bg-red-500';
+  }
+  return '';
 });
 </script>
 
