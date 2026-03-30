@@ -237,14 +237,26 @@ class TestPayableAppealFlow:
         ), f"Expected 1 child after Round 1, got {len(children)}"
         assert children[0].value == 3 * WEI_PER_GEN
 
-        # ── Simulate appeal ──
+        # ── Verify saved snapshot has pre-debit balance ──
+        session.expire_all()
+        tx_after_r1 = transactions_processor.get_transaction_by_hash(tx_hash)
+        saved_snapshot = tx_after_r1.get("contract_snapshot")
+        assert saved_snapshot is not None, "Snapshot should be saved at acceptance"
+        assert saved_snapshot.get("balance") == 10 * WEI_PER_GEN, (
+            f"Saved snapshot should have pre-debit balance=10 GEN, "
+            f"got {saved_snapshot.get('balance')}"
+        )
+
+        # ── Simulate appeal → clear snapshot (as process_validator_appeal does) ──
         transactions_processor.set_transaction_appeal(tx_hash, True)
+        # On successful appeal, snapshot is cleared so re-execution loads fresh from DB
+        transactions_processor.set_transaction_contract_snapshot(tx_hash, None)
         session.commit()
 
-        # ── Round 2: Re-execute after appeal ──
+        # ── Round 2: Re-execute after successful appeal ──
         receipt2 = _make_receipt_with_message(value=3 * WEI_PER_GEN)
 
-        # Reload transaction (now has appealed=True)
+        # Reload transaction (appealed=True, snapshot=None)
         tx_data2 = transactions_processor.get_transaction_by_hash(tx_hash)
         transaction2 = Transaction.from_dict(tx_data2)
 
@@ -260,10 +272,11 @@ class TestPayableAppealFlow:
             validators_snapshot=_make_validators_snapshot(),
         )
 
-        # Verify all nodes in Round 2 saw post-R1-debit balance (7 GEN, not 10)
+        # Re-execution nodes should see post-R1-debit balance (7 GEN)
+        # because snapshot was cleared and balance loaded from DB
         for observed in node_factory_r2.observed_balances:
             assert observed == 7 * WEI_PER_GEN, (
-                f"Appeal round nodes should see balance=7 GEN (post-R1 debit), "
+                f"Re-execution nodes should see balance=7 GEN (post-R1 debit), "
                 f"got {observed / WEI_PER_GEN} GEN"
             )
 
