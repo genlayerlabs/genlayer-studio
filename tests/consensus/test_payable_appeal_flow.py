@@ -302,3 +302,104 @@ class TestPayableAppealFlow:
         # Total debit: 6 GEN (3 + 3), balance: 10 - 6 = 4 GEN
         total_child_value = sum(c.value for c in all_children)
         assert total_child_value == 6 * WEI_PER_GEN
+
+
+class TestAppealVerificationBalance:
+    """Appeal validators must see the pre-debit balance when verifying the original execution."""
+
+    @pytest.mark.asyncio
+    async def test_appeal_validators_see_pre_debit_balance(
+        self,
+        session,
+        accounts_manager,
+        transactions_processor,
+        contract_processor,
+        setup_accounts,
+        insert_transaction,
+    ):
+        sender_addr, contract_addr, _ = setup_accounts
+        tx_hash = insert_transaction(sender_addr, contract_addr)
+
+        # Set up contract state in DB
+        from backend.database_handler.models import CurrentState
+
+        contract_row = session.query(CurrentState).filter_by(id=contract_addr).one()
+        contract_row.data = {
+            "state": {
+                "accepted": {"slot": base64.b64encode(b"hello").decode()},
+                "finalized": {},
+            }
+        }
+        session.commit()
+
+        # ── Round 1: Execute to get ACCEPTED with saved snapshot ──
+        receipt1 = _make_receipt_with_message(value=3 * WEI_PER_GEN)
+        consensus = ConsensusAlgorithm(
+            get_session=lambda: session,
+            msg_handler=MagicMock(),
+            consensus_service=MagicMock(),
+            validators_manager=MagicMock(),
+            genvm_manager=MagicMock(),
+        )
+
+        tx_data = transactions_processor.get_transaction_by_hash(tx_hash)
+        transaction = Transaction.from_dict(tx_data)
+
+        def contract_snapshot_factory(addr):
+            return ContractSnapshot(addr, session)
+
+        node_factory_r1 = _make_node_factory(receipt1)
+        await consensus.exec_transaction(
+            transaction=transaction,
+            transactions_processor=transactions_processor,
+            chain_snapshot=None,
+            accounts_manager=accounts_manager,
+            contract_snapshot_factory=contract_snapshot_factory,
+            contract_processor=contract_processor,
+            node_factory=node_factory_r1,
+            validators_snapshot=_make_validators_snapshot(),
+        )
+
+        # Confirm Round 1: balance debited to 7
+        session.expire_all()
+        assert accounts_manager.get_account_balance(contract_addr) == 7 * WEI_PER_GEN
+
+        # ── Set up appeal: mark as appealed (NOT clearing snapshot) ──
+        transactions_processor.set_transaction_appeal(tx_hash, True)
+        session.commit()
+
+        # Reload transaction for appeal processing
+        session.expire_all()
+        tx_data_appeal = transactions_processor.get_transaction_by_hash(tx_hash)
+        transaction_appeal = Transaction.from_dict(tx_data_appeal)
+
+        # The saved snapshot should have pre-debit balance=10
+        assert transaction_appeal.contract_snapshot is not None
+        saved_balance = transaction_appeal.contract_snapshot.get("balance")
+        assert (
+            saved_balance == 10 * WEI_PER_GEN
+        ), f"Saved snapshot should have pre-debit balance=10 GEN, got {saved_balance}"
+
+        # ── Verify: TransactionContext with saved snapshot gets balance=10 ──
+        from backend.consensus.base import TransactionContext
+
+        appeal_context = TransactionContext(
+            transaction=transaction_appeal,
+            transactions_processor=transactions_processor,
+            chain_snapshot=None,
+            accounts_manager=accounts_manager,
+            contract_snapshot_factory=contract_snapshot_factory,
+            contract_processor=contract_processor,
+            node_factory=MagicMock(),
+            msg_handler=MagicMock(),
+            consensus_service=MagicMock(),
+            validators_snapshot=_make_validators_snapshot(),
+            genvm_manager=MagicMock(),
+        )
+
+        # The contract snapshot used for appeal verification should have balance=10
+        assert appeal_context.contract_snapshot.balance == 10 * WEI_PER_GEN, (
+            f"Appeal context snapshot should have balance=10 GEN (pre-debit), "
+            f"got {appeal_context.contract_snapshot.balance / WEI_PER_GEN} GEN. "
+            f"DB balance is {accounts_manager.get_account_balance(contract_addr) / WEI_PER_GEN} GEN"
+        )
