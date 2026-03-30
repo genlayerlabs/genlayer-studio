@@ -443,12 +443,16 @@ class TransactionContext:
 
         if self.transaction.type != TransactionType.SEND:
             saved = self.transaction.contract_snapshot
-            has_real_state = (
-                saved and hasattr(saved, "states") and saved.states.get("accepted")
+            has_real_data = saved and (
+                (hasattr(saved, "states") and saved.states.get("accepted"))
+                or (hasattr(saved, "balance") and saved.balance is not None)
             )
-            if has_real_state:
+            if has_real_data:
                 self.contract_snapshot = saved
-                # Hydrate balance from DB — saved snapshots don't carry balance
+                # Saved snapshots now carry balance (pre-execution balance at acceptance time).
+                # This ensures appeal validators see the correct balance when verifying
+                # the original execution. Only hydrate from DB if snapshot has no balance
+                # (legacy snapshots created before this change).
                 if not hasattr(saved, "balance") or saved.balance is None:
                     fresh = self.contract_snapshot_factory(self.transaction.to_address)
                     self.contract_snapshot.balance = fresh.balance
@@ -1117,10 +1121,11 @@ class ConsensusAlgorithm:
                             accepted_state=previous_contact_state,
                         )
 
-                        # Reset the contract snapshot for the transaction
-                        context.transactions_processor.set_transaction_contract_snapshot(
-                            context.transaction.hash, None
-                        )
+                    # Always clear snapshot on successful appeal (including timeout appeals)
+                    # so re-execution loads fresh state from DB
+                    context.transactions_processor.set_transaction_contract_snapshot(
+                        context.transaction.hash, None
+                    )
 
                     await ConsensusAlgorithm.dispatch_transaction_status_update(
                         context.transactions_processor,

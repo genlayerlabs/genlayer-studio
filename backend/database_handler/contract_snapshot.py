@@ -40,6 +40,7 @@ class ContractSnapshot:
                 self.contract_address if self.contract_address else None
             ),
             "states": self.states if self.states else {"accepted": {}, "finalized": {}},
+            "balance": getattr(self, "balance", None),
         }
 
     @classmethod
@@ -48,6 +49,7 @@ class ContractSnapshot:
             instance = cls.__new__(cls)
             instance.contract_address = input.get("contract_address", None)
             instance.states = input.get("states", {"accepted": {}, "finalized": {}})
+            instance.balance = input.get("balance")
             return instance
         else:
             return None
