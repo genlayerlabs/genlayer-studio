@@ -17,7 +17,7 @@ export function useChainEnforcer() {
     return { ensureCorrectChain: async () => {} };
   }
 
-  const { chainId, switchNetwork } = useAppKitNetwork();
+  const networkData = useAppKitNetwork();
   const accountsStore = useAccountsStore();
 
   const isExternalWallet = computed(
@@ -26,14 +26,14 @@ export function useChainEnforcer() {
 
   async function ensureCorrectChain() {
     if (!isExternalWallet.value) return;
-    if (chainId.value === genlayerLocalnet!.id) return;
+    if (networkData.value.chainId === genlayerLocalnet!.id) return;
 
-    switchNetwork(genlayerLocalnet!);
+    networkData.value.switchNetwork(genlayerLocalnet!);
 
     // Give the wallet a moment to process the switch
     await new Promise((r) => setTimeout(r, 500));
 
-    if (chainId.value !== genlayerLocalnet!.id) {
+    if (networkData.value.chainId !== genlayerLocalnet!.id) {
       throw new Error(
         'Please switch your wallet to the GenLayer network to send transactions.',
       );
