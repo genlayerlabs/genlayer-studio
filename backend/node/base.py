@@ -721,9 +721,17 @@ class Node:
 
         # 3. Deterministic violation: execution outcome or state diverges from leader
         leader_receipt = self.leader_receipt
+        # Compare contract_state by hash: the full contract_state may have been
+        # stripped to {} during persistence (storage optimisation). The hash is
+        # always persisted and survives the round-trip.
+        state_matches = (
+            leader_receipt.contract_state_hash == receipt.contract_state_hash
+            if leader_receipt.contract_state_hash is not None
+            else leader_receipt.contract_state == receipt.contract_state
+        )
         if (
             leader_receipt.execution_result != receipt.execution_result
-            or leader_receipt.contract_state != receipt.contract_state
+            or not state_matches
             or leader_receipt.pending_transactions != receipt.pending_transactions
         ):
             receipt.vote = Vote.DETERMINISTIC_VIOLATION

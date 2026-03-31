@@ -9,7 +9,12 @@ import {
 import { useDebounceFn } from '@vueuse/core';
 import { notify } from '@kyvg/vue3-notification';
 import { useMockContractData } from './useMockContractData';
-import { useEventTracking, useGenlayer, useWallet } from '@/hooks';
+import {
+  useEventTracking,
+  useGenlayer,
+  useWallet,
+  useChainEnforcer,
+} from '@/hooks';
 import type {
   Address,
   TransactionHash,
@@ -30,6 +35,7 @@ export function useContractQueries() {
   const contractsStore = useContractsStore();
   const queryClient = useQueryClient();
   const { trackEvent } = useEventTracking();
+  const { ensureCorrectChain } = useChainEnforcer();
   const contract = computed(() => contractsStore.currentContract);
 
   const { mockContractId, mockContractSchema } = useMockContractData();
@@ -103,6 +109,8 @@ export function useContractQueries() {
       if (!contract.value || !accountsStore.selectedAccount) {
         throw new Error('Error Deploying the contract');
       }
+
+      await ensureCorrectChain();
 
       const code = contract.value?.content ?? '';
       const code_bytes = new TextEncoder().encode(code);
@@ -223,6 +231,8 @@ export function useContractQueries() {
       if (!accountsStore.selectedAccount) {
         throw new Error('Error writing to contract');
       }
+
+      await ensureCorrectChain();
 
       const result = await genlayerClient.value?.writeContract({
         address: address.value as Address,

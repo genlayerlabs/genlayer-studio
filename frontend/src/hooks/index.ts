@@ -16,3 +16,4 @@ export * from './useNetworks';
 export * from './useAppKit';
 export * from './useWallet';
 export * from './useWalletSync';
+export * from './useChainEnforcer';
