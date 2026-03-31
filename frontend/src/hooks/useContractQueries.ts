@@ -9,7 +9,12 @@ import {
 import { useDebounceFn } from '@vueuse/core';
 import { notify } from '@kyvg/vue3-notification';
 import { useMockContractData } from './useMockContractData';
-import { useEventTracking, useGenlayer, useWallet } from '@/hooks';
+import {
+  useEventTracking,
+  useGenlayer,
+  useWallet,
+  useChainEnforcer,
+} from '@/hooks';
 import type {
   Address,
   TransactionHash,
@@ -30,6 +35,7 @@ export function useContractQueries() {
   const contractsStore = useContractsStore();
   const queryClient = useQueryClient();
   const { trackEvent } = useEventTracking();
+  const { ensureCorrectChain } = useChainEnforcer();
   const contract = computed(() => contractsStore.currentContract);
 
   const { mockContractId, mockContractSchema } = useMockContractData();
@@ -103,6 +109,8 @@ export function useContractQueries() {
       if (!contract.value || !accountsStore.selectedAccount) {
         throw new Error('Error Deploying the contract');
       }
+
+      await ensureCorrectChain();
 
       const code = contract.value?.content ?? '';
       const code_bytes = new TextEncoder().encode(code);
@@ -205,6 +213,7 @@ export function useContractQueries() {
     args,
     executionMode,
     consensusMaxRotations,
+    value = BigInt(0),
   }: {
     method: string;
     args: {
@@ -213,6 +222,7 @@ export function useContractQueries() {
     };
     executionMode: ExecutionMode;
     consensusMaxRotations?: number;
+    value?: bigint;
   }) {
     // Map executionMode to leaderOnly for backward compatibility with genlayer-js SDK
     const leaderOnly = executionMode !== 'NORMAL';
@@ -222,11 +232,13 @@ export function useContractQueries() {
         throw new Error('Error writing to contract');
       }
 
+      await ensureCorrectChain();
+
       const result = await genlayerClient.value?.writeContract({
         address: address.value as Address,
         functionName: method,
         args: args.args,
-        value: BigInt(0),
+        value,
         leaderOnly,
         consensusMaxRotations,
       });

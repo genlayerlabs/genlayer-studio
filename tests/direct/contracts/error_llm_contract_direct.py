@@ -42,7 +42,11 @@ This result should be perfectly parseable by a JSON parser without errors.
 
     def test_system_error(self):
         prompt = "What is 2+2?"
-        gl.nondet.exec_prompt(prompt)
+
+        def get_llm_answer():
+            return gl.nondet.exec_prompt(prompt)
+
+        gl.eq_principle.strict_eq(get_llm_answer)
 
     def test_invalid_json(self):
         prompt = """What is 2+2?

@@ -17,8 +17,10 @@ class ErrorWebContractDirect(gl.Contract):
             self.test_connect_to_url(url)
 
     def test_system_error(self, url: str):
-        result = gl.nondet.web.render(url, mode="text")
-        return result
+        def get_url_data():
+            return gl.nondet.web.render(url, mode="text")
+
+        gl.eq_principle.strict_eq(get_url_data)
 
     def test_connect_to_url(self, url: str):
         def get_url_data():

@@ -7,6 +7,7 @@ from .models import CurrentState
 from backend.database_handler.errors import AccountNotFoundError
 
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 
 class AccountsManager:
@@ -80,3 +81,90 @@ class AccountsManager:
             self.create_new_account_with_address(account_address)
             to_account = self.get_account(account_address)
         to_account.balance = new_balance
+
+    def debit_account_balance(self, account_address: str, amount: int) -> bool:
+        """Atomic conditional debit. Returns False if insufficient balance."""
+        if amount <= 0:
+            return True
+        result = self.session.execute(
+            text(
+                "UPDATE current_state SET balance = balance - :amount "
+                "WHERE id = :addr AND balance >= :amount"
+            ),
+            {"amount": amount, "addr": account_address},
+        )
+        return result.rowcount > 0
+
+    def credit_account_balance(self, account_address: str, amount: int):
+        """Atomic credit. Creates account if it doesn't exist."""
+        if amount <= 0:
+            return
+        self.session.execute(
+            text(
+                "INSERT INTO current_state (id, data, balance) "
+                "VALUES (:addr, '{}'::jsonb, 0) "
+                "ON CONFLICT (id) DO NOTHING"
+            ),
+            {"addr": account_address},
+        )
+        self.session.execute(
+            text(
+                "UPDATE current_state SET balance = balance + :amount "
+                "WHERE id = :addr"
+            ),
+            {"amount": amount, "addr": account_address},
+        )
+
+    def credit_tx_value_once(
+        self, tx_hash: str, target_address: str, amount: int
+    ) -> bool:
+        """Idempotent activation credit: credits target only if tx not already credited.
+        Sets value_credited=true atomically. Returns True if credit was applied."""
+        if amount <= 0:
+            return False
+        # Ensure target account exists
+        self.session.execute(
+            text(
+                "INSERT INTO current_state (id, data, balance) "
+                "VALUES (:addr, '{}'::jsonb, 0) "
+                "ON CONFLICT (id) DO NOTHING"
+            ),
+            {"addr": target_address},
+        )
+        # Atomic: set value_credited and credit balance in one operation
+        result = self.session.execute(
+            text(
+                "UPDATE transactions SET value_credited = true "
+                "WHERE hash = :hash AND value_credited = false AND value > 0"
+            ),
+            {"hash": tx_hash},
+        )
+        if result.rowcount > 0:
+            self.session.execute(
+                text(
+                    "UPDATE current_state SET balance = balance + :amount "
+                    "WHERE id = :addr"
+                ),
+                {"amount": amount, "addr": target_address},
+            )
+            # Expire ORM cache so subsequent reads see post-credit balances
+            self.session.expire_all()
+            return True
+        return False
+
+    def refund_tx_value(self, tx_hash: str, sender_address: str) -> bool:
+        """Refund sender for a canceled/failed payable tx if value not yet credited to target.
+        Returns True if refund was applied."""
+        result = self.session.execute(
+            text(
+                "SELECT value, value_credited FROM transactions " "WHERE hash = :hash"
+            ),
+            {"hash": tx_hash},
+        )
+        row = result.first()
+        if row is None or row.value is None or row.value <= 0:
+            return False
+        if row.value_credited:
+            return False  # target already received funds, can't refund
+        self.credit_account_balance(sender_address, row.value)
+        return True

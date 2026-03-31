@@ -1,11 +1,24 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Iterable, Optional, Literal
 import base64
+import hashlib
+import json
 
 import collections.abc
 
 from eth_hash.auto import keccak
+
+
+def _compute_contract_state_hash(state: dict | None) -> str | None:
+    """Compute a deterministic hash of contract_state for appeal comparison.
+
+    Returns a hex-encoded SHA-256 digest, or None if state is empty/None.
+    """
+    if not state:
+        return None
+    canonical = json.dumps(state, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 class Address:
@@ -209,6 +222,11 @@ class Receipt:
     processing_time: Optional[int] = None
     nondet_disagree: int | None = None
     execution_stats: dict | None = None
+    contract_state_hash: str | None = field(default=None, repr=False)
+
+    def __post_init__(self):
+        if self.contract_state_hash is None and self.contract_state:
+            self.contract_state_hash = _compute_contract_state_hash(self.contract_state)
 
     def to_dict(self, strip_contract_state: bool = False):
         """Convert Receipt to dict.
@@ -228,6 +246,7 @@ class Receipt:
             "gas_used": self.gas_used,
             "mode": self.mode.value,
             "contract_state": {} if strip_contract_state else self.contract_state,
+            "contract_state_hash": self.contract_state_hash,
             "node_config": self.node_config,
             **({"eq_outputs": self.eq_outputs} if self.eq_outputs is not None else {}),
             "pending_transactions": [
@@ -267,6 +286,7 @@ class Receipt:
                 processing_time=input.get("processing_time"),
                 nondet_disagree=input.get("nondet_disagree"),
                 execution_stats=input.get("execution_stats"),
+                contract_state_hash=input.get("contract_state_hash"),
             )
         else:
             return None

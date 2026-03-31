@@ -40,6 +40,9 @@ class ContractSnapshot:
                 self.contract_address if self.contract_address else None
             ),
             "states": self.states if self.states else {"accepted": {}, "finalized": {}},
+            "balance": (
+                int(b) if (b := getattr(self, "balance", None)) is not None else None
+            ),
         }
 
     @classmethod
@@ -48,6 +51,8 @@ class ContractSnapshot:
             instance = cls.__new__(cls)
             instance.contract_address = input.get("contract_address", None)
             instance.states = input.get("states", {"accepted": {}, "finalized": {}})
+            raw_balance = input.get("balance")
+            instance.balance = int(raw_balance) if raw_balance is not None else None
             return instance
         else:
             return None

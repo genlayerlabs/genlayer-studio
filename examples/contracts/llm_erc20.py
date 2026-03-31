@@ -14,13 +14,18 @@ class LlmErc20(gl.Contract):
 
     @gl.public.write
     def transfer(self, amount: int, to_address: str) -> None:
-        input = f"""
+        # Precompute input string deterministically before non-det block
+        current_balances = json.dumps(self.get_balances())
+        sender_hex = gl.message.sender_address.as_hex
+        recipient_hex = Address(to_address).as_hex
+
+        prompt_input = f"""
 You keep track of transactions between users and their balance in coins.
 The current balance for all users in JSON format is:
-{json.dumps(self.get_balances())}
+{current_balances}
 The transaction to compute is: {{
-sender: "{gl.message.sender_address.as_hex}",
-recipient: "{Address(to_address).as_hex}",
+sender: "{sender_hex}",
+recipient: "{recipient_hex}",
 amount: {amount},
 }}
 
@@ -47,15 +52,15 @@ The balance of the sender should have decreased by the amount sent.
 The balance of the receiver should have increased by the amount sent.
 The total sum of all balances should remain the same before and after the transaction"""
 
-        final_result = (
-            gl.eq_principle.prompt_non_comparative(
-                lambda: input,
-                task=task,
-                criteria=criteria,
+        def get_transfer_result() -> str:
+            return (
+                gl.nondet.exec_prompt(prompt_input + task)
+                .replace("```json", "")
+                .replace("```", "")
             )
-            .replace("```json", "")
-            .replace("```", "")
-        )
+
+        final_result = gl.eq_principle.strict_eq(get_transfer_result)
+
         print("final_result: ", final_result)
         result_json = json.loads(final_result)
         for k, v in result_json["updated_balances"].items():

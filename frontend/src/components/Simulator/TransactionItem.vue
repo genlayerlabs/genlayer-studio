@@ -24,6 +24,32 @@ import {
   getRuntimeConfigNumber,
 } from '@/utils/runtimeConfig';
 
+function extractErrorText(receipt: any): string | null {
+  if (!receipt) return null;
+  // Check genvm_result.stderr first (most detailed)
+  const stderr = receipt.genvm_result?.stderr;
+  if (stderr && typeof stderr === 'string' && stderr.trim())
+    return stderr.trim();
+  // Decode result bytes: first byte is status code, rest is error text for codes 1-3
+  const raw = receipt.result;
+  if (typeof raw === 'string' && raw.length > 0) {
+    try {
+      const decoded = resultToUserFriendlyJson(raw);
+      if (
+        decoded?.status &&
+        decoded.status !== 'return' &&
+        decoded.status !== 'none' &&
+        decoded.payload
+      ) {
+        return `[${decoded.status}] ${decoded.payload}`;
+      }
+    } catch {
+      // ignore decode failures
+    }
+  }
+  return null;
+}
+
 const uiStore = useUIStore();
 const nodeStore = useNodeStore();
 const transactionsStore = useTransactionsStore();
@@ -188,21 +214,26 @@ function prettifyTxData(x: any): any {
   }
 }
 
+const leaderErrorDetail = computed(() => {
+  if (leaderReceipt.value?.execution_result !== 'ERROR') return null;
+  return extractErrorText(leaderReceipt.value);
+});
+
 const badgeColorClass = computed(() => {
-  if (props.transaction.statusName !== 'FINALIZED') {
+  const status = props.transaction.statusName;
+  if (status !== 'FINALIZED' && status !== 'ACCEPTED') {
     return '';
-  } else {
-    const executionResult =
-      props.transaction.data?.last_round?.result || leaderReceipt.value?.result;
-    if (
-      executionResult === 6 &&
-      leaderReceipt.value?.execution_result !== 'ERROR'
-    ) {
-      return '!bg-green-500';
-    } else {
-      return '!bg-red-500';
-    }
   }
+  const executionResult =
+    props.transaction.data?.last_round?.result || leaderReceipt.value?.result;
+  if (leaderReceipt.value?.execution_result === 'ERROR') {
+    return '!bg-red-500';
+  } else if (executionResult === 6) {
+    return '!bg-green-500';
+  } else if (status === 'FINALIZED') {
+    return '!bg-red-500';
+  }
+  return '';
 });
 </script>
 
@@ -398,11 +429,20 @@ const badgeColorClass = computed(() => {
 
         <ModalSection v-if="transaction.data.data?.calldata">
           <template #title>Output</template>
-          <div>
+          <div class="flex flex-col gap-2">
             <pre
               class="overflow-x-auto whitespace-pre rounded bg-gray-200 p-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
               >{{ leaderReceipt?.result?.payload?.readable || 'None' }}</pre
             >
+            <div
+              v-if="leaderErrorDetail"
+              class="rounded border border-red-300 bg-red-50 p-2 text-xs text-red-700 dark:border-red-700 dark:bg-red-900/20 dark:text-red-300"
+            >
+              <div class="mb-1 font-medium">Error Detail</div>
+              <pre class="whitespace-pre-wrap break-all">{{
+                leaderErrorDetail
+              }}</pre>
+            </div>
           </div>
         </ModalSection>
 
@@ -477,66 +517,91 @@ const badgeColorClass = computed(() => {
               <!-- Leader row -->
               <div
                 v-if="history?.leader_result"
-                class="flex flex-row items-center justify-between p-2 text-xs dark:border-gray-600"
+                class="flex flex-col p-2 text-xs dark:border-gray-600"
               >
-                <div class="flex flex-col gap-0.5">
-                  <div class="flex items-center gap-1">
-                    <UserPen class="h-4 w-4" />
-                    <span class="font-mono text-xs">{{
-                      history.leader_result[0].node_config.address
-                    }}</span>
+                <div class="flex flex-row items-center justify-between">
+                  <div class="flex flex-col gap-0.5">
+                    <div class="flex items-center gap-1">
+                      <UserPen class="h-4 w-4" />
+                      <span class="font-mono text-xs">{{
+                        history.leader_result[0].node_config.address
+                      }}</span>
+                    </div>
+                    <div
+                      v-if="history.leader_result[0].node_config.primary_model"
+                      class="ml-5 text-[10px] text-gray-500 dark:text-gray-400"
+                    >
+                      {{
+                        history.leader_result[0].node_config.primary_model
+                          .provider
+                      }}
+                      /
+                      {{
+                        history.leader_result[0].node_config.primary_model.model
+                      }}
+                    </div>
                   </div>
-                  <div
-                    v-if="history.leader_result[0].node_config.primary_model"
-                    class="ml-5 text-[10px] text-gray-500 dark:text-gray-400"
-                  >
-                    {{
-                      history.leader_result[0].node_config.primary_model
-                        .provider
-                    }}
-                    /
-                    {{
-                      history.leader_result[0].node_config.primary_model.model
-                    }}
+                  <div class="flex flex-row items-center gap-2">
+                    <span
+                      v-if="history.leader_result[0].execution_result"
+                      :class="[
+                        'rounded px-1.5 py-0.5 text-[9px] font-medium text-white',
+                        history.leader_result[0].execution_result === 'ERROR'
+                          ? 'bg-red-500'
+                          : 'bg-green-500',
+                      ]"
+                    >
+                      {{ history.leader_result[0].execution_result }}
+                    </span>
+                    <div class="flex flex-row items-center gap-1 capitalize">
+                      <!-- LEADER_ONLY mode: single receipt means successful execution, not timeout -->
+                      <template
+                        v-if="
+                          history.leader_result.length === 1 &&
+                          transaction.data.execution_mode === 'LEADER_ONLY'
+                        "
+                      >
+                        <CheckCircleIcon class="h-4 w-4 text-green-500" />
+                        Leader Only
+                      </template>
+                      <template v-else-if="history.leader_result.length === 1">
+                        <EllipsisHorizontalCircleIcon
+                          class="h-4 w-4 text-yellow-500"
+                        />
+                        Timeout
+                      </template>
+                      <template v-else>
+                        <template
+                          v-if="history.leader_result[1].vote === 'agree'"
+                        >
+                          <CheckCircleIcon class="h-4 w-4 text-green-500" />
+                          Agree
+                        </template>
+                        <template
+                          v-if="history.leader_result[1].vote === 'disagree'"
+                        >
+                          <XCircleIcon class="h-4 w-4 text-red-500" />
+                          Disagree
+                        </template>
+                        <template
+                          v-if="history.leader_result[1].vote === 'timeout'"
+                        >
+                          <EllipsisHorizontalCircleIcon
+                            class="h-4 w-4 text-yellow-500"
+                          />
+                          Timeout
+                        </template>
+                      </template>
+                    </div>
                   </div>
                 </div>
-                <div class="flex flex-row items-center gap-1 capitalize">
-                  <!-- LEADER_ONLY mode: single receipt means successful execution, not timeout -->
-                  <template
-                    v-if="
-                      history.leader_result.length === 1 &&
-                      transaction.data.execution_mode === 'LEADER_ONLY'
-                    "
-                  >
-                    <CheckCircleIcon class="h-4 w-4 text-green-500" />
-                    Leader Only
-                  </template>
-                  <template v-else-if="history.leader_result.length === 1">
-                    <EllipsisHorizontalCircleIcon
-                      class="h-4 w-4 text-yellow-500"
-                    />
-                    Timeout
-                  </template>
-                  <template v-else>
-                    <template v-if="history.leader_result[1].vote === 'agree'">
-                      <CheckCircleIcon class="h-4 w-4 text-green-500" />
-                      Agree
-                    </template>
-                    <template
-                      v-if="history.leader_result[1].vote === 'disagree'"
-                    >
-                      <XCircleIcon class="h-4 w-4 text-red-500" />
-                      Disagree
-                    </template>
-                    <template
-                      v-if="history.leader_result[1].vote === 'timeout'"
-                    >
-                      <EllipsisHorizontalCircleIcon
-                        class="h-4 w-4 text-yellow-500"
-                      />
-                      Timeout
-                    </template>
-                  </template>
+                <div
+                  v-if="extractErrorText(history.leader_result[0])"
+                  class="ml-5 mt-1 rounded bg-red-50 px-2 py-1 text-[10px] text-red-600 dark:bg-red-900/20 dark:text-red-300"
+                >
+                  <pre class="whitespace-pre-wrap break-all">{{
+                    extractErrorText(history.leader_result[0])
+                  }}</pre>
                 </div>
               </div>
 
@@ -544,38 +609,67 @@ const badgeColorClass = computed(() => {
               <div
                 v-for="(validator, vIndex) in history.validator_results || []"
                 :key="`${index}-${vIndex}`"
-                class="flex flex-row items-center justify-between p-2 text-xs dark:border-gray-600"
+                class="flex flex-col p-2 text-xs dark:border-gray-600"
               >
-                <div class="flex flex-col gap-0.5">
-                  <div class="flex items-center gap-1">
-                    <UserSearch class="h-4 w-4" />
-                    <span class="font-mono text-xs">{{
-                      validator.node_config.address
-                    }}</span>
+                <div class="flex flex-row items-center justify-between">
+                  <div class="flex flex-col gap-0.5">
+                    <div class="flex items-center gap-1">
+                      <UserSearch class="h-4 w-4" />
+                      <span class="font-mono text-xs">{{
+                        validator.node_config.address
+                      }}</span>
+                    </div>
+                    <div
+                      v-if="validator.node_config.primary_model"
+                      class="ml-5 text-[10px] text-gray-500 dark:text-gray-400"
+                    >
+                      {{ validator.node_config.primary_model.provider }} /
+                      {{ validator.node_config.primary_model.model }}
+                    </div>
                   </div>
-                  <div
-                    v-if="validator.node_config.primary_model"
-                    class="ml-5 text-[10px] text-gray-500 dark:text-gray-400"
-                  >
-                    {{ validator.node_config.primary_model.provider }} /
-                    {{ validator.node_config.primary_model.model }}
+                  <div class="flex flex-row items-center gap-2">
+                    <span
+                      v-if="validator.execution_result"
+                      :class="[
+                        'rounded px-1.5 py-0.5 text-[9px] font-medium text-white',
+                        validator.execution_result === 'ERROR'
+                          ? 'bg-red-500'
+                          : 'bg-green-500',
+                      ]"
+                    >
+                      {{ validator.execution_result }}
+                    </span>
+                    <div class="flex flex-row items-center gap-1 capitalize">
+                      <template v-if="validator.vote === 'agree'">
+                        <CheckCircleIcon class="h-4 w-4 text-green-500" />
+                        Agree
+                      </template>
+                      <template v-if="validator.vote === 'disagree'">
+                        <XCircleIcon class="h-4 w-4 text-red-500" />
+                        Disagree
+                      </template>
+                      <template v-if="validator.vote === 'timeout'">
+                        <EllipsisHorizontalCircleIcon
+                          class="h-4 w-4 text-yellow-500"
+                        />
+                        Timeout
+                      </template>
+                      <template v-if="validator.vote === 'idle'">
+                        <EllipsisHorizontalCircleIcon
+                          class="h-4 w-4 text-gray-400"
+                        />
+                        Idle
+                      </template>
+                    </div>
                   </div>
                 </div>
-                <div class="flex flex-row items-center gap-1 capitalize">
-                  <template v-if="validator.vote === 'agree'">
-                    <CheckCircleIcon class="h-4 w-4 text-green-500" />
-                    Agree
-                  </template>
-                  <template v-if="validator.vote === 'disagree'">
-                    <XCircleIcon class="h-4 w-4 text-red-500" />
-                    Disagree
-                  </template>
-                  <template v-if="validator.vote === 'timeout'">
-                    <EllipsisHorizontalCircleIcon
-                      class="h-4 w-4 text-yellow-500"
-                    />
-                    Timeout
-                  </template>
+                <div
+                  v-if="extractErrorText(validator)"
+                  class="ml-5 mt-1 rounded bg-red-50 px-2 py-1 text-[10px] text-red-600 dark:bg-red-900/20 dark:text-red-300"
+                >
+                  <pre class="whitespace-pre-wrap break-all">{{
+                    extractErrorText(validator)
+                  }}</pre>
                 </div>
               </div>
             </template>

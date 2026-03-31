@@ -126,7 +126,14 @@ class MessageHandler(IMessageHandler):
         if getattr(log_event, "data", None):
             try:
                 data_to_log = self._apply_log_level_truncation(log_event.data)
-                data_str = json.dumps(data_to_log, default=lambda o: o.__dict__)
+                import decimal
+
+                data_str = json.dumps(
+                    data_to_log,
+                    default=lambda o: (
+                        int(o) if isinstance(o, decimal.Decimal) else o.__dict__
+                    ),
+                )
                 message = f"{message} {gray}{data_str}{reset}"
             except TypeError as e:
                 message = f"{message} {gray}{str(log_event.data)} (serialization error: {e}){reset}"

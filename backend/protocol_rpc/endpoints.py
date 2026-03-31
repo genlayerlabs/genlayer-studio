@@ -792,6 +792,13 @@ def cancel_transaction(
             },
         )
 
+    # Refund sender for payable transactions that were never activated
+    tx_val = transaction.value if isinstance(transaction.value, int) else 0
+    if tx_val > 0 and transaction.from_address:
+        AccountsManager(session).refund_tx_value(
+            transaction_hash, transaction.from_address
+        )
+
     # Notify frontend via WebSocket
     msg_handler.send_transaction_status_update(transaction_hash, "CANCELED")
 
@@ -996,7 +1003,10 @@ async def _execute_call_with_snapshot(
 
     async with snapshot_func(*args) as snapshot:
         if len(snapshot.nodes) == 0:
-            raise JSONRPCError("No validators exist to execute the call")
+            raise JSONRPCError(
+                code=-32002,
+                message="No validators available to execute the call",
+            )
 
         receipt = await _gen_call_with_validator(
             session,
@@ -1081,6 +1091,7 @@ async def _gen_call_with_validator(
     data = params["data"]
     to_address = params["to"]
     from_address = params["from"]
+    call_value = int(params.get("value", "0x0"), 16) if params.get("value") else 0
     transaction_hash_variant = (
         params["transaction_hash_variant"]
         if "transaction_hash_variant" in params
@@ -1105,7 +1116,10 @@ async def _gen_call_with_validator(
     if len(validators_snapshot.nodes) > 0:
         validator = validators_snapshot.nodes[0].validator
     else:
-        raise JSONRPCError(f"No validators exist to execute the gen_call")
+        raise JSONRPCError(
+            code=-32002,
+            message="No validators available to execute the gen_call",
+        )
 
     # Create validator node
     try:
@@ -1180,6 +1194,7 @@ async def _gen_call_with_validator(
                     from_address=from_address,
                     calldata=decoded_data.calldata,
                     transaction_created_at=txn_created_at,
+                    value=call_value,
                 )
             elif type == "deploy":
                 txn_created_at = None
@@ -1199,9 +1214,13 @@ async def _gen_call_with_validator(
                     code_to_deploy=decoded_data.contract_code,
                     calldata=decoded_data.calldata,
                     transaction_created_at=txn_created_at,
+                    value=call_value,
                 )
             else:
-                raise JSONRPCError(f"Invalid type: {type}")
+                raise JSONRPCError(
+                    code=-32602,
+                    message=f"Invalid type '{type}': must be 'read', 'write', or 'deploy'",
+                )
         except ContractNotFoundError as e:
             raise NotFoundError(
                 message=f"Contract {e.address} not found",
@@ -1211,7 +1230,8 @@ async def _gen_call_with_validator(
     # Return the result of the write method
     if receipt.execution_result != ExecutionResultStatus.SUCCESS:
         raise JSONRPCError(
-            message="running contract failed",
+            code=-32000,
+            message="execution failed",
             data={"receipt": receipt.to_dict(), "params": params},
         )
 
@@ -1363,7 +1383,7 @@ async def eth_call(
 
     if receipt.execution_result != ExecutionResultStatus.SUCCESS:
         raise JSONRPCError(
-            message="running contract failed", data={"receipt": receipt.to_dict()}
+            code=-32000, message="execution failed", data={"receipt": receipt.to_dict()}
         )
     return eth_utils.hexadecimal.encode_hex(receipt.result[1:])
 
@@ -1397,6 +1417,10 @@ def send_raw_transaction(
         raise InvalidAddressError(
             from_address, f"Invalid address from_address: {from_address}"
         )
+
+    # Ensure sender account exists
+    if accounts_manager.get_account(from_address) is None:
+        accounts_manager.create_new_account_with_address(from_address)
 
     transaction_signature_valid = transactions_parser.transaction_has_valid_signature(
         signed_rollup_transaction, decoded_rollup_transaction
@@ -1462,9 +1486,6 @@ def send_raw_transaction(
                 )
 
         if genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT:
-            if value > 0:
-                raise InvalidTransactionError("Deploy Transaction can't send value")
-
             if (
                 rollup_transaction_details is None
                 or not "recipient" in rollup_transaction_details
@@ -1496,6 +1517,23 @@ def send_raw_transaction(
                 )
 
             transaction_data = {"calldata": genlayer_transaction.data.calldata}
+
+        # Check for duplicate before debit+insert to avoid TOCTOU races
+        is_duplicate = transactions_processor.get_transaction_by_hash(transaction_hash)
+
+        # Debit sender BEFORE insert. Mint on demand if insufficient (Studio sandbox).
+        # Skip for SEND (execute_transfer handles it) and duplicates.
+        if (
+            value > 0
+            and from_address
+            and genlayer_transaction.type != TransactionType.SEND
+            and is_duplicate is None
+        ):
+            sender_balance = accounts_manager.get_account_balance(from_address)
+            if sender_balance < value:
+                shortfall = value - sender_balance
+                accounts_manager.credit_account_balance(from_address, shortfall)
+            accounts_manager.debit_account_balance(from_address, value)
 
         # Insert transaction into the database
         transactions_processor.insert_transaction(
@@ -1605,7 +1643,10 @@ def get_block_by_number(
         try:
             block_number_int = int(block_number, 16)
         except ValueError:
-            raise JSONRPCError(f"Invalid block number format: {block_number}")
+            raise JSONRPCError(
+                code=-32602,
+                message=f"Invalid block number format: {block_number}",
+            )
 
     block_details = transactions_processor.get_transactions_for_block(
         block_number_int, include_full_tx=full_tx

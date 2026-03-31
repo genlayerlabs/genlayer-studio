@@ -115,6 +115,10 @@ class MessageHandler(IMessageHandler):
                             import base64
 
                             return base64.b64encode(o).decode("ascii")
+                    import decimal
+
+                    if isinstance(o, decimal.Decimal):
+                        return int(o)
                     return o.__dict__
 
                 data_str = json.dumps(data_to_log, default=json_serializer)

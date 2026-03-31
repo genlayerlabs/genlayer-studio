@@ -52,6 +52,10 @@ def _decode_exception(x: Exception) -> typing.Any:
             return base64.b64encode(x).decode("ascii")
         if dataclasses.is_dataclass(x) and not isinstance(x, type):
             return dataclasses.asdict(x)
+        import decimal
+
+        if isinstance(x, decimal.Decimal):
+            return int(x)
         return x
 
     try:

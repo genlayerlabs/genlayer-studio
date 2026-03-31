@@ -443,11 +443,19 @@ class TransactionContext:
 
         if self.transaction.type != TransactionType.SEND:
             saved = self.transaction.contract_snapshot
-            has_real_state = (
-                saved and hasattr(saved, "states") and saved.states.get("accepted")
+            has_real_data = saved and (
+                (hasattr(saved, "states") and saved.states.get("accepted"))
+                or (hasattr(saved, "balance") and saved.balance is not None)
             )
-            if has_real_state:
+            if has_real_data:
                 self.contract_snapshot = saved
+                # Saved snapshots now carry balance (pre-execution balance at acceptance time).
+                # This ensures appeal validators see the correct balance when verifying
+                # the original execution. Only hydrate from DB if snapshot has no balance
+                # (legacy snapshots created before this change).
+                if not hasattr(saved, "balance") or saved.balance is None:
+                    fresh = self.contract_snapshot_factory(self.transaction.to_address)
+                    self.contract_snapshot.balance = fresh.balance
             else:
                 self.contract_snapshot = self.contract_snapshot_factory(
                     self.transaction.to_address
@@ -1113,10 +1121,11 @@ class ConsensusAlgorithm:
                             accepted_state=previous_contact_state,
                         )
 
-                        # Reset the contract snapshot for the transaction
-                        context.transactions_processor.set_transaction_contract_snapshot(
-                            context.transaction.hash, None
-                        )
+                    # Always clear snapshot on successful appeal (including timeout appeals)
+                    # so re-execution loads fresh state from DB
+                    context.transactions_processor.set_transaction_contract_snapshot(
+                        context.transaction.hash, None
+                    )
 
                     await ConsensusAlgorithm.dispatch_transaction_status_update(
                         context.transactions_processor,
@@ -1443,7 +1452,8 @@ class PendingState(TransactionState):
             )
             return None
 
-        # Get all validators
+        # Get all validators BEFORE crediting — if no validators, tx will be
+        # canceled and we must not credit (otherwise refund_tx_value can't refund)
         if context.validators_snapshot is None:
             all_validators = None
         else:
@@ -1561,6 +1571,23 @@ class PendingState(TransactionState):
             else:
                 context.involved_validators = get_validators_for_transaction(
                     all_validators, context.transaction.num_of_initial_validators
+                )
+
+        # Credit target contract on activation (value from transaction)
+        # Placed AFTER validator check — if no validators, tx gets canceled
+        # and refund_tx_value must be able to refund (requires value_credited=false)
+        tx_value = context.transaction.value or 0
+        if tx_value > 0:
+            credited = context.accounts_manager.credit_tx_value_once(
+                context.transaction.hash,
+                context.transaction.to_address,
+                tx_value,
+            )
+            if credited and context.contract_snapshot is not None:
+                context.contract_snapshot.balance = (
+                    context.accounts_manager.get_account_balance(
+                        context.transaction.to_address
+                    )
                 )
 
         activate = decide_pending_activate(
@@ -2162,10 +2189,41 @@ class AcceptedState(TransactionState):
         await executor.execute(pre_effects)
 
         # Impure: triggered transaction processing (needs DB reads for nonce/accounts)
-        if not context.transaction.appealed and execution_success:
+        # Cumulative: child emission happens on every acceptance round (including appeal re-acceptance)
+        if execution_success:
+            # Balance debit for on_accepted messages BEFORE child emission
+            total_msg_debit = sum(
+                pt.value
+                for pt in leader_receipt.pending_transactions
+                if pt.on == "accepted" and pt.value > 0
+            )
+            debit_ok = True
+            if total_msg_debit > 0:
+                debit_ok = context.accounts_manager.debit_account_balance(
+                    context.transaction.to_address, total_msg_debit
+                )
+                if not debit_ok:
+                    from loguru import logger
+
+                    logger.error(
+                        f"Contract balance debit failed for {context.transaction.to_address}, "
+                        f"amount={total_msg_debit}, tx={context.transaction.hash}. "
+                        f"Skipping value-bearing child emission."
+                    )
+
+            # Emit child messages — filter out value-bearing children if debit failed
+            if debit_ok:
+                pending_to_emit = leader_receipt.pending_transactions
+            else:
+                pending_to_emit = [
+                    pt
+                    for pt in leader_receipt.pending_transactions
+                    if pt.on != "accepted" or pt.value <= 0
+                ]
+
             internal_messages_data, insert_transactions_data = _get_messages_data(
                 context,
-                leader_receipt.pending_transactions,
+                pending_to_emit,
                 "accepted",
             )
 
@@ -2332,9 +2390,38 @@ class FinalizingState(TransactionState):
                 finalized_state=accepted_state,
             )
 
+            # Balance debit BEFORE child emission
+            total_finalized_debit = sum(
+                pt.value
+                for pt in leader_receipt.pending_transactions
+                if pt.on == "finalized" and pt.value > 0
+            )
+            finalize_debit_ok = True
+            if total_finalized_debit > 0:
+                finalize_debit_ok = context.accounts_manager.debit_account_balance(
+                    context.transaction.to_address, total_finalized_debit
+                )
+                if not finalize_debit_ok:
+                    from loguru import logger
+
+                    logger.error(
+                        f"Contract finalization debit failed for {context.transaction.to_address}, "
+                        f"amount={total_finalized_debit}, tx={context.transaction.hash}"
+                    )
+
+            # Filter out value-bearing children if debit failed
+            if finalize_debit_ok:
+                pending_to_finalize = leader_receipt.pending_transactions
+            else:
+                pending_to_finalize = [
+                    pt
+                    for pt in leader_receipt.pending_transactions
+                    if pt.on != "finalized" or pt.value <= 0
+                ]
+
             internal_messages_data, insert_transactions_data = _get_messages_data(
                 context,
-                leader_receipt.pending_transactions,
+                pending_to_finalize,
                 "finalized",
             )
 
@@ -2359,10 +2446,13 @@ def _get_messages_data(
 ):
     insert_transactions_data = []
     internal_messages_data = []
+    base_nonce = context.transactions_processor.get_transaction_count(
+        context.transaction.to_address
+    )
+    nonce_offset = 0
     for pending_transaction in filter(lambda t: t.on == on, pending_transactions):
-        nonce = context.transactions_processor.get_transaction_count(
-            context.transaction.to_address
-        )
+        nonce = base_nonce + nonce_offset
+        nonce_offset += 1
         data: dict
         transaction_type: TransactionType
         if pending_transaction.is_deploy():
@@ -2402,7 +2492,13 @@ def _get_messages_data(
             }
 
         insert_transactions_data.append(
-            [pending_transaction.address, data, transaction_type.value, nonce]
+            [
+                pending_transaction.address,
+                data,
+                transaction_type.value,
+                nonce,
+                pending_transaction.value,
+            ]
         )
 
         serializable_data = data.copy()
@@ -2449,7 +2545,7 @@ def _emit_messages(
             context.transaction.to_address,  # new calls are done by the contract
             insert_transaction_data[0],
             insert_transaction_data[1],
-            value=0,  # we only handle EOA transfers at the moment, so no value gets transferred
+            value=insert_transaction_data[4],
             type=insert_transaction_data[2],
             nonce=insert_transaction_data[3],
             leader_only=leader_only,  # Backward compat

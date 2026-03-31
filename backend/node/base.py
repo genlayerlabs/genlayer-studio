@@ -348,7 +348,10 @@ class _SnapshotView(genvmbase.StateProxy):
 
     def get_balance(self, addr: Address) -> int:
         snap = self._get_snapshot(addr)
-        return snap.balance
+        # Deserialized snapshots (from_dict) don't have balance — use 0 as fallback.
+        # Balance is not part of the snapshot by design; it persists in DB independently.
+        bal = getattr(snap, "balance", 0)
+        return int(bal) if bal is not None else 0
 
 
 import aiohttp
@@ -627,6 +630,7 @@ class Node:
                 calldata,
                 transaction.hash,
                 transaction_created_at,
+                value=transaction.value or 0,
             )
 
             self.timing_callback("DEPLOY_END")
@@ -642,6 +646,7 @@ class Node:
                 calldata,
                 transaction.hash,
                 transaction_created_at,
+                value=transaction.value or 0,
             )
 
             self.timing_callback("RUN_END")
@@ -716,9 +721,17 @@ class Node:
 
         # 3. Deterministic violation: execution outcome or state diverges from leader
         leader_receipt = self.leader_receipt
+        # Compare contract_state by hash: the full contract_state may have been
+        # stripped to {} during persistence (storage optimisation). The hash is
+        # always persisted and survives the round-trip.
+        state_matches = (
+            leader_receipt.contract_state_hash == receipt.contract_state_hash
+            if leader_receipt.contract_state_hash is not None
+            else leader_receipt.contract_state == receipt.contract_state
+        )
         if (
             leader_receipt.execution_result != receipt.execution_result
-            or leader_receipt.contract_state != receipt.contract_state
+            or not state_matches
             or leader_receipt.pending_transactions != receipt.pending_transactions
         ):
             receipt.vote = Vote.DETERMINISTIC_VIOLATION
@@ -762,6 +775,7 @@ class Node:
         calldata: bytes,
         transaction_hash: str | None = None,
         transaction_created_at: str | None = None,
+        value: int = 0,
     ) -> Receipt:
         assert self.contract_snapshot is not None
 
@@ -777,6 +791,7 @@ class Node:
             transaction_hash=transaction_hash,
             transaction_datetime=transaction_datetime,
             code=code_to_deploy,
+            value=value,
         )
 
     async def run_contract(
@@ -785,6 +800,7 @@ class Node:
         calldata: bytes,
         transaction_hash: str | None = None,
         transaction_created_at: str | None = None,
+        value: int = 0,
     ) -> Receipt:
         return await self._run_genvm(
             from_address,
@@ -793,6 +809,7 @@ class Node:
             is_init=False,
             transaction_hash=transaction_hash,
             transaction_datetime=self._date_from_str(transaction_created_at),
+            value=value,
         )
 
     async def get_contract_data(
@@ -926,6 +943,7 @@ class Node:
         state_status: str | None = None,
         timeout: float = 10 * 60,
         code: bytes | None = None,
+        value: int = 0,
     ) -> Receipt:
         self.timing_callback("GENVM_PREPARATION_START")
 
@@ -983,7 +1001,7 @@ class Node:
             "origin_address": Address(
                 from_address
             ),  # FIXME: no origin in simulator #751
-            "value": 0,
+            "value": int(value),
             "chain_id": get_simulator_chain_id(),
         }
         if transaction_datetime is not None:

@@ -201,6 +201,7 @@ class Transaction:
     leader_timeout_validators: list | None = None
     appeal_validators_timeout: bool = False
     sim_config: SimConfig | None = None
+    triggered_by_hash: str | None = None
 
     def to_dict(self):
         return {
@@ -241,6 +242,7 @@ class Transaction:
             "leader_timeout_validators": self.leader_timeout_validators,
             "appeal_validators_timeout": self.appeal_validators_timeout,
             "sim_config": self.sim_config.to_dict() if self.sim_config else None,
+            "triggered_by": self.triggered_by_hash,
         }
 
     @classmethod
@@ -289,4 +291,5 @@ class Transaction:
                 if input.get("sim_config")
                 else None
             ),
+            triggered_by_hash=input.get("triggered_by"),
         )

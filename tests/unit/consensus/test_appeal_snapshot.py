@@ -35,10 +35,13 @@ def _make_transaction(*, tx_type=TransactionType.RUN_CONTRACT, contract_snapshot
 
 def _make_context(transaction, factory_snapshot=None):
     """Create a TransactionContext with mocked dependencies."""
-    factory = Mock(
-        return_value=factory_snapshot
-        or _make_snapshot({"accepted": {"slot0": "real_data"}, "finalized": {}})
+    default_snapshot = factory_snapshot or _make_snapshot(
+        {"accepted": {"slot0": "real_data"}, "finalized": {}}
     )
+    # Factory snapshots need balance for hydration
+    if not hasattr(default_snapshot, "balance"):
+        default_snapshot.balance = 0
+    factory = Mock(return_value=default_snapshot)
     context = TransactionContext(
         transaction=transaction,
         transactions_processor=Mock(),
@@ -82,12 +85,12 @@ class TestAppealSnapshotLoading:
         assert context.contract_snapshot.states["accepted"] == {"slot0": "real_data"}
 
     def test_saved_snapshot_with_real_states_uses_it(self):
-        """When snapshot has real state data, using it is fine."""
+        """When snapshot has real state data, it is reused (factory only called for balance hydration)."""
         real_snapshot = _make_snapshot({"accepted": {"slot0": "data"}, "finalized": {}})
         tx = _make_transaction(contract_snapshot=real_snapshot)
         context, factory = _make_context(tx)
 
-        factory.assert_not_called()
+        # Factory called once for balance hydration, but states come from saved snapshot
         assert context.contract_snapshot.states["accepted"] == {"slot0": "data"}
 
     def test_deploy_transaction_with_empty_snapshot_on_appeal(self):

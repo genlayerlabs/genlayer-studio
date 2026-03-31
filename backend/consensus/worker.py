@@ -223,7 +223,7 @@ class ConsensusWorker:
                       transactions.leader_only, transactions.execution_mode, transactions.sim_config,
                       transactions.status, transactions.consensus_data,
                       transactions.input_data, transactions.created_at, transactions.timestamp_awaiting_finalization,
-                      transactions.appeal_failed, transactions.blocked_at;
+                      transactions.appeal_failed, transactions.blocked_at, transactions.triggered_by_hash;
         """
         )
 
@@ -267,6 +267,7 @@ class ConsensusWorker:
                 "timestamp_awaiting_finalization": result.timestamp_awaiting_finalization,
                 "appeal_failed": result.appeal_failed,
                 "blocked_at": result.blocked_at,
+                "triggered_by": result.triggered_by_hash,
             }
 
         return None
@@ -331,7 +332,8 @@ class ConsensusWorker:
                       transactions.input_data, transactions.created_at, transactions.appealed,
                       transactions.appeal_failed, transactions.timestamp_appeal,
                       transactions.appeal_undetermined, transactions.appeal_leader_timeout,
-                      transactions.appeal_validators_timeout, transactions.blocked_at;
+                      transactions.appeal_validators_timeout, transactions.blocked_at,
+                      transactions.triggered_by_hash;
         """
         )
 
@@ -374,6 +376,7 @@ class ConsensusWorker:
                 "appeal_leader_timeout": result.appeal_leader_timeout,
                 "appeal_validators_timeout": result.appeal_validators_timeout,
                 "blocked_at": result.blocked_at,
+                "triggered_by": result.triggered_by_hash,
             }
 
         return None
@@ -441,7 +444,8 @@ class ConsensusWorker:
                       transactions.gaslimit, transactions.r, transactions.s, transactions.v,
                       transactions.leader_only, transactions.execution_mode, transactions.sim_config,
                       transactions.status, transactions.consensus_data,
-                      transactions.input_data, transactions.created_at, transactions.blocked_at;
+                      transactions.input_data, transactions.created_at, transactions.blocked_at,
+                      transactions.triggered_by_hash;
         """
         )
 
@@ -479,6 +483,7 @@ class ConsensusWorker:
                 "input_data": result.input_data,
                 "created_at": result.created_at,
                 "blocked_at": result.blocked_at,
+                "triggered_by": result.triggered_by_hash,
             }
 
         return None
@@ -943,6 +948,11 @@ class ConsensusWorker:
                 "error": "no_validators_available",
                 "retries": retry_info["count"],
             }
+            # Refund sender for payable tx that was never activated
+            if tx.value and tx.value > 0 and tx.from_address:
+                from backend.database_handler.accounts_manager import AccountsManager
+
+                AccountsManager(session).refund_tx_value(tx_hash, tx.from_address)
             session.commit()
 
             # Clean up retry tracking
@@ -999,6 +1009,15 @@ class ConsensusWorker:
                     "last_error": str(error),
                     "retries": retry_info["count"],
                 }
+                # Refund sender for payable tx that was never activated
+                if tx.value and tx.value > 0 and tx.from_address:
+                    from backend.database_handler.accounts_manager import (
+                        AccountsManager,
+                    )
+
+                    AccountsManager(cancel_session).refund_tx_value(
+                        tx_hash, tx.from_address
+                    )
                 cancel_session.commit()
 
                 # Send WebSocket notification

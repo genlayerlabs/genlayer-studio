@@ -19,6 +19,7 @@ from backend.protocol_rpc.exceptions import (
     JSONRPCError,
     MethodNotFound,
 )
+from backend.errors.errors import InvalidAddressError, InvalidTransactionError
 from backend.protocol_rpc.message_handler.fastapi_handler import MessageHandler
 from backend.protocol_rpc.message_handler.base import CLIENT_SESSION_ID_CTX
 from backend.protocol_rpc.message_handler.types import EventScope, EventType, LogEvent
@@ -239,6 +240,12 @@ class RPCEndpointManager:
                     )
                 return JSONRPCResponse(
                     jsonrpc="2.0", error=exc.to_dict(), id=request.id
+                )
+            except (InvalidAddressError, InvalidTransactionError) as exc:
+                # Domain validation errors → JSON-RPC invalid params
+                rpc_err = InvalidParams(message=str(exc))
+                return JSONRPCResponse(
+                    jsonrpc="2.0", error=rpc_err.to_dict(), id=request.id
                 )
             except Exception as exc:  # pragma: no cover - safety net
                 if should_log and definition.log_policy.log_failure:
