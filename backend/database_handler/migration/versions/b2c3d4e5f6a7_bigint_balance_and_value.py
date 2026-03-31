@@ -19,19 +19,34 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _column_is_numeric(table: str, column: str) -> bool:
+    """Check if a column is already NUMERIC (idempotent guard)."""
+    conn = op.get_bind()
+    result = conn.execute(
+        sa.text(
+            "SELECT data_type FROM information_schema.columns "
+            "WHERE table_name = :table AND column_name = :col"
+        ),
+        {"table": table, "col": column},
+    ).scalar()
+    return result == "numeric"
+
+
 def upgrade() -> None:
-    op.alter_column(
-        "current_state",
-        "balance",
-        type_=sa.Numeric(precision=78, scale=0),
-        existing_type=sa.Integer(),
-    )
-    op.alter_column(
-        "transactions",
-        "value",
-        type_=sa.Numeric(precision=78, scale=0),
-        existing_type=sa.Integer(),
-    )
+    if not _column_is_numeric("current_state", "balance"):
+        op.alter_column(
+            "current_state",
+            "balance",
+            type_=sa.Numeric(precision=78, scale=0),
+            existing_type=sa.Integer(),
+        )
+    if not _column_is_numeric("transactions", "value"):
+        op.alter_column(
+            "transactions",
+            "value",
+            type_=sa.Numeric(precision=78, scale=0),
+            existing_type=sa.Integer(),
+        )
 
 
 def downgrade() -> None:
