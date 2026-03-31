@@ -233,8 +233,11 @@ const checkRules = () => {
       }
 
       if (isCreateMode.value) {
-        if (rule.then?.properties?.model?.enum) {
-          modelOptions.value = rule.then?.properties?.model?.enum;
+        const thenProps = rule.then?.properties as
+          | Record<string, any>
+          | undefined;
+        if (thenProps?.model?.enum) {
+          modelOptions.value = thenProps.model.enum;
 
           const availableModel = modelOptions.value.find(
             (model) =>
@@ -249,7 +252,7 @@ const checkRules = () => {
             newProviderData.model =
               availableModel || modelOptions.value[0] || '';
           } else {
-            newProviderData.model = rule.then?.properties?.model?.enum[0] || '';
+            newProviderData.model = thenProps.model.enum[0] || '';
           }
         } else {
           newProviderData.model = '';
@@ -592,11 +595,15 @@ watch(configProperties, () => {
             class="flex flex-row items-start gap-2"
           >
             <TextInput
+              :id="`extra-key-${index}`"
+              :name="`extra-key-${index}`"
               v-model="param.key"
               placeholder="key (e.g. models)"
               class="flex-1"
             />
             <TextInput
+              :id="`extra-value-${index}`"
+              :name="`extra-value-${index}`"
               v-model="param.value"
               placeholder='value (e.g. ["openai/gpt-4o","anthropic/claude-sonnet-4"])'
               class="flex-[2]"

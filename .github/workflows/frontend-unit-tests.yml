@@ -23,6 +23,7 @@ jobs:
         working-directory: .
 
       - run: npm ci
+      - run: npm run type-check
       - run: npm run coverage
 
       - name: Upload coverage reports to Codecov

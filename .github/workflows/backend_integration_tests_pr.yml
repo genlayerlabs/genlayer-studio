@@ -45,11 +45,22 @@ jobs:
 
       # TODO: we should also add also heuristai and anthropic keys to the e2e tests and test all providers
 
-      - name: Set OPENAIKEY in the .env file so it can be loaded from the environment
+      - name: Configure LLM provider
         env:
-          OPENAIKEY: ${{ secrets.OPENAIKEY }}
+          OPENROUTERAPIKEY: ${{ secrets.OPENROUTERAPIKEY }}
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'openrouter' }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'deepseek/deepseek-v3.2' }}
         run: |
-          sed -i "s/<add_your_openai_api_key_here>/${OPENAIKEY}/g" .env
+          # Inject OpenRouter API key
+          sed -i "/^OPENROUTERAPIKEY *= *'<add_your_openrouter_api_key_here>'$/d" .env
+          printf "\nOPENROUTERAPIKEY='$OPENROUTERAPIKEY'\n" >> .env
+
+          # Override validators config with configured provider/model
+          sed -i "/^VALIDATORS_CONFIG_JSON=/,/^]'/d" .env
+          printf "\nVALIDATORS_CONFIG_JSON='[\n  {\"stake\": 100, \"provider\": \"$LLM_PROVIDER\", \"model\": \"$LLM_MODEL\", \"amount\": 5}\n]'\n" >> .env
+
+      - name: Configure CI environment
+        run: |
           sed -i "s/VITE_FINALITY_WINDOW=\".*\"/VITE_FINALITY_WINDOW=\"10\"/" .env
           sed -i "s/COMPOSE_RPC_CPU_LIMIT=\".*\"/COMPOSE_RPC_CPU_LIMIT=\"4\"/" .env
           sed -i "s/COMPOSE_WORKER_CPU_LIMIT=\".*\"/COMPOSE_WORKER_CPU_LIMIT=\"4\"/" .env
@@ -132,11 +143,17 @@ jobs:
             http://0.0.0.0:4000/api
 
       - name: Run tests (parallel)
+        env:
+          TEST_PROVIDER: ${{ vars.LLM_PROVIDER || 'openrouter' }}
+          TEST_PROVIDER_MODEL: ${{ vars.LLM_MODEL || 'deepseek/deepseek-v3.2' }}
         run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/ -svv -n 8 --ignore=tests/integration/test_validators.py
 
       # Validator smoke test runs serial (GenVM LLM module restarts on each CRUD op).
       # Full CRUD coverage is in db-sqlalchemy/validators_registry_test.py (<1s).
       - name: Run validator smoke test (serial)
+        env:
+          TEST_PROVIDER: ${{ vars.LLM_PROVIDER || 'openrouter' }}
+          TEST_PROVIDER_MODEL: ${{ vars.LLM_MODEL || 'deepseek/deepseek-v3.2' }}
         run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/test_validators.py -svv
 
       - name: Dump Docker Compose logs
