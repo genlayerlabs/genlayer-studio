@@ -109,7 +109,7 @@ describe('JsonRprService', () => {
         }),
       );
       await expect(jsonRpcService.cancelTransaction(txHash)).rejects.toThrow(
-        'Error cancelling transaction',
+        'Cannot cancel',
       );
     });
   });
