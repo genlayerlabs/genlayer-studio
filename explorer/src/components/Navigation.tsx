@@ -34,7 +34,8 @@ export function Navigation() {
             {navItems.map((item) => {
               const Icon = item.icon;
               const isActive = pathname === item.href ||
-                (item.href !== '/' && pathname.startsWith(item.href));
+                (item.href !== '/' && pathname.startsWith(item.href)) ||
+                (item.href === '/txs' && pathname.startsWith('/tx/'));
 
               return (
                 <Link
