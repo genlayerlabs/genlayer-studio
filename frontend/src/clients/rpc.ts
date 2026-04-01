@@ -2,6 +2,7 @@ import type { JsonRPCRequest, JsonRPCResponse } from '@/types';
 import { v4 as uuidv4 } from 'uuid';
 import { useWebSocketClient } from '@/hooks';
 import { getRuntimeConfig } from '@/utils/runtimeConfig';
+import { isStudioNetwork } from '@/hooks/useConfig';
 
 const JSON_RPC_SERVER_URL = getRuntimeConfig(
   'VITE_JSON_RPC_SERVER_URL',
@@ -17,17 +18,22 @@ export class RpcClient implements IRpcClient {
     method,
     params,
   }: JsonRPCRequest): Promise<JsonRPCResponse<T>> {
-    const webSocketClient = useWebSocketClient();
-    // Wait for the websocket client to connect
-    await new Promise<void>((resolve) => {
-      if (webSocketClient.connected) {
-        resolve();
-      } else {
-        webSocketClient.on('connect', () => {
+    let sessionId = '';
+
+    if (isStudioNetwork()) {
+      const webSocketClient = useWebSocketClient();
+      // Wait for the websocket client to connect (Studio only)
+      await new Promise<void>((resolve) => {
+        if (webSocketClient.connected) {
           resolve();
-        });
-      }
-    });
+        } else {
+          webSocketClient.on('connect', () => {
+            resolve();
+          });
+        }
+      });
+      sessionId = webSocketClient.id ?? '';
+    }
 
     const requestId = uuidv4();
     const data = {
@@ -40,7 +46,7 @@ export class RpcClient implements IRpcClient {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-session-id': webSocketClient.id ?? '',
+        ...(sessionId ? { 'x-session-id': sessionId } : {}),
       },
       body: JSON.stringify(data),
     });

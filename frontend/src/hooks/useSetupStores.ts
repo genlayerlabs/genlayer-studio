@@ -14,6 +14,7 @@ import {
   useWebSocketClientAsync,
 } from '@/hooks';
 import { v4 as uuidv4 } from 'uuid';
+import { isStudioNetwork } from '@/hooks/useConfig';
 
 export const useSetupStores = () => {
   const setupStores = async () => {
@@ -22,8 +23,12 @@ export const useSetupStores = () => {
     const tutorialStore = useTutorialStore();
     const db = useDb();
     const genlayer = useGenlayer();
+    const isStudio = isStudioNetwork();
 
-    await useWebSocketClientAsync();
+    // WebSocket is only available on Studio networks
+    if (isStudio) {
+      await useWebSocketClientAsync();
+    }
 
     const transactionsStore = useTransactionsStore();
     const nodeStore = useNodeStore();
@@ -70,10 +75,14 @@ export const useSetupStores = () => {
     contractListener.init();
     contractsStore.getInitialOpenedFiles();
     tutorialStore.resetTutorialState();
-    nodeStore.getValidatorsData();
-    nodeStore.getProvidersData();
-    await consensusStore.fetchFinalityWindowTime();
-    consensusStore.setupReconnectionListener();
+
+    // Studio-only: validator/provider management and finality window
+    if (isStudio) {
+      nodeStore.getValidatorsData();
+      nodeStore.getProvidersData();
+      await consensusStore.fetchFinalityWindowTime();
+      consensusStore.setupReconnectionListener();
+    }
 
     if (accountsStore.accounts.length < 1) {
       accountsStore.generateNewAccount();

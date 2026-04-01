@@ -1678,6 +1678,8 @@ def get_transaction_receipt(
 ) -> dict | None:
 
     transaction = transactions_processor.get_transaction_by_hash(transaction_hash)
+    if not transaction:
+        return None
 
     event_signature = "NewTransaction(bytes32,address,address)"
     event_signature_hash = eth_utils.keccak(text=event_signature).hex()
