@@ -5,7 +5,14 @@ import { useWallet } from './useWallet';
 import { createGenlayerLocalnet } from './useNetworks';
 import { appKitReady } from './useAppKit';
 
-const genlayerLocalnet = appKitReady ? createGenlayerLocalnet() : null;
+let genlayerLocalnet: ReturnType<typeof createGenlayerLocalnet> | null = null;
+
+function getNetwork() {
+  if (!genlayerLocalnet && appKitReady) {
+    genlayerLocalnet = createGenlayerLocalnet();
+  }
+  return genlayerLocalnet;
+}
 
 /**
  * Ensures the connected external wallet is on the GenLayer network
@@ -15,10 +22,6 @@ const genlayerLocalnet = appKitReady ? createGenlayerLocalnet() : null;
  * via the EIP-1193 provider (Rally2 pattern).
  */
 export function useChainEnforcer() {
-  if (!appKitReady || !genlayerLocalnet) {
-    return { ensureCorrectChain: async () => {} };
-  }
-
   const accountsStore = useAccountsStore();
   const wallet = useWallet();
 
@@ -29,6 +32,9 @@ export function useChainEnforcer() {
   async function ensureCorrectChain() {
     if (!isExternalWallet.value) return;
 
+    const network = getNetwork();
+    if (!network) return;
+
     const provider = wallet.walletProvider.value;
     if (!provider?.request) return;
 
@@ -38,9 +44,9 @@ export function useChainEnforcer() {
     })) as string;
     const currentChainId = parseInt(currentChainHex, 16);
 
-    if (currentChainId === genlayerLocalnet!.id) return;
+    if (currentChainId === network.id) return;
 
-    const targetChainHex = numberToHex(genlayerLocalnet!.id);
+    const targetChainHex = numberToHex(network.id);
 
     try {
       await provider.request({
@@ -51,15 +57,14 @@ export function useChainEnforcer() {
       // 4902 = chain not added to wallet, try adding it
       if (switchError.code === 4902) {
         const rpcUrl =
-          genlayerLocalnet!.rpcUrls?.default?.http?.[0] ??
-          'http://127.0.0.1:4000/api';
+          network.rpcUrls?.default?.http?.[0] ?? 'http://127.0.0.1:4000/api';
         await provider.request({
           method: 'wallet_addEthereumChain',
           params: [
             {
               chainId: targetChainHex,
-              chainName: genlayerLocalnet!.name,
-              nativeCurrency: genlayerLocalnet!.nativeCurrency,
+              chainName: network.name,
+              nativeCurrency: network.nativeCurrency,
               rpcUrls: [rpcUrl],
             },
           ],
@@ -78,7 +83,7 @@ export function useChainEnforcer() {
     const newChainHex = (await provider.request({
       method: 'eth_chainId',
     })) as string;
-    if (parseInt(newChainHex, 16) !== genlayerLocalnet!.id) {
+    if (parseInt(newChainHex, 16) !== network.id) {
       throw new Error(
         'Please switch to the GenLayer network to send transactions.',
       );
