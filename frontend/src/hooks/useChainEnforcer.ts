@@ -2,25 +2,20 @@ import { computed } from 'vue';
 import { numberToHex } from 'viem';
 import { useAccountsStore } from '@/stores';
 import { useWallet } from './useWallet';
-import { createGenlayerLocalnet } from './useNetworks';
-import { appKitReady } from './useAppKit';
-
-const genlayerLocalnet = appKitReady ? createGenlayerLocalnet() : null;
+import { useGenlayer } from './useGenlayer';
 
 /**
- * Ensures the connected external wallet is on the GenLayer network
- * before sending a transaction. For local accounts this is a no-op.
+ * Ensures the connected external wallet is on the same chain
+ * the genlayer-js client is configured for before sending a transaction.
+ * For local accounts this is a no-op.
  *
- * Uses wallet_switchEthereumChain / wallet_addEthereumChain directly
- * via the EIP-1193 provider (Rally2 pattern).
+ * Reads the target chain from the genlayer client (not hardcoded),
+ * so it works for localnet, studionet, and future testnets.
  */
 export function useChainEnforcer() {
-  if (!appKitReady || !genlayerLocalnet) {
-    return { ensureCorrectChain: async () => {} };
-  }
-
   const accountsStore = useAccountsStore();
   const wallet = useWallet();
+  const genlayer = useGenlayer();
 
   const isExternalWallet = computed(
     () => accountsStore.selectedAccount?.type === 'external',
@@ -32,15 +27,20 @@ export function useChainEnforcer() {
     const provider = wallet.walletProvider.value;
     if (!provider?.request) return;
 
+    const client = genlayer.client.value;
+    if (!client?.chain) return;
+
+    const targetChainId = client.chain.id;
+
     // Check current chain
     const currentChainHex = (await provider.request({
       method: 'eth_chainId',
     })) as string;
     const currentChainId = parseInt(currentChainHex, 16);
 
-    if (currentChainId === genlayerLocalnet!.id) return;
+    if (currentChainId === targetChainId) return;
 
-    const targetChainHex = numberToHex(genlayerLocalnet!.id);
+    const targetChainHex = numberToHex(targetChainId);
 
     try {
       await provider.request({
@@ -50,22 +50,19 @@ export function useChainEnforcer() {
     } catch (switchError: any) {
       // 4902 = chain not added to wallet, try adding it
       if (switchError.code === 4902) {
-        const rpcUrl =
-          genlayerLocalnet!.rpcUrls?.default?.http?.[0] ??
-          'http://127.0.0.1:4000/api';
+        const chain = client.chain;
         await provider.request({
           method: 'wallet_addEthereumChain',
           params: [
             {
               chainId: targetChainHex,
-              chainName: genlayerLocalnet!.name,
-              nativeCurrency: genlayerLocalnet!.nativeCurrency,
-              rpcUrls: [rpcUrl],
+              chainName: chain.name,
+              nativeCurrency: chain.nativeCurrency,
+              rpcUrls: chain.rpcUrls?.default?.http ?? [],
             },
           ],
         });
       } else if (switchError.code === 4001) {
-        // User rejected
         throw new Error(
           'Please switch to the GenLayer network to send transactions.',
         );
@@ -78,7 +75,7 @@ export function useChainEnforcer() {
     const newChainHex = (await provider.request({
       method: 'eth_chainId',
     })) as string;
-    if (parseInt(newChainHex, 16) !== genlayerLocalnet!.id) {
+    if (parseInt(newChainHex, 16) !== targetChainId) {
       throw new Error(
         'Please switch to the GenLayer network to send transactions.',
       );

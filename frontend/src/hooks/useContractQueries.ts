@@ -332,6 +332,8 @@ export function useContractQueries() {
     isUpgrading.value = true;
 
     try {
+      await ensureCorrectChain();
+
       // Sign the upgrade request
       // Message: keccak256(contract_address + nonce_bytes32 + keccak256(new_code))
       // Including nonce prevents replay attacks (nonce increments after each tx)
