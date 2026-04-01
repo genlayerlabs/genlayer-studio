@@ -7,6 +7,7 @@
 
 interface RuntimeConfig {
   VITE_GENLAYER_NETWORK?: string;
+  VITE_CHAIN_ID?: string;
   VITE_JSON_RPC_SERVER_URL?: string;
   VITE_WS_SERVER_URL?: string;
   VITE_IS_HOSTED?: string;
