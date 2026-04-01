@@ -3,6 +3,7 @@ import { numberToHex } from 'viem';
 import { useAccountsStore } from '@/stores';
 import { useWallet } from './useWallet';
 import { useGenlayer } from './useGenlayer';
+import { getRuntimeConfig } from '@/utils/runtimeConfig';
 
 /**
  * Ensures the connected external wallet is on the same chain
@@ -51,6 +52,12 @@ export function useChainEnforcer() {
       // 4902 = chain not added to wallet, try adding it
       if (switchError.code === 4902) {
         const chain = client.chain;
+        // Use the actual RPC URL the app is configured with,
+        // not the SDK chain's baked-in default (which may be localhost)
+        const rpcUrl = getRuntimeConfig(
+          'VITE_JSON_RPC_SERVER_URL',
+          chain.rpcUrls?.default?.http?.[0] ?? '',
+        );
         await provider.request({
           method: 'wallet_addEthereumChain',
           params: [
@@ -58,7 +65,7 @@ export function useChainEnforcer() {
               chainId: targetChainHex,
               chainName: chain.name,
               nativeCurrency: chain.nativeCurrency,
-              rpcUrls: chain.rpcUrls?.default?.http ?? [],
+              rpcUrls: [rpcUrl],
             },
           ],
         });
