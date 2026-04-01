@@ -38,6 +38,7 @@ vi.mock('genlayer-js/chains', () => ({
 
 vi.mock('@/utils/runtimeConfig', () => ({
   getRuntimeConfig: (...args: any[]) => mockGetRuntimeConfig(...args),
+  getRuntimeConfigNumber: vi.fn((_key: string, fallback: number) => fallback),
 }));
 
 vi.mock('@/stores', () => ({
