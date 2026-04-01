@@ -105,5 +105,49 @@ describe('JsonRpcService — RPC method mapping', () => {
         expect.objectContaining({ method: 'gen_getContractSchema' }),
       );
     });
+
+    it('getTransactionCount calls eth_getTransactionCount', async () => {
+      await service.getTransactionCount('0xaddr');
+      expect(mockCall).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'eth_getTransactionCount' }),
+      );
+    });
+
+    it('getContractNonce calls gen_getContractNonce', async () => {
+      await service.getContractNonce('0xaddr');
+      expect(mockCall).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'gen_getContractNonce' }),
+      );
+    });
+  });
+
+  describe('Studio-only provider management (sim_*)', () => {
+    it('addProvider calls sim_addProvider', async () => {
+      await service.addProvider({} as any);
+      expect(mockCall).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'sim_addProvider' }),
+      );
+    });
+
+    it('updateProvider calls sim_updateProvider', async () => {
+      await service.updateProvider({} as any);
+      expect(mockCall).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'sim_updateProvider' }),
+      );
+    });
+
+    it('deleteProvider calls sim_deleteProvider', async () => {
+      await service.deleteProvider(1);
+      expect(mockCall).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'sim_deleteProvider' }),
+      );
+    });
+
+    it('resetDefaultsLlmProviders calls sim_resetDefaultsLlmProviders', async () => {
+      await service.resetDefaultsLlmProviders();
+      expect(mockCall).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'sim_resetDefaultsLlmProviders' }),
+      );
+    });
   });
 });

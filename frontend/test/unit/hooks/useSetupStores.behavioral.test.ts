@@ -177,4 +177,39 @@ describe('useSetupStores — behavioral contract', () => {
 
     expect(mockAccountsStore.generateNewAccount).toHaveBeenCalled();
   });
+
+  it('should call listeners before sim_* methods', async () => {
+    const { useSetupStores } = await import('@/hooks/useSetupStores');
+    const { setupStores } = useSetupStores();
+    await setupStores();
+
+    const listenersIdx = Math.max(
+      callOrder.indexOf('transactionListener.init'),
+      callOrder.indexOf('contractListener.init'),
+    );
+    const simIdx = Math.min(
+      callOrder.indexOf('getValidatorsData'),
+      callOrder.indexOf('getProvidersData'),
+    );
+    expect(listenersIdx).toBeLessThan(simIdx);
+  });
+
+  it('should refresh pending transactions before initializing listeners', async () => {
+    const { useSetupStores } = await import('@/hooks/useSetupStores');
+    const { setupStores } = useSetupStores();
+    await setupStores();
+
+    const refreshIdx = callOrder.indexOf('refreshPendingTransactions');
+    const listenerIdx = callOrder.indexOf('transactionListener.init');
+    expect(refreshIdx).toBeLessThan(listenerIdx);
+  });
+
+  it('should initialize genlayer client last', async () => {
+    const { useSetupStores } = await import('@/hooks/useSetupStores');
+    const { setupStores } = useSetupStores();
+    await setupStores();
+
+    const initIdx = callOrder.indexOf('initClient');
+    expect(initIdx).toBe(callOrder.length - 1);
+  });
 });

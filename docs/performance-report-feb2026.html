@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rally PRD Performance Report — Feb 10-12, 2026</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1117;
+    --card: #1a1d27;
+    --border: #2a2d3a;
+    --text: #e1e4ed;
+    --muted: #8b8fa3;
+    --green: #22c55e;
+    --red: #ef4444;
+    --blue: #3b82f6;
+    --purple: #a855f7;
+    --orange: #f59e0b;
+    --cyan: #06b6d4;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 24px;
+  }
+  .container { max-width: 1200px; margin: 0 auto; }
+  h1 { font-size: 28px; font-weight: 700; margin-bottom: 4px; }
+  h2 { font-size: 20px; font-weight: 600; margin: 32px 0 16px; color: var(--text); }
+  h3 { font-size: 16px; font-weight: 600; margin: 24px 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .subtitle { color: var(--muted); font-size: 14px; margin-bottom: 32px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+  }
+  .card-label { font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  .card-value { font-size: 32px; font-weight: 700; }
+  .card-delta { font-size: 14px; margin-top: 4px; }
+  .card-delta.good { color: var(--green); }
+  .card-delta.bad { color: var(--red); }
+  .chart-container { position: relative; height: 340px; }
+  .wide-chart { height: 260px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { text-align: left; padding: 10px 12px; border-bottom: 2px solid var(--border); color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+  .tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .tag-perf { background: rgba(34,197,94,0.15); color: var(--green); }
+  .tag-stab { background: rgba(59,130,246,0.15); color: var(--blue); }
+  .tag-inst { background: rgba(168,85,247,0.15); color: var(--purple); }
+  .tag-rel { background: rgba(245,158,11,0.15); color: var(--orange); }
+  .tag-devex { background: rgba(6,182,212,0.15); color: var(--cyan); }
+  .mono { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 13px; }
+  .section-divider { border-top: 1px solid var(--border); margin: 40px 0; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 768px) { .two-col { grid-template-columns: 1fr; } }
+  .methodology { font-size: 13px; color: var(--muted); }
+  .methodology code { background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 3px; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>Rally PRD Performance Report</h1>
+<p class="subtitle">GenLayer Studio v0.97.4 → v0.99.1 + Contract v0.4.2/v0.5.2 &nbsp;|&nbsp; Feb 10–12, 2026 &nbsp;|&nbsp; Rally Production</p>
+
+<!-- ===== HEADLINE METRICS ===== -->
+<div class="grid">
+  <div class="card">
+    <div class="card-label">Transaction Latency (end-to-end)</div>
+    <div class="card-value" style="color:var(--green)">3.3x faster</div>
+    <div class="card-delta good">~10 min → ~3 min per submit_tweet cycle (main + shard consensus)</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Campaign Throughput</div>
+    <div class="card-value" style="color:var(--green)">7x higher</div>
+    <div class="card-delta good">3.7 tx/h → 27 tx/h observed (GRVT campaign)</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Storage Reads (GRVT main)</div>
+    <div class="card-value">49K</div>
+    <div class="card-delta good">↓ from 266K baseline (5.4x fewer)</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Pod Restarts (24h)</div>
+    <div class="card-value">0</div>
+    <div class="card-delta good">↓ from 134 restarts/17h</div>
+  </div>
+</div>
+
+<!-- ===== END-TO-END CYCLE ===== -->
+<h2>End-to-End Consensus Cycle — GRVT (0xd47A)</h2>
+<p style="font-size:13px; color:var(--muted); margin-bottom:16px;">
+  Total consensus time = main (leader + validators) + shard (leader + validators). Validators run in parallel, so wall clock ≈ sum of sequential steps. Only includes txs with matched shard emissions.
+</p>
+
+<div class="two-col">
+  <div class="card">
+    <div class="chart-container">
+      <canvas id="e2eChart"></canvas>
+    </div>
+  </div>
+  <div class="card">
+    <table>
+      <thead><tr><th>Phase</th><th>Main Ldr</th><th>Main Val</th><th>Shard Ldr</th><th>Shard Val</th><th>Total</th><th>Main Reads</th><th>n</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>v0.97.4 baseline</td>
+          <td class="mono">207s</td><td class="mono">264s</td>
+          <td class="mono">~60s</td><td class="mono">~60s</td>
+          <td class="mono"><strong>~591s</strong></td>
+          <td class="mono">~250K</td><td class="mono">161</td>
+        </tr>
+        <tr>
+          <td>v0.97.5 (base64)</td>
+          <td class="mono">209s</td><td class="mono">263s</td>
+          <td class="mono">60s</td><td class="mono">59s</td>
+          <td class="mono"><strong>591s</strong></td>
+          <td class="mono">264K</td><td class="mono">19</td>
+        </tr>
+        <tr>
+          <td>v0.98.2 (event-loop)</td>
+          <td class="mono">212s</td><td class="mono">272s</td>
+          <td class="mono">56s</td><td class="mono">59s</td>
+          <td class="mono"><strong>599s</strong></td>
+          <td class="mono">270K</td><td class="mono">21</td>
+        </tr>
+        <tr style="color:var(--green)">
+          <td>+ Contract upgrade</td>
+          <td class="mono">35s</td><td class="mono">48s</td>
+          <td class="mono">56s</td><td class="mono">59s</td>
+          <td class="mono"><strong>198s</strong></td>
+          <td class="mono">48K</td><td class="mono">28</td>
+        </tr>
+        <tr style="color:var(--green)">
+          <td>+ v0.99.1 (cache)</td>
+          <td class="mono">37s</td><td class="mono">50s</td>
+          <td class="mono">42s</td><td class="mono">50s</td>
+          <td class="mono"><strong>179s</strong></td>
+          <td class="mono">50K</td><td class="mono">8</td>
+        </tr>
+      </tbody>
+    </table>
+    <p style="font-size:12px; color:var(--muted); margin-top:12px;">
+      <strong>~10 min → ~3 min</strong> total consensus time per submit_tweet cycle.<br>
+      v0.97.4→v0.98.2: no per-tx gain (stability fixes, state grew ~3%).<br>
+      Contract upgrade: <strong>3x</strong> — reads dropped 270K→48K.<br>
+      v0.99.1 cache: <strong>+10%</strong> — shard validators 59→50s.<br>
+      Caveat: state grows with submissions, so baseline phases had slightly fewer reads than they would today.
+    </p>
+  </div>
+</div>
+
+<!-- ===== THROUGHPUT ===== -->
+<div class="section-divider"></div>
+<h2>Hourly Throughput</h2>
+<p style="font-size:13px; color:var(--muted); margin-bottom:16px;">Finalized transactions per hour. Three clear regimes: (1) baseline 25 tx/h, (2) post-stability fixes 40-80 tx/h, (3) post-contract upgrade 170+ tx/h.</p>
+
+<div class="card">
+  <div class="chart-container wide-chart">
+    <canvas id="throughputChart"></canvas>
+  </div>
+</div>
+
+<!-- ===== GRVT MAIN PERFORMANCE ===== -->
+<div class="section-divider"></div>
+<h2>GRVT Campaign (0xd47A) — Before vs After</h2>
+<p style="font-size:13px; color:var(--muted); margin-bottom:16px;">Heaviest sharded campaign: submit_tweet → analyze_submission across 3 shards. State grows with submissions, so only before/after comparison is meaningful.</p>
+
+<div class="two-col">
+  <div class="card">
+    <div class="chart-container">
+      <canvas id="grvtLeaderChart"></canvas>
+    </div>
+  </div>
+  <div class="card">
+    <table>
+      <thead><tr><th>Phase</th><th>Leader (s)</th><th>Host I/O (ms)</th><th>Reads</th><th>Validator (s)</th><th>n</th></tr></thead>
+      <tbody>
+        <tr><td>Before (v0.98.2)</td><td class="mono">205</td><td class="mono">22,479</td><td class="mono">266,120</td><td class="mono">263</td><td class="mono">53</td></tr>
+        <tr><td style="color:var(--green)">After (contract + v0.99.1)</td><td class="mono" style="color:var(--green)">31</td><td class="mono" style="color:var(--green)">4,624</td><td class="mono" style="color:var(--green)">49,128</td><td class="mono" style="color:var(--green)">46</td><td class="mono">86</td></tr>
+      </tbody>
+    </table>
+    <p style="font-size:12px; color:var(--muted); margin-top:12px;">
+      <strong>6.6x faster leader, 5.4x fewer reads.</strong> Intermediate studio versions (v0.97.5, v0.98.x) fixed stability — pod restarts, event-loop blocking — not per-tx speed on this contract. The base64 pre-decode saves ~14s but is masked by growing state and 170s+ LLM variance. The non-sharded GRVT chart below isolates the studio-only gain.
+    </p>
+  </div>
+</div>
+
+<!-- ===== NON-SHARDED: STUDIO-ONLY IMPACT ===== -->
+<div class="section-divider"></div>
+<h2>Non-Sharded GRVT (0xDB73) — Pure Studio Impact</h2>
+<p style="font-size:13px; color:var(--muted); margin-bottom:16px;">Same GRVT campaign logic, non-sharded deployment (~60K storage reads). Shows studio improvements in isolation — contract upgrade had no effect on this contract.</p>
+
+<div class="two-col">
+  <div class="card">
+    <div class="chart-container">
+      <canvas id="db73Chart"></canvas>
+    </div>
+  </div>
+  <div class="card">
+    <table>
+      <thead><tr><th>Phase</th><th>Leader (s)</th><th>Host I/O (ms)</th><th>Reads</th><th>n</th></tr></thead>
+      <tbody>
+        <tr><td>v0.97.4 baseline</td><td class="mono">143</td><td class="mono">—</td><td class="mono">—</td><td class="mono">205</td></tr>
+        <tr><td style="color:var(--green)">v0.97.5 (base64 fix)</td><td class="mono" style="color:var(--green)">70</td><td class="mono">4,828</td><td class="mono">59,479</td><td class="mono">99</td></tr>
+        <tr><td>v0.98.2 (event-loop)</td><td class="mono">66</td><td class="mono">5,081</td><td class="mono">60,915</td><td class="mono">71</td></tr>
+      </tbody>
+    </table>
+    <p style="font-size:12px; color:var(--muted); margin-top:12px;">
+      The base64 pre-decode fix (#1432) halved processing time: 143→70s. With 60K reads, eliminating per-read base64 decode saved ~73s of CPU work. This is the clearest signal of the Studio performance gain — unaffected by contract changes.
+    </p>
+  </div>
+</div>
+
+<!-- ===== SHARD PERFORMANCE ===== -->
+<div class="section-divider"></div>
+<h2>Shard Contract Performance</h2>
+<p style="font-size:13px; color:var(--muted); margin-bottom:16px;">Shard contracts run analyze_submission (cross-contract reads from main). v0.99.1's shared cache lets validators reuse the leader's decoded values.</p>
+
+<div class="two-col">
+<div class="card" style="overflow-x:auto">
+<h3 style="margin-top:0">Leader Metrics</h3>
+<table>
+  <thead><tr><th>Shard Parent</th><th>Phase</th><th>Leader (s)</th><th>Host I/O (ms)</th><th>Reads</th><th>n</th></tr></thead>
+  <tbody>
+    <tr><td rowspan="2">0xd47A shards (GRVT)</td>
+      <td>Baseline (A+B avg)</td><td class="mono">55</td><td class="mono">1,205</td><td class="mono">2,750</td><td class="mono">40</td></tr>
+    <tr><td>After contract + v0.99.1</td><td class="mono">39</td><td class="mono">1,160</td><td class="mono">2,950</td><td class="mono">35</td></tr>
+    <tr><td rowspan="2">0x5186 shards (Rally Beta)</td>
+      <td>Baseline (A+B avg)</td><td class="mono">35</td><td class="mono">580</td><td class="mono">1,530</td><td class="mono">54</td></tr>
+    <tr><td>After contract + v0.99.1</td><td class="mono">33</td><td class="mono">560</td><td class="mono">1,800</td><td class="mono">65</td></tr>
+    <tr><td rowspan="2">0x3a43 shards (argue.fun)</td>
+      <td>Baseline</td><td class="mono">39</td><td class="mono">48</td><td class="mono">210</td><td class="mono">36</td></tr>
+    <tr><td>After contract + v0.99.1</td><td class="mono">43</td><td class="mono">63</td><td class="mono">308</td><td class="mono">17</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="card">
+<h3 style="margin-top:0">Validator Host I/O — v0.99.1 Impact</h3>
+<p style="font-size:13px; color:var(--muted); margin-bottom:12px;">Cross-contract cache: validators reuse leader's decoded storage values instead of re-decoding. Both windows are post-contract-upgrade.</p>
+<table>
+  <thead><tr><th>Shard</th><th>Pre v0.99.1 (ms)</th><th>Post v0.99.1 (ms)</th><th>Change</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">0x60c3 (GRVT)</td><td class="mono">2,366</td><td class="mono" style="color:var(--green)">1,671</td><td style="color:var(--green)">-29%</td></tr>
+    <tr><td class="mono">0x6bdF (GRVT)</td><td class="mono">2,115</td><td class="mono" style="color:var(--green)">1,512</td><td style="color:var(--green)">-29%</td></tr>
+    <tr><td class="mono">0x6BfF (GRVT)</td><td class="mono">2,980</td><td class="mono" style="color:var(--green)">1,465</td><td style="color:var(--green)">-51%</td></tr>
+    <tr><td class="mono">0x948d (Rally)</td><td class="mono">1,280</td><td class="mono" style="color:var(--green)">817</td><td style="color:var(--green)">-36%</td></tr>
+    <tr><td class="mono">0x46D2 (Rally)</td><td class="mono">1,185</td><td class="mono" style="color:var(--green)">852</td><td style="color:var(--green)">-28%</td></tr>
+    <tr><td class="mono">0x4C99 (Rally)</td><td class="mono">1,417</td><td class="mono" style="color:var(--green)">791</td><td style="color:var(--green)">-44%</td></tr>
+  </tbody>
+</table>
+<p style="font-size:12px; color:var(--muted); margin-top:12px;">
+  Main contracts show no change — they only read their own state (no cross-contract reads to cache). The optimization specifically helps shards, which read the main contract's state.
+</p>
+</div>
+</div>
+
+<div class="card" style="margin-top:16px;">
+  <div class="chart-container" style="height:280px;">
+    <canvas id="shardValChart"></canvas>
+  </div>
+</div>
+
+<!-- ===== ALL CAMPAIGNS TABLE ===== -->
+<div class="section-divider"></div>
+<h2>All Main Contracts — Before vs After</h2>
+
+<div class="card" style="overflow-x:auto">
+<table>
+  <thead><tr><th>Contract</th><th>Campaign</th><th>Sharded</th><th>Baseline Leader (s)</th><th>After Leader (s)</th><th>Baseline Reads</th><th>After Reads</th><th>Speedup</th></tr></thead>
+  <tbody>
+    <tr>
+      <td class="mono">0xd47A</td><td>Grvt Experience</td><td>Yes (3)</td>
+      <td class="mono">205</td><td class="mono" style="color:var(--green)">31</td>
+      <td class="mono">266,120</td><td class="mono" style="color:var(--green)">49,128</td>
+      <td style="color:var(--green)"><strong>6.6x</strong></td>
+    </tr>
+    <tr>
+      <td class="mono">0x5186</td><td>Rally Beta Incoming</td><td>Yes (3+)</td>
+      <td class="mono">148</td><td class="mono" style="color:var(--green)">25</td>
+      <td class="mono">140,000</td><td class="mono" style="color:var(--green)">32,000</td>
+      <td style="color:var(--green)"><strong>5.9x</strong></td>
+    </tr>
+    <tr>
+      <td class="mono">0xDB73</td><td>GRVT (non-sharded)</td><td>No</td>
+      <td class="mono">143</td><td class="mono" style="color:var(--green)">70</td>
+      <td class="mono">~60,000</td><td class="mono">~60,000</td>
+      <td style="color:var(--green)"><strong>2.0x</strong> (studio only)</td>
+    </tr>
+    <tr>
+      <td class="mono">0x5771</td><td>(campaign)</td><td>No</td>
+      <td class="mono">67</td><td class="mono">51</td>
+      <td class="mono">51,612</td><td class="mono">53,970</td>
+      <td>~1.3x</td>
+    </tr>
+    <tr>
+      <td class="mono">0xC70B</td><td>(campaign)</td><td>No</td>
+      <td class="mono">58</td><td class="mono">77</td>
+      <td class="mono">21,603</td><td class="mono">23,633</td>
+      <td>~same</td>
+    </tr>
+    <tr>
+      <td class="mono">0x3a43</td><td>argue.fun</td><td>Yes (3)</td>
+      <td class="mono">23</td><td class="mono">19</td>
+      <td class="mono">1,590</td><td class="mono">2,655</td>
+      <td>~same (small state)</td>
+    </tr>
+    <tr>
+      <td class="mono">0xBceE</td><td>(campaign)</td><td>Yes (3)</td>
+      <td class="mono">18</td><td class="mono">16</td>
+      <td class="mono">939</td><td class="mono">1,624</td>
+      <td>~same (small state)</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<!-- ===== STUDIO CHANGES ===== -->
+<div class="section-divider"></div>
+<h2>Studio Changes</h2>
+<p style="font-size:13px; color:var(--muted); margin-bottom:16px;">GenLayer Studio PRs deployed during this window. 8 releases in 48 hours — from v0.97.4 to v0.99.1.</p>
+
+<div class="card" style="overflow-x:auto">
+<table>
+  <thead><tr><th>Version</th><th>PR</th><th>Change</th><th>Category</th><th>Impact</th></tr></thead>
+  <tbody>
+    <tr>
+      <td rowspan="4">v0.97.5</td>
+      <td class="mono">#1432</td>
+      <td>Pre-decode contract state to eliminate per-read base64 overhead</td>
+      <td><span class="tag tag-perf">perf</span></td>
+      <td>GRVT main: 207→193s. Non-sharded: 143→70s (2x). Biggest single win for large-state contracts.</td>
+    </tr>
+    <tr>
+      <td class="mono">#1428</td>
+      <td>Cache GenVM precompile artifacts across restarts</td>
+      <td><span class="tag tag-perf">perf</span></td>
+      <td>Cold-start time ↓ ~2.5 min. No per-tx impact.</td>
+    </tr>
+    <tr>
+      <td class="mono">#1431</td>
+      <td>Permit starvation guard — event-loop yield between permits</td>
+      <td><span class="tag tag-stab">stability</span></td>
+      <td>Prevented event-loop blocking during permit batches.</td>
+    </tr>
+    <tr>
+      <td class="mono">#1424</td>
+      <td>LLM voting consensus fix</td>
+      <td><span class="tag tag-stab">stability</span></td>
+      <td>Correct validator vote aggregation.</td>
+    </tr>
+    <tr>
+      <td>v0.98.0</td>
+      <td class="mono">#1434</td>
+      <td>Upgrade GenVM to v0.2.12, persist execution stats</td>
+      <td><span class="tag tag-inst">instrumentation</span></td>
+      <td>Enabled host_handling_time_ms, call_counts, by_method_ms telemetry.</td>
+    </tr>
+    <tr>
+      <td rowspan="2">v0.98.1</td>
+      <td class="mono">#1435</td>
+      <td>Prevent validator thrashing — config hash comparison before reinit</td>
+      <td><span class="tag tag-stab">stability</span></td>
+      <td>Eliminated unnecessary validator restarts on config checks.</td>
+    </tr>
+    <tr>
+      <td class="mono">#1429</td>
+      <td>OpenRouter preset configurations</td>
+      <td><span class="tag tag-devex">devex</span></td>
+      <td>Simplified LLM provider setup.</td>
+    </tr>
+    <tr>
+      <td>v0.98.2</td>
+      <td class="mono">#1437</td>
+      <td>Fix event-loop starvation + ORM session leak</td>
+      <td><span class="tag tag-stab">stability</span></td>
+      <td>Pod restarts: 134→0 in 24h. No per-tx speedup, but sustained throughput.</td>
+    </tr>
+    <tr>
+      <td>v0.99.0</td>
+      <td class="mono">#1439</td>
+      <td>Worker error retry with bounded concurrency</td>
+      <td><span class="tag tag-stab">stability</span></td>
+      <td>Graceful recovery from transient GenVM failures.</td>
+    </tr>
+    <tr>
+      <td rowspan="3">v0.99.1</td>
+      <td class="mono">—</td>
+      <td>Shared decoded value cache across validators</td>
+      <td><span class="tag tag-perf">perf</span></td>
+      <td>Validators reuse leader's decoded storage values. No re-decode per validator.</td>
+    </tr>
+    <tr>
+      <td class="mono">—</td>
+      <td>Cross-contract snapshot cache for shard reads</td>
+      <td><span class="tag tag-perf">perf</span></td>
+      <td>Shard validator host I/O ↓ 28-51%. Main contracts unaffected (no cross-reads).</td>
+    </tr>
+    <tr>
+      <td class="mono">—</td>
+      <td>Validator execution timeout</td>
+      <td><span class="tag tag-stab">stability</span></td>
+      <td>Prevents stuck validators from blocking consensus indefinitely.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<!-- ===== CONTRACT CHANGES ===== -->
+<div class="section-divider"></div>
+<h2>Contract Changes</h2>
+<p style="font-size:13px; color:var(--muted); margin-bottom:16px;">CampaignIC v0.4.2 / CampaignShard v0.5.2 — deployed Feb 11 ~23:50 UTC. Focused on eliminating redundant storage reads.</p>
+
+<div class="card" style="overflow-x:auto">
+<table>
+  <thead><tr><th>Area</th><th>Change</th><th>Impact</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Cross-contract read amplification</td>
+      <td>Reduced from O(submissions) to O(unique shard+mission groups)</td>
+      <td>Main GRVT reads: 266K → 49K (5.4x reduction). Biggest single win.</td>
+    </tr>
+    <tr>
+      <td>Batched shard data reuse</td>
+      <td>Single fetch reused across submit_tweet, resubmit_tweet, get_submissions, etc.</td>
+      <td>Eliminated redundant cross-contract calls within same tx.</td>
+    </tr>
+    <tr>
+      <td>Selection algorithm</td>
+      <td>Single-pass selection replacing list/sort patterns</td>
+      <td>CPU savings on large submission sets. O(n) → O(n) with fewer allocations.</td>
+    </tr>
+    <tr>
+      <td>Distribution math</td>
+      <td>Fast paths for single-participant and alpha==1 cases</td>
+      <td>Skip expensive math for common degenerate cases.</td>
+    </tr>
+    <tr>
+      <td>Shard lookups</td>
+      <td>Single-pass lookup optimizations</td>
+      <td>Shard leader time: marginal improvement (~55→42s).</td>
+    </tr>
+  </tbody>
+</table>
+<p style="font-size:12px; color:var(--muted); margin-top:12px;">
+  Combined effect: GRVT main processing 205→31s (6.6x). Rally Beta 148→25s (5.9x). Only affects sharded campaigns with significant state; small-state campaigns (argue.fun, BceE) unchanged.
+</p>
+</div>
+
+<!-- ===== CAMPAIGN REFERENCE ===== -->
+<div class="section-divider"></div>
+<h2>Campaign Reference</h2>
+
+<div class="card" style="overflow-x:auto">
+<table>
+  <thead><tr><th>Main Contract</th><th>Name</th><th>Shard Contracts</th><th>State Size</th></tr></thead>
+  <tbody>
+    <tr><td class="mono">0xd47A3b45…</td><td>Grvt Experience</td><td class="mono">0x60c3, 0x6bdF, 0x6BfF</td><td>~289K reads (pre-upgrade)</td></tr>
+    <tr><td class="mono">0x51868feb…</td><td>Rally Beta Incoming</td><td class="mono">0x4C99, 0x948d, 0x46D2</td><td>~140K reads (pre-upgrade)</td></tr>
+    <tr><td class="mono">0x3a43943e…</td><td>argue.fun</td><td class="mono">0x38f4, 0x4D9A, 0xD7dE</td><td>~1.6K reads</td></tr>
+    <tr><td class="mono">0xBceEea57…</td><td>(campaign)</td><td class="mono">0x2dcF, 0x81B1, 0x143A</td><td>~1K reads</td></tr>
+    <tr><td class="mono">0xDB73A35c…</td><td>GRVT (non-sharded)</td><td>—</td><td>~60K reads</td></tr>
+    <tr><td class="mono">0xC70B606D…</td><td>(campaign)</td><td>—</td><td>~22K reads</td></tr>
+    <tr><td class="mono">0x5771f920…</td><td>(campaign)</td><td>—</td><td>~52K reads</td></tr>
+    <tr><td class="mono">0xf7E4FF58…</td><td>(campaign)</td><td>—</td><td>~19K reads</td></tr>
+  </tbody>
+</table>
+</div>
+
+<!-- ===== METHODOLOGY ===== -->
+<div class="section-divider"></div>
+<h2>Methodology</h2>
+
+<div class="card methodology">
+  <h3 style="margin-top:0">Data Source</h3>
+  <p>All metrics from Rally PRD PostgreSQL (<code>rally-studio-prd</code> namespace, <code>genlayer_state</code> database).</p>
+
+  <h3>Key Fields</h3>
+  <ul style="margin-left:20px; margin-bottom:12px;">
+    <li><code>consensus_data::jsonb->'leader_receipt'->0->>'processing_time'</code> — total leader execution time (ms)</li>
+    <li><code>consensus_data::jsonb->'leader_receipt'->0->'execution_stats'->>'host_handling_time_ms'</code> — pure storage I/O time</li>
+    <li><code>consensus_data::jsonb->'leader_receipt'->0->'execution_stats'->'call_counts'->>'STORAGE_READ'</code> — number of storage read calls</li>
+    <li><code>timestamp_awaiting_finalization</code> — bigint Unix epoch when tx entered FINALIZED</li>
+    <li><code>triggered_by_hash IS NOT NULL</code> — distinguishes shard txs from main txs</li>
+  </ul>
+
+  <h3>Phase Boundaries</h3>
+  <table style="font-size:12px; margin-bottom:12px;">
+    <tr><td><strong>Phase 0 (v0.97.4)</strong></td><td>Before Feb 10 20:00 UTC</td><td>No execution_stats; only processing_time available</td></tr>
+    <tr><td><strong>Phase 1 (v0.97.5)</strong></td><td>Feb 10 20:00 – Feb 11 16:00 UTC</td><td>After base64 pre-decode + GenVM v0.2.12</td></tr>
+    <tr><td><strong>Phase 2 (v0.98.2)</strong></td><td>Feb 11 16:00 – Feb 11 23:50 UTC</td><td>After event-loop fix + validator thrashing fix</td></tr>
+    <tr><td><strong>Phase 3a (contract)</strong></td><td>Feb 11 23:50 – Feb 12 01:47 UTC</td><td>After contract storage optimization (v0.99.0 studio)</td></tr>
+    <tr><td><strong>Phase 3b (v0.99.1)</strong></td><td>Feb 12 01:47 UTC onwards</td><td>+ Shared cross-contract cache + validator timeout</td></tr>
+  </table>
+
+  <h3>Caveats</h3>
+  <ul style="margin-left:20px;">
+    <li>execution_stats only available from v0.98.0 onwards (PR #1434)</li>
+    <li>Phase 0 data limited to processing_time; host I/O breakdown unavailable</li>
+    <li>Some Phase 3 txs processed with old code (already in pipeline when upgrade deployed)</li>
+    <li>Non-sharded campaigns (DB73, C70B, 5771) unaffected by contract upgrade — changes there reflect studio improvements only</li>
+    <li>Validator processing times available but validator count constant (5 validators throughout)</li>
+  </ul>
+</div>
+
+<!-- ===== VERSION HISTORY ===== -->
+<div class="section-divider"></div>
+<h2>Release Timeline</h2>
+
+<div class="card">
+  <div class="chart-container wide-chart">
+    <canvas id="timelineChart"></canvas>
+  </div>
+</div>
+
+</div><!-- /container -->
+
+<script>
+// Color palette
+const colors = {
+  green: '#22c55e', blue: '#3b82f6', purple: '#a855f7',
+  orange: '#f59e0b', red: '#ef4444', cyan: '#06b6d4',
+  muted: '#8b8fa3', text: '#e1e4ed'
+};
+
+const chartDefaults = {
+  responsive: true, maintainAspectRatio: false,
+  plugins: { legend: { labels: { color: colors.text, font: { size: 12 } } } },
+  scales: {
+    x: { ticks: { color: colors.muted, font: { size: 11 } }, grid: { color: 'rgba(255,255,255,0.05)' } },
+    y: { ticks: { color: colors.muted, font: { size: 11 } }, grid: { color: 'rgba(255,255,255,0.05)' } }
+  }
+};
+
+// === End-to-End Cycle Chart (Before vs After) ===
+new Chart(document.getElementById('e2eChart'), {
+  type: 'bar',
+  data: {
+    labels: ['Before\n(v0.98.2)', 'After\n(contract + v0.99.1)'],
+    datasets: [
+      { label: 'Main Leader', data: [212, 37], backgroundColor: '#ef4444', borderRadius: 2 },
+      { label: 'Main Validators', data: [272, 50], backgroundColor: '#f59e0b', borderRadius: 2 },
+      { label: 'Shard Leader', data: [56, 42], backgroundColor: '#3b82f6', borderRadius: 2 },
+      { label: 'Shard Validators', data: [59, 50], backgroundColor: '#a855f7', borderRadius: 2 }
+    ]
+  },
+  options: {
+    ...chartDefaults,
+    plugins: {
+      ...chartDefaults.plugins,
+      title: { display: true, text: 'End-to-End Consensus Cycle (seconds)', color: colors.text, font: { size: 14 } }
+    },
+    scales: {
+      ...chartDefaults.scales,
+      x: { ...chartDefaults.scales.x, stacked: true },
+      y: { ...chartDefaults.scales.y, stacked: true, title: { display: true, text: 'Seconds', color: colors.muted } }
+    }
+  }
+});
+
+// === GRVT Leader Chart (Before vs After) ===
+new Chart(document.getElementById('grvtLeaderChart'), {
+  type: 'bar',
+  data: {
+    labels: ['Before\n(v0.98.2)', 'After\n(contract + v0.99.1)'],
+    datasets: [
+      {
+        label: 'Leader (s)',
+        data: [205, 31],
+        backgroundColor: [colors.red, colors.green],
+        borderRadius: 6
+      },
+      {
+        label: 'Validator (s)',
+        data: [263, 46],
+        backgroundColor: ['rgba(239,68,68,0.4)', 'rgba(34,197,94,0.4)'],
+        borderRadius: 6
+      }
+    ]
+  },
+  options: {
+    ...chartDefaults,
+    plugins: {
+      ...chartDefaults.plugins,
+      title: { display: true, text: 'GRVT Main (0xd47A) — Before vs After', color: colors.text, font: { size: 14 } }
+    },
+    scales: {
+      ...chartDefaults.scales,
+      y: { ...chartDefaults.scales.y, title: { display: true, text: 'Seconds', color: colors.muted } }
+    }
+  }
+});
+
+// === DB73 Chart ===
+new Chart(document.getElementById('db73Chart'), {
+  type: 'bar',
+  data: {
+    labels: ['v0.97.4\nBaseline', 'v0.97.5\nBase64 Fix', 'v0.98.2\nEvent-Loop'],
+    datasets: [{
+      label: 'Leader (s)',
+      data: [143, 70, 66],
+      backgroundColor: [colors.red, colors.green, colors.green],
+      borderRadius: 6
+    }]
+  },
+  options: {
+    ...chartDefaults,
+    plugins: {
+      ...chartDefaults.plugins,
+      title: { display: true, text: 'Non-Sharded GRVT (0xDB73) — Studio-Only Impact', color: colors.text, font: { size: 14 } }
+    },
+    scales: {
+      ...chartDefaults.scales,
+      y: { ...chartDefaults.scales.y, title: { display: true, text: 'Seconds', color: colors.muted } }
+    }
+  }
+});
+
+// === Shard Validator Host I/O Chart ===
+new Chart(document.getElementById('shardValChart'), {
+  type: 'bar',
+  data: {
+    labels: ['0x60c3\nGRVT', '0x6bdF\nGRVT', '0x6BfF\nGRVT', '0x948d\nRally', '0x46D2\nRally', '0x4C99\nRally'],
+    datasets: [
+      { label: 'Pre v0.99.1', data: [2366, 2115, 2980, 1280, 1185, 1417], backgroundColor: 'rgba(245,158,11,0.7)', borderRadius: 4 },
+      { label: 'Post v0.99.1', data: [1671, 1512, 1465, 817, 852, 791], backgroundColor: 'rgba(34,197,94,0.7)', borderRadius: 4 }
+    ]
+  },
+  options: {
+    ...chartDefaults,
+    plugins: {
+      ...chartDefaults.plugins,
+      title: { display: true, text: 'Shard Validator Host I/O (ms) — Cross-Contract Cache Impact', color: colors.text, font: { size: 14 } }
+    },
+    scales: {
+      ...chartDefaults.scales,
+      y: { ...chartDefaults.scales.y, title: { display: true, text: 'Host I/O (ms)', color: colors.muted } }
+    }
+  }
+});
+
+// === Throughput Chart ===
+const throughputLabels = [
+  '10 18h','19h','20h','21h','22h','23h',
+  '11 00h','01h','02h','03h','04h','05h','06h','07h','08h','09h','10h','11h','12h','13h','14h','15h','16h','17h','18h','19h','20h','21h','22h','23h',
+  '12 00h','01h'
+];
+const throughputData = [31,18,1,8,9,21,24,31,29,24,23,35,20,27,39,37,27,40,31,31,21,20,84,40,56,61,57,74,45,80,167,175];
+const mainData = [26,17,1,8,6,20,21,25,25,23,21,27,20,27,34,35,25,35,26,26,18,19,79,34,39,45,43,50,30,57,109,118];
+const shardData = [5,1,0,0,3,1,3,6,4,1,2,8,0,0,5,2,2,5,5,5,3,1,5,6,17,16,14,24,15,23,58,57];
+
+// Annotation lines
+const annotationPlugin = {
+  id: 'annotations',
+  afterDraw(chart) {
+    const ctx = chart.ctx;
+    const xScale = chart.scales.x;
+    const yScale = chart.scales.y;
+    const annotations = [
+      { idx: 2, label: 'v0.97.5', color: colors.blue },
+      { idx: 22, label: 'v0.98.2', color: colors.purple },
+      { idx: 29, label: 'Contract', color: colors.green }
+    ];
+    annotations.forEach(a => {
+      const x = xScale.getPixelForValue(a.idx);
+      ctx.save();
+      ctx.strokeStyle = a.color;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([5, 3]);
+      ctx.beginPath();
+      ctx.moveTo(x, yScale.top);
+      ctx.lineTo(x, yScale.bottom);
+      ctx.stroke();
+      ctx.fillStyle = a.color;
+      ctx.font = '11px Inter, sans-serif';
+      ctx.fillText(a.label, x + 4, yScale.top + 14);
+      ctx.restore();
+    });
+  }
+};
+
+new Chart(document.getElementById('throughputChart'), {
+  type: 'bar',
+  data: {
+    labels: throughputLabels,
+    datasets: [
+      { label: 'Main txs', data: mainData, backgroundColor: colors.blue, borderRadius: 2 },
+      { label: 'Shard txs', data: shardData, backgroundColor: colors.purple, borderRadius: 2 }
+    ]
+  },
+  options: {
+    ...chartDefaults,
+    plugins: {
+      ...chartDefaults.plugins,
+      title: { display: true, text: 'Finalized Transactions per Hour', color: colors.text, font: { size: 14 } }
+    },
+    scales: {
+      ...chartDefaults.scales,
+      x: { ...chartDefaults.scales.x, stacked: true },
+      y: { ...chartDefaults.scales.y, stacked: true, title: { display: true, text: 'tx/hour', color: colors.muted } }
+    }
+  },
+  plugins: [annotationPlugin]
+});
+
+// === Timeline Chart ===
+new Chart(document.getElementById('timelineChart'), {
+  type: 'bar',
+  data: {
+    labels: ['v0.97.4', 'v0.97.5', 'v0.98.0', 'v0.98.1', 'v0.98.2', 'v0.99.0', 'Contract', 'v0.99.1'],
+    datasets: [{
+      label: 'Changes',
+      data: [0, 4, 1, 2, 1, 1, 1, 3],
+      backgroundColor: [
+        colors.muted,
+        colors.green,
+        colors.purple,
+        colors.blue,
+        colors.green,
+        colors.orange,
+        colors.green,
+        colors.cyan
+      ],
+      borderRadius: 6
+    }]
+  },
+  options: {
+    ...chartDefaults,
+    indexAxis: 'y',
+    plugins: {
+      ...chartDefaults.plugins,
+      title: { display: true, text: 'Release Cadence (PRs per version)', color: colors.text, font: { size: 14 } },
+      tooltip: {
+        callbacks: {
+          label: function(ctx) {
+            const labels = {
+              0: 'Baseline',
+              1: '#1432 base64 fix, #1428 precompile, #1431 permit, #1424 LLM voting',
+              2: '#1434 GenVM v0.2.12 + execution stats',
+              3: '#1435 validator thrashing, #1429 openrouter presets',
+              4: '#1437 event-loop starvation + ORM fix',
+              5: '#1439 worker error retry + bounded concurrency',
+              6: 'Contract storage optimization',
+              7: 'Cross-contract cache, validator timeout, CI optimization'
+            };
+            return labels[ctx.dataIndex] || '';
+          }
+        }
+      }
+    },
+    scales: {
+      ...chartDefaults.scales,
+      x: { ...chartDefaults.scales.x, title: { display: true, text: 'PRs included', color: colors.muted } }
+    }
+  }
+});
+</script>
+</body>
+</html>

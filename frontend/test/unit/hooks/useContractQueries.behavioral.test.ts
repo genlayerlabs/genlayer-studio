@@ -101,7 +101,7 @@ describe('useContractQueries — behavioral contract', () => {
   });
 
   describe('deployContract', () => {
-    it('should call ensureCorrectChain before deploying', async () => {
+    it('should call ensureCorrectChain BEFORE deploying (order matters)', async () => {
       const { useContractQueries } = await import('@/hooks/useContractQueries');
       const { deployContract } = useContractQueries();
 
@@ -109,6 +109,10 @@ describe('useContractQueries — behavioral contract', () => {
 
       expect(mockEnsureCorrectChain).toHaveBeenCalled();
       expect(mockDeployContract).toHaveBeenCalled();
+      // Verify order: chain check must happen before tx submission
+      const chainOrder = mockEnsureCorrectChain.mock.invocationCallOrder[0];
+      const deployOrder = mockDeployContract.mock.invocationCallOrder[0];
+      expect(chainOrder).toBeLessThan(deployOrder);
     });
 
     it('should call genlayerClient.deployContract with contract code', async () => {
@@ -153,7 +157,7 @@ describe('useContractQueries — behavioral contract', () => {
   });
 
   describe('callWriteMethod', () => {
-    it('should call ensureCorrectChain before writing', async () => {
+    it('should call ensureCorrectChain BEFORE writing (order matters)', async () => {
       const { useContractQueries } = await import('@/hooks/useContractQueries');
       const { callWriteMethod } = useContractQueries();
 
@@ -164,6 +168,10 @@ describe('useContractQueries — behavioral contract', () => {
       });
 
       expect(mockEnsureCorrectChain).toHaveBeenCalled();
+      expect(mockWriteContract).toHaveBeenCalled();
+      const chainOrder = mockEnsureCorrectChain.mock.invocationCallOrder[0];
+      const writeOrder = mockWriteContract.mock.invocationCallOrder[0];
+      expect(chainOrder).toBeLessThan(writeOrder);
     });
 
     it('should call genlayerClient.writeContract with method and args', async () => {
@@ -201,6 +209,52 @@ describe('useContractQueries — behavioral contract', () => {
           type: 'method',
           hash: '0xWriteHash',
           decodedData: expect.objectContaining({ functionName: 'tip' }),
+        }),
+      );
+    });
+  });
+
+  describe('callReadMethod (universal — works on any network)', () => {
+    it('should call genlayerClient.readContract', async () => {
+      const { useContractQueries } = await import('@/hooks/useContractQueries');
+      const { callReadMethod } = useContractQueries();
+
+      const result = await callReadMethod('get_balance', {
+        args: [],
+        kwargs: {},
+      });
+
+      expect(mockReadContract).toHaveBeenCalledWith(
+        expect.objectContaining({
+          functionName: 'get_balance',
+          args: [],
+        }),
+      );
+    });
+
+    it('should NOT call ensureCorrectChain for reads', async () => {
+      const { useContractQueries } = await import('@/hooks/useContractQueries');
+      const { callReadMethod } = useContractQueries();
+
+      await callReadMethod('get_balance', { args: [], kwargs: {} });
+
+      expect(mockEnsureCorrectChain).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('simulateWriteMethod (universal)', () => {
+    it('should call genlayerClient.simulateWriteContract', async () => {
+      const { useContractQueries } = await import('@/hooks/useContractQueries');
+      const { simulateWriteMethod } = useContractQueries();
+
+      await simulateWriteMethod({
+        method: 'tip',
+        args: { args: [], kwargs: {} },
+      });
+
+      expect(mockSimulateWriteContract).toHaveBeenCalledWith(
+        expect.objectContaining({
+          functionName: 'tip',
         }),
       );
     });

@@ -102,6 +102,29 @@ describe('useContractListener — behavioral contract', () => {
     expect(contractsStoreMock.addDeployedContract).not.toHaveBeenCalled();
   });
 
+  it('should forward defaultState from WS payload', async () => {
+    transactionsStoreMock.transactions = [
+      { hash: '0xDeploy', localContractId: 'c1', type: 'deploy' },
+    ];
+
+    const { init } = useContractListener();
+    init();
+
+    const handler = webSocketClientMock.on.mock.calls.find(
+      (c: any[]) => c[0] === 'deployed_contract',
+    )[1];
+
+    const statePayload = { accepted: { slot: 'data' }, finalized: {} };
+    await handler({
+      transaction_hash: '0xDeploy',
+      data: { id: '0xAddr', data: { state: statePayload } },
+    });
+
+    expect(contractsStoreMock.addDeployedContract).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultState: statePayload }),
+    );
+  });
+
   it('should match tx by transaction_hash field', async () => {
     transactionsStoreMock.transactions = [
       { hash: '0xA', localContractId: 'a' },
