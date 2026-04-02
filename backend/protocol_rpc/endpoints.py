@@ -1241,13 +1241,13 @@ async def _gen_call_with_validator(
 ####### ETH ENDPOINTS #######
 def get_balance(
     accounts_manager: AccountsManager, account_address: str, block_tag: str = "latest"
-) -> int:
+) -> str:
     if not accounts_manager.is_valid_address(account_address):
         raise InvalidAddressError(
             account_address, f"Invalid address from_address: {account_address}"
         )
     account_balance = accounts_manager.get_account_balance(account_address)
-    return account_balance
+    return hex(account_balance)
 
 
 def get_transaction_count(
