@@ -68,7 +68,7 @@ export function useChainEnforcer() {
           params: [
             {
               chainId: targetChainHex,
-              chainName: chain.name,
+              chainName: getRuntimeConfig('VITE_CHAIN_NAME', chain.name),
               nativeCurrency: chain.nativeCurrency,
               rpcUrls: [rpcUrl],
             },

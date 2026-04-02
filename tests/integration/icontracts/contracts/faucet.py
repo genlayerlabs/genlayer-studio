@@ -23,3 +23,7 @@ class Faucet(gl.Contract):
         if v == u256(0):
             raise gl.vm.UserError("send some value")
         _Recipient(Address(recipient)).emit_transfer(value=v)
+
+    @gl.public.view
+    def get_balance(self) -> u256:
+        return self.balance
