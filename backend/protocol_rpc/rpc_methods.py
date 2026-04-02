@@ -602,6 +602,44 @@ def eth_get_block_by_hash(
     )
 
 
+@rpc.method("eth_feeHistory", log_policy=LogPolicy.debug())
+def eth_fee_history(
+    block_count: int,
+    newest_block: str = "latest",
+    reward_percentiles: list | None = None,
+) -> dict:
+    """Return empty fee history — Studio transactions are gasless."""
+    return {
+        "baseFeePerGas": ["0x0", "0x0"],
+        "gasUsedRatio": [0.0],
+        "oldestBlock": "0x0",
+    }
+
+
+@rpc.method("eth_maxPriorityFeePerGas", log_policy=LogPolicy.debug())
+def eth_max_priority_fee_per_gas() -> str:
+    """Studio transactions are gasless."""
+    return "0x0"
+
+
+@rpc.method("eth_syncing", log_policy=LogPolicy.debug())
+def eth_syncing() -> bool:
+    """Studio is never syncing."""
+    return False
+
+
+@rpc.method("eth_getLogs", log_policy=LogPolicy.debug())
+def eth_get_logs(filter: dict) -> list:
+    """Return empty logs — Studio doesn't index EVM logs."""
+    return []
+
+
+@rpc.method("eth_getCode", log_policy=LogPolicy.debug())
+def eth_get_code(address: str, block: str = "latest") -> str:
+    """Return empty code for all addresses — Studio contracts aren't EVM bytecode."""
+    return "0x"
+
+
 @rpc.method("sim_updateTransactionStatus")
 def sim_update_transaction_status(
     transaction_hash: str,
