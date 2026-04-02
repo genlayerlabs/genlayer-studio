@@ -20,6 +20,7 @@ function getChain() {
       `Unknown VITE_GENLAYER_NETWORK: "${networkName}". Must be one of: ${Object.keys(chains).join(', ')}`,
     );
   }
+
   return chain;
 }
 
