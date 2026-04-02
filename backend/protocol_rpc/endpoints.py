@@ -1691,9 +1691,9 @@ def get_gas_price() -> str:
 
 
 def get_gas_estimate(data: Any) -> str:
-    # Use zkSync Era's gas limit: 2^32 - 1 (4,294,967,295)
-    gas_limit = 0xFFFFFFFF  # 4,294,967,295
-    return hex(gas_limit)
+    # Return a reasonable estimate within block gas limit (30M).
+    # Gas price is 0 so transactions are still gasless.
+    return hex(0x7A120)  # 500,000 — fits within block limit, enough for any Studio tx
 
 
 def get_transaction_receipt(
@@ -1747,6 +1747,8 @@ def get_transaction_receipt(
         "to": to_addr,
         "cumulativeGasUsed": hex(transaction.get("gas_used", 8000000)),
         "gasUsed": hex(transaction.get("gas_used", 8000000)),
+        "effectiveGasPrice": "0x0",
+        "type": "0x0",
         "contractAddress": (
             transaction.get("contract_address")
             if transaction.get("contract_address")
