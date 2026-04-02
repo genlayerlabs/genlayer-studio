@@ -3,10 +3,7 @@ import { createClient, createAccount } from 'genlayer-js';
 import type { GenLayerClient } from 'genlayer-js/types';
 import { ref, watch, markRaw, type Ref } from 'vue';
 import { useAccountsStore } from '@/stores';
-import {
-  getRuntimeConfig,
-  getRuntimeConfigNumber,
-} from '@/utils/runtimeConfig';
+import { getRuntimeConfig } from '@/utils/runtimeConfig';
 import { useWallet } from './useWallet';
 
 const chains: Record<string, typeof localnet> = {
@@ -22,12 +19,6 @@ function getChain() {
     throw new Error(
       `Unknown VITE_GENLAYER_NETWORK: "${networkName}". Must be one of: ${Object.keys(chains).join(', ')}`,
     );
-  }
-
-  // Allow per-deployment chain ID override (each Studio instance has its own)
-  const chainIdOverride = getRuntimeConfigNumber('VITE_CHAIN_ID', 0);
-  if (chainIdOverride > 0 && chainIdOverride !== chain.id) {
-    return { ...chain, id: chainIdOverride };
   }
 
   return chain;
