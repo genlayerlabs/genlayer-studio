@@ -47,6 +47,7 @@ jobs:
       dockerfile: docker/Dockerfile.backend
       dockerhub_repo: yeagerai/simulator-jsonrpc
       dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
+      ref: ${{ github.event.inputs.version }}
     secrets:
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
@@ -58,6 +59,7 @@ jobs:
       dockerfile: docker/Dockerfile.frontend
       dockerhub_repo: yeagerai/simulator-frontend
       dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
+      ref: ${{ github.event.inputs.version }}
     secrets:
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
@@ -69,6 +71,7 @@ jobs:
       dockerfile: docker/Dockerfile.database-migration
       dockerhub_repo: yeagerai/simulator-database-migration
       dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
+      ref: ${{ github.event.inputs.version }}
     secrets:
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
@@ -80,6 +83,7 @@ jobs:
       dockerfile: docker/Dockerfile.consensus-worker
       dockerhub_repo: yeagerai/simulator-consensus-worker
       dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
+      ref: ${{ github.event.inputs.version }}
     secrets:
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
@@ -91,5 +95,6 @@ jobs:
       dockerfile: docker/Dockerfile.explorer
       dockerhub_repo: yeagerai/simulator-explorer
       dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
+      ref: ${{ github.event.inputs.version }}
     secrets:
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
