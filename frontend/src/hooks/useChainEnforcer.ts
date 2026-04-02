@@ -3,15 +3,19 @@ import { numberToHex } from 'viem';
 import { useAccountsStore } from '@/stores';
 import { useWallet } from './useWallet';
 import { useGenlayer } from './useGenlayer';
-import { getRuntimeConfig } from '@/utils/runtimeConfig';
+import {
+  getRuntimeConfig,
+  getRuntimeConfigNumber,
+} from '@/utils/runtimeConfig';
 
 /**
- * Ensures the connected external wallet is on the same chain
- * the genlayer-js client is configured for before sending a transaction.
- * For local accounts this is a no-op.
+ * Ensures the connected external wallet is on the correct chain
+ * before sending a transaction. For local accounts this is a no-op.
  *
- * Reads the target chain from the genlayer client (not hardcoded),
- * so it works for localnet, studionet, and future testnets.
+ * Uses VITE_CHAIN_ID for the target chain (each Studio instance has
+ * its own chain ID), falling back to the SDK client's chain ID.
+ * Uses VITE_JSON_RPC_SERVER_URL for the RPC URL when adding the
+ * network to MetaMask.
  */
 export function useChainEnforcer() {
   const accountsStore = useAccountsStore();
@@ -31,9 +35,13 @@ export function useChainEnforcer() {
     const client = genlayer.client.value;
     if (!client?.chain) return;
 
-    const targetChainId = client.chain.id;
+    // Use per-deployment chain ID (each Studio instance has its own),
+    // falling back to SDK chain ID
+    const targetChainId = getRuntimeConfigNumber(
+      'VITE_CHAIN_ID',
+      client.chain.id,
+    );
 
-    // Check current chain
     const currentChainHex = (await provider.request({
       method: 'eth_chainId',
     })) as string;
@@ -49,11 +57,8 @@ export function useChainEnforcer() {
         params: [{ chainId: targetChainHex }],
       });
     } catch (switchError: any) {
-      // 4902 = chain not added to wallet, try adding it
       if (switchError.code === 4902) {
         const chain = client.chain;
-        // Use the actual RPC URL the app is configured with,
-        // not the SDK chain's baked-in default (which may be localhost)
         const rpcUrl = getRuntimeConfig(
           'VITE_JSON_RPC_SERVER_URL',
           chain.rpcUrls?.default?.http?.[0] ?? '',
@@ -78,7 +83,6 @@ export function useChainEnforcer() {
       }
     }
 
-    // Verify switch succeeded
     const newChainHex = (await provider.request({
       method: 'eth_chainId',
     })) as string;
