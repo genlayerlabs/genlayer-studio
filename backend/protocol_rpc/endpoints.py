@@ -1627,8 +1627,9 @@ def get_net_version() -> str:
 
 
 def get_block_number(transactions_processor: TransactionsProcessor) -> str:
-    transaction_count = transactions_processor.get_highest_timestamp()
-    return hex(transaction_count)
+    import time
+
+    return hex(int(time.time()))
 
 
 def get_block_by_number(
