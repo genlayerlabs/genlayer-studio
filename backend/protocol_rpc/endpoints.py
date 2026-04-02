@@ -1252,8 +1252,8 @@ def get_balance(
 
 def get_transaction_count(
     transactions_processor: TransactionsProcessor, address: str, block: str = "latest"
-) -> int:
-    return transactions_processor.get_transaction_count(address)
+) -> str:
+    return hex(transactions_processor.get_transaction_count(address))
 
 
 def get_transaction_by_hash(
