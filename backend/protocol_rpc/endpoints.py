@@ -1654,10 +1654,33 @@ def get_block_by_number(
     )
 
     if not block_details:
-        raise NotFoundError(
-            message="Block not found",
-            data={"block_number": block_number},
-        )
+        # Return a synthetic empty block — MetaMask needs valid blocks
+        # for balance queries and gas estimation to work
+        import time as _time
+
+        block_details = {
+            "number": hex(block_number_int),
+            "hash": "0x" + "0" * 64,
+            "parentHash": "0x" + "0" * 64,
+            "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+            "nonce": "0x" + "0" * 16,
+            "logsBloom": "0x" + "00" * 256,
+            "transactionsRoot": "0x" + "0" * 64,
+            "stateRoot": "0x" + "0" * 64,
+            "receiptsRoot": "0x" + "0" * 64,
+            "transactions": [],
+            "timestamp": hex(int(_time.time())),
+            "miner": "0x" + "0" * 40,
+            "difficulty": "0x0",
+            "totalDifficulty": "0x0",
+            "gasUsed": "0x0",
+            "gasLimit": "0x1c9c380",
+            "baseFeePerGas": "0x0",
+            "size": "0x0",
+            "extraData": "0x",
+            "mixHash": "0x" + "0" * 64,
+            "uncles": [],
+        }
 
     return block_details
 
