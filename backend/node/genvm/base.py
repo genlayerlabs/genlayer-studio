@@ -368,6 +368,18 @@ class Host(genvmhost.IHost):
                             on=emission["on"],
                         )
                     )
+                case "EthSend":
+                    pending_transactions.append(
+                        PendingTransaction(
+                            address=emission["address"].as_hex,
+                            calldata=emission.get("calldata", b""),
+                            code=None,
+                            salt_nonce=0,
+                            value=emission["value"],
+                            on="finalized",
+                            is_eth_send=True,
+                        )
+                    )
 
         # Extract eq_outputs from result_nondet_results
         eq_outputs = {i: data for i, data in enumerate(res.result_nondet_results)}

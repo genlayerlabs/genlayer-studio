@@ -640,8 +640,11 @@ class ConsensusAlgorithm:
             accounts_manager (AccountsManager): Manager to handle account balance updates.
         """
 
-        # Check if the transaction is a fund_account call
-        if not transaction.from_address is None:
+        # For triggered (child) transactions, the parent contract was already
+        # debited at acceptance time. Skip sender debit to avoid double-debit.
+        is_triggered = transaction.triggered_by_hash is not None
+
+        if not is_triggered and transaction.from_address is not None:
             # Get the balance of the sender account
             from_balance = accounts_manager.get_account_balance(
                 transaction.from_address
@@ -664,8 +667,7 @@ class ConsensusAlgorithm:
                 transaction.from_address, from_balance - transaction.value
             )
 
-        # Check if the transaction is a burn call
-        if not transaction.to_address is None:
+        if transaction.to_address is not None:
             # Get the balance of the recipient account
             to_balance = accounts_manager.get_account_balance(transaction.to_address)
 
@@ -2455,7 +2457,10 @@ def _get_messages_data(
         nonce_offset += 1
         data: dict
         transaction_type: TransactionType
-        if pending_transaction.is_deploy():
+        if pending_transaction.is_eth_send:
+            transaction_type = TransactionType.SEND
+            data = {}
+        elif pending_transaction.is_deploy():
             transaction_type = TransactionType.DEPLOY_CONTRACT
             new_contract_address: str
             if pending_transaction.salt_nonce == 0:
@@ -2506,10 +2511,11 @@ def _get_messages_data(
             serializable_data["contract_code"] = serializable_data[
                 "contract_code"
             ].decode()
-        # Encode binary calldata as base64 instead of trying to decode as UTF-8
-        serializable_data["calldata"] = base64.b64encode(
-            serializable_data["calldata"]
-        ).decode("utf-8")
+        if "calldata" in serializable_data:
+            # Encode binary calldata as base64 instead of trying to decode as UTF-8
+            serializable_data["calldata"] = base64.b64encode(
+                serializable_data["calldata"]
+            ).decode("utf-8")
 
         internal_messages_data.append(
             {
