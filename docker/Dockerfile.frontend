@@ -2,6 +2,7 @@ FROM node:24.1.0-alpine3.20 AS base
 
 WORKDIR /app
 COPY ./frontend/package*.json .
+COPY ./frontend/genlayer-js-0.28.2.tgz ./
 RUN --mount=type=cache,target=/root/.npm npm ci
 COPY ./frontend .
 COPY ./examples src/assets/examples

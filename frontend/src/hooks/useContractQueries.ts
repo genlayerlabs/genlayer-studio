@@ -26,6 +26,29 @@ import type { ExecutionMode } from '@/types';
 
 const schema = ref<any>();
 
+/**
+ * Shim: SDK v0.28.2 guards getContractSchema/Code/SchemaForCode behind
+ * chain.id === localnet.id (61127). When using studionet or a custom chain ID,
+ * the guard throws. This helper catches that and calls the RPC method directly.
+ * Remove once SDK is updated to use isStudio instead of localnet.id.
+ */
+async function sdkCallWithFallback<T>(
+  sdkCall: () => Promise<T>,
+  rpcFallback: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await sdkCall();
+  } catch (err: any) {
+    if (
+      typeof err?.message === 'string' &&
+      err.message.includes('only available on')
+    ) {
+      return await rpcFallback();
+    }
+    throw err;
+  }
+}
+
 export function useContractQueries() {
   const genlayer = useGenlayer();
   const genlayerClient = computed(() => genlayer.client.value);
@@ -78,14 +101,19 @@ export function useContractQueries() {
     }
 
     try {
-      const result = await genlayerClient.value?.getContractSchemaForCode(
-        contract.value?.content ?? '',
+      const code = contract.value?.content ?? '';
+      const result = await sdkCallWithFallback(
+        () => genlayerClient.value!.getContractSchemaForCode(code),
+        async () => {
+          const { useRpcClient } = await import('@/hooks/useRpcClient');
+          return useRpcClient().getContractSchema({ code });
+        },
       );
 
       schema.value = result;
       return schema.value;
     } catch (error: any) {
-      throw new Error(error.details);
+      throw new Error(error.details || error.message);
     }
   }
 
@@ -178,8 +206,13 @@ export function useContractQueries() {
       return mockContractSchema;
     }
 
-    const result = await genlayerClient.value?.getContractSchema(
-      deployedContract.value?.address ?? '0x0',
+    const addr = deployedContract.value?.address ?? '0x0';
+    const result = await sdkCallWithFallback(
+      () => genlayerClient.value!.getContractSchema(addr as Address),
+      async () => {
+        const { useRpcClient } = await import('@/hooks/useRpcClient');
+        return useRpcClient().getDeployedContractSchema({ address: addr });
+      },
     );
 
     return result;
@@ -292,8 +325,13 @@ export function useContractQueries() {
         throw new Error('Genlayer client not initialized');
       }
 
-      const code = await genlayerClient.value.getContractCode(
-        contractAddress as Address,
+      const code = await sdkCallWithFallback(
+        () => genlayerClient.value!.getContractCode(contractAddress as Address),
+        async () => {
+          const { useRpcClient } = await import('@/hooks/useRpcClient');
+          const result = await useRpcClient().getContractCode(contractAddress);
+          return result as string;
+        },
       );
 
       if (!code || !code.trim()) {

@@ -63,6 +63,14 @@ export class JsonRpcService implements IJsonRpcService {
     );
   }
 
+  async getContractCode(address: string): Promise<any> {
+    return this.callRpcMethod<any>(
+      'gen_getContractCode',
+      [address],
+      'Error getting contract code',
+    );
+  }
+
   async getDeployedContractSchema({
     address,
   }: GetDeployedContractSchemaRequest): Promise<any> {
