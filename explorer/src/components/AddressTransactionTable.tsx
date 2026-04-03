@@ -61,7 +61,7 @@ export function AddressTransactionTable({ transactions, address }: AddressTransa
               <TableCell>
                 <AddressDisplay
                   address={tx.hash}
-                  href={`/transactions/${tx.hash}`}
+                  href={`/tx/${tx.hash}`}
                   isHash
                   linkClassName="text-primary hover:underline font-mono text-sm"
                 />

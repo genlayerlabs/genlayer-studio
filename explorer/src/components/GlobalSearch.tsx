@@ -144,8 +144,8 @@ export function GlobalSearch() {
                 Quick Links
               </div>
               {[
-                { icon: ArrowRightLeft, label: 'All Transactions', href: '/transactions' },
-                { icon: Clock, label: 'In Progress Transactions', href: '/transactions?tab=in_progress' },
+                { icon: ArrowRightLeft, label: 'All Transactions', href: '/txs' },
+                { icon: Clock, label: 'In Progress Transactions', href: '/txs?tab=in_progress' },
                 { icon: Database, label: 'All Contracts', href: '/contracts' },
                 { icon: Users, label: 'All Validators', href: '/validators' },
               ].map((link) => (
@@ -178,7 +178,7 @@ export function GlobalSearch() {
                   {results.transactions.map((tx) => (
                     <button
                       key={tx.hash}
-                      onClick={() => navigate(`/transactions/${tx.hash}`)}
+                      onClick={() => navigate(`/tx/${tx.hash}`)}
                       className="w-full flex items-center justify-between px-3 py-2 rounded-md text-sm hover:bg-accent transition-colors text-left cursor-pointer"
                     >
                       <span className="font-mono text-foreground">{truncateHash(tx.hash)}</span>
