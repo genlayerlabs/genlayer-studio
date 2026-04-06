@@ -12,6 +12,8 @@
     "test:unit": "vitest run",
     "test:e2e": "npm run cp-examples && npm run build && start-server-and-test 'vite preview --port 8081' http://localhost:8081 'mocha -r tsx test/e2e/*spec.ts'",
     "test:e2e:dev": "start-server-and-test 'vite dev --port 8081' http://localhost:8081 'mocha -r tsx test/e2e/*spec.ts'",
+    "synpress:cache": "synpress test/metamask --force",
+    "test:metamask": "npm run synpress:cache && playwright test --config=playwright.metamask.config.ts",
     "test:ui": "vitest --ui",
     "coverage": "vitest run --coverage",
     "build-only": "vite build",
@@ -58,6 +60,8 @@
     "wagmi": "^3.5.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.48.2",
+    "@synthetixio/synpress": "^4.1.2",
     "@tailwindcss/forms": "^0.5.7",
     "@tsconfig/node24": "^24.0.0",
     "@types/chai": "^5.0.0",

@@ -1,7 +1,7 @@
 # consensus/services/transactions_db_service.py
 
 from eth_account import Account
-from eth_utils import is_address
+from eth_utils import is_address, to_checksum_address
 
 from .models import CurrentState
 from backend.database_handler.errors import AccountNotFoundError
@@ -36,6 +36,11 @@ class AccountsManager:
         if not is_address(address):
             raise ValueError(f"Invalid address: {address}")
 
+        try:
+            address = to_checksum_address(address)
+        except Exception:
+            pass
+
         existing_account = (
             self.session.query(CurrentState).filter(CurrentState.id == address).first()
         )
@@ -53,9 +58,13 @@ class AccountsManager:
 
     def get_account(self, account_address: str) -> CurrentState | None:
         """Private method to retrieve an account from the data base"""
+        try:
+            normalized = to_checksum_address(account_address)
+        except Exception:
+            normalized = account_address
         account = (
             self.session.query(CurrentState)
-            .filter(CurrentState.id == account_address)
+            .filter(CurrentState.id == normalized)
             .one_or_none()
         )
         return account
