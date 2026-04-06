@@ -107,12 +107,18 @@ const handleCallWriteMethod = async () => {
       responseMessageAccepted.value = '';
       responseMessageFinalized.value = '';
 
+      const WEI_PER_GEN = BigInt('1000000000000000000');
+      const simValue =
+        props.method.payable && payableValue.value
+          ? BigInt(payableValue.value) * WEI_PER_GEN
+          : undefined;
       const result = await simulateWriteMethod({
         method: props.name,
         args: unfoldArgsData({
           args: calldataArguments.value.args,
           kwargs: calldataArguments.value.kwargs,
         }),
+        value: simValue,
       });
 
       responseMessageAccepted.value = formatResponseIfNeeded(
