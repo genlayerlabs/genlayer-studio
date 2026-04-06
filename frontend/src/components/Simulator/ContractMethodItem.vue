@@ -171,10 +171,10 @@ const handleCallWriteMethod = async () => {
 
 <template>
   <div
-    class="dark:bg-g flex flex-col overflow-hidden rounded-md bg-slate-100 dark:bg-gray-700"
+    class="flex flex-col overflow-hidden rounded-md bg-slate-100 dark:bg-zinc-800/60"
   >
     <button
-      class="flex grow flex-row items-center justify-between bg-slate-200 p-2 text-xs hover:bg-slate-300 dark:bg-slate-600 dark:hover:bg-slate-500"
+      class="flex grow flex-row items-center justify-between bg-slate-200 p-2 text-xs hover:bg-slate-300 dark:bg-zinc-700 dark:hover:bg-zinc-600"
       @click="isExpanded = !isExpanded"
       :data-testid="`expand-method-btn-${name}`"
     >
@@ -182,7 +182,7 @@ const handleCallWriteMethod = async () => {
         <span>{{ name }}</span>
         <span
           v-if="method.payable"
-          class="text-[10px] italic text-slate-400 dark:text-slate-500"
+          class="text-[10px] italic text-slate-400 dark:text-zinc-500"
           >payable</span
         >
       </div>
@@ -208,7 +208,7 @@ const handleCallWriteMethod = async () => {
           v-if="methodType === 'write' && method.payable"
           class="flex w-full flex-col"
         >
-          <label class="mb-1 text-xs text-slate-500 dark:text-slate-400"
+          <label class="mb-1 text-xs text-slate-500 dark:text-zinc-400"
             >Value (GEN)</label
           >
           <input
@@ -217,7 +217,7 @@ const handleCallWriteMethod = async () => {
             min="0"
             step="1"
             placeholder="0"
-            class="rounded border border-slate-300 bg-white px-2 py-1 text-xs dark:border-slate-500 dark:bg-slate-600"
+            class="rounded border border-slate-300 bg-white px-2 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-700 dark:text-zinc-200"
             :data-testid="`payable-value-input-${name}`"
           />
         </div>
@@ -264,7 +264,7 @@ const handleCallWriteMethod = async () => {
           </div>
           <div
             :data-testid="`method-response-${name}`"
-            class="w-full whitespace-pre-wrap rounded bg-white p-1 font-mono text-xs dark:bg-slate-600"
+            class="w-full whitespace-pre-wrap rounded bg-white p-1 font-mono text-xs dark:bg-zinc-700 dark:text-zinc-300"
           >
             {{ responseMessage }}
           </div>
@@ -278,7 +278,7 @@ const handleCallWriteMethod = async () => {
           <div class="mb-1 text-xs font-medium">Simulation Result:</div>
           <div
             :data-testid="`method-response-${name}`"
-            class="w-full whitespace-pre-wrap rounded bg-white p-1 font-mono text-xs dark:bg-slate-600"
+            class="w-full whitespace-pre-wrap rounded bg-white p-1 font-mono text-xs dark:bg-zinc-700 dark:text-zinc-300"
           >
             {{ responseMessageAccepted }}
           </div>
