@@ -60,6 +60,7 @@
     "wagmi": "^3.5.0"
   },
   "devDependencies": {
+    "@johanneskares/wallet-mock": "^1.4.1",
     "@playwright/test": "^1.48.2",
     "@synthetixio/synpress": "^4.1.2",
     "@tailwindcss/forms": "^0.5.7",
