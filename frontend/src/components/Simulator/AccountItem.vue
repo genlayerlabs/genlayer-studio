@@ -2,10 +2,31 @@
 import { useAccountsStore, type AccountInfo } from '@/stores';
 import { notify } from '@kyvg/vue3-notification';
 import { PowerCircle, Wallet } from 'lucide-vue-next';
-import { ref } from 'vue';
+import { ref, onMounted } from 'vue';
 import CopyTextButton from '../global/CopyTextButton.vue';
 import { TrashIcon, CheckCircleIcon } from '@heroicons/vue/16/solid';
+import { useRpcClient } from '@/hooks';
 const store = useAccountsStore();
+const rpcClient = useRpcClient();
+
+const balance = ref<string | null>(null);
+
+const formatBalance = (hexBalance: string): string => {
+  const wei = BigInt(hexBalance);
+  const gen = Number(wei) / 1e18;
+  if (gen === 0) return '0';
+  if (gen < 0.001) return '<0.001';
+  return gen.toLocaleString(undefined, { maximumFractionDigits: 3 });
+};
+
+onMounted(async () => {
+  try {
+    const hex = await rpcClient.getBalance(props.account.address);
+    balance.value = formatBalance(hex as string);
+  } catch {
+    balance.value = null;
+  }
+});
 
 const setCurentAddress = () => {
   store.setCurrentAccount(props.account as AccountInfo);
@@ -56,12 +77,20 @@ const showConfirmDelete = ref(false);
         <PowerCircle class="h-4 w-4 text-green-500" v-if="active" />
       </div>
 
-      <span
-        class="flex grow flex-row truncate font-mono text-xs font-semibold"
+      <div
+        class="flex grow flex-col truncate"
         :class="[!active && 'opacity-50']"
       >
-        {{ account.address }}
-      </span>
+        <span class="truncate font-mono text-xs font-semibold">
+          {{ account.address }}
+        </span>
+        <span
+          v-if="balance !== null"
+          class="font-mono text-[10px] text-gray-500 dark:text-gray-400"
+        >
+          {{ balance }} GEN
+        </span>
+      </div>
 
       <Wallet
         v-if="account.type === 'external'"

@@ -6,7 +6,7 @@ import { Wallet, Droplets } from 'lucide-vue-next';
 import { PlusIcon } from '@heroicons/vue/16/solid';
 import { notify } from '@kyvg/vue3-notification';
 import { useEventTracking, useWallet, useRpcClient } from '@/hooks';
-import { computed, ref } from 'vue';
+import { computed, ref, watch, onMounted } from 'vue';
 
 const store = useAccountsStore();
 const { trackEvent } = useEventTracking();
@@ -20,6 +20,29 @@ const hasExternalAccount = computed(() =>
 const showFaucet = ref(false);
 const faucetAmount = ref('10');
 const isFunding = ref(false);
+const currentBalance = ref<string | null>(null);
+
+const formatBalance = (hexBalance: string): string => {
+  const wei = BigInt(hexBalance);
+  const gen = Number(wei) / 1e18;
+  if (gen === 0) return '0';
+  if (gen < 0.001) return '<0.001';
+  return gen.toLocaleString(undefined, { maximumFractionDigits: 3 });
+};
+
+const refreshBalance = async () => {
+  if (!store.selectedAccount?.address) return;
+  try {
+    const hex = await rpcClient.getBalance(store.selectedAccount.address);
+    currentBalance.value = formatBalance(hex as string);
+  } catch {
+    currentBalance.value = null;
+  }
+};
+
+// Fetch balance on load and when account changes
+watch(() => store.selectedAccount?.address, refreshBalance);
+onMounted(refreshBalance);
 
 const handleCreateNewAccount = async () => {
   const address = store.generateNewAccount();
@@ -59,6 +82,7 @@ const handleFundAccount = async () => {
       type: 'success',
     });
     showFaucet.value = false;
+    await refreshBalance();
   } catch (e: any) {
     notify({
       title: 'Error funding account',
@@ -92,6 +116,12 @@ const disconnectWallet = async () => {
       <GhostBtn v-tooltip="'Switch account'">
         <Wallet class="h-5 w-5" />
         {{ store.displayAddress }}
+        <span
+          v-if="currentBalance !== null"
+          class="ml-1 text-xs text-gray-500 dark:text-gray-400"
+        >
+          {{ currentBalance }} GEN
+        </span>
       </GhostBtn>
 
       <template #popper>

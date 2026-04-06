@@ -63,6 +63,14 @@ export class JsonRpcService implements IJsonRpcService {
     );
   }
 
+  async getBalance(address: string): Promise<string> {
+    return this.callRpcMethod<string>(
+      'eth_getBalance',
+      [address, 'latest'],
+      'Error getting balance',
+    ) as Promise<string>;
+  }
+
   async fundAccount(address: string, amount: number): Promise<any> {
     return this.callRpcMethod<any>(
       'sim_fundAccount',
