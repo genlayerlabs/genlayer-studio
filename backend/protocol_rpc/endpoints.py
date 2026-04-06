@@ -181,7 +181,6 @@ def fund_account(
         None, account_address, None, amount, 0, nonce, False, 0, None, transaction_hash
     )
     accounts_manager.credit_account_balance(account_address, amount)
-    session.commit()
     return transaction_hash
 
 
