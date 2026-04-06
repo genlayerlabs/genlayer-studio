@@ -5,6 +5,7 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from eth_utils import to_checksum_address
 from sqlalchemy import asc, desc, func, or_, select, union
 from sqlalchemy.orm import Session, defer
 
@@ -267,6 +268,11 @@ def get_all_transactions_paginated(
     to_date: Optional[str] = None,
     address: Optional[str] = None,
 ) -> dict:
+    if address:
+        try:
+            address = to_checksum_address(address)
+        except Exception:
+            pass
     filters = []
     if address:
         filters.append(
@@ -692,6 +698,10 @@ def get_state_with_transactions(session: Session, state_id: str) -> Optional[dic
 def get_address_info(session: Session, address: str) -> Optional[dict]:
     """Resolve an address to its type (CONTRACT, VALIDATOR, or ACCOUNT) and return
     relevant data."""
+    try:
+        address = to_checksum_address(address)
+    except Exception:
+        pass
 
     # 1. Check if it's a contract (exists in CurrentState with a deploy tx)
     state = session.query(CurrentState).filter(CurrentState.id == address).first()

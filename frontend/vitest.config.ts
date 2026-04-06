@@ -8,7 +8,7 @@ export default defineConfig((env) =>
     defineConfig({
       test: {
         environment: 'jsdom',
-        exclude: [...configDefaults.exclude, 'test/e2e/**'],
+        exclude: [...configDefaults.exclude, 'test/e2e/**', 'test/metamask/**'],
         root: fileURLToPath(new URL('./', import.meta.url)),
       },
     }),

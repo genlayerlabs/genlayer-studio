@@ -180,6 +180,7 @@ def fund_account(
     transactions_processor.insert_transaction(
         None, account_address, None, amount, 0, nonce, False, 0, None, transaction_hash
     )
+    accounts_manager.credit_tx_value_once(transaction_hash, account_address, amount)
     return transaction_hash
 
 
@@ -493,6 +494,10 @@ def get_contract_deployer(session: Session, contract_address: str) -> str | None
     """Get the address that deployed a contract by looking up the deploy transaction."""
     from backend.database_handler.models import Transactions
 
+    try:
+        contract_address = eth_utils.to_checksum_address(contract_address)
+    except Exception:
+        pass
     deploy_tx = (
         session.query(Transactions)
         .filter(
@@ -1241,19 +1246,19 @@ async def _gen_call_with_validator(
 ####### ETH ENDPOINTS #######
 def get_balance(
     accounts_manager: AccountsManager, account_address: str, block_tag: str = "latest"
-) -> int:
+) -> str:
     if not accounts_manager.is_valid_address(account_address):
         raise InvalidAddressError(
             account_address, f"Invalid address from_address: {account_address}"
         )
     account_balance = accounts_manager.get_account_balance(account_address)
-    return account_balance
+    return hex(account_balance)
 
 
 def get_transaction_count(
     transactions_processor: TransactionsProcessor, address: str, block: str = "latest"
-) -> int:
-    return transactions_processor.get_transaction_count(address)
+) -> str:
+    return hex(transactions_processor.get_transaction_count(address))
 
 
 def get_transaction_by_hash(
@@ -1627,8 +1632,9 @@ def get_net_version() -> str:
 
 
 def get_block_number(transactions_processor: TransactionsProcessor) -> str:
-    transaction_count = transactions_processor.get_highest_timestamp()
-    return hex(transaction_count)
+    import time
+
+    return hex(int(time.time()))
 
 
 def get_block_by_number(
@@ -1653,10 +1659,33 @@ def get_block_by_number(
     )
 
     if not block_details:
-        raise NotFoundError(
-            message="Block not found",
-            data={"block_number": block_number},
-        )
+        # Return a synthetic empty block — MetaMask needs valid blocks
+        # for balance queries and gas estimation to work
+        import time as _time
+
+        block_details = {
+            "number": hex(block_number_int),
+            "hash": "0x" + "0" * 64,
+            "parentHash": "0x" + "0" * 64,
+            "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+            "nonce": "0x" + "0" * 16,
+            "logsBloom": "0x" + "00" * 256,
+            "transactionsRoot": "0x" + "0" * 64,
+            "stateRoot": "0x" + "0" * 64,
+            "receiptsRoot": "0x" + "0" * 64,
+            "transactions": [],
+            "timestamp": hex(int(_time.time())),
+            "miner": "0x" + "0" * 40,
+            "difficulty": "0x0",
+            "totalDifficulty": "0x0",
+            "gasUsed": "0x0",
+            "gasLimit": "0x1c9c380",
+            "baseFeePerGas": "0x0",
+            "size": "0x0",
+            "extraData": "0x",
+            "mixHash": "0x" + "0" * 64,
+            "uncles": [],
+        }
 
     return block_details
 
@@ -1667,9 +1696,9 @@ def get_gas_price() -> str:
 
 
 def get_gas_estimate(data: Any) -> str:
-    # Use zkSync Era's gas limit: 2^32 - 1 (4,294,967,295)
-    gas_limit = 0xFFFFFFFF  # 4,294,967,295
-    return hex(gas_limit)
+    # Return a reasonable estimate within block gas limit (30M).
+    # Gas price is 0 so transactions are still gasless.
+    return hex(0x7A120)  # 500,000 — fits within block limit, enough for any Studio tx
 
 
 def get_transaction_receipt(
@@ -1723,6 +1752,8 @@ def get_transaction_receipt(
         "to": to_addr,
         "cumulativeGasUsed": hex(transaction.get("gas_used", 8000000)),
         "gasUsed": hex(transaction.get("gas_used", 8000000)),
+        "effectiveGasPrice": "0x0",
+        "type": "0x0",
         "contractAddress": (
             transaction.get("contract_address")
             if transaction.get("contract_address")

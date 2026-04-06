@@ -9,7 +9,7 @@ from sqlalchemy import or_, desc, and_, JSON, type_coerce, text
 
 from backend.node.types import Vote, Receipt, ExecutionResultStatus
 from .models import Transactions, TransactionStatus
-from eth_utils import to_bytes, keccak, is_address
+from eth_utils import to_bytes, keccak, is_address, to_checksum_address
 import json
 import base64
 import time
@@ -914,6 +914,10 @@ class TransactionsProcessor:
         address: str,
         filter: TransactionAddressFilter,
     ) -> list[dict]:
+        try:
+            address = to_checksum_address(address)
+        except Exception:
+            pass
         query = self.session.query(Transactions).options(
             selectinload(Transactions.triggered_transactions)
         )
@@ -1044,15 +1048,24 @@ class TransactionsProcessor:
             "number": hex(block_number),
             "hash": block_hash,
             "parentHash": parent_hash,
+            "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
             "nonce": "0x" + "0" * 16,
+            "logsBloom": "0x" + "00" * 256,
+            "transactionsRoot": "0x" + "0" * 64,
+            "stateRoot": "0x" + "0" * 64,
+            "receiptsRoot": "0x" + "0" * 64,
             "transactions": transaction_data,
             "timestamp": hex(int(timestamp)),
             "miner": "0x" + "0" * 40,
-            "difficulty": "0x1",
+            "difficulty": "0x0",
+            "totalDifficulty": "0x0",
             "gasUsed": "0x0",
-            "gasLimit": "0x0",
+            "gasLimit": "0x1c9c380",  # 30M gas limit (standard)
+            "baseFeePerGas": "0x0",
             "size": "0x0",
             "extraData": "0x",
+            "mixHash": "0x" + "0" * 64,
+            "uncles": [],
         }
 
         return block_details
@@ -1401,6 +1414,10 @@ class TransactionsProcessor:
         Returns:
             Transaction data if processing, None otherwise
         """
+        try:
+            contract_address = to_checksum_address(contract_address)
+        except Exception:
+            pass
         processing_tx = (
             self.session.query(Transactions)
             .filter(
@@ -1429,6 +1446,10 @@ class TransactionsProcessor:
         Returns:
             Oldest pending transaction data or None
         """
+        try:
+            contract_address = to_checksum_address(contract_address)
+        except Exception:
+            pass
         pending_tx = (
             self.session.query(Transactions)
             .filter(

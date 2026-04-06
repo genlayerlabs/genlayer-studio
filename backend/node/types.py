@@ -163,12 +163,22 @@ class PendingTransaction:
     salt_nonce: int
     on: Literal["accepted", "finalized"]
     value: int
+    is_eth_send: bool = (
+        False  # True for EthSend (simple value transfer, no contract call)
+    )
 
     def is_deploy(self) -> bool:
         return self.code is not None
 
     def to_dict(self):
-        if self.code is None:
+        if self.is_eth_send:
+            return {
+                "address": self.address,
+                "is_eth_send": True,
+                "on": self.on,
+                "value": self.value,
+            }
+        elif self.code is None:
             return {
                 "address": self.address,
                 "calldata": str(base64.b64encode(self.calldata), encoding="ascii"),
@@ -186,7 +196,17 @@ class PendingTransaction:
 
     @classmethod
     def from_dict(cls, input: dict) -> "PendingTransaction":
-        if "code" in input:
+        if input.get("is_eth_send"):
+            return cls(
+                address=input["address"],
+                calldata=b"",
+                code=None,
+                salt_nonce=0,
+                value=input.get("value", 0),
+                on=input.get("on", "finalized"),
+                is_eth_send=True,
+            )
+        elif "code" in input:
             return cls(
                 address="0x",
                 calldata=base64.b64decode(input["calldata"]),

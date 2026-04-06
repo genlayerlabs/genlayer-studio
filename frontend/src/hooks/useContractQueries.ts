@@ -26,6 +26,29 @@ import type { ExecutionMode } from '@/types';
 
 const schema = ref<any>();
 
+/**
+ * Shim: SDK v0.28.2 guards getContractSchema/Code/SchemaForCode behind
+ * chain.id === localnet.id (61127). When using studionet or a custom chain ID,
+ * the guard throws. This helper catches that and calls the RPC method directly.
+ * Remove once SDK is updated to use isStudio instead of localnet.id.
+ */
+async function sdkCallWithFallback<T>(
+  sdkCall: () => Promise<T>,
+  rpcFallback: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await sdkCall();
+  } catch (err: any) {
+    if (
+      typeof err?.message === 'string' &&
+      err.message.includes('only available on')
+    ) {
+      return await rpcFallback();
+    }
+    throw err;
+  }
+}
+
 export function useContractQueries() {
   const genlayer = useGenlayer();
   const genlayerClient = computed(() => genlayer.client.value);
@@ -78,14 +101,19 @@ export function useContractQueries() {
     }
 
     try {
-      const result = await genlayerClient.value?.getContractSchemaForCode(
-        contract.value?.content ?? '',
+      const code = contract.value?.content ?? '';
+      const result = await sdkCallWithFallback(
+        () => genlayerClient.value!.getContractSchemaForCode(code),
+        async () => {
+          const { useRpcClient } = await import('@/hooks/useRpcClient');
+          return useRpcClient().getContractSchema({ code });
+        },
       );
 
       schema.value = result;
       return schema.value;
     } catch (error: any) {
-      throw new Error(error.details);
+      throw new Error(error.details || error.message);
     }
   }
 
@@ -178,8 +206,13 @@ export function useContractQueries() {
       return mockContractSchema;
     }
 
-    const result = await genlayerClient.value?.getContractSchema(
-      deployedContract.value?.address ?? '0x0',
+    const addr = deployedContract.value?.address ?? '0x0';
+    const result = await sdkCallWithFallback(
+      () => genlayerClient.value!.getContractSchema(addr as Address),
+      async () => {
+        const { useRpcClient } = await import('@/hooks/useRpcClient');
+        return useRpcClient().getDeployedContractSchema({ address: addr });
+      },
     );
 
     return result;
@@ -265,14 +298,49 @@ export function useContractQueries() {
   async function simulateWriteMethod({
     method,
     args,
+    value,
   }: {
     method: string;
     args: {
       args: CalldataEncodable[];
       kwargs: { [key: string]: CalldataEncodable };
     };
+    value?: bigint;
   }) {
     try {
+      // Use simulateWriteContract for non-payable, but for payable we need
+      // to call gen_call directly since the SDK doesn't support value param.
+      if (value && value > 0n) {
+        const { abi } = await import('genlayer-js');
+        const { toRlp, toHex } = await import('viem');
+        const calldataObj = abi.calldata.makeCalldataObject(
+          method,
+          args.args,
+          undefined,
+        );
+        const encoded = abi.calldata.encode(calldataObj);
+        const serialized = toRlp(
+          [toHex(encoded), toHex(false)].map((d) => d as `0x${string}`),
+        );
+        const from =
+          accountsStore.selectedAccount?.address ||
+          '0x0000000000000000000000000000000000000000';
+        const result = await (genlayerClient.value as any).request({
+          method: 'gen_call',
+          params: [
+            {
+              type: 'write',
+              to: address.value,
+              from,
+              data: serialized,
+              value: '0x' + value.toString(16),
+              transaction_hash_variant: 'latest-nonfinal',
+            },
+          ],
+        });
+        return result;
+      }
+
       const result = await genlayerClient.value?.simulateWriteContract({
         address: address.value as Address,
         functionName: method,
@@ -280,9 +348,9 @@ export function useContractQueries() {
       });
 
       return result;
-    } catch (error) {
-      console.error(error);
-      throw new Error('Error simulating write method');
+    } catch (error: any) {
+      const serverMsg = error?.details || error?.message || '';
+      throw new Error(serverMsg || 'Error simulating write method');
     }
   }
 
@@ -292,8 +360,13 @@ export function useContractQueries() {
         throw new Error('Genlayer client not initialized');
       }
 
-      const code = await genlayerClient.value.getContractCode(
-        contractAddress as Address,
+      const code = await sdkCallWithFallback(
+        () => genlayerClient.value!.getContractCode(contractAddress as Address),
+        async () => {
+          const { useRpcClient } = await import('@/hooks/useRpcClient');
+          const result = await useRpcClient().getContractCode(contractAddress);
+          return result as string;
+        },
       );
 
       if (!code || !code.trim()) {
