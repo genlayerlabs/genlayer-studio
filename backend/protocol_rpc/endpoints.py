@@ -494,6 +494,10 @@ def get_contract_deployer(session: Session, contract_address: str) -> str | None
     """Get the address that deployed a contract by looking up the deploy transaction."""
     from backend.database_handler.models import Transactions
 
+    try:
+        contract_address = eth_utils.to_checksum_address(contract_address)
+    except Exception:
+        pass
     deploy_tx = (
         session.query(Transactions)
         .filter(
