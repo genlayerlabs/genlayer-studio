@@ -15,6 +15,7 @@ from copy import deepcopy
 import json
 import base64
 
+from eth_utils import to_checksum_address
 from sqlalchemy.orm import Session
 from backend.consensus.vrf import get_validators_for_transaction
 from backend.database_handler.chain_snapshot import ChainSnapshot
@@ -301,6 +302,10 @@ def contract_snapshot_factory(
     Returns:
         ContractSnapshot: A new ContractSnapshot instance.
     """
+    try:
+        contract_address = to_checksum_address(contract_address)
+    except Exception:
+        pass
     # Check if the transaction is a contract deployment and the contract address matches the transaction's to address
     if (
         transaction.type == TransactionType.DEPLOY_CONTRACT

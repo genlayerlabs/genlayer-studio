@@ -3,6 +3,8 @@
 from typing import List
 from sqlalchemy.orm import Session
 
+from eth_utils import to_checksum_address
+
 from backend.domain.types import Validator
 
 from .models import Validators
@@ -32,6 +34,10 @@ class ValidatorsRegistry:
 
     def _get_validator_or_fail(self, validator_address: str) -> Validators:
         """Private method to check if an account exists, and raise an error if not."""
+        try:
+            validator_address = to_checksum_address(validator_address)
+        except Exception:
+            pass
 
         validator_data = (
             self.session.query(Validators)
