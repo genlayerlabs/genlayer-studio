@@ -1,7 +1,7 @@
 """add origin_address to transactions
 
-Revision ID: a1b2c3d4e5f6
-Revises: f7a1b3c5d9e2
+Revision ID: d4e5f6a7b8c9
+Revises: b2c3d4e5f6a7
 Create Date: 2026-04-07 12:00:00.000000
 
 """
@@ -13,8 +13,8 @@ from alembic import op
 
 
 # revision identifiers, used by Alembic.
-revision: str = "a1b2c3d4e5f6"
-down_revision: Union[str, None] = "f7a1b3c5d9e2"
+revision: str = "d4e5f6a7b8c9"
+down_revision: Union[str, None] = "b2c3d4e5f6a7"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
