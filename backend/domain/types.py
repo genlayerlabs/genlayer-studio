@@ -202,6 +202,7 @@ class Transaction:
     appeal_validators_timeout: bool = False
     sim_config: SimConfig | None = None
     triggered_by_hash: str | None = None
+    origin_address: str | None = None
 
     def to_dict(self):
         return {
@@ -243,6 +244,7 @@ class Transaction:
             "appeal_validators_timeout": self.appeal_validators_timeout,
             "sim_config": self.sim_config.to_dict() if self.sim_config else None,
             "triggered_by": self.triggered_by_hash,
+            "origin_address": self.origin_address,
         }
 
     @classmethod
@@ -292,4 +294,5 @@ class Transaction:
                 else None
             ),
             triggered_by_hash=input.get("triggered_by"),
+            origin_address=input.get("origin_address"),
         )

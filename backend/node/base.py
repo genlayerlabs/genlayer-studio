@@ -631,6 +631,7 @@ class Node:
                 transaction.hash,
                 transaction_created_at,
                 value=transaction.value or 0,
+                origin_address=transaction.origin_address,
             )
 
             self.timing_callback("DEPLOY_END")
@@ -647,6 +648,7 @@ class Node:
                 transaction.hash,
                 transaction_created_at,
                 value=transaction.value or 0,
+                origin_address=transaction.origin_address,
             )
 
             self.timing_callback("RUN_END")
@@ -776,6 +778,7 @@ class Node:
         transaction_hash: str | None = None,
         transaction_created_at: str | None = None,
         value: int = 0,
+        origin_address: str | None = None,
     ) -> Receipt:
         assert self.contract_snapshot is not None
 
@@ -792,6 +795,7 @@ class Node:
             transaction_datetime=transaction_datetime,
             code=code_to_deploy,
             value=value,
+            origin_address=origin_address,
         )
 
     async def run_contract(
@@ -801,6 +805,7 @@ class Node:
         transaction_hash: str | None = None,
         transaction_created_at: str | None = None,
         value: int = 0,
+        origin_address: str | None = None,
     ) -> Receipt:
         return await self._run_genvm(
             from_address,
@@ -810,6 +815,7 @@ class Node:
             transaction_hash=transaction_hash,
             transaction_datetime=self._date_from_str(transaction_created_at),
             value=value,
+            origin_address=origin_address,
         )
 
     async def get_contract_data(
@@ -818,6 +824,7 @@ class Node:
         calldata: bytes,
         state_status: str | None = None,
         transaction_datetime: datetime.datetime | None = None,
+        origin_address: str | None = None,
     ) -> Receipt:
         return await self._run_genvm(
             from_address,
@@ -831,6 +838,7 @@ class Node:
                 else datetime.datetime.now().astimezone(datetime.UTC)
             ),
             state_status=state_status,
+            origin_address=origin_address,
         )
 
     async def _execution_finished(
@@ -944,6 +952,7 @@ class Node:
         timeout: float = 10 * 60,
         code: bytes | None = None,
         value: int = 0,
+        origin_address: str | None = None,
     ) -> Receipt:
         self.timing_callback("GENVM_PREPARATION_START")
 
@@ -998,9 +1007,7 @@ class Node:
             "is_init": is_init,
             "contract_address": contract_address,
             "sender_address": Address(from_address),
-            "origin_address": Address(
-                from_address
-            ),  # FIXME: no origin in simulator #751
+            "origin_address": Address(origin_address or from_address),
             "value": int(value),
             "chain_id": get_simulator_chain_id(),
         }
