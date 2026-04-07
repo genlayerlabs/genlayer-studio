@@ -13,7 +13,13 @@ import {
   EllipsisHorizontalCircleIcon,
 } from '@heroicons/vue/16/solid';
 import CopyTextButton from '../global/CopyTextButton.vue';
-import { FilterIcon, GavelIcon, UserPen, UserSearch } from 'lucide-vue-next';
+import {
+  FilterIcon,
+  GavelIcon,
+  UserPen,
+  UserSearch,
+  ExternalLink,
+} from 'lucide-vue-next';
 import {
   resultToUserFriendlyJson,
   b64ToArray,
@@ -23,6 +29,9 @@ import {
   getRuntimeConfigBoolean,
   getRuntimeConfigNumber,
 } from '@/utils/runtimeConfig';
+import { getExplorerUrl } from '@/utils/explorerUrl';
+
+const explorerUrl = computed(() => getExplorerUrl());
 
 function extractErrorText(receipt: any): string | null {
   if (!receipt) return null;
@@ -273,6 +282,18 @@ const badgeColorClass = computed(() => {
           class="h-4 w-4 text-gray-400 outline-none transition-all hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400"
         />
       </button>
+
+      <a
+        :href="`${explorerUrl}/transactions/${transaction.hash}`"
+        target="_blank"
+        @click.stop
+        v-tooltip="'View in Explorer'"
+        class="active:scale-90"
+      >
+        <ExternalLink
+          class="h-4 w-4 text-gray-400 outline-none transition-all hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400"
+        />
+      </a>
     </div>
 
     <div class="flex items-center justify-between gap-2 p-1">
