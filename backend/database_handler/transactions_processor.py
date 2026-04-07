@@ -104,6 +104,7 @@ class TransactionsProcessor:
             "created_at": transaction_data.created_at.isoformat(),
             "leader_only": transaction_data.leader_only,
             "execution_mode": transaction_data.execution_mode,
+            "origin_address": transaction_data.origin_address,
             "triggered_by": transaction_data.triggered_by_hash,
             "triggered_on": transaction_data.triggered_on,
             "triggered_transactions": [
@@ -229,6 +230,7 @@ class TransactionsProcessor:
         sim_config: dict | None = None,
         triggered_on: str | None = None,  # "accepted" or "finalized"
         execution_mode: str = "NORMAL",  # "NORMAL", "LEADER_ONLY", or "LEADER_SELF_VALIDATOR"
+        origin_address: str | None = None,
     ) -> str:
 
         if transaction_hash is None:
@@ -262,6 +264,7 @@ class TransactionsProcessor:
             s=None,
             v=None,
             leader_only=leader_only,
+            origin_address=origin_address if origin_address else from_address,
             execution_mode=execution_mode,
             triggered_by=(
                 self.session.query(Transactions).filter_by(hash=triggered_by_hash).one()

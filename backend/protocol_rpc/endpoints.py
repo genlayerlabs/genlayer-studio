@@ -1096,6 +1096,7 @@ async def _gen_call_with_validator(
     data = params["data"]
     to_address = params["to"]
     from_address = params["from"]
+    origin_address = params.get("origin_address")
     call_value = int(params.get("value", "0x0"), 16) if params.get("value") else 0
     transaction_hash_variant = (
         params["transaction_hash_variant"]
@@ -1181,6 +1182,7 @@ async def _gen_call_with_validator(
                     calldata=decoded_data.calldata,
                     state_status=state_status,
                     transaction_datetime=txn_dt,
+                    origin_address=origin_address,
                 )
             elif type == "write":
                 txn_created_at = None
@@ -1200,6 +1202,7 @@ async def _gen_call_with_validator(
                     calldata=decoded_data.calldata,
                     transaction_created_at=txn_created_at,
                     value=call_value,
+                    origin_address=origin_address,
                 )
             elif type == "deploy":
                 txn_created_at = None
@@ -1220,6 +1223,7 @@ async def _gen_call_with_validator(
                     calldata=decoded_data.calldata,
                     transaction_created_at=txn_created_at,
                     value=call_value,
+                    origin_address=origin_address,
                 )
             else:
                 raise JSONRPCError(

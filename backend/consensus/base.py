@@ -2571,4 +2571,5 @@ def _emit_messages(
             ),
             triggered_on=triggered_on,
             execution_mode=execution_mode_str,  # Cascade execution mode
+            origin_address=context.transaction.origin_address,
         )
