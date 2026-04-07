@@ -101,6 +101,6 @@ docker compose down -v && docker compose up -d
 docker compose logs backend
 
 # Rebuild containers
-docker compose build --no-cache
+docker compose build
 docker compose up -d
 ```
