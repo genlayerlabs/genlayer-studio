@@ -17,6 +17,7 @@ interface RuntimeConfig {
   VITE_MAX_ROTATIONS?: string;
   VITE_PLAUSIBLE_DOMAIN?: string;
   VITE_APPKIT_PROJECT_ID?: string;
+  VITE_EXPLORER_URL?: string;
 }
 
 declare global {

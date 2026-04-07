@@ -5,9 +5,10 @@ import { ArrowPathIcon } from '@heroicons/vue/20/solid';
 import EmptyListPlaceholder from '@/components/Simulator/EmptyListPlaceholder.vue';
 import { useNodeStore, useUIStore } from '@/stores';
 import { useContractQueries, useShortAddress } from '@/hooks';
-import { UploadIcon, Share2, Check } from 'lucide-vue-next';
+import { UploadIcon, Share2, Check, ExternalLink } from 'lucide-vue-next';
 import { useClipboard } from '@vueuse/core';
 import { computed } from 'vue';
+import { getExplorerUrl } from '@/utils/explorerUrl';
 
 const nodeStore = useNodeStore();
 const { shorten } = useShortAddress();
@@ -21,6 +22,7 @@ const { isDeployed, address, contract, upgradeContract, isUpgrading } =
   useContractQueries();
 const uiStore = useUIStore();
 
+const explorerUrl = computed(() => getExplorerUrl());
 const shareUrl = computed(
   () => `${window.location.origin}/?import-contract=${address.value}`,
 );
@@ -74,6 +76,15 @@ const upgradeTooltip = `
       </div>
 
       <CopyTextButton :text="address" />
+
+      <a
+        :href="`${explorerUrl}/address/${address}`"
+        target="_blank"
+        v-tooltip="'View in Explorer'"
+        class="shrink-0 text-gray-400 transition-all hover:text-gray-500 dark:text-gray-400 dark:hover:text-gray-300"
+      >
+        <ExternalLink class="h-3.5 w-3.5" />
+      </a>
 
       <button
         v-if="shareIsSupported"
