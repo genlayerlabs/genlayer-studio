@@ -18,7 +18,7 @@ from backend.protocol_rpc.message_handler.types import LogEvent, EventType, Even
 import backend.node.genvm.base as genvmbase
 import backend.node.genvm.origin.calldata as calldata
 from backend.database_handler.contract_snapshot import ContractSnapshot
-from backend.node.types import Receipt, ExecutionMode, Vote, ExecutionResultStatus
+from backend.node.types import Receipt, ExecutionMode, Vote, ExecutionResultStatus, NodeConfig
 from backend.protocol_rpc.message_handler.base import IMessageHandler
 from .genvm.origin import logger as genvm_logger
 from .genvm.origin import public_abi
@@ -659,7 +659,7 @@ class Node:
 
         return receipt
 
-    def _create_enhanced_node_config(self, host_data: dict | None) -> dict:
+    def _create_enhanced_node_config(self, host_data: dict | None) -> NodeConfig:
         """
         Create enhanced node_config that includes both primary and fallback provider info.
 
