@@ -15,7 +15,7 @@ from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.database_handler.llm_providers import LLMProviderRegistry
 from backend.rollup.consensus_service import ConsensusService
 from backend.database_handler.models import Base, TransactionStatus
-from backend.domain.types import LLMProvider, Validator, TransactionType, SimConfig
+from backend.domain.types import LLMProvider, LLMProviderConfig, PluginConfig, ProviderParams, Validator, TransactionType, SimConfig
 from backend.node.create_nodes.providers import (
     get_default_provider_for,
     validate_provider,
@@ -270,7 +270,7 @@ async def get_providers_and_models(
 
 
 @check_forbidden_method_in_hosted_studio
-def add_provider(session: Session, params: dict) -> int:
+def add_provider(session: Session, params: ProviderParams) -> int:
     """Add a provider using the request-scoped session."""
     llm_provider_registry = LLMProviderRegistry(session)
 
@@ -288,7 +288,7 @@ def add_provider(session: Session, params: dict) -> int:
 
 
 @check_forbidden_method_in_hosted_studio
-def update_provider(session: Session, id: int, params: dict) -> None:
+def update_provider(session: Session, id: int, params: ProviderParams) -> None:
     """Update a provider using the request-scoped session."""
     llm_provider_registry = LLMProviderRegistry(session)
 
@@ -317,9 +317,9 @@ async def create_validator(
     stake: int,
     provider: str,
     model: str,
-    config: dict | None = None,
+    config: LLMProviderConfig | None = None,
     plugin: str | None = None,
-    plugin_config: dict | None = None,
+    plugin_config: PluginConfig | None = None,
 ) -> dict:
     # fallback for default provider
     llm_provider = None
@@ -420,9 +420,9 @@ async def update_validator(
     stake: int,
     provider: str,
     model: str,
-    config: dict | None = None,
+    config: LLMProviderConfig | None = None,
     plugin: str | None = None,
-    plugin_config: dict | None = None,
+    plugin_config: PluginConfig | None = None,
 ) -> dict:
     # Remove validation while adding migration to update the db address
     # if not accounts_manager.is_valid_address(validator_address):

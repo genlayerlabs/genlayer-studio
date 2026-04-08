@@ -26,6 +26,7 @@ from backend.protocol_rpc.dependencies import (
 )
 from backend.protocol_rpc.rpc_decorators import rpc
 from backend.protocol_rpc.rpc_endpoint_manager import LogPolicy
+from backend.domain.types import LLMProviderConfig, PluginConfig, ProviderParams
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +80,7 @@ def reset_defaults_llm_providers(
 
 @rpc.method("sim_addProvider")
 def add_provider(
-    params: dict,
+    params: ProviderParams,
     session: Session = Depends(get_db_session),
 ) -> int:
     return impl.add_provider(session=session, params=params)
@@ -88,7 +89,7 @@ def add_provider(
 @rpc.method("sim_updateProvider")
 def update_provider(
     id: int,
-    params: dict,
+    params: ProviderParams,
     session: Session = Depends(get_db_session),
 ) -> None:
     return impl.update_provider(session=session, id=id, params=params)
@@ -107,9 +108,9 @@ async def create_validator(
     stake: int,
     provider: str,
     model: str,
-    config: dict | None = None,
+    config: LLMProviderConfig | None = None,
     plugin: str | None = None,
-    plugin_config: dict | None = None,
+    plugin_config: PluginConfig | None = None,
     session: Session = Depends(get_db_session),
     validators_manager=Depends(get_validators_manager),
 ) -> dict:
@@ -170,7 +171,7 @@ async def update_validator(
     provider: str | None = None,
     model: str | None = None,
     plugin: str | None = None,
-    plugin_config: dict | None = None,
+    plugin_config: PluginConfig | None = None,
     session: Session = Depends(get_db_session),
     validators_manager=Depends(get_validators_manager),
 ) -> dict:
