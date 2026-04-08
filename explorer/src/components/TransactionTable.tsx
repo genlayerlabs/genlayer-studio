@@ -173,7 +173,7 @@ export function TransactionTable({
                     <TableCell>
                       <AddressDisplay
                         address={tx.hash}
-                        href={`/transactions/${tx.hash}`}
+                        href={`/tx/${tx.hash}`}
                         isHash
                         linkClassName="text-primary hover:underline font-mono text-sm"
                       />
@@ -260,7 +260,7 @@ export function TransactionTable({
                       <div className="flex items-center gap-2">
                         {tx.triggered_by_hash && (
                           <Link
-                            href={`/transactions/${tx.triggered_by_hash}`}
+                            href={`/tx/${tx.triggered_by_hash}`}
                             className="flex items-center gap-1 bg-amber-50 dark:bg-amber-950 text-amber-700 dark:text-amber-400 px-2 py-1 rounded-lg text-xs font-medium hover:bg-amber-100 dark:hover:bg-amber-900 transition-colors"
                             title={`Parent: ${tx.triggered_by_hash}`}
                             onMouseEnter={() => onHighlightParent?.(tx.triggered_by_hash)}
@@ -272,7 +272,7 @@ export function TransactionTable({
                         )}
                         {tx.triggered_count !== undefined && tx.triggered_count > 0 && (
                           <Link
-                            href={`/transactions?search=${tx.hash}`}
+                            href={`/txs?search=${tx.hash}`}
                             className="flex items-center gap-1 bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-400 px-2 py-1 rounded-lg text-xs font-medium hover:bg-blue-100 dark:hover:bg-blue-900 transition-colors"
                             title={`${tx.triggered_count} triggered transaction(s)`}
                             onMouseEnter={() => onHighlightChildren?.(tx.hash)}

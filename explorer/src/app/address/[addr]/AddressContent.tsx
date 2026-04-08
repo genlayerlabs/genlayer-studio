@@ -104,7 +104,7 @@ function AccountView({ address, data }: { address: string; data: AddressInfo }) 
             <AddressTransactionTable transactions={txs} address={address} />
             {txCount > txs.length && (
               <div className="border-t px-6 py-3 text-center">
-                <Link href={`/transactions?address=${address}`} className="text-sm font-medium text-primary hover:underline">
+                <Link href={`/txs?address=${address}`} className="text-sm font-medium text-primary hover:underline">
                   VIEW ALL TRANSACTIONS &rarr;
                 </Link>
               </div>
@@ -157,7 +157,7 @@ function ContractView({ address, data }: { address: string; data: AddressInfo })
                   <p className="text-muted-foreground text-sm mb-1">Deploy Tx</p>
                   <AddressDisplay
                     address={creator_info.deployment_tx_hash}
-                    href={`/transactions/${creator_info.deployment_tx_hash}`}
+                    href={`/tx/${creator_info.deployment_tx_hash}`}
                     isHash
                     linkClassName="text-primary hover:underline font-mono text-sm"
                   />
@@ -196,7 +196,7 @@ function ContractView({ address, data }: { address: string; data: AddressInfo })
             <AddressTransactionTable transactions={transactions} address={address} />
             {txCount > transactions.length && (
               <div className="border-t px-6 py-3 text-center">
-                <Link href={`/transactions?address=${address}`} className="text-sm font-medium text-primary hover:underline">
+                <Link href={`/txs?address=${address}`} className="text-sm font-medium text-primary hover:underline">
                   VIEW ALL TRANSACTIONS &rarr;
                 </Link>
               </div>
