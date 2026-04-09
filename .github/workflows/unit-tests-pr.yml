@@ -34,6 +34,7 @@ jobs:
       - run: pip install pytest-cov pytest-xdist
       - run: pytest tests/unit --cov=backend --cov-report=xml --cov-branch -n auto
       - name: SonarCloud Scan
+        if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push'
         uses: sonarsource/sonarqube-scan-action@v7.0.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
