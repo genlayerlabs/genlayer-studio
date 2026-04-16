@@ -19,54 +19,63 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # Exit the implicit transaction so CREATE INDEX CONCURRENTLY can run.
-    # CONCURRENTLY builds indexes without blocking concurrent writes,
-    # which is critical for the transactions table (consensus workers
-    # update it continuously).
-    connection = op.get_bind()
-    connection.execution_options(isolation_level="AUTOCOMMIT")
+    # CREATE INDEX CONCURRENTLY cannot run inside a transaction block.
+    # Each index gets its own autocommit block so the builds run without
+    # blocking concurrent writes — critical for the transactions table
+    # (consensus workers update it continuously).
 
     # Index for GROUP BY status (used by /api/explorer/stats and /stats/counts)
     # Fixes GENLAYER-STUDIO-1SN (1259 events)
-    op.execute(
-        """
-        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transactions_status
-        ON transactions (status)
-        """
-    )
+    with op.get_context().autocommit_block():
+        op.execute(
+            """
+            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transactions_status
+            ON transactions (status)
+            """
+        )
 
     # Index for GROUP BY triggered_by_hash (used by /api/explorer/transactions batch fetch)
     # Fixes GENLAYER-STUDIO-1W8 (25 events)
-    op.execute(
-        """
-        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transactions_triggered_by_hash
-        ON transactions (triggered_by_hash)
-        WHERE triggered_by_hash IS NOT NULL
-        """
-    )
+    with op.get_context().autocommit_block():
+        op.execute(
+            """
+            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transactions_triggered_by_hash
+            ON transactions (triggered_by_hash)
+            WHERE triggered_by_hash IS NOT NULL
+            """
+        )
 
     # Index for WHERE type = 1 count (deploy count in /api/explorer/stats)
     # Part of GENLAYER-STUDIO-102 (196 events)
-    op.execute(
-        """
-        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transactions_type
-        ON transactions (type)
-        """
-    )
+    with op.get_context().autocommit_block():
+        op.execute(
+            """
+            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transactions_type
+            ON transactions (type)
+            """
+        )
 
     # Index for WHERE appealed = true count
     # Part of GENLAYER-STUDIO-102 (196 events)
-    op.execute(
-        """
-        CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transactions_appealed
-        ON transactions (appealed)
-        WHERE appealed = true
-        """
-    )
+    with op.get_context().autocommit_block():
+        op.execute(
+            """
+            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_transactions_appealed
+            ON transactions (appealed)
+            WHERE appealed = true
+            """
+        )
 
 
 def downgrade() -> None:
-    op.execute("DROP INDEX IF EXISTS idx_transactions_appealed")
-    op.execute("DROP INDEX IF EXISTS idx_transactions_type")
-    op.execute("DROP INDEX IF EXISTS idx_transactions_triggered_by_hash")
-    op.execute("DROP INDEX IF EXISTS idx_transactions_status")
+    # DROP INDEX CONCURRENTLY for symmetry (no write lock on downgrade)
+    with op.get_context().autocommit_block():
+        op.execute("DROP INDEX CONCURRENTLY IF EXISTS idx_transactions_appealed")
+    with op.get_context().autocommit_block():
+        op.execute("DROP INDEX CONCURRENTLY IF EXISTS idx_transactions_type")
+    with op.get_context().autocommit_block():
+        op.execute(
+            "DROP INDEX CONCURRENTLY IF EXISTS idx_transactions_triggered_by_hash"
+        )
+    with op.get_context().autocommit_block():
+        op.execute("DROP INDEX CONCURRENTLY IF EXISTS idx_transactions_status")
