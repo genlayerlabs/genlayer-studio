@@ -16,6 +16,7 @@ import json
 import base64
 
 from eth_utils import to_checksum_address
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from backend.consensus.vrf import get_validators_for_transaction
 from backend.database_handler.chain_snapshot import ChainSnapshot
@@ -649,6 +650,21 @@ class ConsensusAlgorithm:
             accounts_manager (AccountsManager): Manager to handle account balance updates.
         """
 
+        # Idempotency guard: if the tx was already credited elsewhere (e.g. the
+        # `sim_fundAccount` endpoint sets value_credited=true after crediting
+        # the recipient directly), skip debit+credit to avoid double-processing.
+        # This fixes a latent 2x-balance bug for faucet txs where both the
+        # endpoint and this function credited the recipient.
+        existing_tx = transactions_processor.get_transaction_by_hash(transaction.hash)
+        if existing_tx and existing_tx.get("value_credited"):
+            await ConsensusAlgorithm.dispatch_transaction_status_update(
+                transactions_processor,
+                transaction.hash,
+                TransactionStatus.FINALIZED,
+                msg_handler,
+            )
+            return
+
         # For triggered (child) transactions, the parent contract was already
         # debited at acceptance time. Skip sender debit to avoid double-debit.
         is_triggered = transaction.triggered_by_hash is not None
@@ -683,6 +699,17 @@ class ConsensusAlgorithm:
             # Update the balance of the recipient account
             accounts_manager.update_account_balance(
                 transaction.to_address, to_balance + transaction.value
+            )
+
+        # Mark the tx as credited so a later retry (or duplicate sync path)
+        # hits the idempotency guard above and no-ops.
+        if transaction.value and transaction.value > 0:
+            accounts_manager.session.execute(
+                text(
+                    "UPDATE transactions SET value_credited = true "
+                    "WHERE hash = :hash"
+                ),
+                {"hash": transaction.hash},
             )
 
         # Dispatch a transaction status update to FINALIZED
