@@ -676,13 +676,15 @@ class ConsensusAlgorithm:
                 transaction.from_address, from_balance - transaction.value
             )
 
-        if transaction.to_address is not None:
-            # Get the balance of the recipient account
-            to_balance = accounts_manager.get_account_balance(transaction.to_address)
-
-            # Update the balance of the recipient account
-            accounts_manager.update_account_balance(
-                transaction.to_address, to_balance + transaction.value
+        if transaction.to_address is not None and transaction.value > 0:
+            # Credit the recipient idempotently. For faucet txs (sim_fundAccount),
+            # the endpoint already credited and set value_credited=true, so this
+            # is a no-op. For regular user SEND txs, this is the first credit.
+            # Using the idempotent path prevents double-crediting when the same
+            # tx reaches this branch twice (e.g. the endpoint-then-consensus flow
+            # for faucet txs, or any future worker retry).
+            accounts_manager.credit_tx_value_once(
+                transaction.hash, transaction.to_address, transaction.value
             )
 
         # Dispatch a transaction status update to FINALIZED
