@@ -21,6 +21,7 @@ from backend.consensus.vrf import get_validators_for_transaction
 from backend.database_handler.chain_snapshot import ChainSnapshot
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.database_handler.contract_processor import ContractProcessor
+from backend.database_handler.errors import ContractNotFoundError
 from backend.database_handler.transactions_processor import (
     TransactionsProcessor,
     TransactionStatus,
@@ -462,9 +463,12 @@ class TransactionContext:
                     fresh = self.contract_snapshot_factory(self.transaction.to_address)
                     self.contract_snapshot.balance = fresh.balance
             else:
-                self.contract_snapshot = self.contract_snapshot_factory(
-                    self.transaction.to_address
-                )
+                try:
+                    self.contract_snapshot = self.contract_snapshot_factory(
+                        self.transaction.to_address
+                    )
+                except ContractNotFoundError:
+                    self.contract_snapshot = None
 
         self.validators_snapshot = validators_snapshot
 
