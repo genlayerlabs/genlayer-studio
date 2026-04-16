@@ -21,14 +21,14 @@ class PayableEscrow(gl.Contract):
         self.deposited = self.deposited + v
 
     @gl.public.write
-    def withdraw(self, to: Address) -> None:
+    def withdraw(self, to: str) -> None:
         if gl.message.sender_address != self.depositor:
             raise gl.vm.UserError("not depositor")
         amount = self.deposited
         if amount == u256(0):
             raise gl.vm.UserError("nothing to withdraw")
         self.deposited = u256(0)
-        gl.get_contract_at(to).emit_transfer(value=amount)
+        gl.get_contract_at(Address(to)).emit_transfer(value=amount)
 
     @gl.public.view
     def get_deposited(self) -> u256:
