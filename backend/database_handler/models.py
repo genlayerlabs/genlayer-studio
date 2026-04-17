@@ -176,6 +176,9 @@ class Transactions(Base):
     value_credited: Mapped[bool] = mapped_column(
         Boolean, server_default="false", nullable=False, default=False
     )
+    recovery_count: Mapped[int] = mapped_column(
+        Integer, server_default="0", nullable=False, default=0
+    )
 
 
 class Validators(Base):
