@@ -35,6 +35,7 @@ class ConsensusWorker:
 
     MAX_GENERIC_ERROR_RETRIES = 3
     MAX_LEADER_CRASH_RETRIES = 3
+    MAX_RECOVERY_CYCLES = 3
 
     def __init__(
         self,
@@ -135,6 +136,13 @@ class ConsensusWorker:
             os.environ.get(
                 "LEADER_CRASH_MAX_RETRIES", str(self.MAX_LEADER_CRASH_RETRIES)
             )
+        )
+
+        # Cap on how many times recover_stuck_transactions will reset the
+        # same tx. Past this threshold, the tx is escalated to CANCELED so
+        # the per-contract queue can advance past a poisoned head.
+        self._max_recovery_cycles = int(
+            os.environ.get("RECOVERY_MAX_CYCLES", str(self.MAX_RECOVERY_CYCLES))
         )
 
         # Initialize usage metrics service for reporting transaction metrics
@@ -722,9 +730,60 @@ class ConsensusWorker:
         Resets them back to PENDING status and clears blocking fields.
         Also recovers orphaned transactions (in processing states but no worker).
 
+        Per-tx recovery_count is incremented on each reset. Once a tx hits
+        MAX_RECOVERY_CYCLES, it's escalated to CANCELED instead of another
+        reset — otherwise a deterministically-poisoned tx keeps getting
+        re-claimed and re-stuck, blocking the whole per-contract queue
+        for that address.
+
         Returns:
-            Number of transactions recovered
+            Number of transactions reset (escalations are logged but not
+            counted as recoveries).
         """
+        # Step 1: escalate txs that have already hit the recovery limit.
+        # These have been reset N times and keep getting stuck — cancel
+        # them so the per-contract queue can drain.
+        escalate_query = text(
+            """
+            UPDATE transactions
+            SET status = 'CANCELED',
+                worker_id = NULL,
+                blocked_at = NULL,
+                consensus_data = COALESCE(consensus_data, '{}'::jsonb)
+                                 || jsonb_build_object(
+                                    'error', 'max_recovery_cycles_exceeded',
+                                    'recovery_count', recovery_count
+                                 )
+            WHERE recovery_count >= :max_cycles
+              AND status NOT IN ('FINALIZED', 'CANCELED')
+              AND (
+                  (blocked_at IS NOT NULL
+                   AND blocked_at < NOW() - CAST(:timeout AS INTERVAL))
+                  OR
+                  (blocked_at IS NULL
+                   AND status IN ('PROPOSING', 'COMMITTING', 'REVEALING')
+                   AND created_at < NOW() - CAST(:orphan_timeout AS INTERVAL))
+              )
+            RETURNING hash, recovery_count;
+            """
+        )
+        escalated = session.execute(
+            escalate_query,
+            {
+                "max_cycles": self._max_recovery_cycles,
+                "timeout": f"{self.transaction_timeout_minutes} minutes",
+                "orphan_timeout": "5 minutes",
+            },
+        ).fetchall()
+        if escalated:
+            session.commit()
+            for row in escalated:
+                logger.error(
+                    f"[Worker {self.worker_id}] Transaction {row.hash} canceled "
+                    f"after {row.recovery_count} recovery cycles (stuck repeatedly)"
+                )
+
+        # Step 2: reset txs under the limit and bump their counter.
         recovery_query = text(
             """
             UPDATE transactions
@@ -732,25 +791,28 @@ class ConsensusWorker:
                 worker_id = NULL,
                 consensus_data = NULL,
                 consensus_history = NULL,
-                status = 'PENDING'
-            WHERE (
-                -- Case 1: Transactions with expired blocks
-                (blocked_at IS NOT NULL
-                 AND blocked_at < NOW() - CAST(:timeout AS INTERVAL)
-                 AND status NOT IN ('FINALIZED', 'CANCELED'))
-                OR
-                -- Case 2: Orphaned transactions in processing states with no block
-                (blocked_at IS NULL
-                 AND status IN ('PROPOSING', 'COMMITTING', 'REVEALING')
-                 AND created_at < NOW() - CAST(:orphan_timeout AS INTERVAL))
-            )
-            RETURNING hash, status;
-        """
+                status = 'PENDING',
+                recovery_count = recovery_count + 1
+            WHERE recovery_count < :max_cycles
+              AND (
+                  -- Case 1: Transactions with expired blocks
+                  (blocked_at IS NOT NULL
+                   AND blocked_at < NOW() - CAST(:timeout AS INTERVAL)
+                   AND status NOT IN ('FINALIZED', 'CANCELED'))
+                  OR
+                  -- Case 2: Orphaned transactions in processing states with no block
+                  (blocked_at IS NULL
+                   AND status IN ('PROPOSING', 'COMMITTING', 'REVEALING')
+                   AND created_at < NOW() - CAST(:orphan_timeout AS INTERVAL))
+              )
+            RETURNING hash, status, recovery_count;
+            """
         )
 
         result = session.execute(
             recovery_query,
             {
+                "max_cycles": self._max_recovery_cycles,
                 "timeout": f"{self.transaction_timeout_minutes} minutes",
                 "orphan_timeout": "5 minutes",  # Shorter timeout for orphaned transactions
             },
@@ -760,7 +822,9 @@ class ConsensusWorker:
             session.commit()
             for row in recovered:
                 logger.info(
-                    f"[Worker {self.worker_id}] Recovered stuck transaction {row.hash} (was {row.status}, now PENDING)"
+                    f"[Worker {self.worker_id}] Recovered stuck transaction {row.hash} "
+                    f"(was {row.status}, now PENDING, cycle {row.recovery_count}/"
+                    f"{self._max_recovery_cycles})"
                 )
 
         return len(recovered)
