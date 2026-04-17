@@ -26,7 +26,17 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     # ADD COLUMN with constant DEFAULT is metadata-only in PG 11+
-    # (no table rewrite, no long lock). Safe on the 158K-row transactions table.
+    # (no table rewrite, no per-row scan). It still needs a brief
+    # ACCESS EXCLUSIVE lock though, and on a hot table like `transactions`
+    # a slow long-running query could queue the ALTER behind it — which
+    # in turn queues every new read/write behind the ALTER.
+    #
+    # Belt + suspenders: cap how long we're willing to wait for the lock.
+    # If we can't grab it in 5s, fail the migration fast and let it retry,
+    # rather than pile up every consensus-worker commit behind us.
+    op.execute("SET LOCAL lock_timeout = '5s'")
+    op.execute("SET LOCAL statement_timeout = '30s'")
+
     op.add_column(
         "transactions",
         sa.Column(
@@ -39,4 +49,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("SET LOCAL lock_timeout = '5s'")
     op.drop_column("transactions", "recovery_count")
