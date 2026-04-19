@@ -11,9 +11,14 @@ interface DataTabProps {
 }
 
 export function DataTab({ transaction: tx }: DataTabProps) {
-  const calldataB64 = (tx.type === 1 || tx.type === 2) && tx.data && typeof tx.data === 'object'
-    ? (tx.data as Record<string, unknown>).calldata as string | undefined
-    : undefined;
+  const dataObj =
+    tx.data && typeof tx.data === 'object' ? (tx.data as Record<string, unknown>) : null;
+  const calldataB64 =
+    (tx.type === 1 || tx.type === 2) && dataObj
+      ? (dataObj.calldata as string | undefined)
+      : undefined;
+  const contractCodeB64 =
+    tx.type === 1 && dataObj ? (dataObj.contract_code as string | undefined) : undefined;
 
   return (
     <div className="space-y-6">
@@ -29,8 +34,21 @@ export function DataTab({ transaction: tx }: DataTabProps) {
         </div>
       )}
 
-      {/* Etherscan-style input data panel for call transactions */}
-      {calldataB64 && (
+      {/* Deploy transactions: show contract source code alongside constructor args.
+          DataDecodePanel renders each base64 field with the best decoder per key
+          (CodeBlock for contract_code, calldata decoder for calldata). */}
+      {contractCodeB64 && dataObj && (
+        <div>
+          <h4 className="font-medium text-foreground mb-2 flex items-center gap-2">
+            <FileCode className="w-4 h-4" />
+            Contract Source
+          </h4>
+          <DataDecodePanel data={dataObj} />
+        </div>
+      )}
+
+      {/* Call transactions: focused Etherscan-style decoder on calldata. */}
+      {calldataB64 && !contractCodeB64 && (
         <div>
           <h4 className="font-medium text-foreground mb-2 flex items-center gap-2">
             <FileCode className="w-4 h-4" />
@@ -40,8 +58,8 @@ export function DataTab({ transaction: tx }: DataTabProps) {
         </div>
       )}
 
-      {/* Generic data panel for non-call transactions */}
-      {tx.data && !calldataB64 && (
+      {/* Fallback for non-call/non-deploy transactions that still carry data. */}
+      {tx.data && !calldataB64 && !contractCodeB64 && (
         <div>
           <h4 className="font-medium text-foreground mb-2 flex items-center gap-2">
             <FileCode className="w-4 h-4" />

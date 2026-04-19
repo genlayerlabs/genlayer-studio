@@ -703,9 +703,12 @@ def get_address_info(session: Session, address: str) -> Optional[dict]:
     except Exception:
         pass
 
-    # 1. Check if it's a contract (exists in CurrentState with a deploy tx)
+    # 1. Check if it's a contract (exists in CurrentState with a successful
+    # deploy). An errored deploy also leaves a CurrentState row, but with an
+    # empty `data` blob (register_contract only runs on SUCCESS) — treat those
+    # as ACCOUNT so the explorer doesn't render a zombie contract page.
     state = session.query(CurrentState).filter(CurrentState.id == address).first()
-    if state:
+    if state and state.data:
         deploy_tx = (
             session.query(Transactions)
             .filter(
