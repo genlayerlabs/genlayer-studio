@@ -469,7 +469,20 @@ class TransactionContext:
                         self.transaction.to_address
                     )
                 except ContractNotFoundError:
-                    self.contract_snapshot = None
+                    # For DEPLOY, the current_state row exists (created at tx
+                    # submission) but is still empty — this is expected, the
+                    # contract hasn't executed yet.
+                    #
+                    # For RUN_CONTRACT / UPGRADE_CONTRACT, a missing contract
+                    # (no row, or data={} left behind by a failed deploy) means
+                    # the user is calling something that was never successfully
+                    # deployed. Re-raise so the worker-level handler can
+                    # finalize the tx with a proper error receipt instead of
+                    # letting it hang.
+                    if self.transaction.type == TransactionType.DEPLOY_CONTRACT:
+                        self.contract_snapshot = None
+                    else:
+                        raise
 
         self.validators_snapshot = validators_snapshot
 

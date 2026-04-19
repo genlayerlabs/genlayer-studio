@@ -67,8 +67,16 @@ def _check_last_round(tx_receipt: dict, expected_round: str):
 
 
 def _deployment_error_to_tx_receipt(e: DeploymentError):
-    error_dict_str = str(e).split("error: ", 1)[1]
-    return literal_eval(error_dict_str)
+    # gltest raises DeploymentError with one of two message shapes:
+    #   "Deployment transaction failed: {receipt_dict}"
+    #   "Failed to deploy contract <Name>: <nested error: {receipt_dict}>"
+    # Pick whichever prefix matches, then literal_eval the dict portion.
+    msg = str(e)
+    for prefix in ("Deployment transaction failed: ", "error: "):
+        idx = msg.find(prefix)
+        if idx != -1:
+            return literal_eval(msg[idx + len(prefix) :])
+    raise ValueError(f"could not parse DeploymentError payload: {msg!r}")
 
 
 def _run_testcase(setup_validators, testcase: ErrorType):
