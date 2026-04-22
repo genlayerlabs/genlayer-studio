@@ -167,11 +167,17 @@ class Transactions(Base):
     worker_id: Mapped[Optional[str]] = mapped_column(
         String(255), nullable=True, default=None
     )
+    origin_address: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True, default=None
+    )
     execution_mode: Mapped[str] = mapped_column(
         String(30), server_default="NORMAL", nullable=False, default="NORMAL"
     )
     value_credited: Mapped[bool] = mapped_column(
         Boolean, server_default="false", nullable=False, default=False
+    )
+    recovery_count: Mapped[int] = mapped_column(
+        Integer, server_default="0", nullable=False, default=0
     )
 
 

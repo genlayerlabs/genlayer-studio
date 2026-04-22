@@ -13,6 +13,7 @@ import { getExecutionResult, getConsensusRoundResult } from '@/lib/transactionUt
 import { ConsensusResultBadge } from '@/components/ConsensusResultBadge';
 import { resultStatusLabel, type DecodedResult } from '@/lib/resultDecoder';
 import { InputDataPanel } from '@/components/InputDataPanel';
+import { DataDecodePanel } from '@/components/DataDecodePanel';
 import { formatGenValue } from '@/lib/formatters';
 
 interface OverviewTabProps {
@@ -98,9 +99,14 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
   const decodedResult = execResult?.decodedResult;
   const eqOutputs = execResult?.eqOutputs;
 
-  const calldataB64 = (tx.type === 1 || tx.type === 2) && tx.data && typeof tx.data === 'object'
-    ? (tx.data as Record<string, unknown>).calldata as string | undefined
-    : undefined;
+  const dataObj =
+    tx.data && typeof tx.data === 'object' ? (tx.data as Record<string, unknown>) : null;
+  const calldataB64 =
+    (tx.type === 1 || tx.type === 2) && dataObj
+      ? (dataObj.calldata as string | undefined)
+      : undefined;
+  const contractCodeB64 =
+    tx.type === 1 && dataObj ? (dataObj.contract_code as string | undefined) : undefined;
 
   return (
     <div className="space-y-1">
@@ -162,7 +168,15 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
       />
       {tx.worker_id && <InfoRow label="Worker ID" value={tx.worker_id} />}
 
-      {calldataB64 && (
+      {contractCodeB64 && dataObj && (
+        <div className="border-t border-border mt-4 pt-4">
+          <h4 className="text-sm font-semibold text-foreground mb-3">Input Data</h4>
+          {/* Deploy: show both constructor calldata and contract source */}
+          <DataDecodePanel data={dataObj} />
+        </div>
+      )}
+
+      {calldataB64 && !contractCodeB64 && (
         <div className="border-t border-border mt-4 pt-4">
           <h4 className="text-sm font-semibold text-foreground mb-3">Input Data</h4>
           <InputDataPanel calldataB64={calldataB64} />

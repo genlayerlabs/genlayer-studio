@@ -45,7 +45,7 @@ def test_accounts_funding():
         payload("eth_getBalance", new_account_address)
     ).json()
     assert has_success_status(get_balance_after_fund_result)
-    assert get_balance_after_fund_result["result"] == fund_amount
+    assert int(get_balance_after_fund_result["result"], 16) == fund_amount
 
     # TODO: this is not working on CI https://github.com/yeagerai/genlayer-simulator/issues/548
     # Test get_balance with invalid address
@@ -85,13 +85,15 @@ def test_accounts_transfers():
         payload("eth_getBalance", account_1_address)
     ).json()
     assert has_success_status(get_balance_1_after_transfer)
-    assert get_balance_1_after_transfer["result"] == fund_amount - transfer_amount
+    assert (
+        int(get_balance_1_after_transfer["result"], 16) == fund_amount - transfer_amount
+    )
 
     get_balance_2_after_transfer = post_request_localhost(
         payload("eth_getBalance", account_2_address)
     ).json()
     assert has_success_status(get_balance_2_after_transfer)
-    assert get_balance_2_after_transfer["result"] == transfer_amount
+    assert int(get_balance_2_after_transfer["result"], 16) == transfer_amount
 
 
 def test_accounts_burn():
@@ -115,4 +117,4 @@ def test_accounts_burn():
         payload("eth_getBalance", account_1_address)
     ).json()
     assert has_success_status(get_balance_1_after_transfer)
-    assert get_balance_1_after_transfer["result"] == fund_amount - burn_amount
+    assert int(get_balance_1_after_transfer["result"], 16) == fund_amount - burn_amount

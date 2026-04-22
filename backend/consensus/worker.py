@@ -34,6 +34,8 @@ class ConsensusWorker:
     """
 
     MAX_GENERIC_ERROR_RETRIES = 3
+    MAX_LEADER_CRASH_RETRIES = 3
+    MAX_RECOVERY_CYCLES = 3
 
     def __init__(
         self,
@@ -123,6 +125,24 @@ class ConsensusWorker:
         self._generic_error_retries: dict[str, dict] = {}
         self._generic_error_base_backoff = float(
             os.environ.get("GENERIC_ERROR_BASE_BACKOFF_SECONDS", "10")
+        )
+
+        # Track retry counts for transactions hitting non-classifiable GenVM crashes
+        # (WASM host-side traps before Lua can produce a structured error).
+        # Counter is in-memory; survives the lifetime of one worker pod only.
+        # Key: transaction_hash, Value: {"count": int, "last_attempt": float}
+        self._leader_crash_retries: dict[str, dict] = {}
+        self._max_leader_crash_retries = int(
+            os.environ.get(
+                "LEADER_CRASH_MAX_RETRIES", str(self.MAX_LEADER_CRASH_RETRIES)
+            )
+        )
+
+        # Cap on how many times recover_stuck_transactions will reset the
+        # same tx. Past this threshold, the tx is escalated to CANCELED so
+        # the per-contract queue can advance past a poisoned head.
+        self._max_recovery_cycles = int(
+            os.environ.get("RECOVERY_MAX_CYCLES", str(self.MAX_RECOVERY_CYCLES))
         )
 
         # Initialize usage metrics service for reporting transaction metrics
@@ -647,24 +667,40 @@ class ConsensusWorker:
                     f"consensus will continue with remaining validators"
                 )
             else:
-                # Leader error (or unknown) - reset transaction for reprocessing
-                try:
-                    with self.get_session() as reset_session:
-                        self.reset_transaction(reset_session, tx_hash)
-                        transaction_reset = True
-                except Exception as reset_error:
-                    logger.error(
-                        f"[Worker {self.worker_id}] Failed to reset {tx_type} {tx_hash}: {reset_error}",
-                        exc_info=True,
-                    )
+                # Leader error (or unknown origin).
+                # First, cap retries for the non-classifiable "hard crash" class
+                # (code=None + causes=[] with is_fatal=False): these are deterministic
+                # WASM host-side traps that repeat indefinitely on the same input,
+                # generating thousands of identical Sentry events. Finalize with an
+                # error receipt instead, mirroring contract-raised-exception flow.
+                is_hard_crash = e.error_code is None and not e.causes and not e.is_fatal
+                cap_hit = False
+                if is_hard_crash:
+                    cap_hit = await self._handle_leader_crash_retry(tx_hash, tx_type, e)
 
-                # For fatal leader errors, stop the worker to trigger K8s restart via health check
-                if e.is_fatal:
-                    logger.warning(
-                        f"[Worker {self.worker_id}] Fatal GenVM error in leader - stopping worker. "
-                        f"{tx_type.capitalize()} {tx_hash} will be reset for another worker."
-                    )
-                    self.running = False
+                if cap_hit:
+                    # Transaction finalized with synthetic error receipt by the
+                    # helper above. Don't release/reset — it's in ACCEPTED now.
+                    transaction_reset = True
+                else:
+                    # Retryable leader error — reset for another worker to pick up.
+                    try:
+                        with self.get_session() as reset_session:
+                            self.reset_transaction(reset_session, tx_hash)
+                            transaction_reset = True
+                    except Exception as reset_error:
+                        logger.error(
+                            f"[Worker {self.worker_id}] Failed to reset {tx_type} {tx_hash}: {reset_error}",
+                            exc_info=True,
+                        )
+
+                    # For fatal leader errors, stop the worker to trigger K8s restart via health check
+                    if e.is_fatal:
+                        logger.warning(
+                            f"[Worker {self.worker_id}] Fatal GenVM error in leader - stopping worker. "
+                            f"{tx_type.capitalize()} {tx_hash} will be reset for another worker."
+                        )
+                        self.running = False
         except (ContractNotFoundError, _NoValidatorsError):
             # Re-raise for specific handling by caller
             raise
@@ -694,9 +730,60 @@ class ConsensusWorker:
         Resets them back to PENDING status and clears blocking fields.
         Also recovers orphaned transactions (in processing states but no worker).
 
+        Per-tx recovery_count is incremented on each reset. Once a tx hits
+        MAX_RECOVERY_CYCLES, it's escalated to CANCELED instead of another
+        reset — otherwise a deterministically-poisoned tx keeps getting
+        re-claimed and re-stuck, blocking the whole per-contract queue
+        for that address.
+
         Returns:
-            Number of transactions recovered
+            Number of transactions reset (escalations are logged but not
+            counted as recoveries).
         """
+        # Step 1: escalate txs that have already hit the recovery limit.
+        # These have been reset N times and keep getting stuck — cancel
+        # them so the per-contract queue can drain.
+        escalate_query = text(
+            """
+            UPDATE transactions
+            SET status = 'CANCELED',
+                worker_id = NULL,
+                blocked_at = NULL,
+                consensus_data = COALESCE(consensus_data, '{}'::jsonb)
+                                 || jsonb_build_object(
+                                    'error', 'max_recovery_cycles_exceeded',
+                                    'recovery_count', recovery_count
+                                 )
+            WHERE recovery_count >= :max_cycles
+              AND status NOT IN ('FINALIZED', 'CANCELED')
+              AND (
+                  (blocked_at IS NOT NULL
+                   AND blocked_at < NOW() - CAST(:timeout AS INTERVAL))
+                  OR
+                  (blocked_at IS NULL
+                   AND status IN ('PROPOSING', 'COMMITTING', 'REVEALING')
+                   AND created_at < NOW() - CAST(:orphan_timeout AS INTERVAL))
+              )
+            RETURNING hash, recovery_count;
+            """
+        )
+        escalated = session.execute(
+            escalate_query,
+            {
+                "max_cycles": self._max_recovery_cycles,
+                "timeout": f"{self.transaction_timeout_minutes} minutes",
+                "orphan_timeout": "5 minutes",
+            },
+        ).fetchall()
+        if escalated:
+            session.commit()
+            for row in escalated:
+                logger.error(
+                    f"[Worker {self.worker_id}] Transaction {row.hash} canceled "
+                    f"after {row.recovery_count} recovery cycles (stuck repeatedly)"
+                )
+
+        # Step 2: reset txs under the limit and bump their counter.
         recovery_query = text(
             """
             UPDATE transactions
@@ -704,25 +791,28 @@ class ConsensusWorker:
                 worker_id = NULL,
                 consensus_data = NULL,
                 consensus_history = NULL,
-                status = 'PENDING'
-            WHERE (
-                -- Case 1: Transactions with expired blocks
-                (blocked_at IS NOT NULL
-                 AND blocked_at < NOW() - CAST(:timeout AS INTERVAL)
-                 AND status NOT IN ('FINALIZED', 'CANCELED'))
-                OR
-                -- Case 2: Orphaned transactions in processing states with no block
-                (blocked_at IS NULL
-                 AND status IN ('PROPOSING', 'COMMITTING', 'REVEALING')
-                 AND created_at < NOW() - CAST(:orphan_timeout AS INTERVAL))
-            )
-            RETURNING hash, status;
-        """
+                status = 'PENDING',
+                recovery_count = recovery_count + 1
+            WHERE recovery_count < :max_cycles
+              AND (
+                  -- Case 1: Transactions with expired blocks
+                  (blocked_at IS NOT NULL
+                   AND blocked_at < NOW() - CAST(:timeout AS INTERVAL)
+                   AND status NOT IN ('FINALIZED', 'CANCELED'))
+                  OR
+                  -- Case 2: Orphaned transactions in processing states with no block
+                  (blocked_at IS NULL
+                   AND status IN ('PROPOSING', 'COMMITTING', 'REVEALING')
+                   AND created_at < NOW() - CAST(:orphan_timeout AS INTERVAL))
+              )
+            RETURNING hash, status, recovery_count;
+            """
         )
 
         result = session.execute(
             recovery_query,
             {
+                "max_cycles": self._max_recovery_cycles,
                 "timeout": f"{self.transaction_timeout_minutes} minutes",
                 "orphan_timeout": "5 minutes",  # Shorter timeout for orphaned transactions
             },
@@ -732,7 +822,9 @@ class ConsensusWorker:
             session.commit()
             for row in recovered:
                 logger.info(
-                    f"[Worker {self.worker_id}] Recovered stuck transaction {row.hash} (was {row.status}, now PENDING)"
+                    f"[Worker {self.worker_id}] Recovered stuck transaction {row.hash} "
+                    f"(was {row.status}, now PENDING, cycle {row.recovery_count}/"
+                    f"{self._max_recovery_cycles})"
                 )
 
         return len(recovered)
@@ -855,6 +947,8 @@ class ConsensusWorker:
                     del self._no_validators_retries[transaction.hash]
                 if transaction.hash in self._generic_error_retries:
                     del self._generic_error_retries[transaction.hash]
+                if transaction.hash in self._leader_crash_retries:
+                    del self._leader_crash_retries[transaction.hash]
 
         except NoValidatorsAvailableError:
             # Handle no-validators case with retry logic and backoff
@@ -1039,6 +1133,98 @@ class ConsensusWorker:
                 f"retry {retry_info['count']}/{self.MAX_GENERIC_ERROR_RETRIES}, "
                 f"next attempt in {backoff}s - error: {error}"
             )
+
+    async def _handle_leader_crash_retry(
+        self, tx_hash: str, tx_type: str, error: GenVMInternalError
+    ) -> bool:
+        """
+        Cap retries on non-classifiable GenVM leader crashes (WASM traps that
+        produce no structured error code). Past the cap, finalize the transaction
+        with a synthetic error receipt so it reaches a terminal FINALIZED state
+        with execution_result=ERROR — same observable outcome as a contract that
+        raised an exception.
+
+        Returns:
+            True if the cap was hit and the transaction was finalized with an
+            error receipt. Caller must NOT reset/release the transaction.
+            False if the caller should fall back to the existing reset-retry path.
+        """
+        retry_info = self._leader_crash_retries.get(
+            tx_hash, {"count": 0, "last_attempt": 0}
+        )
+        retry_info["count"] += 1
+        retry_info["last_attempt"] = time.time()
+        self._leader_crash_retries[tx_hash] = retry_info
+
+        if retry_info["count"] < self._max_leader_crash_retries:
+            logger.warning(
+                f"[Worker {self.worker_id}] GenVM hard crash on {tx_type} {tx_hash}, "
+                f"retry {retry_info['count']}/{self._max_leader_crash_retries}"
+            )
+            return False
+
+        # Cap reached — synthesize a leader error receipt and push the tx to
+        # ACCEPTED. From there the normal finalization path handles it.
+        import base64
+        from backend.node.types import ExecutionMode, ExecutionResultStatus
+
+        detail_str = str(error.detail) if error.detail is not None else ""
+        if len(detail_str) > 2000:
+            detail_str = detail_str[:2000] + "...(truncated)"
+        error_description = (
+            f"GenVM crashed {retry_info['count']} times with a non-classifiable "
+            f"internal error (no structured cause). Detail: {detail_str}"
+        )
+        error_payload = error_description.encode("utf-8")
+        error_receipt = {
+            "vote": None,
+            "execution_result": ExecutionResultStatus.ERROR.value,
+            "result": base64.b64encode(error_payload).decode("ascii"),
+            "calldata": base64.b64encode(b"").decode("ascii"),
+            "gas_used": 0,
+            "mode": ExecutionMode.LEADER.value,
+            "contract_state": {},
+            "node_config": {"address": "genvm_crash_handler"},
+            "eq_outputs": {},
+            "pending_transactions": [],
+            "genvm_result": {
+                "error_code": "INTERNAL_ERROR",
+                "error_description": error_description,
+                "raw_error": {
+                    "causes": error.causes,
+                    "ctx": error.ctx,
+                    "detail": detail_str,
+                },
+            },
+            "processing_time": 0,
+        }
+
+        logger.error(
+            f"[Worker {self.worker_id}] Transaction {tx_hash} finalizing with "
+            f"synthetic ERROR receipt after {retry_info['count']} leader crashes"
+        )
+
+        with self.get_session() as error_session:
+            tx = error_session.query(Transactions).filter_by(hash=tx_hash).one()
+            tx.status = TransactionStatus.ACCEPTED
+            tx.timestamp_awaiting_finalization = int(time.time())
+            tx.consensus_data = {
+                "votes": {},
+                "leader_receipt": [error_receipt],
+                "validators": [],
+            }
+            error_session.commit()
+
+            await ConsensusAlgorithm.dispatch_transaction_status_update(
+                TransactionsProcessor(error_session),
+                tx_hash,
+                TransactionStatus.ACCEPTED,
+                self.msg_handler,
+            )
+
+        # Clean up retry tracking
+        del self._leader_crash_retries[tx_hash]
+        return True
 
     async def _process_upgrade_transaction(
         self, transaction_data: dict, session: Session
