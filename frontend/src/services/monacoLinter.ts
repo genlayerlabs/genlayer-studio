@@ -4,8 +4,18 @@
  */
 
 import * as Monaco from 'monaco-editor';
-import { RpcClient } from '@/clients/rpc';
 import type { JsonRPCResponse } from '@/types';
+import { getRuntimeConfig } from '@/utils/runtimeConfig';
+
+// Linting is a developer tool, not a chain operation. Always route it at the
+// Studio backend URL (`VITE_JSON_RPC_SERVER_URL`), regardless of whichever
+// network the user has selected in the UI — `sim_lintContract` only exists
+// on Studio. If the Studio backend is unreachable we fail soft (no markers).
+const STUDIO_RPC_URL = getRuntimeConfig(
+  'VITE_JSON_RPC_SERVER_URL',
+  'http://127.0.0.1:4000/api',
+);
+let nextLintRequestId = 1;
 
 interface LintResult {
   rule_id: string;
@@ -42,14 +52,24 @@ export async function lintGenVMCode(
   const code = editor.getValue();
 
   try {
-    const rpcClient = new RpcClient();
-    const response: JsonRPCResponse<LintResponse> = await rpcClient.call({
-      method: 'sim_lintContract',
-      params: [code, 'contract.py'], // Pass as positional arguments in array
+    const res = await fetch(STUDIO_RPC_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'sim_lintContract',
+        params: [code, 'contract.py'],
+        id: nextLintRequestId++,
+      }),
     });
+    const response = (await res.json()) as JsonRPCResponse<LintResponse>;
 
     if (response.error) {
-      console.error('[Monaco Linter] Error from server:', response.error);
+      // `sim_lintContract` is Studio-only; quietly disable the linter if the
+      // backend doesn't expose it (e.g. hosted deployment with no Studio).
+      if (response.error.code !== -32601) {
+        console.error('[Monaco Linter] Error from server:', response.error);
+      }
       return;
     }
 
