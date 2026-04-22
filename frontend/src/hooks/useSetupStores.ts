@@ -51,16 +51,22 @@ export const useSetupStores = () => {
       for (const key of Object.keys(contractsBlob)) {
         const loader = contractsBlob[key];
         if (!loader) continue;
-        const raw = await loader();
-        const name = key.split('/').pop() || 'ExampleContract.py';
-        if (!contractFiles.some((c) => c.name === name)) {
-          const contract = {
-            id: uuidv4(),
-            name,
-            content: ((raw as string) || '').trim(),
-            example: true,
-          };
-          contractsStore.addContractFile(contract);
+        try {
+          const raw = await loader();
+          const name = key.split('/').pop() || 'ExampleContract.py';
+          if (!contractFiles.some((c) => c.name === name)) {
+            const contract = {
+              id: uuidv4(),
+              name,
+              content: ((raw as string) || '').trim(),
+              example: true,
+            };
+            contractsStore.addContractFile(contract);
+          }
+        } catch (err) {
+          // One bad file shouldn't block the rest — log and continue so the
+          // user still gets the other examples.
+          console.error('Failed to load example contract', key, err);
         }
       }
     } else {
