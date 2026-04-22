@@ -284,7 +284,7 @@ const badgeColorClass = computed(() => {
       </button>
 
       <a
-        :href="`${explorerUrl}/transactions/${transaction.hash}`"
+        :href="`${explorerUrl}/tx/${transaction.hash}`"
         target="_blank"
         @click.stop
         v-tooltip="'View in Explorer'"
