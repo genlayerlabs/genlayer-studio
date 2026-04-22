@@ -476,6 +476,20 @@ class TestGetAddressInfo:
         assert result["balance"] == 999
         assert result["transactions"] == []
 
+    def test_zombie_deploy_classified_as_account(self, session: Session):
+        # An errored deploy leaves a CurrentState row with empty data ({}) —
+        # register_contract only runs on SUCCESS. The explorer must not treat
+        # this as a deployed contract.
+        addr = "0xZOMBIE_CONTRACT"
+        _make_state(session, addr, data={}, balance=42)
+        _make_tx(session, to_address=addr, type=1, from_address="0xDEPLOYER")
+        session.commit()
+
+        result = queries.get_address_info(session, addr)
+        assert result["type"] == "ACCOUNT"
+        assert result["balance"] == 42
+        assert "state" not in result
+
 
 # ---------------------------------------------------------------------------
 # Validators
