@@ -86,7 +86,7 @@ export default function TransactionDetailPage({ params }: { params: Promise<{ ha
     return (
       <div className="space-y-4">
         <Button variant="ghost" size="sm" asChild>
-          <Link href="/transactions" className="flex items-center gap-2">
+          <Link href="/txs" className="flex items-center gap-2">
             <ArrowLeft className="w-4 h-4" />
             Back to transactions
           </Link>
@@ -112,7 +112,7 @@ export default function TransactionDetailPage({ params }: { params: Promise<{ ha
       <div className="flex items-start justify-between">
         <div>
           <Button variant="ghost" size="sm" asChild className="mb-4">
-            <Link href="/transactions" className="flex items-center gap-2">
+            <Link href="/txs" className="flex items-center gap-2">
               <ArrowLeft className="w-4 h-4" />
               Back to transactions
             </Link>

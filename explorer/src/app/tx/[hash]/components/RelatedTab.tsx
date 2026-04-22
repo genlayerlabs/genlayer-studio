@@ -22,7 +22,7 @@ export function RelatedTab({ parentTransaction, triggeredTransactions }: Related
             Parent Transaction
           </h4>
           <Link
-            href={`/transactions/${parentTransaction.hash}`}
+            href={`/tx/${parentTransaction.hash}`}
             className="block"
           >
             <Card className="p-4 bg-blue-50 dark:bg-blue-950 border-blue-200 dark:border-blue-800 hover:bg-blue-100 dark:hover:bg-blue-900 transition-colors">
@@ -47,7 +47,7 @@ export function RelatedTab({ parentTransaction, triggeredTransactions }: Related
             {triggeredTransactions.map((ttx) => (
               <Link
                 key={ttx.hash}
-                href={`/transactions/${ttx.hash}`}
+                href={`/tx/${ttx.hash}`}
                 className="block"
               >
                 <Card className="p-4 hover:bg-accent transition-colors">

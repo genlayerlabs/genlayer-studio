@@ -46,7 +46,7 @@ export async function StatCardsSection() {
         icon="ArrowRightLeft"
         color="text-blue-600 dark:text-blue-400"
         iconBg="bg-blue-50 dark:bg-blue-950"
-        href="/transactions"
+        href="/txs"
       />
       <StatCard
         title="Active Validators"
@@ -208,7 +208,7 @@ export async function RecentTransactionsSection() {
         <div className="flex items-center justify-between">
           <CardTitle className="text-sm font-medium text-muted-foreground">Recent Transactions</CardTitle>
           <Button variant="ghost" size="sm" asChild>
-            <Link href="/transactions" className="flex items-center gap-1">
+            <Link href="/txs" className="flex items-center gap-1">
               View all
               <ChevronRight className="w-4 h-4" />
             </Link>

@@ -10,7 +10,7 @@ import { cn } from '@/lib/utils';
 
 const navItems = [
   { href: '/', label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/transactions', label: 'Transactions', icon: ArrowRightLeft },
+  { href: '/txs', label: 'Transactions', icon: ArrowRightLeft },
   { href: '/validators', label: 'Validators', icon: Users },
   { href: '/contracts', label: 'Contracts', icon: Database },
   { href: '/providers', label: 'Providers', icon: Cpu },
@@ -34,7 +34,8 @@ export function Navigation() {
             {navItems.map((item) => {
               const Icon = item.icon;
               const isActive = pathname === item.href ||
-                (item.href !== '/' && pathname.startsWith(item.href));
+                (item.href !== '/' && pathname.startsWith(item.href)) ||
+                (item.href === '/txs' && pathname.startsWith('/tx/'));
 
               return (
                 <Link
