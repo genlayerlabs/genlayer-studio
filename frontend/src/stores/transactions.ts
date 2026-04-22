@@ -2,9 +2,18 @@ import { defineStore } from 'pinia';
 import { ref, computed, watch } from 'vue';
 import type { TransactionItem } from '@/types';
 import type { TransactionHash } from 'genlayer-js/types';
-import { TransactionStatus } from 'genlayer-js/types';
+import {
+  isDecidedState,
+  transactionsStatusNameToNumber,
+} from 'genlayer-js/types';
 import { useDb, useGenlayer, useWebSocketClient } from '@/hooks';
 import { useNetworkStore } from '@/stores/network';
+
+// Non-Studio chains have no WebSocket push (tx status updates come via
+// `useTransactionListener` which is wired to WS events that only Studio
+// emits). Poll while any tx is still undecided so CANCELED / FINALIZED /
+// TIMEOUT states actually reach the UI.
+const NON_STUDIO_POLL_INTERVAL_MS = 5_000;
 
 export const useTransactionsStore = defineStore('transactionsStore', () => {
   const genlayer = useGenlayer();
@@ -35,15 +44,47 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
 
   // On network change, drop WS subscriptions (they are Studio-only anyway)
   // and re-subscribe to the current network's pending-ish txs on Studio.
+  // On non-Studio, start the polling loop.
   watch(
     () => networkStore.chainId,
     () => {
       subscriptions.clear();
       if (networkStore.isStudio) {
+        stopUndecidedPolling();
         initSubscriptions();
+      } else {
+        startUndecidedPolling();
       }
     },
   );
+
+  let undecidedPollTimer: ReturnType<typeof setInterval> | null = null;
+
+  function hasUndecidedTx() {
+    return transactions.value.some(
+      (tx) => !isDecidedState(transactionsStatusNameToNumber[tx.statusName]),
+    );
+  }
+
+  function startUndecidedPolling() {
+    if (undecidedPollTimer) return;
+    undecidedPollTimer = setInterval(async () => {
+      if (!hasUndecidedTx()) return;
+      try {
+        await refreshPendingTransactions();
+      } catch (err) {
+        // Keep polling even if a single refresh fails.
+        console.error('Failed polling transaction statuses', err);
+      }
+    }, NON_STUDIO_POLL_INTERVAL_MS);
+  }
+
+  function stopUndecidedPolling() {
+    if (undecidedPollTimer) {
+      clearInterval(undecidedPollTimer);
+      undecidedPollTimer = null;
+    }
+  }
 
   function setAllTransactions(items: TransactionItem[]) {
     allTransactions.value = items;
@@ -93,8 +134,11 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
   async function refreshPendingTransactions() {
     // Only refresh txs belonging to the current network — querying cross-network
     // hashes would silently "not find" them and drop them from the store.
+    // Skip fully-decided txs (CANCELED / FINALIZED / *_TIMEOUT / UNDETERMINED /
+    // ACCEPTED) — their status isn't going to change.
     const pendingTxs = transactions.value.filter(
-      (tx: TransactionItem) => tx.statusName !== TransactionStatus.FINALIZED,
+      (tx: TransactionItem) =>
+        !isDecidedState(transactionsStatusNameToNumber[tx.statusName]),
     ) as TransactionItem[];
 
     await Promise.all(
@@ -168,6 +212,12 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
     await db.transactions.clear();
   }
 
+  // Kick off non-Studio polling at store creation if the user lands directly
+  // on a testnet (chainId watcher only fires on changes, not on initial load).
+  if (!networkStore.isStudio) {
+    startUndecidedPolling();
+  }
+
   return {
     transactions,
     allTransactions,
@@ -182,5 +232,7 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
     initSubscriptions,
     setAllTransactions,
     resetStorage,
+    startUndecidedPolling,
+    stopUndecidedPolling,
   };
 });
