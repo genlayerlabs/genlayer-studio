@@ -4,7 +4,7 @@ import { createAppKit } from '@reown/appkit/vue';
 import type { AppKitNetwork } from '@reown/appkit/networks';
 import { mainnet, sepolia } from '@reown/appkit/networks';
 import { getRuntimeConfig } from '@/utils/runtimeConfig';
-import { createGenlayerLocalnet } from './useNetworks';
+import { createGenlayerLocalnet, createGenlayerBradbury } from './useNetworks';
 
 export const wagmiAdapterRef = shallowRef<WagmiAdapter>();
 export let appKitReady = false;
@@ -40,9 +40,11 @@ export async function initAppKit() {
   }
 
   const genlayerLocalnet = createGenlayerLocalnet();
+  const genlayerBradbury = createGenlayerBradbury();
 
   const networks: [AppKitNetwork, ...AppKitNetwork[]] = [
     genlayerLocalnet,
+    genlayerBradbury,
     mainnet,
     sepolia,
   ];

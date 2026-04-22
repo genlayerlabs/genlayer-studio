@@ -120,7 +120,7 @@ describe('useContractsStore', () => {
 
     contractsStore.addDeployedContract(testDeployedContract);
     expect(contractsStore.deployedContracts).toContainEqual(
-      testDeployedContract,
+      expect.objectContaining(testDeployedContract),
     );
     expect(notify).toHaveBeenCalledWith({
       title: 'Contract deployed',
@@ -129,7 +129,7 @@ describe('useContractsStore', () => {
 
     contractsStore.removeDeployedContract(testDeployedContract.contractId);
     expect(contractsStore.deployedContracts).not.toContainEqual(
-      deployedContract,
+      expect.objectContaining({ contractId: deployedContract.contractId }),
     );
   });
 

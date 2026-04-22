@@ -17,6 +17,7 @@ export interface DeployedContract {
   contractId: string;
   address: Address;
   defaultState: string;
+  chainId?: number;
 }
 
 export interface NodeLog {
@@ -34,6 +35,7 @@ export interface TransactionItem {
   statusName: TransactionStatus;
   contractAddress: string;
   localContractId: string;
+  chainId?: number;
   data?: any;
   decodedData?: {
     functionName: string;

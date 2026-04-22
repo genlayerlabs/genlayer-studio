@@ -75,16 +75,32 @@ Studio needs to be updated so its transaction response format matches the testne
 
 ## GenLayer RPC Methods
 
-These methods exist in studio but NOT on testnet RPC:
+### Availability
 
-| Method | Studio | Testnet |
+| Method | Studio | Testnet (Bradbury / Asimov) |
 |---|---|---|
-| `gen_getContractCode` | Returns base64 contract source | **Not available** — `contractActions` throws "not supported on this network" |
-| `gen_getContractSchema` | Returns JSON schema | **Not available** — same |
-| `gen_getContractSchemaForCode` | Returns schema for code string | **Not available** — same |
-| `gen_call` | Returns bare hex string (e.g. `"818080a8..."`) | Returns object: `{"data": "818080...", "eqOutputs": [], "status": {"code": 0, "message": "success"}, "stdout": "", "stderr": "", "logs": [...]}` |
+| `gen_getContractCode` | Available — param: `address` | Available — param: `{ address }` |
+| `gen_getContractSchema` | Available — param: `address`, returns schema for contract deployed at that address | **Available but semantically different** — param: `{ code }` (base64), returns schema for the supplied code. See "Schema method divergence" below. |
+| `gen_getContractSchemaForCode` | Available — param: hex or UTF-8 contract code | **Not available** under this name — node exposes equivalent behavior as `gen_getContractSchema` (see below) |
+| `gen_call` | Returns bare hex string (e.g. `"818080a8..."`) | Returns object: `{"data": "818080...", "eqOutputs": [], "status": {"code": 0, "message": "success"}, "stdout": "", "stderr": "", "logs": [...]}`. Normalized in `genlayer-js` via `extractGenCallResult` |
 | `sim_call` | Simulates with full state | **Not available** — studio-only |
 | `sim_cancelTransaction` | Cancels pending tx | **Not available** — studio-only |
+| `sim_lintContract` | Lints contract source | **Not available** — studio-only |
+
+### Schema method divergence
+
+`gen_getContractSchema` and `gen_getContractSchemaForCode` share names across implementations but have different parameters and semantics:
+
+| Behavior | Studio | Node (Bradbury / Asimov) |
+|---|---|---|
+| "Give me the schema of the contract deployed at address X" | `gen_getContractSchema(address)` — 1 call | No direct method. Requires 2 calls: `gen_getContractCode({address})` → `gen_getContractSchema({code})` |
+| "Give me the schema for this source code" | `gen_getContractSchemaForCode(hex_or_utf8)` | `gen_getContractSchema({base64_code})` |
+| Studio impl | `backend/protocol_rpc/endpoints.py:817-857` (reads `ContractSnapshot`, decodes stored b64, compiles) | Node takes code directly as the input payload |
+
+**Resolution path:**
+
+1. **Short term — hide divergence in `genlayer-js`.** Patch the SDK so `getContractSchema(address)` works on any chain: on Studio, call `gen_getContractSchema(address)` directly; on the node, do the 2-call dance internally (`gen_getContractCode` → `gen_getContractSchema({code})`). Same for `getContractSchemaForCode`. Remove the existing `if (!isStudio) throw` guards. Unblocks multi-network UIs (e.g. Studio frontend running against testnet) immediately without any protocol-level change.
+2. **Long term — align at the protocol level.** Studio's address-based `gen_getContractSchema` is arguably the more useful primitive (address is what a consumer typically has; the lookup is on the server anyway). TBD whether Studio adopts node semantics or vice-versa. Once aligned, the SDK workaround in (1) is removed and both sides speak the same protocol.
 
 ## Status Enums
 

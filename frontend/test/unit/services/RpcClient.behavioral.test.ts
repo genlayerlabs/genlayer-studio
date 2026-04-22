@@ -1,10 +1,10 @@
 /**
  * Behavioral snapshot tests for RpcClient.
  *
- * Documents the WS-blocking behavior and HTTP call pattern.
- * The multi-network refactor must:
- * - Preserve this behavior when isStudio=true (WS exists)
- * - Skip WS wait when isStudio=false (no WS on testnet)
+ * Documents the WS-blocking behavior and HTTP call pattern:
+ * - On Studio (isStudio=true): block on WS connect before making HTTP call,
+ *   forward session id in `x-session-id`.
+ * - On non-Studio (isStudio=false): skip WS entirely — no session header.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -14,16 +14,19 @@ const mockWsClient = {
   id: 'test-session-id',
   on: vi.fn(),
 };
+const mockNetworkStore = {
+  rpcUrl: 'http://localhost:4000/api',
+  isStudio: true,
+};
 
 vi.mock('@/hooks', () => ({
   useWebSocketClient: vi.fn(() => mockWsClient),
 }));
 
-vi.mock('@/utils/runtimeConfig', () => ({
-  getRuntimeConfig: vi.fn(() => 'http://localhost:4000/api'),
+vi.mock('@/stores/network', () => ({
+  useNetworkStore: vi.fn(() => mockNetworkStore),
 }));
 
-// Mock uuid
 vi.mock('uuid', () => ({
   v4: vi.fn(() => 'test-uuid'),
 }));
@@ -34,29 +37,29 @@ describe('RpcClient — behavioral contract', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockWsClient.connected = false;
+    mockWsClient.id = 'test-session-id';
+    mockNetworkStore.rpcUrl = 'http://localhost:4000/api';
+    mockNetworkStore.isStudio = true;
     mockFetch.mockResolvedValue({
       ok: true,
       json: () => Promise.resolve({ result: 'ok', error: null }),
     });
   });
 
-  it('should block on WS connect before making HTTP call', async () => {
+  it('on Studio: blocks on WS connect before making HTTP call', async () => {
     vi.resetModules();
     const { RpcClient } = await import('@/clients/rpc');
     const client = new RpcClient();
 
-    // Start the call — should be blocked waiting for WS
     let resolved = false;
     const callPromise = client.call({ method: 'ping', params: [] }).then(() => {
       resolved = true;
     });
 
-    // Give microtasks a chance
     await new Promise((r) => setTimeout(r, 50));
     expect(resolved).toBe(false);
     expect(mockFetch).not.toHaveBeenCalled();
 
-    // Simulate WS connect
     const connectCallback = mockWsClient.on.mock.calls.find(
       (c: any[]) => c[0] === 'connect',
     )?.[1];
@@ -67,7 +70,7 @@ describe('RpcClient — behavioral contract', () => {
     expect(mockFetch).toHaveBeenCalled();
   });
 
-  it('should not block if WS is already connected', async () => {
+  it('on Studio: does not block if WS is already connected', async () => {
     mockWsClient.connected = true;
 
     vi.resetModules();
@@ -79,7 +82,7 @@ describe('RpcClient — behavioral contract', () => {
     expect(mockFetch).toHaveBeenCalled();
   });
 
-  it('should send x-session-id header from WS client id', async () => {
+  it('on Studio: sends x-session-id header from WS client id', async () => {
     mockWsClient.connected = true;
     mockWsClient.id = 'my-session-123';
 
@@ -94,7 +97,25 @@ describe('RpcClient — behavioral contract', () => {
     expect(headers['x-session-id']).toBe('my-session-123');
   });
 
-  it('should send JSON-RPC 2.0 formatted request', async () => {
+  it('on non-Studio: skips WS entirely and omits the session header', async () => {
+    mockNetworkStore.isStudio = false;
+
+    vi.resetModules();
+    const { RpcClient } = await import('@/clients/rpc');
+    const client = new RpcClient();
+
+    await client.call({ method: 'ping', params: [] });
+
+    // No WS interactions at all
+    expect(mockWsClient.on).not.toHaveBeenCalled();
+
+    const fetchCall = mockFetch.mock.calls[0];
+    const headers = fetchCall[1].headers;
+    expect(headers['x-session-id']).toBeUndefined();
+    expect(mockFetch).toHaveBeenCalled();
+  });
+
+  it('sends JSON-RPC 2.0 formatted request', async () => {
     mockWsClient.connected = true;
 
     vi.resetModules();
@@ -111,8 +132,10 @@ describe('RpcClient — behavioral contract', () => {
     expect(body.id).toBeDefined();
   });
 
-  it('should POST to the configured RPC URL', async () => {
+  it('POSTs to the RPC URL resolved from the network store', async () => {
     mockWsClient.connected = true;
+    mockNetworkStore.rpcUrl = 'https://rpc-bradbury.genlayer.com';
+    mockNetworkStore.isStudio = false;
 
     vi.resetModules();
     const { RpcClient } = await import('@/clients/rpc');
@@ -121,6 +144,6 @@ describe('RpcClient — behavioral contract', () => {
     await client.call({ method: 'ping', params: [] });
 
     const url = mockFetch.mock.calls[0][0];
-    expect(url).toBe('http://localhost:4000/api');
+    expect(url).toBe('https://rpc-bradbury.genlayer.com');
   });
 });

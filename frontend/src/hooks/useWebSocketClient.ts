@@ -3,7 +3,7 @@
  * Replaces Socket.IO with standard WebSockets for FastAPI compatibility
  */
 
-import { getRuntimeConfig } from '@/utils/runtimeConfig';
+import { useNetworkStore } from '@/stores/network';
 
 interface WebSocketMessage {
   event: string;
@@ -214,8 +214,62 @@ class NativeWebSocketClient {
 // Singleton instance with initialization state tracking
 let webSocketClient: NativeWebSocketClient | null = null;
 let isInitializing: boolean = false;
+let currentUrl: string | null = null;
 
-export function useWebSocketClient(): NativeWebSocketClient {
+/**
+ * A no-op stub returned when there is no WebSocket endpoint for the current
+ * network (e.g. Bradbury). Callers still get the same interface so existing
+ * `.on()` / `.emit()` / `.connected` usage compiles and runs without branches.
+ */
+const nullClient: NativeWebSocketClient = new Proxy(
+  {},
+  {
+    get(_target, prop) {
+      if (prop === 'connected') return false;
+      if (prop === 'id') return null;
+      if (prop === 'on' || prop === 'off' || prop === 'emit') {
+        return () => undefined;
+      }
+      if (
+        prop === 'disconnect' ||
+        prop === 'reconnectNow' ||
+        prop === 'connect'
+      ) {
+        return () => undefined;
+      }
+      return undefined;
+    },
+  },
+) as unknown as NativeWebSocketClient;
+
+export function useWebSocketClient(url?: string): NativeWebSocketClient {
+  // Resolve the URL: explicit argument wins; otherwise derive from the
+  // currently-selected network (non-Studio chains have no WS endpoint).
+  let resolvedUrl: string | null = url ?? null;
+  if (resolvedUrl === null) {
+    try {
+      resolvedUrl = useNetworkStore().wsUrl;
+    } catch {
+      // Pinia not yet initialized (very early boot) — caller gets the stub.
+      return nullClient;
+    }
+  }
+
+  if (!resolvedUrl) {
+    // Non-Studio network or caller opted out: ensure any existing singleton
+    // is torn down so we don't keep a stale WS alive after a network switch.
+    if (webSocketClient) {
+      disposeWebSocketClient();
+    }
+    return nullClient;
+  }
+
+  // If the URL changed since the singleton was created, tear it down and
+  // recreate against the new endpoint.
+  if (webSocketClient && currentUrl && currentUrl !== resolvedUrl) {
+    disposeWebSocketClient();
+  }
+
   // Return existing client if already created or currently initializing
   if (webSocketClient && (webSocketClient.connected || isInitializing)) {
     return webSocketClient;
@@ -224,8 +278,8 @@ export function useWebSocketClient(): NativeWebSocketClient {
   // Create new client if none exists
   if (!webSocketClient && !isInitializing) {
     isInitializing = true;
-    const wsUrl = getRuntimeConfig('VITE_WS_SERVER_URL', 'ws://localhost:4000');
-    webSocketClient = new NativeWebSocketClient(wsUrl);
+    currentUrl = resolvedUrl;
+    webSocketClient = new NativeWebSocketClient(resolvedUrl);
 
     // Reset initialization flag when connection completes (success or failure)
     webSocketClient.on('connect', () => {
@@ -240,11 +294,13 @@ export function useWebSocketClient(): NativeWebSocketClient {
     });
   }
 
-  return webSocketClient!;
+  return webSocketClient ?? nullClient;
 }
 
-export async function useWebSocketClientAsync(): Promise<NativeWebSocketClient> {
-  const client = useWebSocketClient();
+export async function useWebSocketClientAsync(
+  url?: string,
+): Promise<NativeWebSocketClient> {
+  const client = useWebSocketClient(url);
 
   if (client.connected) {
     return client;
@@ -255,4 +311,38 @@ export async function useWebSocketClientAsync(): Promise<NativeWebSocketClient> 
       resolve(client);
     });
   });
+}
+
+/**
+ * Dispose the current WebSocket singleton. Safe to call repeatedly. After
+ * dispose, `useWebSocketClient(url)` returns `nullClient` until the caller
+ * explicitly reinitializes with a URL (or calls `ensureWebSocketClient`).
+ */
+export function disposeWebSocketClient() {
+  if (webSocketClient) {
+    webSocketClient.disconnect();
+    webSocketClient = null;
+  }
+  isInitializing = false;
+  currentUrl = null;
+}
+
+/**
+ * Ensures a WebSocket is running against `url`. If the current singleton is
+ * connected to a different URL, it is torn down and replaced. Pass a falsy
+ * url to fully dispose the client (e.g. when switching to a non-Studio chain).
+ */
+export function ensureWebSocketClient(
+  url: string | null,
+): NativeWebSocketClient {
+  if (!url) {
+    disposeWebSocketClient();
+    return nullClient;
+  }
+  if (webSocketClient && currentUrl === url) {
+    return webSocketClient;
+  }
+  // URL changed or no client yet — tear down and recreate.
+  disposeWebSocketClient();
+  return useWebSocketClient(url);
 }

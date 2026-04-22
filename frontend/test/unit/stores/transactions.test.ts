@@ -87,19 +87,25 @@ describe('useTransactionsStore', () => {
 
     // Now create the store - this will trigger the WebSocket setup
     transactionsStore = useTransactionsStore();
-    transactionsStore.transactions = [];
+    transactionsStore.setAllTransactions([]);
   });
 
   it('should add a transaction', () => {
     transactionsStore.addTransaction(testTransaction);
-    expect(transactionsStore.transactions).to.deep.include(testTransaction);
+    expect(transactionsStore.transactions).toContainEqual(
+      expect.objectContaining({ hash: testTransaction.hash }),
+    );
   });
 
   it('should remove an added transaction', () => {
     transactionsStore.addTransaction(testTransaction);
-    expect(transactionsStore.transactions).to.deep.include(testTransaction);
+    expect(transactionsStore.transactions).toContainEqual(
+      expect.objectContaining({ hash: testTransaction.hash }),
+    );
     transactionsStore.removeTransaction(testTransaction);
-    expect(transactionsStore.transactions).not.to.deep.include(testTransaction);
+    expect(transactionsStore.transactions).not.toContainEqual(
+      expect.objectContaining({ hash: testTransaction.hash }),
+    );
   });
 
   it('should update a transaction', () => {
@@ -148,7 +154,9 @@ describe('useTransactionsStore', () => {
     expect(mockDb.transactions.equals).toHaveBeenCalledWith('contract-1');
     expect(mockDb.transactions.delete).toHaveBeenCalled();
 
-    expect(transactionsStore.transactions).toEqual([tx2]);
+    expect(transactionsStore.transactions).toEqual([
+      expect.objectContaining({ hash: tx2.hash }),
+    ]);
   });
 
   it('should refresh pending transactions', async () => {

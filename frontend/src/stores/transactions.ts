@@ -1,16 +1,23 @@
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
 import type { TransactionItem } from '@/types';
 import type { TransactionHash } from 'genlayer-js/types';
 import { TransactionStatus } from 'genlayer-js/types';
 import { useDb, useGenlayer, useWebSocketClient } from '@/hooks';
+import { useNetworkStore } from '@/stores/network';
 
 export const useTransactionsStore = defineStore('transactionsStore', () => {
   const genlayer = useGenlayer();
   const genlayerClient = computed(() => genlayer.client.value);
+  const networkStore = useNetworkStore();
   const webSocketClient = useWebSocketClient();
-  const transactions = ref<TransactionItem[]>([]);
-  const subscriptions = new Set();
+  const allTransactions = ref<TransactionItem[]>([]);
+  const transactions = computed<TransactionItem[]>(() =>
+    allTransactions.value.filter(
+      (t) => t.chainId === undefined || t.chainId === networkStore.chainId,
+    ),
+  );
+  const subscriptions = new Set<string>();
   const db = useDb();
 
   // Named handler for WebSocket reconnection
@@ -26,26 +33,48 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
   webSocketClient.off('connect', handleReconnection);
   webSocketClient.on('connect', handleReconnection);
 
+  // On network change, drop WS subscriptions (they are Studio-only anyway)
+  // and re-subscribe to the current network's pending-ish txs on Studio.
+  watch(
+    () => networkStore.chainId,
+    () => {
+      subscriptions.clear();
+      if (networkStore.isStudio) {
+        initSubscriptions();
+      }
+    },
+  );
+
+  function setAllTransactions(items: TransactionItem[]) {
+    allTransactions.value = items;
+  }
+
   function addTransaction(tx: TransactionItem) {
-    transactions.value.unshift(tx); // Push on top in case there's no date property yet
-    subscribe([tx.hash]);
+    const stamped = {
+      ...tx,
+      chainId: tx.chainId ?? networkStore.chainId,
+    };
+    allTransactions.value.unshift(stamped); // Push on top in case there's no date property yet
+    subscribe([stamped.hash]);
   }
 
   function removeTransaction(tx: TransactionItem) {
-    transactions.value = transactions.value.filter((t) => t.hash !== tx.hash);
+    allTransactions.value = allTransactions.value.filter(
+      (t) => t.hash !== tx.hash,
+    );
     unsubscribe(tx.hash);
   }
 
   function updateTransaction(tx: any) {
-    const currentTxIndex = transactions.value.findIndex(
+    const currentTxIndex = allTransactions.value.findIndex(
       (t) => t.hash === tx.hash,
     );
 
     if (currentTxIndex !== -1) {
-      const currentTx = transactions.value[currentTxIndex];
+      const currentTx = allTransactions.value[currentTxIndex];
       if (!currentTx) return;
 
-      transactions.value.splice(currentTxIndex, 1, {
+      allTransactions.value.splice(currentTxIndex, 1, {
         ...currentTx,
         statusName: tx.statusName,
         data: tx,
@@ -62,6 +91,8 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
   }
 
   async function refreshPendingTransactions() {
+    // Only refresh txs belonging to the current network — querying cross-network
+    // hashes would silently "not find" them and drop them from the store.
     const pendingTxs = transactions.value.filter(
       (tx: TransactionItem) => tx.statusName !== TransactionStatus.FINALIZED,
     ) as TransactionItem[];
@@ -85,13 +116,13 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
   }
 
   async function clearTransactionsForContract(contractId: string) {
-    const contractTxs = transactions.value.filter(
+    const contractTxs = allTransactions.value.filter(
       (t) => t.localContractId === contractId,
     );
 
     contractTxs.forEach((t) => unsubscribe(t.hash));
 
-    transactions.value = transactions.value.filter(
+    allTransactions.value = allTransactions.value.filter(
       (t) => t.localContractId !== contractId,
     );
 
@@ -127,17 +158,19 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
   }
 
   function initSubscriptions() {
+    // Only subscribe to the current network's txs; testnet WS is a no-op stub.
     subscribe(transactions.value.map((t) => t.hash));
   }
 
   async function resetStorage() {
-    transactions.value.forEach((t) => unsubscribe(t.hash));
-    transactions.value = [];
+    allTransactions.value.forEach((t) => unsubscribe(t.hash));
+    allTransactions.value = [];
     await db.transactions.clear();
   }
 
   return {
     transactions,
+    allTransactions,
     getTransaction,
     addTransaction,
     removeTransaction,
@@ -147,6 +180,7 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
     cancelTransaction,
     refreshPendingTransactions,
     initSubscriptions,
+    setAllTransactions,
     resetStorage,
   };
 });

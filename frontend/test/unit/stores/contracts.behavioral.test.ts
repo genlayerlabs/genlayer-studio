@@ -65,7 +65,7 @@ describe('contractsStore — deployed contract behavior', () => {
     );
   });
 
-  it('deployed contracts have NO chainId field (current limitation)', () => {
+  it('deployed contracts are stamped with the current network chainId', () => {
     const store = useContractsStore();
     store.addDeployedContract({
       contractId: 'test',
@@ -77,8 +77,7 @@ describe('contractsStore — deployed contract behavior', () => {
       (d: any) => d.contractId === 'test',
     );
     expect(deployed).toBeDefined();
-    // This documents the current state — no chainId scoping
-    expect((deployed as any).chainId).toBeUndefined();
+    expect((deployed as any).chainId).toBeTypeOf('number');
   });
 
   it('removeDeployedContract removes by contractId', () => {

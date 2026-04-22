@@ -1,46 +1,56 @@
 import { computed } from 'vue';
 import { numberToHex } from 'viem';
 import { useAccountsStore } from '@/stores';
+import { useNetworkStore } from '@/stores/network';
 import { useWallet } from './useWallet';
-import { useGenlayer } from './useGenlayer';
-import {
-  getRuntimeConfig,
-  getRuntimeConfigNumber,
-} from '@/utils/runtimeConfig';
+import { getRuntimeConfig } from '@/utils/runtimeConfig';
 
 /**
  * Ensures the connected external wallet is on the correct chain
  * before sending a transaction. For local accounts this is a no-op.
  *
- * Uses VITE_CHAIN_ID for the target chain (each Studio instance has
- * its own chain ID), falling back to the SDK client's chain ID.
- * Uses VITE_JSON_RPC_SERVER_URL for the RPC URL when adding the
- * network to MetaMask.
+ * Chain info comes from the network store; an explicit `target` can be
+ * supplied when switching network via the UI selector (so we enforce
+ * the new chain before the SDK client re-inits).
  */
 export function useChainEnforcer() {
   const accountsStore = useAccountsStore();
+  const networkStore = useNetworkStore();
   const wallet = useWallet();
-  const genlayer = useGenlayer();
 
   const isExternalWallet = computed(
     () => accountsStore.selectedAccount?.type === 'external',
   );
 
-  async function ensureCorrectChain() {
+  async function ensureCorrectChain(target?: {
+    chainId: number;
+    chainName: string;
+    rpcUrl: string;
+    nativeCurrency?: {
+      name: string;
+      symbol: string;
+      decimals: number;
+    };
+  }): Promise<void> {
     if (!isExternalWallet.value) return;
 
     const provider = wallet.walletProvider.value;
     if (!provider?.request) return;
 
-    const client = genlayer.client.value;
-    if (!client?.chain) return;
-
-    // Use per-deployment chain ID (each Studio instance has its own),
-    // falling back to SDK chain ID
-    const targetChainId = getRuntimeConfigNumber(
-      'VITE_CHAIN_ID',
-      client.chain.id,
-    );
+    const chain = networkStore.chain;
+    const targetChainId = target?.chainId ?? networkStore.chainId;
+    const defaultHttpRpc = chain.rpcUrls?.default?.http?.[0] ?? '';
+    const rpcUrl =
+      target?.rpcUrl ??
+      (networkStore.isStudio
+        ? getRuntimeConfig('VITE_JSON_RPC_SERVER_URL', defaultHttpRpc)
+        : defaultHttpRpc);
+    const chainName =
+      target?.chainName ??
+      (networkStore.isStudio
+        ? getRuntimeConfig('VITE_CHAIN_NAME', chain.name)
+        : chain.name);
+    const nativeCurrency = target?.nativeCurrency ?? chain.nativeCurrency;
 
     const currentChainHex = (await provider.request({
       method: 'eth_chainId',
@@ -58,18 +68,13 @@ export function useChainEnforcer() {
       });
     } catch (switchError: any) {
       if (switchError.code === 4902) {
-        const chain = client.chain;
-        const rpcUrl = getRuntimeConfig(
-          'VITE_JSON_RPC_SERVER_URL',
-          chain.rpcUrls?.default?.http?.[0] ?? '',
-        );
         await provider.request({
           method: 'wallet_addEthereumChain',
           params: [
             {
               chainId: targetChainHex,
-              chainName: getRuntimeConfig('VITE_CHAIN_NAME', chain.name),
-              nativeCurrency: chain.nativeCurrency,
+              chainName,
+              nativeCurrency,
               rpcUrls: [rpcUrl],
             },
           ],
@@ -93,5 +98,5 @@ export function useChainEnforcer() {
     }
   }
 
-  return { ensureCorrectChain };
+  return { ensureCorrectChain, isExternalWallet };
 }
