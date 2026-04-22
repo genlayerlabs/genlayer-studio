@@ -106,6 +106,7 @@ jobs:
             database-migration
             jsonrpc
             consensus-worker
+            explorer
           set: |
             *.cache-from=type=gha
             *.cache-to=type=gha,mode=max
@@ -113,6 +114,7 @@ jobs:
             database-migration.tags=genlayer-studio-database-migration:latest
             jsonrpc.tags=genlayer-studio-jsonrpc:latest
             consensus-worker.tags=genlayer-studio-consensus-worker:latest
+            explorer.tags=genlayer-studio-explorer:latest
           load: true
 
       - name: Run Docker Compose with multiple workers
