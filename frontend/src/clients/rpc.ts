@@ -1,11 +1,16 @@
 import type { JsonRPCRequest, JsonRPCResponse } from '@/types';
-import { v4 as uuidv4 } from 'uuid';
 import { useWebSocketClient } from '@/hooks';
 import { useNetworkStore } from '@/stores/network';
 
 export interface IRpcClient {
   call<T>(request: JsonRPCRequest): Promise<JsonRPCResponse<T>>;
 }
+
+// JSON-RPC 2.0 allows string or number ids, but the Go node we talk to on
+// Bradbury/Asimov rejects strings (`cannot unmarshal string into Go struct
+// field Request.id of type int`). Use a monotonic counter to stay compatible
+// with both the Studio Python backend and Go testnet nodes.
+let nextRequestId = 1;
 
 export class RpcClient implements IRpcClient {
   async call<T>({
@@ -33,12 +38,11 @@ export class RpcClient implements IRpcClient {
       headers['x-session-id'] = webSocketClient.id ?? '';
     }
 
-    const requestId = uuidv4();
     const data = {
       jsonrpc: '2.0',
       method,
       params,
-      id: requestId,
+      id: nextRequestId++,
     };
     const response = await fetch(endpoint, {
       method: 'POST',
