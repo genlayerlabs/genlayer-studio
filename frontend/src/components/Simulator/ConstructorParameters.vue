@@ -23,8 +23,9 @@ const calldataArguments = ref<ArgData>({ args: [], kwargs: {} });
 const ctorMethod = computed(() => data.value.ctor);
 
 const schemaErrorMessage = computed(() => {
-  if (!schemaError.value) return '';
-  return (schemaError.value as Error)?.message || String(schemaError.value);
+  const err = schemaError.value as any;
+  if (!err) return '';
+  return err.rawGenvmError || err.message || String(err);
 });
 
 const emit = defineEmits(['deployed-contract']);

@@ -116,7 +116,9 @@ export function useContractQueries() {
     } catch (error: any) {
       const rawMsg = error.details || error.message || String(error);
       const friendly = parseGenvmError(rawMsg);
-      throw new Error(friendly.title + ': ' + friendly.reason);
+      const err = new Error(friendly.title + ': ' + friendly.reason);
+      (err as any).rawGenvmError = rawMsg;
+      throw err;
     }
   }
 
@@ -187,7 +189,9 @@ export function useContractQueries() {
         text: friendly.reason,
       });
       console.error('Error Deploying the contract', error);
-      throw new Error(friendly.title + ': ' + friendly.reason);
+      const err = new Error(friendly.title + ': ' + friendly.reason);
+      (err as any).rawGenvmError = rawMsg;
+      throw err;
     }
   }
 
@@ -299,7 +303,9 @@ export function useContractQueries() {
       const rawMsg = error?.details || error?.message || String(error);
       const friendly = parseGenvmError(rawMsg);
       console.error(error);
-      throw new Error(friendly.title + ': ' + friendly.reason);
+      const err = new Error(friendly.title + ': ' + friendly.reason);
+      (err as any).rawGenvmError = rawMsg;
+      throw err;
     }
   }
 
