@@ -6,6 +6,7 @@ import { ArrowUpTrayIcon } from '@heroicons/vue/16/solid';
 import ContractParams from './ContractParams.vue';
 import { type ArgData, unfoldArgsData } from './ContractParams';
 import type { ExecutionMode } from '@/types';
+import GenVMErrorDisplay from '@/components/Simulator/GenVMErrorDisplay.vue';
 
 const props = defineProps<{
   executionMode: ExecutionMode;
@@ -15,11 +16,16 @@ const props = defineProps<{
 const { contract, contractSchemaQuery, deployContract, isDeploying } =
   useContractQueries();
 
-const { data, isPending, isRefetching, isError } = contractSchemaQuery;
+const { data, isPending, isRefetching, isError, error: schemaError } = contractSchemaQuery;
 
 const calldataArguments = ref<ArgData>({ args: [], kwargs: {} });
 
 const ctorMethod = computed(() => data.value.ctor);
+
+const schemaErrorMessage = computed(() => {
+  if (!schemaError.value) return '';
+  return (schemaError.value as Error)?.message || String(schemaError.value);
+});
 
 const emit = defineEmits(['deployed-contract']);
 
@@ -45,6 +51,10 @@ const handleDeployContract = async () => {
 
     <ContentLoader v-if="isPending" />
 
+    <GenVMErrorDisplay
+      v-else-if="isError && schemaErrorMessage"
+      :raw-error="schemaErrorMessage"
+    />
     <Alert v-else-if="isError" error> Could not load contract schema. </Alert>
 
     <template v-else-if="data">
@@ -69,3 +79,4 @@ const handleDeployContract = async () => {
     </template>
   </PageSection>
 </template>
+

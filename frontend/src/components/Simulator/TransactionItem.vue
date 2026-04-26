@@ -30,6 +30,7 @@ import {
   getRuntimeConfigNumber,
 } from '@/utils/runtimeConfig';
 import { getExplorerUrl } from '@/utils/explorerUrl';
+import GenVMErrorDisplay from '@/components/Simulator/GenVMErrorDisplay.vue';
 
 const explorerUrl = computed(() => getExplorerUrl());
 
@@ -455,15 +456,10 @@ const badgeColorClass = computed(() => {
               class="overflow-x-auto whitespace-pre rounded bg-gray-200 p-1 text-xs text-gray-600 dark:bg-zinc-800 dark:text-gray-300"
               >{{ leaderReceipt?.result?.payload?.readable || 'None' }}</pre
             >
-            <div
+            <GenVMErrorDisplay
               v-if="leaderErrorDetail"
-              class="rounded border border-red-300 bg-red-50 p-2 text-xs text-red-700 dark:border-red-700 dark:bg-red-900/20 dark:text-red-300"
-            >
-              <div class="mb-1 font-medium">Error Detail</div>
-              <pre class="whitespace-pre-wrap break-all">{{
-                leaderErrorDetail
-              }}</pre>
-            </div>
+              :raw-error="leaderErrorDetail"
+            />
           </div>
         </ModalSection>
 
@@ -616,14 +612,11 @@ const badgeColorClass = computed(() => {
                     </div>
                   </div>
                 </div>
-                <div
+                <GenVMErrorDisplay
                   v-if="extractErrorText(history.leader_result[0])"
-                  class="ml-5 mt-1 rounded bg-red-50 px-2 py-1 text-[10px] text-red-600 dark:bg-red-900/20 dark:text-red-300"
-                >
-                  <pre class="whitespace-pre-wrap break-all">{{
-                    extractErrorText(history.leader_result[0])
-                  }}</pre>
-                </div>
+                  :raw-error="extractErrorText(history.leader_result[0])!"
+                  class="ml-5 mt-1"
+                />
               </div>
 
               <!-- Validator rows -->
@@ -684,14 +677,11 @@ const badgeColorClass = computed(() => {
                     </div>
                   </div>
                 </div>
-                <div
+                <GenVMErrorDisplay
                   v-if="extractErrorText(validator)"
-                  class="ml-5 mt-1 rounded bg-red-50 px-2 py-1 text-[10px] text-red-600 dark:bg-red-900/20 dark:text-red-300"
-                >
-                  <pre class="whitespace-pre-wrap break-all">{{
-                    extractErrorText(validator)
-                  }}</pre>
-                </div>
+                  :raw-error="extractErrorText(validator)!"
+                  class="ml-5 mt-1"
+                />
               </div>
             </template>
           </div>

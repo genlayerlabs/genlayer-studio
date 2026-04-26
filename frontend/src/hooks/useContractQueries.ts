@@ -15,6 +15,7 @@ import {
   useWallet,
   useChainEnforcer,
 } from '@/hooks';
+import { parseGenvmError } from '@/utils/genvmErrors';
 import type {
   Address,
   TransactionHash,
@@ -113,7 +114,9 @@ export function useContractQueries() {
       schema.value = result;
       return schema.value;
     } catch (error: any) {
-      throw new Error(error.details || error.message);
+      const rawMsg = error.details || error.message || String(error);
+      const friendly = parseGenvmError(rawMsg);
+      throw new Error(friendly.title + ': ' + friendly.reason);
     }
   }
 
@@ -174,14 +177,17 @@ export function useContractQueries() {
       transactionsStore.addTransaction(tx);
       contractsStore.removeDeployedContract(contract.value?.id ?? '');
       return tx;
-    } catch (error) {
+    } catch (error: any) {
       isDeploying.value = false;
+      const rawMsg = error?.details || error?.message || String(error);
+      const friendly = parseGenvmError(rawMsg);
       notify({
         type: 'error',
-        title: 'Error deploying contract',
+        title: friendly.title,
+        text: friendly.reason,
       });
       console.error('Error Deploying the contract', error);
-      throw new Error('Error Deploying the contract');
+      throw new Error(friendly.title + ': ' + friendly.reason);
     }
   }
 
@@ -289,9 +295,11 @@ export function useContractQueries() {
         },
       });
       return true;
-    } catch (error) {
+    } catch (error: any) {
+      const rawMsg = error?.details || error?.message || String(error);
+      const friendly = parseGenvmError(rawMsg);
       console.error(error);
-      throw new Error('Error writing to contract');
+      throw new Error(friendly.title + ': ' + friendly.reason);
     }
   }
 
