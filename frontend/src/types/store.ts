@@ -17,6 +17,7 @@ export interface DeployedContract {
   contractId: string;
   address: Address;
   defaultState: string;
+  deployTxHash?: `0x${string}`;
 }
 
 export interface NodeLog {

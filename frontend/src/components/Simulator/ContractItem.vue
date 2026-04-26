@@ -10,6 +10,10 @@ import {
 } from '@heroicons/vue/16/solid';
 import { ref, onMounted, nextTick } from 'vue';
 import { notify } from '@kyvg/vue3-notification';
+import { computed } from 'vue';
+import { useShortAddress } from '@/hooks';
+
+const { shorten } = useShortAddress();
 
 const store = useContractsStore();
 const defaultContractName = 'New Contract.py';
@@ -21,6 +25,11 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits(['save', 'cancel']);
+
+const deployedContract = computed(() => {
+  if (!props.contract) return null;
+  return store.deployedContracts.find((c) => c.contractId === props.contract?.id);
+});
 
 const isEditing = ref(false);
 const editInput = ref<HTMLInputElement | null>(null);
@@ -137,33 +146,41 @@ const handleDownloadFile = (e: Event) => {
 
       <div
         v-else-if="contract"
-        class="flex w-full items-center justify-between truncate"
+        class="flex w-full flex-col truncate"
       >
-        <div data-testid="contract-file" class="truncate font-semibold">
-          {{ contract.name }}
+        <div class="flex w-full items-center justify-between truncate">
+          <div data-testid="contract-file" class="truncate font-semibold">
+            {{ contract.name }}
+          </div>
+
+          <div class="hidden flex-row gap-1 group-hover:flex">
+            <button @click.stop="handleEditFile" v-tooltip="'Edit Name'">
+              <PencilSquareIcon
+                class="h-[16px] w-[16px] p-[2px] text-gray-400 transition-all hover:text-gray-800 active:scale-90 dark:hover:text-white"
+              />
+            </button>
+
+            <button @click.stop="handleDownloadFile" v-tooltip="'Download file'">
+              <ArrowDownOnSquareIcon
+                class="h-[16px] w-[16px] p-[2px] text-gray-400 transition-all hover:text-gray-800 active:scale-90 dark:hover:text-white"
+              />
+            </button>
+
+            <button
+              @click.stop="deleteModalOpen = true"
+              v-tooltip="'Delete file'"
+            >
+              <TrashIcon
+                class="h-[16px] w-[16px] p-[2px] text-gray-400 transition-all hover:text-gray-800 active:scale-90 dark:hover:text-white"
+              />
+            </button>
+          </div>
         </div>
-
-        <div class="hidden flex-row gap-1 group-hover:flex">
-          <button @click.stop="handleEditFile" v-tooltip="'Edit Name'">
-            <PencilSquareIcon
-              class="h-[16px] w-[16px] p-[2px] text-gray-400 transition-all hover:text-gray-800 active:scale-90 dark:hover:text-white"
-            />
-          </button>
-
-          <button @click.stop="handleDownloadFile" v-tooltip="'Download file'">
-            <ArrowDownOnSquareIcon
-              class="h-[16px] w-[16px] p-[2px] text-gray-400 transition-all hover:text-gray-800 active:scale-90 dark:hover:text-white"
-            />
-          </button>
-
-          <button
-            @click.stop="deleteModalOpen = true"
-            v-tooltip="'Delete file'"
-          >
-            <TrashIcon
-              class="h-[16px] w-[16px] p-[2px] text-gray-400 transition-all hover:text-gray-800 active:scale-90 dark:hover:text-white"
-            />
-          </button>
+        <div
+          v-if="deployedContract"
+          class="truncate text-[10px] text-gray-400 dark:text-gray-500"
+        >
+          {{ shorten(deployedContract.address) }}
         </div>
       </div>
 

@@ -3,6 +3,7 @@ import ConstructorParameters from '@/components/Simulator/ConstructorParameters.
 import ContractReadMethods from '@/components/Simulator/ContractReadMethods.vue';
 import ContractWriteMethods from '@/components/Simulator/ContractWriteMethods.vue';
 import TransactionsList from '@/components/Simulator/TransactionsList.vue';
+import DeploymentSuccessPanel from '@/components/Simulator/DeploymentSuccessPanel.vue';
 import { useContractQueries } from '@/hooks';
 import MainTitle from '@/components/Simulator/MainTitle.vue';
 import { ref, watch, computed } from 'vue';
@@ -59,6 +60,33 @@ function isFinalityWindowValid(value: number) {
 }
 
 const consensusMaxRotations = computed(() => consensusStore.maxRotations);
+
+const showDeploymentSuccessPanel = ref(false);
+const newlyDeployedTxHash = ref('');
+
+watch(
+  [() => isDeployed.value, () => contract.value?.id],
+  ([newIsDeployed, newId], [oldIsDeployed, oldId]) => {
+    if (newIsDeployed && !oldIsDeployed && newId === oldId) {
+      showDeploymentSuccessPanel.value = true;
+      const deployedContract = contractsStore.deployedContracts.find(
+        (c) => c.contractId === newId,
+      );
+      newlyDeployedTxHash.value = deployedContract?.deployTxHash || '';
+    } else if (newId !== oldId) {
+      showDeploymentSuccessPanel.value = false;
+    }
+  },
+);
+
+const scrollToInteract = () => {
+  const el =
+    document.getElementById('tutorial-read-methods') ||
+    document.getElementById('tutorial-write-methods');
+  if (el) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+};
 </script>
 
 <template>
@@ -112,6 +140,16 @@ const consensusMaxRotations = computed(() => consensusStore.maxRotations);
         :showNewDeploymentButton="!isDeploymentOpen"
         @openDeployment="isDeploymentOpen = true"
       />
+
+      <div class="px-2">
+        <DeploymentSuccessPanel
+          v-if="showDeploymentSuccessPanel && isDeployed"
+          :contractAddress="address"
+          :txHash="newlyDeployedTxHash"
+          @close="showDeploymentSuccessPanel = false"
+          @interact="scrollToInteract"
+        />
+      </div>
 
       <template v-if="nodeStore.hasAtLeastOneValidator || uiStore.showTutorial">
         <ConstructorParameters
