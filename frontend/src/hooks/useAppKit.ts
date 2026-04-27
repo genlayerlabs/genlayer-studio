@@ -3,8 +3,35 @@ import { WagmiAdapter } from '@reown/appkit-adapter-wagmi';
 import { createAppKit } from '@reown/appkit/vue';
 import type { AppKitNetwork } from '@reown/appkit/networks';
 import { mainnet, sepolia } from '@reown/appkit/networks';
+import { custom } from 'viem';
 import { getRuntimeConfig } from '@/utils/runtimeConfig';
 import { createGenlayerLocalnet, createGenlayerBradbury } from './useNetworks';
+
+// GenLayer's Go RPC server rejects requests missing `jsonrpc` or `id`. Some
+// transport paths in viem/Wagmi/Reown surface a body without `id` (the field
+// is added by the http transport, but batching/retry can drop it on certain
+// paths). Wrap our chain RPCs in a custom transport that guarantees both.
+let rpcIdCounter = 1;
+function makeStrictJsonRpcTransport(rpcUrl: string) {
+  return custom({
+    async request({ method, params }) {
+      const id = rpcIdCounter++;
+      const res = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+      });
+      const json = await res.json();
+      if (json.error) {
+        const err: any = new Error(json.error.message ?? 'RPC error');
+        err.code = json.error.code;
+        err.data = json.error.data;
+        throw err;
+      }
+      return json.result;
+    },
+  });
+}
 
 export const wagmiAdapterRef = shallowRef<WagmiAdapter>();
 export let appKitReady = false;
@@ -52,6 +79,14 @@ export async function initAppKit() {
   const adapter = new GenlayerWagmiAdapter({
     projectId,
     networks,
+    transports: {
+      [genlayerLocalnet.id]: makeStrictJsonRpcTransport(
+        genlayerLocalnet.rpcUrls.default.http[0],
+      ),
+      [genlayerBradbury.id]: makeStrictJsonRpcTransport(
+        genlayerBradbury.rpcUrls.default.http[0],
+      ),
+    },
     ssr: false,
   });
 
