@@ -33,6 +33,14 @@ function makeStrictJsonRpcTransport(rpcUrl: string) {
   });
 }
 
+function getDefaultRpcUrl(network: AppKitNetwork) {
+  const rpcUrl = network.rpcUrls.default.http[0];
+  if (!rpcUrl) {
+    throw new Error(`Missing default RPC URL for ${network.name}`);
+  }
+  return rpcUrl;
+}
+
 export const wagmiAdapterRef = shallowRef<WagmiAdapter>();
 export let appKitReady = false;
 
@@ -81,10 +89,10 @@ export async function initAppKit() {
     networks,
     transports: {
       [genlayerLocalnet.id]: makeStrictJsonRpcTransport(
-        genlayerLocalnet.rpcUrls.default.http[0],
+        getDefaultRpcUrl(genlayerLocalnet),
       ),
       [genlayerBradbury.id]: makeStrictJsonRpcTransport(
-        genlayerBradbury.rpcUrls.default.http[0],
+        getDefaultRpcUrl(genlayerBradbury),
       ),
     },
     ssr: false,

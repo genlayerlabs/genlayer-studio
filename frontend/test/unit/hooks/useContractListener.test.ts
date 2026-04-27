@@ -1,11 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { useContractListener } from '@/hooks/useContractListener';
-import { useTransactionsStore, useContractsStore } from '@/stores';
+import {
+  useTransactionsStore,
+  useContractsStore,
+  useNetworkStore,
+} from '@/stores';
 import { useWebSocketClient } from '@/hooks';
 
 vi.mock('@/stores', () => ({
   useTransactionsStore: vi.fn(),
   useContractsStore: vi.fn(),
+  useNetworkStore: vi.fn(),
 }));
 
 vi.mock('@/hooks', () => ({
@@ -15,6 +20,7 @@ vi.mock('@/hooks', () => ({
 describe('useContractListener', () => {
   let transactionsStoreMock: any;
   let contractsStoreMock: any;
+  let networkStoreMock: any;
   let webSocketClientMock: any;
 
   beforeEach(() => {
@@ -31,6 +37,10 @@ describe('useContractListener', () => {
       deployedContracts: [],
     };
 
+    networkStoreMock = {
+      isStudio: true,
+    };
+
     webSocketClientMock = {
       id: 'mocked-socket-id',
       on: vi.fn(),
@@ -38,6 +48,7 @@ describe('useContractListener', () => {
 
     (useTransactionsStore as any).mockReturnValue(transactionsStoreMock);
     (useContractsStore as any).mockReturnValue(contractsStoreMock);
+    (useNetworkStore as any).mockReturnValue(networkStoreMock);
     (useWebSocketClient as any).mockReturnValue(webSocketClientMock);
   });
 
