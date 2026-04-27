@@ -107,8 +107,11 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
   }
 
   function updateTransaction(tx: any) {
+    // SDK exposes the same id under two names — `hash` on Studio responses,
+    // `txId` on testnet (Solidity struct field). Accept either.
+    const id = tx.hash ?? tx.txId;
     const currentTxIndex = allTransactions.value.findIndex(
-      (t) => t.hash === tx.hash,
+      (t) => t.hash === id,
     );
 
     if (currentTxIndex !== -1) {
