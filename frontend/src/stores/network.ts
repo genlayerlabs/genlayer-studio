@@ -28,22 +28,55 @@ const CHAINS: Record<NetworkName, GenLayerChain> = {
 
 const STORAGE_KEY = 'networkStore.currentNetwork';
 
-// v1 ships Studio + Bradbury as runtime-selectable options. Asimov shares
-// Bradbury's chain ID so it is not exposed as a separate dropdown entry;
-// reachable only via a deployment-time `VITE_GENLAYER_NETWORK` override.
-const SELECTABLE_NETWORKS: NetworkName[] = ['localnet', 'testnetBradbury'];
+// v1 ships one deployment-configured Studio network + Bradbury as
+// runtime-selectable options. Asimov shares Bradbury's chain ID so it is not
+// exposed as a separate dropdown entry; reachable only via a deployment-time
+// `VITE_GENLAYER_NETWORK` override.
+const SELECTABLE_TESTNET_NETWORKS: NetworkName[] = ['testnetBradbury'];
+
+function getConfiguredNetwork(): NetworkName {
+  const fromEnv = getRuntimeConfig(
+    'VITE_GENLAYER_NETWORK',
+    'localnet',
+  ) as NetworkName;
+
+  return fromEnv in CHAINS ? fromEnv : 'localnet';
+}
+
+function getSelectableStudioNetwork(): NetworkName {
+  const configured = getConfiguredNetwork();
+  return CHAINS[configured].isStudio ? configured : 'localnet';
+}
+
+function resolveNetworkChain(name: NetworkName): GenLayerChain {
+  const base = CHAINS[name];
+  if (!base.isStudio) return base as GenLayerChain;
+
+  const defaultRpcUrl = base.rpcUrls?.default?.http?.[0] ?? '';
+  const runtimeRpcUrl = getRuntimeConfig(
+    'VITE_JSON_RPC_SERVER_URL',
+    defaultRpcUrl,
+  );
+
+  return markRaw({
+    ...base,
+    id: getRuntimeConfigNumber('VITE_CHAIN_ID', base.id),
+    name: getRuntimeConfig('VITE_CHAIN_NAME', base.name),
+    rpcUrls: {
+      ...base.rpcUrls,
+      default: {
+        ...base.rpcUrls.default,
+        http: runtimeRpcUrl ? [runtimeRpcUrl] : [],
+      },
+    },
+  }) as GenLayerChain;
+}
 
 function readInitialNetwork(): NetworkName {
   const persisted = localStorage.getItem(STORAGE_KEY) as NetworkName | null;
   if (persisted && persisted in CHAINS) return persisted;
 
-  const fromEnv = getRuntimeConfig(
-    'VITE_GENLAYER_NETWORK',
-    'localnet',
-  ) as NetworkName;
-  if (fromEnv in CHAINS) return fromEnv;
-
-  return 'localnet';
+  return getConfiguredNetwork();
 }
 
 export const useNetworkStore = defineStore('networkStore', () => {
@@ -54,15 +87,7 @@ export const useNetworkStore = defineStore('networkStore', () => {
   );
 
   const chain = computed<GenLayerChain>(() => {
-    const base = CHAINS[currentNetwork.value];
-    if (base.isStudio) {
-      // Per-deployment Studio chain-ID override (each Studio instance picks its own).
-      const override = getRuntimeConfigNumber('VITE_CHAIN_ID', 0);
-      if (override > 0 && override !== base.id) {
-        return markRaw({ ...base, id: override }) as GenLayerChain;
-      }
-    }
-    return markRaw(base) as GenLayerChain;
+    return resolveNetworkChain(currentNetwork.value);
   });
 
   const chainId = computed(() => chain.value.id);
@@ -89,8 +114,13 @@ export const useNetworkStore = defineStore('networkStore', () => {
   const availableNetworks = computed<
     { name: NetworkName; label: string; isStudio: boolean; chainId: number }[]
   >(() => {
-    const list = SELECTABLE_NETWORKS.map((name) => {
-      const c = CHAINS[name];
+    const selectableNetworks: NetworkName[] = [
+      getSelectableStudioNetwork(),
+      ...SELECTABLE_TESTNET_NETWORKS,
+    ];
+
+    const list = selectableNetworks.map((name) => {
+      const c = resolveNetworkChain(name);
       return {
         name,
         label: c.name,
@@ -99,11 +129,10 @@ export const useNetworkStore = defineStore('networkStore', () => {
       };
     });
 
-    // If the operator pinned a network outside the selectable list (e.g. Asimov
-    // via VITE_GENLAYER_NETWORK), surface it so the user can at least see where
-    // they are — but they cannot switch away from it via the dropdown.
+    // If the user has a persisted network outside the selectable list, surface
+    // it so they can see where they are before choosing a supported target.
     if (!list.some((n) => n.name === currentNetwork.value)) {
-      const c = CHAINS[currentNetwork.value];
+      const c = resolveNetworkChain(currentNetwork.value);
       list.push({
         name: currentNetwork.value,
         label: c.name,

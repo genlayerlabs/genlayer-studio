@@ -1,18 +1,31 @@
 import { defineChain } from '@reown/appkit/networks';
 import { markRaw } from 'vue';
-import { testnetBradbury } from 'genlayer-js/chains';
+import { localnet, studionet, testnetBradbury } from 'genlayer-js/chains';
 import {
   getRuntimeConfig,
   getRuntimeConfigNumber,
 } from '@/utils/runtimeConfig';
+import type { GenLayerChain } from 'genlayer-js/types';
+
+function getConfiguredStudioChain(): GenLayerChain {
+  const configuredNetwork = getRuntimeConfig(
+    'VITE_GENLAYER_NETWORK',
+    'localnet',
+  );
+  return configuredNetwork === 'studionet'
+    ? (studionet as GenLayerChain)
+    : (localnet as GenLayerChain);
+}
 
 export function createGenlayerLocalnet() {
+  const base = getConfiguredStudioChain();
+  const defaultRpcUrl = base.rpcUrls?.default?.http?.[0] ?? '';
   const rpcUrl = getRuntimeConfig(
     'VITE_JSON_RPC_SERVER_URL',
-    'http://127.0.0.1:4000/api',
+    defaultRpcUrl || 'http://127.0.0.1:4000/api',
   );
-  const chainId = getRuntimeConfigNumber('VITE_CHAIN_ID', 61999);
-  const chainName = getRuntimeConfig('VITE_CHAIN_NAME', 'GenLayer Localnet');
+  const chainId = getRuntimeConfigNumber('VITE_CHAIN_ID', base.id);
+  const chainName = getRuntimeConfig('VITE_CHAIN_NAME', base.name);
 
   return markRaw(
     defineChain({
