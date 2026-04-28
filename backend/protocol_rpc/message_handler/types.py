@@ -1,5 +1,7 @@
+import os
 from enum import Enum
 from dataclasses import dataclass
+from typing import Any
 
 
 class EventType(Enum):
@@ -17,6 +19,46 @@ class EventScope(Enum):
     TRANSACTION = "Transaction"
 
 
+def show_validator_private_keys_in_logs() -> bool:
+    return os.getenv("SHOW_VALIDATOR_PRIVATE_KEYS_IN_LOGS", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def _is_private_key_field(key: Any) -> bool:
+    if not isinstance(key, str):
+        return False
+
+    normalized = key.replace("_", "").replace("-", "").lower()
+    return normalized == "privatekey" or normalized.endswith("privatekey")
+
+
+def sanitize_log_data(value: Any) -> Any:
+    """Return a copy of log data with private-key fields removed."""
+    if show_validator_private_keys_in_logs():
+        return value
+
+    if isinstance(value, dict):
+        return {
+            key: sanitize_log_data(item)
+            for key, item in value.items()
+            if not _is_private_key_field(key)
+        }
+
+    if isinstance(value, list):
+        return [sanitize_log_data(item) for item in value]
+
+    if isinstance(value, tuple):
+        return tuple(sanitize_log_data(item) for item in value)
+
+    if hasattr(value, "__dict__"):
+        return sanitize_log_data(vars(value))
+
+    return value
+
+
 @dataclass
 class LogEvent:
     name: str
@@ -28,13 +70,16 @@ class LogEvent:
     client_session_id: str | None = None
     account_address: str | None = None
 
+    def sanitized_data(self):
+        return sanitize_log_data(self.data)
+
     def to_dict(self):
         return {
             "name": self.name,
             "type": self.type.value,
             "scope": self.scope.value,
             "message": self.message,
-            "data": self.data,
+            "data": self.sanitized_data(),
             "transaction_hash": self.transaction_hash,
             "client_id": self.client_session_id,
             "account_address": self.account_address,

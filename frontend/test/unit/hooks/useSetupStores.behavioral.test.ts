@@ -43,6 +43,7 @@ const mockContractsStore = {
   deployedContracts: [],
   addContractFile: vi.fn(),
   getInitialOpenedFiles: vi.fn(),
+  setAllDeployedContracts: vi.fn(),
 };
 
 const mockAccountsStore = {
@@ -54,6 +55,13 @@ const mockTransactionsStore = {
   transactions: [],
   initSubscriptions: vi.fn(() => track('initSubscriptions')),
   refreshPendingTransactions: vi.fn(() => track('refreshPendingTransactions')),
+  setAllTransactions: vi.fn(),
+};
+
+const mockNetworkStore = {
+  isStudio: true,
+  chainId: 61127,
+  currentNetwork: 'localnet',
 };
 
 const mockNodeStore = {
@@ -89,6 +97,7 @@ vi.mock('@/stores', () => ({
   useUIStore: vi.fn(() => ({})),
   useConsensusStore: vi.fn(() => mockConsensusStore),
   useTutorialStore: vi.fn(() => mockTutorialStore),
+  useNetworkStore: vi.fn(() => mockNetworkStore),
 }));
 
 vi.mock('uuid', () => ({
@@ -211,5 +220,20 @@ describe('useSetupStores — behavioral contract', () => {
 
     const initIdx = callOrder.indexOf('initClient');
     expect(initIdx).toBe(callOrder.length - 1);
+  });
+
+  it('skips sim_* calls when the current network is non-Studio', async () => {
+    mockNetworkStore.isStudio = false;
+
+    const { useSetupStores } = await import('@/hooks/useSetupStores');
+    const { setupStores } = useSetupStores();
+    await setupStores();
+
+    expect(mockNodeStore.getValidatorsData).not.toHaveBeenCalled();
+    expect(mockNodeStore.getProvidersData).not.toHaveBeenCalled();
+    expect(mockConsensusStore.fetchFinalityWindowTime).not.toHaveBeenCalled();
+
+    // Reset for other tests.
+    mockNetworkStore.isStudio = true;
   });
 });

@@ -1,38 +1,9 @@
-import { localnet, studionet, testnetAsimov } from 'genlayer-js/chains';
 import { createClient, createAccount } from 'genlayer-js';
 import type { GenLayerClient } from 'genlayer-js/types';
 import { ref, watch, markRaw, type Ref } from 'vue';
 import { useAccountsStore } from '@/stores';
-import {
-  getRuntimeConfig,
-  getRuntimeConfigNumber,
-} from '@/utils/runtimeConfig';
+import { useNetworkStore } from '@/stores/network';
 import { useWallet } from './useWallet';
-
-const chains: Record<string, typeof localnet> = {
-  localnet,
-  studionet,
-  testnetAsimov,
-};
-
-function getChain() {
-  const networkName = getRuntimeConfig('VITE_GENLAYER_NETWORK', 'localnet');
-  const chain = chains[networkName];
-  if (!chain) {
-    throw new Error(
-      `Unknown VITE_GENLAYER_NETWORK: "${networkName}". Must be one of: ${Object.keys(chains).join(', ')}`,
-    );
-  }
-
-  // Allow per-deployment chain ID override (each Studio instance has its own).
-  // Safe now that the SDK uses isStudio instead of localnet.id for guards.
-  const chainIdOverride = getRuntimeConfigNumber('VITE_CHAIN_ID', 0);
-  if (chainIdOverride > 0 && chainIdOverride !== chain.id) {
-    return { ...chain, id: chainIdOverride };
-  }
-
-  return chain;
-}
 
 type UseGenlayerReturn = {
   client: Ref<GenLayerClient<any> | null>;
@@ -41,6 +12,7 @@ type UseGenlayerReturn = {
 
 export function useGenlayer(): UseGenlayerReturn {
   const accountsStore = useAccountsStore();
+  const networkStore = useNetworkStore();
   const wallet = useWallet();
   const client = ref<GenLayerClient<any> | null>(null);
 
@@ -52,6 +24,8 @@ export function useGenlayer(): UseGenlayerReturn {
     [
       () => accountsStore.selectedAccount?.address,
       () => wallet.walletProvider.value,
+      () => networkStore.currentNetwork,
+      () => networkStore.rpcUrl,
     ],
     () => {
       initClient();
@@ -65,11 +39,8 @@ export function useGenlayer(): UseGenlayerReturn {
         : accountsStore.selectedAccount?.address;
 
     const clientOptions: Record<string, unknown> = {
-      chain: getChain(),
-      endpoint: getRuntimeConfig(
-        'VITE_JSON_RPC_SERVER_URL',
-        'http://127.0.0.1:4000/api',
-      ),
+      chain: networkStore.chain,
+      endpoint: networkStore.rpcUrl,
       account: clientAccount,
     };
 

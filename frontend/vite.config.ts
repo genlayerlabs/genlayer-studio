@@ -45,6 +45,15 @@ export default defineConfig(({ mode }) => {
       strictPort: true,
       host: true,
       origin: 'http://0.0.0.0:8080',
+      fs: {
+        // examples/contracts lives at the repo root and is symlinked under
+        // src/assets/examples; allow Vite's dev server to follow into it
+        // (without this, the dynamic `?raw` glob only transforms files the
+        // static module graph already knows about — e.g. storage.py — and
+        // the rest load as plain text, which the browser rejects when
+        // `import()`ed).
+        allow: ['..'],
+      },
     },
   };
 

@@ -123,9 +123,10 @@ class MessageHandler(IMessageHandler):
         gray = "\033[38;5;245m"
         reset = "\033[0m"
 
-        if getattr(log_event, "data", None):
+        data = log_event.sanitized_data()
+        if data:
             try:
-                data_to_log = self._apply_log_level_truncation(log_event.data)
+                data_to_log = self._apply_log_level_truncation(data)
                 import decimal
 
                 data_str = json.dumps(
@@ -136,7 +137,9 @@ class MessageHandler(IMessageHandler):
                 )
                 message = f"{message} {gray}{data_str}{reset}"
             except TypeError as e:
-                message = f"{message} {gray}{str(log_event.data)} (serialization error: {e}){reset}"
+                message = (
+                    f"{message} {gray}{str(data)} (serialization error: {e}){reset}"
+                )
 
         if log_event.type == EventType.ERROR:
             logger.error(message)

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useAccountsStore } from '@/stores';
+import { useAccountsStore, useNetworkStore } from '@/stores';
 import AccountItem from '@/components/Simulator/AccountItem.vue';
 import { Dropdown } from 'floating-vue';
 import { Wallet, Droplets } from 'lucide-vue-next';
@@ -9,9 +9,12 @@ import { useEventTracking, useWallet, useRpcClient } from '@/hooks';
 import { computed, ref, watch, onMounted } from 'vue';
 
 const store = useAccountsStore();
+const networkStore = useNetworkStore();
 const { trackEvent } = useEventTracking();
 const { connect, disconnect } = useWallet();
 const rpcClient = useRpcClient();
+
+const PUBLIC_TESTNET_FAUCET_URL = 'https://testnet-faucet.genlayer.foundation';
 
 const hasExternalAccount = computed(() =>
   store.accounts.some((account) => account.type === 'external'),
@@ -42,7 +45,12 @@ const refreshBalance = async () => {
 
 // Fetch balance on load and when account changes
 watch(() => store.selectedAccount?.address, refreshBalance);
+watch(() => networkStore.chainId, refreshBalance);
 onMounted(refreshBalance);
+
+const openTestnetFaucet = () => {
+  window.open(PUBLIC_TESTNET_FAUCET_URL, '_blank', 'noopener,noreferrer');
+};
 
 const handleCreateNewAccount = async () => {
   const address = store.generateNewAccount();
@@ -167,7 +175,11 @@ const disconnectWallet = async () => {
       </template>
     </Dropdown>
 
-    <Dropdown placement="bottom-end" :shown="showFaucet">
+    <Dropdown
+      v-if="networkStore.isStudio"
+      placement="bottom-end"
+      :shown="showFaucet"
+    >
       <button
         @click="showFaucet = !showFaucet"
         v-tooltip="'Fund account'"
@@ -205,5 +217,16 @@ const disconnectWallet = async () => {
         </div>
       </template>
     </Dropdown>
+
+    <button
+      v-else
+      @click="openTestnetFaucet"
+      v-tooltip="
+        'Open the testnet faucet (100 GEN / 24h, requires 0.01 ETH on mainnet)'
+      "
+      class="rounded p-1 text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-zinc-700 dark:hover:text-gray-200"
+    >
+      <Droplets class="h-4 w-4" />
+    </button>
   </div>
 </template>

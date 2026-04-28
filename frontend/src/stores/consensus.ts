@@ -2,10 +2,12 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { useRpcClient, useWebSocketClient } from '@/hooks';
 import { getRuntimeConfigNumber } from '@/utils/runtimeConfig';
+import { useNetworkStore } from '@/stores/network';
 
 export const useConsensusStore = defineStore('consensusStore', () => {
   const rpcClient = useRpcClient();
   const webSocketClient = useWebSocketClient();
+  const networkStore = useNetworkStore();
   const finalityWindow = ref(
     getRuntimeConfigNumber('VITE_FINALITY_WINDOW', 10),
   );
@@ -21,6 +23,15 @@ export const useConsensusStore = defineStore('consensusStore', () => {
   };
 
   async function fetchFinalityWindowTime() {
+    // `sim_getFinalityWindowTime` is Studio-only; on testnet we keep the env-
+    // or network-configured value and stop showing a loader.
+    if (!networkStore.isStudio) {
+      if (!hasInitialized) {
+        isLoading.value = false;
+        hasInitialized = true;
+      }
+      return;
+    }
     try {
       finalityWindow.value = await rpcClient.getFinalityWindowTime(); // Assume this RPC method exists
       if (!hasInitialized) {

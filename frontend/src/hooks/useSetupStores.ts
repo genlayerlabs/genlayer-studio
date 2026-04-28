@@ -5,6 +5,7 @@ import {
   useNodeStore,
   useTutorialStore,
   useConsensusStore,
+  useNetworkStore,
 } from '@/stores';
 import {
   useDb,
@@ -20,10 +21,15 @@ export const useSetupStores = () => {
     const contractsStore = useContractsStore();
     const accountsStore = useAccountsStore();
     const tutorialStore = useTutorialStore();
+    const networkStore = useNetworkStore();
     const db = useDb();
     const genlayer = useGenlayer();
 
-    await useWebSocketClientAsync();
+    // WebSocket push events are Studio-only. On non-Studio chains, skip the
+    // async wait (the client is a no-op stub) and move on.
+    if (networkStore.isStudio) {
+      await useWebSocketClientAsync();
+    }
 
     const transactionsStore = useTransactionsStore();
     const nodeStore = useNodeStore();
@@ -45,24 +51,32 @@ export const useSetupStores = () => {
       for (const key of Object.keys(contractsBlob)) {
         const loader = contractsBlob[key];
         if (!loader) continue;
-        const raw = await loader();
-        const name = key.split('/').pop() || 'ExampleContract.py';
-        if (!contractFiles.some((c) => c.name === name)) {
-          const contract = {
-            id: uuidv4(),
-            name,
-            content: ((raw as string) || '').trim(),
-            example: true,
-          };
-          contractsStore.addContractFile(contract);
+        try {
+          const raw = await loader();
+          const name = key.split('/').pop() || 'ExampleContract.py';
+          if (!contractFiles.some((c) => c.name === name)) {
+            const contract = {
+              id: uuidv4(),
+              name,
+              content: ((raw as string) || '').trim(),
+              example: true,
+            };
+            contractsStore.addContractFile(contract);
+          }
+        } catch (err) {
+          // One bad file shouldn't block the rest — log and continue so the
+          // user still gets the other examples.
+          console.error('Failed to load example contract', key, err);
         }
       }
     } else {
       contractsStore.contracts = await db.contractFiles.toArray();
     }
 
-    contractsStore.deployedContracts = await db.deployedContracts.toArray();
-    transactionsStore.transactions = await db.transactions.toArray();
+    contractsStore.setAllDeployedContracts(
+      await db.deployedContracts.toArray(),
+    );
+    transactionsStore.setAllTransactions(await db.transactions.toArray());
 
     transactionsStore.initSubscriptions();
     transactionsStore.refreshPendingTransactions();
@@ -70,10 +84,13 @@ export const useSetupStores = () => {
     contractListener.init();
     contractsStore.getInitialOpenedFiles();
     tutorialStore.resetTutorialState();
-    nodeStore.getValidatorsData();
-    nodeStore.getProvidersData();
-    await consensusStore.fetchFinalityWindowTime();
-    consensusStore.setupReconnectionListener();
+    // Validator / provider / finality-window RPCs are Studio-only.
+    if (networkStore.isStudio) {
+      nodeStore.getValidatorsData();
+      nodeStore.getProvidersData();
+      await consensusStore.fetchFinalityWindowTime();
+      consensusStore.setupReconnectionListener();
+    }
 
     if (accountsStore.accounts.length < 1) {
       accountsStore.generateNewAccount();

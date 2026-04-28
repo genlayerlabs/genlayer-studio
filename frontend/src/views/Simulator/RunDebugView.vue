@@ -16,12 +16,14 @@ import {
 import ContractInfo from '@/components/Simulator/ContractInfo.vue';
 import SelectInput from '@/components/global/inputs/SelectInput.vue';
 import type { ExecutionMode } from '@/types';
+import { useConfig } from '@/hooks';
 
 const uiStore = useUIStore();
 const contractsStore = useContractsStore();
 const { isDeployed, address, contract } = useContractQueries();
 const nodeStore = useNodeStore();
 const consensusStore = useConsensusStore();
+const { isStudioNetwork } = useConfig();
 
 // Execution mode selection
 const executionMode = ref<ExecutionMode>('NORMAL');
@@ -68,7 +70,7 @@ const consensusMaxRotations = computed(() => consensusStore.maxRotations);
     <template
       v-if="contractsStore.currentContract && contractsStore.currentContractId"
     >
-      <div class="p-2">
+      <div v-if="isStudioNetwork" class="p-2">
         <label for="executionMode" class="mb-1 block text-xs font-medium">
           Execution Mode
         </label>
@@ -113,7 +115,13 @@ const consensusMaxRotations = computed(() => consensusStore.maxRotations);
         @openDeployment="isDeploymentOpen = true"
       />
 
-      <template v-if="nodeStore.hasAtLeastOneValidator || uiStore.showTutorial">
+      <template
+        v-if="
+          !isStudioNetwork ||
+          nodeStore.hasAtLeastOneValidator ||
+          uiStore.showTutorial
+        "
+      >
         <ConstructorParameters
           id="tutorial-how-to-deploy"
           v-if="isDeploymentOpen"

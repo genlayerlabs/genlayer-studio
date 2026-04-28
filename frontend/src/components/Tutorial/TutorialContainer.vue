@@ -103,7 +103,7 @@ const steps = ref([
       title: 'Validators',
     },
     target: '#tutorial-validators',
-    content: canUpdateValidators
+    content: canUpdateValidators.value
       ? 'Configure the number of validators and set up their parameters here.'
       : 'Here you can see the validators that are currently running on the network.',
     placement: 'right',

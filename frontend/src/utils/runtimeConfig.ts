@@ -18,6 +18,7 @@ interface RuntimeConfig {
   VITE_PLAUSIBLE_DOMAIN?: string;
   VITE_APPKIT_PROJECT_ID?: string;
   VITE_EXPLORER_URL?: string;
+  VITE_LOCK_NETWORK?: string;
 }
 
 declare global {
