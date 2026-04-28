@@ -1,6 +1,15 @@
-import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  vi,
+  type Mock,
+} from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
-import { useTransactionsStore } from '@/stores';
+import { nextTick } from 'vue';
+import { useNetworkStore, useTransactionsStore } from '@/stores';
 import { useDb, useGenlayer } from '@/hooks';
 import type { TransactionItem } from '@/types';
 import type { Address, TransactionHash } from 'genlayer-js/types';
@@ -63,6 +72,10 @@ describe('useTransactionsStore', () => {
   };
 
   beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+    localStorage.removeItem('networkStore.currentNetwork');
+
     // Set up mocks BEFORE creating the store
     mockWebSocketClient = {
       connected: true,
@@ -90,6 +103,12 @@ describe('useTransactionsStore', () => {
     transactionsStore.setAllTransactions([]);
   });
 
+  afterEach(() => {
+    transactionsStore.stopUndecidedPolling();
+    vi.useRealTimers();
+    localStorage.removeItem('networkStore.currentNetwork');
+  });
+
   it('should add a transaction', () => {
     transactionsStore.addTransaction(testTransaction);
     expect(transactionsStore.transactions).toContainEqual(
@@ -113,6 +132,21 @@ describe('useTransactionsStore', () => {
     transactionsStore.updateTransaction(updatedTransactionPayload);
     expect(transactionsStore.transactions[0].statusName).toBe(
       TransactionStatus.FINALIZED,
+    );
+  });
+
+  it('should normalize txId-only transaction updates to hash', () => {
+    transactionsStore.addTransaction(testTransaction);
+    transactionsStore.updateTransaction({
+      txId: testTransaction.hash,
+      statusName: TransactionStatus.ACCEPTED,
+    });
+
+    expect(transactionsStore.transactions[0].statusName).toBe(
+      TransactionStatus.ACCEPTED,
+    );
+    expect(transactionsStore.transactions[0].data).toEqual(
+      expect.objectContaining({ hash: testTransaction.hash }),
     );
   });
 
@@ -188,6 +222,51 @@ describe('useTransactionsStore', () => {
     expect(transactionsStore.transactions[0].statusName).toBe(
       TransactionStatus.FINALIZED,
     );
+  });
+
+  it('should keep missing pending transactions during the non-Studio grace window', async () => {
+    useNetworkStore().setCurrentNetwork('testnetBradbury');
+    await nextTick();
+    const pendingTransaction = {
+      ...testTransaction,
+      statusName: TransactionStatus.PENDING,
+      addedAt: Date.now(),
+    };
+
+    transactionsStore.addTransaction(pendingTransaction);
+    mockGenlayerClient.getTransaction.mockResolvedValue(undefined);
+
+    await transactionsStore.refreshPendingTransactions();
+
+    expect(transactionsStore.transactions).toContainEqual(
+      expect.objectContaining({ hash: pendingTransaction.hash }),
+    );
+    expect(mockDb.transactions.delete).not.toHaveBeenCalled();
+  });
+
+  it('should remove missing pending transactions after grace and a repeated miss', async () => {
+    vi.useFakeTimers();
+    useNetworkStore().setCurrentNetwork('testnetBradbury');
+    await nextTick();
+    const now = Date.now();
+    vi.setSystemTime(now);
+    const pendingTransaction = {
+      ...testTransaction,
+      statusName: TransactionStatus.PENDING,
+      addedAt: now - 30_000,
+    };
+
+    transactionsStore.addTransaction(pendingTransaction);
+    mockGenlayerClient.getTransaction.mockResolvedValue(undefined);
+
+    await transactionsStore.refreshPendingTransactions();
+    vi.advanceTimersByTime(5_000);
+    await transactionsStore.refreshPendingTransactions();
+
+    expect(transactionsStore.transactions).not.toContainEqual(
+      expect.objectContaining({ hash: pendingTransaction.hash }),
+    );
+    expect(mockDb.transactions.delete).toHaveBeenCalled();
   });
 
   describe('cancelTransaction', () => {
@@ -291,6 +370,19 @@ describe('useTransactionsStore', () => {
 
       // Remove transaction
       transactionsStore.removeTransaction(testTransaction);
+
+      expect(mockWebSocketClient.emit).toHaveBeenCalledWith('unsubscribe', [
+        testTransaction.hash,
+      ]);
+    });
+
+    it('should unsubscribe existing topics when the network changes', async () => {
+      const networkStore = useNetworkStore();
+      transactionsStore.addTransaction(testTransaction);
+      mockWebSocketClient.emit.mockClear();
+
+      networkStore.setCurrentNetwork('testnetBradbury');
+      await nextTick();
 
       expect(mockWebSocketClient.emit).toHaveBeenCalledWith('unsubscribe', [
         testTransaction.hash,

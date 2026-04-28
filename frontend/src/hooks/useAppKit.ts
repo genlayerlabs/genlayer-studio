@@ -11,17 +11,65 @@ import { createGenlayerLocalnet, createGenlayerBradbury } from './useNetworks';
 // transport paths in viem/Wagmi/Reown surface a body without `id` (the field
 // is added by the http transport, but batching/retry can drop it on certain
 // paths). Wrap our chain RPCs in a custom transport that guarantees both.
+const RPC_REQUEST_TIMEOUT_MS = 30_000;
 let rpcIdCounter = 1;
+
+function getRpcErrorPreview(text: string) {
+  return text.length > 200 ? `${text.slice(0, 200)}...` : text;
+}
+
 function makeStrictJsonRpcTransport(rpcUrl: string) {
   return custom({
     async request({ method, params }) {
       const id = rpcIdCounter++;
-      const res = await fetch(rpcUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
-      });
-      const json = await res.json();
+      const controller = new AbortController();
+      const timeout = window.setTimeout(
+        () => controller.abort(),
+        RPC_REQUEST_TIMEOUT_MS,
+      );
+
+      let res: Response;
+      try {
+        res = await fetch(rpcUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+          signal: controller.signal,
+        });
+      } catch (cause: any) {
+        const err: any = new Error(
+          cause?.name === 'AbortError'
+            ? `RPC request timed out after ${RPC_REQUEST_TIMEOUT_MS}ms`
+            : (cause?.message ?? 'RPC request failed'),
+        );
+        err.cause = cause;
+        throw err;
+      } finally {
+        window.clearTimeout(timeout);
+      }
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(
+          `RPC HTTP ${res.status} ${res.statusText}${
+            text ? `: ${getRpcErrorPreview(text)}` : ''
+          }`,
+        );
+      }
+
+      let json: any;
+      try {
+        json = await res.json();
+      } catch (cause: any) {
+        const err: any = new Error(
+          `RPC response was not valid JSON${
+            cause?.message ? `: ${cause.message}` : ''
+          }`,
+        );
+        err.cause = cause;
+        throw err;
+      }
+
       if (json.error) {
         const err: any = new Error(json.error.message ?? 'RPC error');
         err.code = json.error.code;

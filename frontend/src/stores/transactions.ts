@@ -14,6 +14,7 @@ import { useNetworkStore } from '@/stores/network';
 // emits). Poll while any tx is still undecided so CANCELED / FINALIZED /
 // TIMEOUT states actually reach the UI.
 const NON_STUDIO_POLL_INTERVAL_MS = 5_000;
+const NON_STUDIO_NOT_FOUND_GRACE_MS = 30_000;
 
 export const useTransactionsStore = defineStore('transactionsStore', () => {
   const genlayer = useGenlayer();
@@ -27,6 +28,7 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
     ),
   );
   const subscriptions = new Set<string>();
+  const missingTransactionSince = new Map<string, number>();
   const db = useDb();
 
   // Named handler for WebSocket reconnection
@@ -48,7 +50,7 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
   watch(
     () => networkStore.chainId,
     () => {
-      subscriptions.clear();
+      unsubscribeAll();
       if (networkStore.isStudio) {
         stopUndecidedPolling();
         initSubscriptions();
@@ -67,9 +69,12 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
   }
 
   function startUndecidedPolling() {
-    if (undecidedPollTimer) return;
+    if (undecidedPollTimer || !hasUndecidedTx()) return;
     undecidedPollTimer = setInterval(async () => {
-      if (!hasUndecidedTx()) return;
+      if (!hasUndecidedTx()) {
+        stopUndecidedPolling();
+        return;
+      }
       try {
         await refreshPendingTransactions();
       } catch (err) {
@@ -86,20 +91,71 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
     }
   }
 
+  function parseCreatedAt(tx: TransactionItem) {
+    const createdAt = tx.data?.created_at;
+    if (!createdAt) return null;
+
+    const parsed = new Date(createdAt).getTime();
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function normalizeStoredTransaction(tx: TransactionItem): TransactionItem {
+    return {
+      ...tx,
+      addedAt: tx.addedAt ?? parseCreatedAt(tx) ?? Date.now(),
+    };
+  }
+
+  function normalizeRemoteTransaction(tx: any, fallbackHash?: string) {
+    if (!tx) return null;
+
+    const hash = tx.hash ?? tx.txId ?? fallbackHash;
+    if (!hash) return null;
+
+    return {
+      ...tx,
+      hash,
+    };
+  }
+
+  function shouldRemoveMissingTransaction(tx: TransactionItem) {
+    const now = Date.now();
+    const firstMissAt = missingTransactionSince.get(tx.hash);
+
+    if (firstMissAt === undefined) {
+      missingTransactionSince.set(tx.hash, now);
+      return false;
+    }
+
+    const addedAt = tx.addedAt ?? firstMissAt;
+    return (
+      now - addedAt >= NON_STUDIO_NOT_FOUND_GRACE_MS &&
+      now - firstMissAt >= NON_STUDIO_POLL_INTERVAL_MS
+    );
+  }
+
   function setAllTransactions(items: TransactionItem[]) {
-    allTransactions.value = items;
+    allTransactions.value = items.map(normalizeStoredTransaction);
+    if (!networkStore.isStudio) {
+      startUndecidedPolling();
+    }
   }
 
   function addTransaction(tx: TransactionItem) {
     const stamped = {
       ...tx,
       chainId: tx.chainId ?? networkStore.chainId,
+      addedAt: tx.addedAt ?? Date.now(),
     };
     allTransactions.value.unshift(stamped); // Push on top in case there's no date property yet
     subscribe([stamped.hash]);
+    if (!networkStore.isStudio) {
+      startUndecidedPolling();
+    }
   }
 
   function removeTransaction(tx: TransactionItem) {
+    missingTransactionSince.delete(tx.hash);
     allTransactions.value = allTransactions.value.filter(
       (t) => t.hash !== tx.hash,
     );
@@ -109,19 +165,25 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
   function updateTransaction(tx: any) {
     // SDK exposes the same id under two names — `hash` on Studio responses,
     // `txId` on testnet (Solidity struct field). Accept either.
-    const id = tx.hash ?? tx.txId;
+    const normalizedTx = normalizeRemoteTransaction(tx);
+    if (!normalizedTx) {
+      console.warn('Transaction missing hash', tx);
+      return;
+    }
+
     const currentTxIndex = allTransactions.value.findIndex(
-      (t) => t.hash === id,
+      (t) => t.hash === normalizedTx.hash,
     );
 
     if (currentTxIndex !== -1) {
       const currentTx = allTransactions.value[currentTxIndex];
       if (!currentTx) return;
 
+      missingTransactionSince.delete(currentTx.hash);
       allTransactions.value.splice(currentTxIndex, 1, {
         ...currentTx,
-        statusName: tx.statusName,
-        data: tx,
+        statusName: normalizedTx.statusName,
+        data: normalizedTx,
       });
     } else {
       // Temporary logging to debug always-PENDING transactions
@@ -147,14 +209,18 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
     await Promise.all(
       pendingTxs.map(async (tx) => {
         const newTx = await getTransaction(tx.hash as TransactionHash);
+        const normalizedTx = normalizeRemoteTransaction(newTx, tx.hash);
 
-        if (newTx) {
-          updateTransaction(newTx);
+        if (normalizedTx) {
+          updateTransaction(normalizedTx);
           await db.transactions.where('hash').equals(tx.hash).modify({
-            statusName: newTx.statusName,
-            data: newTx,
+            statusName: normalizedTx.statusName,
+            data: normalizedTx,
           });
-        } else {
+        } else if (
+          networkStore.isStudio ||
+          shouldRemoveMissingTransaction(tx)
+        ) {
           removeTransaction(tx);
           await db.transactions.where('hash').equals(tx.hash).delete();
         }
@@ -168,6 +234,7 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
     );
 
     contractTxs.forEach((t) => unsubscribe(t.hash));
+    contractTxs.forEach((t) => missingTransactionSince.delete(t.hash));
 
     allTransactions.value = allTransactions.value.filter(
       (t) => t.localContractId !== contractId,
@@ -204,21 +271,24 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
     }
   }
 
+  function unsubscribeAll() {
+    const topics = Array.from(subscriptions);
+    subscriptions.clear();
+    if (topics.length > 0 && webSocketClient.connected) {
+      webSocketClient.emit('unsubscribe', topics);
+    }
+  }
+
   function initSubscriptions() {
     // Only subscribe to the current network's txs; testnet WS is a no-op stub.
     subscribe(transactions.value.map((t) => t.hash));
   }
 
   async function resetStorage() {
-    allTransactions.value.forEach((t) => unsubscribe(t.hash));
+    unsubscribeAll();
+    missingTransactionSince.clear();
     allTransactions.value = [];
     await db.transactions.clear();
-  }
-
-  // Kick off non-Studio polling at store creation if the user lands directly
-  // on a testnet (chainId watcher only fires on changes, not on initial load).
-  if (!networkStore.isStudio) {
-    startUndecidedPolling();
   }
 
   return {

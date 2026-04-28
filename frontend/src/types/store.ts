@@ -36,6 +36,7 @@ export interface TransactionItem {
   contractAddress: string;
   localContractId: string;
   chainId?: number;
+  addedAt?: number;
   data?: any;
   decodedData?: {
     functionName: string;
