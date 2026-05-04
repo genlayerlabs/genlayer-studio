@@ -4,7 +4,11 @@ FROM python:3.12-slim AS base
 ARG path=/app
 WORKDIR $path
 
-RUN apt-get update && \
+RUN for i in 1 2 3 4 5; do \
+        apt-get update && break; \
+        echo "apt-get update failed (attempt $i/5), retrying in 15s..."; \
+        sleep 15; \
+    done && \
     apt-get install -y --no-install-recommends build-essential && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
