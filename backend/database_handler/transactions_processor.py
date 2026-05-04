@@ -900,7 +900,7 @@ class TransactionsProcessor:
         # Normalize address to checksum format
         try:
             checksum_address = self.web3.to_checksum_address(address)
-        except:
+        except (ValueError, TypeError):
             checksum_address = address
 
         # Always use database count as source of truth
