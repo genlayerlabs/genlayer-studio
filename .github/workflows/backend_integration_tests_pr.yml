@@ -146,7 +146,7 @@ jobs:
         env:
           TEST_PROVIDER: ${{ vars.LLM_PROVIDER || 'openrouter' }}
           TEST_PROVIDER_MODEL: ${{ vars.LLM_MODEL || 'deepseek/deepseek-v3.2' }}
-        run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/ -svv -n 8 --ignore=tests/integration/test_validators.py
+        run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/ -svv -n 8 --dist loadgroup --ignore=tests/integration/test_validators.py
 
       # Validator smoke test runs serial (GenVM LLM module restarts on each CRUD op).
       # Full CRUD coverage is in db-sqlalchemy/validators_registry_test.py (<1s).
