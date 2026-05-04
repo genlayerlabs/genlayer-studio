@@ -104,3 +104,19 @@ class RateLimitExceeded(JSONRPCError):
         self, message: str = "Rate limit exceeded", data: Optional[Any] = None
     ):
         super().__init__(code=-32029, message=message, data=data)
+
+
+class QueueDepthExceeded(JSONRPCError):
+    """Per-contract or per-sender PENDING tx cap reached.
+
+    Distinct from RateLimitExceeded: that one caps RPC call frequency,
+    this one caps how many in-flight transactions a single contract or
+    sender can have queued for consensus. Studio Prod is a shared
+    sandbox — without this cap, one heavy user can fill the queue and
+    starve everyone else's contracts.
+    """
+
+    def __init__(
+        self, message: str = "Queue depth exceeded", data: Optional[Any] = None
+    ):
+        super().__init__(code=-32030, message=message, data=data)

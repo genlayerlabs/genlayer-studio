@@ -6,8 +6,12 @@ import eth_utils
 import logging
 from functools import partial, wraps
 from typing import Any
-from backend.protocol_rpc.exceptions import JSONRPCError, NotFoundError
-from sqlalchemy import Table
+from backend.protocol_rpc.exceptions import (
+    JSONRPCError,
+    NotFoundError,
+    QueueDepthExceeded,
+)
+from sqlalchemy import Table, text
 from sqlalchemy.orm import Session
 import backend.validators as validators
 
@@ -98,6 +102,106 @@ def _check_rate_limit(address: str) -> None:
         )
     timestamps.append(now)
     _address_request_log[address] = timestamps
+
+
+# ---------------------------------------------------------------------------
+# Admission control on PENDING queue depth (eth_sendRawTransaction path).
+#
+# Studio Prod is a shared sandbox. Without this, a single user can submit
+# thousands of txs to one contract and starve everyone else's contracts
+# behind a 5-day backlog. We cap PENDING per (to_address) and per
+# (from_address) at submission time and return a structured error pointing
+# users at non-shared deployments for production-volume workloads.
+#
+# Both caps default to unset (unlimited) — meaningful only when explicitly
+# configured (the public studio deployment sets them; self-hosted does not).
+# ---------------------------------------------------------------------------
+def _parse_optional_positive_int(env_name: str) -> int | None:
+    raw = os.environ.get(env_name)
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        parsed = int(raw)
+    except (ValueError, TypeError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+_MAX_PENDING_PER_CONTRACT = _parse_optional_positive_int(
+    "MAX_PENDING_PER_CONTRACT_DEFAULT"
+)
+_MAX_PENDING_PER_SENDER = _parse_optional_positive_int("MAX_PENDING_PER_SENDER_DEFAULT")
+
+# Generic guidance text in the error response — directs heavy users to
+# non-shared deployments rather than retrying against the same instance.
+_QUEUE_DEPTH_HELP = (
+    "The public Studio is a shared sandbox with per-contract and "
+    "per-sender PENDING transaction caps. For production-volume "
+    "workloads, run a self-hosted instance or use Rally."
+)
+
+
+def _enforce_pending_queue_caps(
+    transactions_processor,
+    to_address: str | None,
+    from_address: str | None,
+) -> None:
+    """Raise QueueDepthExceeded if the per-contract or per-sender cap is hit.
+
+    Both checks are best-effort and racy by design — two concurrent
+    submissions can both pass the COUNT(*) check before either commits,
+    so the actual depth can transiently exceed the cap by a few. That's
+    fine; the goal is to prevent unbounded growth, not to enforce an
+    exact bound.
+    """
+    if _MAX_PENDING_PER_CONTRACT is not None and to_address is not None:
+        contract_pending = transactions_processor.session.execute(
+            text(
+                "SELECT COUNT(*) FROM transactions "
+                "WHERE to_address = :addr AND status = 'PENDING'"
+            ),
+            {"addr": to_address},
+        ).scalar()
+        if (
+            contract_pending is not None
+            and contract_pending >= _MAX_PENDING_PER_CONTRACT
+        ):
+            raise QueueDepthExceeded(
+                message=(
+                    f"Contract {to_address} has {contract_pending} pending "
+                    f"transactions (limit: {_MAX_PENDING_PER_CONTRACT}). "
+                    f"{_QUEUE_DEPTH_HELP}"
+                ),
+                data={
+                    "scope": "contract",
+                    "address": to_address,
+                    "pending": contract_pending,
+                    "limit": _MAX_PENDING_PER_CONTRACT,
+                },
+            )
+
+    if _MAX_PENDING_PER_SENDER is not None and from_address is not None:
+        sender_pending = transactions_processor.session.execute(
+            text(
+                "SELECT COUNT(*) FROM transactions "
+                "WHERE from_address = :addr AND status = 'PENDING'"
+            ),
+            {"addr": from_address},
+        ).scalar()
+        if sender_pending is not None and sender_pending >= _MAX_PENDING_PER_SENDER:
+            raise QueueDepthExceeded(
+                message=(
+                    f"Sender {from_address} has {sender_pending} pending "
+                    f"transactions (limit: {_MAX_PENDING_PER_SENDER}). "
+                    f"{_QUEUE_DEPTH_HELP}"
+                ),
+                data={
+                    "scope": "sender",
+                    "address": from_address,
+                    "pending": sender_pending,
+                    "limit": _MAX_PENDING_PER_SENDER,
+                },
+            )
 
 
 ####### ADMIN ACCESS CONTROL #######
@@ -1529,6 +1633,23 @@ def send_raw_transaction(
 
         # Check for duplicate before debit+insert to avoid TOCTOU races
         is_duplicate = transactions_processor.get_transaction_by_hash(transaction_hash)
+
+        # Queue-depth admission control: refuse new submissions when a
+        # contract or a sender already has too many txs queued. Studio Prod
+        # is a shared sandbox; without this, one heavy user (e.g. an
+        # external oracle backend running batch verifications) can pile up
+        # thousands of PENDING txs on a single contract and starve the
+        # network for everyone else.
+        #
+        # Skip duplicates (resubmission of an already-known hash is benign)
+        # and SEND txs (faucet/transfer; not subject to per-contract pile-up
+        # because to_address is a user account, not a contract).
+        if is_duplicate is None and genlayer_transaction.type != TransactionType.SEND:
+            _enforce_pending_queue_caps(
+                transactions_processor=transactions_processor,
+                to_address=to_address,
+                from_address=from_address,
+            )
 
         # Debit sender BEFORE insert. Mint on demand if insufficient (Studio sandbox).
         # Skip for SEND (execute_transfer handles it) and duplicates.

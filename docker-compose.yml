@@ -125,6 +125,11 @@ services:
       - RATE_LIMIT_ANON_PER_MINUTE=${RATE_LIMIT_ANON_PER_MINUTE:-30}
       - RATE_LIMIT_ANON_PER_HOUR=${RATE_LIMIT_ANON_PER_HOUR:-500}
       - RATE_LIMIT_ANON_PER_DAY=${RATE_LIMIT_ANON_PER_DAY:-5000}
+      # Per-contract / per-sender PENDING tx caps (admission control on
+      # eth_sendRawTransaction). Empty/unset = no cap. Set in shared
+      # deployments to keep one heavy user from filling the queue.
+      - MAX_PENDING_PER_CONTRACT_DEFAULT=${MAX_PENDING_PER_CONTRACT_DEFAULT:-}
+      - MAX_PENDING_PER_SENDER_DEFAULT=${MAX_PENDING_PER_SENDER_DEFAULT:-}
     ports:
       - "${RPCPORT}:${RPCPORT}"
     expose:
