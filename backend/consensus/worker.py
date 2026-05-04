@@ -7,7 +7,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Callable, Optional, Any
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
 
 from backend.database_handler.models import Transactions, TransactionStatus
 from backend.database_handler.transactions_processor import TransactionsProcessor
@@ -143,6 +143,13 @@ class ConsensusWorker:
         # the per-contract queue can advance past a poisoned head.
         self._max_recovery_cycles = int(
             os.environ.get("RECOVERY_MAX_CYCLES", str(self.MAX_RECOVERY_CYCLES))
+        )
+
+        # Multiplier (× finality_window_time) past which a finalization-eligible
+        # tx is considered "stuck" and worth a warning log. Default 10× catches
+        # genuine starvation while ignoring routine waiting.
+        self._stuck_finalization_window_multiplier = int(
+            os.environ.get("STUCK_FINALIZATION_WINDOW_MULTIPLIER", "10")
         )
 
         # Initialize usage metrics service for reporting transaction metrics
@@ -428,6 +435,29 @@ class ConsensusWorker:
                             AND t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
                             AND t2.hash != t.hash
                     )
+                    -- Defer to eligible finalizations on the same contract.
+                    -- Both this query and claim_next_finalization gate on the
+                    -- same per-contract serialization (NOT EXISTS + advisory
+                    -- lock). With continuous PENDING inflow, claim_next_transaction
+                    -- can keep winning the slot and starve finalization for days.
+                    -- This clause makes PENDING/ACTIVATED claims defer when an
+                    -- ACCEPTED-class tx for the same contract is past its
+                    -- finality window — letting finalization drain the queue.
+                    AND NOT EXISTS (
+                        SELECT 1 FROM transactions t3
+                        WHERE t3.to_address IS NOT DISTINCT FROM t.to_address
+                            AND t3.status IN ('ACCEPTED', 'UNDETERMINED', 'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT')
+                            AND t3.appealed = false
+                            AND t3.timestamp_awaiting_finalization IS NOT NULL
+                            AND (
+                                t3.execution_mode IN ('LEADER_ONLY', 'LEADER_SELF_VALIDATOR')
+                                OR (
+                                    EXTRACT(EPOCH FROM NOW()) - t3.timestamp_awaiting_finalization - COALESCE(t3.appeal_processing_time, 0)
+                                ) > :finality_window_seconds * POWER(1 - :appeal_failed_reduction, COALESCE(t3.appeal_failed, 0))
+                            )
+                            AND (t3.blocked_at IS NULL
+                                 OR t3.blocked_at < NOW() - CAST(:timeout AS INTERVAL))
+                    )
                     -- Atomic per-contract lock to close TOCTOU window in NOT EXISTS.
                     -- Under READ COMMITTED, two workers can both pass NOT EXISTS before
                     -- either commits blocked_at. This advisory lock prevents that race.
@@ -474,6 +504,8 @@ class ConsensusWorker:
             {
                 "worker_id": self.worker_id,
                 "timeout": f"{self.transaction_timeout_minutes} minutes",
+                "finality_window_seconds": self.consensus_algorithm.finality_window_time,
+                "appeal_failed_reduction": self.consensus_algorithm.finality_window_appeal_failed_reduction,
             },
         ).first()
         duration = time.perf_counter() - start_time
@@ -724,6 +756,28 @@ class ConsensusWorker:
                         exc_info=True,
                     )
 
+    # Statuses where the consensus result has been agreed and the tx is
+    # awaiting finalization. Recovery must NOT wipe consensus_data /
+    # consensus_history for these — that state is what gets promoted to
+    # FINALIZED. An orphaned finalization just needs blocked_at cleared
+    # so another worker can resume.
+    _FINALIZATION_ELIGIBLE_STATUSES = (
+        "ACCEPTED",
+        "UNDETERMINED",
+        "LEADER_TIMEOUT",
+        "VALIDATORS_TIMEOUT",
+    )
+
+    # Statuses where consensus is mid-flight. If a worker dies here,
+    # full reset to PENDING is correct — consensus will re-run.
+    _CONSENSUS_RECOVERABLE_STATUSES = (
+        "PENDING",
+        "ACTIVATED",
+        "PROPOSING",
+        "COMMITTING",
+        "REVEALING",
+    )
+
     async def recover_stuck_transactions(self, session: Session) -> int:
         """
         Recover transactions that have been stuck for too long.
@@ -743,6 +797,9 @@ class ConsensusWorker:
         # Step 1: escalate txs that have already hit the recovery limit.
         # These have been reset N times and keep getting stuck — cancel
         # them so the per-contract queue can drain.
+        # Restricted to consensus-recoverable statuses: ACCEPTED-class txs
+        # have agreed consensus and shouldn't be canceled by recovery
+        # (Step 1b handles their orphan case via release-only).
         escalate_query = text(
             """
             UPDATE transactions
@@ -755,7 +812,7 @@ class ConsensusWorker:
                                     'recovery_count', recovery_count
                                  )
             WHERE recovery_count >= :max_cycles
-              AND status NOT IN ('FINALIZED', 'CANCELED')
+              AND status IN :consensus_statuses
               AND (
                   (blocked_at IS NOT NULL
                    AND blocked_at < NOW() - CAST(:timeout AS INTERVAL))
@@ -766,13 +823,14 @@ class ConsensusWorker:
               )
             RETURNING hash, recovery_count;
             """
-        )
+        ).bindparams(bindparam("consensus_statuses", expanding=True))
         escalated = session.execute(
             escalate_query,
             {
                 "max_cycles": self._max_recovery_cycles,
                 "timeout": f"{self.transaction_timeout_minutes} minutes",
                 "orphan_timeout": "5 minutes",
+                "consensus_statuses": list(self._CONSENSUS_RECOVERABLE_STATUSES),
             },
         ).fetchall()
         if escalated:
@@ -783,7 +841,43 @@ class ConsensusWorker:
                     f"after {row.recovery_count} recovery cycles (stuck repeatedly)"
                 )
 
+        # Step 1b: release orphaned finalization-eligible txs.
+        # If a worker dies mid-finalization on an ACCEPTED-class tx, its
+        # blocked_at goes stale. The tx has agreed consensus_data that
+        # MUST survive — finalization will resume from it. Just clear
+        # blocked_at + worker_id; do NOT wipe state or change status, do
+        # NOT bump recovery_count (this isn't a consensus failure, just a
+        # released claim).
+        release_finalization_query = text(
+            """
+            UPDATE transactions
+            SET blocked_at = NULL,
+                worker_id = NULL
+            WHERE blocked_at IS NOT NULL
+              AND blocked_at < NOW() - CAST(:timeout AS INTERVAL)
+              AND status IN :finalization_statuses
+            RETURNING hash, status;
+            """
+        ).bindparams(bindparam("finalization_statuses", expanding=True))
+        released = session.execute(
+            release_finalization_query,
+            {
+                "timeout": f"{self.transaction_timeout_minutes} minutes",
+                "finalization_statuses": list(self._FINALIZATION_ELIGIBLE_STATUSES),
+            },
+        ).fetchall()
+        if released:
+            session.commit()
+            for row in released:
+                logger.info(
+                    f"[Worker {self.worker_id}] Released orphaned finalization "
+                    f"{row.hash} (status={row.status}, state preserved)"
+                )
+
         # Step 2: reset txs under the limit and bump their counter.
+        # Restricted to consensus-recoverable statuses to avoid wiping
+        # consensus_data / consensus_history for ACCEPTED-class txs
+        # (those are handled by Step 1b above).
         recovery_query = text(
             """
             UPDATE transactions
@@ -794,11 +888,11 @@ class ConsensusWorker:
                 status = 'PENDING',
                 recovery_count = recovery_count + 1
             WHERE recovery_count < :max_cycles
+              AND status IN :consensus_statuses
               AND (
                   -- Case 1: Transactions with expired blocks
                   (blocked_at IS NOT NULL
-                   AND blocked_at < NOW() - CAST(:timeout AS INTERVAL)
-                   AND status NOT IN ('FINALIZED', 'CANCELED'))
+                   AND blocked_at < NOW() - CAST(:timeout AS INTERVAL))
                   OR
                   -- Case 2: Orphaned transactions in processing states with no block
                   (blocked_at IS NULL
@@ -807,7 +901,7 @@ class ConsensusWorker:
               )
             RETURNING hash, status, recovery_count;
             """
-        )
+        ).bindparams(bindparam("consensus_statuses", expanding=True))
 
         result = session.execute(
             recovery_query,
@@ -815,6 +909,7 @@ class ConsensusWorker:
                 "max_cycles": self._max_recovery_cycles,
                 "timeout": f"{self.transaction_timeout_minutes} minutes",
                 "orphan_timeout": "5 minutes",  # Shorter timeout for orphaned transactions
+                "consensus_statuses": list(self._CONSENSUS_RECOVERABLE_STATUSES),
             },
         )
         recovered = result.fetchall()
@@ -825,6 +920,49 @@ class ConsensusWorker:
                     f"[Worker {self.worker_id}] Recovered stuck transaction {row.hash} "
                     f"(was {row.status}, now PENDING, cycle {row.recovery_count}/"
                     f"{self._max_recovery_cycles})"
+                )
+
+        # Step 3: safety-net detector for finalization-eligible txs that
+        # have been waiting far longer than the finality window. If
+        # finalization scheduling is healthy these never appear; if they
+        # do, something is starving finalization (e.g., the scheduler
+        # bug this comment exists because of) and we want loud signal,
+        # not 5 days of silent backlog.
+        finality_window = self.consensus_algorithm.finality_window_time
+        stuck_threshold_seconds = (
+            finality_window * self._stuck_finalization_window_multiplier
+        )
+        stuck_finalization_query = text(
+            """
+            SELECT hash, status, to_address,
+                   EXTRACT(EPOCH FROM NOW())::bigint
+                       - timestamp_awaiting_finalization AS waiting_seconds
+            FROM transactions
+            WHERE status IN :finalization_statuses
+              AND blocked_at IS NULL
+              AND timestamp_awaiting_finalization IS NOT NULL
+              AND (
+                  EXTRACT(EPOCH FROM NOW()) - timestamp_awaiting_finalization
+              ) > :threshold_seconds
+            ORDER BY timestamp_awaiting_finalization ASC
+            LIMIT 50
+            """
+        ).bindparams(bindparam("finalization_statuses", expanding=True))
+        stuck = session.execute(
+            stuck_finalization_query,
+            {
+                "finalization_statuses": list(self._FINALIZATION_ELIGIBLE_STATUSES),
+                "threshold_seconds": stuck_threshold_seconds,
+            },
+        ).fetchall()
+        if stuck:
+            for row in stuck:
+                logger.warning(
+                    f"[Worker {self.worker_id}] Finalization-eligible tx "
+                    f"{row.hash} (status={row.status}, contract={row.to_address}) "
+                    f"has been awaiting finalization for {row.waiting_seconds}s "
+                    f"(>{int(stuck_threshold_seconds)}s threshold). "
+                    f"Likely finalization-starvation — investigate."
                 )
 
         return len(recovered)
