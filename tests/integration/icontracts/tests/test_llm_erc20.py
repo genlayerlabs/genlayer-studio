@@ -12,17 +12,9 @@ def test_llm_erc20(setup_validators, default_account):
     from_account_a = default_account
     from_account_b = create_account()
 
-    # Mock keyed on "" (the default match in backend/node/llm.lua) so it
-    # returns this response for any LLM prompt the contract issues.
-    # The contract's prompt no longer contains the previous key
-    # "The balance of the sender" — that string was part of the
-    # eq_principle criteria, which now runs as `strict_eq` and does NOT
-    # go through the LLM. With a non-matching key, the mock returned the
-    # literal string "no match", `json.loads("no match")` raised, and
-    # the contract execution errored.
     mock_response = {
         "response": {
-            "": json.dumps(
+            "The balance of the sender": json.dumps(
                 {
                     "transaction_success": True,
                     "transaction_error": "",
@@ -33,7 +25,7 @@ def test_llm_erc20(setup_validators, default_account):
                 }
             )
         },
-        "eq_principle_prompt_non_comparative": {"": True},
+        "eq_principle_prompt_non_comparative": {"The balance of the sender": True},
     }
     setup_validators(mock_response)
 
