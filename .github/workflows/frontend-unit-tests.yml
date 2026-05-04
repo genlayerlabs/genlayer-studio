@@ -4,7 +4,7 @@ on:
   workflow_call:
     secrets:
       codecov_token:
-        required: true
+        required: false
 
 jobs:
   frontend:
@@ -32,5 +32,5 @@ jobs:
         with:
           verbose: true
           token: ${{ secrets.codecov_token }}
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           directory: frontend/coverage
