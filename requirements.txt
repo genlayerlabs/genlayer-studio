@@ -3,4 +3,4 @@ python-dotenv==1.2.2
 black==26.3.1
 pytest==9.0.2
 pre-commit==4.5.1
-aiohttp==3.13.3
+aiohttp==3.13.4
