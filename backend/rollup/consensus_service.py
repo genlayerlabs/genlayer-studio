@@ -24,10 +24,18 @@ class ConsensusService:
         Get a contract instance
 
         Returns:
-            Contract: The contract instance
+            Contract: The contract instance.
+            None: If deployment data is unavailable for this contract on this
+                instance — the caller should treat this as a soft "not found"
+                rather than a system error. Hosted Studio does not ship the
+                hardhat deployment artifacts for the rollup-side consensus
+                contracts (Queues / RevealingPhase / IdlenessPhase / etc.)
+                because newer genlayer-js clients carry that info in their
+                chain config; older clients still fall through to this RPC.
 
         Raises:
-            Exception: If the contract deployment data cannot be loaded or the contract does not exist
+            Exception: If the contract should exist but the on-chain code is
+                missing, or for any other unexpected error.
         """
         # Load deployment data
         deployment_data = self._load_deployment_data(contract_name)
@@ -43,7 +51,11 @@ class ConsensusService:
                     return self.web3.eth.contract(
                         address=default_contract["address"], abi=default_contract["abi"]
                     )
-            raise Exception(f"Failed to load {contract_name} deployment data")
+            # Soft "not found" — caller (endpoints.get_contract) will turn
+            # this into a NotFoundError, which the RPC framework logs at the
+            # JSONRPCError soft-error path instead of the noisy
+            # "Unexpected error in sim_getConsensusContract" stderr print.
+            return None
 
         # Verify contract exists on chain
         code = self.web3.eth.get_code(deployment_data["address"])
@@ -76,6 +88,12 @@ class ConsensusService:
         """
         try:
             contract = self._get_contract(contract_name)
+            if contract is None:
+                # _get_contract returns None for the soft "deployment data
+                # missing" case — propagate that up so endpoints.get_contract
+                # raises NotFoundError instead of the caller seeing a bare
+                # exception.
+                return None
             deployment_data = self._load_deployment_data(contract_name)
 
             return {
