@@ -485,10 +485,58 @@ async def _check_database_health() -> Dict[str, Any]:
 
 
 async def _check_consensus_health() -> Dict[str, Any]:
-    """Check consensus system status."""
-    from datetime import datetime, timedelta, timezone
-    from backend.database_handler.models import Transactions
+    """Check consensus system status.
+
+    "Orphaned transactions" here means *contracts whose head-of-queue tx
+    isn't making progress* — not "lots of pending txs". A long queue is
+    not a problem if the head is moving; the head being stuck IS a
+    problem regardless of queue depth.
+
+    A contract's head is the oldest non-final tx for that contract. The
+    head is "stuck" when:
+      - it was created more than `head_stuck_after_minutes` ago
+        (enough time to expect *some* progress), AND
+      - no tx for that contract has a fresh `blocked_at` within the
+        `recent_activity_window_minutes` window (i.e. no worker is
+        currently doing anything for the contract).
+
+    `active_workers` is derived from unexpired worker claims so it
+    correctly reflects workers processing OLD txs (the previous "txs
+    created in last 1h with worker_id" filter falsely reported zero
+    workers when traffic was bursty).
+
+    Note on the "claim window": workers do NOT heartbeat `blocked_at`
+    during execution — it's set once at claim time, cleared on
+    completion. So "fresh blocked_at" must mean "claim not yet
+    expired", aligned with TRANSACTION_TIMEOUT_MINUTES, not "claimed
+    within the last few minutes" (which would falsely flag a long
+    consensus round as inactive).
+    """
+    import os
+
     from backend.database_handler.session_factory import get_database_manager
+
+    HEAD_STUCK_AFTER_MINUTES = int(
+        os.environ.get("HEALTH_HEAD_STUCK_AFTER_MINUTES", "15")
+    )
+    # Aligned with the worker's claim timeout. While blocked_at sits
+    # within this window, a worker still legitimately owns the tx and
+    # we must not call its contract "stuck". Past this window, recovery
+    # would also reset the claim. Default 30 matches docker-compose /
+    # prod manifests.
+    CLAIM_WINDOW_MINUTES = int(os.environ.get("TRANSACTION_TIMEOUT_MINUTES", "30"))
+    # Match the dashboard alert threshold so consensus.status and the
+    # top-level "issues" tag agree on what counts as degraded.
+    DEGRADED_AT_STUCK_HEADS = int(os.environ.get("HEALTH_DEGRADED_AT_STUCK_HEADS", "3"))
+
+    # Statuses considered "in flight". Includes the *_TIMEOUT variants
+    # because finalization and appeal claim paths process them. Must
+    # match the head-CTE filter and the in-flight-count query for
+    # consistency.
+    IN_FLIGHT_STATUSES_SQL = (
+        "'ACTIVATED','PROPOSING','COMMITTING','REVEALING',"
+        "'ACCEPTED','UNDETERMINED','LEADER_TIMEOUT','VALIDATORS_TIMEOUT'"
+    )
 
     try:
         if not _rpc_router_ref:
@@ -497,54 +545,98 @@ async def _check_consensus_health() -> Dict[str, Any]:
         db_manager = get_database_manager()
 
         def _query_consensus():
-            now = datetime.now(timezone.utc)
-            recent_threshold = now - timedelta(hours=1)
+            from sqlalchemy import text
 
-            from sqlalchemy import select, distinct, and_, text
-
-            # Get active worker IDs
-            with db_manager.engine.connect() as worker_conn:
-                worker_query = select(distinct(Transactions.worker_id)).where(
-                    and_(
-                        Transactions.worker_id.isnot(None),
-                        Transactions.created_at > recent_threshold,
-                    )
-                )
-                worker_result = worker_conn.execute(worker_query)
-                active_workers = {row[0] for row in worker_result if row[0]}
-
-            # Get transaction statistics
             with db_manager.engine.connect() as conn:
-                query = text(
-                    """
-                    SELECT
-                        COUNT(*) FILTER (WHERE status IN ('ACTIVATED', 'PROPOSING', 'COMMITTING', 'REVEALING', 'ACCEPTED', 'UNDETERMINED')) as processing_count,
-                        COUNT(*) FILTER (WHERE worker_id IS NOT NULL AND status IN ('PENDING', 'ACTIVATED', 'PROPOSING', 'COMMITTING', 'REVEALING', 'ACCEPTED', 'UNDETERMINED')) as blocked_count
-                    FROM transactions
-                    WHERE to_address IS NOT NULL
-                """
-                )
-                result = conn.execute(query)
-                row = result.fetchone()
+                # Active workers: distinct worker_ids with an unexpired
+                # claim. Catches workers processing old txs that the
+                # previous "created_at > 1h ago" filter incorrectly
+                # excluded.
+                active_workers_row = conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(DISTINCT worker_id) AS n
+                        FROM transactions
+                        WHERE worker_id IS NOT NULL
+                          AND blocked_at IS NOT NULL
+                          AND blocked_at > NOW() - make_interval(mins => :claim_window)
+                        """
+                    ),
+                    {"claim_window": CLAIM_WINDOW_MINUTES},
+                ).fetchone()
+                active_workers_count = active_workers_row.n if active_workers_row else 0
 
-                total_processing = row.processing_count if row else 0
-                total_blocked = row.blocked_count if row else 0
+                # Stuck heads: per contract, the oldest in-flight tx
+                # whose contract has no unexpired worker claim AND head
+                # is old enough to expect progress. Returns the count
+                # of AFFECTED CONTRACTS, not the count of queued txs
+                # behind them — those are not the problem, the head is.
+                # Tie-break on hash so debug output (when we surface
+                # the heads) is deterministic.
+                stuck_row = conn.execute(
+                    text(
+                        f"""
+                        WITH heads AS (
+                            SELECT DISTINCT ON (to_address)
+                                to_address,
+                                hash,
+                                status,
+                                created_at
+                            FROM transactions
+                            WHERE status IN ({IN_FLIGHT_STATUSES_SQL})
+                              AND to_address IS NOT NULL
+                            ORDER BY to_address, created_at ASC, hash ASC
+                        )
+                        SELECT COUNT(*) AS stuck_heads
+                        FROM heads h
+                        WHERE h.created_at < NOW() - make_interval(mins => :head_stuck_minutes)
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM transactions t2
+                              WHERE t2.to_address = h.to_address
+                                AND t2.status IN ({IN_FLIGHT_STATUSES_SQL})
+                                AND t2.blocked_at IS NOT NULL
+                                AND t2.blocked_at > NOW() - make_interval(mins => :claim_window)
+                          )
+                        """
+                    ),
+                    {
+                        "head_stuck_minutes": HEAD_STUCK_AFTER_MINUTES,
+                        "claim_window": CLAIM_WINDOW_MINUTES,
+                    },
+                ).fetchone()
+                stuck_head_contracts = stuck_row.stuck_heads if stuck_row else 0
 
-                total_orphaned = 0
-                if total_blocked > 0 and len(active_workers) == 0:
-                    total_orphaned = total_blocked
+                # Total in-flight (non-final) tx count, for context.
+                # Same status set as the head CTE so the metrics are
+                # consistent.
+                processing_row = conn.execute(
+                    text(
+                        f"""
+                        SELECT COUNT(*) AS n
+                        FROM transactions
+                        WHERE status IN ({IN_FLIGHT_STATUSES_SQL})
+                          AND to_address IS NOT NULL
+                        """
+                    )
+                ).fetchone()
+                total_processing = processing_row.n if processing_row else 0
 
                 status = (
                     "healthy"
-                    if total_processing < 100 and total_orphaned == 0
+                    if stuck_head_contracts < DEGRADED_AT_STUCK_HEADS
                     else "degraded"
                 )
 
                 return {
                     "status": status,
                     "total_processing_transactions": total_processing,
-                    "total_orphaned_transactions": total_orphaned,
-                    "active_workers": len(active_workers),
+                    # Field name preserved for backwards-compat with the
+                    # external dashboard. Semantics changed: now counts
+                    # CONTRACTS whose head-of-queue is stuck, not raw
+                    # blocked txs. A long queue with a moving head reads 0.
+                    "total_orphaned_transactions": stuck_head_contracts,
+                    "active_workers": active_workers_count,
                 }
 
         return await asyncio.to_thread(_query_consensus)
