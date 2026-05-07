@@ -268,7 +268,27 @@ async def _run_health_checks() -> None:
                 overall_status = "degraded"
             issues.append("orphaned_transactions")
 
-        # 3. Memory health
+        # 3. LLM provider health (per-provider failure-rate detection)
+        # Catches cases like a provider returning HTTP 402 / "tier required"
+        # for every call from a specific (provider, model) entry — the
+        # actual cause behind a recent stuck-shard incident that the
+        # generic "orphaned_transactions" tag couldn't articulate.
+        llm_health = await _check_llm_provider_health()
+        llm_status = llm_health.get("status", "unknown")
+        services["llm_providers"] = {
+            "status": llm_status,
+            "alert_providers": llm_health.get("alert_providers", []),
+            "window_minutes": llm_health.get("window_minutes"),
+            "total_samples": llm_health.get("total_samples"),
+        }
+        if llm_status == "error":
+            issues.append("llm_provider_check_error")
+        elif llm_status == "degraded" and llm_health.get("alert_providers"):
+            if overall_status == "healthy":
+                overall_status = "degraded"
+            issues.append("llm_provider_failure")
+
+        # 4. Memory health
         memory_health = await _check_memory_health()
         memory_status = memory_health.get("status", "unknown")
         services["memory"] = {
@@ -282,7 +302,7 @@ async def _run_health_checks() -> None:
                 overall_status = "degraded"
             issues.append("memory_issue")
 
-        # 4. Redis health
+        # 5. Redis health
         redis_status = await _check_redis_health()
         services["redis"] = redis_status
         if redis_status == "unhealthy":
@@ -290,7 +310,7 @@ async def _run_health_checks() -> None:
                 overall_status = "degraded"
             issues.append("redis_unreachable")
 
-        # 5. GenVM manager health (+ capacity details when available)
+        # 6. GenVM manager health (+ capacity details when available)
         genvm_ok, genvm_error, genvm_status = await _check_genvm_health()
         services["genvm"] = {"status": "healthy" if genvm_ok else "unhealthy"}
         _health_cache.genvm_healthy = genvm_ok
@@ -330,14 +350,14 @@ async def _run_health_checks() -> None:
             _health_cache.genvm_available_permits = None
             _health_cache.genvm_active_executions = None
 
-        # 6. Aggregate counts for metrics
+        # 7. Aggregate counts for metrics
         decisions_count, users_count, pending_count = await _get_aggregate_counts()
         _health_cache.total_decisions = decisions_count
         _health_cache.total_users = users_count
         _health_cache.pending_transactions = pending_count
         _health_cache.uptime_percent = 100.0  # 100% while running
 
-        # 7. Get pending contracts breakdown for dashboard
+        # 8. Get pending contracts breakdown for dashboard
         _health_cache.pending_contracts = await _get_pending_contracts()
 
         # Update cache
@@ -643,6 +663,250 @@ async def _check_consensus_health() -> Dict[str, Any]:
 
     except Exception as e:
         logger.exception("Consensus health check failed")
+        return {"status": "error", "error": str(e)}
+
+
+async def _check_llm_provider_health() -> Dict[str, Any]:
+    """Per-(provider, model) failure-rate detection from recent receipts.
+
+    Mines `consensus_data->'leader_receipt'` and
+    `consensus_data->'validators'` on txs created in the last
+    `LLM_PROVIDER_WINDOW_MINUTES` minutes. For each (provider, model)
+    pair, counts validator runs whose `execution_result == 'ERROR'` and
+    reports those whose failure rate is above
+    `LLM_PROVIDER_FAILURE_THRESHOLD` AND have at least
+    `LLM_PROVIDER_MIN_SAMPLES` runs in the window.
+
+    Output schema (always shaped, never partial):
+
+        {
+          "status": "healthy" | "degraded" | "no_data" | "error",
+          "alert_providers": [
+              {
+                "provider": "...", "model": "...",
+                "samples": int, "failures": int, "failure_rate": float,
+                "sample_error": {error_code, causes, http_status, brief}
+              }, ...
+          ],
+          "window_minutes": int,
+          "total_samples": int,
+        }
+
+    Limitations (acknowledged):
+      - Window is on `tx.created_at`, not "consensus ran in the last N
+        min" — the schema has no `status_changed_at`. For very slow
+        contracts a tx that finished consensus 6h after submission falls
+        outside the window. Acceptable trade-off for a 15-minute alert.
+      - Cannot detect "primary failed but fallback rescued it":
+        backend/node/llm.lua's try_provider returns SUCCESS as soon as
+        any provider succeeds, with no persisted record of the primary
+        attempt. This metric catches all-providers-down (the primary
+        failure mode that took an instance into DEGRADED yesterday) but
+        not stealth fallback-masked outages. A future improvement would
+        persist `llm_attempts[]` from Lua at call time.
+
+    Privacy: never expose raw stderr (contains LLM prompts), node_config
+    (contains validator private keys), or raw_error.ctx.host_data
+    (contains payloads). Only emits structured signals: error_code,
+    causes (joined string), HTTP status, and a 200-char cap of
+    error_description.
+    """
+    import os
+
+    from backend.database_handler.session_factory import get_database_manager
+
+    WINDOW_MINUTES = int(os.environ.get("LLM_PROVIDER_WINDOW_MINUTES", "15"))
+    MIN_SAMPLES = int(os.environ.get("LLM_PROVIDER_MIN_SAMPLES", "25"))
+    FAILURE_THRESHOLD = float(os.environ.get("LLM_PROVIDER_FAILURE_THRESHOLD", "0.5"))
+
+    try:
+        if not _rpc_router_ref:
+            return {
+                "status": "not_initialized",
+                "error": "RPC router not available",
+            }
+
+        db_manager = get_database_manager()
+
+        def _query_llm_health():
+            from sqlalchemy import text
+
+            with db_manager.engine.connect() as conn:
+                # One row per (provider, model) over the window.
+                # Concatenates leader_receipt[] and validators[] arrays so
+                # leader-only txs (where validators is empty) still count.
+                # Status filter excludes in-flight rows where
+                # consensus_data could still mutate.
+                agg_rows = conn.execute(
+                    text(
+                        """
+                        WITH receipts AS (
+                            SELECT
+                                v.receipt->'node_config'->'primary_model'->>'provider'
+                                    AS provider,
+                                v.receipt->'node_config'->'primary_model'->>'model'
+                                    AS model,
+                                v.receipt->>'execution_result' AS execution_result
+                            FROM transactions t,
+                                 jsonb_array_elements(
+                                     COALESCE(
+                                         t.consensus_data->'leader_receipt',
+                                         '[]'::jsonb
+                                     )
+                                     || COALESCE(
+                                         t.consensus_data->'validators',
+                                         '[]'::jsonb
+                                     )
+                                 ) AS v(receipt)
+                            WHERE t.consensus_data IS NOT NULL
+                              AND t.created_at > NOW()
+                                  - make_interval(mins => :window_minutes)
+                              AND t.status IN (
+                                  'FINALIZED', 'ACCEPTED', 'UNDETERMINED',
+                                  'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT'
+                              )
+                              AND v.receipt->'node_config'->'primary_model'->>'provider'
+                                      IS NOT NULL
+                        )
+                        SELECT
+                            provider,
+                            model,
+                            COUNT(*) AS samples,
+                            COUNT(*) FILTER (WHERE execution_result = 'ERROR')
+                                AS failures
+                        FROM receipts
+                        GROUP BY provider, model
+                        """
+                    ),
+                    {"window_minutes": WINDOW_MINUTES},
+                ).fetchall()
+
+                if not agg_rows:
+                    return {
+                        "status": "no_data",
+                        "alert_providers": [],
+                        "window_minutes": WINDOW_MINUTES,
+                        "total_samples": 0,
+                    }
+
+                total_samples = sum(r.samples for r in agg_rows)
+
+                # Pick which (provider, model) pairs are alert-worthy
+                # before doing the (more expensive) sample-error query.
+                alert_keys = []
+                for r in agg_rows:
+                    if (
+                        r.samples >= MIN_SAMPLES
+                        and r.failures / r.samples >= FAILURE_THRESHOLD
+                    ):
+                        alert_keys.append((r.provider, r.model, r))
+
+                # Sample errors: one most-recent ERROR per alert (provider,
+                # model). Done as a separate query to keep the aggregate
+                # cheap when there are no alerts. Allowlists structured
+                # fields only — no raw stderr, no node_config.
+                sample_errors_by_key: dict[tuple, dict] = {}
+                if alert_keys:
+                    err_rows = conn.execute(
+                        text(
+                            """
+                            WITH error_rows AS (
+                                SELECT
+                                    v.receipt->'node_config'->'primary_model'->>'provider'
+                                        AS provider,
+                                    v.receipt->'node_config'->'primary_model'->>'model'
+                                        AS model,
+                                    v.receipt->'genvm_result'->>'error_code'
+                                        AS error_code,
+                                    v.receipt->'genvm_result'->'raw_error'->'causes'
+                                        AS causes,
+                                    v.receipt->'genvm_result'->'raw_error'->'ctx'->>'status'
+                                        AS http_status,
+                                    SUBSTRING(
+                                        v.receipt->'genvm_result'->>'error_description'
+                                        FROM 1 FOR 200
+                                    ) AS description_brief,
+                                    t.created_at AS tx_created_at,
+                                    ROW_NUMBER() OVER (
+                                        PARTITION BY
+                                            v.receipt->'node_config'->'primary_model'->>'provider',
+                                            v.receipt->'node_config'->'primary_model'->>'model'
+                                        ORDER BY t.created_at DESC
+                                    ) AS rn
+                                FROM transactions t,
+                                     jsonb_array_elements(
+                                         COALESCE(
+                                             t.consensus_data->'leader_receipt',
+                                             '[]'::jsonb
+                                         )
+                                         || COALESCE(
+                                             t.consensus_data->'validators',
+                                             '[]'::jsonb
+                                         )
+                                     ) AS v(receipt)
+                                WHERE t.consensus_data IS NOT NULL
+                                  AND t.created_at > NOW()
+                                      - make_interval(mins => :window_minutes)
+                                  AND t.status IN (
+                                      'FINALIZED', 'ACCEPTED', 'UNDETERMINED',
+                                      'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT'
+                                  )
+                                  AND v.receipt->>'execution_result' = 'ERROR'
+                                  AND v.receipt->'node_config'->'primary_model'->>'provider'
+                                          IS NOT NULL
+                            )
+                            SELECT provider, model, error_code, causes,
+                                   http_status, description_brief
+                            FROM error_rows
+                            WHERE rn = 1
+                            """
+                        ),
+                        {"window_minutes": WINDOW_MINUTES},
+                    ).fetchall()
+                    for er in err_rows:
+                        causes_summary = None
+                        if er.causes:
+                            try:
+                                causes_summary = ", ".join(str(c) for c in er.causes)[
+                                    :200
+                                ]
+                            except (TypeError, ValueError):
+                                causes_summary = str(er.causes)[:200]
+                        sample_errors_by_key[(er.provider, er.model)] = {
+                            "error_code": er.error_code,
+                            "causes": causes_summary,
+                            "http_status": er.http_status,
+                            "description_brief": er.description_brief,
+                        }
+
+                alert_providers = []
+                for provider, model, r in alert_keys:
+                    alert_providers.append(
+                        {
+                            "provider": provider,
+                            "model": model,
+                            "samples": int(r.samples),
+                            "failures": int(r.failures),
+                            "failure_rate": round(r.failures / r.samples, 3),
+                            "sample_error": sample_errors_by_key.get((provider, model)),
+                        }
+                    )
+                # Sort: highest failure rate first, then highest sample
+                # count, for stable & operator-friendly output.
+                alert_providers.sort(key=lambda a: (-a["failure_rate"], -a["samples"]))
+
+                status = "degraded" if alert_providers else "healthy"
+                return {
+                    "status": status,
+                    "alert_providers": alert_providers,
+                    "window_minutes": WINDOW_MINUTES,
+                    "total_samples": total_samples,
+                }
+
+        return await asyncio.to_thread(_query_llm_health)
+
+    except Exception as e:
+        logger.exception("LLM provider health check failed")
         return {"status": "error", "error": str(e)}
 
 
