@@ -142,7 +142,14 @@ const handleDownloadFile = (e: Event) => {
         <div data-testid="contract-file" class="truncate font-semibold">
           {{ contract.name }}
         </div>
-
+<a 
+  v-if="contract?.address"
+  :href="'https://explorer.genlayer.com/address/' + contract.address" 
+  target="_blank"
+  class="ml-2 text-[10px] text-blue-500 hover:text-blue-700 underline flex items-center"
+>
+  View Explorer
+</a>
         <div class="hidden flex-row gap-1 group-hover:flex">
           <button @click.stop="handleEditFile" v-tooltip="'Edit Name'">
             <PencilSquareIcon
