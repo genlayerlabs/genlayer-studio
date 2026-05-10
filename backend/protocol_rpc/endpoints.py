@@ -272,10 +272,18 @@ def fund_account(
 ) -> str:
     """Fund an account within a request-scoped database session."""
     accounts_manager = AccountsManager(session)
-    transactions_processor = TransactionsProcessor(session)
 
     if not accounts_manager.is_valid_address(account_address):
         raise InvalidAddressError(account_address)
+
+    if amount <= 0:
+        raise JSONRPCError(
+            code=-32602,
+            message="amount must be greater than 0",
+            data={},
+        )
+
+    transactions_processor = TransactionsProcessor(session)
 
     import secrets
 
