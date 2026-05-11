@@ -189,8 +189,11 @@ const MAPPINGS: Mapping[] = [
 export function parseGenVMError(input: unknown): FriendlyError {
   const raw = stringifyError(input);
   // Prefer an extracted GenVM message; fall back to the trimmed raw string
-  // so callers can pass already-bare codes like `"OOM"` directly.
-  const code = extractGenVMMessage(raw) ?? raw.trim();
+  // so callers can pass already-bare codes like `"OOM"` directly. We compute
+  // the normalized code exactly once and reuse it in both the matched and
+  // fallback paths so the `code` field stays consistent for any input shape.
+  const trimmed = raw.trim();
+  const code = extractGenVMMessage(raw) ?? (trimmed.length > 0 ? trimmed : undefined);
 
   if (code) {
     for (const m of MAPPINGS) {
@@ -208,7 +211,7 @@ export function parseGenVMError(input: unknown): FriendlyError {
 
   return {
     ...GENERIC_FALLBACK,
-    code: extractGenVMMessage(raw),
+    code,
     raw,
   };
 }

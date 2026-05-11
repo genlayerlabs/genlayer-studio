@@ -132,6 +132,22 @@ describe('parseGenVMError', () => {
       expect(result.recognized).toBe(false);
       expect(result.code).toBe('some_brand_new_error');
     });
+
+    it('exposes the normalized code consistently for bare-string fallbacks', () => {
+      // Regression: previously the fallback path re-ran extraction and dropped
+      // the bare-string code, so an unrecognized bare input came back with
+      // `code: undefined` while a *recognized* bare input came back with
+      // `code: "OOM"`. The field should now always reflect what we used for
+      // matching.
+      const result = parseGenVMError('not_a_known_code');
+      expect(result.recognized).toBe(false);
+      expect(result.code).toBe('not_a_known_code');
+    });
+
+    it('leaves code undefined when the input is empty / whitespace', () => {
+      expect(parseGenVMError('').code).toBeUndefined();
+      expect(parseGenVMError('   ').code).toBeUndefined();
+    });
   });
 
   describe('input normalization', () => {
