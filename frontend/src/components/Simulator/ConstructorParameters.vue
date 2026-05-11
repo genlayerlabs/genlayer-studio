@@ -4,6 +4,7 @@ import { ref, computed } from 'vue';
 import PageSection from '@/components/Simulator/PageSection.vue';
 import { ArrowUpTrayIcon } from '@heroicons/vue/16/solid';
 import ContractParams from './ContractParams.vue';
+import FriendlyError from './FriendlyError.vue';
 import { type ArgData, unfoldArgsData } from './ContractParams';
 import type { ExecutionMode } from '@/types';
 
@@ -15,7 +16,7 @@ const props = defineProps<{
 const { contract, contractSchemaQuery, deployContract, isDeploying } =
   useContractQueries();
 
-const { data, isPending, isRefetching, isError } = contractSchemaQuery;
+const { data, isPending, isRefetching, isError, error } = contractSchemaQuery;
 
 const calldataArguments = ref<ArgData>({ args: [], kwargs: {} });
 
@@ -45,7 +46,7 @@ const handleDeployContract = async () => {
 
     <ContentLoader v-if="isPending" />
 
-    <Alert v-else-if="isError" error> Could not load contract schema. </Alert>
+    <FriendlyError v-else-if="isError" :error="error" />
 
     <template v-else-if="data">
       <ContractParams
