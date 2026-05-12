@@ -3,7 +3,9 @@
 DEFAULT_VALIDATORS_COUNT = 5
 ACTIVATED_TRANSACTION_TIMEOUT = 900
 MAX_IDLE_REPLACEMENTS = 5
-DEFAULT_VALIDATOR_EXEC_TIMEOUT_SECONDS = ACTIVATED_TRANSACTION_TIMEOUT
+DEFAULT_EXEC_TIMEOUT_SECONDS = 600
+DEFAULT_LEADER_EXEC_TIMEOUT_SECONDS = DEFAULT_EXEC_TIMEOUT_SECONDS
+DEFAULT_VALIDATOR_EXEC_TIMEOUT_SECONDS = DEFAULT_EXEC_TIMEOUT_SECONDS
 
 import os
 import asyncio
@@ -54,7 +56,7 @@ from backend.rollup.consensus_service import ConsensusService
 
 import backend.validators as validators
 from backend.node.genvm.origin.public_abi import ResultCode
-from backend.consensus.types import ConsensusRound
+from backend.consensus.types import ConsensusResult, ConsensusRound
 from backend.consensus.utils import determine_consensus_from_votes
 from backend.consensus.decisions import (
     decide_undetermined,
@@ -219,16 +221,32 @@ def _redact_contract_for_log(contract_dict: dict) -> dict:
     return redacted
 
 
-def _validator_exec_timeout_seconds() -> float:
-    raw_timeout = os.getenv("CONSENSUS_VALIDATOR_EXEC_TIMEOUT_SECONDS")
+def _slot_budget_seconds(
+    transaction: Transaction,
+    role: Literal["leader", "validator"],
+) -> float:
+    """Per-tx slot budget.
+
+    Future: read from transaction.sim_config / gas mechanism. Today: env var
+    fallback.
+    """
+    _ = transaction
+    if role == "leader":
+        env_key = "CONSENSUS_LEADER_EXEC_TIMEOUT_SECONDS"
+        default = DEFAULT_LEADER_EXEC_TIMEOUT_SECONDS
+    else:
+        env_key = "CONSENSUS_VALIDATOR_EXEC_TIMEOUT_SECONDS"
+        default = DEFAULT_VALIDATOR_EXEC_TIMEOUT_SECONDS
+
+    raw_timeout = os.getenv(env_key)
     if raw_timeout is None:
-        return float(DEFAULT_VALIDATOR_EXEC_TIMEOUT_SECONDS)
+        return float(default)
     try:
         timeout = float(raw_timeout)
     except ValueError:
-        return float(DEFAULT_VALIDATOR_EXEC_TIMEOUT_SECONDS)
+        return float(default)
     if timeout <= 0:
-        return float(DEFAULT_VALIDATOR_EXEC_TIMEOUT_SECONDS)
+        return float(default)
     return timeout
 
 
@@ -1702,8 +1720,42 @@ class ProposingState(TransactionState):
                 context.transaction.hash, f"PROPOSING.LEADER.{step_name}"
             )
 
-        # Execute leader with replacement on fatal infrastructure failures
+        # Execute leader with one wall-clock slot budget. Fatal internal
+        # failures can still use replacements while budget remains.
+        leader_budget_seconds = _slot_budget_seconds(context.transaction, "leader")
+        leader_deadline = asyncio.get_running_loop().time() + leader_budget_seconds
+
+        def _build_leader_timeout_receipt(leader_dict: dict) -> Receipt:
+            timeout_ms = int(leader_budget_seconds * 1000)
+            return Receipt(
+                result=bytes([ResultCode.VM_ERROR]) + b"timeout",
+                calldata=b"",
+                gas_used=0,
+                mode=ExecutionMode.LEADER,
+                contract_state={},
+                node_config=leader_dict,
+                execution_result=ExecutionResultStatus.ERROR,
+                vote=None,
+                genvm_result={
+                    "stdout": "",
+                    "stderr": f"Leader execution exceeded {leader_budget_seconds:.3f}s",
+                    "error_code": "CONSENSUS_LEADER_EXEC_TIMEOUT",
+                    "raw_error": {
+                        "causes": ["LEADER_EXEC_TIMEOUT"],
+                        "fatal": False,
+                    },
+                },
+                processing_time=timeout_ms,
+            )
+
         for attempt in range(MAX_IDLE_REPLACEMENTS + 1):
+            remaining = leader_deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                context.consensus_data.leader_receipt = [
+                    _build_leader_timeout_receipt(context.leader)
+                ]
+                break
+
             leader_node = context.node_factory(
                 context.leader,
                 ExecutionMode.LEADER,
@@ -1722,10 +1774,27 @@ class ProposingState(TransactionState):
                 context.transaction.hash,
                 f"PROPOSING.LEADER_NODE_CREATED.attempt_{attempt}",
             )
+            exec_task = asyncio.create_task(
+                leader_node.exec_transaction(context.transaction)
+            )
             try:
-                context.consensus_data.leader_receipt = [
-                    await leader_node.exec_transaction(context.transaction)
-                ]
+                done, _ = await asyncio.wait(
+                    {exec_task},
+                    timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if exec_task not in done:
+                    exec_task.cancel()
+                    try:
+                        await asyncio.wait_for(exec_task, timeout=0.1)
+                    except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                        pass
+                    context.consensus_data.leader_receipt = [
+                        _build_leader_timeout_receipt(context.leader)
+                    ]
+                    break
+
+                context.consensus_data.leader_receipt = [await exec_task]
                 break  # success
             except GenVMInternalError as e:
                 if not e.is_fatal:
@@ -1848,7 +1917,9 @@ class CommittingState(TransactionState):
                 context.shared_contract_snapshot_cache,
             )
 
-        validator_exec_timeout_seconds = _validator_exec_timeout_seconds()
+        validator_slot_budget_seconds = _slot_budget_seconds(
+            context.transaction, "validator"
+        )
 
         # Execute the transaction with a semaphore to limit the number of concurrent validators
         sem = asyncio.Semaphore(8)
@@ -1874,7 +1945,7 @@ class CommittingState(TransactionState):
             return isinstance(raw_error, dict) and raw_error.get("fatal") is True
 
         def _build_timeout_receipt(validator_dict: dict) -> Receipt:
-            timeout_ms = int(validator_exec_timeout_seconds * 1000)
+            timeout_ms = int(validator_slot_budget_seconds * 1000)
             return Receipt(
                 result=bytes([ResultCode.VM_ERROR]) + b"timeout",
                 calldata=b"",
@@ -1883,21 +1954,44 @@ class CommittingState(TransactionState):
                 contract_state={},
                 node_config=validator_dict,
                 execution_result=ExecutionResultStatus.ERROR,
-                vote=None,
+                vote=Vote.TIMEOUT,
                 genvm_result={
                     "stdout": "",
                     "stderr": (
                         "Validator execution exceeded "
-                        f"{validator_exec_timeout_seconds:.3f}s"
+                        f"{validator_slot_budget_seconds:.3f}s"
                     ),
                     "error_code": "CONSENSUS_VALIDATOR_EXEC_TIMEOUT",
                     "raw_error": {
                         "causes": ["VALIDATOR_EXEC_TIMEOUT"],
-                        # Mark as fatal so replacement validators are attempted.
-                        "fatal": True,
+                        # Slot budget expiry is terminal for this attempt; timeout
+                        # replacement is driven after votes are collected.
+                        "fatal": False,
                     },
                 },
                 processing_time=timeout_ms,
+            )
+
+        def _build_synthetic_idle_receipt(validator_dict: dict) -> Receipt:
+            return Receipt(
+                result=bytes([ResultCode.VM_ERROR]) + b"idle",
+                calldata=b"",
+                gas_used=0,
+                mode=ExecutionMode.VALIDATOR,
+                contract_state={},
+                node_config=validator_dict,
+                execution_result=ExecutionResultStatus.ERROR,
+                vote=Vote.IDLE,
+                genvm_result={
+                    "stdout": "",
+                    "stderr": "Validator execution cancelled after quorum",
+                    "error_code": "CONSENSUS_VALIDATOR_QUORUM_REACHED",
+                    "raw_error": {
+                        "causes": ["VALIDATOR_QUORUM_REACHED"],
+                        "fatal": False,
+                    },
+                },
+                processing_time=0,
             )
 
         def _build_internal_error_receipt(
@@ -1928,7 +2022,15 @@ class CommittingState(TransactionState):
         async def run_single_validator(validator_dict: dict, index: int) -> Receipt:
             async with sem:
                 current = validator_dict
+                slot_deadline = (
+                    asyncio.get_running_loop().time() + validator_slot_budget_seconds
+                )
                 for attempt in range(MAX_IDLE_REPLACEMENTS + 1):
+                    remaining = slot_deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        result = _build_timeout_receipt(current)
+                        break
+
                     node = create_validator_node(context, current, index)
                     context.transactions_processor.add_state_timestamp(
                         context.transaction.hash,
@@ -1939,7 +2041,7 @@ class CommittingState(TransactionState):
                     )
                     done, _ = await asyncio.wait(
                         {exec_task},
-                        timeout=validator_exec_timeout_seconds,
+                        timeout=remaining,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     if exec_task in done:
@@ -2006,11 +2108,114 @@ class CommittingState(TransactionState):
             context.transaction.hash, "COMMITTING.VALIDATORS_EXECUTION_START"
         )
 
-        validation_tasks = [
-            run_single_validator(validator_dict, index)
-            for index, validator_dict in enumerate(validators_to_run)
+        def _is_quorum_reached(votes_so_far: list[str], total_votes: int) -> bool:
+            pending = total_votes - len(votes_so_far)
+            if pending < 0:
+                return False
+            possible_pending_votes = (
+                Vote.AGREE.value,
+                Vote.DISAGREE.value,
+                Vote.TIMEOUT.value,
+                Vote.IDLE.value,
+            )
+            outcomes = {
+                determine_consensus_from_votes(votes_so_far + [pending_vote] * pending)
+                for pending_vote in possible_pending_votes
+            }
+            if len(outcomes) != 1:
+                return False
+            return next(iter(outcomes)) != ConsensusResult.NO_MAJORITY
+
+        async def _cancel_pending_validator_tasks(
+            pending: Iterable[asyncio.Task],
+        ) -> None:
+            for task in pending:
+                task.cancel()
+            for task in pending:
+                try:
+                    await task
+                except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                    pass
+
+        async def _run_validator_wave(
+            results: list[Receipt | None],
+            slot_validators: list[dict],
+            indexes_to_run: list[int],
+        ) -> bool:
+            if not indexes_to_run:
+                return False
+
+            tasks_by_task = {
+                asyncio.create_task(
+                    run_single_validator(slot_validators[index], index)
+                ): index
+                for index in indexes_to_run
+            }
+            pending = set(tasks_by_task)
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done:
+                    index = tasks_by_task[task]
+                    results[index] = task.result()
+
+                context.validation_results = list(results)
+                votes_so_far = [
+                    result.vote.value
+                    for result in results
+                    if result is not None and result.vote is not None
+                ]
+                if _is_quorum_reached(votes_so_far, len(slot_validators)):
+                    await _cancel_pending_validator_tasks(pending)
+                    for task in pending:
+                        index = tasks_by_task[task]
+                        results[index] = _build_synthetic_idle_receipt(
+                            slot_validators[index]
+                        )
+                    context.validation_results = list(results)
+                    return True
+
+            return False
+
+        slot_validators = list(validators_to_run)
+        results: list[Receipt | None] = [None] * len(slot_validators)
+        replacement_cycles = 0
+
+        while True:
+            indexes_to_run = [
+                index for index, result in enumerate(results) if result is None
+            ]
+            quorum_reached = await _run_validator_wave(
+                results, slot_validators, indexes_to_run
+            )
+            if quorum_reached:
+                break
+
+            timeout_indexes = [
+                index
+                for index, result in enumerate(results)
+                if result is not None and result.vote == Vote.TIMEOUT
+            ]
+            if not timeout_indexes or replacement_cycles >= MAX_IDLE_REPLACEMENTS:
+                break
+
+            replacement_indexes: list[int] = []
+            for index in timeout_indexes:
+                replacement = await pop_replacement()
+                if replacement is None:
+                    continue
+                slot_validators[index] = replacement
+                results[index] = None
+                replacement_indexes.append(index)
+
+            if not replacement_indexes:
+                break
+            replacement_cycles += 1
+
+        context.validation_results = [
+            result for result in results if result is not None
         ]
-        context.validation_results = await asyncio.gather(*validation_tasks)
 
         # If all validators voted IDLE, infrastructure is systemically broken
         if all(r.vote == Vote.IDLE for r in context.validation_results):
@@ -2030,10 +2235,7 @@ class CommittingState(TransactionState):
         )
 
         # Post-execution effects (vote committed events + timestamp)
-        if validation_by_leader:
-            validators_to_emit = [context.leader] + context.remaining_validators
-        else:
-            validators_to_emit = list(context.remaining_validators)
+        validators_to_emit = slot_validators
 
         post_effects = decide_post_committing(
             tx_hash=context.transaction.hash,
