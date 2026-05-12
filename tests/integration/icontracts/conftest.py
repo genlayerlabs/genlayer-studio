@@ -49,6 +49,21 @@ def setup_validators():
     def _setup(mock_response: Any = None) -> None:
         nonlocal created_validator_addresses
         if mock_llms():
+            # Wipe ALL existing validators before seeding this test's mocks.
+            # Without this, a prior test's validator (which has different
+            # mock_response, possibly even none) can be picked into this
+            # test's consensus round via VRF, disagree with the leader's
+            # mocked output, and produce an UNDETERMINED result — the
+            # leader's receipt still says SUCCESS so tx_execution_succeeded
+            # passes, but contract state stays unchanged and the balance
+            # assertion fails. The xdist_group marker serializes these
+            # tests onto a single worker, so this wipe is safe for the
+            # parallel CI run.
+            delete_all = post_request_localhost(
+                payload("sim_deleteAllValidators")
+            ).json()
+            assert has_success_status(delete_all)
+
             mock_cfg = get_mock_provider_config()
             # Mock mode: create validators with specific mock_response for this test
             for _ in range(5):
