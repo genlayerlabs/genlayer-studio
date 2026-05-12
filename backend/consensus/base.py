@@ -690,7 +690,13 @@ class ConsensusAlgorithm:
 
             # Check if the sender has enough balance
             if from_balance < transaction.value:
-                # Set the transaction status to UNDETERMINED if balance is insufficient
+                # UNDETERMINED is finalization-eligible: claim_next_finalization
+                # filters on timestamp_awaiting_finalization IS NOT NULL.
+                # Without this stamp the row strands forever (16 such rows
+                # accumulated on Studio Prod over 19 days before this fix).
+                transactions_processor.set_transaction_timestamp_awaiting_finalization(
+                    transaction.hash
+                )
                 await ConsensusAlgorithm.dispatch_transaction_status_update(
                     transactions_processor,
                     transaction.hash,
