@@ -4,6 +4,7 @@ import { computed, ref } from 'vue';
 import PageSection from '@/components/Simulator/PageSection.vue';
 import ContractMethodItem from '@/components/Simulator/ContractMethodItem.vue';
 import EmptyListPlaceholder from '@/components/Simulator/EmptyListPlaceholder.vue';
+import FriendlyError from '@/components/Simulator/FriendlyError.vue';
 import type { ContractSchema } from 'genlayer-js/types';
 import type { ExecutionMode } from '@/types';
 
@@ -43,9 +44,7 @@ const simulationMode = ref(false);
 
     <ContentLoader v-if="isPending" />
 
-    <Alert v-else-if="isError" error>
-      {{ error?.message }}
-    </Alert>
+    <FriendlyError v-else-if="isError" :error="error" />
 
     <template v-else-if="data">
       <ContractMethodItem
