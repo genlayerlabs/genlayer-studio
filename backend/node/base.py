@@ -68,6 +68,24 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _genvm_extra_args() -> list[str]:
+    """Extra CLI args for the genvm executor.
+
+    `--debug-mode` enables the `:latest` and `:test` runner version
+    aliases (see genvm/executor/src/exe/run.rs:58-62). Convenient in
+    dev/stg where you want to iterate without pinning a specific runner
+    hash, but a footgun in prd: those aliases float, so two validators
+    on the same tx can resolve different runner binaries — breaks
+    determinism / consensus.
+
+    Gated on GENVM_DEBUG_MODE (default true to preserve dev/stg
+    convenience). Prd manifests should set GENVM_DEBUG_MODE=false so
+    contracts that try to use `py-genlayer:latest` or `py-genlayer:test`
+    fail fast at the executor.
+    """
+    return ["--debug-mode"] if _env_bool("GENVM_DEBUG_MODE", default=True) else []
+
+
 def _filter_genvm_log_by_level(genvm_log: list[dict]) -> list[dict]:
     """
     Filter genvm_log entries based on configured LOG_LEVEL.
@@ -905,7 +923,7 @@ class Node:
             ),
             message=message,
             permissions="rw",
-            extra_args=["--debug-mode"],
+            extra_args=_genvm_extra_args(),
             host_data='{"node_address":"0x", "tx_id":"0x"}',
             capture_output=True,
             is_sync=True,
@@ -1031,7 +1049,7 @@ class Node:
                 permissions=perms,
                 capture_output=True,
                 host_data=json.dumps(host_data),
-                extra_args=["--debug-mode"],
+                extra_args=_genvm_extra_args(),
                 is_sync=is_sync,
                 manager_uri=self.manager.url,
                 timeout=timeout,
