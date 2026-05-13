@@ -640,9 +640,34 @@ async def run_genvm(
 
     # IMPORTANT: if proc setup fails (e.g., manager accepts TCP but never replies),
     # don't wait forever on host_loop.
-    done, pending = await asyncio.wait(
-        [fut_host, fut_proc, fut_prob], return_when=asyncio.FIRST_EXCEPTION
-    )
+    try:
+        done, pending = await asyncio.wait(
+            [fut_host, fut_proc, fut_prob], return_when=asyncio.FIRST_EXCEPTION
+        )
+    except BaseException:
+        cancellation_event.set()
+        tasks = [fut_host, fut_proc, fut_prob]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except BaseException:
+                pass
+
+        timeout_task = timeout_task_cell[0]
+        if timeout_task is not None and not timeout_task.done():
+            timeout_task.cancel()
+            try:
+                await timeout_task
+            except BaseException:
+                pass
+
+        genvm_id = genvm_id_cell[0]
+        if genvm_id is not None:
+            await _send_timeout(manager_uri, genvm_id, ctx=ctx)
+        raise
 
     # Log which tasks completed/failed for debugging
     done_names = [task_names.get(id(t), "unknown") for t in done]

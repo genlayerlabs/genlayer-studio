@@ -193,6 +193,24 @@ class ConsensusWorker:
         Returns:
             Transaction data dict if claimed, None otherwise
         """
+        # Ordering invariant: a tx can only be claimed for finalization
+        # once every OLDER tx on the same contract has reached a terminal
+        # state ({FINALIZED, CANCELED}). Otherwise a younger tx could
+        # finalize before its predecessor — e.g. tx N+1 ACCEPTED finalizes
+        # while N is still stuck in COMMITTING, locking in state changes
+        # out of causal order. Made head-of-queue per contract; the
+        # cascade is automatic — when N finalizes, N+1 becomes eligible
+        # on the next claim cycle.
+        #
+        # Eligibility also accepts NULL timestamp_awaiting_finalization
+        # rows past STRANDED_TX_AFTER_SECONDS. Pre-fix code paths (e.g.
+        # the May 2026 insufficient-balance SEND short-circuit) could
+        # set a finalization-eligible status without stamping the
+        # timestamp, leaving the row invisible to this query forever.
+        # The defensive branch drains them naturally without backfill.
+        STRANDED_TX_AFTER_SECONDS = int(
+            os.environ.get("FINALIZATION_STRANDED_TX_AFTER_SECONDS", "600")
+        )
         # Query for transactions that are ready for finalization
         # They must be in ACCEPTED/UNDETERMINED/TIMEOUT states and appeal window must have passed
         start_time = time.perf_counter()
@@ -203,15 +221,30 @@ class ConsensusWorker:
                 FROM transactions t
                 WHERE t.status IN ('ACCEPTED', 'UNDETERMINED', 'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT')
                     AND t.appealed = false
-                    AND t.timestamp_awaiting_finalization IS NOT NULL
                     AND (
-                        t.execution_mode IN ('LEADER_ONLY', 'LEADER_SELF_VALIDATOR')
-                        OR (
-                            EXTRACT(EPOCH FROM NOW()) - t.timestamp_awaiting_finalization - COALESCE(t.appeal_processing_time, 0)
-                        ) > :finality_window_seconds * POWER(1 - :appeal_failed_reduction, COALESCE(t.appeal_failed, 0))
+                        -- Normal: timestamp set and finality window elapsed
+                        (t.timestamp_awaiting_finalization IS NOT NULL
+                         AND (
+                            t.execution_mode IN ('LEADER_ONLY', 'LEADER_SELF_VALIDATOR')
+                            OR (
+                                EXTRACT(EPOCH FROM NOW()) - t.timestamp_awaiting_finalization - COALESCE(t.appeal_processing_time, 0)
+                            ) > :finality_window_seconds * POWER(1 - :appeal_failed_reduction, COALESCE(t.appeal_failed, 0))
+                         ))
+                        OR
+                        -- Defensive: timestamp NULL + row past stranded threshold
+                        (t.timestamp_awaiting_finalization IS NULL
+                         AND t.created_at < NOW() - make_interval(secs => :stranded_threshold_seconds))
                     )
                     AND (t.blocked_at IS NULL
                          OR t.blocked_at < NOW() - CAST(:timeout AS INTERVAL))
+                    AND NOT EXISTS (
+                        -- Ordering invariant: no older non-terminal tx on the same contract
+                        SELECT 1 FROM transactions earlier
+                        WHERE earlier.to_address IS NOT DISTINCT FROM t.to_address
+                            AND earlier.created_at < t.created_at
+                            AND earlier.status NOT IN ('FINALIZED', 'CANCELED')
+                            AND earlier.hash != t.hash
+                    )
                     AND NOT EXISTS (
                         -- Ensure no other transaction for same contract is being processed
                         SELECT 1 FROM transactions t2
@@ -261,6 +294,7 @@ class ConsensusWorker:
                 "timeout": f"{self.transaction_timeout_minutes} minutes",
                 "finality_window_seconds": self.consensus_algorithm.finality_window_time,
                 "appeal_failed_reduction": self.consensus_algorithm.finality_window_appeal_failed_reduction,
+                "stranded_threshold_seconds": STRANDED_TX_AFTER_SECONDS,
             },
         ).first()
         duration = time.perf_counter() - start_time
