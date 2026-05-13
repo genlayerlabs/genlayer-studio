@@ -69,6 +69,7 @@ def _insert_tx(
     created_at: datetime,
     blocked_at: datetime | None = None,
     worker_id: str | None = None,
+    timestamp_awaiting_finalization: int | None = None,
 ):
     """Direct INSERT — bypass the processor so we can backdate created_at."""
     session.execute(
@@ -80,13 +81,15 @@ def _insert_tx(
                 appeal_undetermined, appeal_leader_timeout,
                 appeal_validators_timeout, appeal_processing_time,
                 recovery_count, value_credited,
-                created_at, blocked_at, worker_id
+                created_at, blocked_at, worker_id,
+                timestamp_awaiting_finalization
             ) VALUES (
                 :hash, CAST(:status AS transaction_status),
                 '0xfromaddress', :to_addr, CAST('{}' AS jsonb), 0, 2,
                 :nonce, false, 'NORMAL', false, 0,
                 false, false, false, 0, 0, false,
-                :created_at, :blocked_at, :worker_id
+                :created_at, :blocked_at, :worker_id,
+                :timestamp_awaiting_finalization
             )
             """
         ),
@@ -98,6 +101,7 @@ def _insert_tx(
             "created_at": created_at,
             "blocked_at": blocked_at,
             "worker_id": worker_id,
+            "timestamp_awaiting_finalization": timestamp_awaiting_finalization,
         },
     )
 
@@ -163,7 +167,7 @@ async def test_stuck_head_no_active_work_is_orphaned(engine: Engine):
             s,
             tx_hash="0x" + "01" * 32,
             to_address=contract,
-            status="ACCEPTED",
+            status="COMMITTING",
             nonce=0,
             created_at=now - timedelta(minutes=30),
         )
@@ -279,7 +283,7 @@ async def test_multiple_contracts_only_stuck_heads_count(engine: Engine):
             s,
             tx_hash="0x" + "0b" * 32,
             to_address="0x" + "bb" * 20,
-            status="ACCEPTED",
+            status="COMMITTING",
             nonce=0,
             created_at=now - timedelta(minutes=30),
         )
@@ -375,15 +379,21 @@ async def test_expired_claim_counts_contract_as_stuck(engine: Engine):
 
 
 @pytest.mark.asyncio
-async def test_timeout_status_head_is_treated_as_in_flight(engine: Engine):
-    """LEADER_TIMEOUT and VALIDATORS_TIMEOUT are processed by the
-    finalization/appeal claim paths — they're in-flight statuses, so
-    a stale head in those states should still trigger detection."""
+async def test_post_consensus_statuses_excluded_from_stuck_head_count(engine: Engine):
+    """ACCEPTED / UNDETERMINED / *_TIMEOUT are post-consensus statuses,
+    awaiting finalization rather than blocked on consensus progress.
+    They MUST NOT count as stuck consensus heads — that's the false-
+    positive class that mis-fired the production alert in May 2026
+    (15 stranded UNDETERMINED rows on unused contracts looked like
+    stuck heads, but they had zero queue behind them). The dedicated
+    stuck-finalization detector covers these instead."""
     Session_ = sessionmaker(bind=engine, expire_on_commit=False)
     now = datetime.now(timezone.utc)
 
     with Session_() as s:
-        for i, st in enumerate(["LEADER_TIMEOUT", "VALIDATORS_TIMEOUT"]):
+        for i, st in enumerate(
+            ["ACCEPTED", "UNDETERMINED", "LEADER_TIMEOUT", "VALIDATORS_TIMEOUT"]
+        ):
             _insert_tx(
                 s,
                 tx_hash=f"0x{i:064x}",
@@ -398,9 +408,9 @@ async def test_timeout_status_head_is_treated_as_in_flight(engine: Engine):
 
     result = await health_module._check_consensus_health()
 
-    assert result["total_orphaned_transactions"] == 2, (
-        "*_TIMEOUT statuses must be in-flight per the head CTE so the "
-        "metric agrees with the worker claim paths that process them."
+    assert result["total_orphaned_transactions"] == 0, (
+        "Post-consensus statuses must not pollute the stuck-head signal. "
+        f"Got: {result}"
     )
 
 
@@ -419,7 +429,7 @@ async def test_status_threshold_matches_dashboard_alert_gate(engine: Engine):
                 s,
                 tx_hash=f"0x{i:064x}",
                 to_address=f"0x{(0x70 + i):02x}" + "00" * 19,
-                status="ACCEPTED",
+                status="COMMITTING",
                 nonce=0,
                 created_at=now - timedelta(minutes=30),
             )
@@ -433,3 +443,147 @@ async def test_status_threshold_matches_dashboard_alert_gate(engine: Engine):
     assert (
         result["status"] == "degraded"
     ), f"3 stuck contracts must flip status to degraded. Got: {result}"
+
+
+# ── Stuck-finalization detector ───────────────────────────────────
+#
+# Separate from the stuck-consensus-head detector. Post-consensus txs
+# (ACCEPTED / UNDETERMINED / *_TIMEOUT) carry agreed consensus_data and
+# only need finalization. They live under this metric. The detector
+# has two arms:
+#
+#   1. timestamp_awaiting_finalization set + stale → finalizer not
+#      making progress on these rows (e.g., finalization scheduler
+#      starvation, finalization claim path broken).
+#   2. timestamp_awaiting_finalization NULL + row is old → defensive:
+#      catches future bugs like the May 2026 insufficient-balance SEND
+#      path, which reached UNDETERMINED without ever stamping the
+#      timestamp and was invisible to claim_next_finalization forever.
+
+
+@pytest.mark.asyncio
+async def test_stuck_finalization_with_stale_timestamp_is_flagged(engine: Engine):
+    """timestamp_awaiting_finalization is set but older than the
+    threshold — classic "finalizer not running" case."""
+    import time
+
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    stale_ts = int(time.time()) - 24 * 3600  # 1 day ago
+
+    with Session_() as s:
+        _insert_tx(
+            s,
+            tx_hash="0x" + "f1" * 32,
+            to_address="0x" + "f1" * 20,
+            status="ACCEPTED",
+            nonce=0,
+            created_at=now - timedelta(days=1),
+            timestamp_awaiting_finalization=stale_ts,
+        )
+        s.commit()
+
+    from backend.protocol_rpc import health as health_module
+
+    result = await health_module._check_consensus_health()
+
+    assert (
+        result["stuck_finalization_count"] == 1
+    ), f"Stale timestamp_awaiting_finalization must be flagged. Got: {result}"
+
+
+@pytest.mark.asyncio
+async def test_stuck_finalization_with_null_timestamp_is_flagged(engine: Engine):
+    """timestamp_awaiting_finalization is NULL but the row is old —
+    defensive coverage for the May 2026 insufficient-balance SEND bug
+    pattern (post-consensus row without an awaiting timestamp, invisible
+    to claim_next_finalization)."""
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+
+    with Session_() as s:
+        _insert_tx(
+            s,
+            tx_hash="0x" + "f2" * 32,
+            to_address="0x" + "f2" * 20,
+            status="UNDETERMINED",
+            nonce=0,
+            created_at=now - timedelta(hours=2),
+            timestamp_awaiting_finalization=None,
+        )
+        s.commit()
+
+    from backend.protocol_rpc import health as health_module
+
+    result = await health_module._check_consensus_health()
+
+    assert result["stuck_finalization_count"] == 1, (
+        "NULL timestamp + old row must be flagged so a regression of the "
+        f"insufficient-balance SEND bug is caught. Got: {result}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_recent_finalization_eligible_row_is_not_flagged(engine: Engine):
+    """Row younger than the stuck-finalization threshold must not be
+    flagged — the finalization window is still open."""
+    import time
+
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+
+    with Session_() as s:
+        _insert_tx(
+            s,
+            tx_hash="0x" + "f3" * 32,
+            to_address="0x" + "f3" * 20,
+            status="ACCEPTED",
+            nonce=0,
+            created_at=now - timedelta(seconds=30),
+            # set to "now" — finality window not exceeded yet
+            timestamp_awaiting_finalization=int(time.time()),
+        )
+        s.commit()
+
+    from backend.protocol_rpc import health as health_module
+
+    result = await health_module._check_consensus_health()
+
+    assert (
+        result["stuck_finalization_count"] == 0
+    ), f"Fresh finalization-eligible row must not be flagged. Got: {result}"
+
+
+@pytest.mark.asyncio
+async def test_stuck_finalization_flips_status_at_threshold(engine: Engine):
+    """consensus.status flips to degraded when stuck_finalization_count
+    reaches HEALTH_DEGRADED_AT_STUCK_FINALIZATIONS (default 3) —
+    independent of stuck-head count, so finalization stalls get their
+    own clear signal."""
+    import time
+
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    stale_ts = int(time.time()) - 12 * 3600
+
+    with Session_() as s:
+        for i in range(3):
+            _insert_tx(
+                s,
+                tx_hash=f"0xf4{i:062x}",
+                to_address=f"0x{(0xF4 + i):02x}" + "00" * 19,
+                status="UNDETERMINED",
+                nonce=0,
+                created_at=now - timedelta(hours=12),
+                timestamp_awaiting_finalization=stale_ts,
+            )
+        s.commit()
+
+    from backend.protocol_rpc import health as health_module
+
+    result = await health_module._check_consensus_health()
+
+    assert result["stuck_finalization_count"] == 3
+    assert (
+        result["status"] == "degraded"
+    ), f"3 stuck finalizations must flip consensus.status. Got: {result}"

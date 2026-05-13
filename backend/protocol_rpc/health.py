@@ -256,6 +256,9 @@ async def _run_health_checks() -> None:
             "orphaned_transactions": consensus_health.get(
                 "total_orphaned_transactions", 0
             ),
+            "stuck_finalization_count": consensus_health.get(
+                "stuck_finalization_count", 0
+            ),
             "active_workers": consensus_health.get("active_workers", 0),
             "status": consensus_status,
         }
@@ -263,10 +266,15 @@ async def _run_health_checks() -> None:
             if overall_status == "healthy":
                 overall_status = "degraded"
             issues.append("consensus_issue")
-        elif consensus_health.get("total_orphaned_transactions", 0) >= 3:
-            if overall_status == "healthy":
-                overall_status = "degraded"
-            issues.append("orphaned_transactions")
+        else:
+            if consensus_health.get("total_orphaned_transactions", 0) >= 3:
+                if overall_status == "healthy":
+                    overall_status = "degraded"
+                issues.append("orphaned_transactions")
+            if consensus_health.get("stuck_finalization_count", 0) >= 3:
+                if overall_status == "healthy":
+                    overall_status = "degraded"
+                issues.append("stuck_finalizations")
 
         # 3. LLM provider health (per-provider failure-rate detection)
         # Catches cases like a provider returning HTTP 402 / "tier required"
@@ -548,13 +556,31 @@ async def _check_consensus_health() -> Dict[str, Any]:
     # Match the dashboard alert threshold so consensus.status and the
     # top-level "issues" tag agree on what counts as degraded.
     DEGRADED_AT_STUCK_HEADS = int(os.environ.get("HEALTH_DEGRADED_AT_STUCK_HEADS", "3"))
+    # Finalization-stall threshold: ACCEPTED/UNDETERMINED/*_TIMEOUT txs
+    # that haven't reached FINALIZED within this many seconds count as
+    # stuck. Default 600s (10 min) — finalization is supposed to be
+    # quick after the finality window opens.
+    STUCK_FINALIZATION_AFTER_SECONDS = int(
+        os.environ.get("HEALTH_STUCK_FINALIZATION_AFTER_SECONDS", "600")
+    )
+    DEGRADED_AT_STUCK_FINALIZATIONS = int(
+        os.environ.get("HEALTH_DEGRADED_AT_STUCK_FINALIZATIONS", "3")
+    )
 
-    # Statuses considered "in flight". Includes the *_TIMEOUT variants
-    # because finalization and appeal claim paths process them. Must
-    # match the head-CTE filter and the in-flight-count query for
-    # consistency.
-    IN_FLIGHT_STATUSES_SQL = (
+    # Statuses where the consensus state machine is actively working.
+    # The "head of queue stuck" check uses ONLY these: ACCEPTED-class
+    # statuses are post-consensus and live under the separate
+    # finalization-stall detector below.
+    CONSENSUS_ACTIVE_STATUSES_SQL = "'ACTIVATED','PROPOSING','COMMITTING','REVEALING'"
+    # Broader set including finalization-pending statuses. Used only
+    # in the "is any worker actively claiming on this contract" NOT
+    # EXISTS clause — a finalization worker counts as active work and
+    # should mask a stuck consensus head.
+    ANY_INFLIGHT_STATUSES_SQL = (
         "'ACTIVATED','PROPOSING','COMMITTING','REVEALING',"
+        "'ACCEPTED','UNDETERMINED','LEADER_TIMEOUT','VALIDATORS_TIMEOUT'"
+    )
+    FINALIZATION_ELIGIBLE_STATUSES_SQL = (
         "'ACCEPTED','UNDETERMINED','LEADER_TIMEOUT','VALIDATORS_TIMEOUT'"
     )
 
@@ -586,13 +612,18 @@ async def _check_consensus_health() -> Dict[str, Any]:
                 ).fetchone()
                 active_workers_count = active_workers_row.n if active_workers_row else 0
 
-                # Stuck heads: per contract, the oldest in-flight tx
-                # whose contract has no unexpired worker claim AND head
-                # is old enough to expect progress. Returns the count
-                # of AFFECTED CONTRACTS, not the count of queued txs
-                # behind them — those are not the problem, the head is.
-                # Tie-break on hash so debug output (when we surface
-                # the heads) is deterministic.
+                # Stuck heads: per contract, the oldest consensus-active
+                # tx whose contract has no unexpired worker claim AND
+                # head is old enough to expect progress. Head CTE uses
+                # only the consensus-active set — ACCEPTED-class rows
+                # are post-consensus and would otherwise pollute the
+                # signal (one stranded UNDETERMINED on an unused
+                # contract is not a stuck head). The NOT EXISTS clause
+                # uses the broader set so a finalization worker
+                # currently processing on the same contract correctly
+                # masks the alarm.
+                # Returns the count of AFFECTED CONTRACTS, not the
+                # count of queued txs behind them.
                 stuck_row = conn.execute(
                     text(
                         f"""
@@ -603,7 +634,7 @@ async def _check_consensus_health() -> Dict[str, Any]:
                                 status,
                                 created_at
                             FROM transactions
-                            WHERE status IN ({IN_FLIGHT_STATUSES_SQL})
+                            WHERE status IN ({CONSENSUS_ACTIVE_STATUSES_SQL})
                               AND to_address IS NOT NULL
                             ORDER BY to_address, created_at ASC, hash ASC
                         )
@@ -614,7 +645,7 @@ async def _check_consensus_health() -> Dict[str, Any]:
                               SELECT 1
                               FROM transactions t2
                               WHERE t2.to_address = h.to_address
-                                AND t2.status IN ({IN_FLIGHT_STATUSES_SQL})
+                                AND t2.status IN ({ANY_INFLIGHT_STATUSES_SQL})
                                 AND t2.blocked_at IS NOT NULL
                                 AND t2.blocked_at > NOW() - make_interval(mins => :claim_window)
                           )
@@ -627,15 +658,47 @@ async def _check_consensus_health() -> Dict[str, Any]:
                 ).fetchone()
                 stuck_head_contracts = stuck_row.stuck_heads if stuck_row else 0
 
+                # Stuck finalizations: ACCEPTED-class txs waiting too
+                # long to reach FINALIZED. Two paths:
+                #   1. timestamp_awaiting_finalization set and stale
+                #      (normal "finalizer not running" case)
+                #   2. timestamp_awaiting_finalization NULL and the row
+                #      is old (catches future bugs like the May 2026
+                #      insufficient-balance SEND path, where a tx
+                #      reached UNDETERMINED without ever stamping the
+                #      timestamp — invisible to claim_next_finalization
+                #      forever)
+                stuck_fin_row = conn.execute(
+                    text(
+                        f"""
+                        SELECT COUNT(*) AS n
+                        FROM transactions
+                        WHERE status IN ({FINALIZATION_ELIGIBLE_STATUSES_SQL})
+                          AND (
+                              (timestamp_awaiting_finalization IS NOT NULL
+                               AND EXTRACT(EPOCH FROM NOW())::bigint
+                                   - timestamp_awaiting_finalization
+                                   > :stuck_seconds)
+                              OR
+                              (timestamp_awaiting_finalization IS NULL
+                               AND created_at
+                                   < NOW() - make_interval(secs => :stuck_seconds))
+                          )
+                        """
+                    ),
+                    {"stuck_seconds": STUCK_FINALIZATION_AFTER_SECONDS},
+                ).fetchone()
+                stuck_finalization_count = stuck_fin_row.n if stuck_fin_row else 0
+
                 # Total in-flight (non-final) tx count, for context.
-                # Same status set as the head CTE so the metrics are
-                # consistent.
+                # Consensus-active only — finalization-pending rows
+                # are tracked separately via stuck_finalization_count.
                 processing_row = conn.execute(
                     text(
                         f"""
                         SELECT COUNT(*) AS n
                         FROM transactions
-                        WHERE status IN ({IN_FLIGHT_STATUSES_SQL})
+                        WHERE status IN ({CONSENSUS_ACTIVE_STATUSES_SQL})
                           AND to_address IS NOT NULL
                         """
                     )
@@ -643,19 +706,22 @@ async def _check_consensus_health() -> Dict[str, Any]:
                 total_processing = processing_row.n if processing_row else 0
 
                 status = (
-                    "healthy"
-                    if stuck_head_contracts < DEGRADED_AT_STUCK_HEADS
-                    else "degraded"
+                    "degraded"
+                    if (
+                        stuck_head_contracts >= DEGRADED_AT_STUCK_HEADS
+                        or stuck_finalization_count >= DEGRADED_AT_STUCK_FINALIZATIONS
+                    )
+                    else "healthy"
                 )
 
                 return {
                     "status": status,
                     "total_processing_transactions": total_processing,
                     # Field name preserved for backwards-compat with the
-                    # external dashboard. Semantics changed: now counts
-                    # CONTRACTS whose head-of-queue is stuck, not raw
-                    # blocked txs. A long queue with a moving head reads 0.
+                    # external dashboard. Semantics: count of CONTRACTS
+                    # whose consensus head is stuck.
                     "total_orphaned_transactions": stuck_head_contracts,
+                    "stuck_finalization_count": stuck_finalization_count,
                     "active_workers": active_workers_count,
                 }
 
