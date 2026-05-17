@@ -115,10 +115,21 @@ const consensusMaxRotations = computed(() => consensusStore.maxRotations);
         @openDeployment="isDeploymentOpen = true"
       />
 
+      <!--
+        Mirror the validator-required Alert in ContractInfo: while
+        validators are still loading we don't yet know whether to show
+        the "you need validators" warning or the deploy form, so render
+        the form rather than leave the user with just "Not deployed yet"
+        and no UI. After load:
+          - 1+ validators → form stays.
+          - 0 validators → Alert in ContractInfo takes over (gated on
+            `!isLoadingValidatorData`).
+      -->
       <template
         v-if="
           !isStudioNetwork ||
           nodeStore.hasAtLeastOneValidator ||
+          nodeStore.isLoadingValidatorData ||
           uiStore.showTutorial
         "
       >
