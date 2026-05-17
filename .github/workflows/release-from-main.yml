@@ -30,6 +30,7 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: "lts/*"
+          cache: "npm"
       - name: Install dependencies
         run: npm install @semantic-release/github @semantic-release/release-notes-generator @semantic-release/commit-analyzer @semantic-release/npm conventional-changelog-conventionalcommits
       - name: Release
