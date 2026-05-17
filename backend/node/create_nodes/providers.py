@@ -23,7 +23,7 @@ def is_ollama_available() -> bool:
         result = sock.connect_ex(("ollama", int(os.getenv("OLAMAPORT", "11434"))))
         sock.close()
         return result == 0
-    except:
+    except (OSError, ValueError):
         return False
 
 

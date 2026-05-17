@@ -31,7 +31,7 @@ def upgrade() -> None:
         if isinstance(value, str):
             try:
                 return json.loads(value)
-            except:
+            except (json.JSONDecodeError, TypeError):
                 print(f"Failed to parse JSON: {value}. Removing configuration.")
                 return {}
         print(f"Unexpected type: {type(value)}. Removing configuration.")
