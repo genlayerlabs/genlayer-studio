@@ -43,7 +43,7 @@
     "hash-sum": "^2.0.0",
     "jump.js": "^1.0.2",
     "lodash-es": "^4.17.21",
-    "lucide-vue-next": "^0.575.0",
+    "lucide-vue-next": "^1.0.0",
     "monaco-editor": "^0.55.0",
     "pinia": "^3.0.0",
     "sortablejs": "^1.15.3",
