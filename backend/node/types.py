@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Iterable, Optional, Literal
+from typing import Iterable, Optional, Literal, NotRequired, TypedDict
 import base64
 import hashlib
 import json
@@ -226,6 +226,21 @@ class PendingTransaction:
             )
 
 
+class NodeConfig(TypedDict, total=False):
+    address: str
+    stake: int
+    provider: str
+    model: str
+    config: dict
+    plugin: str
+    plugin_config: dict
+    private_key: str | None
+    fallback_validator: str | None
+    id: int
+    primary_model: dict | None
+    secondary_model: dict | None
+
+
 @dataclass
 class Receipt:
     result: bytes
@@ -233,7 +248,7 @@ class Receipt:
     gas_used: int
     mode: ExecutionMode
     contract_state: dict[str, str]
-    node_config: dict
+    node_config: NodeConfig
     execution_result: ExecutionResultStatus
     eq_outputs: dict[int, str] | None = None
     vote: Optional[Vote] = None
