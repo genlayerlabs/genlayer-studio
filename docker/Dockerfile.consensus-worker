@@ -11,7 +11,14 @@ ARG path=/app
 WORKDIR $path
 
 SHELL ["/bin/bash", "-x", "-c"]
-RUN apt-get update -y \
+# Retry apt-get update — Ubuntu mirrors occasionally serve out-of-sync
+# Packages.gz files mid-rotation, which causes "File has unexpected size"
+# errors that persist for a few minutes. Retrying smooths over these.
+RUN for i in 1 2 3 4 5; do \
+        apt-get update -y && break; \
+        echo "apt-get update failed (attempt $i/5), retrying in 15s..."; \
+        sleep 15; \
+    done \
     && DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install -y --no-install-recommends \
         curl unzip xz-utils ca-certificates python3.12 python3.12-dev python3.12-venv libssl3 gcc musl \
     && mkdir -p "$HOME/.config/pip/" \

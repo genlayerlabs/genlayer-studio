@@ -63,7 +63,7 @@ describe('transactionsStore — behavioral contract', () => {
     );
   });
 
-  it('transactions have NO chainId field (current limitation)', () => {
+  it('transactions are stamped with the current network chainId on add', () => {
     const store = useTransactionsStore();
     store.addTransaction({
       hash: '0xTx2',
@@ -76,7 +76,7 @@ describe('transactionsStore — behavioral contract', () => {
 
     const tx = store.transactions.find((t: any) => t.hash === '0xTx2');
     expect(tx).toBeDefined();
-    expect((tx as any).chainId).toBeUndefined();
+    expect((tx as any).chainId).toBeTypeOf('number');
   });
 
   it('updateTransaction replaces existing by hash', () => {

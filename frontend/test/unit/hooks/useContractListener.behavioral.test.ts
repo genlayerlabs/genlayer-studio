@@ -7,12 +7,17 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { useContractListener } from '@/hooks/useContractListener';
-import { useContractsStore, useTransactionsStore } from '@/stores';
+import {
+  useContractsStore,
+  useTransactionsStore,
+  useNetworkStore,
+} from '@/stores';
 import { useWebSocketClient } from '@/hooks';
 
 vi.mock('@/stores', () => ({
   useContractsStore: vi.fn(),
   useTransactionsStore: vi.fn(),
+  useNetworkStore: vi.fn(),
 }));
 
 vi.mock('@/hooks', () => ({
@@ -22,15 +27,21 @@ vi.mock('@/hooks', () => ({
 describe('useContractListener — behavioral contract', () => {
   let contractsStoreMock: any;
   let transactionsStoreMock: any;
+  let networkStoreMock: any;
   let webSocketClientMock: any;
 
   beforeEach(() => {
     contractsStoreMock = {
       addDeployedContract: vi.fn(),
+      deployedContracts: [],
     };
 
     transactionsStoreMock = {
       transactions: [],
+    };
+
+    networkStoreMock = {
+      isStudio: true,
     };
 
     webSocketClientMock = {
@@ -39,6 +50,7 @@ describe('useContractListener — behavioral contract', () => {
 
     (useContractsStore as any).mockReturnValue(contractsStoreMock);
     (useTransactionsStore as any).mockReturnValue(transactionsStoreMock);
+    (useNetworkStore as any).mockReturnValue(networkStoreMock);
     (useWebSocketClient as any).mockReturnValue(webSocketClientMock);
   });
 
@@ -146,5 +158,29 @@ describe('useContractListener — behavioral contract', () => {
     expect(contractsStoreMock.addDeployedContract).toHaveBeenCalledWith(
       expect.objectContaining({ contractId: 'b' }),
     );
+  });
+
+  it('should register accepted deploy txs on non-Studio networks without WS event', () => {
+    networkStoreMock.isStudio = false;
+    transactionsStoreMock.transactions = [
+      {
+        hash: '0xDeployHash',
+        localContractId: 'my-contract',
+        type: 'deploy',
+        statusName: 'ACCEPTED',
+        data: {
+          recipient: '0x1111111111111111111111111111111111111111',
+        },
+      },
+    ];
+
+    const { init } = useContractListener();
+    init();
+
+    expect(contractsStoreMock.addDeployedContract).toHaveBeenCalledWith({
+      contractId: 'my-contract',
+      address: '0x1111111111111111111111111111111111111111',
+      defaultState: '{}',
+    });
   });
 });

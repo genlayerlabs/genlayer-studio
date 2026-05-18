@@ -103,9 +103,10 @@ class MessageHandler(IMessageHandler):
         gray = "\033[38;5;245m"
         reset = "\033[0m"
 
-        if log_event.data:
+        data = log_event.sanitized_data()
+        if data:
             try:
-                data_to_log = self._apply_log_level_truncation(log_event.data)
+                data_to_log = self._apply_log_level_truncation(data)
 
                 def json_serializer(o):
                     if isinstance(o, bytes):
@@ -124,9 +125,7 @@ class MessageHandler(IMessageHandler):
                 data_str = json.dumps(data_to_log, default=json_serializer)
                 log_message += f" {gray}{data_str}{reset}"
             except TypeError as e:
-                log_message += (
-                    f" {gray}{str(log_event.data)} (serialization error: {e}){reset}"
-                )
+                log_message += f" {gray}{str(data)} (serialization error: {e}){reset}"
 
         log_method(log_message)
 

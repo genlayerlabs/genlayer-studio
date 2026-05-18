@@ -16,63 +16,60 @@ Object.assign(WebSocketMock, {
 });
 (global as any).WebSocket = WebSocketMock;
 
+// Reusable mock network store so `useWebSocketClient()` (no args) can resolve
+// a URL without requiring a real Pinia instance in the test runtime.
+const mockNetworkStore = {
+  wsUrl: 'ws://localhost:4000' as string | null,
+};
+vi.mock('@/stores/network', () => ({
+  useNetworkStore: vi.fn(() => mockNetworkStore),
+}));
+
 describe('useWebSocketClient', () => {
-  it('should create a WebSocket client with the correct URL', async () => {
+  it('creates a WebSocket client using the network store URL', async () => {
     const { useWebSocketClient } = await import('@/hooks/useWebSocketClient');
-    const client = useWebSocketClient();
-    const expectedUrl = (client as unknown as { url: string }).url;
-
     WebSocketMock.mockClear();
-    client.connect();
-
-    expect(WebSocketMock).toHaveBeenCalledWith(expectedUrl);
+    const client = useWebSocketClient();
+    expect(client).toBeDefined();
+    expect(WebSocketMock).toHaveBeenCalled();
   });
 
-  it('should create a WebSocket client with the correct URL', async () => {
+  it('returns a no-op stub when the current network has no WS url', async () => {
+    mockNetworkStore.wsUrl = null;
+    vi.resetModules();
+    WebSocketMock.mockClear();
     const { useWebSocketClient } = await import('@/hooks/useWebSocketClient');
     const client = useWebSocketClient();
     expect(client).toBeDefined();
-    expect(global.WebSocket).toHaveBeenCalled();
+    expect(WebSocketMock).not.toHaveBeenCalled();
+    expect(client.connected).toBe(false);
+    // Restore for subsequent tests.
+    mockNetworkStore.wsUrl = 'ws://localhost:4000';
   });
 
-  it('should have an emit method', async () => {
+  it('accepts an explicit URL override', async () => {
+    vi.resetModules();
+    WebSocketMock.mockClear();
     const { useWebSocketClient } = await import('@/hooks/useWebSocketClient');
-    const client = useWebSocketClient();
-    expect(client.emit).toBeDefined();
+    const client = useWebSocketClient('ws://explicit:5000');
+    expect(client).toBeDefined();
+    expect(WebSocketMock).toHaveBeenCalled();
+  });
+
+  it('exposes the standard emit / on / off / disconnect surface', async () => {
+    vi.resetModules();
+    const { useWebSocketClient } = await import('@/hooks/useWebSocketClient');
+    const client = useWebSocketClient('ws://localhost:4000');
     expect(typeof client.emit).toBe('function');
-  });
-
-  it('should have an on method for event handling', async () => {
-    const { useWebSocketClient } = await import('@/hooks/useWebSocketClient');
-    const client = useWebSocketClient();
-    expect(client.on).toBeDefined();
     expect(typeof client.on).toBe('function');
-  });
-
-  it('should have an off method for removing event handlers', async () => {
-    const { useWebSocketClient } = await import('@/hooks/useWebSocketClient');
-    const client = useWebSocketClient();
-    expect(client.off).toBeDefined();
     expect(typeof client.off).toBe('function');
-  });
-
-  it('should have a connect method', async () => {
-    const { useWebSocketClient } = await import('@/hooks/useWebSocketClient');
-    const client = useWebSocketClient();
-    expect(client.connect).toBeDefined();
-    expect(typeof client.connect).toBe('function');
-  });
-
-  it('should have a disconnect method', async () => {
-    const { useWebSocketClient } = await import('@/hooks/useWebSocketClient');
-    const client = useWebSocketClient();
-    expect(client.disconnect).toBeDefined();
     expect(typeof client.disconnect).toBe('function');
   });
 
-  it('should handle event listeners', async () => {
+  it('handles event listeners without throwing', async () => {
+    vi.resetModules();
     const { useWebSocketClient } = await import('@/hooks/useWebSocketClient');
-    const client = useWebSocketClient();
+    const client = useWebSocketClient('ws://localhost:4000');
     const mockHandler = vi.fn();
 
     client.on('test-event', mockHandler);

@@ -421,7 +421,9 @@ class Host(genvmhost.IHost):
         self, type: StorageType, account: bytes, slot: bytes, index: int, le: int, /
     ) -> bytes:
         assert type != StorageType.LATEST_FINAL
-        return self._state_proxy.storage_read(Address(account), slot, index, le)
+        return await asyncio.to_thread(
+            self._state_proxy.storage_read, Address(account), slot, index, le
+        )
 
     async def consume_gas(self, gas: int, /) -> None:
         pass
@@ -431,7 +433,7 @@ class Host(genvmhost.IHost):
         assert False
 
     async def get_balance(self, account: bytes, /) -> int:
-        return self._state_proxy.get_balance(Address(account))
+        return await asyncio.to_thread(self._state_proxy.get_balance, Address(account))
 
     async def notify_nondet_disagreement(self, call_no: int, /) -> None:
         self._nondet_disagreement = call_no

@@ -256,6 +256,9 @@ async def _run_health_checks() -> None:
             "orphaned_transactions": consensus_health.get(
                 "total_orphaned_transactions", 0
             ),
+            "stuck_finalization_count": consensus_health.get(
+                "stuck_finalization_count", 0
+            ),
             "active_workers": consensus_health.get("active_workers", 0),
             "status": consensus_status,
         }
@@ -263,12 +266,37 @@ async def _run_health_checks() -> None:
             if overall_status == "healthy":
                 overall_status = "degraded"
             issues.append("consensus_issue")
-        elif consensus_health.get("total_orphaned_transactions", 0) >= 3:
+        else:
+            if consensus_health.get("total_orphaned_transactions", 0) >= 3:
+                if overall_status == "healthy":
+                    overall_status = "degraded"
+                issues.append("orphaned_transactions")
+            if consensus_health.get("stuck_finalization_count", 0) >= 3:
+                if overall_status == "healthy":
+                    overall_status = "degraded"
+                issues.append("stuck_finalizations")
+
+        # 3. LLM provider health (per-provider failure-rate detection)
+        # Catches cases like a provider returning HTTP 402 / "tier required"
+        # for every call from a specific (provider, model) entry — the
+        # actual cause behind a recent stuck-shard incident that the
+        # generic "orphaned_transactions" tag couldn't articulate.
+        llm_health = await _check_llm_provider_health()
+        llm_status = llm_health.get("status", "unknown")
+        services["llm_providers"] = {
+            "status": llm_status,
+            "alert_providers": llm_health.get("alert_providers", []),
+            "window_minutes": llm_health.get("window_minutes"),
+            "total_samples": llm_health.get("total_samples"),
+        }
+        if llm_status == "error":
+            issues.append("llm_provider_check_error")
+        elif llm_status == "degraded" and llm_health.get("alert_providers"):
             if overall_status == "healthy":
                 overall_status = "degraded"
-            issues.append("orphaned_transactions")
+            issues.append("llm_provider_failure")
 
-        # 3. Memory health
+        # 4. Memory health
         memory_health = await _check_memory_health()
         memory_status = memory_health.get("status", "unknown")
         services["memory"] = {
@@ -282,7 +310,7 @@ async def _run_health_checks() -> None:
                 overall_status = "degraded"
             issues.append("memory_issue")
 
-        # 4. Redis health
+        # 5. Redis health
         redis_status = await _check_redis_health()
         services["redis"] = redis_status
         if redis_status == "unhealthy":
@@ -290,7 +318,7 @@ async def _run_health_checks() -> None:
                 overall_status = "degraded"
             issues.append("redis_unreachable")
 
-        # 5. GenVM manager health (+ capacity details when available)
+        # 6. GenVM manager health (+ capacity details when available)
         genvm_ok, genvm_error, genvm_status = await _check_genvm_health()
         services["genvm"] = {"status": "healthy" if genvm_ok else "unhealthy"}
         _health_cache.genvm_healthy = genvm_ok
@@ -330,14 +358,14 @@ async def _run_health_checks() -> None:
             _health_cache.genvm_available_permits = None
             _health_cache.genvm_active_executions = None
 
-        # 6. Aggregate counts for metrics
+        # 7. Aggregate counts for metrics
         decisions_count, users_count, pending_count = await _get_aggregate_counts()
         _health_cache.total_decisions = decisions_count
         _health_cache.total_users = users_count
         _health_cache.pending_transactions = pending_count
         _health_cache.uptime_percent = 100.0  # 100% while running
 
-        # 7. Get pending contracts breakdown for dashboard
+        # 8. Get pending contracts breakdown for dashboard
         _health_cache.pending_contracts = await _get_pending_contracts()
 
         # Update cache
@@ -485,10 +513,76 @@ async def _check_database_health() -> Dict[str, Any]:
 
 
 async def _check_consensus_health() -> Dict[str, Any]:
-    """Check consensus system status."""
-    from datetime import datetime, timedelta, timezone
-    from backend.database_handler.models import Transactions
+    """Check consensus system status.
+
+    "Orphaned transactions" here means *contracts whose head-of-queue tx
+    isn't making progress* — not "lots of pending txs". A long queue is
+    not a problem if the head is moving; the head being stuck IS a
+    problem regardless of queue depth.
+
+    A contract's head is the oldest non-final tx for that contract. The
+    head is "stuck" when:
+      - it was created more than `head_stuck_after_minutes` ago
+        (enough time to expect *some* progress), AND
+      - no tx for that contract has a fresh `blocked_at` within the
+        `recent_activity_window_minutes` window (i.e. no worker is
+        currently doing anything for the contract).
+
+    `active_workers` is derived from unexpired worker claims so it
+    correctly reflects workers processing OLD txs (the previous "txs
+    created in last 1h with worker_id" filter falsely reported zero
+    workers when traffic was bursty).
+
+    Note on the "claim window": workers do NOT heartbeat `blocked_at`
+    during execution — it's set once at claim time, cleared on
+    completion. So "fresh blocked_at" must mean "claim not yet
+    expired", aligned with TRANSACTION_TIMEOUT_MINUTES, not "claimed
+    within the last few minutes" (which would falsely flag a long
+    consensus round as inactive).
+    """
+    import os
+
     from backend.database_handler.session_factory import get_database_manager
+
+    HEAD_STUCK_AFTER_MINUTES = int(
+        os.environ.get("HEALTH_HEAD_STUCK_AFTER_MINUTES", "15")
+    )
+    # Aligned with the worker's claim timeout. While blocked_at sits
+    # within this window, a worker still legitimately owns the tx and
+    # we must not call its contract "stuck". Past this window, recovery
+    # would also reset the claim. Default 30 matches docker-compose /
+    # prod manifests.
+    CLAIM_WINDOW_MINUTES = int(os.environ.get("TRANSACTION_TIMEOUT_MINUTES", "30"))
+    # Match the dashboard alert threshold so consensus.status and the
+    # top-level "issues" tag agree on what counts as degraded.
+    DEGRADED_AT_STUCK_HEADS = int(os.environ.get("HEALTH_DEGRADED_AT_STUCK_HEADS", "3"))
+    # Finalization-stall threshold: ACCEPTED/UNDETERMINED/*_TIMEOUT txs
+    # that haven't reached FINALIZED within this many seconds count as
+    # stuck. Default 600s (10 min) — finalization is supposed to be
+    # quick after the finality window opens.
+    STUCK_FINALIZATION_AFTER_SECONDS = int(
+        os.environ.get("HEALTH_STUCK_FINALIZATION_AFTER_SECONDS", "600")
+    )
+    DEGRADED_AT_STUCK_FINALIZATIONS = int(
+        os.environ.get("HEALTH_DEGRADED_AT_STUCK_FINALIZATIONS", "3")
+    )
+
+    # Statuses where the consensus state machine is actively working.
+    # The "head of queue stuck" check uses ONLY these: ACCEPTED-class
+    # statuses are post-consensus and live under the separate
+    # finalization-stall detector below.
+    CONSENSUS_ACTIVE_STATUSES_SQL = "'ACTIVATED','PROPOSING','COMMITTING','REVEALING'"
+    # Broader set including finalization-pending statuses. Used only
+    # in the "is any worker actively claiming on this contract" NOT
+    # EXISTS clause — a finalization worker counts as active work and
+    # should mask a stuck consensus head.
+    ANY_INFLIGHT_STATUSES_SQL = (
+        "'ACTIVATED','PROPOSING','COMMITTING','REVEALING',"
+        "'ACCEPTED','UNDETERMINED','LEADER_TIMEOUT','VALIDATORS_TIMEOUT'"
+    )
+    FINALIZATION_ELIGIBLE_STATUSES_SQL = (
+        "'ACCEPTED','UNDETERMINED','LEADER_TIMEOUT','VALIDATORS_TIMEOUT'"
+    )
 
     try:
         if not _rpc_router_ref:
@@ -497,60 +591,421 @@ async def _check_consensus_health() -> Dict[str, Any]:
         db_manager = get_database_manager()
 
         def _query_consensus():
-            now = datetime.now(timezone.utc)
-            recent_threshold = now - timedelta(hours=1)
+            from sqlalchemy import text
 
-            from sqlalchemy import select, distinct, and_, text
-
-            # Get active worker IDs
-            with db_manager.engine.connect() as worker_conn:
-                worker_query = select(distinct(Transactions.worker_id)).where(
-                    and_(
-                        Transactions.worker_id.isnot(None),
-                        Transactions.created_at > recent_threshold,
-                    )
-                )
-                worker_result = worker_conn.execute(worker_query)
-                active_workers = {row[0] for row in worker_result if row[0]}
-
-            # Get transaction statistics
             with db_manager.engine.connect() as conn:
-                query = text(
-                    """
-                    SELECT
-                        COUNT(*) FILTER (WHERE status IN ('ACTIVATED', 'PROPOSING', 'COMMITTING', 'REVEALING', 'ACCEPTED', 'UNDETERMINED')) as processing_count,
-                        COUNT(*) FILTER (WHERE worker_id IS NOT NULL AND status IN ('PENDING', 'ACTIVATED', 'PROPOSING', 'COMMITTING', 'REVEALING', 'ACCEPTED', 'UNDETERMINED')) as blocked_count
-                    FROM transactions
-                    WHERE to_address IS NOT NULL
-                """
-                )
-                result = conn.execute(query)
-                row = result.fetchone()
+                # Active workers: distinct worker_ids with an unexpired
+                # claim. Catches workers processing old txs that the
+                # previous "created_at > 1h ago" filter incorrectly
+                # excluded.
+                active_workers_row = conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(DISTINCT worker_id) AS n
+                        FROM transactions
+                        WHERE worker_id IS NOT NULL
+                          AND blocked_at IS NOT NULL
+                          AND blocked_at > NOW() - make_interval(mins => :claim_window)
+                        """
+                    ),
+                    {"claim_window": CLAIM_WINDOW_MINUTES},
+                ).fetchone()
+                active_workers_count = active_workers_row.n if active_workers_row else 0
 
-                total_processing = row.processing_count if row else 0
-                total_blocked = row.blocked_count if row else 0
+                # Stuck heads: per contract, the oldest consensus-active
+                # tx whose contract has no unexpired worker claim AND
+                # head is old enough to expect progress. Head CTE uses
+                # only the consensus-active set — ACCEPTED-class rows
+                # are post-consensus and would otherwise pollute the
+                # signal (one stranded UNDETERMINED on an unused
+                # contract is not a stuck head). The NOT EXISTS clause
+                # uses the broader set so a finalization worker
+                # currently processing on the same contract correctly
+                # masks the alarm.
+                # Returns the count of AFFECTED CONTRACTS, not the
+                # count of queued txs behind them.
+                stuck_row = conn.execute(
+                    text(
+                        f"""
+                        WITH heads AS (
+                            SELECT DISTINCT ON (to_address)
+                                to_address,
+                                hash,
+                                status,
+                                created_at
+                            FROM transactions
+                            WHERE status IN ({CONSENSUS_ACTIVE_STATUSES_SQL})
+                              AND to_address IS NOT NULL
+                            ORDER BY to_address, created_at ASC, hash ASC
+                        )
+                        SELECT COUNT(*) AS stuck_heads
+                        FROM heads h
+                        WHERE h.created_at < NOW() - make_interval(mins => :head_stuck_minutes)
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM transactions t2
+                              WHERE t2.to_address = h.to_address
+                                AND t2.status IN ({ANY_INFLIGHT_STATUSES_SQL})
+                                AND t2.blocked_at IS NOT NULL
+                                AND t2.blocked_at > NOW() - make_interval(mins => :claim_window)
+                          )
+                        """
+                    ),
+                    {
+                        "head_stuck_minutes": HEAD_STUCK_AFTER_MINUTES,
+                        "claim_window": CLAIM_WINDOW_MINUTES,
+                    },
+                ).fetchone()
+                stuck_head_contracts = stuck_row.stuck_heads if stuck_row else 0
 
-                total_orphaned = 0
-                if total_blocked > 0 and len(active_workers) == 0:
-                    total_orphaned = total_blocked
+                # Stuck finalizations: ACCEPTED-class txs waiting too
+                # long to reach FINALIZED. Two paths:
+                #   1. timestamp_awaiting_finalization set and stale
+                #      (normal "finalizer not running" case)
+                #   2. timestamp_awaiting_finalization NULL and the row
+                #      is old (catches future bugs like the May 2026
+                #      insufficient-balance SEND path, where a tx
+                #      reached UNDETERMINED without ever stamping the
+                #      timestamp — invisible to claim_next_finalization
+                #      forever)
+                stuck_fin_row = conn.execute(
+                    text(
+                        f"""
+                        SELECT COUNT(*) AS n
+                        FROM transactions
+                        WHERE status IN ({FINALIZATION_ELIGIBLE_STATUSES_SQL})
+                          AND (
+                              (timestamp_awaiting_finalization IS NOT NULL
+                               AND EXTRACT(EPOCH FROM NOW())::bigint
+                                   - timestamp_awaiting_finalization
+                                   > :stuck_seconds)
+                              OR
+                              (timestamp_awaiting_finalization IS NULL
+                               AND created_at
+                                   < NOW() - make_interval(secs => :stuck_seconds))
+                          )
+                        """
+                    ),
+                    {"stuck_seconds": STUCK_FINALIZATION_AFTER_SECONDS},
+                ).fetchone()
+                stuck_finalization_count = stuck_fin_row.n if stuck_fin_row else 0
+
+                # Total in-flight (non-final) tx count, for context.
+                # Consensus-active only — finalization-pending rows
+                # are tracked separately via stuck_finalization_count.
+                processing_row = conn.execute(
+                    text(
+                        f"""
+                        SELECT COUNT(*) AS n
+                        FROM transactions
+                        WHERE status IN ({CONSENSUS_ACTIVE_STATUSES_SQL})
+                          AND to_address IS NOT NULL
+                        """
+                    )
+                ).fetchone()
+                total_processing = processing_row.n if processing_row else 0
 
                 status = (
-                    "healthy"
-                    if total_processing < 100 and total_orphaned == 0
-                    else "degraded"
+                    "degraded"
+                    if (
+                        stuck_head_contracts >= DEGRADED_AT_STUCK_HEADS
+                        or stuck_finalization_count >= DEGRADED_AT_STUCK_FINALIZATIONS
+                    )
+                    else "healthy"
                 )
 
                 return {
                     "status": status,
                     "total_processing_transactions": total_processing,
-                    "total_orphaned_transactions": total_orphaned,
-                    "active_workers": len(active_workers),
+                    # Field name preserved for backwards-compat with the
+                    # external dashboard. Semantics: count of CONTRACTS
+                    # whose consensus head is stuck.
+                    "total_orphaned_transactions": stuck_head_contracts,
+                    "stuck_finalization_count": stuck_finalization_count,
+                    "active_workers": active_workers_count,
                 }
 
         return await asyncio.to_thread(_query_consensus)
 
     except Exception as e:
         logger.exception("Consensus health check failed")
+        return {"status": "error", "error": str(e)}
+
+
+async def _check_llm_provider_health() -> Dict[str, Any]:
+    """Per-(provider, model) failure-rate detection from recent receipts.
+
+    Mines `consensus_data->'leader_receipt'` and
+    `consensus_data->'validators'` on txs created in the last
+    `LLM_PROVIDER_WINDOW_MINUTES` minutes. For each (provider, model)
+    pair, counts validator runs whose `execution_result == 'ERROR'` and
+    reports those whose failure rate is above
+    `LLM_PROVIDER_FAILURE_THRESHOLD` AND have at least
+    `LLM_PROVIDER_MIN_SAMPLES` runs in the window.
+
+    Output schema (always shaped, never partial):
+
+        {
+          "status": "healthy" | "degraded" | "no_data" | "error",
+          "alert_providers": [
+              {
+                "provider": "...", "model": "...",
+                "samples": int, "failures": int, "failure_rate": float,
+                "sample_error": {error_code, causes, http_status, brief}
+              }, ...
+          ],
+          "window_minutes": int,
+          "total_samples": int,
+        }
+
+    Limitations (acknowledged):
+      - Window is on `tx.created_at`, not "consensus ran in the last N
+        min" — the schema has no `status_changed_at`. For very slow
+        contracts a tx that finished consensus 6h after submission falls
+        outside the window. Acceptable trade-off for a 15-minute alert.
+      - Cannot detect "primary failed but fallback rescued it":
+        backend/node/llm.lua's try_provider returns SUCCESS as soon as
+        any provider succeeds, with no persisted record of the primary
+        attempt. This metric catches all-providers-down (the primary
+        failure mode that took an instance into DEGRADED yesterday) but
+        not stealth fallback-masked outages. A future improvement would
+        persist `llm_attempts[]` from Lua at call time.
+
+    Privacy: never expose raw stderr (contains LLM prompts), node_config
+    (contains validator private keys), or raw_error.ctx.host_data
+    (contains payloads). Only emits structured signals: error_code,
+    causes (joined string), HTTP status, and a 200-char cap of
+    error_description.
+    """
+    import os
+
+    from backend.database_handler.session_factory import get_database_manager
+
+    WINDOW_MINUTES = int(os.environ.get("LLM_PROVIDER_WINDOW_MINUTES", "15"))
+    MIN_SAMPLES = int(os.environ.get("LLM_PROVIDER_MIN_SAMPLES", "25"))
+    FAILURE_THRESHOLD = float(os.environ.get("LLM_PROVIDER_FAILURE_THRESHOLD", "0.5"))
+
+    try:
+        if not _rpc_router_ref:
+            return {
+                "status": "not_initialized",
+                "error": "RPC router not available",
+            }
+
+        db_manager = get_database_manager()
+
+        def _query_llm_health():
+            from sqlalchemy import text
+
+            with db_manager.engine.connect() as conn:
+                # One row per (provider, model) over the window.
+                # Concatenates leader_receipt[] and validators[] arrays so
+                # leader-only txs (where validators is empty) still count.
+                # Status filter excludes in-flight rows where
+                # consensus_data could still mutate.
+                agg_rows = conn.execute(
+                    text(
+                        """
+                        WITH receipts AS (
+                            SELECT
+                                v.receipt->'node_config'->'primary_model'->>'provider'
+                                    AS provider,
+                                v.receipt->'node_config'->'primary_model'->>'model'
+                                    AS model,
+                                v.receipt->>'execution_result' AS execution_result,
+                                v.receipt->'genvm_result'->>'error_code' AS error_code,
+                                -- Use ->> not -> so a JSONB null literal
+                                -- becomes SQL NULL (otherwise IS NOT NULL
+                                -- is true for `raw_error: null`).
+                                (v.receipt->'genvm_result'->>'raw_error') IS NOT NULL
+                                    AS has_raw_error
+                            FROM transactions t,
+                                 jsonb_array_elements(
+                                     COALESCE(
+                                         t.consensus_data->'leader_receipt',
+                                         '[]'::jsonb
+                                     )
+                                     || COALESCE(
+                                         t.consensus_data->'validators',
+                                         '[]'::jsonb
+                                     )
+                                 ) AS v(receipt)
+                            WHERE t.consensus_data IS NOT NULL
+                              AND t.created_at > NOW()
+                                  - make_interval(mins => :window_minutes)
+                              AND t.status IN (
+                                  'FINALIZED', 'ACCEPTED', 'UNDETERMINED',
+                                  'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT'
+                              )
+                              AND v.receipt->'node_config'->'primary_model'->>'provider'
+                                      IS NOT NULL
+                        )
+                        SELECT
+                            provider,
+                            model,
+                            COUNT(*) AS samples,
+                            -- Only count errors that have a structured
+                            -- LLM/manager error_code OR raw_error block.
+                            -- Contract-side Python exceptions (e.g. a user
+                            -- contract using a non-existent SDK attribute)
+                            -- also surface as execution_result = 'ERROR',
+                            -- but have error_code = null AND raw_error =
+                            -- null because the failure happened inside the
+                            -- user code before any LLM call. Counting those
+                            -- here would let one broken contract make every
+                            -- validator (across all models) look like an
+                            -- LLM provider failure — exactly the false
+                            -- signal that fired Studio Prod's nonstop
+                            -- llm_provider_failure alert (May 2026).
+                            COUNT(*) FILTER (
+                                WHERE execution_result = 'ERROR'
+                                  AND (
+                                      error_code IS NOT NULL
+                                      OR has_raw_error
+                                  )
+                            ) AS failures
+                        FROM receipts
+                        GROUP BY provider, model
+                        """
+                    ),
+                    {"window_minutes": WINDOW_MINUTES},
+                ).fetchall()
+
+                if not agg_rows:
+                    return {
+                        "status": "no_data",
+                        "alert_providers": [],
+                        "window_minutes": WINDOW_MINUTES,
+                        "total_samples": 0,
+                    }
+
+                total_samples = sum(r.samples for r in agg_rows)
+
+                # Pick which (provider, model) pairs are alert-worthy
+                # before doing the (more expensive) sample-error query.
+                alert_keys = []
+                for r in agg_rows:
+                    if (
+                        r.samples >= MIN_SAMPLES
+                        and r.failures / r.samples >= FAILURE_THRESHOLD
+                    ):
+                        alert_keys.append((r.provider, r.model, r))
+
+                # Sample errors: one most-recent ERROR per alert (provider,
+                # model). Done as a separate query to keep the aggregate
+                # cheap when there are no alerts. Allowlists structured
+                # fields only — no raw stderr, no node_config.
+                sample_errors_by_key: dict[tuple, dict] = {}
+                if alert_keys:
+                    err_rows = conn.execute(
+                        text(
+                            """
+                            WITH error_rows AS (
+                                SELECT
+                                    v.receipt->'node_config'->'primary_model'->>'provider'
+                                        AS provider,
+                                    v.receipt->'node_config'->'primary_model'->>'model'
+                                        AS model,
+                                    v.receipt->'genvm_result'->>'error_code'
+                                        AS error_code,
+                                    v.receipt->'genvm_result'->'raw_error'->'causes'
+                                        AS causes,
+                                    v.receipt->'genvm_result'->'raw_error'->'ctx'->>'status'
+                                        AS http_status,
+                                    SUBSTRING(
+                                        v.receipt->'genvm_result'->>'error_description'
+                                        FROM 1 FOR 200
+                                    ) AS description_brief,
+                                    t.created_at AS tx_created_at,
+                                    ROW_NUMBER() OVER (
+                                        PARTITION BY
+                                            v.receipt->'node_config'->'primary_model'->>'provider',
+                                            v.receipt->'node_config'->'primary_model'->>'model'
+                                        ORDER BY t.created_at DESC
+                                    ) AS rn
+                                FROM transactions t,
+                                     jsonb_array_elements(
+                                         COALESCE(
+                                             t.consensus_data->'leader_receipt',
+                                             '[]'::jsonb
+                                         )
+                                         || COALESCE(
+                                             t.consensus_data->'validators',
+                                             '[]'::jsonb
+                                         )
+                                     ) AS v(receipt)
+                                WHERE t.consensus_data IS NOT NULL
+                                  AND t.created_at > NOW()
+                                      - make_interval(mins => :window_minutes)
+                                  AND t.status IN (
+                                      'FINALIZED', 'ACCEPTED', 'UNDETERMINED',
+                                      'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT'
+                                  )
+                                  AND v.receipt->>'execution_result' = 'ERROR'
+                                  -- Match the aggregate filter: only sample
+                                  -- structured LLM/manager errors, skip
+                                  -- contract-side Python crashes.
+                                  AND (
+                                      v.receipt->'genvm_result'->>'error_code'
+                                          IS NOT NULL
+                                      OR (v.receipt->'genvm_result'->>'raw_error')
+                                          IS NOT NULL
+                                  )
+                                  AND v.receipt->'node_config'->'primary_model'->>'provider'
+                                          IS NOT NULL
+                            )
+                            SELECT provider, model, error_code, causes,
+                                   http_status, description_brief
+                            FROM error_rows
+                            WHERE rn = 1
+                            """
+                        ),
+                        {"window_minutes": WINDOW_MINUTES},
+                    ).fetchall()
+                    for er in err_rows:
+                        causes_summary = None
+                        if er.causes:
+                            try:
+                                causes_summary = ", ".join(str(c) for c in er.causes)[
+                                    :200
+                                ]
+                            except (TypeError, ValueError):
+                                causes_summary = str(er.causes)[:200]
+                        sample_errors_by_key[(er.provider, er.model)] = {
+                            "error_code": er.error_code,
+                            "causes": causes_summary,
+                            "http_status": er.http_status,
+                            "description_brief": er.description_brief,
+                        }
+
+                alert_providers = []
+                for provider, model, r in alert_keys:
+                    alert_providers.append(
+                        {
+                            "provider": provider,
+                            "model": model,
+                            "samples": int(r.samples),
+                            "failures": int(r.failures),
+                            "failure_rate": round(r.failures / r.samples, 3),
+                            "sample_error": sample_errors_by_key.get((provider, model)),
+                        }
+                    )
+                # Sort: highest failure rate first, then highest sample
+                # count, for stable & operator-friendly output.
+                alert_providers.sort(key=lambda a: (-a["failure_rate"], -a["samples"]))
+
+                status = "degraded" if alert_providers else "healthy"
+                return {
+                    "status": status,
+                    "alert_providers": alert_providers,
+                    "window_minutes": WINDOW_MINUTES,
+                    "total_samples": total_samples,
+                }
+
+        return await asyncio.to_thread(_query_llm_health)
+
+    except Exception as e:
+        logger.exception("LLM provider health check failed")
         return {"status": "error", "error": str(e)}
 
 

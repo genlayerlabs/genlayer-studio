@@ -239,6 +239,8 @@ const badgeColorClass = computed(() => {
     return '!bg-red-500';
   } else if (executionResult === 6) {
     return '!bg-green-500';
+  } else if (status === 'ACCEPTED') {
+    return '!bg-green-500';
   } else if (status === 'FINALIZED') {
     return '!bg-red-500';
   }

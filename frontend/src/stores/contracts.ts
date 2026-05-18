@@ -3,17 +3,30 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { notify } from '@kyvg/vue3-notification';
 import { useDb, useFileName } from '@/hooks';
+import { useNetworkStore } from '@/stores/network';
 
 export const useContractsStore = defineStore('contractsStore', () => {
   const contracts = ref<ContractFile[]>([]);
   const openedFiles = ref<string[]>([]);
   const db = useDb();
   const { cleanupFileName } = useFileName();
+  const networkStore = useNetworkStore();
 
   const currentContractId = ref<string | undefined>(
     localStorage.getItem('contractsStore.currentContractId') || '',
   );
-  const deployedContracts = ref<DeployedContract[]>([]);
+  // Internal flat list across all chains. UI consumers read the filtered
+  // `deployedContracts` computed below.
+  const allDeployedContracts = ref<DeployedContract[]>([]);
+  const deployedContracts = computed<DeployedContract[]>(() =>
+    allDeployedContracts.value.filter(
+      (c) => c.chainId === undefined || c.chainId === networkStore.chainId,
+    ),
+  );
+
+  function setAllDeployedContracts(items: DeployedContract[]) {
+    allDeployedContracts.value = items;
+  }
 
   function getInitialOpenedFiles() {
     const storage = localStorage.getItem('contractsStore.openedFiles');
@@ -43,9 +56,9 @@ export const useContractsStore = defineStore('contractsStore', () => {
 
   function removeContractFile(id: string): void {
     contracts.value = [...contracts.value.filter((c) => c.id !== id)];
-    deployedContracts.value = [
-      ...deployedContracts.value.filter((c) => c.contractId !== id),
-    ];
+    allDeployedContracts.value = allDeployedContracts.value.filter(
+      (c) => c.contractId !== id,
+    );
     openedFiles.value = openedFiles.value.filter(
       (contractId) => contractId !== id,
     );
@@ -107,17 +120,28 @@ export const useContractsStore = defineStore('contractsStore', () => {
     contractId,
     address,
     defaultState,
+    chainId,
   }: DeployedContract): void {
-    const index = deployedContracts.value.findIndex(
-      (c) => c.contractId === contractId,
+    const effectiveChainId = chainId ?? networkStore.chainId;
+    // Dedupe by (chainId, contractId): a contract deployed on localnet and
+    // then again on Bradbury should produce two distinct records.
+    const index = allDeployedContracts.value.findIndex(
+      (c) =>
+        c.contractId === contractId &&
+        (c.chainId ?? networkStore.chainId) === effectiveChainId,
     );
 
-    const newItem = { contractId, address, defaultState };
+    const newItem = {
+      contractId,
+      address,
+      defaultState,
+      chainId: effectiveChainId,
+    };
 
     if (index === -1) {
-      deployedContracts.value.push(newItem);
+      allDeployedContracts.value.push(newItem);
     } else {
-      deployedContracts.value.splice(index, 1, newItem);
+      allDeployedContracts.value.splice(index, 1, newItem);
     }
 
     notify({
@@ -127,9 +151,14 @@ export const useContractsStore = defineStore('contractsStore', () => {
   }
 
   function removeDeployedContract(contractId: string): void {
-    deployedContracts.value = [
-      ...deployedContracts.value.filter((c) => c.contractId !== contractId),
-    ];
+    // Only remove the record for the current chain; other chains keep theirs.
+    allDeployedContracts.value = allDeployedContracts.value.filter(
+      (c) =>
+        !(
+          c.contractId === contractId &&
+          (c.chainId ?? networkStore.chainId) === networkStore.chainId
+        ),
+    );
   }
 
   function setCurrentContractId(id?: string) {
@@ -140,6 +169,7 @@ export const useContractsStore = defineStore('contractsStore', () => {
     contracts.value = [];
     openedFiles.value = [];
     currentContractId.value = '';
+    allDeployedContracts.value = [];
 
     await db.deployedContracts.clear();
     await db.contractFiles.clear();
@@ -172,6 +202,7 @@ export const useContractsStore = defineStore('contractsStore', () => {
     openedFiles,
     currentContractId,
     deployedContracts,
+    allDeployedContracts,
 
     //getters
     currentContract,
@@ -187,6 +218,7 @@ export const useContractsStore = defineStore('contractsStore', () => {
     addDeployedContract,
     removeDeployedContract,
     setCurrentContractId,
+    setAllDeployedContracts,
     resetStorage,
     getInitialOpenedFiles,
     moveOpenedFile,

@@ -19,10 +19,14 @@ echo "Generating runtime configuration for ${MODE}..."
 # Create config directory if it doesn't exist
 mkdir -p "${CONFIG_DIR}"
 
+STUDIO_CHAIN_ID="${VITE_CHAIN_ID:-${GENLAYER_CHAIN_ID:-${HARDHAT_CHAIN_ID:-}}}"
+
 # Generate runtime config that overrides build-time values
 cat > "${CONFIG_DIR}/runtime-config.js" <<EOF
 window.__RUNTIME_CONFIG__ = {
   VITE_GENLAYER_NETWORK: "${VITE_GENLAYER_NETWORK:-localnet}",
+  VITE_CHAIN_ID: "${STUDIO_CHAIN_ID}",
+  VITE_CHAIN_NAME: "${VITE_CHAIN_NAME:-}",
   VITE_JSON_RPC_SERVER_URL: "${VITE_JSON_RPC_SERVER_URL:-http://127.0.0.1:4000/api}",
   VITE_WS_SERVER_URL: "${VITE_WS_SERVER_URL:-ws://127.0.0.1:4000}",
   VITE_IS_HOSTED: "${VITE_IS_HOSTED:-false}",
@@ -30,7 +34,9 @@ window.__RUNTIME_CONFIG__ = {
   VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION: "${VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION:-0.2}",
   VITE_MAX_ROTATIONS: "${VITE_MAX_ROTATIONS:-3}",
   VITE_PLAUSIBLE_DOMAIN: "${VITE_PLAUSIBLE_DOMAIN:-studio.genlayer.com}",
-  VITE_APPKIT_PROJECT_ID: "${VITE_APPKIT_PROJECT_ID:-}"
+  VITE_APPKIT_PROJECT_ID: "${VITE_APPKIT_PROJECT_ID:-}",
+  VITE_EXPLORER_URL: "${VITE_EXPLORER_URL:-}",
+  VITE_LOCK_NETWORK: "${VITE_LOCK_NETWORK:-false}"
 };
 EOF
 

@@ -6,6 +6,9 @@ import NodeLogs from '@/components/Simulator/NodeLogs.vue';
 import ContractsPanel from '@/components/Simulator/ContractsPanel.vue';
 import { Splitpanes, Pane } from 'splitpanes';
 import 'splitpanes/dist/splitpanes.css';
+import { useConfig } from '@/hooks';
+
+const { isStudioNetwork } = useConfig();
 
 const showLogsTerminal = ref<boolean>(true);
 
@@ -32,7 +35,11 @@ const handleLogsResize = (event: any) => {
       </Pane>
 
       <Pane>
-        <Splitpanes horizontal @resize="handleLogsResize">
+        <Splitpanes
+          v-if="isStudioNetwork"
+          horizontal
+          @resize="handleLogsResize"
+        >
           <Pane min-size="20" size="80" max-size="80">
             <ContractsPanel />
           </Pane>
@@ -40,6 +47,7 @@ const handleLogsResize = (event: any) => {
             <NodeLogs />
           </Pane>
         </Splitpanes>
+        <ContractsPanel v-else />
       </Pane>
     </Splitpanes>
   </div>

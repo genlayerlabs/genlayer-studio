@@ -10,10 +10,12 @@ import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 import { notify } from '@kyvg/vue3-notification';
 import { useRpcClient, useWebSocketClient } from '@/hooks';
+import { useNetworkStore } from '@/stores/network';
 
 export const useNodeStore = defineStore('nodeStore', () => {
   const rpcClient = useRpcClient();
   const webSocketClient = useWebSocketClient();
+  const networkStore = useNetworkStore();
   const logs = ref<NodeLog[]>([]);
   const leaderTxHashes = new Set<string>();
   const nodeProviders = ref<GetProvidersAndModelsData>([]);
@@ -73,6 +75,12 @@ export const useNodeStore = defineStore('nodeStore', () => {
   }
 
   async function getValidatorsData() {
+    // `sim_getAllValidators` is Studio-only; skip cleanly on non-Studio chains.
+    if (!networkStore.isStudio) {
+      validators.value = [];
+      isLoadingValidatorData.value = false;
+      return;
+    }
     isLoadingValidatorData.value = true;
 
     try {
@@ -90,6 +98,12 @@ export const useNodeStore = defineStore('nodeStore', () => {
   }
 
   async function getProvidersData() {
+    // `sim_getProvidersAndModels` is Studio-only; skip on non-Studio chains.
+    if (!networkStore.isStudio) {
+      nodeProviders.value = [];
+      isLoadingProviders.value = false;
+      return;
+    }
     isLoadingProviders.value = true;
 
     try {

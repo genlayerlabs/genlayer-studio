@@ -315,6 +315,44 @@ def test_insert_transaction_duplicate_hash_returns_existing(
     assert tx["data"] == data  # Original data, not the second attempt's data
 
 
+def test_get_transaction_by_hash_exposes_value_credited(
+    transactions_processor: TransactionsProcessor, session
+):
+    """Regression test for the silent double-credit bug.
+
+    `_parse_transaction_data` must include `value_credited` in its returned
+    dict. Without it, the idempotency guard in `execute_transfer`
+    (`backend/consensus/base.py` — `if existing_tx.get("value_credited"): ...`)
+    silently sees None for every tx and credits SEND recipients twice.
+
+    The originating bug: PR #1582 added `credit_tx_value_once` to
+    `sim_fundAccount`. PR #1600 added the guard in `execute_transfer` to
+    prevent the consensus worker from re-crediting. But the parsed-tx dict
+    never exposed `value_credited`, so the guard never fired.
+    Symptom: integration `test_accounts_funding` saw balance=2000 after
+    funding 1000.
+    """
+    tx_hash = _make_tx(transactions_processor)
+
+    # Default value_credited is False at insert.
+    tx = transactions_processor.get_transaction_by_hash(tx_hash)
+    assert "value_credited" in tx, (
+        "value_credited missing from get_transaction_by_hash result — "
+        "execute_transfer's idempotency guard will silently fail and "
+        "double-credit SEND recipients (regression of PR #1600)."
+    )
+    assert tx["value_credited"] is False
+
+    # After credit_tx_value_once, the field must reflect true.
+    session.execute(
+        text("UPDATE transactions SET value_credited = true WHERE hash = :h"),
+        {"h": tx_hash},
+    )
+    session.commit()
+    tx = transactions_processor.get_transaction_by_hash(tx_hash)
+    assert tx["value_credited"] is True
+
+
 def _insert_tx_with_consensus_history(session, tp, consensus_history_sql, suffix):
     """Insert a transaction then force consensus_history to a specific SQL value."""
     tx_hash = tp.insert_transaction(

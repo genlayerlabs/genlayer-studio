@@ -49,6 +49,21 @@ def setup_validators():
     def _setup(mock_response: Any = None) -> None:
         nonlocal created_validator_addresses
         if mock_llms():
+            # Wipe ALL existing validators before seeding this test's mocks.
+            # Without this, a prior test's validator (which has different
+            # mock_response, possibly even none) can be picked into this
+            # test's consensus round via VRF, disagree with the leader's
+            # mocked output, and produce an UNDETERMINED result — the
+            # leader's receipt still says SUCCESS so tx_execution_succeeded
+            # passes, but contract state stays unchanged and the balance
+            # assertion fails. The xdist_group marker serializes these
+            # tests onto a single worker, so this wipe is safe for the
+            # parallel CI run.
+            delete_all = post_request_localhost(
+                payload("sim_deleteAllValidators")
+            ).json()
+            assert has_success_status(delete_all)
+
             mock_cfg = get_mock_provider_config()
             # Mock mode: create validators with specific mock_response for this test
             for _ in range(5):
@@ -114,3 +129,25 @@ def mock_llms() -> bool:
 
 def pytest_configure(config: Any) -> None:
     load_dotenv(override=True)
+
+
+def pytest_collection_modifyitems(config: Any, items: list) -> None:
+    """Force tests using `setup_validators` onto a single xdist worker.
+
+    Validators are global across the whole studio process — there's no
+    per-test pool. With pytest-xdist `-n 8`, two parallel tests can each
+    create 5 validators with different mock_response payloads, and a
+    third test's consensus will randomly pick from the merged pool.
+    Validators with the wrong mock return wrong outputs, validators
+    disagree, the tx errors, the test fails non-deterministically.
+
+    Grouping all tests that exercise validators onto one xdist worker
+    serializes them and removes the cross-test interference.
+
+    Requires `--dist loadgroup` to take effect (see CI test command).
+    """
+    import pytest as _pytest
+
+    for item in items:
+        if "setup_validators" in getattr(item, "fixturenames", ()):
+            item.add_marker(_pytest.mark.xdist_group(name="mock_validators"))

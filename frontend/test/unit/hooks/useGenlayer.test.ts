@@ -1,8 +1,8 @@
 /**
- * Behavioral snapshot tests for useGenlayer.
+ * Behavioral tests for useGenlayer.
  *
- * These tests document the current client creation/recreation behavior
- * so the multi-network refactor doesn't break existing Studio flows.
+ * Documents client creation/recreation, including reactive network switching
+ * through the network store.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -11,40 +11,45 @@ const mockCreateAccount = vi.fn(() => ({
   address: '0xLocalAccount',
   type: 'local',
 }));
-const mockGetRuntimeConfig = vi.fn((key: string, fallback: string) => fallback);
+
+const localnetChain = {
+  id: 61127,
+  name: 'localnet',
+  isStudio: true,
+  rpcUrls: { default: { http: ['http://127.0.0.1:4000/api'] } },
+};
+const studionetChain = {
+  id: 61999,
+  name: 'studionet',
+  isStudio: true,
+  rpcUrls: { default: { http: ['https://studio.genlayer.com/api'] } },
+};
+const testnetBradburyChain = {
+  id: 4221,
+  name: 'Genlayer Bradbury Testnet',
+  isStudio: false,
+  rpcUrls: { default: { http: ['https://rpc-bradbury.genlayer.com'] } },
+};
+
+const mockNetworkStore = {
+  chain: localnetChain,
+  rpcUrl: 'http://127.0.0.1:4000/api',
+  currentNetwork: 'localnet',
+};
 
 vi.mock('genlayer-js', () => ({
   createClient: (...args: any[]) => mockCreateClient(...args),
   createAccount: (...args: any[]) => mockCreateAccount(...args),
 }));
 
-vi.mock('genlayer-js/chains', () => ({
-  localnet: {
-    id: 61127,
-    name: 'localnet',
-    rpcUrls: { default: { http: ['http://127.0.0.1:4000/api'] } },
-  },
-  studionet: {
-    id: 61999,
-    name: 'studionet',
-    rpcUrls: { default: { http: ['https://studio.genlayer.com/api'] } },
-  },
-  testnetAsimov: {
-    id: 4221,
-    name: 'testnetAsimov',
-    rpcUrls: { default: { http: ['https://asimov.genlayer.com'] } },
-  },
-}));
-
-vi.mock('@/utils/runtimeConfig', () => ({
-  getRuntimeConfig: (...args: any[]) => mockGetRuntimeConfig(...args),
-  getRuntimeConfigNumber: vi.fn((_key: string, fallback: number) => fallback),
-}));
-
 vi.mock('@/stores', () => ({
   useAccountsStore: vi.fn(() => ({
     selectedAccount: { address: '0xTest', type: 'local', privateKey: '0xkey' },
   })),
+}));
+
+vi.mock('@/stores/network', () => ({
+  useNetworkStore: vi.fn(() => mockNetworkStore),
 }));
 
 vi.mock('@/hooks/useWallet', () => ({
@@ -64,12 +69,12 @@ vi.mock('vue', async () => {
 describe('useGenlayer', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockGetRuntimeConfig.mockImplementation(
-      (key: string, fallback: string) => fallback,
-    );
+    mockNetworkStore.chain = localnetChain;
+    mockNetworkStore.rpcUrl = 'http://127.0.0.1:4000/api';
+    mockNetworkStore.currentNetwork = 'localnet';
   });
 
-  it('should create client with localnet chain by default', async () => {
+  it('creates a client using the chain from the network store', async () => {
     const { useGenlayer } = await import('@/hooks/useGenlayer');
     useGenlayer();
 
@@ -78,11 +83,10 @@ describe('useGenlayer', () => {
     expect(opts.chain.name).toBe('localnet');
   });
 
-  it('should use VITE_GENLAYER_NETWORK to select chain', async () => {
-    mockGetRuntimeConfig.mockImplementation((key: string, fallback: string) => {
-      if (key === 'VITE_GENLAYER_NETWORK') return 'studionet';
-      return fallback;
-    });
+  it('picks up studionet when the network store reports studionet', async () => {
+    mockNetworkStore.chain = studionetChain;
+    mockNetworkStore.rpcUrl = 'https://studio.genlayer.com/api';
+    mockNetworkStore.currentNetwork = 'studionet';
 
     vi.resetModules();
     const { useGenlayer } = await import('@/hooks/useGenlayer');
@@ -92,11 +96,8 @@ describe('useGenlayer', () => {
     expect(opts.chain.name).toBe('studionet');
   });
 
-  it('should pass VITE_JSON_RPC_SERVER_URL as endpoint', async () => {
-    mockGetRuntimeConfig.mockImplementation((key: string, fallback: string) => {
-      if (key === 'VITE_JSON_RPC_SERVER_URL') return 'http://custom:4000/api';
-      return fallback;
-    });
+  it('passes the network store rpc URL as the client endpoint', async () => {
+    mockNetworkStore.rpcUrl = 'http://custom:4000/api';
 
     vi.resetModules();
     const { useGenlayer } = await import('@/hooks/useGenlayer');
@@ -106,7 +107,21 @@ describe('useGenlayer', () => {
     expect(opts.endpoint).toBe('http://custom:4000/api');
   });
 
-  it('should create local account from private key for local accounts', async () => {
+  it('honors a non-Studio chain (e.g. Bradbury testnet)', async () => {
+    mockNetworkStore.chain = testnetBradburyChain;
+    mockNetworkStore.rpcUrl = 'https://rpc-bradbury.genlayer.com';
+    mockNetworkStore.currentNetwork = 'testnetBradbury';
+
+    vi.resetModules();
+    const { useGenlayer } = await import('@/hooks/useGenlayer');
+    useGenlayer();
+
+    const opts = mockCreateClient.mock.calls[0][0];
+    expect(opts.chain.isStudio).toBe(false);
+    expect(opts.endpoint).toBe('https://rpc-bradbury.genlayer.com');
+  });
+
+  it('creates a local account from the private key for local accounts', async () => {
     const { useGenlayer } = await import('@/hooks/useGenlayer');
     useGenlayer();
 

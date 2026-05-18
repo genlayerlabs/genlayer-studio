@@ -6,6 +6,18 @@ import json
 TOKEN_TOTAL_SUPPLY = 1000
 TRANSFER_AMOUNT = 100
 
+# Substring guaranteed to appear in the LlmErc20 contract's exec_prompt
+# call (see examples/contracts/llm_erc20.py — the prompt opens with
+# "You keep track of transactions between users..."). The Lua mock
+# plugin in backend/node/llm.lua matches mock_response keys against the
+# prompt via string.find; a non-matching key falls through to the real
+# LLM provider, which is non-deterministic. The previous key
+# ("The balance of the sender") came from the eq_principle criteria
+# that USED to be concatenated to the LLM prompt — the contract has
+# since moved to gl.eq_principle.strict_eq, so that string is no longer
+# in the prompt and the mock never matched.
+_PROMPT_MATCH_KEY = "transactions between users"
+
 
 def test_llm_erc20(setup_validators, default_account):
     # Account Setup
@@ -14,7 +26,7 @@ def test_llm_erc20(setup_validators, default_account):
 
     mock_response = {
         "response": {
-            "The balance of the sender": json.dumps(
+            _PROMPT_MATCH_KEY: json.dumps(
                 {
                     "transaction_success": True,
                     "transaction_error": "",
@@ -25,7 +37,7 @@ def test_llm_erc20(setup_validators, default_account):
                 }
             )
         },
-        "eq_principle_prompt_non_comparative": {"The balance of the sender": True},
+        "eq_principle_prompt_non_comparative": {_PROMPT_MATCH_KEY: True},
     }
     setup_validators(mock_response)
 

@@ -1,4 +1,4 @@
-import type { ContractFile, DeployedContract } from '@/types';
+import type { ContractFile, DeployedContract, TransactionItem } from '@/types';
 import { type PiniaPluginContext } from 'pinia';
 import { useDb, useFileName } from '@/hooks';
 import { toRaw } from 'vue';
@@ -135,9 +135,13 @@ export function persistStorePlugin(context: PiniaPluginContext): void {
             break;
         }
       } else if (store.$id === 'transactionsStore') {
+        const transactions = store.allTransactions as TransactionItem[];
         switch (name) {
           case 'addTransaction':
-            await db.transactions.add(args[0]);
+            await db.transactions.add(
+              transactions.find((t) => t.hash === (args[0] as any).hash) ??
+                args[0],
+            );
             break;
           case 'removeTransaction':
             await db.transactions
@@ -146,10 +150,20 @@ export function persistStorePlugin(context: PiniaPluginContext): void {
               .delete();
             break;
           case 'updateTransaction':
-            await db.transactions
-              .where('hash')
-              .equals((args[0] as any).hash)
-              .modify({ data: args[0], statusName: args[0].statusName });
+            {
+              const hash = (args[0] as any).hash ?? (args[0] as any).txId;
+              const transaction = transactions.find((t) => t.hash === hash);
+              if (transaction) {
+                await db.transactions
+                  .where('hash')
+                  .equals(transaction.hash)
+                  .modify({
+                    data: transaction.data,
+                    statusName: transaction.statusName,
+                    addedAt: transaction.addedAt,
+                  });
+              }
+            }
             break;
           case 'clearTransactionsForContract':
             await db.transactions

@@ -127,6 +127,10 @@ class TransactionsProcessor:
             "leader_timeout_validators": transaction_data.leader_timeout_validators,
             "appeal_validators_timeout": transaction_data.appeal_validators_timeout,
             "sim_config": transaction_data.sim_config,
+            # Required for execute_transfer's idempotency guard. Missing this
+            # field caused the guard to always read None/false, double-crediting
+            # SEND txs created by sim_fundAccount.
+            "value_credited": transaction_data.value_credited,
         }
 
     @staticmethod
