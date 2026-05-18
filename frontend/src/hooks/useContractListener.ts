@@ -66,6 +66,7 @@ export function useContractListener() {
         contractId: localDeployTx.localContractId,
         address: eventData.data.id,
         defaultState: eventData.data.data.state,
+        deployTxHash: localDeployTx.hash,
       });
     }
   }
