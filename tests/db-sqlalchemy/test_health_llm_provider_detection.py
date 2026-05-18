@@ -225,6 +225,7 @@ async def test_below_threshold_does_not_alert(engine: Engine):
                         provider="openrouter",
                         model="openai/gpt-5.4",
                         execution_result="SUCCESS" if ok else "ERROR",
+                        causes=None if ok else ["STATUS_NOT_OK"],
                     )
                 ],
                 created_at=now - timedelta(minutes=1 + i),
@@ -258,6 +259,7 @@ async def test_below_min_samples_does_not_alert(engine: Engine):
                         provider="openrouter",
                         model="z-ai/glm-5.1",
                         execution_result="ERROR",
+                        causes=["STATUS_NOT_OK"],
                     )
                 ],
                 created_at=now - timedelta(minutes=1 + i),
@@ -292,6 +294,7 @@ async def test_outside_window_excluded(engine: Engine):
                         provider="ionet",
                         model="failing-model",
                         execution_result="ERROR",
+                        causes=["STATUS_NOT_OK"],
                     )
                 ],
                 created_at=now - timedelta(hours=2),
@@ -363,6 +366,7 @@ async def test_only_terminal_status_txs_counted(engine: Engine):
                         provider="ionet",
                         model="in-flight-model",
                         execution_result="ERROR",
+                        causes=["STATUS_NOT_OK"],
                     )
                 ],
                 created_at=now - timedelta(minutes=1 + i),
@@ -413,6 +417,7 @@ async def test_multiple_providers_only_failing_one_in_alert(engine: Engine):
                         provider="ionet",
                         model="broken-model",
                         execution_result="ERROR",
+                        causes=["STATUS_NOT_OK"],
                     )
                 ],
                 created_at=now - timedelta(minutes=1 + i),
@@ -428,3 +433,119 @@ async def test_multiple_providers_only_failing_one_in_alert(engine: Engine):
     assert result["alert_providers"][0]["provider"] == "ionet"
     # total_samples spans both provider buckets.
     assert result["total_samples"] == 9
+
+
+@pytest.mark.asyncio
+async def test_contract_side_errors_do_not_count_as_llm_failures(engine: Engine):
+    """Contract-side Python exceptions (e.g. user code calling a non-
+    existent SDK attribute) surface as execution_result='ERROR' with
+    `error_code` AND `raw_error` both NULL — the genvm crashed in user
+    code before any LLM call.
+
+    Without filtering, one broken contract running on a hot path makes
+    every validator (across all models) look like an LLM provider
+    failure. This is exactly what fired Studio Prod's nonstop
+    llm_provider_failure alert in May 2026 (every openrouter model
+    reported 50-75% error rate; turned out to be one user contract
+    crashing with `AttributeError: module 'genlayer.gl' has no
+    attribute 'ContractState'`).
+
+    Pin: contract-side ERROR receipts (no error_code, no raw_error) MUST
+    NOT count as LLM failures.
+    """
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+
+    with Session_() as s:
+        # 30 receipts, all ERROR, all simulating a contract-side crash
+        # (no structured error fields). At 30 samples this is well above
+        # MIN_SAMPLES (25), so a naive counter would flip degraded.
+        for i in range(30):
+            _insert_tx_with_receipts(
+                s,
+                tx_hash=f"0x{(0x200 + i):064x}",
+                leader_receipt=None,
+                validators=[
+                    _make_validator(
+                        provider="openrouter",
+                        model="openai/gpt-5.4",
+                        execution_result="ERROR",
+                        # error_code=None, causes=None, http_status=None
+                        # → raw_error is None too. This is the contract-
+                        # crash shape (stderr contains the Python
+                        # traceback but we don't surface it).
+                    )
+                ],
+                created_at=now - timedelta(minutes=1),
+            )
+        s.commit()
+
+    from backend.protocol_rpc import health as health_module
+
+    result = await health_module._check_llm_provider_health()
+
+    # Sample count includes contract crashes (the receipt did happen),
+    # but failure count for the alert excludes them. So:
+    # - 30 samples total, 0 LLM failures → 0% failure rate → no alert.
+    assert result["status"] == "healthy", (
+        f"30 contract-crash ERROR receipts must NOT trigger an "
+        f"llm_provider_failure alert. Got: {result}"
+    )
+    assert result["alert_providers"] == []
+
+
+@pytest.mark.asyncio
+async def test_contract_crashes_mixed_with_real_llm_failures(engine: Engine):
+    """When the same (provider, model) sees both contract crashes and
+    real LLM errors, only the LLM errors count toward the failure rate.
+
+    Setup: 20 contract crashes + 10 real LLM errors → 30 samples, 10
+    failures = 33% → below the 50% threshold → no alert. Without the
+    filter this would be 30 samples, 30 failures = 100% → alert."""
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+
+    with Session_() as s:
+        # 20 contract crashes
+        for i in range(20):
+            _insert_tx_with_receipts(
+                s,
+                tx_hash=f"0x{(0x300 + i):064x}",
+                leader_receipt=None,
+                validators=[
+                    _make_validator(
+                        provider="openrouter",
+                        model="anthropic/claude-sonnet-4.6",
+                        execution_result="ERROR",
+                    )
+                ],
+                created_at=now - timedelta(minutes=2),
+            )
+        # 10 real LLM errors
+        for i in range(10):
+            _insert_tx_with_receipts(
+                s,
+                tx_hash=f"0x{(0x400 + i):064x}",
+                leader_receipt=None,
+                validators=[
+                    _make_validator(
+                        provider="openrouter",
+                        model="anthropic/claude-sonnet-4.6",
+                        execution_result="ERROR",
+                        causes=["STATUS_NOT_OK"],
+                        http_status="429",
+                    )
+                ],
+                created_at=now - timedelta(minutes=2),
+            )
+        s.commit()
+
+    from backend.protocol_rpc import health as health_module
+
+    result = await health_module._check_llm_provider_health()
+
+    # 30 samples, 10 LLM failures = 33% < 50% threshold → healthy
+    assert (
+        result["status"] == "healthy"
+    ), f"Mixed crashes + LLM errors: only LLM errors should count. Got: {result}"
+    assert result["alert_providers"] == []

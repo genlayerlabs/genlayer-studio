@@ -812,7 +812,13 @@ async def _check_llm_provider_health() -> Dict[str, Any]:
                                     AS provider,
                                 v.receipt->'node_config'->'primary_model'->>'model'
                                     AS model,
-                                v.receipt->>'execution_result' AS execution_result
+                                v.receipt->>'execution_result' AS execution_result,
+                                v.receipt->'genvm_result'->>'error_code' AS error_code,
+                                -- Use ->> not -> so a JSONB null literal
+                                -- becomes SQL NULL (otherwise IS NOT NULL
+                                -- is true for `raw_error: null`).
+                                (v.receipt->'genvm_result'->>'raw_error') IS NOT NULL
+                                    AS has_raw_error
                             FROM transactions t,
                                  jsonb_array_elements(
                                      COALESCE(
@@ -838,8 +844,26 @@ async def _check_llm_provider_health() -> Dict[str, Any]:
                             provider,
                             model,
                             COUNT(*) AS samples,
-                            COUNT(*) FILTER (WHERE execution_result = 'ERROR')
-                                AS failures
+                            -- Only count errors that have a structured
+                            -- LLM/manager error_code OR raw_error block.
+                            -- Contract-side Python exceptions (e.g. a user
+                            -- contract using a non-existent SDK attribute)
+                            -- also surface as execution_result = 'ERROR',
+                            -- but have error_code = null AND raw_error =
+                            -- null because the failure happened inside the
+                            -- user code before any LLM call. Counting those
+                            -- here would let one broken contract make every
+                            -- validator (across all models) look like an
+                            -- LLM provider failure — exactly the false
+                            -- signal that fired Studio Prod's nonstop
+                            -- llm_provider_failure alert (May 2026).
+                            COUNT(*) FILTER (
+                                WHERE execution_result = 'ERROR'
+                                  AND (
+                                      error_code IS NOT NULL
+                                      OR has_raw_error
+                                  )
+                            ) AS failures
                         FROM receipts
                         GROUP BY provider, model
                         """
@@ -918,6 +942,15 @@ async def _check_llm_provider_health() -> Dict[str, Any]:
                                       'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT'
                                   )
                                   AND v.receipt->>'execution_result' = 'ERROR'
+                                  -- Match the aggregate filter: only sample
+                                  -- structured LLM/manager errors, skip
+                                  -- contract-side Python crashes.
+                                  AND (
+                                      v.receipt->'genvm_result'->>'error_code'
+                                          IS NOT NULL
+                                      OR (v.receipt->'genvm_result'->>'raw_error')
+                                          IS NOT NULL
+                                  )
                                   AND v.receipt->'node_config'->'primary_model'->>'provider'
                                           IS NOT NULL
                             )
