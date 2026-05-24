@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine, event, text
 from sqlalchemy.orm import sessionmaker
 
 
@@ -661,6 +661,31 @@ async def test_old_backlog_without_recent_progress_is_flagged(
     assert result["no_consensus_progress"] is True
     assert result["no_progress_backlog_count"] == 3
     assert result["status"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_no_progress_detector_skips_history_scan_without_backlog(engine: Engine):
+    """No old backlog means consensus cannot be stalled, so the detector
+    must not scan JSON consensus history. On Rally-scale datasets that scan
+    can be expensive enough to wedge the background health task."""
+
+    def fail_on_progress_scan(
+        conn, cursor, statement, parameters, context, executemany
+    ):
+        if "current_monitoring" in statement:
+            raise AssertionError("progress history scan should be skipped")
+
+    event.listen(engine, "before_cursor_execute", fail_on_progress_scan)
+    try:
+        from backend.protocol_rpc import health as health_module
+
+        result = await health_module._check_consensus_health()
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_on_progress_scan)
+
+    assert result["status"] == "healthy"
+    assert result["no_consensus_progress"] is False
+    assert result["no_progress_backlog_count"] == 0
 
 
 @pytest.mark.asyncio

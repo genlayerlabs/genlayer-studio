@@ -598,6 +598,9 @@ async def _check_consensus_health() -> Dict[str, Any]:
         os.environ.get("HEALTH_NO_PROGRESS_WINDOW_MINUTES", "30")
     )
     NO_PROGRESS_MIN_BACKLOG = int(os.environ.get("HEALTH_NO_PROGRESS_MIN_BACKLOG", "3"))
+    NO_PROGRESS_QUERY_TIMEOUT_MS = int(
+        os.environ.get("HEALTH_NO_PROGRESS_QUERY_TIMEOUT_MS", "5000")
+    )
     RECOVERY_STORM_MIN_RECOVERIES = int(
         os.environ.get("HEALTH_RECOVERY_STORM_MIN_RECOVERIES", "2")
     )
@@ -751,103 +754,6 @@ async def _check_consensus_health() -> Dict[str, Any]:
                     recovery_row.max_recovery_count if recovery_row else 0
                 )
 
-                # No-progress detector: if there is an old pre-consensus
-                # backlog and nothing has reached ACCEPTED/FINALIZED recently,
-                # workers may be busy but not producing outcomes. This is
-                # intentionally backlog-age gated to avoid alerting on normal
-                # short bursts or a single fresh long-running transaction.
-                progress_row = conn.execute(
-                    text(
-                        f"""
-                        WITH backlog AS (
-                            SELECT
-                                COUNT(*) AS backlog_count,
-                                MIN(created_at) AS oldest_created_at
-                            FROM transactions
-                            WHERE status IN ({PRE_CONSENSUS_BACKLOG_STATUSES_SQL})
-                        ),
-                        progress AS (
-                            SELECT
-                                MAX(
-                                    GREATEST(
-                                        COALESCE(
-                                            CASE
-                                                WHEN consensus_history
-                                                     -> 'current_monitoring'
-                                                     ->> 'ACCEPTED'
-                                                     ~ '^[0-9]+(\\.[0-9]+)?$'
-                                                THEN (
-                                                    consensus_history
-                                                    -> 'current_monitoring'
-                                                    ->> 'ACCEPTED'
-                                                )::double precision
-                                            END,
-                                            0
-                                        ),
-                                        COALESCE(
-                                            CASE
-                                                WHEN consensus_history
-                                                     -> 'current_monitoring'
-                                                     ->> 'FINALIZED'
-                                                     ~ '^[0-9]+(\\.[0-9]+)?$'
-                                                THEN (
-                                                    consensus_history
-                                                    -> 'current_monitoring'
-                                                    ->> 'FINALIZED'
-                                                )::double precision
-                                            END,
-                                            0
-                                        )
-                                    )
-                                ) AS last_progress_epoch
-                            FROM transactions
-                            WHERE consensus_history IS NOT NULL
-                        )
-                        SELECT
-                            backlog.backlog_count,
-                            EXTRACT(
-                                EPOCH FROM (NOW() - backlog.oldest_created_at)
-                            )::bigint AS oldest_backlog_age_seconds,
-                            COALESCE(progress.last_progress_epoch, 0)
-                                AS last_progress_epoch,
-                            CASE
-                                WHEN COALESCE(progress.last_progress_epoch, 0) > 0
-                                THEN (
-                                    EXTRACT(EPOCH FROM NOW())
-                                    - progress.last_progress_epoch
-                                )::bigint
-                                ELSE NULL
-                            END AS seconds_since_progress
-                        FROM backlog
-                        CROSS JOIN progress
-                        """
-                    )
-                ).fetchone()
-
-                no_progress_window_seconds = NO_PROGRESS_WINDOW_MINUTES * 60
-                no_progress_backlog_count = (
-                    progress_row.backlog_count if progress_row else 0
-                )
-                oldest_backlog_age_seconds = (
-                    progress_row.oldest_backlog_age_seconds if progress_row else None
-                )
-                seconds_since_consensus_progress = (
-                    progress_row.seconds_since_progress if progress_row else None
-                )
-                last_progress_epoch = (
-                    progress_row.last_progress_epoch if progress_row else 0
-                )
-                no_recent_progress = not last_progress_epoch or (
-                    seconds_since_consensus_progress is not None
-                    and seconds_since_consensus_progress > no_progress_window_seconds
-                )
-                no_consensus_progress = (
-                    no_progress_backlog_count >= NO_PROGRESS_MIN_BACKLOG
-                    and oldest_backlog_age_seconds is not None
-                    and oldest_backlog_age_seconds > no_progress_window_seconds
-                    and no_recent_progress
-                )
-
                 # Total in-flight (non-final) tx count, for context.
                 # Consensus-active only — finalization-pending rows
                 # are tracked separately via stuck_finalization_count.
@@ -862,6 +768,122 @@ async def _check_consensus_health() -> Dict[str, Any]:
                     )
                 ).fetchone()
                 total_processing = processing_row.n if processing_row else 0
+
+                no_progress_window_seconds = NO_PROGRESS_WINDOW_MINUTES * 60
+                no_progress_check_error = False
+
+                # No-progress detector: first do a cheap backlog gate. The
+                # progress scan has to inspect JSON history and can be expensive
+                # on large Rally-style datasets; if there is no old backlog,
+                # scanning history cannot change the alert decision.
+                backlog_row = conn.execute(
+                    text(
+                        f"""
+                        SELECT
+                            COUNT(*) AS backlog_count,
+                            MIN(created_at) AS oldest_created_at,
+                            EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))::bigint
+                                AS oldest_backlog_age_seconds
+                        FROM transactions
+                        WHERE status IN ({PRE_CONSENSUS_BACKLOG_STATUSES_SQL})
+                        """
+                    )
+                ).fetchone()
+
+                no_progress_backlog_count = (
+                    backlog_row.backlog_count if backlog_row else 0
+                )
+                oldest_backlog_age_seconds = (
+                    backlog_row.oldest_backlog_age_seconds
+                    if backlog_row and backlog_row.oldest_created_at
+                    else None
+                )
+
+                should_scan_progress = (
+                    no_progress_backlog_count >= NO_PROGRESS_MIN_BACKLOG
+                    and oldest_backlog_age_seconds is not None
+                    and oldest_backlog_age_seconds > no_progress_window_seconds
+                )
+
+                seconds_since_consensus_progress = None
+                last_progress_epoch = 0
+                if should_scan_progress:
+                    try:
+                        conn.execute(
+                            text(
+                                f"SET LOCAL statement_timeout = {NO_PROGRESS_QUERY_TIMEOUT_MS}"
+                            )
+                        )
+                        progress_row = conn.execute(
+                            text(
+                                """
+                                SELECT
+                                    MAX(
+                                        GREATEST(
+                                            COALESCE(
+                                                CASE
+                                                    WHEN consensus_history
+                                                         -> 'current_monitoring'
+                                                         ->> 'ACCEPTED'
+                                                         ~ '^[0-9]+(\\.[0-9]+)?$'
+                                                    THEN (
+                                                        consensus_history
+                                                        -> 'current_monitoring'
+                                                        ->> 'ACCEPTED'
+                                                    )::double precision
+                                                END,
+                                                0
+                                            ),
+                                            COALESCE(
+                                                CASE
+                                                    WHEN consensus_history
+                                                         -> 'current_monitoring'
+                                                         ->> 'FINALIZED'
+                                                         ~ '^[0-9]+(\\.[0-9]+)?$'
+                                                    THEN (
+                                                        consensus_history
+                                                        -> 'current_monitoring'
+                                                        ->> 'FINALIZED'
+                                                    )::double precision
+                                                END,
+                                                0
+                                            )
+                                        )
+                                    ) AS last_progress_epoch
+                                FROM transactions
+                                WHERE consensus_history IS NOT NULL
+                                """
+                            )
+                        ).fetchone()
+                        last_progress_epoch = (
+                            progress_row.last_progress_epoch if progress_row else 0
+                        )
+                        seconds_since_consensus_progress = (
+                            int(time.time() - last_progress_epoch)
+                            if last_progress_epoch
+                            else None
+                        )
+                    except Exception as exc:
+                        no_progress_check_error = True
+                        logger.warning(
+                            "No-progress health query skipped after timeout/error: %s",
+                            exc,
+                        )
+
+                no_recent_progress = should_scan_progress and (
+                    not last_progress_epoch
+                    or (
+                        seconds_since_consensus_progress is not None
+                        and seconds_since_consensus_progress
+                        > no_progress_window_seconds
+                    )
+                )
+                no_consensus_progress = (
+                    no_progress_backlog_count >= NO_PROGRESS_MIN_BACKLOG
+                    and oldest_backlog_age_seconds is not None
+                    and oldest_backlog_age_seconds > no_progress_window_seconds
+                    and no_recent_progress
+                )
 
                 status = (
                     "degraded"
@@ -890,6 +912,7 @@ async def _check_consensus_health() -> Dict[str, Any]:
                     "seconds_since_consensus_progress": (
                         seconds_since_consensus_progress
                     ),
+                    "no_progress_check_error": no_progress_check_error,
                     "no_progress_window_minutes": NO_PROGRESS_WINDOW_MINUTES,
                     "active_workers": active_workers_count,
                 }
