@@ -637,30 +637,62 @@ class ConsensusWorker:
         """
         update_query = text(
             """
+            WITH target AS (
+                SELECT hash, recovery_count
+                FROM transactions
+                WHERE hash = :hash
+                  AND worker_id = :worker_id
+                FOR UPDATE
+            )
             UPDATE transactions
             SET blocked_at = NULL,
                 worker_id = NULL,
-                consensus_data = NULL,
                 consensus_history = NULL,
-                status = 'PENDING'
-            WHERE hash = :hash
-              AND worker_id = :worker_id
-            RETURNING hash, status, blocked_at, worker_id
+                recovery_count = target.recovery_count + 1,
+                status = CASE
+                    WHEN target.recovery_count + 1 >= :max_recovery_cycles
+                    THEN 'CANCELED'::transaction_status
+                    ELSE 'PENDING'::transaction_status
+                END,
+                consensus_data = CASE
+                    WHEN target.recovery_count + 1 >= :max_recovery_cycles
+                    THEN jsonb_build_object(
+                        'error', 'max_recovery_cycles_exceeded',
+                        'recovery_count', target.recovery_count + 1
+                    )
+                    ELSE NULL
+                END
+            FROM target
+            WHERE transactions.hash = target.hash
+            RETURNING transactions.hash, transactions.status, transactions.blocked_at,
+                      transactions.worker_id, transactions.recovery_count
         """
         )
 
         try:
             result = session.execute(
                 update_query,
-                {"hash": transaction_hash, "worker_id": self.worker_id},
+                {
+                    "hash": transaction_hash,
+                    "worker_id": self.worker_id,
+                    "max_recovery_cycles": self._max_recovery_cycles,
+                },
             )
             row = result.first()
             session.commit()
 
             if row:
-                logger.info(
-                    f"[Worker {self.worker_id}] Reset transaction {transaction_hash} to PENDING after GenVM internal error"
-                )
+                if row.status == TransactionStatus.CANCELED.value:
+                    logger.error(
+                        f"[Worker {self.worker_id}] Canceled transaction {transaction_hash} "
+                        f"after {row.recovery_count} GenVM reset cycles"
+                    )
+                else:
+                    logger.info(
+                        f"[Worker {self.worker_id}] Reset transaction {transaction_hash} "
+                        f"to PENDING after GenVM internal error "
+                        f"(cycle {row.recovery_count}/{self._max_recovery_cycles})"
+                    )
             else:
                 logger.warning(
                     f"[Worker {self.worker_id}] Transaction {transaction_hash} not found or owned by another worker when resetting"
