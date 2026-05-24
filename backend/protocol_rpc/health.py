@@ -221,6 +221,49 @@ def get_health_check_interval() -> float:
     return float(os.getenv("HEALTH_CHECK_INTERVAL_SECONDS", "10"))
 
 
+def _update_genvm_health_cache(
+    services: Dict[str, Any],
+    genvm_ok: bool,
+    genvm_error: Optional[str],
+    genvm_status: Dict[str, Any],
+) -> None:
+    services["genvm"] = {"status": "healthy" if genvm_ok else "unhealthy"}
+    _health_cache.genvm_healthy = genvm_ok
+    _health_cache.genvm_error = genvm_error
+
+    # Best-effort parse of permit info from /status.
+    # The manager returns: {"permits": {"current": N, "max": M}, "executions": {...}}
+    # where permits.current = available permits (semaphore value).
+    try:
+        permits_obj = genvm_status.get("permits") or {}
+        executions_obj = genvm_status.get("executions")
+
+        max_permits_i = int(permits_obj["max"]) if "max" in permits_obj else None
+        # permits.current IS the available count (semaphore value)
+        available_i = int(permits_obj["current"]) if "current" in permits_obj else None
+        active_i = len(executions_obj) if isinstance(executions_obj, dict) else None
+
+        _health_cache.genvm_max_permits = max_permits_i
+        _health_cache.genvm_available_permits = available_i
+        _health_cache.genvm_current_permits = active_i  # in-use count
+        _health_cache.genvm_active_executions = active_i
+
+        services["genvm"].update(
+            {
+                "max_permits": max_permits_i,
+                "available_permits": available_i,
+                "current_permits": active_i,
+                "active_executions": active_i,
+            }
+        )
+    except Exception as e:
+        logger.debug(f"Failed to parse GenVM permit info from /status: {e}")
+        _health_cache.genvm_max_permits = None
+        _health_cache.genvm_current_permits = None
+        _health_cache.genvm_available_permits = None
+        _health_cache.genvm_active_executions = None
+
+
 async def _run_health_checks() -> None:
     """Run all expensive health checks and update cache."""
     global _health_cache
@@ -231,7 +274,13 @@ async def _run_health_checks() -> None:
     services = {}
 
     try:
-        # 1. Database health
+        # 1. GenVM manager health. Keep readiness-critical state independent
+        # from slower dashboard/alert queries so new pods can become ready once
+        # their local GenVM manager is responsive.
+        genvm_ok, genvm_error, genvm_status = await _check_genvm_health()
+        _update_genvm_health_cache(services, genvm_ok, genvm_error, genvm_status)
+
+        # 2. Database health
         db_health = await _check_database_health()
         db_status = db_health.get("status", "unknown")
         services["database"] = {
@@ -246,7 +295,7 @@ async def _run_health_checks() -> None:
             if overall_status == "healthy":
                 overall_status = "degraded"
 
-        # 2. Consensus health
+        # 3. Consensus health
         consensus_health = await _check_consensus_health()
         consensus_status = consensus_health.get("status", "unknown")
         services["consensus"] = {
@@ -295,7 +344,7 @@ async def _run_health_checks() -> None:
                     overall_status = "degraded"
                 issues.append("no_consensus_progress")
 
-        # 3. LLM provider health (per-provider failure-rate detection)
+        # 4. LLM provider health (per-provider failure-rate detection)
         # Catches cases like a provider returning HTTP 402 / "tier required"
         # for every call from a specific (provider, model) entry — the
         # actual cause behind a recent stuck-shard incident that the
@@ -315,7 +364,7 @@ async def _run_health_checks() -> None:
                 overall_status = "degraded"
             issues.append("llm_provider_failure")
 
-        # 4. Memory health
+        # 5. Memory health
         memory_health = await _check_memory_health()
         memory_status = memory_health.get("status", "unknown")
         services["memory"] = {
@@ -329,53 +378,13 @@ async def _run_health_checks() -> None:
                 overall_status = "degraded"
             issues.append("memory_issue")
 
-        # 5. Redis health
+        # 6. Redis health
         redis_status = await _check_redis_health()
         services["redis"] = redis_status
         if redis_status == "unhealthy":
             if overall_status == "healthy":
                 overall_status = "degraded"
             issues.append("redis_unreachable")
-
-        # 6. GenVM manager health (+ capacity details when available)
-        genvm_ok, genvm_error, genvm_status = await _check_genvm_health()
-        services["genvm"] = {"status": "healthy" if genvm_ok else "unhealthy"}
-        _health_cache.genvm_healthy = genvm_ok
-        _health_cache.genvm_error = genvm_error
-
-        # Best-effort parse of permit info from /status.
-        # The manager returns: {"permits": {"current": N, "max": M}, "executions": {...}}
-        # where permits.current = available permits (semaphore value).
-        try:
-            permits_obj = genvm_status.get("permits") or {}
-            executions_obj = genvm_status.get("executions")
-
-            max_permits_i = int(permits_obj["max"]) if "max" in permits_obj else None
-            # permits.current IS the available count (semaphore value)
-            available_i = (
-                int(permits_obj["current"]) if "current" in permits_obj else None
-            )
-            active_i = len(executions_obj) if isinstance(executions_obj, dict) else None
-
-            _health_cache.genvm_max_permits = max_permits_i
-            _health_cache.genvm_available_permits = available_i
-            _health_cache.genvm_current_permits = active_i  # in-use count
-            _health_cache.genvm_active_executions = active_i
-
-            services["genvm"].update(
-                {
-                    "max_permits": max_permits_i,
-                    "available_permits": available_i,
-                    "current_permits": active_i,
-                    "active_executions": active_i,
-                }
-            )
-        except Exception as e:
-            logger.debug(f"Failed to parse GenVM permit info from /status: {e}")
-            _health_cache.genvm_max_permits = None
-            _health_cache.genvm_current_permits = None
-            _health_cache.genvm_available_permits = None
-            _health_cache.genvm_active_executions = None
 
         # 7. Aggregate counts for metrics
         decisions_count, users_count, pending_count = await _get_aggregate_counts()

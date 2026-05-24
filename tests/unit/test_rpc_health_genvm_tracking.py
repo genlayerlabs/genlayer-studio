@@ -4,7 +4,7 @@ Mirrors test_worker_health_degradation.py pattern for jsonrpc process.
 """
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 import backend.protocol_rpc.health as health_module
 
@@ -172,6 +172,111 @@ class TestReadinessWithExecutionFailures:
         payload = json.loads(response.body.decode())
         assert payload["status"] == "not_ready"
         assert payload["rpc_router_initialized"] is False
+
+
+class TestBackgroundHealthGenVMOrdering:
+    """GenVM readiness state must be initialized before slower alert queries."""
+
+    def setup_method(self):
+        health_module._health_cache = health_module.HealthCache()
+        health_module._genvm_consecutive_failures = 0
+
+    @pytest.mark.asyncio
+    async def test_genvm_cache_updates_before_database_and_consensus_checks(
+        self, monkeypatch
+    ):
+        events = []
+
+        async def fake_genvm_health():
+            events.append("genvm")
+            return (
+                True,
+                None,
+                {
+                    "permits": {"current": 4, "max": 5},
+                    "executions": {"tx-1": {}},
+                },
+            )
+
+        async def fake_database_health():
+            events.append(
+                (
+                    "database",
+                    health_module._health_cache.genvm_healthy,
+                    health_module._health_cache.genvm_available_permits,
+                )
+            )
+            return {
+                "status": "healthy",
+                "connection_pool": {"size": 10, "checked_out": 0},
+            }
+
+        async def fake_consensus_health():
+            events.append(
+                (
+                    "consensus",
+                    health_module._health_cache.genvm_healthy,
+                    health_module._health_cache.genvm_available_permits,
+                )
+            )
+            return {
+                "status": "healthy",
+                "total_processing_transactions": 0,
+                "total_orphaned_transactions": 0,
+                "stuck_finalization_count": 0,
+                "active_workers": 0,
+            }
+
+        async def fake_llm_health():
+            return {
+                "status": "no_data",
+                "alert_providers": [],
+                "window_minutes": 15,
+                "total_samples": 0,
+            }
+
+        async def fake_memory_health():
+            return {
+                "status": "healthy",
+                "memory_usage_mb": 1,
+                "memory_percent": 1,
+                "cpu_percent": 0,
+            }
+
+        monkeypatch.setattr(health_module, "_check_genvm_health", fake_genvm_health)
+        monkeypatch.setattr(
+            health_module, "_check_database_health", fake_database_health
+        )
+        monkeypatch.setattr(
+            health_module, "_check_consensus_health", fake_consensus_health
+        )
+        monkeypatch.setattr(
+            health_module, "_check_llm_provider_health", fake_llm_health
+        )
+        monkeypatch.setattr(health_module, "_check_memory_health", fake_memory_health)
+        monkeypatch.setattr(
+            health_module, "_check_redis_health", AsyncMock(return_value="healthy")
+        )
+        monkeypatch.setattr(
+            health_module,
+            "_get_aggregate_counts",
+            AsyncMock(return_value=(1, 2, 3)),
+        )
+        monkeypatch.setattr(
+            health_module, "_get_pending_contracts", AsyncMock(return_value=[])
+        )
+
+        await health_module._run_health_checks()
+
+        assert events == [
+            "genvm",
+            ("database", True, 4),
+            ("consensus", True, 4),
+        ]
+        assert health_module._health_cache.genvm_healthy is True
+        assert health_module._health_cache.genvm_max_permits == 5
+        assert health_module._health_cache.genvm_available_permits == 4
+        assert health_module._health_cache.genvm_active_executions == 1
 
 
 class TestThresholdConfig:
