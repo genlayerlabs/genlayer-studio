@@ -296,43 +296,52 @@ def reset_defaults_llm_providers(llm_provider_registry: LLMProviderRegistry) -> 
 async def check_provider_is_available(
     genvm_manager: GenVMManager, provider: LLMProvider | dict
 ) -> bool:
-    if isinstance(provider, LLMProvider):
-        model = provider.model
-        url = provider.plugin_config["api_url"]
-        plugin = provider.plugin
-        key = provider.plugin_config["api_key_env_var"]
-        temperature = provider.config.get("temperature", 1)
-        use_max_completion_tokens = provider.config.get(
-            "use_max_completion_tokens", False
+    try:
+        if isinstance(provider, LLMProvider):
+            model = provider.model
+            url = provider.plugin_config["api_url"]
+            plugin = provider.plugin
+            key = provider.plugin_config["api_key_env_var"]
+            temperature = provider.config.get("temperature", 1)
+            use_max_completion_tokens = provider.config.get(
+                "use_max_completion_tokens", False
+            )
+        else:
+            model = provider["model"]
+            url = provider["plugin_config"]["api_url"]
+            plugin = provider["plugin"]
+            key = provider["plugin_config"]["api_key_env_var"]
+            temperature = provider["config"].get("temperature", 1)
+            use_max_completion_tokens = provider["config"].get(
+                "use_max_completion_tokens", False
+            )
+        key = f"${{ENV[{key}]}}"
+        res = await genvm_manager.try_llms(
+            [
+                {
+                    "host": url,
+                    "model": model,
+                    "provider": plugin,
+                    "key": key,
+                }
+            ],
+            prompt={
+                "system_message": "",
+                "user_message": "respond with two letters 'ok' and nothing else. No quotes, no repetition",
+                "temperature": temperature,
+                "max_tokens": 500,
+                "use_max_completion_tokens": use_max_completion_tokens,
+                "images": [],
+            },
         )
-    else:
-        model = provider["model"]
-        url = provider["plugin_config"]["api_url"]
-        plugin = provider["plugin"]
-        key = provider["plugin_config"]["api_key_env_var"]
-        temperature = provider["config"].get("temperature", 1)
-        use_max_completion_tokens = provider["config"].get(
-            "use_max_completion_tokens", False
+    except Exception as exc:
+        genvm_manager.logger.error(
+            "LLM provider availability check failed",
+            provider=provider,
+            error=str(exc),
         )
-    key = f"${{ENV[{key}]}}"
-    res = await genvm_manager.try_llms(
-        [
-            {
-                "host": url,
-                "model": model,
-                "provider": plugin,
-                "key": key,
-            }
-        ],
-        prompt={
-            "system_message": "",
-            "user_message": "respond with two letters 'ok' and nothing else. No quotes, no repetition",
-            "temperature": temperature,
-            "max_tokens": 500,
-            "use_max_completion_tokens": use_max_completion_tokens,
-            "images": [],
-        },
-    )
+        return False
+
     if len(res) != 1:
         genvm_manager.logger.error(
             f"LLM provider check failed", provider=provider, result=res
