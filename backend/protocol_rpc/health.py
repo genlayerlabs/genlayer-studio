@@ -259,6 +259,17 @@ async def _run_health_checks() -> None:
             "stuck_finalization_count": consensus_health.get(
                 "stuck_finalization_count", 0
             ),
+            "recovery_storm_count": consensus_health.get("recovery_storm_count", 0),
+            "max_recovery_count": consensus_health.get("max_recovery_count", 0),
+            "no_consensus_progress": consensus_health.get(
+                "no_consensus_progress", False
+            ),
+            "no_progress_backlog_count": consensus_health.get(
+                "no_progress_backlog_count", 0
+            ),
+            "seconds_since_consensus_progress": consensus_health.get(
+                "seconds_since_consensus_progress"
+            ),
             "active_workers": consensus_health.get("active_workers", 0),
             "status": consensus_status,
         }
@@ -275,6 +286,14 @@ async def _run_health_checks() -> None:
                 if overall_status == "healthy":
                     overall_status = "degraded"
                 issues.append("stuck_finalizations")
+            if consensus_health.get("recovery_storm_count", 0) > 0:
+                if overall_status == "healthy":
+                    overall_status = "degraded"
+                issues.append("transaction_recovery_storm")
+            if consensus_health.get("no_consensus_progress", False):
+                if overall_status == "healthy":
+                    overall_status = "degraded"
+                issues.append("no_consensus_progress")
 
         # 3. LLM provider health (per-provider failure-rate detection)
         # Catches cases like a provider returning HTTP 402 / "tier required"
@@ -566,6 +585,13 @@ async def _check_consensus_health() -> Dict[str, Any]:
     DEGRADED_AT_STUCK_FINALIZATIONS = int(
         os.environ.get("HEALTH_DEGRADED_AT_STUCK_FINALIZATIONS", "3")
     )
+    NO_PROGRESS_WINDOW_MINUTES = int(
+        os.environ.get("HEALTH_NO_PROGRESS_WINDOW_MINUTES", "30")
+    )
+    NO_PROGRESS_MIN_BACKLOG = int(os.environ.get("HEALTH_NO_PROGRESS_MIN_BACKLOG", "3"))
+    RECOVERY_STORM_MIN_RECOVERIES = int(
+        os.environ.get("HEALTH_RECOVERY_STORM_MIN_RECOVERIES", "2")
+    )
 
     # Statuses where the consensus state machine is actively working.
     # The "head of queue stuck" check uses ONLY these: ACCEPTED-class
@@ -582,6 +608,9 @@ async def _check_consensus_health() -> Dict[str, Any]:
     )
     FINALIZATION_ELIGIBLE_STATUSES_SQL = (
         "'ACCEPTED','UNDETERMINED','LEADER_TIMEOUT','VALIDATORS_TIMEOUT'"
+    )
+    PRE_CONSENSUS_BACKLOG_STATUSES_SQL = (
+        "'PENDING','ACTIVATED','PROPOSING','COMMITTING','REVEALING'"
     )
 
     try:
@@ -690,6 +719,126 @@ async def _check_consensus_health() -> Dict[str, Any]:
                 ).fetchone()
                 stuck_finalization_count = stuck_fin_row.n if stuck_fin_row else 0
 
+                # Recovery storm: a non-terminal transaction that has already
+                # been reset several times is a high-confidence poison-tx
+                # signal. This catches the crash-loop pattern even when each
+                # individual retry creates fresh blocked_at activity and masks
+                # the stuck-head detector.
+                recovery_row = conn.execute(
+                    text(
+                        f"""
+                        SELECT
+                            COUNT(*) AS n,
+                            COALESCE(MAX(recovery_count), 0) AS max_recovery_count
+                        FROM transactions
+                        WHERE status IN ({PRE_CONSENSUS_BACKLOG_STATUSES_SQL})
+                          AND recovery_count >= :min_recoveries
+                        """
+                    ),
+                    {"min_recoveries": RECOVERY_STORM_MIN_RECOVERIES},
+                ).fetchone()
+                recovery_storm_count = recovery_row.n if recovery_row else 0
+                max_recovery_count = (
+                    recovery_row.max_recovery_count if recovery_row else 0
+                )
+
+                # No-progress detector: if there is an old pre-consensus
+                # backlog and nothing has reached ACCEPTED/FINALIZED recently,
+                # workers may be busy but not producing outcomes. This is
+                # intentionally backlog-age gated to avoid alerting on normal
+                # short bursts or a single fresh long-running transaction.
+                progress_row = conn.execute(
+                    text(
+                        f"""
+                        WITH backlog AS (
+                            SELECT
+                                COUNT(*) AS backlog_count,
+                                MIN(created_at) AS oldest_created_at
+                            FROM transactions
+                            WHERE status IN ({PRE_CONSENSUS_BACKLOG_STATUSES_SQL})
+                        ),
+                        progress AS (
+                            SELECT
+                                MAX(
+                                    GREATEST(
+                                        COALESCE(
+                                            CASE
+                                                WHEN consensus_history
+                                                     -> 'current_monitoring'
+                                                     ->> 'ACCEPTED'
+                                                     ~ '^[0-9]+(\\.[0-9]+)?$'
+                                                THEN (
+                                                    consensus_history
+                                                    -> 'current_monitoring'
+                                                    ->> 'ACCEPTED'
+                                                )::double precision
+                                            END,
+                                            0
+                                        ),
+                                        COALESCE(
+                                            CASE
+                                                WHEN consensus_history
+                                                     -> 'current_monitoring'
+                                                     ->> 'FINALIZED'
+                                                     ~ '^[0-9]+(\\.[0-9]+)?$'
+                                                THEN (
+                                                    consensus_history
+                                                    -> 'current_monitoring'
+                                                    ->> 'FINALIZED'
+                                                )::double precision
+                                            END,
+                                            0
+                                        )
+                                    )
+                                ) AS last_progress_epoch
+                            FROM transactions
+                            WHERE consensus_history IS NOT NULL
+                        )
+                        SELECT
+                            backlog.backlog_count,
+                            EXTRACT(
+                                EPOCH FROM (NOW() - backlog.oldest_created_at)
+                            )::bigint AS oldest_backlog_age_seconds,
+                            COALESCE(progress.last_progress_epoch, 0)
+                                AS last_progress_epoch,
+                            CASE
+                                WHEN COALESCE(progress.last_progress_epoch, 0) > 0
+                                THEN (
+                                    EXTRACT(EPOCH FROM NOW())
+                                    - progress.last_progress_epoch
+                                )::bigint
+                                ELSE NULL
+                            END AS seconds_since_progress
+                        FROM backlog
+                        CROSS JOIN progress
+                        """
+                    )
+                ).fetchone()
+
+                no_progress_window_seconds = NO_PROGRESS_WINDOW_MINUTES * 60
+                no_progress_backlog_count = (
+                    progress_row.backlog_count if progress_row else 0
+                )
+                oldest_backlog_age_seconds = (
+                    progress_row.oldest_backlog_age_seconds if progress_row else None
+                )
+                seconds_since_consensus_progress = (
+                    progress_row.seconds_since_progress if progress_row else None
+                )
+                last_progress_epoch = (
+                    progress_row.last_progress_epoch if progress_row else 0
+                )
+                no_recent_progress = not last_progress_epoch or (
+                    seconds_since_consensus_progress is not None
+                    and seconds_since_consensus_progress > no_progress_window_seconds
+                )
+                no_consensus_progress = (
+                    no_progress_backlog_count >= NO_PROGRESS_MIN_BACKLOG
+                    and oldest_backlog_age_seconds is not None
+                    and oldest_backlog_age_seconds > no_progress_window_seconds
+                    and no_recent_progress
+                )
+
                 # Total in-flight (non-final) tx count, for context.
                 # Consensus-active only — finalization-pending rows
                 # are tracked separately via stuck_finalization_count.
@@ -710,6 +859,8 @@ async def _check_consensus_health() -> Dict[str, Any]:
                     if (
                         stuck_head_contracts >= DEGRADED_AT_STUCK_HEADS
                         or stuck_finalization_count >= DEGRADED_AT_STUCK_FINALIZATIONS
+                        or recovery_storm_count > 0
+                        or no_consensus_progress
                     )
                     else "healthy"
                 )
@@ -722,6 +873,15 @@ async def _check_consensus_health() -> Dict[str, Any]:
                     # whose consensus head is stuck.
                     "total_orphaned_transactions": stuck_head_contracts,
                     "stuck_finalization_count": stuck_finalization_count,
+                    "recovery_storm_count": recovery_storm_count,
+                    "max_recovery_count": max_recovery_count,
+                    "no_consensus_progress": no_consensus_progress,
+                    "no_progress_backlog_count": no_progress_backlog_count,
+                    "oldest_backlog_age_seconds": oldest_backlog_age_seconds,
+                    "seconds_since_consensus_progress": (
+                        seconds_since_consensus_progress
+                    ),
+                    "no_progress_window_minutes": NO_PROGRESS_WINDOW_MINUTES,
                     "active_workers": active_workers_count,
                 }
 
