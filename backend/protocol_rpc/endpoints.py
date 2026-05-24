@@ -316,23 +316,29 @@ async def check_provider_is_available(
                 "use_max_completion_tokens", False
             )
         key = f"${{ENV[{key}]}}"
-        res = await genvm_manager.try_llms(
-            [
-                {
-                    "host": url,
-                    "model": model,
-                    "provider": plugin,
-                    "key": key,
-                }
-            ],
-            prompt={
-                "system_message": "",
-                "user_message": "respond with two letters 'ok' and nothing else. No quotes, no repetition",
-                "temperature": temperature,
-                "max_tokens": 500,
-                "use_max_completion_tokens": use_max_completion_tokens,
-                "images": [],
-            },
+        timeout_s = float(
+            os.environ.get("LLM_PROVIDER_AVAILABILITY_TIMEOUT_SECONDS", "20")
+        )
+        res = await asyncio.wait_for(
+            genvm_manager.try_llms(
+                [
+                    {
+                        "host": url,
+                        "model": model,
+                        "provider": plugin,
+                        "key": key,
+                    }
+                ],
+                prompt={
+                    "system_message": "",
+                    "user_message": "respond with two letters 'ok' and nothing else. No quotes, no repetition",
+                    "temperature": temperature,
+                    "max_tokens": 500,
+                    "use_max_completion_tokens": use_max_completion_tokens,
+                    "images": [],
+                },
+            ),
+            timeout=timeout_s,
         )
     except Exception as exc:
         genvm_manager.logger.error(

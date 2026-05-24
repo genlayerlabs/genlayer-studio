@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import MagicMock
 
 import pytest
@@ -41,6 +42,15 @@ class FakeGenVMManager:
         return [{"response": "ok"}]
 
 
+class SlowGenVMManager:
+    def __init__(self):
+        self.logger = MagicMock()
+
+    async def try_llms(self, providers, prompt):
+        await asyncio.sleep(1)
+        return [{"response": "ok"}]
+
+
 @pytest.mark.asyncio
 async def test_get_providers_and_models_marks_failed_checks_unavailable():
     providers = await endpoints.get_providers_and_models(
@@ -50,3 +60,26 @@ async def test_get_providers_and_models_marks_failed_checks_unavailable():
 
     assert providers[0]["is_model_available"] is False
     assert providers[1]["is_model_available"] is True
+
+
+@pytest.mark.asyncio
+async def test_provider_availability_timeout_returns_unavailable(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER_AVAILABILITY_TIMEOUT_SECONDS", "0.01")
+    manager = SlowGenVMManager()
+
+    available = await endpoints.check_provider_is_available(
+        manager,
+        {
+            "provider": "slow-provider",
+            "model": "slow-model",
+            "config": {},
+            "plugin": "openai-compatible",
+            "plugin_config": {
+                "api_key_env_var": "SLOW_KEY",
+                "api_url": "https://example.test/api",
+            },
+        },
+    )
+
+    assert available is False
+    manager.logger.error.assert_called_once()
