@@ -456,7 +456,7 @@ class ConsensusWorker:
         query = text(
             """
             WITH candidate_transactions AS (
-                SELECT t.hash, t.to_address, t.type, t.created_at
+                SELECT t.hash, t.to_address, t.type, t.created_at, t.recovery_count
                 FROM transactions t
                 WHERE t.status IN ('PENDING', 'ACTIVATED')
                     AND (t.blocked_at IS NULL
@@ -511,11 +511,17 @@ class ConsensusWorker:
             ),
             single_transaction AS (
                 -- Select only ONE transaction (oldest across all contracts)
-                -- Upgrade transactions (type=3) are prioritized ahead of regular txs
+                -- Prefer transactions that have not already needed recovery, so
+                -- one repeatedly reset poison tx does not monopolize all workers.
+                -- Upgrade transactions (type=3) are prioritized ahead of regular
+                -- txs within each recovery class.
                 SELECT *
                 FROM oldest_per_contract
                 WHERE rn = 1
-                ORDER BY CASE WHEN type = 3 THEN 0 ELSE 1 END, created_at ASC
+                ORDER BY CASE WHEN recovery_count > 0 THEN 1 ELSE 0 END,
+                         CASE WHEN type = 3 THEN 0 ELSE 1 END,
+                         created_at ASC,
+                         hash ASC
                 LIMIT 1
             )
             UPDATE transactions

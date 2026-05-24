@@ -17,6 +17,8 @@ These tests cover:
 3. recover_stuck_transactions preserves consensus_data for finalization-
    eligible statuses (ACCEPTED/UNDETERMINED/*_TIMEOUT).
 4. Safety-net log fires when an ACCEPTED tx's wait exceeds N×finality_window.
+5. Recovered PENDING txs are deprioritized across contracts so other
+   contracts keep making progress.
 """
 
 import time
@@ -41,12 +43,12 @@ CONTRACT_ADDRESS = "0xfinalization_starvation_test_contract"
 SENDER = "0x" + "ab" * 20
 
 
-def _setup_contract(engine: Engine):
+def _setup_contract(engine: Engine, contract_address: str = CONTRACT_ADDRESS):
     Session_ = sessionmaker(bind=engine)
     with Session_() as s:
         s.add(
             CurrentState(
-                id=CONTRACT_ADDRESS,
+                id=contract_address,
                 data={
                     "state": {
                         "accepted": {"slot": "init"},
@@ -69,6 +71,7 @@ def _insert_tx(
     consensus_data: dict | None = None,
     consensus_history: dict | None = None,
     blocked_at_offset_seconds: int | None = None,  # negative = past
+    created_at_offset_seconds: int | None = None,  # negative = past
     worker_id: str | None = None,
     recovery_count: int = 0,
 ):
@@ -78,6 +81,9 @@ def _insert_tx(
     blocked_at_clause = "NULL"
     if blocked_at_offset_seconds is not None:
         blocked_at_clause = f"NOW() + INTERVAL '{blocked_at_offset_seconds} seconds'"
+    created_at_clause = "NOW()"
+    if created_at_offset_seconds is not None:
+        created_at_clause = f"NOW() + INTERVAL '{created_at_offset_seconds} seconds'"
     session.execute(
         text(
             f"""
@@ -90,7 +96,8 @@ def _insert_tx(
                 appeal_processing_time,
                 timestamp_awaiting_finalization,
                 consensus_data, consensus_history,
-                blocked_at, worker_id, recovery_count, value_credited
+                blocked_at, worker_id, recovery_count, value_credited,
+                created_at
             ) VALUES (
                 :hash, CAST(:status AS transaction_status), :from_addr, :to_addr,
                 CAST(:data AS jsonb), 0, 2, :nonce,
@@ -100,7 +107,8 @@ def _insert_tx(
                 0,
                 :timestamp_awaiting_finalization,
                 CAST(:consensus_data AS jsonb), CAST(:consensus_history AS jsonb),
-                {blocked_at_clause}, :worker_id, :recovery_count, false
+                {blocked_at_clause}, :worker_id, :recovery_count, false,
+                {created_at_clause}
             )
             """
         ),
@@ -234,6 +242,46 @@ async def test_claim_next_transaction_proceeds_when_finalization_window_not_yet_
 
     assert claimed is not None
     assert claimed["hash"] == "0x" + "55" * 32
+
+
+@pytest.mark.asyncio
+async def test_claim_next_transaction_prefers_unrecovered_contract_head(
+    engine: Engine, worker: ConsensusWorker, session: Session
+):
+    """A recovered old tx should not monopolize the global worker queue when
+    another contract has fresh work ready. Contract-local ordering still holds
+    because only the head tx from each contract is considered."""
+    recovered_contract = CONTRACT_ADDRESS
+    fresh_contract = "0xclaim_recovery_fresh_contract"
+    _setup_contract(engine, recovered_contract)
+    _setup_contract(engine, fresh_contract)
+
+    recovered_hash = "0x" + "56" * 32
+    fresh_hash = "0x" + "57" * 32
+
+    _insert_tx(
+        session,
+        tx_hash=recovered_hash,
+        status="PENDING",
+        nonce=0,
+        recovery_count=1,
+        created_at_offset_seconds=-600,
+        to_address=recovered_contract,
+    )
+    _insert_tx(
+        session,
+        tx_hash=fresh_hash,
+        status="PENDING",
+        nonce=0,
+        recovery_count=0,
+        created_at_offset_seconds=-60,
+        to_address=fresh_contract,
+    )
+
+    claimed = await worker.claim_next_transaction(session)
+
+    assert claimed is not None
+    assert claimed["hash"] == fresh_hash
 
 
 @pytest.mark.asyncio
