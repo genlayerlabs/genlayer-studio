@@ -74,6 +74,7 @@ class GenVMErrorCode(StrEnum):
     LLM_NO_PROVIDER = "LLM_NO_PROVIDER"
     LLM_PROVIDER_ERROR = "LLM_PROVIDER_ERROR"
     LLM_INVALID_API_KEY = "LLM_INVALID_API_KEY"
+    LLM_INVALID_PROMPT = "LLM_INVALID_PROMPT"
     LLM_TIMEOUT = "LLM_TIMEOUT"
 
     # Web request errors
@@ -89,6 +90,7 @@ class GenVMErrorCode(StrEnum):
 # Mapping from Lua error causes to standardized error codes
 LUA_CAUSE_TO_CODE: dict[str, GenVMErrorCode] = {
     "NO_PROVIDER_FOR_PROMPT": GenVMErrorCode.LLM_NO_PROVIDER,
+    "EMPTY_PROMPT": GenVMErrorCode.LLM_INVALID_PROMPT,
     "STATUS_NOT_OK": GenVMErrorCode.LLM_PROVIDER_ERROR,
     "WEBPAGE_LOAD_FAILED": GenVMErrorCode.WEB_REQUEST_FAILED,
     "TLD_FORBIDDEN": GenVMErrorCode.WEB_TLD_FORBIDDEN,

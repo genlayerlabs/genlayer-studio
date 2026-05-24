@@ -69,6 +69,8 @@ def _insert_tx(
     consensus_data: dict | None = None,
     consensus_history: dict | None = None,
     blocked_at_offset_seconds: int | None = None,  # negative = past
+    worker_id: str | None = None,
+    recovery_count: int = 0,
 ):
     """Insert a transaction directly, bypassing TransactionsProcessor's
     PENDING-default and other defaults — we want full control over the row
@@ -88,7 +90,7 @@ def _insert_tx(
                 appeal_processing_time,
                 timestamp_awaiting_finalization,
                 consensus_data, consensus_history,
-                blocked_at, recovery_count, value_credited
+                blocked_at, worker_id, recovery_count, value_credited
             ) VALUES (
                 :hash, CAST(:status AS transaction_status), :from_addr, :to_addr,
                 CAST(:data AS jsonb), 0, 2, :nonce,
@@ -98,7 +100,7 @@ def _insert_tx(
                 0,
                 :timestamp_awaiting_finalization,
                 CAST(:consensus_data AS jsonb), CAST(:consensus_history AS jsonb),
-                {blocked_at_clause}, 0, false
+                {blocked_at_clause}, :worker_id, :recovery_count, false
             )
             """
         ),
@@ -120,6 +122,8 @@ def _insert_tx(
                 if consensus_history is None
                 else __import__("json").dumps(consensus_history)
             ),
+            "worker_id": worker_id,
+            "recovery_count": recovery_count,
         },
     )
     session.commit()
@@ -311,6 +315,87 @@ async def test_recover_still_resets_stuck_consensus_txs(
     assert row.status == TransactionStatus.PENDING.value
     assert row.recovery_count == 1
     assert row.consensus_data is None
+    assert row.consensus_history is None
+
+
+def test_direct_genvm_reset_increments_recovery_count(
+    engine: Engine, worker: ConsensusWorker, session: Session
+):
+    """The direct GenVM reset path must count as a recovery cycle.
+
+    Fatal leader GenVM errors call reset_transaction immediately instead of
+    waiting for recover_stuck_transactions. Without this increment, a poison
+    tx can be reset to PENDING forever and keep killing fresh workers.
+    """
+    _setup_contract(engine)
+    tx_hash = "0x" + "89" * 32
+
+    _insert_tx(
+        session,
+        tx_hash=tx_hash,
+        status="PROPOSING",
+        nonce=0,
+        consensus_data={"partial": True},
+        consensus_history={"attempts": [1]},
+        blocked_at_offset_seconds=0,
+        worker_id=worker.worker_id,
+    )
+
+    worker.reset_transaction(session, tx_hash)
+
+    row = session.execute(
+        text(
+            "SELECT status, recovery_count, blocked_at, worker_id, "
+            "consensus_data, consensus_history "
+            "FROM transactions WHERE hash = :h"
+        ),
+        {"h": tx_hash},
+    ).one()
+    assert row.status == TransactionStatus.PENDING.value
+    assert row.recovery_count == 1
+    assert row.blocked_at is None
+    assert row.worker_id is None
+    assert row.consensus_data is None
+    assert row.consensus_history is None
+
+
+def test_direct_genvm_reset_cancels_at_recovery_limit(
+    engine: Engine, worker: ConsensusWorker, session: Session
+):
+    """After the configured reset cap, direct GenVM recovery cancels the tx."""
+    _setup_contract(engine)
+    tx_hash = "0x" + "8a" * 32
+
+    _insert_tx(
+        session,
+        tx_hash=tx_hash,
+        status="PROPOSING",
+        nonce=0,
+        consensus_data={"partial": True},
+        consensus_history={"attempts": [1, 2, 3]},
+        blocked_at_offset_seconds=0,
+        worker_id=worker.worker_id,
+        recovery_count=worker._max_recovery_cycles - 1,
+    )
+
+    worker.reset_transaction(session, tx_hash)
+
+    row = session.execute(
+        text(
+            "SELECT status, recovery_count, blocked_at, worker_id, "
+            "consensus_data, consensus_history "
+            "FROM transactions WHERE hash = :h"
+        ),
+        {"h": tx_hash},
+    ).one()
+    assert row.status == TransactionStatus.CANCELED.value
+    assert row.recovery_count == worker._max_recovery_cycles
+    assert row.blocked_at is None
+    assert row.worker_id is None
+    assert row.consensus_data == {
+        "error": "max_recovery_cycles_exceeded",
+        "recovery_count": worker._max_recovery_cycles,
+    }
     assert row.consensus_history is None
 
 
