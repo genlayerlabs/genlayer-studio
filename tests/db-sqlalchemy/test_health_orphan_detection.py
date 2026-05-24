@@ -689,6 +689,50 @@ async def test_no_progress_detector_skips_history_scan_without_backlog(engine: E
 
 
 @pytest.mark.asyncio
+async def test_no_progress_scan_error_does_not_assert_outage(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+):
+    """If the optional JSON history scan times out, surface the check error
+    but don't turn an unknown progress signal into a consensus outage."""
+    monkeypatch.setenv("HEALTH_NO_PROGRESS_WINDOW_MINUTES", "10")
+    monkeypatch.setenv("HEALTH_NO_PROGRESS_MIN_BACKLOG", "3")
+
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+
+    with Session_() as s:
+        for i in range(3):
+            _insert_tx(
+                s,
+                tx_hash=f"0xd0{i:062x}",
+                to_address="0x" + "d0" * 20,
+                status="PENDING",
+                nonce=i,
+                created_at=now - timedelta(minutes=20 + i),
+            )
+        s.commit()
+
+    def fail_on_progress_scan(
+        conn, cursor, statement, parameters, context, executemany
+    ):
+        if "current_monitoring" in statement:
+            raise RuntimeError("simulated progress scan timeout")
+
+    event.listen(engine, "before_cursor_execute", fail_on_progress_scan)
+    try:
+        from backend.protocol_rpc import health as health_module
+
+        result = await health_module._check_consensus_health()
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_on_progress_scan)
+
+    assert result["no_progress_check_error"] is True
+    assert result["no_consensus_progress"] is False
+    assert result["no_progress_backlog_count"] == 3
+    assert result["status"] == "healthy"
+
+
+@pytest.mark.asyncio
 async def test_recent_consensus_progress_suppresses_no_progress_alert(
     engine: Engine, monkeypatch: pytest.MonkeyPatch
 ):
