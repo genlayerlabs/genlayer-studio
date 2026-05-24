@@ -23,6 +23,7 @@ The head is "stuck" when:
 this state, not the count of in-flight txs in tail of queues.
 """
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -70,6 +71,8 @@ def _insert_tx(
     blocked_at: datetime | None = None,
     worker_id: str | None = None,
     timestamp_awaiting_finalization: int | None = None,
+    recovery_count: int = 0,
+    consensus_history: dict | None = None,
 ):
     """Direct INSERT — bypass the processor so we can backdate created_at."""
     session.execute(
@@ -81,13 +84,15 @@ def _insert_tx(
                 appeal_undetermined, appeal_leader_timeout,
                 appeal_validators_timeout, appeal_processing_time,
                 recovery_count, value_credited,
+                consensus_history,
                 created_at, blocked_at, worker_id,
                 timestamp_awaiting_finalization
             ) VALUES (
                 :hash, CAST(:status AS transaction_status),
                 '0xfromaddress', :to_addr, CAST('{}' AS jsonb), 0, 2,
                 :nonce, false, 'NORMAL', false, 0,
-                false, false, false, 0, 0, false,
+                false, false, false, 0, :recovery_count, false,
+                CAST(:consensus_history AS jsonb),
                 :created_at, :blocked_at, :worker_id,
                 :timestamp_awaiting_finalization
             )
@@ -102,6 +107,10 @@ def _insert_tx(
             "blocked_at": blocked_at,
             "worker_id": worker_id,
             "timestamp_awaiting_finalization": timestamp_awaiting_finalization,
+            "recovery_count": recovery_count,
+            "consensus_history": (
+                json.dumps(consensus_history) if consensus_history is not None else None
+            ),
         },
     )
 
@@ -587,3 +596,116 @@ async def test_stuck_finalization_flips_status_at_threshold(engine: Engine):
     assert (
         result["status"] == "degraded"
     ), f"3 stuck finalizations must flip consensus.status. Got: {result}"
+
+
+@pytest.mark.asyncio
+async def test_recovery_storm_flags_poison_transaction(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+):
+    """A tx that has been recovered repeatedly is a high-confidence
+    poison-tx signal even when blocked_at keeps looking fresh."""
+    monkeypatch.setenv("HEALTH_RECOVERY_STORM_MIN_RECOVERIES", "2")
+
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+
+    with Session_() as s:
+        _insert_tx(
+            s,
+            tx_hash="0x" + "aa" * 32,
+            to_address="0x" + "aa" * 20,
+            status="PENDING",
+            nonce=0,
+            created_at=now - timedelta(minutes=1),
+            recovery_count=2,
+        )
+        s.commit()
+
+    from backend.protocol_rpc import health as health_module
+
+    result = await health_module._check_consensus_health()
+
+    assert result["recovery_storm_count"] == 1
+    assert result["max_recovery_count"] == 2
+    assert result["status"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_old_backlog_without_recent_progress_is_flagged(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+):
+    """If an old backlog exists and no tx has reached ACCEPTED/FINALIZED
+    recently, consensus is not producing outcomes."""
+    monkeypatch.setenv("HEALTH_NO_PROGRESS_WINDOW_MINUTES", "10")
+    monkeypatch.setenv("HEALTH_NO_PROGRESS_MIN_BACKLOG", "3")
+
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+
+    with Session_() as s:
+        for i in range(3):
+            _insert_tx(
+                s,
+                tx_hash=f"0xb0{i:062x}",
+                to_address="0x" + "b0" * 20,
+                status="PENDING",
+                nonce=i,
+                created_at=now - timedelta(minutes=20 + i),
+            )
+        s.commit()
+
+    from backend.protocol_rpc import health as health_module
+
+    result = await health_module._check_consensus_health()
+
+    assert result["no_consensus_progress"] is True
+    assert result["no_progress_backlog_count"] == 3
+    assert result["status"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_recent_consensus_progress_suppresses_no_progress_alert(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+):
+    """A fresh ACCEPTED/FINALIZED timestamp means the queue is draining,
+    even if an older backlog still exists."""
+    import time
+
+    monkeypatch.setenv("HEALTH_NO_PROGRESS_WINDOW_MINUTES", "10")
+    monkeypatch.setenv("HEALTH_NO_PROGRESS_MIN_BACKLOG", "3")
+
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+
+    with Session_() as s:
+        for i in range(3):
+            _insert_tx(
+                s,
+                tx_hash=f"0xc0{i:062x}",
+                to_address="0x" + "c0" * 20,
+                status="PENDING",
+                nonce=i,
+                created_at=now - timedelta(minutes=20 + i),
+            )
+        _insert_tx(
+            s,
+            tx_hash="0x" + "c1" * 32,
+            to_address="0x" + "c1" * 20,
+            status="FINALIZED",
+            nonce=99,
+            created_at=now - timedelta(minutes=1),
+            consensus_history={
+                "current_monitoring": {
+                    "ACCEPTED": time.time(),
+                    "FINALIZED": time.time(),
+                }
+            },
+        )
+        s.commit()
+
+    from backend.protocol_rpc import health as health_module
+
+    result = await health_module._check_consensus_health()
+
+    assert result["no_consensus_progress"] is False
+    assert result["no_progress_backlog_count"] == 3
