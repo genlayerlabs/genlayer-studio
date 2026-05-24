@@ -22,6 +22,11 @@ from genlayer_py import create_client, create_account, localnet
 
 RPC_URL = "http://localhost:4000/api"
 
+# Upgrade tests rely on the global validator registry for deploy/read/upgrade.
+# Keep them on the same xdist worker as icontract tests that temporarily wipe
+# validators while seeding mock responses.
+pytestmark = pytest.mark.xdist_group(name="mock_validators")
+
 
 @pytest.fixture(scope="module", autouse=True)
 def ensure_validators_exist():
