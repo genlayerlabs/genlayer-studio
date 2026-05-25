@@ -319,6 +319,9 @@ async def _run_health_checks() -> None:
             "seconds_since_consensus_progress": consensus_health.get(
                 "seconds_since_consensus_progress"
             ),
+            "no_progress_check_error": consensus_health.get(
+                "no_progress_check_error", False
+            ),
             "active_workers": consensus_health.get("active_workers", 0),
             "status": consensus_status,
         }
@@ -870,12 +873,19 @@ async def _check_consensus_health() -> Dict[str, Any]:
                             exc,
                         )
 
-                no_recent_progress = should_scan_progress and (
-                    not last_progress_epoch
-                    or (
-                        seconds_since_consensus_progress is not None
-                        and seconds_since_consensus_progress
-                        > no_progress_window_seconds
+                # The progress scan is an alert-quality check, not a liveness
+                # requirement. If it times out on a large table, surface that
+                # as check_error but do not assert a consensus outage.
+                no_recent_progress = (
+                    should_scan_progress
+                    and not no_progress_check_error
+                    and (
+                        not last_progress_epoch
+                        or (
+                            seconds_since_consensus_progress is not None
+                            and seconds_since_consensus_progress
+                            > no_progress_window_seconds
+                        )
                     )
                 )
                 no_consensus_progress = (
