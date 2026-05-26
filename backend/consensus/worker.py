@@ -664,7 +664,9 @@ class ConsensusWorker:
                     WHEN target.recovery_count + 1 >= :max_recovery_cycles
                     THEN jsonb_build_object(
                         'error', 'max_recovery_cycles_exceeded',
-                        'recovery_count', target.recovery_count + 1
+                        'recovery_count', target.recovery_count + 1,
+                        'max_recovery_exhausted_at',
+                        EXTRACT(EPOCH FROM NOW())::bigint
                     )
                     ELSE NULL
                 END
@@ -881,13 +883,33 @@ class ConsensusWorker:
                 consensus_data = COALESCE(consensus_data, '{}'::jsonb)
                                  || jsonb_build_object(
                                     'error', 'max_recovery_cycles_exceeded',
-                                    'recovery_count', recovery_count
+                                    'recovery_count', recovery_count,
+                                    'max_recovery_exhausted_at',
+                                    EXTRACT(EPOCH FROM NOW())::bigint
                                  )
             WHERE recovery_count >= :max_cycles
               AND status IN :consensus_statuses
               AND (
-                  (blocked_at IS NOT NULL
-                   AND blocked_at < NOW() - CAST(:timeout AS INTERVAL))
+                  (
+                   blocked_at IS NOT NULL
+                   AND blocked_at < NOW() - CAST(:timeout AS INTERVAL)
+                   -- blocked_at is a claim lease, not a heartbeat. Long
+                   -- consensus attempts with rotations can exceed it while
+                   -- still progressing, so require progress to be stale too.
+                   AND COALESCE(
+                       (
+                           SELECT to_timestamp(MAX(progress.value::double precision))
+                           FROM jsonb_each_text(
+                               COALESCE(
+                                   transactions.consensus_history->'current_monitoring',
+                                   '{}'::jsonb
+                               )
+                           ) AS progress(key, value)
+                           WHERE progress.value ~ '^[0-9]+(\\.[0-9]+)?$'
+                       ),
+                       blocked_at
+                   ) < NOW() - CAST(:timeout AS INTERVAL)
+                  )
                   OR
                   (blocked_at IS NULL
                    AND status IN ('PROPOSING', 'COMMITTING', 'REVEALING')
@@ -963,8 +985,26 @@ class ConsensusWorker:
               AND status IN :consensus_statuses
               AND (
                   -- Case 1: Transactions with expired blocks
-                  (blocked_at IS NOT NULL
-                   AND blocked_at < NOW() - CAST(:timeout AS INTERVAL))
+                  (
+                   blocked_at IS NOT NULL
+                   AND blocked_at < NOW() - CAST(:timeout AS INTERVAL)
+                   -- blocked_at is a claim lease, not a heartbeat. Long
+                   -- consensus attempts with rotations can exceed it while
+                   -- still progressing, so require progress to be stale too.
+                   AND COALESCE(
+                       (
+                           SELECT to_timestamp(MAX(progress.value::double precision))
+                           FROM jsonb_each_text(
+                               COALESCE(
+                                   transactions.consensus_history->'current_monitoring',
+                                   '{}'::jsonb
+                               )
+                           ) AS progress(key, value)
+                           WHERE progress.value ~ '^[0-9]+(\\.[0-9]+)?$'
+                       ),
+                       blocked_at
+                   ) < NOW() - CAST(:timeout AS INTERVAL)
+                  )
                   OR
                   -- Case 2: Orphaned transactions in processing states with no block
                   (blocked_at IS NULL

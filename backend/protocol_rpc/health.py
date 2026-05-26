@@ -310,6 +310,9 @@ async def _run_health_checks() -> None:
             ),
             "recovery_storm_count": consensus_health.get("recovery_storm_count", 0),
             "max_recovery_count": consensus_health.get("max_recovery_count", 0),
+            "max_recovery_exhausted_count": consensus_health.get(
+                "max_recovery_exhausted_count", 0
+            ),
             "no_consensus_progress": consensus_health.get(
                 "no_consensus_progress", False
             ),
@@ -342,6 +345,10 @@ async def _run_health_checks() -> None:
                 if overall_status == "healthy":
                     overall_status = "degraded"
                 issues.append("transaction_recovery_storm")
+            if consensus_health.get("max_recovery_exhausted_count", 0) > 0:
+                if overall_status == "healthy":
+                    overall_status = "degraded"
+                issues.append("max_recovery_cycles_exhausted")
             if consensus_health.get("no_consensus_progress", False):
                 if overall_status == "healthy":
                     overall_status = "degraded"
@@ -607,6 +614,9 @@ async def _check_consensus_health() -> Dict[str, Any]:
     RECOVERY_STORM_MIN_RECOVERIES = int(
         os.environ.get("HEALTH_RECOVERY_STORM_MIN_RECOVERIES", "2")
     )
+    MAX_RECOVERY_EXHAUSTED_NOTICE_WINDOW_MINUTES = int(
+        os.environ.get("HEALTH_MAX_RECOVERY_EXHAUSTED_NOTICE_WINDOW_MINUTES", "60")
+    )
 
     # Statuses where the consensus state machine is actively working.
     # The "head of queue stuck" check uses ONLY these: ACCEPTED-class
@@ -757,6 +767,38 @@ async def _check_consensus_health() -> Dict[str, Any]:
                     recovery_row.max_recovery_count if recovery_row else 0
                 )
 
+                max_recovery_exhausted_row = conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*) AS n
+                        FROM transactions
+                        WHERE status = 'CANCELED'
+                          AND consensus_data ->> 'error'
+                              = 'max_recovery_cycles_exceeded'
+                          AND CASE
+                              WHEN consensus_data
+                                   ->> 'max_recovery_exhausted_at'
+                                   ~ '^[0-9]+(\\.[0-9]+)?$'
+                              THEN to_timestamp(
+                                  (
+                                      consensus_data
+                                      ->> 'max_recovery_exhausted_at'
+                                  )::double precision
+                              )
+                              ELSE created_at
+                          END > NOW() - CAST(:notice_window AS INTERVAL)
+                        """
+                    ),
+                    {
+                        "notice_window": (
+                            f"{MAX_RECOVERY_EXHAUSTED_NOTICE_WINDOW_MINUTES} minutes"
+                        )
+                    },
+                ).fetchone()
+                max_recovery_exhausted_count = (
+                    max_recovery_exhausted_row.n if max_recovery_exhausted_row else 0
+                )
+
                 # Total in-flight (non-final) tx count, for context.
                 # Consensus-active only — finalization-pending rows
                 # are tracked separately via stuck_finalization_count.
@@ -901,6 +943,7 @@ async def _check_consensus_health() -> Dict[str, Any]:
                         stuck_head_contracts >= DEGRADED_AT_STUCK_HEADS
                         or stuck_finalization_count >= DEGRADED_AT_STUCK_FINALIZATIONS
                         or recovery_storm_count > 0
+                        or max_recovery_exhausted_count > 0
                         or no_consensus_progress
                     )
                     else "healthy"
@@ -916,6 +959,7 @@ async def _check_consensus_health() -> Dict[str, Any]:
                     "stuck_finalization_count": stuck_finalization_count,
                     "recovery_storm_count": recovery_storm_count,
                     "max_recovery_count": max_recovery_count,
+                    "max_recovery_exhausted_count": max_recovery_exhausted_count,
                     "no_consensus_progress": no_consensus_progress,
                     "no_progress_backlog_count": no_progress_backlog_count,
                     "oldest_backlog_age_seconds": oldest_backlog_age_seconds,
