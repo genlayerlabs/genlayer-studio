@@ -25,7 +25,7 @@ name: E2E Housekeeper
 
 on:
   schedule:
-    - cron: '0 6 * * *'   # daily 06:00 UTC
+    - cron: '0 6 * * *' # daily 06:00 UTC
   # No inputs: production triggers (schedule today, PR-merged later)
   # don't pass them, and the script's defaults (24h idle / 200 page
   # cap) are stable. workflow_dispatch stays as a no-arg "run the
@@ -69,7 +69,7 @@ jobs:
           # resolves to the caller's repo (where the cron fires + the
           # cache pool lives).
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO:  ${{ github.repository }}
+          GH_REPO: ${{ github.repository }}
         run: ./taskfiles/housekeeper/scripts/evict-stale-caches.sh --age 24 --limit 200
 
       # Companion sweep for artifacts (logs, shard outputs, per-component
@@ -80,5 +80,5 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO:  ${{ github.repository }}
+          GH_REPO: ${{ github.repository }}
         run: ./taskfiles/housekeeper/scripts/evict-stale-artifacts.sh --age 24 --limit 1000
