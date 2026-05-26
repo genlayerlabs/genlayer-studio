@@ -73,6 +73,7 @@ def _insert_tx(
     timestamp_awaiting_finalization: int | None = None,
     recovery_count: int = 0,
     consensus_history: dict | None = None,
+    consensus_data: dict | None = None,
 ):
     """Direct INSERT — bypass the processor so we can backdate created_at."""
     session.execute(
@@ -84,7 +85,7 @@ def _insert_tx(
                 appeal_undetermined, appeal_leader_timeout,
                 appeal_validators_timeout, appeal_processing_time,
                 recovery_count, value_credited,
-                consensus_history,
+                consensus_history, consensus_data,
                 created_at, blocked_at, worker_id,
                 timestamp_awaiting_finalization
             ) VALUES (
@@ -92,7 +93,7 @@ def _insert_tx(
                 '0xfromaddress', :to_addr, CAST('{}' AS jsonb), 0, 2,
                 :nonce, false, 'NORMAL', false, 0,
                 false, false, false, 0, :recovery_count, false,
-                CAST(:consensus_history AS jsonb),
+                CAST(:consensus_history AS jsonb), CAST(:consensus_data AS jsonb),
                 :created_at, :blocked_at, :worker_id,
                 :timestamp_awaiting_finalization
             )
@@ -110,6 +111,9 @@ def _insert_tx(
             "recovery_count": recovery_count,
             "consensus_history": (
                 json.dumps(consensus_history) if consensus_history is not None else None
+            ),
+            "consensus_data": (
+                json.dumps(consensus_data) if consensus_data is not None else None
             ),
         },
     )
@@ -627,6 +631,42 @@ async def test_recovery_storm_flags_poison_transaction(
 
     assert result["recovery_storm_count"] == 1
     assert result["max_recovery_count"] == 2
+    assert result["status"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_recent_max_recovery_exhaustion_flags_notice(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+):
+    """A transaction canceled after exhausting recovery cycles should surface
+    as a degraded notice even though it no longer appears in active backlog."""
+    monkeypatch.setenv("HEALTH_MAX_RECOVERY_EXHAUSTED_NOTICE_WINDOW_MINUTES", "60")
+
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+
+    with Session_() as s:
+        _insert_tx(
+            s,
+            tx_hash="0x" + "ab" * 32,
+            to_address="0x" + "ab" * 20,
+            status="CANCELED",
+            nonce=0,
+            created_at=now - timedelta(minutes=5),
+            recovery_count=3,
+            consensus_data={
+                "error": "max_recovery_cycles_exceeded",
+                "recovery_count": 3,
+                "max_recovery_exhausted_at": int(now.timestamp()),
+            },
+        )
+        s.commit()
+
+    from backend.protocol_rpc import health as health_module
+
+    result = await health_module._check_consensus_health()
+
+    assert result["max_recovery_exhausted_count"] == 1
     assert result["status"] == "degraded"
 
 

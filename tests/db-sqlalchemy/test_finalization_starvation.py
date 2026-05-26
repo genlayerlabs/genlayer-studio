@@ -332,6 +332,49 @@ async def test_recover_does_not_wipe_consensus_data_for_accepted(
 
 
 @pytest.mark.asyncio
+async def test_recover_does_not_reset_when_consensus_recently_progressed(
+    engine: Engine, worker: ConsensusWorker, session: Session
+):
+    """A long-running tx can legitimately exceed its original claim lease
+    while rotations/validator work are still advancing. Recovery should reset
+    only when both the claim and the latest consensus progress are stale."""
+    _setup_contract(engine)
+    tx_hash = "0x" + "66" * 32
+    consensus_history = {
+        "current_monitoring": {
+            "PENDING": time.time() - 25 * 60,
+            "PROPOSING": time.time() - 60,
+        }
+    }
+
+    _insert_tx(
+        session,
+        tx_hash=tx_hash,
+        status="PROPOSING",
+        nonce=0,
+        consensus_history=consensus_history,
+        blocked_at_offset_seconds=-25 * 60,
+        worker_id="worker-that-is-still-progressing",
+    )
+
+    recovered = await worker.recover_stuck_transactions(session)
+
+    row = session.execute(
+        text(
+            "SELECT status, recovery_count, consensus_history, blocked_at, worker_id "
+            "FROM transactions WHERE hash = :h"
+        ),
+        {"h": tx_hash},
+    ).one()
+    assert recovered == 0
+    assert row.status == TransactionStatus.PROPOSING.value
+    assert row.recovery_count == 0
+    assert row.consensus_history == consensus_history
+    assert row.blocked_at is not None
+    assert row.worker_id == "worker-that-is-still-progressing"
+
+
+@pytest.mark.asyncio
 async def test_recover_still_resets_stuck_consensus_txs(
     engine: Engine, worker: ConsensusWorker, session: Session
 ):
@@ -440,10 +483,10 @@ def test_direct_genvm_reset_cancels_at_recovery_limit(
     assert row.recovery_count == worker._max_recovery_cycles
     assert row.blocked_at is None
     assert row.worker_id is None
-    assert row.consensus_data == {
-        "error": "max_recovery_cycles_exceeded",
-        "recovery_count": worker._max_recovery_cycles,
-    }
+    assert row.consensus_data["error"] == "max_recovery_cycles_exceeded"
+    assert row.consensus_data["recovery_count"] == worker._max_recovery_cycles
+    assert isinstance(row.consensus_data["max_recovery_exhausted_at"], int)
+    assert row.consensus_data["max_recovery_exhausted_at"] > 0
     assert row.consensus_history is None
 
 
