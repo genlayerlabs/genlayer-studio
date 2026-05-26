@@ -115,7 +115,7 @@ on:
           whose declared `stack-targets` don't include the chosen
           stack cascade-skip with reason "stack".
         required: false
-        default: studio  # SYNC_INJECT(default_stack)
+        default: studio # SYNC_INJECT(default_stack)
         type: choice
         options:
           - all
@@ -150,7 +150,7 @@ env:
   GCP_SECRET_APP_PRIVATE_KEY: ${{ vars.GCP_SECRET_APP_PRIVATE_KEY || 'ci-core-e2e-runner-app-private-key' }}
   # Suppress notify-outcome's compact PR banner. Detailed results
   # table still posted. Remove to re-enable.
-  E2E_REPORT_SKIP_RESULT: "true"
+  E2E_REPORT_SKIP_RESULT: 'true'
 
 jobs:
   # ===========================================================================
@@ -215,7 +215,7 @@ jobs:
       # issue_comment `/run-e2e` with no stack token still routes to
       # the per-consumer default — inputs.stack is workflow_dispatch-
       # only and resolves empty on the issue_comment path.
-      stack: ${{ needs.acknowledge.outputs.stack-token || inputs.stack || 'studio' }}  # SYNC_INJECT(default_stack_fallback)
+      stack: ${{ needs.acknowledge.outputs.stack-token || inputs.stack || 'studio' }} # SYNC_INJECT(default_stack_fallback)
       target-repo: ${{ github.repository }}
       pr-number: ${{ github.event.issue.number || '' }}
       comment-id: ${{ github.event.comment.id || '' }}
@@ -602,7 +602,15 @@ jobs:
   # `.result` for the rough verdict.
   # ===========================================================================
   result:
-    needs: [acknowledge, plan, build, build-studio, wave-1, wave-2, wave-3, wave-4]
+    needs:
+      - acknowledge
+      - plan
+      - build
+      - build-studio
+      - wave-1
+      - wave-2
+      - wave-3
+      - wave-4
     # `always() && plan.result != 'skipped'` rather than bare `always()`:
     # noop issue_comments (any non-/run-e2e comment in this repo, since
     # the workflow lives at `on: issue_comment`) skip acknowledge → plan
@@ -658,29 +666,29 @@ jobs:
         # the workflow conclusion.
         continue-on-error: true
         env:
-          PLAN_RESULT:            ${{ needs.plan.result }}
+          PLAN_RESULT: ${{ needs.plan.result }}
           # BUILD_STATUS is the AND of the two stack-scoped builds,
           # but a build that wasn't requested (its stack filtered out
           # by /run-e2e <stack>) counts as success — its job is
           # `skipped`, not `failure`. The contains() checks gate each
           # build's contribution by whether its stack-target appears
           # in the wave-plans output.
-          BUILD_STATUS:           ${{ ((!contains(needs.plan.outputs.stack-config, '"target":"dev-env"') || needs.build.outputs.build-status == 'success') && (!contains(needs.plan.outputs.stack-config, '"target":"studio"') || needs.build-studio.outputs.build-status == 'success')) && 'success' || 'failure' }}
-          BUILD_RESULT:           ${{ format('dev-env={0}, studio={1}', needs.build.result, needs.build-studio.result) }}
+          BUILD_STATUS: ${{ ((!contains(needs.plan.outputs.stack-config, '"target":"dev-env"') || needs.build.outputs.build-status == 'success') && (!contains(needs.plan.outputs.stack-config, '"target":"studio"') || needs.build-studio.outputs.build-status == 'success')) && 'success' || 'failure' }}
+          BUILD_RESULT: ${{ format('dev-env={0}, studio={1}', needs.build.result, needs.build-studio.result) }}
           # Classifier-emitted stage + detail surfaced in the build row's
           # Notes column when BUILD_STATUS != success. Empty when build
           # was a cache-hit (no execute job ran) — the aggregate script
           # falls back to the legacy verdict-word render.
-          BUILD_STAGE:            ${{ (contains(needs.plan.outputs.stack-config, '"target":"studio"') && needs.build-studio.outputs.build-status != 'success') && 'build:studio' || needs.build.outputs.build-stage || '' }}
-          BUILD_DETAIL:           ${{ (contains(needs.plan.outputs.stack-config, '"target":"studio"') && needs.build-studio.outputs.build-status != 'success') && 'Studio build failed' || needs.build.outputs.build-detail || '' }}
-          WAVE_1_RESULT:          ${{ needs.wave-1.result }}
-          WAVE_1_PLAN:            ${{ toJson(fromJson(needs.plan.outputs.wave-plans)['wave-1']) }}
-          WAVE_2_RESULT:          ${{ needs.wave-2.result }}
-          WAVE_2_PLAN:            ${{ toJson(fromJson(needs.plan.outputs.wave-plans)['wave-2']) }}
-          WAVE_3_RESULT:          ${{ needs.wave-3.result }}
-          WAVE_3_PLAN:            ${{ toJson(fromJson(needs.plan.outputs.wave-plans)['wave-3']) }}
-          WAVE_4_RESULT:          ${{ needs.wave-4.result }}
-          WAVE_4_PLAN:            ${{ toJson(fromJson(needs.plan.outputs.wave-plans)['wave-4']) }}
+          BUILD_STAGE: ${{ (contains(needs.plan.outputs.stack-config, '"target":"studio"') && needs.build-studio.outputs.build-status != 'success') && 'build:studio' || needs.build.outputs.build-stage || '' }}
+          BUILD_DETAIL: ${{ (contains(needs.plan.outputs.stack-config, '"target":"studio"') && needs.build-studio.outputs.build-status != 'success') && 'Studio build failed' || needs.build.outputs.build-detail || '' }}
+          WAVE_1_RESULT: ${{ needs.wave-1.result }}
+          WAVE_1_PLAN: ${{ toJson(fromJson(needs.plan.outputs.wave-plans)['wave-1']) }}
+          WAVE_2_RESULT: ${{ needs.wave-2.result }}
+          WAVE_2_PLAN: ${{ toJson(fromJson(needs.plan.outputs.wave-plans)['wave-2']) }}
+          WAVE_3_RESULT: ${{ needs.wave-3.result }}
+          WAVE_3_PLAN: ${{ toJson(fromJson(needs.plan.outputs.wave-plans)['wave-3']) }}
+          WAVE_4_RESULT: ${{ needs.wave-4.result }}
+          WAVE_4_PLAN: ${{ toJson(fromJson(needs.plan.outputs.wave-plans)['wave-4']) }}
           # Per-(component, stack-target) verdict directory (one file
           # per artifact, name == component, content ∈ {success,
           # failure, skipped}). Replaces the legacy single-value
@@ -689,8 +697,8 @@ jobs:
           # artifacts step above. PR_NUMBER lets the script construct
           # the exact artifact path; on workflow_dispatch (no PR) the
           # run_id stands in, matching the wave jobs' pr-number input.
-          CONCLUSIONS_DIR:        /tmp/test-conclusions
-          PR_NUMBER:              ${{ github.event.issue.number || github.run_id }}
+          CONCLUSIONS_DIR: /tmp/test-conclusions
+          PR_NUMBER: ${{ github.event.issue.number || github.run_id }}
         run: ./taskfiles/runner/scripts/aggregate-wave-outcomes.sh
 
       # Final notify-outcome — flips 👀 → 🚀 (overall pass) or 👎
