@@ -667,6 +667,14 @@ async def test_recent_max_recovery_exhaustion_flags_notice(
     result = await health_module._check_consensus_health()
 
     assert result["max_recovery_exhausted_count"] == 1
+    assert result["max_recovery_exhausted_transactions"] == [
+        {
+            "hash": "0x" + "ab" * 32,
+            "contract_address": "0x" + "ab" * 20,
+            "recovery_count": 3,
+            "exhausted_at": int(now.timestamp()),
+        }
+    ]
     assert result["status"] == "degraded"
 
 

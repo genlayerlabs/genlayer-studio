@@ -5,6 +5,7 @@ Mirrors test_worker_health_degradation.py pattern for jsonrpc process.
 
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
+from types import SimpleNamespace
 
 import backend.protocol_rpc.health as health_module
 
@@ -277,6 +278,86 @@ class TestBackgroundHealthGenVMOrdering:
         assert health_module._health_cache.genvm_max_permits == 5
         assert health_module._health_cache.genvm_available_permits == 4
         assert health_module._health_cache.genvm_active_executions == 1
+
+    @pytest.mark.asyncio
+    async def test_consensus_health_includes_max_recovery_exhaustion_events(
+        self, monkeypatch
+    ):
+        exhausted_tx = SimpleNamespace(
+            total_count=1,
+            tx_hash="0xabc",
+            to_address="0xcontract",
+            recovery_count=3,
+            exhausted_at_epoch=1779938084,
+        )
+
+        class FakeResult:
+            def __init__(self, row=None, rows=None):
+                self.row = row
+                self.rows = rows or []
+
+            def fetchone(self):
+                return self.row
+
+            def fetchall(self):
+                return self.rows
+
+        class FakeConnection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, statement, params=None):
+                query = str(statement)
+                if "COUNT(DISTINCT worker_id)" in query:
+                    return FakeResult(SimpleNamespace(n=0))
+                if "COUNT(*) AS stuck_heads" in query:
+                    return FakeResult(SimpleNamespace(stuck_heads=0))
+                if "timestamp_awaiting_finalization" in query:
+                    return FakeResult(SimpleNamespace(n=0))
+                if "COALESCE(MAX(recovery_count), 0)" in query:
+                    return FakeResult(SimpleNamespace(n=0, max_recovery_count=0))
+                if "max_recovery_cycles_exceeded" in query:
+                    return FakeResult(rows=[exhausted_tx])
+                if "WHERE status IN ('ACTIVATED'" in query:
+                    return FakeResult(SimpleNamespace(n=0))
+                if "backlog_count" in query:
+                    return FakeResult(
+                        SimpleNamespace(
+                            backlog_count=0,
+                            oldest_created_at=None,
+                            oldest_backlog_age_seconds=None,
+                        )
+                    )
+                raise AssertionError(f"unexpected query: {query}")
+
+        class FakeEngine:
+            def connect(self):
+                return FakeConnection()
+
+        import backend.database_handler.session_factory as session_factory
+
+        monkeypatch.setattr(
+            session_factory,
+            "get_database_manager",
+            lambda: SimpleNamespace(engine=FakeEngine()),
+        )
+        monkeypatch.setattr(health_module, "_rpc_router_ref", object())
+
+        result = await health_module._check_consensus_health()
+
+        assert result["status"] == "degraded"
+        assert result["max_recovery_exhausted_count"] == 1
+        assert result["max_recovery_exhausted_transactions"] == [
+            {
+                "hash": "0xabc",
+                "contract_address": "0xcontract",
+                "recovery_count": 3,
+                "exhausted_at": 1779938084,
+            }
+        ]
 
 
 class TestThresholdConfig:

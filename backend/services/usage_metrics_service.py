@@ -103,6 +103,21 @@ class UsageMetricsService:
             if mapped_status != "healthy":
                 system_health["instanceHealthReasons"] = health_cache.issues
 
+            max_recovery_events = health_cache.services.get("consensus", {}).get(
+                "max_recovery_exhausted_transactions", []
+            )
+            if max_recovery_events:
+                system_health["instanceHealthEvents"] = [
+                    {
+                        "type": "max_recovery_cycles_exhausted",
+                        "transactionHash": event.get("hash"),
+                        "contractAddress": event.get("contract_address"),
+                        "recoveryCount": event.get("recovery_count"),
+                        "occurredAt": event.get("exhausted_at"),
+                    }
+                    for event in max_recovery_events
+                ]
+
             # Add pending contracts breakdown if available
             pending_contracts = getattr(health_cache, "pending_contracts", [])
             if pending_contracts:
