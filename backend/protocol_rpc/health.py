@@ -221,6 +221,49 @@ def get_health_check_interval() -> float:
     return float(os.getenv("HEALTH_CHECK_INTERVAL_SECONDS", "10"))
 
 
+def _update_genvm_health_cache(
+    services: Dict[str, Any],
+    genvm_ok: bool,
+    genvm_error: Optional[str],
+    genvm_status: Dict[str, Any],
+) -> None:
+    services["genvm"] = {"status": "healthy" if genvm_ok else "unhealthy"}
+    _health_cache.genvm_healthy = genvm_ok
+    _health_cache.genvm_error = genvm_error
+
+    # Best-effort parse of permit info from /status.
+    # The manager returns: {"permits": {"current": N, "max": M}, "executions": {...}}
+    # where permits.current = available permits (semaphore value).
+    try:
+        permits_obj = genvm_status.get("permits") or {}
+        executions_obj = genvm_status.get("executions")
+
+        max_permits_i = int(permits_obj["max"]) if "max" in permits_obj else None
+        # permits.current IS the available count (semaphore value)
+        available_i = int(permits_obj["current"]) if "current" in permits_obj else None
+        active_i = len(executions_obj) if isinstance(executions_obj, dict) else None
+
+        _health_cache.genvm_max_permits = max_permits_i
+        _health_cache.genvm_available_permits = available_i
+        _health_cache.genvm_current_permits = active_i  # in-use count
+        _health_cache.genvm_active_executions = active_i
+
+        services["genvm"].update(
+            {
+                "max_permits": max_permits_i,
+                "available_permits": available_i,
+                "current_permits": active_i,
+                "active_executions": active_i,
+            }
+        )
+    except Exception as e:
+        logger.debug(f"Failed to parse GenVM permit info from /status: {e}")
+        _health_cache.genvm_max_permits = None
+        _health_cache.genvm_current_permits = None
+        _health_cache.genvm_available_permits = None
+        _health_cache.genvm_active_executions = None
+
+
 async def _run_health_checks() -> None:
     """Run all expensive health checks and update cache."""
     global _health_cache
@@ -231,7 +274,13 @@ async def _run_health_checks() -> None:
     services = {}
 
     try:
-        # 1. Database health
+        # 1. GenVM manager health. Keep readiness-critical state independent
+        # from slower dashboard/alert queries so new pods can become ready once
+        # their local GenVM manager is responsive.
+        genvm_ok, genvm_error, genvm_status = await _check_genvm_health()
+        _update_genvm_health_cache(services, genvm_ok, genvm_error, genvm_status)
+
+        # 2. Database health
         db_health = await _check_database_health()
         db_status = db_health.get("status", "unknown")
         services["database"] = {
@@ -246,7 +295,7 @@ async def _run_health_checks() -> None:
             if overall_status == "healthy":
                 overall_status = "degraded"
 
-        # 2. Consensus health
+        # 3. Consensus health
         consensus_health = await _check_consensus_health()
         consensus_status = consensus_health.get("status", "unknown")
         services["consensus"] = {
@@ -258,6 +307,26 @@ async def _run_health_checks() -> None:
             ),
             "stuck_finalization_count": consensus_health.get(
                 "stuck_finalization_count", 0
+            ),
+            "recovery_storm_count": consensus_health.get("recovery_storm_count", 0),
+            "max_recovery_count": consensus_health.get("max_recovery_count", 0),
+            "max_recovery_exhausted_count": consensus_health.get(
+                "max_recovery_exhausted_count", 0
+            ),
+            "max_recovery_exhausted_transactions": consensus_health.get(
+                "max_recovery_exhausted_transactions", []
+            ),
+            "no_consensus_progress": consensus_health.get(
+                "no_consensus_progress", False
+            ),
+            "no_progress_backlog_count": consensus_health.get(
+                "no_progress_backlog_count", 0
+            ),
+            "seconds_since_consensus_progress": consensus_health.get(
+                "seconds_since_consensus_progress"
+            ),
+            "no_progress_check_error": consensus_health.get(
+                "no_progress_check_error", False
             ),
             "active_workers": consensus_health.get("active_workers", 0),
             "status": consensus_status,
@@ -275,8 +344,20 @@ async def _run_health_checks() -> None:
                 if overall_status == "healthy":
                     overall_status = "degraded"
                 issues.append("stuck_finalizations")
+            if consensus_health.get("recovery_storm_count", 0) > 0:
+                if overall_status == "healthy":
+                    overall_status = "degraded"
+                issues.append("transaction_recovery_storm")
+            if consensus_health.get("max_recovery_exhausted_count", 0) > 0:
+                if overall_status == "healthy":
+                    overall_status = "degraded"
+                issues.append("max_recovery_cycles_exhausted")
+            if consensus_health.get("no_consensus_progress", False):
+                if overall_status == "healthy":
+                    overall_status = "degraded"
+                issues.append("no_consensus_progress")
 
-        # 3. LLM provider health (per-provider failure-rate detection)
+        # 4. LLM provider health (per-provider failure-rate detection)
         # Catches cases like a provider returning HTTP 402 / "tier required"
         # for every call from a specific (provider, model) entry — the
         # actual cause behind a recent stuck-shard incident that the
@@ -296,7 +377,7 @@ async def _run_health_checks() -> None:
                 overall_status = "degraded"
             issues.append("llm_provider_failure")
 
-        # 4. Memory health
+        # 5. Memory health
         memory_health = await _check_memory_health()
         memory_status = memory_health.get("status", "unknown")
         services["memory"] = {
@@ -310,53 +391,13 @@ async def _run_health_checks() -> None:
                 overall_status = "degraded"
             issues.append("memory_issue")
 
-        # 5. Redis health
+        # 6. Redis health
         redis_status = await _check_redis_health()
         services["redis"] = redis_status
         if redis_status == "unhealthy":
             if overall_status == "healthy":
                 overall_status = "degraded"
             issues.append("redis_unreachable")
-
-        # 6. GenVM manager health (+ capacity details when available)
-        genvm_ok, genvm_error, genvm_status = await _check_genvm_health()
-        services["genvm"] = {"status": "healthy" if genvm_ok else "unhealthy"}
-        _health_cache.genvm_healthy = genvm_ok
-        _health_cache.genvm_error = genvm_error
-
-        # Best-effort parse of permit info from /status.
-        # The manager returns: {"permits": {"current": N, "max": M}, "executions": {...}}
-        # where permits.current = available permits (semaphore value).
-        try:
-            permits_obj = genvm_status.get("permits") or {}
-            executions_obj = genvm_status.get("executions")
-
-            max_permits_i = int(permits_obj["max"]) if "max" in permits_obj else None
-            # permits.current IS the available count (semaphore value)
-            available_i = (
-                int(permits_obj["current"]) if "current" in permits_obj else None
-            )
-            active_i = len(executions_obj) if isinstance(executions_obj, dict) else None
-
-            _health_cache.genvm_max_permits = max_permits_i
-            _health_cache.genvm_available_permits = available_i
-            _health_cache.genvm_current_permits = active_i  # in-use count
-            _health_cache.genvm_active_executions = active_i
-
-            services["genvm"].update(
-                {
-                    "max_permits": max_permits_i,
-                    "available_permits": available_i,
-                    "current_permits": active_i,
-                    "active_executions": active_i,
-                }
-            )
-        except Exception as e:
-            logger.debug(f"Failed to parse GenVM permit info from /status: {e}")
-            _health_cache.genvm_max_permits = None
-            _health_cache.genvm_current_permits = None
-            _health_cache.genvm_available_permits = None
-            _health_cache.genvm_active_executions = None
 
         # 7. Aggregate counts for metrics
         decisions_count, users_count, pending_count = await _get_aggregate_counts()
@@ -566,6 +607,22 @@ async def _check_consensus_health() -> Dict[str, Any]:
     DEGRADED_AT_STUCK_FINALIZATIONS = int(
         os.environ.get("HEALTH_DEGRADED_AT_STUCK_FINALIZATIONS", "3")
     )
+    NO_PROGRESS_WINDOW_MINUTES = int(
+        os.environ.get("HEALTH_NO_PROGRESS_WINDOW_MINUTES", "30")
+    )
+    NO_PROGRESS_MIN_BACKLOG = int(os.environ.get("HEALTH_NO_PROGRESS_MIN_BACKLOG", "3"))
+    NO_PROGRESS_QUERY_TIMEOUT_MS = int(
+        os.environ.get("HEALTH_NO_PROGRESS_QUERY_TIMEOUT_MS", "5000")
+    )
+    RECOVERY_STORM_MIN_RECOVERIES = int(
+        os.environ.get("HEALTH_RECOVERY_STORM_MIN_RECOVERIES", "2")
+    )
+    MAX_RECOVERY_EXHAUSTED_NOTICE_WINDOW_MINUTES = int(
+        os.environ.get("HEALTH_MAX_RECOVERY_EXHAUSTED_NOTICE_WINDOW_MINUTES", "60")
+    )
+    MAX_RECOVERY_EXHAUSTED_EVENT_LIMIT = int(
+        os.environ.get("HEALTH_MAX_RECOVERY_EXHAUSTED_EVENT_LIMIT", "10")
+    )
 
     # Statuses where the consensus state machine is actively working.
     # The "head of queue stuck" check uses ONLY these: ACCEPTED-class
@@ -582,6 +639,9 @@ async def _check_consensus_health() -> Dict[str, Any]:
     )
     FINALIZATION_ELIGIBLE_STATUSES_SQL = (
         "'ACCEPTED','UNDETERMINED','LEADER_TIMEOUT','VALIDATORS_TIMEOUT'"
+    )
+    PRE_CONSENSUS_BACKLOG_STATUSES_SQL = (
+        "'PENDING','ACTIVATED','PROPOSING','COMMITTING','REVEALING'"
     )
 
     try:
@@ -690,6 +750,90 @@ async def _check_consensus_health() -> Dict[str, Any]:
                 ).fetchone()
                 stuck_finalization_count = stuck_fin_row.n if stuck_fin_row else 0
 
+                # Recovery storm: a non-terminal transaction that has already
+                # been reset several times is a high-confidence poison-tx
+                # signal. This catches the crash-loop pattern even when each
+                # individual retry creates fresh blocked_at activity and masks
+                # the stuck-head detector.
+                recovery_row = conn.execute(
+                    text(
+                        f"""
+                        SELECT
+                            COUNT(*) AS n,
+                            COALESCE(MAX(recovery_count), 0) AS max_recovery_count
+                        FROM transactions
+                        WHERE status IN ({PRE_CONSENSUS_BACKLOG_STATUSES_SQL})
+                          AND recovery_count >= :min_recoveries
+                        """
+                    ),
+                    {"min_recoveries": RECOVERY_STORM_MIN_RECOVERIES},
+                ).fetchone()
+                recovery_storm_count = recovery_row.n if recovery_row else 0
+                max_recovery_count = (
+                    recovery_row.max_recovery_count if recovery_row else 0
+                )
+
+                max_recovery_exhausted_rows = conn.execute(
+                    text(
+                        """
+                        WITH exhausted AS (
+                            SELECT
+                                hash AS tx_hash,
+                                to_address,
+                                recovery_count,
+                                CASE
+                                    WHEN consensus_data
+                                         ->> 'max_recovery_exhausted_at'
+                                         ~ '^[0-9]+(\\.[0-9]+)?$'
+                                    THEN to_timestamp(
+                                        (
+                                            consensus_data
+                                            ->> 'max_recovery_exhausted_at'
+                                        )::double precision
+                                    )
+                                    ELSE created_at
+                                END AS exhausted_at
+                            FROM transactions
+                            WHERE status = 'CANCELED'
+                              AND consensus_data ->> 'error'
+                                  = 'max_recovery_cycles_exceeded'
+                        )
+                        SELECT
+                            COUNT(*) OVER() AS total_count,
+                            tx_hash,
+                            to_address,
+                            recovery_count,
+                            EXTRACT(EPOCH FROM exhausted_at)::bigint
+                                AS exhausted_at_epoch
+                        FROM exhausted
+                        WHERE exhausted_at
+                            > NOW() - CAST(:notice_window AS INTERVAL)
+                        ORDER BY exhausted_at DESC
+                        LIMIT :event_limit
+                        """
+                    ),
+                    {
+                        "notice_window": (
+                            f"{MAX_RECOVERY_EXHAUSTED_NOTICE_WINDOW_MINUTES} minutes"
+                        ),
+                        "event_limit": MAX_RECOVERY_EXHAUSTED_EVENT_LIMIT,
+                    },
+                ).fetchall()
+                max_recovery_exhausted_count = (
+                    max_recovery_exhausted_rows[0].total_count
+                    if max_recovery_exhausted_rows
+                    else 0
+                )
+                max_recovery_exhausted_transactions = [
+                    {
+                        "hash": row.tx_hash,
+                        "contract_address": row.to_address,
+                        "recovery_count": row.recovery_count,
+                        "exhausted_at": row.exhausted_at_epoch,
+                    }
+                    for row in max_recovery_exhausted_rows
+                ]
+
                 # Total in-flight (non-final) tx count, for context.
                 # Consensus-active only — finalization-pending rows
                 # are tracked separately via stuck_finalization_count.
@@ -705,11 +849,137 @@ async def _check_consensus_health() -> Dict[str, Any]:
                 ).fetchone()
                 total_processing = processing_row.n if processing_row else 0
 
+                no_progress_window_seconds = NO_PROGRESS_WINDOW_MINUTES * 60
+                no_progress_check_error = False
+
+                # No-progress detector: first do a cheap backlog gate. The
+                # progress scan has to inspect JSON history and can be expensive
+                # on large Rally-style datasets; if there is no old backlog,
+                # scanning history cannot change the alert decision.
+                backlog_row = conn.execute(
+                    text(
+                        f"""
+                        SELECT
+                            COUNT(*) AS backlog_count,
+                            MIN(created_at) AS oldest_created_at,
+                            EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))::bigint
+                                AS oldest_backlog_age_seconds
+                        FROM transactions
+                        WHERE status IN ({PRE_CONSENSUS_BACKLOG_STATUSES_SQL})
+                        """
+                    )
+                ).fetchone()
+
+                no_progress_backlog_count = (
+                    backlog_row.backlog_count if backlog_row else 0
+                )
+                oldest_backlog_age_seconds = (
+                    backlog_row.oldest_backlog_age_seconds
+                    if backlog_row and backlog_row.oldest_created_at
+                    else None
+                )
+
+                should_scan_progress = (
+                    no_progress_backlog_count >= NO_PROGRESS_MIN_BACKLOG
+                    and oldest_backlog_age_seconds is not None
+                    and oldest_backlog_age_seconds > no_progress_window_seconds
+                )
+
+                seconds_since_consensus_progress = None
+                last_progress_epoch = 0
+                if should_scan_progress:
+                    try:
+                        conn.execute(
+                            text(
+                                f"SET LOCAL statement_timeout = {NO_PROGRESS_QUERY_TIMEOUT_MS}"
+                            )
+                        )
+                        progress_row = conn.execute(
+                            text(
+                                """
+                                SELECT
+                                    MAX(
+                                        GREATEST(
+                                            COALESCE(
+                                                CASE
+                                                    WHEN consensus_history
+                                                         -> 'current_monitoring'
+                                                         ->> 'ACCEPTED'
+                                                         ~ '^[0-9]+(\\.[0-9]+)?$'
+                                                    THEN (
+                                                        consensus_history
+                                                        -> 'current_monitoring'
+                                                        ->> 'ACCEPTED'
+                                                    )::double precision
+                                                END,
+                                                0
+                                            ),
+                                            COALESCE(
+                                                CASE
+                                                    WHEN consensus_history
+                                                         -> 'current_monitoring'
+                                                         ->> 'FINALIZED'
+                                                         ~ '^[0-9]+(\\.[0-9]+)?$'
+                                                    THEN (
+                                                        consensus_history
+                                                        -> 'current_monitoring'
+                                                        ->> 'FINALIZED'
+                                                    )::double precision
+                                                END,
+                                                0
+                                            )
+                                        )
+                                    ) AS last_progress_epoch
+                                FROM transactions
+                                WHERE consensus_history IS NOT NULL
+                                """
+                            )
+                        ).fetchone()
+                        last_progress_epoch = (
+                            progress_row.last_progress_epoch if progress_row else 0
+                        )
+                        seconds_since_consensus_progress = (
+                            int(time.time() - last_progress_epoch)
+                            if last_progress_epoch
+                            else None
+                        )
+                    except Exception as exc:
+                        no_progress_check_error = True
+                        logger.warning(
+                            "No-progress health query skipped after timeout/error: %s",
+                            exc,
+                        )
+
+                # The progress scan is an alert-quality check, not a liveness
+                # requirement. If it times out on a large table, surface that
+                # as check_error but do not assert a consensus outage.
+                no_recent_progress = (
+                    should_scan_progress
+                    and not no_progress_check_error
+                    and (
+                        not last_progress_epoch
+                        or (
+                            seconds_since_consensus_progress is not None
+                            and seconds_since_consensus_progress
+                            > no_progress_window_seconds
+                        )
+                    )
+                )
+                no_consensus_progress = (
+                    no_progress_backlog_count >= NO_PROGRESS_MIN_BACKLOG
+                    and oldest_backlog_age_seconds is not None
+                    and oldest_backlog_age_seconds > no_progress_window_seconds
+                    and no_recent_progress
+                )
+
                 status = (
                     "degraded"
                     if (
                         stuck_head_contracts >= DEGRADED_AT_STUCK_HEADS
                         or stuck_finalization_count >= DEGRADED_AT_STUCK_FINALIZATIONS
+                        or recovery_storm_count > 0
+                        or max_recovery_exhausted_count > 0
+                        or no_consensus_progress
                     )
                     else "healthy"
                 )
@@ -722,6 +992,20 @@ async def _check_consensus_health() -> Dict[str, Any]:
                     # whose consensus head is stuck.
                     "total_orphaned_transactions": stuck_head_contracts,
                     "stuck_finalization_count": stuck_finalization_count,
+                    "recovery_storm_count": recovery_storm_count,
+                    "max_recovery_count": max_recovery_count,
+                    "max_recovery_exhausted_count": max_recovery_exhausted_count,
+                    "max_recovery_exhausted_transactions": (
+                        max_recovery_exhausted_transactions
+                    ),
+                    "no_consensus_progress": no_consensus_progress,
+                    "no_progress_backlog_count": no_progress_backlog_count,
+                    "oldest_backlog_age_seconds": oldest_backlog_age_seconds,
+                    "seconds_since_consensus_progress": (
+                        seconds_since_consensus_progress
+                    ),
+                    "no_progress_check_error": no_progress_check_error,
+                    "no_progress_window_minutes": NO_PROGRESS_WINDOW_MINUTES,
                     "active_workers": active_workers_count,
                 }
 

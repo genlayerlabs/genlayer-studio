@@ -13,6 +13,7 @@ Run with containers up:
     .venv/bin/pytest tests/integration/test_upgrade_contract.py -xvs
 """
 
+import os
 import time
 import requests
 import pytest
@@ -20,6 +21,11 @@ from genlayer_py import create_client, create_account, localnet
 
 
 RPC_URL = "http://localhost:4000/api"
+
+# Upgrade tests rely on the global validator registry for deploy/read/upgrade.
+# Keep them on the same xdist worker as icontract tests that temporarily wipe
+# validators while seeding mock responses.
+pytestmark = pytest.mark.xdist_group(name="mock_validators")
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -38,9 +44,11 @@ def ensure_validators_exist():
     validators = response.get("result", [])
 
     if not validators:
-        # Create validators if none exist (using same approach as icontracts tests)
+        # Match the provider/model configured by CI or the local test env.
+        provider = os.environ.get("TEST_PROVIDER", "openai")
+        model = os.environ.get("TEST_PROVIDER_MODEL", "gpt-4o")
         result = post_request_localhost(
-            payload("sim_createRandomValidators", 5, 8, 12, ["openai"], ["gpt-4o"])
+            payload("sim_createRandomValidators", 5, 8, 12, [provider], [model])
         ).json()
         if not has_success_status(result):
             pytest.fail(f"Failed to create validators: {result}")

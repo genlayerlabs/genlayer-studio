@@ -72,6 +72,25 @@ local function get_mock_response_from_table(table, message)
 	}
 end
 
+local function validate_prompt(mapped_prompt)
+	local prompt = mapped_prompt and mapped_prompt.prompt
+	local user_message = prompt and prompt.user_message
+	local images = prompt and prompt.images
+	local has_images = type(images) == "table" and next(images) ~= nil
+
+	if not has_images and (type(user_message) ~= "string" or string.match(user_message, "%S") == nil) then
+		lib.rs.user_error({
+			message = "exec_prompt requires a non-empty prompt",
+			causes = {"EMPTY_PROMPT"},
+			fatal = false,
+			ctx = {
+				reason = "empty_prompt",
+				format = mapped_prompt and mapped_prompt.format,
+			}
+		})
+	end
+end
+
 local function handle_custom_plugin(ctx, args, mapped_prompt)
 	local custom_plugin_data = ctx.host_data.custom_plugin_data
 	local content
@@ -255,6 +274,8 @@ end
 local function just_in_backend(ctx, args, mapped_prompt)
 	---@cast mapped_prompt MappedPrompt
 	---@cast args LLMExecPromptPayload | LLMExecPromptTemplatePayload
+
+	validate_prompt(mapped_prompt)
 
 	-- Return mock response if it exists and matches
 	if ctx.host_data.mock_response then

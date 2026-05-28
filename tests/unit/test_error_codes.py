@@ -65,6 +65,15 @@ class TestExtractErrorCode:
         }
         assert extract_error_code(result_data) == GenVMErrorCode.LLM_NO_PROVIDER
 
+    def test_dict_with_empty_prompt_cause(self):
+        """Dict with EMPTY_PROMPT cause should return LLM_INVALID_PROMPT."""
+        result_data = {
+            "message": "exec_prompt requires a non-empty prompt",
+            "causes": ["EMPTY_PROMPT"],
+            "fatal": False,
+        }
+        assert extract_error_code(result_data) == GenVMErrorCode.LLM_INVALID_PROMPT
+
     def test_dict_with_status_429_in_ctx(self):
         """Dict with status 429 in ctx should return LLM_RATE_LIMITED."""
         result_data = {
@@ -200,6 +209,7 @@ class TestLuaCauseMapping:
         """All expected Lua causes should be in the mapping."""
         expected_causes = [
             "NO_PROVIDER_FOR_PROMPT",
+            "EMPTY_PROMPT",
             "STATUS_NOT_OK",
             "WEBPAGE_LOAD_FAILED",
             "TLD_FORBIDDEN",

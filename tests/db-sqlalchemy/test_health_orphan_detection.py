@@ -23,11 +23,12 @@ The head is "stuck" when:
 this state, not the count of in-flight txs in tail of queues.
 """
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine, event, text
 from sqlalchemy.orm import sessionmaker
 
 
@@ -70,6 +71,9 @@ def _insert_tx(
     blocked_at: datetime | None = None,
     worker_id: str | None = None,
     timestamp_awaiting_finalization: int | None = None,
+    recovery_count: int = 0,
+    consensus_history: dict | None = None,
+    consensus_data: dict | None = None,
 ):
     """Direct INSERT — bypass the processor so we can backdate created_at."""
     session.execute(
@@ -81,13 +85,15 @@ def _insert_tx(
                 appeal_undetermined, appeal_leader_timeout,
                 appeal_validators_timeout, appeal_processing_time,
                 recovery_count, value_credited,
+                consensus_history, consensus_data,
                 created_at, blocked_at, worker_id,
                 timestamp_awaiting_finalization
             ) VALUES (
                 :hash, CAST(:status AS transaction_status),
                 '0xfromaddress', :to_addr, CAST('{}' AS jsonb), 0, 2,
                 :nonce, false, 'NORMAL', false, 0,
-                false, false, false, 0, 0, false,
+                false, false, false, 0, :recovery_count, false,
+                CAST(:consensus_history AS jsonb), CAST(:consensus_data AS jsonb),
                 :created_at, :blocked_at, :worker_id,
                 :timestamp_awaiting_finalization
             )
@@ -102,6 +108,13 @@ def _insert_tx(
             "blocked_at": blocked_at,
             "worker_id": worker_id,
             "timestamp_awaiting_finalization": timestamp_awaiting_finalization,
+            "recovery_count": recovery_count,
+            "consensus_history": (
+                json.dumps(consensus_history) if consensus_history is not None else None
+            ),
+            "consensus_data": (
+                json.dumps(consensus_data) if consensus_data is not None else None
+            ),
         },
     )
 
@@ -587,3 +600,229 @@ async def test_stuck_finalization_flips_status_at_threshold(engine: Engine):
     assert (
         result["status"] == "degraded"
     ), f"3 stuck finalizations must flip consensus.status. Got: {result}"
+
+
+@pytest.mark.asyncio
+async def test_recovery_storm_flags_poison_transaction(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+):
+    """A tx that has been recovered repeatedly is a high-confidence
+    poison-tx signal even when blocked_at keeps looking fresh."""
+    monkeypatch.setenv("HEALTH_RECOVERY_STORM_MIN_RECOVERIES", "2")
+
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+
+    with Session_() as s:
+        _insert_tx(
+            s,
+            tx_hash="0x" + "aa" * 32,
+            to_address="0x" + "aa" * 20,
+            status="PENDING",
+            nonce=0,
+            created_at=now - timedelta(minutes=1),
+            recovery_count=2,
+        )
+        s.commit()
+
+    from backend.protocol_rpc import health as health_module
+
+    result = await health_module._check_consensus_health()
+
+    assert result["recovery_storm_count"] == 1
+    assert result["max_recovery_count"] == 2
+    assert result["status"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_recent_max_recovery_exhaustion_flags_notice(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+):
+    """A transaction canceled after exhausting recovery cycles should surface
+    as a degraded notice even though it no longer appears in active backlog."""
+    monkeypatch.setenv("HEALTH_MAX_RECOVERY_EXHAUSTED_NOTICE_WINDOW_MINUTES", "60")
+
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+
+    with Session_() as s:
+        _insert_tx(
+            s,
+            tx_hash="0x" + "ab" * 32,
+            to_address="0x" + "ab" * 20,
+            status="CANCELED",
+            nonce=0,
+            created_at=now - timedelta(minutes=5),
+            recovery_count=3,
+            consensus_data={
+                "error": "max_recovery_cycles_exceeded",
+                "recovery_count": 3,
+                "max_recovery_exhausted_at": int(now.timestamp()),
+            },
+        )
+        s.commit()
+
+    from backend.protocol_rpc import health as health_module
+
+    result = await health_module._check_consensus_health()
+
+    assert result["max_recovery_exhausted_count"] == 1
+    assert result["max_recovery_exhausted_transactions"] == [
+        {
+            "hash": "0x" + "ab" * 32,
+            "contract_address": "0x" + "ab" * 20,
+            "recovery_count": 3,
+            "exhausted_at": int(now.timestamp()),
+        }
+    ]
+    assert result["status"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_old_backlog_without_recent_progress_is_flagged(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+):
+    """If an old backlog exists and no tx has reached ACCEPTED/FINALIZED
+    recently, consensus is not producing outcomes."""
+    monkeypatch.setenv("HEALTH_NO_PROGRESS_WINDOW_MINUTES", "10")
+    monkeypatch.setenv("HEALTH_NO_PROGRESS_MIN_BACKLOG", "3")
+
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+
+    with Session_() as s:
+        for i in range(3):
+            _insert_tx(
+                s,
+                tx_hash=f"0xb0{i:062x}",
+                to_address="0x" + "b0" * 20,
+                status="PENDING",
+                nonce=i,
+                created_at=now - timedelta(minutes=20 + i),
+            )
+        s.commit()
+
+    from backend.protocol_rpc import health as health_module
+
+    result = await health_module._check_consensus_health()
+
+    assert result["no_consensus_progress"] is True
+    assert result["no_progress_backlog_count"] == 3
+    assert result["status"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_no_progress_detector_skips_history_scan_without_backlog(engine: Engine):
+    """No old backlog means consensus cannot be stalled, so the detector
+    must not scan JSON consensus history. On Rally-scale datasets that scan
+    can be expensive enough to wedge the background health task."""
+
+    def fail_on_progress_scan(
+        conn, cursor, statement, parameters, context, executemany
+    ):
+        if "current_monitoring" in statement:
+            raise AssertionError("progress history scan should be skipped")
+
+    event.listen(engine, "before_cursor_execute", fail_on_progress_scan)
+    try:
+        from backend.protocol_rpc import health as health_module
+
+        result = await health_module._check_consensus_health()
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_on_progress_scan)
+
+    assert result["status"] == "healthy"
+    assert result["no_consensus_progress"] is False
+    assert result["no_progress_backlog_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_no_progress_scan_error_does_not_assert_outage(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+):
+    """If the optional JSON history scan times out, surface the check error
+    but don't turn an unknown progress signal into a consensus outage."""
+    monkeypatch.setenv("HEALTH_NO_PROGRESS_WINDOW_MINUTES", "10")
+    monkeypatch.setenv("HEALTH_NO_PROGRESS_MIN_BACKLOG", "3")
+
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+
+    with Session_() as s:
+        for i in range(3):
+            _insert_tx(
+                s,
+                tx_hash=f"0xd0{i:062x}",
+                to_address="0x" + "d0" * 20,
+                status="PENDING",
+                nonce=i,
+                created_at=now - timedelta(minutes=20 + i),
+            )
+        s.commit()
+
+    def fail_on_progress_scan(
+        conn, cursor, statement, parameters, context, executemany
+    ):
+        if "current_monitoring" in statement:
+            raise RuntimeError("simulated progress scan timeout")
+
+    event.listen(engine, "before_cursor_execute", fail_on_progress_scan)
+    try:
+        from backend.protocol_rpc import health as health_module
+
+        result = await health_module._check_consensus_health()
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_on_progress_scan)
+
+    assert result["no_progress_check_error"] is True
+    assert result["no_consensus_progress"] is False
+    assert result["no_progress_backlog_count"] == 3
+    assert result["status"] == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_recent_consensus_progress_suppresses_no_progress_alert(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+):
+    """A fresh ACCEPTED/FINALIZED timestamp means the queue is draining,
+    even if an older backlog still exists."""
+    import time
+
+    monkeypatch.setenv("HEALTH_NO_PROGRESS_WINDOW_MINUTES", "10")
+    monkeypatch.setenv("HEALTH_NO_PROGRESS_MIN_BACKLOG", "3")
+
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+
+    with Session_() as s:
+        for i in range(3):
+            _insert_tx(
+                s,
+                tx_hash=f"0xc0{i:062x}",
+                to_address="0x" + "c0" * 20,
+                status="PENDING",
+                nonce=i,
+                created_at=now - timedelta(minutes=20 + i),
+            )
+        _insert_tx(
+            s,
+            tx_hash="0x" + "c1" * 32,
+            to_address="0x" + "c1" * 20,
+            status="FINALIZED",
+            nonce=99,
+            created_at=now - timedelta(minutes=1),
+            consensus_history={
+                "current_monitoring": {
+                    "ACCEPTED": time.time(),
+                    "FINALIZED": time.time(),
+                }
+            },
+        )
+        s.commit()
+
+    from backend.protocol_rpc import health as health_module
+
+    result = await health_module._check_consensus_health()
+
+    assert result["no_consensus_progress"] is False
+    assert result["no_progress_backlog_count"] == 3

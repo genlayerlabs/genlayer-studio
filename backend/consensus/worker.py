@@ -456,7 +456,7 @@ class ConsensusWorker:
         query = text(
             """
             WITH candidate_transactions AS (
-                SELECT t.hash, t.to_address, t.type, t.created_at
+                SELECT t.hash, t.to_address, t.type, t.created_at, t.recovery_count
                 FROM transactions t
                 WHERE t.status IN ('PENDING', 'ACTIVATED')
                     AND (t.blocked_at IS NULL
@@ -511,11 +511,17 @@ class ConsensusWorker:
             ),
             single_transaction AS (
                 -- Select only ONE transaction (oldest across all contracts)
-                -- Upgrade transactions (type=3) are prioritized ahead of regular txs
+                -- Prefer transactions that have not already needed recovery, so
+                -- one repeatedly reset poison tx does not monopolize all workers.
+                -- Upgrade transactions (type=3) are prioritized ahead of regular
+                -- txs within each recovery class.
                 SELECT *
                 FROM oldest_per_contract
                 WHERE rn = 1
-                ORDER BY CASE WHEN type = 3 THEN 0 ELSE 1 END, created_at ASC
+                ORDER BY CASE WHEN recovery_count > 0 THEN 1 ELSE 0 END,
+                         CASE WHEN type = 3 THEN 0 ELSE 1 END,
+                         created_at ASC,
+                         hash ASC
                 LIMIT 1
             )
             UPDATE transactions
@@ -637,30 +643,64 @@ class ConsensusWorker:
         """
         update_query = text(
             """
+            WITH target AS (
+                SELECT hash, recovery_count
+                FROM transactions
+                WHERE hash = :hash
+                  AND worker_id = :worker_id
+                FOR UPDATE
+            )
             UPDATE transactions
             SET blocked_at = NULL,
                 worker_id = NULL,
-                consensus_data = NULL,
                 consensus_history = NULL,
-                status = 'PENDING'
-            WHERE hash = :hash
-              AND worker_id = :worker_id
-            RETURNING hash, status, blocked_at, worker_id
+                recovery_count = target.recovery_count + 1,
+                status = CASE
+                    WHEN target.recovery_count + 1 >= :max_recovery_cycles
+                    THEN 'CANCELED'::transaction_status
+                    ELSE 'PENDING'::transaction_status
+                END,
+                consensus_data = CASE
+                    WHEN target.recovery_count + 1 >= :max_recovery_cycles
+                    THEN jsonb_build_object(
+                        'error', 'max_recovery_cycles_exceeded',
+                        'recovery_count', target.recovery_count + 1,
+                        'max_recovery_exhausted_at',
+                        EXTRACT(EPOCH FROM NOW())::bigint
+                    )
+                    ELSE NULL
+                END
+            FROM target
+            WHERE transactions.hash = target.hash
+            RETURNING transactions.hash, transactions.status, transactions.blocked_at,
+                      transactions.worker_id, transactions.recovery_count
         """
         )
 
         try:
             result = session.execute(
                 update_query,
-                {"hash": transaction_hash, "worker_id": self.worker_id},
+                {
+                    "hash": transaction_hash,
+                    "worker_id": self.worker_id,
+                    "max_recovery_cycles": self._max_recovery_cycles,
+                },
             )
             row = result.first()
             session.commit()
 
             if row:
-                logger.info(
-                    f"[Worker {self.worker_id}] Reset transaction {transaction_hash} to PENDING after GenVM internal error"
-                )
+                if row.status == TransactionStatus.CANCELED.value:
+                    logger.error(
+                        f"[Worker {self.worker_id}] Canceled transaction {transaction_hash} "
+                        f"after {row.recovery_count} GenVM reset cycles"
+                    )
+                else:
+                    logger.info(
+                        f"[Worker {self.worker_id}] Reset transaction {transaction_hash} "
+                        f"to PENDING after GenVM internal error "
+                        f"(cycle {row.recovery_count}/{self._max_recovery_cycles})"
+                    )
             else:
                 logger.warning(
                     f"[Worker {self.worker_id}] Transaction {transaction_hash} not found or owned by another worker when resetting"
@@ -843,13 +883,33 @@ class ConsensusWorker:
                 consensus_data = COALESCE(consensus_data, '{}'::jsonb)
                                  || jsonb_build_object(
                                     'error', 'max_recovery_cycles_exceeded',
-                                    'recovery_count', recovery_count
+                                    'recovery_count', recovery_count,
+                                    'max_recovery_exhausted_at',
+                                    EXTRACT(EPOCH FROM NOW())::bigint
                                  )
             WHERE recovery_count >= :max_cycles
               AND status IN :consensus_statuses
               AND (
-                  (blocked_at IS NOT NULL
-                   AND blocked_at < NOW() - CAST(:timeout AS INTERVAL))
+                  (
+                   blocked_at IS NOT NULL
+                   AND blocked_at < NOW() - CAST(:timeout AS INTERVAL)
+                   -- blocked_at is a claim lease, not a heartbeat. Long
+                   -- consensus attempts with rotations can exceed it while
+                   -- still progressing, so require progress to be stale too.
+                   AND COALESCE(
+                       (
+                           SELECT to_timestamp(MAX(progress.value::double precision))
+                           FROM jsonb_each_text(
+                               COALESCE(
+                                   transactions.consensus_history->'current_monitoring',
+                                   '{}'::jsonb
+                               )
+                           ) AS progress(key, value)
+                           WHERE progress.value ~ '^[0-9]+(\\.[0-9]+)?$'
+                       ),
+                       blocked_at
+                   ) < NOW() - CAST(:timeout AS INTERVAL)
+                  )
                   OR
                   (blocked_at IS NULL
                    AND status IN ('PROPOSING', 'COMMITTING', 'REVEALING')
@@ -925,8 +985,26 @@ class ConsensusWorker:
               AND status IN :consensus_statuses
               AND (
                   -- Case 1: Transactions with expired blocks
-                  (blocked_at IS NOT NULL
-                   AND blocked_at < NOW() - CAST(:timeout AS INTERVAL))
+                  (
+                   blocked_at IS NOT NULL
+                   AND blocked_at < NOW() - CAST(:timeout AS INTERVAL)
+                   -- blocked_at is a claim lease, not a heartbeat. Long
+                   -- consensus attempts with rotations can exceed it while
+                   -- still progressing, so require progress to be stale too.
+                   AND COALESCE(
+                       (
+                           SELECT to_timestamp(MAX(progress.value::double precision))
+                           FROM jsonb_each_text(
+                               COALESCE(
+                                   transactions.consensus_history->'current_monitoring',
+                                   '{}'::jsonb
+                               )
+                           ) AS progress(key, value)
+                           WHERE progress.value ~ '^[0-9]+(\\.[0-9]+)?$'
+                       ),
+                       blocked_at
+                   ) < NOW() - CAST(:timeout AS INTERVAL)
+                  )
                   OR
                   -- Case 2: Orphaned transactions in processing states with no block
                   (blocked_at IS NULL
