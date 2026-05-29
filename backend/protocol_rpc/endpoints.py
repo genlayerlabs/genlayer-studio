@@ -4,6 +4,7 @@ import json
 import time
 import eth_utils
 import logging
+from contextlib import asynccontextmanager
 from functools import partial, wraps
 from typing import Any
 from backend.protocol_rpc.exceptions import (
@@ -63,11 +64,13 @@ from backend.database_handler.snapshot_manager import SnapshotManager
 from backend.node.base import Manager as GenVMManager
 import asyncio
 
-# Limit concurrent GenVM executions on the jsonrpc path to prevent uvloop fd conflicts.
-# Workers use asyncio.Semaphore(8) in consensus/base.py; gen_call had none, allowing
-# unbounded concurrent GenVM socket operations that cause fd registry collisions.
+# Limit concurrent GenVM executions on the jsonrpc path to prevent uvloop fd
+# conflicts and DB pool exhaustion while calls hold request-scoped sessions.
+# Workers use asyncio.Semaphore(8) in consensus/base.py; keep the RPC path
+# bounded too.
 _GENVM_CONCURRENCY = int(os.environ.get("GENVM_MAX_CONCURRENT", "8"))
 _genvm_semaphore = asyncio.Semaphore(_GENVM_CONCURRENCY)
+_genvm_admission_semaphore = asyncio.Semaphore(_GENVM_CONCURRENCY)
 
 # ---------------------------------------------------------------------------
 # Per-address rate limiting for gen_call / sim_call
@@ -97,11 +100,34 @@ def _check_rate_limit(address: str) -> None:
         )
         raise JSONRPCError(
             code=-32005,
-            message=f"Rate limit exceeded: max {_RATE_LIMIT_MAX} gen_call requests per {_RATE_LIMIT_WINDOW}s per contract address",
+            message=f"Rate limit exceeded: max {_RATE_LIMIT_MAX} gen_call/sim_call requests per {_RATE_LIMIT_WINDOW}s per contract address",
             data={"address": address, "retry_after_seconds": _RATE_LIMIT_WINDOW},
         )
     timestamps.append(now)
     _address_request_log[address] = timestamps
+
+
+@asynccontextmanager
+async def _admit_genvm_call(method: str, to_address: str | None):
+    """Reject GenVM-backed RPC calls instead of queueing unlimited work."""
+    if _genvm_admission_semaphore.locked():
+        _rate_limit_logger.warning(
+            "GenVM at capacity (%s concurrent) - rejecting %s to %s",
+            _GENVM_CONCURRENCY,
+            method,
+            to_address,
+        )
+        raise JSONRPCError(
+            code=-32006,
+            message=f"Server busy: all {_GENVM_CONCURRENCY} execution slots occupied, retry later",
+            data={"retry_after_seconds": 2},
+        )
+
+    await _genvm_admission_semaphore.acquire()
+    try:
+        yield
+    finally:
+        _genvm_admission_semaphore.release()
 
 
 # ---------------------------------------------------------------------------
@@ -1153,15 +1179,17 @@ async def gen_call(
     genvm_manager: GenVMManager,
     params: dict,
 ) -> str:
-    receipt = await _execute_call_with_snapshot(
-        session,
-        accounts_manager,
-        msg_handler,
-        transactions_parser,
-        validators_manager,
-        genvm_manager,
-        params,
-    )
+    to_address = params.get("to") if isinstance(params, dict) else None
+    async with _admit_genvm_call("gen_call", to_address):
+        receipt = await _execute_call_with_snapshot(
+            session,
+            accounts_manager,
+            msg_handler,
+            transactions_parser,
+            validators_manager,
+            genvm_manager,
+            params,
+        )
     return eth_utils.hexadecimal.encode_hex(receipt.result[1:])[2:]
 
 
@@ -1190,15 +1218,17 @@ async def sim_call(
     genvm_manager: GenVMManager,
     params: dict,
 ) -> dict:
-    receipt = await _execute_call_with_snapshot(
-        session,
-        accounts_manager,
-        msg_handler,
-        transactions_parser,
-        validators_manager,
-        genvm_manager,
-        params,
-    )
+    to_address = params.get("to") if isinstance(params, dict) else None
+    async with _admit_genvm_call("sim_call", to_address):
+        receipt = await _execute_call_with_snapshot(
+            session,
+            accounts_manager,
+            msg_handler,
+            transactions_parser,
+            validators_manager,
+            genvm_manager,
+            params,
+        )
     return receipt.to_dict()
 
 
@@ -1469,45 +1499,45 @@ async def eth_call(
     if not accounts_manager.is_valid_address(from_address):
         raise InvalidAddressError(from_address)
 
-    decoded_data = transactions_parser.decode_method_call_data(data)
+    async with _admit_genvm_call("eth_call", to_address):
+        decoded_data = transactions_parser.decode_method_call_data(data)
 
-    async with validators_manager.snapshot() as snapshot:
-        print(snapshot.nodes)
-        if len(snapshot.nodes) == 0:
-            raise JSONRPCError(
-                code=-32000,
-                message="No validators available to execute eth_call",
-                data={"reason": "no_validators"},
+        async with validators_manager.snapshot() as snapshot:
+            if len(snapshot.nodes) == 0:
+                raise JSONRPCError(
+                    code=-32000,
+                    message="No validators available to execute eth_call",
+                    data={"reason": "no_validators"},
+                )
+            as_validator = snapshot.nodes[0].validator
+            try:
+                target_contract_snapshot = ContractSnapshot(to_address, session)
+            except ContractNotFoundError:
+                raise NotFoundError(
+                    message=f"Contract {to_address} not found",
+                    data={"contract_address": to_address},
+                )
+            node = Node(  # Mock node just to get the data from the GenVM
+                contract_snapshot=target_contract_snapshot,
+                contract_snapshot_factory=partial(ContractSnapshot, session=session),
+                validator_mode=ExecutionMode.LEADER,
+                validator=as_validator,
+                leader_receipt=None,
+                msg_handler=msg_handler.with_client_session(get_client_session_id()),
+                validators_snapshot=snapshot,
+                manager=genvm_manager,
             )
-        as_validator = snapshot.nodes[0].validator
-        try:
-            target_contract_snapshot = ContractSnapshot(to_address, session)
-        except ContractNotFoundError:
-            raise NotFoundError(
-                message=f"Contract {to_address} not found",
-                data={"contract_address": to_address},
-            )
-        node = Node(  # Mock node just to get the data from the GenVM
-            contract_snapshot=target_contract_snapshot,
-            contract_snapshot_factory=partial(ContractSnapshot, session=session),
-            validator_mode=ExecutionMode.LEADER,
-            validator=as_validator,
-            leader_receipt=None,
-            msg_handler=msg_handler.with_client_session(get_client_session_id()),
-            validators_snapshot=snapshot,
-            manager=genvm_manager,
-        )
 
-        try:
-            receipt = await node.get_contract_data(
-                from_address=as_validator.address,
-                calldata=decoded_data.calldata,
-            )
-        except ContractNotFoundError as e:
-            raise NotFoundError(
-                message=f"Contract {e.address} not found",
-                data={"contract_address": e.address},
-            ) from e
+            try:
+                receipt = await node.get_contract_data(
+                    from_address=as_validator.address,
+                    calldata=decoded_data.calldata,
+                )
+            except ContractNotFoundError as e:
+                raise NotFoundError(
+                    message=f"Contract {e.address} not found",
+                    data={"contract_address": e.address},
+                ) from e
 
     if receipt.execution_result != ExecutionResultStatus.SUCCESS:
         raise JSONRPCError(
