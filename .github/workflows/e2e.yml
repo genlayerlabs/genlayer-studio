@@ -225,6 +225,12 @@ jobs:
       # and its output is empty — the planner's empty default then
       # disables layering (today's pre-Slice-A behaviour).
       pre-build-cache: ${{ needs.acknowledge.outputs.pre-build-cache || '' }}
+      # Pre-parsed Depends-On TSV (one `<repo>\t<ref>` line per entry).
+      # Produced by acknowledge's validate-depends-on step. Empty on
+      # workflow_dispatch (no PR body to parse) — plan's resolve-matrix /
+      # resolve-components treat empty as "no overrides", same as the
+      # legacy path that used to do its own parse.
+      depends-on-tsv: ${{ needs.acknowledge.outputs.depends-on-tsv || '' }}
 
   # ===========================================================================
   # build — full stack up + pack to cache. Synthetic PR context on the
