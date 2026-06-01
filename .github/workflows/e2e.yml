@@ -185,6 +185,14 @@ jobs:
       target-repo: ${{ github.repository }}
       server-url: ${{ github.server_url }}
       run-id: ${{ github.run_id }}
+      # template-hash is the sha256 of this file's SOURCE on
+      # genlayer-e2e (pre-injection); sync-templates.sh fills it in
+      # for each consumer at sync time. The acknowledge job compares
+      # it to the current source hash and fails fast when the consumer
+      # is behind on syncs. The empty literal here is what the source
+      # ships with — it stays empty in the genlayer-e2e repo itself
+      # (skipped at the check step on the source-side path).
+      template-hash: 'c930ed3f3db92eedf5b2bf944dbe882b5b8c962210e44ab33e8f397bb8bf64d1' # SYNC_INJECT(template_hash)
     secrets: inherit
 
   # ===========================================================================
