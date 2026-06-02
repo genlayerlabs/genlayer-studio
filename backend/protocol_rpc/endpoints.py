@@ -85,7 +85,7 @@ import asyncio
 # Workers use asyncio.Semaphore(8) in consensus/base.py; keep the RPC path
 # bounded too.
 _GENVM_CONCURRENCY = int(os.environ.get("GENVM_MAX_CONCURRENT", "8"))
-_genvm_semaphore = asyncio.Semaphore(_GENVM_CONCURRENCY)
+_genvm_admission_semaphore = asyncio.Semaphore(_GENVM_CONCURRENCY)
 
 # ---------------------------------------------------------------------------
 # Per-address rate limiting for gen_call / sim_call
@@ -125,7 +125,7 @@ def _check_rate_limit(address: str) -> None:
 @asynccontextmanager
 async def _admit_genvm_call(method: str, to_address: str | None):
     """Reject GenVM-backed RPC calls instead of queueing unlimited work."""
-    if _genvm_semaphore.locked():
+    if _genvm_admission_semaphore.locked():
         _rate_limit_logger.warning(
             "GenVM at capacity (%s concurrent) - rejecting %s to %s",
             _GENVM_CONCURRENCY,
@@ -138,11 +138,11 @@ async def _admit_genvm_call(method: str, to_address: str | None):
             data={"retry_after_seconds": 2},
         )
 
-    await _genvm_semaphore.acquire()
+    await _genvm_admission_semaphore.acquire()
     try:
         yield
     finally:
-        _genvm_semaphore.release()
+        _genvm_admission_semaphore.release()
 
 
 # ---------------------------------------------------------------------------

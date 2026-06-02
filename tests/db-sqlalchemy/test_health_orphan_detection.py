@@ -50,7 +50,7 @@ def _wire_health_module_to_test_engine(engine: Engine):
 
     prev_mgr = session_factory._db_manager
     prev_router = health_module._rpc_router_ref
-    prev_suppressed_until = health_module._no_progress_scan_suppressed_until
+    prev_scan_suppressed_until = health_module._no_progress_scan_suppressed_until
 
     session_factory._db_manager = _StubManager(engine=engine)
     health_module._rpc_router_ref = object()  # truthy
@@ -60,7 +60,7 @@ def _wire_health_module_to_test_engine(engine: Engine):
 
     session_factory._db_manager = prev_mgr
     health_module._rpc_router_ref = prev_router
-    health_module._no_progress_scan_suppressed_until = prev_suppressed_until
+    health_module._no_progress_scan_suppressed_until = prev_scan_suppressed_until
 
 
 def _insert_tx(
@@ -787,8 +787,8 @@ async def test_no_progress_scan_error_does_not_assert_outage(
 async def test_no_progress_scan_timeout_enters_cooldown(
     engine: Engine, monkeypatch: pytest.MonkeyPatch
 ):
-    """After a history scan timeout, subsequent health loops should not
-    immediately run the same expensive JSON scan again."""
+    """After a timeout, skip the optional JSON scan briefly instead of
+    re-running the same expensive query every health tick."""
     monkeypatch.setenv("HEALTH_NO_PROGRESS_WINDOW_MINUTES", "10")
     monkeypatch.setenv("HEALTH_NO_PROGRESS_MIN_BACKLOG", "3")
     monkeypatch.setenv("HEALTH_NO_PROGRESS_SCAN_ERROR_COOLDOWN_SECONDS", "300")
@@ -810,24 +810,25 @@ async def test_no_progress_scan_timeout_enters_cooldown(
 
     progress_scan_count = 0
 
-    def fail_on_first_progress_scan(
+    def fail_first_progress_scan(
         conn, cursor, statement, parameters, context, executemany
     ):
         nonlocal progress_scan_count
-        if "current_monitoring" in statement:
-            progress_scan_count += 1
-            if progress_scan_count == 1:
-                raise RuntimeError("simulated progress scan timeout")
-            raise AssertionError("progress history scan should be in cooldown")
+        if "current_monitoring" not in statement:
+            return
+        progress_scan_count += 1
+        if progress_scan_count == 1:
+            raise RuntimeError("simulated progress scan timeout")
+        raise AssertionError("progress scan should be suppressed during cooldown")
 
-    event.listen(engine, "before_cursor_execute", fail_on_first_progress_scan)
+    event.listen(engine, "before_cursor_execute", fail_first_progress_scan)
     try:
         from backend.protocol_rpc import health as health_module
 
         first = await health_module._check_consensus_health()
         second = await health_module._check_consensus_health()
     finally:
-        event.remove(engine, "before_cursor_execute", fail_on_first_progress_scan)
+        event.remove(engine, "before_cursor_execute", fail_first_progress_scan)
 
     assert first["no_progress_check_error"] is True
     assert first["no_progress_scan_suppressed"] is False

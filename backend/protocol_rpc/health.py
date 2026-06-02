@@ -865,6 +865,7 @@ async def _check_consensus_health() -> Dict[str, Any]:
 
                 no_progress_window_seconds = NO_PROGRESS_WINDOW_MINUTES * 60
                 no_progress_check_error = False
+                no_progress_scan_suppressed = False
 
                 # No-progress detector: first do a cheap backlog gate. The
                 # progress scan has to inspect JSON history and can be expensive
@@ -901,77 +902,78 @@ async def _check_consensus_health() -> Dict[str, Any]:
 
                 seconds_since_consensus_progress = None
                 last_progress_epoch = 0
-                no_progress_scan_suppressed = False
-                if should_scan_progress:
-                    if time.time() < _no_progress_scan_suppressed_until:
-                        no_progress_check_error = True
-                        no_progress_scan_suppressed = True
-                    else:
-                        try:
-                            conn.execute(
-                                text(
-                                    f"SET LOCAL statement_timeout = {NO_PROGRESS_QUERY_TIMEOUT_MS}"
-                                )
+                if (
+                    should_scan_progress
+                    and time.time() < _no_progress_scan_suppressed_until
+                ):
+                    no_progress_check_error = True
+                    no_progress_scan_suppressed = True
+                elif should_scan_progress:
+                    try:
+                        conn.execute(
+                            text(
+                                f"SET LOCAL statement_timeout = {NO_PROGRESS_QUERY_TIMEOUT_MS}"
                             )
-                            progress_row = conn.execute(
-                                text(
-                                    """
-                                    SELECT
-                                        MAX(
-                                            GREATEST(
-                                                COALESCE(
-                                                    CASE
-                                                        WHEN consensus_history
-                                                             -> 'current_monitoring'
-                                                             ->> 'ACCEPTED'
-                                                             ~ '^[0-9]+(\\.[0-9]+)?$'
-                                                        THEN (
-                                                            consensus_history
-                                                            -> 'current_monitoring'
-                                                            ->> 'ACCEPTED'
-                                                        )::double precision
-                                                    END,
-                                                    0
-                                                ),
-                                                COALESCE(
-                                                    CASE
-                                                        WHEN consensus_history
-                                                             -> 'current_monitoring'
-                                                             ->> 'FINALIZED'
-                                                             ~ '^[0-9]+(\\.[0-9]+)?$'
-                                                        THEN (
-                                                            consensus_history
-                                                            -> 'current_monitoring'
-                                                            ->> 'FINALIZED'
-                                                        )::double precision
-                                                    END,
-                                                    0
-                                                )
+                        )
+                        progress_row = conn.execute(
+                            text(
+                                """
+                                SELECT
+                                    MAX(
+                                        GREATEST(
+                                            COALESCE(
+                                                CASE
+                                                    WHEN consensus_history
+                                                         -> 'current_monitoring'
+                                                         ->> 'ACCEPTED'
+                                                         ~ '^[0-9]+(\\.[0-9]+)?$'
+                                                    THEN (
+                                                        consensus_history
+                                                        -> 'current_monitoring'
+                                                        ->> 'ACCEPTED'
+                                                    )::double precision
+                                                END,
+                                                0
+                                            ),
+                                            COALESCE(
+                                                CASE
+                                                    WHEN consensus_history
+                                                         -> 'current_monitoring'
+                                                         ->> 'FINALIZED'
+                                                         ~ '^[0-9]+(\\.[0-9]+)?$'
+                                                    THEN (
+                                                        consensus_history
+                                                        -> 'current_monitoring'
+                                                        ->> 'FINALIZED'
+                                                    )::double precision
+                                                END,
+                                                0
                                             )
-                                        ) AS last_progress_epoch
-                                    FROM transactions
-                                    WHERE consensus_history IS NOT NULL
-                                    """
-                                )
-                            ).fetchone()
-                            _no_progress_scan_suppressed_until = 0.0
-                            last_progress_epoch = (
-                                progress_row.last_progress_epoch if progress_row else 0
+                                        )
+                                    ) AS last_progress_epoch
+                                FROM transactions
+                                WHERE consensus_history IS NOT NULL
+                                """
                             )
-                            seconds_since_consensus_progress = (
-                                int(time.time() - last_progress_epoch)
-                                if last_progress_epoch
-                                else None
-                            )
-                        except Exception as exc:
-                            no_progress_check_error = True
-                            _no_progress_scan_suppressed_until = (
-                                time.time() + NO_PROGRESS_SCAN_ERROR_COOLDOWN_SECONDS
-                            )
-                            logger.warning(
-                                "No-progress health query skipped after timeout/error: %s",
-                                exc,
-                            )
+                        ).fetchone()
+                        last_progress_epoch = (
+                            progress_row.last_progress_epoch if progress_row else 0
+                        )
+                        seconds_since_consensus_progress = (
+                            int(time.time() - last_progress_epoch)
+                            if last_progress_epoch
+                            else None
+                        )
+                        _no_progress_scan_suppressed_until = 0.0
+                    except Exception as exc:
+                        no_progress_check_error = True
+                        _no_progress_scan_suppressed_until = (
+                            time.time() + NO_PROGRESS_SCAN_ERROR_COOLDOWN_SECONDS
+                        )
+                        logger.warning(
+                            "No-progress health query skipped after timeout/error: %s",
+                            exc,
+                        )
                 else:
                     _no_progress_scan_suppressed_until = 0.0
 
