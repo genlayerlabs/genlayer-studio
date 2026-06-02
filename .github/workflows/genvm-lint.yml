@@ -28,6 +28,8 @@ jobs:
           python-version: "3.12"
 
       - name: Install genvm-linter
+        # This commit packages as 0.10.0 and includes SDK artifact resolution fixes
+        # needed by `genvm-lint check` for the v0.2.16 runner hashes below.
         run: pip install "genvm-linter @ git+https://github.com/genlayerlabs/genvm-linter.git@fe426bcc28de0523294f5fb6b93280b1bb8de302"
 
       - name: Lint example contracts
