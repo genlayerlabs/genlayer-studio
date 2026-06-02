@@ -396,7 +396,7 @@ async def test_run_genvm_passes_mode2_message_fee_allocations_to_genvm():
 
 
 @pytest.mark.asyncio
-async def test_run_genvm_rejects_fee_bearing_mode1_before_genvm():
+async def test_run_genvm_passes_mode1_message_bucket_with_empty_allocations():
     node = _make_node()
     execution_result = ExecutionResult(
         result=ExecutionReturn(ret=b"\x00\x00"),
@@ -443,21 +443,15 @@ async def test_run_genvm_rejects_fee_bearing_mode1_before_genvm():
             fee_accounting=fee_accounting,
         )
 
-    run_genvm_host.assert_not_awaited()
-    assert receipt.execution_result == ExecutionResultStatus.ERROR
-    assert (
-        receipt.genvm_result["error_code"]
-        == "Mode1MessageFeesRequireGenVMPerEmissionSupport"
-    )
-    assert receipt.genvm_result["raw_error"] == {
-        "fatal": False,
-        "causes": [
-            "Mode1MessageFeesRequireGenVMPerEmissionSupport: GenVM v0.3.x "
-            "message emissions do not carry per-emission feeParams/declaredBudget "
-            "without a message allocation tree"
-        ],
-        "ctx": {"source": "studio_fee_accounting"},
-    }
+    run_genvm_host.assert_awaited_once()
+    assert receipt.execution_result == ExecutionResultStatus.SUCCESS
+    fee_context = run_genvm_host.await_args.kwargs["fee_context"]
+    assert fee_context.bucket_totals == [
+        (1 << 256) - 1,
+        (1 << 256) - 1,
+        55,
+    ]
+    assert fee_context.message_fee_allocation == []
 
 
 @pytest.mark.asyncio

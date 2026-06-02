@@ -44,7 +44,6 @@ from backend.protocol_rpc.fees import (
     MessageAllocationsNotEqualBudget,
     MessageFeesReportMismatch,
     MessageNoMatchingAllocation,
-    Mode1MessageFeesRequireGenVMPerEmissionSupport,
     CALL_KEY_WILDCARD,
     MESSAGE_ALLOCATION_NODE_ABI_TYPE,
     MIN_RECEIPT_BYTES,
@@ -1666,7 +1665,7 @@ def test_genvm_message_fee_allocation_uses_empty_allocation_list_without_message
     assert genvm_message_fee_allocation(accounting) == []
 
 
-def test_genvm_message_fee_allocation_rejects_fee_bearing_mode1_until_genvm_supports_it():
+def test_genvm_message_fee_allocation_uses_empty_allocation_list_for_fee_bearing_mode1():
     accounting = create_fee_accounting(
         fees_distribution=_fees_distribution(total_message_fees=55),
         num_of_validators=5,
@@ -1674,8 +1673,7 @@ def test_genvm_message_fee_allocation_rejects_fee_bearing_mode1_until_genvm_supp
         user_value=0,
     )
 
-    with pytest.raises(Mode1MessageFeesRequireGenVMPerEmissionSupport):
-        genvm_message_fee_allocation(accounting)
+    assert genvm_message_fee_allocation(accounting) == []
 
 
 def test_create_fee_accounting_records_user_side_budgets():
