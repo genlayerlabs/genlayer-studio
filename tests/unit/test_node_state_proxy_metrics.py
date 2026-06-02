@@ -451,7 +451,11 @@ async def test_run_genvm_rejects_fee_bearing_mode1_before_genvm():
     )
     assert receipt.genvm_result["raw_error"] == {
         "fatal": False,
-        "causes": ["Mode1MessageFeesRequireGenVMPerEmissionSupport"],
+        "causes": [
+            "Mode1MessageFeesRequireGenVMPerEmissionSupport: GenVM v0.3.x "
+            "message emissions do not carry per-emission feeParams/declaredBudget "
+            "without a message allocation tree"
+        ],
         "ctx": {"source": "studio_fee_accounting"},
     }
 
