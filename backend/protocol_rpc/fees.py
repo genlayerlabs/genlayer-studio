@@ -121,10 +121,6 @@ class InvalidFeeParams(FeeValidationError):
     pass
 
 
-class Mode1MessageFeesRequireGenVMPerEmissionSupport(FeeValidationError):
-    """GenVM must expose per-emission feeParams/declaredBudget before Mode 1 is safe."""
-
-
 class InvalidAppealBond(FeeValidationError):
     pass
 
@@ -758,12 +754,8 @@ def genvm_message_fee_allocation(
         return _genvm_unmetered_message_fee_allocation()
 
     if not accounting.get("message_allocations"):
-        if int(accounting.get("message_fee_budget", 0) or 0) > 0:
-            raise Mode1MessageFeesRequireGenVMPerEmissionSupport(
-                "Mode1MessageFeesRequireGenVMPerEmissionSupport: GenVM v0.3.x "
-                "message emissions do not carry per-emission feeParams/"
-                "declaredBudget without a message allocation tree"
-            )
+        # Mode 1 is bucket-only: GenVM receives the message bucket via
+        # bucket_totals[2] and each emission supplies feeParams/declaredBudget.
         return []
 
     nodes: list[dict[str, Any]] = []

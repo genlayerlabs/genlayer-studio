@@ -108,7 +108,11 @@ class TransactionsProcessor:
             "from_address": transaction_data.from_address,
             "to_address": transaction_data.to_address,
             "data": TransactionsProcessor._json_safe_numbers(transaction_data.data),
-            "value": TransactionsProcessor._json_safe_numbers(transaction_data.value),
+            "value": (
+                int(transaction_data.value)
+                if transaction_data.value is not None
+                else None
+            ),
             "type": transaction_data.type,
             "status": transaction_data.status.value,
             "result": TransactionsProcessor._decode_base64_data(result),
