@@ -284,13 +284,13 @@ async def test_run_genvm_receives_fee_context_from_transaction_accounting():
             fee_accounting=fee_accounting,
         )
 
-    call_kwargs = run_genvm_host.await_args.kwargs
-    assert call_kwargs["bucket_totals"] == [
+    fee_context = run_genvm_host.await_args.kwargs["fee_context"]
+    assert fee_context.bucket_totals == [
         fees_distribution["executionBudgetPerRound"],
         fees_distribution["executionBudgetPerRound"],
         0,
     ]
-    assert call_kwargs["gas_data"]["intrinsicGas"] == "21000"
+    assert fee_context.gas_data["intrinsicGas"] == "21000"
 
 
 @pytest.mark.asyncio
@@ -367,7 +367,7 @@ async def test_run_genvm_passes_mode2_message_fee_allocations_to_genvm():
             fee_accounting=fee_accounting,
         )
 
-    allocations = run_genvm_host.await_args.kwargs["message_fee_allocation"]
+    allocations = run_genvm_host.await_args.kwargs["fee_context"].message_fee_allocation
     assert len(allocations) == 2
     allocation = allocations[0]
     assert allocation["message_type"] == "InternalFinalized"
