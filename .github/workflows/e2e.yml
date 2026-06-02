@@ -21,6 +21,10 @@
 #     on the consumer's repo. The acknowledge job's `if:` gates on
 #     author-association so only members/owners/collaborators can fire
 #     the pipeline.
+#   - `repository_dispatch` — GitHub App dispatcher path. The webhook
+#     service validates the public/private policy, creates the `E2E Tests`
+#     check on the source PR, then dispatches this central private run with
+#     synthetic PR context.
 #   - `workflow_dispatch` — manual / debug in this repo (UI dropdowns).
 #     Acknowledge is skipped (no PR comment context); plan/build/waves
 #     run with workflow_dispatch input values.
@@ -70,6 +74,10 @@ run-name: >-
   ${{ (github.event_name == 'issue_comment'
     && startsWith(github.event.comment.body, '/run-e2e')
     && format('PR #{0} /run-e2e', github.event.issue.number))
+    || (github.event_name == 'repository_dispatch'
+    && format('{0} #{1} /run-e2e',
+      github.event.client_payload.dispatch.target_repo || github.event.client_payload.target_repo,
+      github.event.client_payload.dispatch.pr_number || github.event.client_payload.pr_number))
     || (github.event_name == 'workflow_dispatch'
     && format('E2E Test {0}/{1}/{2}/{3}', inputs.profile, inputs.track, inputs.scope, inputs.stack))
     || format('noop {0}', github.run_id) }}
@@ -77,6 +85,8 @@ run-name: >-
 on:
   issue_comment:
     types: [created]
+  repository_dispatch:
+    types: [e2e-dispatch]
   workflow_dispatch:
     inputs:
       profile:
@@ -139,6 +149,10 @@ concurrency:
     ${{ (github.event_name == 'issue_comment'
         && startsWith(github.event.comment.body, '/run-e2e'))
         && format('e2e-{0}-pr-{1}', github.repository, github.event.issue.number)
+        || (github.event_name == 'repository_dispatch'
+        && format('e2e-{0}-pr-{1}',
+          github.event.client_payload.dispatch.target_repo || github.event.client_payload.target_repo,
+          github.event.client_payload.dispatch.pr_number || github.event.client_payload.pr_number))
         || format('e2e-noop-{0}', github.run_id) }}
   cancel-in-progress: true
 
@@ -153,6 +167,112 @@ env:
   E2E_REPORT_SKIP_RESULT: 'true'
 
 jobs:
+  # ===========================================================================
+  # dispatch-context — central GitHub App webhook path.
+  #
+  # The dispatcher service has already verified the webhook, actor, trusted-head
+  # policy, and source PR metadata before emitting repository_dispatch. This job
+  # validates the payload contract again inside GitHub Actions, updates the
+  # already-created source check-run with this private run URL, parses the
+  # comment tokens, parses Depends-On from the forwarded PR body, and emits the
+  # same context fields that acknowledge emits on the synced issue_comment path.
+  # ===========================================================================
+  dispatch-context:
+    if: github.event_name == 'repository_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      target-repo: ${{ steps.payload.outputs.target_repo }}
+      pr-number: ${{ steps.payload.outputs.pr_number }}
+      comment-id: ${{ steps.payload.outputs.comment_id }}
+      check-run-id: ${{ steps.payload.outputs.check_run_id }}
+      head-sha: ${{ steps.payload.outputs.head_sha }}
+      public-result-policy: ${{ steps.payload.outputs.public_result_policy }}
+      profile-token: ${{ steps.parse.outputs.profile-token }}
+      track-token: ${{ steps.parse.outputs.track-token }}
+      scope-token: ${{ steps.parse.outputs.scope-token }}
+      stack-token: ${{ steps.parse.outputs.stack-token }}
+      pre-build-cache: ${{ steps.pre-build-cache.outputs.pre-build-cache }}
+      depends-on-tsv: ${{ steps.validate-depends-on.outputs.depends-on-tsv }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Validate dispatcher payload
+        id: payload
+        env:
+          PAYLOAD: ${{ toJson(github.event.client_payload.dispatch || github.event.client_payload) }}
+        run: |
+          set -euo pipefail
+          node services/e2e-dispatcher/scripts/validate-dispatch-payload.mjs "${PAYLOAD}"
+          echo "target_repo=$(jq -r '.target_repo' <<<"${PAYLOAD}")" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$(jq -r '.pr_number' <<<"${PAYLOAD}")" >> "$GITHUB_OUTPUT"
+          echo "comment_id=$(jq -r '.comment_id // ""' <<<"${PAYLOAD}")" >> "$GITHUB_OUTPUT"
+          echo "check_run_id=$(jq -r '.check_run_id' <<<"${PAYLOAD}")" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$(jq -r '.head_sha' <<<"${PAYLOAD}")" >> "$GITHUB_OUTPUT"
+          public_result_policy=$(jq -r '.public_result_policy // "detailed"' <<<"${PAYLOAD}")
+          echo "public_result_policy=${public_result_policy}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: ./.github/actions/gcp-app-token
+
+      - name: Mark source check in progress
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TARGET_REPO: ${{ steps.payload.outputs.target_repo }}
+          COMMENT_ID: ${{ steps.payload.outputs.comment_id }}
+          CHECK_RUN_ID: ${{ steps.payload.outputs.check_run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: ./taskfiles/runner/scripts/mark-dispatch-check-in-progress.sh
+
+      - name: Parse trigger comment
+        id: parse
+        uses: ./.github/actions/parse-comment
+        with:
+          comment-body: ${{ github.event.client_payload.dispatch.comment_body || github.event.client_payload.comment_body }}
+
+      - name: Validate Depends-On lines
+        id: validate-depends-on
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_BODY: ${{ github.event.client_payload.dispatch.pull_request_body || github.event.client_payload.pull_request_body || '' }}
+          COMPONENTS_FILE: ${{ github.workspace }}/components.yaml
+        run: |
+          set -euo pipefail
+          tsv=$(./taskfiles/runner/scripts/parse-depends-on.sh)
+          {
+            echo "depends-on-tsv<<TSV_EOF"
+            printf '%s\n' "${tsv}"
+            echo "TSV_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Decide pre-build-cache cleavage
+        id: pre-build-cache
+        env:
+          TARGET_REPO: ${{ steps.payload.outputs.target_repo }}
+        run: |
+          case "${TARGET_REPO}" in
+            genlayerlabs/genlayer-node)  cleavage="configure_node" ;;
+            *)                           cleavage="" ;;
+          esac
+          echo "pre-build-cache=${cleavage}" >> "$GITHUB_OUTPUT"
+
+      - name: Notify dispatch context failure
+        if: failure() && steps.payload.outputs.check_run_id != ''
+        uses: ./.github/actions/notify-outcome
+        with:
+          outcome: failure
+          check-run-title: 'E2E Tests — Setup Failed'
+          repo: ${{ steps.payload.outputs.target_repo }}
+          comment-id: ${{ steps.payload.outputs.comment_id }}
+          check-run-id: ${{ steps.payload.outputs.check_run_id }}
+          pr-number: ${{ steps.payload.outputs.pr_number }}
+          github-token: ${{ steps.app-token.outputs.token }}
+          public-result-policy: ${{ steps.payload.outputs.public_result_policy }}
+
   # ===========================================================================
   # acknowledge — PR-side bookkeeping and comment tokenization.
   #
@@ -192,7 +312,7 @@ jobs:
       # is behind on syncs. The empty literal here is what the source
       # ships with — it stays empty in the genlayer-e2e repo itself
       # (skipped at the check step on the source-side path).
-      template-hash: '3293b72724e1175541918c31e537e631a746138219ccff8f18fd4ac668238f24' # SYNC_INJECT(template_hash)
+      template-hash: '419a85c5c48a72efae81e7fdf1aeed963222a8bcf78f9ac82a51778e4c441c4a' # SYNC_INJECT(template_hash)
     secrets: inherit
 
   # ===========================================================================
@@ -205,40 +325,42 @@ jobs:
   # the `github.event_name == 'workflow_dispatch'` clause filters it out.
   # ===========================================================================
   plan:
-    needs: acknowledge
+    needs: [acknowledge, dispatch-context]
     if: |
       !cancelled() &&
       (needs.acknowledge.result == 'success' ||
+        needs.dispatch-context.result == 'success' ||
         (needs.acknowledge.result == 'skipped' && github.event_name == 'workflow_dispatch'))
     uses: genlayerlabs/genlayer-e2e/.github/workflows/e2e-planner.yml@main
     with:
       # Coalesce: acknowledge tokens win on the PR-comment path; on
       # workflow_dispatch the tokens are empty and we fall back to
       # the manual choice inputs.
-      profile: ${{ needs.acknowledge.outputs.profile-token || inputs.profile }}
-      track: ${{ needs.acknowledge.outputs.track-token || inputs.track }}
-      scope: ${{ needs.acknowledge.outputs.scope-token || inputs.scope }}
+      profile: ${{ needs.acknowledge.outputs.profile-token || needs.dispatch-context.outputs.profile-token || inputs.profile }}
+      track: ${{ needs.acknowledge.outputs.track-token || needs.dispatch-context.outputs.track-token || inputs.track }}
+      scope: ${{ needs.acknowledge.outputs.scope-token || needs.dispatch-context.outputs.scope-token || inputs.scope }}
       # SYNC_INJECT(default_stack_fallback) rewrites the literal 'all' on
       # consumer copies (e.g. 'dev-env' for genlayer-node), so an
       # issue_comment `/run-e2e` with no stack token still routes to
       # the per-consumer default — inputs.stack is workflow_dispatch-
       # only and resolves empty on the issue_comment path.
-      stack: ${{ needs.acknowledge.outputs.stack-token || inputs.stack || 'studio' }} # SYNC_INJECT(default_stack_fallback)
-      target-repo: ${{ github.repository }}
-      pr-number: ${{ github.event.issue.number || '' }}
-      comment-id: ${{ github.event.comment.id || '' }}
-      check-run-id: ${{ needs.acknowledge.outputs.check-run-id || '' }}
+      stack: ${{ needs.acknowledge.outputs.stack-token || needs.dispatch-context.outputs.stack-token || inputs.stack || 'all' }} # SYNC_INJECT(default_stack_fallback)
+      target-repo: ${{ needs.dispatch-context.outputs.target-repo || github.repository }}
+      pr-number: ${{ needs.dispatch-context.outputs.pr-number || github.event.issue.number || '' }}
+      comment-id: ${{ needs.dispatch-context.outputs.comment-id || github.event.comment.id || '' }}
+      check-run-id: ${{ needs.acknowledge.outputs.check-run-id || needs.dispatch-context.outputs.check-run-id || '' }}
+      public-result-policy: ${{ needs.dispatch-context.outputs.public-result-policy || 'detailed' }}
       # acknowledge picks the layered-cache cleavage based on the
       # consumer repo. On workflow_dispatch acknowledge is skipped
       # and its output is empty — the planner's empty default then
       # disables layering (today's pre-Slice-A behaviour).
-      pre-build-cache: ${{ needs.acknowledge.outputs.pre-build-cache || '' }}
+      pre-build-cache: ${{ needs.acknowledge.outputs.pre-build-cache || needs.dispatch-context.outputs.pre-build-cache || '' }}
       # Pre-parsed Depends-On TSV (one `<repo>\t<ref>` line per entry).
       # Produced by acknowledge's validate-depends-on step. Empty on
       # workflow_dispatch (no PR body to parse) — plan's resolve-matrix /
       # resolve-components treat empty as "no overrides", same as the
       # legacy path that used to do its own parse.
-      depends-on-tsv: ${{ needs.acknowledge.outputs.depends-on-tsv || '' }}
+      depends-on-tsv: ${{ needs.acknowledge.outputs.depends-on-tsv || needs.dispatch-context.outputs.depends-on-tsv || '' }}
 
   # ===========================================================================
   # build — full stack up + pack to cache. Synthetic PR context on the
@@ -247,7 +369,7 @@ jobs:
   # ===========================================================================
   build:
     name: build (dev-env)
-    needs: [acknowledge, plan]
+    needs: [acknowledge, dispatch-context, plan]
     # Without an explicit `if:`, GHA's implicit `success()` would require
     # acknowledge to have succeeded — but acknowledge is intentionally
     # skipped on the workflow_dispatch path. Mirror the wave jobs and
@@ -284,11 +406,11 @@ jobs:
       # field set as the matrix file.
       matrix-json: >-
         {"core":{"genlayer-node":"${{ needs.plan.outputs.genlayer-node-ref }}","genlayer-consensus":"${{ needs.plan.outputs.consensus-ref }}","genvm":"${{ needs.plan.outputs.genvm-version }}"},"harness":{"genlayer-dev-env":"${{ needs.plan.outputs.harness-ref }}"},"tooling":{"genlayer-js":"${{ needs.plan.outputs.genlayer-js-ref }}","genlayer-py":"${{ needs.plan.outputs.genlayer-py-ref }}","genlayer-cli":"${{ needs.plan.outputs.genlayer-cli-ref }}","genlayer-studio":"${{ needs.plan.outputs.genlayer-studio-ref }}","genlayer-explorer":"${{ needs.plan.outputs.genlayer-explorer-ref }}","genlayer-testing-suite":"${{ needs.plan.outputs.genlayer-testing-suite-ref }}","genvm-linter":"${{ needs.plan.outputs.genvm-linter-ref }}","genlayer-wallet":"${{ needs.plan.outputs.genlayer-wallet-ref }}","genlayer-project-boilerplate":"${{ needs.plan.outputs.genlayer-project-boilerplate-ref }}","vscode-extension":"${{ needs.plan.outputs.vscode-extension-ref }}"}}
-      pr-number: ${{ github.event.issue.number || github.run_id }}
-      comment-id: ${{ github.event.comment.id || '' }}
-      target-repo: ${{ github.repository }}
-      check-run-id: ${{ needs.acknowledge.outputs.check-run-id || '' }}
-      head-sha: ${{ needs.acknowledge.outputs.head-sha || github.sha }}
+      pr-number: ${{ needs.dispatch-context.outputs.pr-number || github.event.issue.number || github.run_id }}
+      comment-id: ${{ needs.dispatch-context.outputs.comment-id || github.event.comment.id || '' }}
+      target-repo: ${{ needs.dispatch-context.outputs.target-repo || github.repository }}
+      check-run-id: ${{ needs.acknowledge.outputs.check-run-id || needs.dispatch-context.outputs.check-run-id || '' }}
+      head-sha: ${{ needs.acknowledge.outputs.head-sha || needs.dispatch-context.outputs.head-sha || github.sha }}
       github-retry-max: ${{ needs.plan.outputs.github-retry-max }}
       github-retry-initial-delay: ${{ needs.plan.outputs.github-retry-initial-delay }}
       github-retry-max-delay: ${{ needs.plan.outputs.github-retry-max-delay }}
@@ -301,7 +423,7 @@ jobs:
   # ===========================================================================
   build-studio:
     name: build (studio)
-    needs: [acknowledge, plan]
+    needs: [acknowledge, dispatch-context, plan]
     if: |
       !cancelled() &&
       needs.plan.result == 'success' &&
@@ -313,11 +435,11 @@ jobs:
       genvm-version: ${{ needs.plan.outputs.genvm-version }}
       genlayer-studio-ref: ${{ needs.plan.outputs.genlayer-studio-ref }}
       studio-cache-key: ${{ needs.plan.outputs.studio-cache-key }}
-      pr-number: ${{ github.event.issue.number || github.run_id }}
-      comment-id: ${{ github.event.comment.id || '' }}
-      target-repo: ${{ github.repository }}
-      check-run-id: ${{ needs.acknowledge.outputs.check-run-id || '' }}
-      head-sha: ${{ needs.acknowledge.outputs.head-sha || github.sha }}
+      pr-number: ${{ needs.dispatch-context.outputs.pr-number || github.event.issue.number || github.run_id }}
+      comment-id: ${{ needs.dispatch-context.outputs.comment-id || github.event.comment.id || '' }}
+      target-repo: ${{ needs.dispatch-context.outputs.target-repo || github.repository }}
+      check-run-id: ${{ needs.acknowledge.outputs.check-run-id || needs.dispatch-context.outputs.check-run-id || '' }}
+      head-sha: ${{ needs.acknowledge.outputs.head-sha || needs.dispatch-context.outputs.head-sha || github.sha }}
 
   # ===========================================================================
   # Wave jobs — cascade pattern with sentinel-as-skip. Each wave matrix
@@ -341,7 +463,7 @@ jobs:
     # reading `needs.wave-K.outputs.failure-label` (the per-component
     # layer tag emitted by e2e-run.yml when that wave's run failed).
     name: ${{ (matrix.component != 'none' && ((matrix.stack-target == 'studio' && needs.build-studio.outputs.build-status != 'success') || (matrix.stack-target != 'studio' && needs.build.outputs.build-status != 'success'))) && format('{0} (skipped - build fails)', matrix.job-name) || matrix.job-name }}
-    needs: [acknowledge, plan, build, build-studio]
+    needs: [acknowledge, dispatch-context, plan, build, build-studio]
     # No `build-status == 'success'` gate — when build fails we want
     # wave-1 to RUN (so the `name:` expression evaluates and tiles
     # render cleanly) but no-op via the sentinel-component override
@@ -407,11 +529,12 @@ jobs:
       cache-key: ${{ needs.plan.outputs.full-cache-key }}
       studio-cache-key: ${{ needs.plan.outputs.studio-cache-key }}
       profile: ${{ needs.plan.outputs.profile }}
-      pr-number: ${{ github.event.issue.number || github.run_id }}
-      comment-id: ${{ github.event.comment.id || '' }}
-      target-repo: ${{ github.repository }}
-      check-run-id: ${{ needs.acknowledge.outputs.check-run-id || '' }}
-      head-sha: ${{ needs.acknowledge.outputs.head-sha || github.sha }}
+      pr-number: ${{ needs.dispatch-context.outputs.pr-number || github.event.issue.number || github.run_id }}
+      comment-id: ${{ needs.dispatch-context.outputs.comment-id || github.event.comment.id || '' }}
+      target-repo: ${{ needs.dispatch-context.outputs.target-repo || github.repository }}
+      check-run-id: ${{ needs.acknowledge.outputs.check-run-id || needs.dispatch-context.outputs.check-run-id || '' }}
+      public-result-policy: ${{ needs.dispatch-context.outputs.public-result-policy || 'detailed' }}
+      head-sha: ${{ needs.acknowledge.outputs.head-sha || needs.dispatch-context.outputs.head-sha || github.sha }}
       github-retry-max: ${{ needs.plan.outputs.github-retry-max }}
       github-retry-initial-delay: ${{ needs.plan.outputs.github-retry-initial-delay }}
       github-retry-max-delay: ${{ needs.plan.outputs.github-retry-max-delay }}
@@ -430,7 +553,7 @@ jobs:
     # 'failure'. Empty otherwise — so a successful or sentinel-skipped
     # wave doesn't carry a stale tag forward.
     name: ${{ (matrix.component != 'none' && ((matrix.stack-target == 'studio' && needs.build-studio.outputs.build-status != 'success') || (matrix.stack-target != 'studio' && needs.build.outputs.build-status != 'success'))) && format('{0} (skipped - build fails)', matrix.job-name) || (matrix.component != 'none' && needs.wave-1.outputs.failure-label != '') && format('{0} (skipped - {1} fails)', matrix.job-name, needs.wave-1.outputs.failure-label) || (matrix.component != 'none' && needs.wave-1.result == 'failure') && format('{0} (skipped - fails)', matrix.job-name) || matrix.job-name }}
-    needs: [acknowledge, plan, build, build-studio, wave-1]
+    needs: [acknowledge, dispatch-context, plan, build, build-studio, wave-1]
     # No cascade gate — wave-2 always runs when plan is OK. If
     # build or wave-1 failed, with.component is overridden to 'none'
     # below, tripping e2e-run.yml's sentinel path (allocate/shard/
@@ -479,11 +602,12 @@ jobs:
       cache-key: ${{ needs.plan.outputs.full-cache-key }}
       studio-cache-key: ${{ needs.plan.outputs.studio-cache-key }}
       profile: ${{ needs.plan.outputs.profile }}
-      pr-number: ${{ github.event.issue.number || github.run_id }}
-      comment-id: ${{ github.event.comment.id || '' }}
-      target-repo: ${{ github.repository }}
-      check-run-id: ${{ needs.acknowledge.outputs.check-run-id || '' }}
-      head-sha: ${{ needs.acknowledge.outputs.head-sha || github.sha }}
+      pr-number: ${{ needs.dispatch-context.outputs.pr-number || github.event.issue.number || github.run_id }}
+      comment-id: ${{ needs.dispatch-context.outputs.comment-id || github.event.comment.id || '' }}
+      target-repo: ${{ needs.dispatch-context.outputs.target-repo || github.repository }}
+      check-run-id: ${{ needs.acknowledge.outputs.check-run-id || needs.dispatch-context.outputs.check-run-id || '' }}
+      public-result-policy: ${{ needs.dispatch-context.outputs.public-result-policy || 'detailed' }}
+      head-sha: ${{ needs.acknowledge.outputs.head-sha || needs.dispatch-context.outputs.head-sha || github.sha }}
       github-retry-max: ${{ needs.plan.outputs.github-retry-max }}
       github-retry-initial-delay: ${{ needs.plan.outputs.github-retry-initial-delay }}
       github-retry-max-delay: ${{ needs.plan.outputs.github-retry-max-delay }}
@@ -496,7 +620,7 @@ jobs:
     # but didn't emit a failure-tag (e.g. internal job-level error
     # before conclusion ran).
     name: ${{ (matrix.component != 'none' && ((matrix.stack-target == 'studio' && needs.build-studio.outputs.build-status != 'success') || (matrix.stack-target != 'studio' && needs.build.outputs.build-status != 'success'))) && format('{0} (skipped - build fails)', matrix.job-name) || (matrix.component != 'none' && needs.wave-1.outputs.failure-label != '') && format('{0} (skipped - {1} fails)', matrix.job-name, needs.wave-1.outputs.failure-label) || (matrix.component != 'none' && needs.wave-2.outputs.failure-label != '') && format('{0} (skipped - {1} fails)', matrix.job-name, needs.wave-2.outputs.failure-label) || (matrix.component != 'none' && (needs.wave-1.result == 'failure' || needs.wave-2.result == 'failure')) && format('{0} (skipped - fails)', matrix.job-name) || matrix.job-name }}
-    needs: [acknowledge, plan, build, build-studio, wave-1, wave-2]
+    needs: [acknowledge, dispatch-context, plan, build, build-studio, wave-1, wave-2]
     # No cascade gate — wave-3 always runs. If build or any upstream
     # wave failed, with.component is overridden to 'none' below,
     # tripping e2e-run.yml's sentinel path (no GCE provisioned,
@@ -544,11 +668,12 @@ jobs:
       cache-key: ${{ needs.plan.outputs.full-cache-key }}
       studio-cache-key: ${{ needs.plan.outputs.studio-cache-key }}
       profile: ${{ needs.plan.outputs.profile }}
-      pr-number: ${{ github.event.issue.number || github.run_id }}
-      comment-id: ${{ github.event.comment.id || '' }}
-      target-repo: ${{ github.repository }}
-      check-run-id: ${{ needs.acknowledge.outputs.check-run-id || '' }}
-      head-sha: ${{ needs.acknowledge.outputs.head-sha || github.sha }}
+      pr-number: ${{ needs.dispatch-context.outputs.pr-number || github.event.issue.number || github.run_id }}
+      comment-id: ${{ needs.dispatch-context.outputs.comment-id || github.event.comment.id || '' }}
+      target-repo: ${{ needs.dispatch-context.outputs.target-repo || github.repository }}
+      check-run-id: ${{ needs.acknowledge.outputs.check-run-id || needs.dispatch-context.outputs.check-run-id || '' }}
+      public-result-policy: ${{ needs.dispatch-context.outputs.public-result-policy || 'detailed' }}
+      head-sha: ${{ needs.acknowledge.outputs.head-sha || needs.dispatch-context.outputs.head-sha || github.sha }}
       github-retry-max: ${{ needs.plan.outputs.github-retry-max }}
       github-retry-initial-delay: ${{ needs.plan.outputs.github-retry-initial-delay }}
       github-retry-max-delay: ${{ needs.plan.outputs.github-retry-max-delay }}
@@ -558,7 +683,7 @@ jobs:
     # (first match wins): build → wave-1 → wave-2 → wave-3 failure-
     # label, then generic-fallback via `.result == 'failure'`.
     name: ${{ (matrix.component != 'none' && ((matrix.stack-target == 'studio' && needs.build-studio.outputs.build-status != 'success') || (matrix.stack-target != 'studio' && needs.build.outputs.build-status != 'success'))) && format('{0} (skipped - build fails)', matrix.job-name) || (matrix.component != 'none' && needs.wave-1.outputs.failure-label != '') && format('{0} (skipped - {1} fails)', matrix.job-name, needs.wave-1.outputs.failure-label) || (matrix.component != 'none' && needs.wave-2.outputs.failure-label != '') && format('{0} (skipped - {1} fails)', matrix.job-name, needs.wave-2.outputs.failure-label) || (matrix.component != 'none' && needs.wave-3.outputs.failure-label != '') && format('{0} (skipped - {1} fails)', matrix.job-name, needs.wave-3.outputs.failure-label) || (matrix.component != 'none' && (needs.wave-1.result == 'failure' || needs.wave-2.result == 'failure' || needs.wave-3.result == 'failure')) && format('{0} (skipped - fails)', matrix.job-name) || matrix.job-name }}
-    needs: [acknowledge, plan, build, build-studio, wave-1, wave-2, wave-3]
+    needs: [acknowledge, dispatch-context, plan, build, build-studio, wave-1, wave-2, wave-3]
     # No cascade gate — wave-4 always runs. See wave-2 for the
     # cascade-as-sentinel rationale.
     if: |
@@ -602,11 +727,12 @@ jobs:
       cache-key: ${{ needs.plan.outputs.full-cache-key }}
       studio-cache-key: ${{ needs.plan.outputs.studio-cache-key }}
       profile: ${{ needs.plan.outputs.profile }}
-      pr-number: ${{ github.event.issue.number || github.run_id }}
-      comment-id: ${{ github.event.comment.id || '' }}
-      target-repo: ${{ github.repository }}
-      check-run-id: ${{ needs.acknowledge.outputs.check-run-id || '' }}
-      head-sha: ${{ needs.acknowledge.outputs.head-sha || github.sha }}
+      pr-number: ${{ needs.dispatch-context.outputs.pr-number || github.event.issue.number || github.run_id }}
+      comment-id: ${{ needs.dispatch-context.outputs.comment-id || github.event.comment.id || '' }}
+      target-repo: ${{ needs.dispatch-context.outputs.target-repo || github.repository }}
+      check-run-id: ${{ needs.acknowledge.outputs.check-run-id || needs.dispatch-context.outputs.check-run-id || '' }}
+      public-result-policy: ${{ needs.dispatch-context.outputs.public-result-policy || 'detailed' }}
+      head-sha: ${{ needs.acknowledge.outputs.head-sha || needs.dispatch-context.outputs.head-sha || github.sha }}
       github-retry-max: ${{ needs.plan.outputs.github-retry-max }}
       github-retry-initial-delay: ${{ needs.plan.outputs.github-retry-initial-delay }}
       github-retry-max-delay: ${{ needs.plan.outputs.github-retry-max-delay }}
@@ -626,6 +752,7 @@ jobs:
   result:
     needs:
       - acknowledge
+      - dispatch-context
       - plan
       - build
       - build-studio
@@ -677,7 +804,7 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
-          pattern: e2e-test-conclusion-*-pr${{ github.event.issue.number || github.run_id }}
+          pattern: e2e-test-conclusion-*-pr${{ needs.dispatch-context.outputs.pr-number || github.event.issue.number || github.run_id }}
           path: /tmp/test-conclusions
 
       - name: Aggregate outcomes
@@ -720,7 +847,7 @@ jobs:
           # the exact artifact path; on workflow_dispatch (no PR) the
           # run_id stands in, matching the wave jobs' pr-number input.
           CONCLUSIONS_DIR: /tmp/test-conclusions
-          PR_NUMBER: ${{ github.event.issue.number || github.run_id }}
+          PR_NUMBER: ${{ needs.dispatch-context.outputs.pr-number || github.event.issue.number || github.run_id }}
         run: ./taskfiles/runner/scripts/aggregate-wave-outcomes.sh
 
       # Final notify-outcome — flips 👀 → 🚀 (overall pass) or 👎
@@ -739,17 +866,18 @@ jobs:
       # — no extra signal, and it buries the specific error message
       # under a generic-looking second comment.
       - name: Notify final outcome
-        if: always() && needs.acknowledge.outputs.check-run-id != '' && needs.plan.result != 'failure'
+        if: always() && (needs.acknowledge.outputs.check-run-id != '' || needs.dispatch-context.outputs.check-run-id != '') && needs.plan.result != 'failure'
         continue-on-error: true
         uses: genlayerlabs/genlayer-e2e/.github/actions/notify-outcome@main
         with:
           outcome: ${{ steps.aggregate.outcome == 'success' && 'success' || 'failure' }}
           check-run-title: 'E2E Tests'
-          repo: ${{ github.repository }}
-          comment-id: ${{ github.event.comment.id }}
-          check-run-id: ${{ needs.acknowledge.outputs.check-run-id }}
-          pr-number: ${{ github.event.issue.number }}
+          repo: ${{ needs.dispatch-context.outputs.target-repo || github.repository }}
+          comment-id: ${{ needs.dispatch-context.outputs.comment-id || github.event.comment.id }}
+          check-run-id: ${{ needs.acknowledge.outputs.check-run-id || needs.dispatch-context.outputs.check-run-id }}
+          pr-number: ${{ needs.dispatch-context.outputs.pr-number || github.event.issue.number }}
           github-token: ${{ steps.app-token.outputs.token }}
+          public-result-policy: ${{ needs.dispatch-context.outputs.public-result-policy || 'detailed' }}
 
       # Re-propagate the aggregate's exit status to the workflow
       # conclusion. Without this, the result job would always succeed
