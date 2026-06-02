@@ -1,7 +1,8 @@
+import genlayer as gl
 from genlayer import *
 
 
-class MultiFileContract(gl.Contract):
+class MultiFileContract(gl.contract.Contract):
     other_addr: Address
 
     def __init__(self):

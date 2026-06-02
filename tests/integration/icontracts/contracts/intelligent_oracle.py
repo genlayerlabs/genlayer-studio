@@ -5,6 +5,7 @@ import json
 from enum import Enum
 from datetime import datetime
 from urllib.parse import urlparse
+import genlayer as gl
 from genlayer import *
 
 
@@ -14,7 +15,7 @@ class Status(Enum):
     ERROR = "Error"
 
 
-class IntelligentOracle(gl.Contract):
+class IntelligentOracle(gl.contract.Contract):
     # Declare persistent storage fields
     prediction_market_id: str
     title: str

@@ -1,10 +1,11 @@
 # v0.1.0
 # { "Depends": "py-genlayer:test" }
 
+import genlayer as gl
 from genlayer import *
 
 
-class MultiTentantStorage(gl.Contract):
+class MultiTentantStorage(gl.contract.Contract):
     """
     Same functionality as UserStorage, but implemented with multiple storage contracts.
     Each user is assigned to a storage contract, and all storage contracts are managed by this same contract.

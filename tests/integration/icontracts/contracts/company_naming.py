@@ -1,12 +1,13 @@
 # { "Depends": "py-genlayer:test" }
 
 import json
+import genlayer as gl
 from genlayer import *
 
 MAX_SCORE_DIFFERENCE = 3
 
 
-class CompanyNaming(gl.Contract):
+class CompanyNaming(gl.contract.Contract):
     scores: TreeMap[str, u256]
 
     def __init__(self):

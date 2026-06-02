@@ -164,9 +164,10 @@ def write_contract_method(
 CONTRACT_V1 = """# v0.1.0
 # { "Depends": "py-genlayer:latest" }
 
+import genlayer as gl
 from genlayer import *
 
-class UpgradeTest(gl.Contract):
+class UpgradeTest(gl.contract.Contract):
     counter: u64
     name: str
 
@@ -198,9 +199,10 @@ class UpgradeTest(gl.Contract):
 CONTRACT_V2 = """# v0.1.0
 # { "Depends": "py-genlayer:latest" }
 
+import genlayer as gl
 from genlayer import *
 
-class UpgradeTest(gl.Contract):
+class UpgradeTest(gl.contract.Contract):
     counter: u64
     name: str
 
@@ -236,9 +238,10 @@ class UpgradeTest(gl.Contract):
 CONTRACT_V3_WITH_NEW_STATE = """# v0.1.0
 # { "Depends": "py-genlayer:latest" }
 
+import genlayer as gl
 from genlayer import *
 
-class UpgradeTest(gl.Contract):
+class UpgradeTest(gl.contract.Contract):
     counter: u64
     name: str
     extra_field: str  # NEW FIELD
@@ -276,9 +279,10 @@ class UpgradeTest(gl.Contract):
 INVALID_CONTRACT = """# v0.1.0
 # { "Depends": "py-genlayer:latest" }
 
+import genlayer as gl
 from genlayer import *
 
-class BrokenContract(gl.Contract):
+class BrokenContract(gl.contract.Contract):
     def __init__(self):
         this is not valid python syntax!!!
 """
@@ -286,9 +290,10 @@ class BrokenContract(gl.Contract):
 SIMPLE_CONTRACT = """# v0.1.0
 # { "Depends": "py-genlayer:latest" }
 
+import genlayer as gl
 from genlayer import *
 
-class SimpleContract(gl.Contract):
+class SimpleContract(gl.contract.Contract):
     value: u64
 
     def __init__(self):

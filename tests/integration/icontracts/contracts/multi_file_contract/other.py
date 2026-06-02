@@ -1,9 +1,9 @@
 # { "Depends": "py-genlayer:test" }
 
-from genlayer import *
+import genlayer as gl
 
 
-class Other(gl.Contract):
+class Other(gl.contract.Contract):
     data: str
 
     def __init__(self, data: str):

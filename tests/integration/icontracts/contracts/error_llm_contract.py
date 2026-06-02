@@ -1,11 +1,11 @@
 # v0.1.0
 # { "Depends": "py-genlayer:test" }
 
-from genlayer import *
+import genlayer as gl
 import json
 
 
-class ErrorLLMContract(gl.Contract):
+class ErrorLLMContract(gl.contract.Contract):
     def __init__(self, testcase: int):
         if testcase == 1:
             self.test_execute_prompt()

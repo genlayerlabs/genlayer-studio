@@ -1,10 +1,11 @@
 # v0.1.0
 # { "Depends": "py-genlayer:test" }
 
+import genlayer as gl
 from genlayer import *
 
 
-class ErrorExecutionContract(gl.Contract):
+class ErrorExecutionContract(gl.contract.Contract):
     state: TreeMap[str, str]
 
     def __init__(self, testcase: int, target_address: str | None = None):
