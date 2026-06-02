@@ -5,7 +5,7 @@ import genlayer as gl
 from genlayer import *
 
 
-class ErrorExecutionContract(gl.contract.Contract):
+class ErrorExecutionContract(gl.Contract):
     state: TreeMap[str, str]
 
     def __init__(self, testcase: int, target_address: str | None = None):

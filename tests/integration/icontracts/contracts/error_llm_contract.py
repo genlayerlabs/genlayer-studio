@@ -5,7 +5,7 @@ import genlayer as gl
 import json
 
 
-class ErrorLLMContract(gl.contract.Contract):
+class ErrorLLMContract(gl.Contract):
     def __init__(self, testcase: int):
         if testcase == 1:
             self.test_execute_prompt()

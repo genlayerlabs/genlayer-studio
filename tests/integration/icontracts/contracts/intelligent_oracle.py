@@ -15,7 +15,7 @@ class Status(Enum):
     ERROR = "Error"
 
 
-class IntelligentOracle(gl.contract.Contract):
+class IntelligentOracle(gl.Contract):
     # Declare persistent storage fields
     prediction_market_id: str
     title: str

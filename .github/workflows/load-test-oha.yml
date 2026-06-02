@@ -173,6 +173,7 @@ jobs:
           fi
 
       - name: Setup validators
+        timeout-minutes: 5
         run: |
           echo "Creating 5 validators with retry logic..."
           created=0
@@ -180,7 +181,7 @@ jobs:
             success=false
             for attempt in 1 2 3; do
               echo "Creating validator $i/5 (attempt $attempt/3)..."
-              response=$(curl -s -X POST http://localhost:4000/api \
+              response=$(curl --max-time 20 -sS -X POST http://localhost:4000/api \
                 -H "Content-Type: application/json" \
                 -d "{\"jsonrpc\":\"2.0\",\"method\":\"sim_createRandomValidator\",\"params\":[1],\"id\":$i}")
 
@@ -213,7 +214,7 @@ jobs:
 
           # Verify validator count with retry
           for attempt in 1 2 3; do
-            response=$(curl -s -X POST http://localhost:4000/api \
+            response=$(curl --max-time 20 -sS -X POST http://localhost:4000/api \
               -H "Content-Type: application/json" \
               -d '{"jsonrpc":"2.0","method":"sim_countValidators","params":[],"id":100}')
             count=$(python3 -c "import json,sys; r=json.loads(sys.argv[1]); print(r.get('result',0))" "$response" 2>/dev/null || echo "0")
@@ -229,7 +230,7 @@ jobs:
 
           if [ "$count" -lt 5 ]; then
             echo "ERROR: Expected at least 5 validators, found $count"
-            curl -s -X POST http://localhost:4000/api \
+            curl --max-time 20 -sS -X POST http://localhost:4000/api \
               -H "Content-Type: application/json" \
               -d '{"jsonrpc":"2.0","method":"sim_getAllValidators","params":[],"id":101}'
             exit 1
@@ -457,13 +458,14 @@ jobs:
           fi
 
       - name: Re-setup validators for state integrity test
+        timeout-minutes: 5
         run: |
           echo "Re-creating validators (previous step cleaned them up)..."
           for i in {1..5}; do
             success=false
             for attempt in 1 2 3; do
               echo "Creating validator $i/5 (attempt $attempt/3)..."
-              response=$(curl -s -X POST http://localhost:4000/api \
+              response=$(curl --max-time 20 -sS -X POST http://localhost:4000/api \
                 -H "Content-Type: application/json" \
                 -d "{\"jsonrpc\":\"2.0\",\"method\":\"sim_createRandomValidator\",\"params\":[1],\"id\":$i}")
 
@@ -490,7 +492,7 @@ jobs:
           sleep 5
 
           # Verify validators exist
-          response=$(curl -s -X POST http://localhost:4000/api \
+          response=$(curl --max-time 20 -sS -X POST http://localhost:4000/api \
             -H "Content-Type: application/json" \
             -d '{"jsonrpc":"2.0","method":"sim_countValidators","params":[],"id":100}')
           count=$(python3 -c "import json,sys; r=json.loads(sys.argv[1]); print(r.get('result',0))" "$response" 2>/dev/null || echo "0")

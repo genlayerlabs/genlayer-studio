@@ -5,7 +5,7 @@ import genlayer as gl
 from genlayer import *
 
 
-class Registry(gl.contract.Contract):
+class Registry(gl.Contract):
     # Declare persistent storage fields
     contract_addresses: DynArray[str]
     intelligent_oracle_code: str

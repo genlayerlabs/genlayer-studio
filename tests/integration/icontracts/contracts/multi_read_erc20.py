@@ -5,7 +5,7 @@ import genlayer as gl
 from genlayer import *
 
 
-class multi_read_erc20(gl.contract.Contract):
+class multi_read_erc20(gl.Contract):
     balances: TreeMap[Address, TreeMap[Address, u256]]
 
     def __init__(self):

@@ -4,7 +4,7 @@
 import genlayer as gl
 
 
-class ErrorWebContract(gl.contract.Contract):
+class ErrorWebContract(gl.Contract):
     def __init__(self, testcase: int, url: str):
 
         if testcase == 1:

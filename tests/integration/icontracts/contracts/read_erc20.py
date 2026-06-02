@@ -5,7 +5,7 @@ import genlayer as gl
 from genlayer import *
 
 
-class read_erc20(gl.contract.Contract):
+class read_erc20(gl.Contract):
     token_contract: Address
 
     def __init__(self, token_contract: str):

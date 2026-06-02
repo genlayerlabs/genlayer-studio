@@ -4,7 +4,7 @@
 import genlayer as gl
 
 
-class Utf8RoundtripContract(gl.contract.Contract):
+class Utf8RoundtripContract(gl.Contract):
     value: str
 
     def __init__(self):

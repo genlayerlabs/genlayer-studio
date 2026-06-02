@@ -3,7 +3,7 @@
 import genlayer as gl
 
 
-class Other(gl.contract.Contract):
+class Other(gl.Contract):
     data: str
 
     def __init__(self, data: str):
