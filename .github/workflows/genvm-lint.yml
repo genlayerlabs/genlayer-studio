@@ -28,7 +28,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install genvm-linter
-        run: pip install genvm-linter==0.10.0
+        run: pip install "genvm-linter @ git+https://github.com/genlayerlabs/genvm-linter.git@fe426bcc28de0523294f5fb6b93280b1bb8de302"
 
       - name: Lint example contracts
         env:

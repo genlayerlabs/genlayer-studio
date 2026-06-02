@@ -19,7 +19,7 @@ jsonschema==4.26.0
 loguru==0.7.3
 web3==7.14.1
 PyYAML==6.0.3
-genvm-linter==0.10.0
+genvm-linter @ git+https://github.com/genlayerlabs/genvm-linter.git@fe426bcc28de0523294f5fb6b93280b1bb8de302
 
 # FastAPI and ASGI dependencies
 fastapi==0.135.1
