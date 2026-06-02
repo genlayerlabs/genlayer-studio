@@ -192,7 +192,7 @@ jobs:
       # is behind on syncs. The empty literal here is what the source
       # ships with — it stays empty in the genlayer-e2e repo itself
       # (skipped at the check step on the source-side path).
-      template-hash: 'c930ed3f3db92eedf5b2bf944dbe882b5b8c962210e44ab33e8f397bb8bf64d1' # SYNC_INJECT(template_hash)
+      template-hash: '3293b72724e1175541918c31e537e631a746138219ccff8f18fd4ac668238f24' # SYNC_INJECT(template_hash)
     secrets: inherit
 
   # ===========================================================================
@@ -283,7 +283,7 @@ jobs:
       # block. Trailing JSON commas would be invalid — keep the same
       # field set as the matrix file.
       matrix-json: >-
-        {"core":{"genlayer-node":"${{ needs.plan.outputs.genlayer-node-ref }}","genlayer-consensus":"${{ needs.plan.outputs.consensus-ref }}","genvm":"${{ needs.plan.outputs.genvm-version }}"},"harness":{"genlayer-dev-env":"${{ needs.plan.outputs.harness-ref }}"},"tooling":{"genlayer-js":"${{ needs.plan.outputs.genlayer-js-ref }}","genlayer-py":"${{ needs.plan.outputs.genlayer-py-ref }}","genlayer-cli":"${{ needs.plan.outputs.genlayer-cli-ref }}","genlayer-studio":"${{ needs.plan.outputs.genlayer-studio-ref }}","genlayer-explorer":"${{ needs.plan.outputs.genlayer-explorer-ref }}","genlayer-testing-suite":"${{ needs.plan.outputs.genlayer-testing-suite-ref }}","genvm-linter":"${{ needs.plan.outputs.genvm-linter-ref }}","genlayer-wallet":"${{ needs.plan.outputs.genlayer-wallet-ref }}"}}
+        {"core":{"genlayer-node":"${{ needs.plan.outputs.genlayer-node-ref }}","genlayer-consensus":"${{ needs.plan.outputs.consensus-ref }}","genvm":"${{ needs.plan.outputs.genvm-version }}"},"harness":{"genlayer-dev-env":"${{ needs.plan.outputs.harness-ref }}"},"tooling":{"genlayer-js":"${{ needs.plan.outputs.genlayer-js-ref }}","genlayer-py":"${{ needs.plan.outputs.genlayer-py-ref }}","genlayer-cli":"${{ needs.plan.outputs.genlayer-cli-ref }}","genlayer-studio":"${{ needs.plan.outputs.genlayer-studio-ref }}","genlayer-explorer":"${{ needs.plan.outputs.genlayer-explorer-ref }}","genlayer-testing-suite":"${{ needs.plan.outputs.genlayer-testing-suite-ref }}","genvm-linter":"${{ needs.plan.outputs.genvm-linter-ref }}","genlayer-wallet":"${{ needs.plan.outputs.genlayer-wallet-ref }}","genlayer-project-boilerplate":"${{ needs.plan.outputs.genlayer-project-boilerplate-ref }}","vscode-extension":"${{ needs.plan.outputs.vscode-extension-ref }}"}}
       pr-number: ${{ github.event.issue.number || github.run_id }}
       comment-id: ${{ github.event.comment.id || '' }}
       target-repo: ${{ github.repository }}
@@ -400,6 +400,8 @@ jobs:
       genlayer-testing-suite-ref: ${{ needs.plan.outputs.genlayer-testing-suite-ref }}
       genvm-linter-ref: ${{ needs.plan.outputs.genvm-linter-ref }}
       genlayer-wallet-ref: ${{ needs.plan.outputs.genlayer-wallet-ref }}
+      genlayer-project-boilerplate-ref: ${{ needs.plan.outputs.genlayer-project-boilerplate-ref }}
+      vscode-extension-ref: ${{ needs.plan.outputs.vscode-extension-ref }}
       harness-ref: ${{ needs.plan.outputs.harness-ref }}
       harness-sha: ${{ needs.plan.outputs.harness-sha }}
       cache-key: ${{ needs.plan.outputs.full-cache-key }}
@@ -470,6 +472,8 @@ jobs:
       genlayer-testing-suite-ref: ${{ needs.plan.outputs.genlayer-testing-suite-ref }}
       genvm-linter-ref: ${{ needs.plan.outputs.genvm-linter-ref }}
       genlayer-wallet-ref: ${{ needs.plan.outputs.genlayer-wallet-ref }}
+      genlayer-project-boilerplate-ref: ${{ needs.plan.outputs.genlayer-project-boilerplate-ref }}
+      vscode-extension-ref: ${{ needs.plan.outputs.vscode-extension-ref }}
       harness-ref: ${{ needs.plan.outputs.harness-ref }}
       harness-sha: ${{ needs.plan.outputs.harness-sha }}
       cache-key: ${{ needs.plan.outputs.full-cache-key }}
@@ -533,6 +537,8 @@ jobs:
       genlayer-testing-suite-ref: ${{ needs.plan.outputs.genlayer-testing-suite-ref }}
       genvm-linter-ref: ${{ needs.plan.outputs.genvm-linter-ref }}
       genlayer-wallet-ref: ${{ needs.plan.outputs.genlayer-wallet-ref }}
+      genlayer-project-boilerplate-ref: ${{ needs.plan.outputs.genlayer-project-boilerplate-ref }}
+      vscode-extension-ref: ${{ needs.plan.outputs.vscode-extension-ref }}
       harness-ref: ${{ needs.plan.outputs.harness-ref }}
       harness-sha: ${{ needs.plan.outputs.harness-sha }}
       cache-key: ${{ needs.plan.outputs.full-cache-key }}
@@ -589,6 +595,8 @@ jobs:
       genlayer-testing-suite-ref: ${{ needs.plan.outputs.genlayer-testing-suite-ref }}
       genvm-linter-ref: ${{ needs.plan.outputs.genvm-linter-ref }}
       genlayer-wallet-ref: ${{ needs.plan.outputs.genlayer-wallet-ref }}
+      genlayer-project-boilerplate-ref: ${{ needs.plan.outputs.genlayer-project-boilerplate-ref }}
+      vscode-extension-ref: ${{ needs.plan.outputs.vscode-extension-ref }}
       harness-ref: ${{ needs.plan.outputs.harness-ref }}
       harness-sha: ${{ needs.plan.outputs.harness-sha }}
       cache-key: ${{ needs.plan.outputs.full-cache-key }}
