@@ -28,6 +28,29 @@ RPC_URL = "http://localhost:4000/api"
 pytestmark = pytest.mark.xdist_group(name="mock_validators")
 
 
+def _wait_for_validator_count(min_count: int, timeout: float = 20.0) -> None:
+    from tests.common.request import payload, post_request_localhost
+    from tests.common.response import has_success_status
+
+    deadline = time.monotonic() + timeout
+    last_count = 0
+    while time.monotonic() < deadline:
+        response = post_request_localhost(payload("sim_getAllValidators")).json()
+        assert has_success_status(response)
+        last_count = len(response.get("result", []))
+        if last_count >= min_count:
+            # Validator registry changes are consumed by consensus workers via
+            # reload events; give workers time to observe the current registry
+            # before this module submits deploy/write transactions.
+            time.sleep(5)
+            return
+        time.sleep(0.5)
+
+    pytest.fail(
+        f"Expected at least {min_count} validators, found {last_count} after {timeout}s"
+    )
+
+
 @pytest.fixture(scope="module", autouse=True)
 def ensure_validators_exist():
     """Ensure validators exist before running tests in this module.
@@ -52,6 +75,8 @@ def ensure_validators_exist():
         ).json()
         if not has_success_status(result):
             pytest.fail(f"Failed to create validators: {result}")
+
+    _wait_for_validator_count(5)
 
     yield
 
