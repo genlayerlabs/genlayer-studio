@@ -15,12 +15,6 @@ import logging
 
 from backend.domain.types import Validator, Transaction, TransactionType
 from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope
-from backend.protocol_rpc.fees import (
-    FEE_ACCOUNTING_KEY,
-    FeeValidationError,
-    genvm_fee_context,
-    genvm_message_fee_allocation,
-)
 import backend.node.genvm.base as genvmbase
 import backend.node.genvm.origin.calldata as calldata
 from backend.database_handler.contract_snapshot import ContractSnapshot
@@ -632,7 +626,6 @@ class Node:
 
         assert transaction.data is not None
         transaction_data = transaction.data
-        fee_accounting = transaction_data.get(FEE_ACCOUNTING_KEY)
         assert transaction.from_address is not None
 
         # Override transaction timestamp
@@ -657,7 +650,6 @@ class Node:
                 transaction_created_at,
                 value=transaction.value or 0,
                 origin_address=transaction.origin_address,
-                fee_accounting=fee_accounting,
             )
 
             self.timing_callback("DEPLOY_END")
@@ -675,7 +667,6 @@ class Node:
                 transaction_created_at,
                 value=transaction.value or 0,
                 origin_address=transaction.origin_address,
-                fee_accounting=fee_accounting,
             )
 
             self.timing_callback("RUN_END")
@@ -806,7 +797,6 @@ class Node:
         transaction_created_at: str | None = None,
         value: int = 0,
         origin_address: str | None = None,
-        fee_accounting: dict | None = None,
     ) -> Receipt:
         assert self.contract_snapshot is not None
 
@@ -824,7 +814,6 @@ class Node:
             code=code_to_deploy,
             value=value,
             origin_address=origin_address,
-            fee_accounting=fee_accounting,
         )
 
     async def run_contract(
@@ -835,7 +824,6 @@ class Node:
         transaction_created_at: str | None = None,
         value: int = 0,
         origin_address: str | None = None,
-        fee_accounting: dict | None = None,
     ) -> Receipt:
         return await self._run_genvm(
             from_address,
@@ -846,7 +834,6 @@ class Node:
             transaction_datetime=self._date_from_str(transaction_created_at),
             value=value,
             origin_address=origin_address,
-            fee_accounting=fee_accounting,
         )
 
     async def get_contract_data(
@@ -984,7 +971,6 @@ class Node:
         code: bytes | None = None,
         value: int = 0,
         origin_address: str | None = None,
-        fee_accounting: dict | None = None,
     ) -> Receipt:
         self.timing_callback("GENVM_PREPARATION_START")
 
@@ -1034,6 +1020,7 @@ class Node:
             host_data["node_address"] = self.address
 
         logger = self.logger.with_keys({"tx_id": host_data["tx_id"]})
+
         message = {
             "is_init": is_init,
             "contract_address": contract_address,
@@ -1051,13 +1038,6 @@ class Node:
 
         start_time = time.time()
         try:
-            bucket_totals, gas_data = genvm_fee_context(
-                fee_accounting,
-            )
-            message_fee_allocation = genvm_message_fee_allocation(
-                fee_accounting,
-                address_factory=Address,
-            )
             result = await genvmbase.run_genvm_host(
                 functools.partial(
                     genvmbase.Host,
@@ -1074,35 +1054,7 @@ class Node:
                 manager_uri=self.manager.url,
                 timeout=timeout,
                 code=code,
-                fee_context=genvmbase.GenVMFeeContext(
-                    bucket_totals=bucket_totals,
-                    gas_data=gas_data,
-                    message_fee_allocation=message_fee_allocation,
-                ),
                 logger=logger,
-            )
-        except FeeValidationError as e:
-            result = genvmbase.ExecutionResult(
-                result=genvmbase.ExecutionError(
-                    message=str(e),
-                    kind=public_abi.ResultCode.USER_ERROR,
-                    error_code=e.__class__.__name__,
-                    raw_error={
-                        "fatal": False,
-                        "causes": [str(e)],
-                        "ctx": {"source": "studio_fee_accounting"},
-                    },
-                    description=str(e),
-                ),
-                eq_outputs={},
-                pending_transactions=[],
-                stdout="",
-                stderr=str(e),
-                genvm_log=[],
-                state=snapshot_view,
-                processing_time=int((time.time() - start_time) * 1000),
-                nondet_disagree=None,
-                execution_stats=None,
             )
         except genvmbase.GenVMInternalError as e:
             e.is_leader = self.validator_mode == ExecutionMode.LEADER
@@ -1130,17 +1082,6 @@ class Node:
             if isinstance(result.result, genvmbase.ExecutionReturn)
             else ExecutionResultStatus.ERROR
         )
-        data_fees_consumed = None
-        if (
-            result.data_fee_bucket_totals is not None
-            and result.data_fees_remaining is not None
-        ):
-            data_fees_consumed = [
-                max(0, int(total) - int(remaining))
-                for total, remaining in zip(
-                    result.data_fee_bucket_totals, result.data_fees_remaining
-                )
-            ]
 
         result = Receipt(
             result=genvmbase.encode_result_to_bytes(result.result),
@@ -1180,9 +1121,6 @@ class Node:
                     if isinstance(result.result, genvmbase.ExecutionError)
                     else None
                 ),
-                "data_fee_bucket_totals": result.data_fee_bucket_totals,
-                "data_fees_remaining": result.data_fees_remaining,
-                "data_fees_consumed": data_fees_consumed,
             },
             processing_time=result.processing_time,
             nondet_disagree=result.nondet_disagree,

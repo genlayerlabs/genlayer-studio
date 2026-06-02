@@ -9,16 +9,12 @@ import { ConsensusJourney } from '@/components/ConsensusJourney';
 import { InfoRow } from '@/components/InfoRow';
 import { Badge } from '@/components/ui/badge';
 import { JsonViewer } from '@/components/JsonViewer';
-import {
-  getExecutionResult,
-  getConsensusRoundResult,
-} from '@/lib/transactionUtils';
+import { getExecutionResult, getConsensusRoundResult } from '@/lib/transactionUtils';
 import { ConsensusResultBadge } from '@/components/ConsensusResultBadge';
 import { resultStatusLabel, type DecodedResult } from '@/lib/resultDecoder';
 import { InputDataPanel } from '@/components/InputDataPanel';
 import { DataDecodePanel } from '@/components/DataDecodePanel';
 import { formatGenValue } from '@/lib/formatters';
-import { FeeAccountingPanel } from '@/components/FeeAccountingPanel';
 
 interface OverviewTabProps {
   transaction: Transaction;
@@ -103,15 +99,14 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
   const decodedResult = execResult?.decodedResult;
   const eqOutputs = execResult?.eqOutputs;
 
-  const dataObj = tx.data && typeof tx.data === 'object' ? tx.data : null;
+  const dataObj =
+    tx.data && typeof tx.data === 'object' ? (tx.data as Record<string, unknown>) : null;
   const calldataB64 =
     (tx.type === 1 || tx.type === 2) && dataObj
-      ? stringField(dataObj, 'calldata')
+      ? (dataObj.calldata as string | undefined)
       : undefined;
   const contractCodeB64 =
-    tx.type === 1 && dataObj
-      ? stringField(dataObj, 'contract_code')
-      : undefined;
+    tx.type === 1 && dataObj ? (dataObj.contract_code as string | undefined) : undefined;
 
   return (
     <div className="space-y-1">
@@ -122,10 +117,7 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
         label="From"
         value={
           tx.from_address ? (
-            <Link
-              href={`/address/${tx.from_address}`}
-              className="text-primary hover:underline"
-            >
+            <Link href={`/address/${tx.from_address}`} className="text-primary hover:underline">
               {tx.from_address}
             </Link>
           ) : (
@@ -139,10 +131,7 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
         label="To"
         value={
           tx.to_address ? (
-            <Link
-              href={`/address/${tx.to_address}`}
-              className="text-primary hover:underline"
-            >
+            <Link href={`/address/${tx.to_address}`} className="text-primary hover:underline">
               {tx.to_address}
             </Link>
           ) : (
@@ -153,14 +142,8 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
         copyText={tx.to_address || undefined}
       />
       <InfoRow label="Value" value={formatGenValue(tx.value)} />
-      <InfoRow
-        label="Nonce"
-        value={tx.nonce === null ? '-' : tx.nonce.toString()}
-      />
-      <InfoRow
-        label="Gas Limit"
-        value={tx.gaslimit === null ? '-' : tx.gaslimit.toString()}
-      />
+      <InfoRow label="Nonce" value={tx.nonce !== null ? tx.nonce.toString() : '-'} />
+      <InfoRow label="Gas Limit" value={tx.gaslimit !== null ? tx.gaslimit.toString() : '-'} />
       <InfoRow
         label="Created At"
         value={tx.created_at ? format(new Date(tx.created_at), 'PPpp') : '-'}
@@ -169,47 +152,25 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
         label="Execution Mode"
         value={
           tx.execution_mode === 'LEADER_ONLY' ? (
-            <Badge className="bg-yellow-50 dark:bg-yellow-950 text-yellow-700 dark:text-yellow-400 border-yellow-200 dark:border-yellow-800">
-              Leader Only
-            </Badge>
+            <Badge className="bg-yellow-50 dark:bg-yellow-950 text-yellow-700 dark:text-yellow-400 border-yellow-200 dark:border-yellow-800">Leader Only</Badge>
           ) : tx.execution_mode === 'LEADER_SELF_VALIDATOR' ? (
-            <Badge className="bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-400 border-blue-200 dark:border-blue-800">
-              Leader + Self Validator
-            </Badge>
+            <Badge className="bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-400 border-blue-200 dark:border-blue-800">Leader + Self Validator</Badge>
           ) : (
-            <Badge className="bg-green-50 dark:bg-green-950 text-green-700 dark:text-green-400 border-green-200 dark:border-green-800">
-              Normal
-            </Badge>
+            <Badge className="bg-green-50 dark:bg-green-950 text-green-700 dark:text-green-400 border-green-200 dark:border-green-800">Normal</Badge>
           )
         }
       />
-      <InfoRow
-        label="Rotation Count"
-        value={tx.rotation_count?.toString() || '-'}
-      />
-      <InfoRow
-        label="Initial Validators"
-        value={tx.num_of_initial_validators?.toString() || '-'}
-      />
+      <InfoRow label="Rotation Count" value={tx.rotation_count?.toString() || '-'} />
+      <InfoRow label="Initial Validators" value={tx.num_of_initial_validators?.toString() || '-'} />
       <InfoRow
         label="Consensus Result"
-        value={
-          consensusRound ? (
-            <ConsensusResultBadge result={consensusRound} variant="badge" />
-          ) : (
-            '-'
-          )
-        }
+        value={consensusRound ? <ConsensusResultBadge result={consensusRound} variant="badge" /> : '-'}
       />
       {tx.worker_id && <InfoRow label="Worker ID" value={tx.worker_id} />}
 
-      <FeeAccountingPanel transaction={tx} />
-
       {contractCodeB64 && dataObj && (
         <div className="border-t border-border mt-4 pt-4">
-          <h4 className="text-sm font-semibold text-foreground mb-3">
-            Input Data
-          </h4>
+          <h4 className="text-sm font-semibold text-foreground mb-3">Input Data</h4>
           {/* Deploy: show both constructor calldata and contract source */}
           <DataDecodePanel data={dataObj} />
         </div>
@@ -217,9 +178,7 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
 
       {calldataB64 && !contractCodeB64 && (
         <div className="border-t border-border mt-4 pt-4">
-          <h4 className="text-sm font-semibold text-foreground mb-3">
-            Input Data
-          </h4>
+          <h4 className="text-sm font-semibold text-foreground mb-3">Input Data</h4>
           <InputDataPanel calldataB64={calldataB64} />
         </div>
       )}
@@ -228,22 +187,16 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
       {(executionResult || genvmResult || decodedResult) && (
         <>
           <div className="border-t border-border mt-4 pt-4">
-            <h4 className="text-sm font-semibold text-foreground mb-3">
-              GenVM Execution
-            </h4>
+            <h4 className="text-sm font-semibold text-foreground mb-3">GenVM Execution</h4>
           </div>
           {executionResult && (
             <InfoRow
               label="Execution Result"
               value={
                 executionResult === 'SUCCESS' ? (
-                  <Badge className="bg-green-50 dark:bg-green-950 text-green-700 dark:text-green-400 border-green-200 dark:border-green-800">
-                    SUCCESS
-                  </Badge>
+                  <Badge className="bg-green-50 dark:bg-green-950 text-green-700 dark:text-green-400 border-green-200 dark:border-green-800">SUCCESS</Badge>
                 ) : (
-                  <Badge className="bg-red-50 dark:bg-red-950 text-red-700 dark:text-red-400 border-red-200 dark:border-red-800">
-                    {executionResult}
-                  </Badge>
+                  <Badge className="bg-red-50 dark:bg-red-950 text-red-700 dark:text-red-400 border-red-200 dark:border-red-800">{executionResult}</Badge>
                 )
               }
             />
@@ -260,11 +213,7 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
           {genvmResult?.stdout !== undefined && (
             <InfoRow
               label="Stdout"
-              value={
-                genvmResult.stdout || (
-                  <span className="text-muted-foreground">(empty)</span>
-                )
-              }
+              value={genvmResult.stdout || <span className="text-muted-foreground">(empty)</span>}
               copyable={!!genvmResult.stdout}
               copyText={genvmResult.stdout}
             />
@@ -298,24 +247,19 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
             {Object.entries(eqOutputs).map(([key, decoded]) => (
               <div key={key} className="bg-muted rounded-lg p-3">
                 <div className="flex items-center gap-2 mb-2">
-                  <span className="text-sm font-medium text-foreground">
-                    {key}
-                  </span>
+                  <span className="text-sm font-medium text-foreground">{key}</span>
                   <ResultStatusBadge status={decoded.status} />
                 </div>
                 {decoded.payload != null && (
                   <div className="text-sm">
                     {typeof decoded.payload === 'object' &&
                     decoded.payload !== null &&
-                    'readable' in
-                      (decoded.payload as Record<string, unknown>) ? (
+                    'readable' in (decoded.payload as Record<string, unknown>) ? (
                       <code className="text-foreground break-all">
                         {(decoded.payload as { readable: string }).readable}
                       </code>
                     ) : typeof decoded.payload === 'string' ? (
-                      <code className="text-foreground break-all">
-                        {decoded.payload}
-                      </code>
+                      <code className="text-foreground break-all">{decoded.payload}</code>
                     ) : (
                       <JsonViewer data={decoded.payload} />
                     )}
@@ -333,12 +277,4 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
       </div>
     </div>
   );
-}
-
-function stringField(
-  record: Record<string, unknown>,
-  key: string,
-): string | undefined {
-  const value = record[key];
-  return typeof value === 'string' ? value : undefined;
 }

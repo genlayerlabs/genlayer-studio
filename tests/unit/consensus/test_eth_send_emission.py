@@ -19,13 +19,11 @@ class TestPendingTransactionEthSend:
             on="finalized",
             value=1000,
             is_eth_send=True,
-            gas_used=123,
         )
         d = pt.to_dict()
         assert d["is_eth_send"] is True
         assert d["address"] == "0xrecipient"
         assert d["value"] == 1000
-        assert d["gas_used"] == 123
         assert "calldata" not in d
 
     def test_eth_send_from_dict(self):
@@ -34,31 +32,13 @@ class TestPendingTransactionEthSend:
             "is_eth_send": True,
             "on": "finalized",
             "value": 500,
-            "gas_used": 77,
         }
         pt = PendingTransaction.from_dict(d)
         assert pt.is_eth_send is True
         assert pt.address == "0xrecipient"
         assert pt.value == 500
-        assert pt.gas_used == 77
         assert pt.calldata == b""
         assert pt.code is None
-
-    def test_eth_send_from_dict_coerces_serialized_numeric_fields(self):
-        d = {
-            "address": "0xrecipient",
-            "is_eth_send": True,
-            "on": "finalized",
-            "value": str(3 * 10**18),
-            "declared_budget": "0",
-            "gas_used": "77",
-        }
-
-        pt = PendingTransaction.from_dict(d)
-
-        assert pt.value == 3 * 10**18
-        assert pt.declared_budget == 0
-        assert pt.gas_used == 77
 
     def test_eth_send_roundtrip(self):
         original = PendingTransaction(
@@ -69,14 +49,12 @@ class TestPendingTransactionEthSend:
             on="accepted",
             value=42,
             is_eth_send=True,
-            gas_used=91,
         )
         restored = PendingTransaction.from_dict(original.to_dict())
         assert restored.is_eth_send is True
         assert restored.address == original.address
         assert restored.value == original.value
         assert restored.on == original.on
-        assert restored.gas_used == original.gas_used
 
     def test_non_eth_send_default(self):
         pt = PendingTransaction(

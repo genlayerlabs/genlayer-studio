@@ -23,10 +23,6 @@ export interface EventProperties {
     contract_name: string;
     method_name: string;
   };
-  estimated_write_method_fees: {
-    contract_name: string;
-    method_name: string;
-  };
   upgraded_contract: {
     contract_name: string;
   };

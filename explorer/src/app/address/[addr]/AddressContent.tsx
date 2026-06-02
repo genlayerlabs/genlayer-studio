@@ -7,6 +7,8 @@ import { Transaction, Validator, CurrentState } from '@/lib/types';
 import { AddressTransactionTable } from '@/components/AddressTransactionTable';
 import { CopyButton } from '@/components/CopyButton';
 import { AddressDisplay } from '@/components/AddressDisplay';
+import { CodeBlock } from '@/components/CodeBlock';
+import { JsonViewer } from '@/components/JsonViewer';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
@@ -32,7 +34,6 @@ interface CreatorInfo {
   deployment_tx_hash: string;
   creation_timestamp: string | null;
 }
-
 export interface AddressInfo {
   type: 'CONTRACT' | 'VALIDATOR' | 'ACCOUNT';
   address: string;

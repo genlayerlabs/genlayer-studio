@@ -25,18 +25,6 @@ from . import public_abi
 ACCOUNT_ADDR_SIZE = 20
 SLOT_ID_SIZE = 32
 
-DEFAULT_GAS_DATA: dict[str, str] = {
-    "storageUnitPrice": "1",
-    "receiptGasPerByte": "1",
-    "gasPerChangedSlot": "1",
-    "intrinsicGas": "0",
-    "bootloaderOverhead": "0",
-    "fixedProposeReceiptGas": "0",
-    "fixedMessageRevealGas": "0",
-    "genPerTimeUnit": "0",
-}
-DEFAULT_INITIAL_TIME_UNITS_ALLOCATION = 10 * 60
-
 from .logger import Logger
 
 
@@ -114,31 +102,11 @@ class ResultFingerprint(typing.TypedDict):
     module_instances: dict[str, typing.Any]
 
 
-class MessageFeeParams(typing.TypedDict):
-    leader_timeunits_allocation: int
-    validator_timeunits_allocation: int
-    execution_budget_per_round: int
-    rotations: list[int]
-
-
-class MessageFeeAllocationNode(typing.TypedDict):
-    message_type: typing.Literal["InternalAccepted", "InternalFinalized", "External"]
-    parent_index: int | None
-    recipient: Address | None
-    call_key: bytes | None
-    budget: int
-    fee_params: MessageFeeParams
-
-
 class EthSendInner(typing.TypedDict):
     type: typing.Literal["EthSend"]
     address: Address
     calldata: bytes
     value: int
-    feeParams: typing.NotRequired[bytes]
-    declaredBudget: typing.NotRequired[int]
-    callKey: typing.NotRequired[bytes]
-    allocationSubtree: typing.NotRequired[list[dict]]
 
 
 class PostMessageInner(typing.TypedDict):
@@ -147,10 +115,6 @@ class PostMessageInner(typing.TypedDict):
     calldata: gvm_calldata.Decoded
     value: int
     on: typing.Literal["finalized", "accepted"]
-    feeParams: typing.NotRequired[bytes]
-    declaredBudget: typing.NotRequired[int]
-    callKey: typing.NotRequired[bytes]
-    allocationSubtree: typing.NotRequired[list[dict]]
 
 
 class DeployContractInner(typing.TypedDict):
@@ -160,10 +124,6 @@ class DeployContractInner(typing.TypedDict):
     value: int
     on: typing.Literal["finalized", "accepted"]
     salt_nonce: int
-    feeParams: typing.NotRequired[bytes]
-    declaredBudget: typing.NotRequired[int]
-    callKey: typing.NotRequired[bytes]
-    allocationSubtree: typing.NotRequired[list[dict]]
 
 
 class EmitEventInner(typing.TypedDict):
@@ -415,7 +375,6 @@ class RunHostAndProgramRes:
     result_storage_changes: list[tuple[bytes, bytes]]
     result_emissions: list[ResultEmission]
     result_nondet_results: list[bytes]
-    data_fees_remaining: list[int]
     vm_error_description: str | None = None
 
 
@@ -470,20 +429,17 @@ async def run_genvm(
     capture_output: bool = True,
     message: Message,
     host_data: str = "",
-    gas_data: dict[str, str] | None = None,
     host: str,
     extra_args: list[str] = [],
-    bucket_totals: list[int] | None = None,
+    data_fees_limit: int = 10_000_000,
+    storage_page_cost: int = 1,
+    receipt_word_cost: int = 1,
     code: bytes | None = None,
     calldata: bytes,
     leader_nondet_results: list[bytes] | None = None,
-    message_fee_allocation: list[MessageFeeAllocationNode] | None = None,
     request_extra: dict[str, gvm_calldata.Encodable] = {},
 ) -> RunHostAndProgramRes:
     logger = ctx.logger
-    effective_bucket_totals = bucket_totals or [10_000_000, 10_000_000, 10_000_000]
-    effective_gas_data = DEFAULT_GAS_DATA if gas_data is None else gas_data
-    effective_message_fee_allocation = message_fee_allocation or []
 
     perf_timeline: dict[str, typing.Any] = {
         "run_started_s": time.perf_counter(),
@@ -519,10 +475,9 @@ async def run_genvm(
                     "code": code,
                     "calldata": calldata,
                     "leader_nondet_results": leader_nondet_results,
-                    "bucket_totals": effective_bucket_totals,
-                    "gas_data": effective_gas_data,
-                    "message_fee_allocation": effective_message_fee_allocation,
-                    "initial_time_units_allocation": DEFAULT_INITIAL_TIME_UNITS_ALLOCATION,
+                    "data_fees_limit": data_fees_limit,
+                    "storage_page_cost": storage_page_cost,
+                    "receipt_word_cost": receipt_word_cost,
                     **request_extra,
                 }
             ),
@@ -836,7 +791,6 @@ async def run_genvm(
             result_storage_changes = decoded.get("storage_changes", [])
             result_emissions = decoded.get("emissions", [])
             nondet_results = decoded.get("nondet_results", [])
-            data_fees_remaining = decoded.get("data_fees_remaining", [])
         else:
             execution_hash = b""
             result_kind = public_abi.ResultCode.INTERNAL_ERROR
@@ -845,11 +799,10 @@ async def run_genvm(
             result_storage_changes = []
             result_emissions = []
             nondet_results = []
-            data_fees_remaining = []
 
         if timeout_fired.is_set() and result_kind != public_abi.ResultCode.RETURN:
             result_kind = public_abi.ResultCode.VM_ERROR
-            result_data = str(public_abi.VmError.TIMEOUT)
+            result_data = public_abi.VmError.TIMEOUT.value
 
         vm_error_description: str | None = None
         if result_kind == public_abi.ResultCode.VM_ERROR and isinstance(
@@ -879,7 +832,6 @@ async def run_genvm(
             result_storage_changes=result_storage_changes,
             result_emissions=result_emissions,
             result_nondet_results=nondet_results,
-            data_fees_remaining=data_fees_remaining,
             vm_error_description=vm_error_description,
             execution_time=time.time() - started_at[0],
         )

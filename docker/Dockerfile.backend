@@ -3,7 +3,7 @@ FROM ubuntu:24.04 AS base
 ARG TARGETPLATFORM
 ARG TARGETARCH
 
-ARG GENVM_TAG=v0.3.0-rc1
+ARG GENVM_TAG=v0.2.16
 
 ENV GENVM_TAG=$GENVM_TAG
 
@@ -46,32 +46,32 @@ ENV HUGGINGFACE_HUB_CACHE /home/backend-user/.cache/huggingface
 
 ENV RUST_BACKTRACE=1
 
-# Download and extract GenVM binaries. Keep downloads in the extraction layer so
-# architecture tarballs do not remain in lower image layers.
+ADD \
+   https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-linux-amd64.tar.xz \
+   /genvm/genvm-linux-amd64.tar.xz
+
+ADD \
+   https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-linux-arm64.tar.xz \
+   /genvm/genvm-linux-arm64.tar.xz
+
+ADD \
+   https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-universal.tar.xz \
+   /genvm/genvm-universal.tar.xz
+
+# Extract and prepare GenVM binaries
 RUN cd /genvm \
-    && if [[ "$TARGETPLATFORM" == "linux/amd64" ]] || [[ -z "$TARGETPLATFORM" ]]; then \
-            ARCH_FILE="genvm-linux-amd64.tar.xz" ; \
+    && if [[ "$TARGETPLATFORM" == "linux/amd64" ]] ; \
+        then \
+            tar -xf genvm-linux-amd64.tar.xz ; \
         elif [[ "$TARGETPLATFORM" == "linux/arm64" ]] ; \
         then \
-            ARCH_FILE="genvm-linux-arm64.tar.xz" ; \
+            tar -xf genvm-linux-arm64.tar.xz ; \
         else \
             echo "Sorry, $TARGETPLATFORM is not supported yet" ; exit 1 ; \
         fi \
-    && curl -L --proto '=https' --proto-redir '=https' \
-        --fail --retry 3 --retry-delay 2 \
-        --connect-timeout 10 --max-time 300 \
-        --progress-bar \
-        -o "$ARCH_FILE" \
-        "https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/$ARCH_FILE" \
-    && curl -L --proto '=https' --proto-redir '=https' \
-        --fail --retry 3 --retry-delay 2 \
-        --connect-timeout 10 --max-time 300 \
-        --progress-bar \
-        -o "genvm-runners-all.tar.xz" \
-        "https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-runners-all.tar.xz" \
-    && tar -xf "$ARCH_FILE" \
-    && tar -xf genvm-runners-all.tar.xz \
+    && tar -xf genvm-universal.tar.xz \
     && rm *.tar.xz \
+    && ls -R . \
     && chown -R backend-user:backend-group /genvm \
     && su - backend-user -c "/genvm/bin/post-install.py --precompile false" \
     && find /genvm -name genvm.yaml -exec sed -i 's|cache_dir:.*|cache_dir: /genvm-cache/|' {} + \

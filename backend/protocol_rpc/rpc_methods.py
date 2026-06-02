@@ -169,7 +169,6 @@ async def update_validator(
     stake: int | None = None,
     provider: str | None = None,
     model: str | None = None,
-    config: dict | None = None,
     plugin: str | None = None,
     plugin_config: dict | None = None,
     session: Session = Depends(get_db_session),
@@ -182,7 +181,6 @@ async def update_validator(
         stake=stake,
         provider=provider,
         model=model,
-        config=config,
         plugin=plugin,
         plugin_config=plugin_config,
     )
@@ -291,11 +289,6 @@ def get_finality_window_time(
     consensus=Depends(get_consensus),
 ) -> dict:
     return impl.get_finality_window_time(consensus)
-
-
-@rpc.method("sim_getFeeConfig", log_policy=LogPolicy.debug())
-def get_fee_config() -> dict:
-    return impl.get_studio_fee_config()
 
 
 @rpc.method("sim_getConsensusContract", log_policy=LogPolicy.debug())
@@ -421,27 +414,6 @@ async def sim_call(
     genvm_manager=Depends(get_genvm_manager),
 ) -> dict:
     return await impl.sim_call(
-        session=session,
-        accounts_manager=accounts_manager,
-        msg_handler=msg_handler,
-        transactions_parser=transactions_parser,
-        validators_manager=validators_manager,
-        genvm_manager=genvm_manager,
-        params=params,
-    )
-
-
-@rpc.method("sim_estimateTransactionFees")
-async def sim_estimate_transaction_fees(
-    params: dict,
-    session: Session = Depends(get_db_session),
-    accounts_manager: AccountsManager = Depends(get_accounts_manager),
-    msg_handler=Depends(get_message_handler),
-    transactions_parser=Depends(get_transactions_parser),
-    validators_manager=Depends(get_validators_manager),
-    genvm_manager=Depends(get_genvm_manager),
-) -> dict:
-    return await impl.sim_estimate_transaction_fees(
         session=session,
         accounts_manager=accounts_manager,
         msg_handler=msg_handler,

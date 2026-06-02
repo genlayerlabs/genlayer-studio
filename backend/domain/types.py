@@ -164,12 +164,6 @@ class TransactionExecutionMode(Enum):
     NORMAL = "NORMAL"
 
 
-def _int_from_serialized(value, default: int | None = 0) -> int | None:
-    if value is None or value == "":
-        return default
-    return int(value)
-
-
 @dataclass
 class Transaction:
     hash: str
@@ -265,7 +259,7 @@ class Transaction:
             data=input.get("data"),
             consensus_data=ConsensusData.from_dict(input.get("consensus_data")),
             nonce=input.get("nonce"),
-            value=_int_from_serialized(input.get("value"), None),
+            value=input.get("value"),
             gaslimit=input.get("gaslimit"),
             r=input.get("r"),
             s=input.get("s"),

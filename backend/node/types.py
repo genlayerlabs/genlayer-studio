@@ -155,12 +155,6 @@ class ExecutionResultStatus(Enum):
             raise ValueError(f"Invalid execution result status value: {value}")
 
 
-def _int_from_serialized(value, default: int = 0) -> int:
-    if value is None or value == "":
-        return default
-    return int(value)
-
-
 @dataclass
 class PendingTransaction:
     address: str  # Address of the contract to call
@@ -172,11 +166,6 @@ class PendingTransaction:
     is_eth_send: bool = (
         False  # True for EthSend (simple value transfer, no contract call)
     )
-    fee_params: bytes = b""
-    declared_budget: int = 0
-    call_key: str = "0x" + ("0" * 64)
-    allocation_subtree: list[dict] = field(default_factory=list)
-    gas_used: int = 0
 
     def is_deploy(self) -> bool:
         return self.code is not None
@@ -188,11 +177,6 @@ class PendingTransaction:
                 "is_eth_send": True,
                 "on": self.on,
                 "value": self.value,
-                "fee_params": str(base64.b64encode(self.fee_params), encoding="ascii"),
-                "declared_budget": self.declared_budget,
-                "call_key": self.call_key,
-                "allocation_subtree": self.allocation_subtree,
-                "gas_used": self.gas_used,
             }
         elif self.code is None:
             return {
@@ -200,11 +184,6 @@ class PendingTransaction:
                 "calldata": str(base64.b64encode(self.calldata), encoding="ascii"),
                 "on": self.on,
                 "value": self.value,
-                "fee_params": str(base64.b64encode(self.fee_params), encoding="ascii"),
-                "declared_budget": self.declared_budget,
-                "call_key": self.call_key,
-                "allocation_subtree": self.allocation_subtree,
-                "gas_used": self.gas_used,
             }
         else:
             return {
@@ -213,11 +192,6 @@ class PendingTransaction:
                 "salt_nonce": self.salt_nonce,
                 "on": self.on,
                 "value": self.value,
-                "fee_params": str(base64.b64encode(self.fee_params), encoding="ascii"),
-                "declared_budget": self.declared_budget,
-                "call_key": self.call_key,
-                "allocation_subtree": self.allocation_subtree,
-                "gas_used": self.gas_used,
             }
 
     @classmethod
@@ -228,42 +202,27 @@ class PendingTransaction:
                 calldata=b"",
                 code=None,
                 salt_nonce=0,
-                value=_int_from_serialized(input.get("value"), 0),
+                value=input.get("value", 0),
                 on=input.get("on", "finalized"),
                 is_eth_send=True,
-                fee_params=base64.b64decode(input.get("fee_params", "")),
-                declared_budget=_int_from_serialized(input.get("declared_budget"), 0),
-                call_key=input.get("call_key", "0x" + ("0" * 64)),
-                allocation_subtree=input.get("allocation_subtree", []),
-                gas_used=_int_from_serialized(input.get("gas_used"), 0),
             )
         elif "code" in input:
             return cls(
                 address="0x",
                 calldata=base64.b64decode(input["calldata"]),
                 code=base64.b64decode(input["code"]),
-                salt_nonce=_int_from_serialized(input.get("salt_nonce"), 0),
-                value=_int_from_serialized(input.get("value"), 0),
+                salt_nonce=input.get("salt_nonce", 0),
+                value=input.get("value", 0),
                 on=input.get("on", "finalized"),
-                fee_params=base64.b64decode(input.get("fee_params", "")),
-                declared_budget=_int_from_serialized(input.get("declared_budget"), 0),
-                call_key=input.get("call_key", "0x" + ("0" * 64)),
-                allocation_subtree=input.get("allocation_subtree", []),
-                gas_used=_int_from_serialized(input.get("gas_used"), 0),
             )
         else:
             return cls(
                 address=input["address"],
                 calldata=base64.b64decode(input["calldata"]),
-                value=_int_from_serialized(input.get("value"), 0),
+                value=input.get("value", 0),
                 code=None,
                 salt_nonce=0,
                 on=input.get("on", "finalized"),
-                fee_params=base64.b64decode(input.get("fee_params", "")),
-                declared_budget=_int_from_serialized(input.get("declared_budget"), 0),
-                call_key=input.get("call_key", "0x" + ("0" * 64)),
-                allocation_subtree=input.get("allocation_subtree", []),
-                gas_used=_int_from_serialized(input.get("gas_used"), 0),
             )
 
 

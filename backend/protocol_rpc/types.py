@@ -30,14 +30,6 @@ class EndpointResult:
 @dataclass
 class DecodedsubmitAppealDataArgs:
     tx_id: str
-    fees_distribution: dict | None = None
-    top_up_and_submit: bool = False
-
-
-@dataclass
-class DecodedTopUpFeesDataArgs:
-    tx_id: str
-    fees_distribution: dict
 
 
 @dataclass
@@ -47,12 +39,6 @@ class DecodedRollupTransactionDataArgs:
     num_of_initial_validators: int
     max_rotations: int
     data: str
-    valid_until: int | None = None
-    salt_nonce: int = 0
-    user_value: int | None = None
-    fees_distribution: dict | None = None
-    message_allocations: list[dict] = field(default_factory=list)
-    message_allocations_count: int = 0
 
 
 @dataclass
@@ -65,23 +51,10 @@ class DecodedRollupTransactionData:
 class DecodedRollupTransaction:
     from_address: str
     to_address: str
-    data: (
-        DecodedRollupTransactionData
-        | DecodedsubmitAppealDataArgs
-        | DecodedTopUpFeesDataArgs
-        | None
-    )
+    data: DecodedRollupTransactionData | DecodedsubmitAppealDataArgs
     type: str
     nonce: int
     value: int
-    fee_value: int = 0
-    submitted_value: int | None = None
-
-    @property
-    def total_spend(self) -> int:
-        if self.submitted_value is not None:
-            return self.submitted_value
-        return self.value + self.fee_value
 
 
 @dataclass

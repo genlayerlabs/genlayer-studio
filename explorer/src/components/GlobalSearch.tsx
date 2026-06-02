@@ -7,7 +7,7 @@ import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { StatusBadge } from '@/components/StatusBadge';
 import { Badge } from '@/components/ui/badge';
 import { truncateHash, truncateAddress } from '@/lib/formatters';
-import type { Transaction, CurrentState, Validator } from '@/lib/types';
+import type { Transaction, CurrentState, Validator, TransactionStatus } from '@/lib/types';
 
 interface SearchResults {
   transactions: Transaction[];
