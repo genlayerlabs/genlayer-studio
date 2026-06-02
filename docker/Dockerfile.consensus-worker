@@ -4,7 +4,7 @@ FROM ubuntu:24.04 AS base
 ARG TARGETPLATFORM
 ARG TARGETARCH
 
-ARG GENVM_TAG=v0.2.16
+ARG GENVM_TAG=v0.3.0-rc1
 ENV GENVM_TAG=$GENVM_TAG
 
 ARG path=/app
@@ -66,13 +66,13 @@ RUN cd /genvm \
         -o "$ARCH_FILE" \
         "https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/$ARCH_FILE" \
     && echo "✓ Downloaded $ARCH_FILE" \
-    && echo "Downloading genvm-universal.tar.xz..." \
+    && echo "Downloading genvm-runners-all.tar.xz..." \
     && curl -L --fail --retry 3 --retry-delay 2 \
         --connect-timeout 10 --max-time 300 \
         --progress-bar \
-        -o "genvm-universal.tar.xz" \
-        "https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-universal.tar.xz" \
-    && echo "✓ Downloaded genvm-universal.tar.xz" \
+        -o "genvm-runners-all.tar.xz" \
+        "https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-runners-all.tar.xz" \
+    && echo "✓ Downloaded genvm-runners-all.tar.xz" \
     && echo "Verifying downloads..." \
     && ls -lah *.tar.xz \
     && for f in *.tar.xz; do \
@@ -82,7 +82,7 @@ RUN cd /genvm \
     done \
     && echo "Extracting archives..." \
     && tar -xf "$ARCH_FILE" \
-    && tar -xf "genvm-universal.tar.xz" \
+    && tar -xf "genvm-runners-all.tar.xz" \
     && rm *.tar.xz \
     && echo "Configuring GenVM manager threads..." \
     && CONFIG_FILE="/genvm/config/genvm-manager.yaml" \

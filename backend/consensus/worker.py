@@ -11,6 +11,7 @@ from sqlalchemy import text, bindparam
 
 from backend.database_handler.models import Transactions, TransactionStatus
 from backend.database_handler.transactions_processor import TransactionsProcessor
+from backend.database_handler.accounts_manager import AccountsManager
 from backend.database_handler.errors import ContractNotFoundError
 from backend.domain.types import Transaction
 from backend.node.genvm.error_codes import GenVMInternalError
@@ -1297,6 +1298,12 @@ class ConsensusWorker:
                 from backend.database_handler.accounts_manager import AccountsManager
 
                 AccountsManager(session).refund_tx_value(tx_hash, tx.from_address)
+            if tx.from_address:
+                from backend.database_handler.accounts_manager import AccountsManager
+
+                AccountsManager(session).cancel_tx_fee_accounting_once(
+                    tx_hash, tx.from_address, "no_validators_available"
+                )
             session.commit()
 
             # Clean up retry tracking
@@ -1361,6 +1368,14 @@ class ConsensusWorker:
 
                     AccountsManager(cancel_session).refund_tx_value(
                         tx_hash, tx.from_address
+                    )
+                if tx.from_address:
+                    from backend.database_handler.accounts_manager import (
+                        AccountsManager,
+                    )
+
+                    AccountsManager(cancel_session).cancel_tx_fee_accounting_once(
+                        tx_hash, tx.from_address, "max_generic_retries_exceeded"
                     )
                 cancel_session.commit()
 
@@ -1698,6 +1713,14 @@ class ConsensusWorker:
                     TransactionStatus.FINALIZED,
                     self.msg_handler,
                 )
+                tx = error_session.query(Transactions).filter_by(hash=tx_hash).one()
+                refund_recipient = tx.origin_address or tx.from_address
+                if refund_recipient:
+                    AccountsManager(error_session).settle_tx_fee_accounting_once(
+                        tx_hash,
+                        refund_recipient,
+                        reason="finalized_contract_not_found",
+                    )
                 error_session.commit()
 
             logger.info(
@@ -1802,6 +1825,14 @@ class ConsensusWorker:
                     TransactionStatus.FINALIZED,
                     self.msg_handler,
                 )
+                tx = error_session.query(Transactions).filter_by(hash=tx_hash).one()
+                refund_recipient = tx.origin_address or tx.from_address
+                if refund_recipient:
+                    AccountsManager(error_session).settle_tx_fee_accounting_once(
+                        tx_hash,
+                        refund_recipient,
+                        reason="finalized_contract_not_found_during_appeal",
+                    )
                 error_session.commit()
 
             logger.info(

@@ -214,11 +214,17 @@ def _evaluate_permit_readiness(
 
 # Send system health metrics every 6 health checks (6 × 10s = 60s = 1 minute)
 METRICS_SEND_INTERVAL = 6
+_no_progress_scan_suppressed_until: float = 0.0
 
 
 def get_health_check_interval() -> float:
     """Get health check interval from env (default 10s)."""
     return float(os.getenv("HEALTH_CHECK_INTERVAL_SECONDS", "10"))
+
+
+def get_no_progress_scan_error_cooldown_seconds() -> float:
+    """Cooldown after the expensive no-progress scan times out."""
+    return float(os.getenv("HEALTH_NO_PROGRESS_SCAN_ERROR_COOLDOWN_SECONDS", "300"))
 
 
 def _update_genvm_health_cache(
@@ -327,6 +333,9 @@ async def _run_health_checks() -> None:
             ),
             "no_progress_check_error": consensus_health.get(
                 "no_progress_check_error", False
+            ),
+            "no_progress_scan_suppressed": consensus_health.get(
+                "no_progress_scan_suppressed", False
             ),
             "active_workers": consensus_health.get("active_workers", 0),
             "status": consensus_status,
@@ -614,6 +623,9 @@ async def _check_consensus_health() -> Dict[str, Any]:
     NO_PROGRESS_QUERY_TIMEOUT_MS = int(
         os.environ.get("HEALTH_NO_PROGRESS_QUERY_TIMEOUT_MS", "5000")
     )
+    NO_PROGRESS_SCAN_ERROR_COOLDOWN_SECONDS = (
+        get_no_progress_scan_error_cooldown_seconds()
+    )
     RECOVERY_STORM_MIN_RECOVERIES = int(
         os.environ.get("HEALTH_RECOVERY_STORM_MIN_RECOVERIES", "2")
     )
@@ -651,6 +663,8 @@ async def _check_consensus_health() -> Dict[str, Any]:
         db_manager = get_database_manager()
 
         def _query_consensus():
+            global _no_progress_scan_suppressed_until
+
             from sqlalchemy import text
 
             with db_manager.engine.connect() as conn:
@@ -887,68 +901,79 @@ async def _check_consensus_health() -> Dict[str, Any]:
 
                 seconds_since_consensus_progress = None
                 last_progress_epoch = 0
+                no_progress_scan_suppressed = False
                 if should_scan_progress:
-                    try:
-                        conn.execute(
-                            text(
-                                f"SET LOCAL statement_timeout = {NO_PROGRESS_QUERY_TIMEOUT_MS}"
-                            )
-                        )
-                        progress_row = conn.execute(
-                            text(
-                                """
-                                SELECT
-                                    MAX(
-                                        GREATEST(
-                                            COALESCE(
-                                                CASE
-                                                    WHEN consensus_history
-                                                         -> 'current_monitoring'
-                                                         ->> 'ACCEPTED'
-                                                         ~ '^[0-9]+(\\.[0-9]+)?$'
-                                                    THEN (
-                                                        consensus_history
-                                                        -> 'current_monitoring'
-                                                        ->> 'ACCEPTED'
-                                                    )::double precision
-                                                END,
-                                                0
-                                            ),
-                                            COALESCE(
-                                                CASE
-                                                    WHEN consensus_history
-                                                         -> 'current_monitoring'
-                                                         ->> 'FINALIZED'
-                                                         ~ '^[0-9]+(\\.[0-9]+)?$'
-                                                    THEN (
-                                                        consensus_history
-                                                        -> 'current_monitoring'
-                                                        ->> 'FINALIZED'
-                                                    )::double precision
-                                                END,
-                                                0
-                                            )
-                                        )
-                                    ) AS last_progress_epoch
-                                FROM transactions
-                                WHERE consensus_history IS NOT NULL
-                                """
-                            )
-                        ).fetchone()
-                        last_progress_epoch = (
-                            progress_row.last_progress_epoch if progress_row else 0
-                        )
-                        seconds_since_consensus_progress = (
-                            int(time.time() - last_progress_epoch)
-                            if last_progress_epoch
-                            else None
-                        )
-                    except Exception as exc:
+                    if time.time() < _no_progress_scan_suppressed_until:
                         no_progress_check_error = True
-                        logger.warning(
-                            "No-progress health query skipped after timeout/error: %s",
-                            exc,
-                        )
+                        no_progress_scan_suppressed = True
+                    else:
+                        try:
+                            conn.execute(
+                                text(
+                                    f"SET LOCAL statement_timeout = {NO_PROGRESS_QUERY_TIMEOUT_MS}"
+                                )
+                            )
+                            progress_row = conn.execute(
+                                text(
+                                    """
+                                    SELECT
+                                        MAX(
+                                            GREATEST(
+                                                COALESCE(
+                                                    CASE
+                                                        WHEN consensus_history
+                                                             -> 'current_monitoring'
+                                                             ->> 'ACCEPTED'
+                                                             ~ '^[0-9]+(\\.[0-9]+)?$'
+                                                        THEN (
+                                                            consensus_history
+                                                            -> 'current_monitoring'
+                                                            ->> 'ACCEPTED'
+                                                        )::double precision
+                                                    END,
+                                                    0
+                                                ),
+                                                COALESCE(
+                                                    CASE
+                                                        WHEN consensus_history
+                                                             -> 'current_monitoring'
+                                                             ->> 'FINALIZED'
+                                                             ~ '^[0-9]+(\\.[0-9]+)?$'
+                                                        THEN (
+                                                            consensus_history
+                                                            -> 'current_monitoring'
+                                                            ->> 'FINALIZED'
+                                                        )::double precision
+                                                    END,
+                                                    0
+                                                )
+                                            )
+                                        ) AS last_progress_epoch
+                                    FROM transactions
+                                    WHERE consensus_history IS NOT NULL
+                                    """
+                                )
+                            ).fetchone()
+                            _no_progress_scan_suppressed_until = 0.0
+                            last_progress_epoch = (
+                                progress_row.last_progress_epoch if progress_row else 0
+                            )
+                            seconds_since_consensus_progress = (
+                                int(time.time() - last_progress_epoch)
+                                if last_progress_epoch
+                                else None
+                            )
+                        except Exception as exc:
+                            no_progress_check_error = True
+                            _no_progress_scan_suppressed_until = (
+                                time.time() + NO_PROGRESS_SCAN_ERROR_COOLDOWN_SECONDS
+                            )
+                            logger.warning(
+                                "No-progress health query skipped after timeout/error: %s",
+                                exc,
+                            )
+                else:
+                    _no_progress_scan_suppressed_until = 0.0
 
                 # The progress scan is an alert-quality check, not a liveness
                 # requirement. If it times out on a large table, surface that
@@ -1005,6 +1030,7 @@ async def _check_consensus_health() -> Dict[str, Any]:
                         seconds_since_consensus_progress
                     ),
                     "no_progress_check_error": no_progress_check_error,
+                    "no_progress_scan_suppressed": no_progress_scan_suppressed,
                     "no_progress_window_minutes": NO_PROGRESS_WINDOW_MINUTES,
                     "active_workers": active_workers_count,
                 }

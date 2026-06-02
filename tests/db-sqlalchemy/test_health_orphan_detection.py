@@ -50,14 +50,17 @@ def _wire_health_module_to_test_engine(engine: Engine):
 
     prev_mgr = session_factory._db_manager
     prev_router = health_module._rpc_router_ref
+    prev_suppressed_until = health_module._no_progress_scan_suppressed_until
 
     session_factory._db_manager = _StubManager(engine=engine)
     health_module._rpc_router_ref = object()  # truthy
+    health_module._no_progress_scan_suppressed_until = 0.0
 
     yield
 
     session_factory._db_manager = prev_mgr
     health_module._rpc_router_ref = prev_router
+    health_module._no_progress_scan_suppressed_until = prev_suppressed_until
 
 
 def _insert_tx(
@@ -778,6 +781,59 @@ async def test_no_progress_scan_error_does_not_assert_outage(
     assert result["no_consensus_progress"] is False
     assert result["no_progress_backlog_count"] == 3
     assert result["status"] == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_no_progress_scan_timeout_enters_cooldown(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+):
+    """After a history scan timeout, subsequent health loops should not
+    immediately run the same expensive JSON scan again."""
+    monkeypatch.setenv("HEALTH_NO_PROGRESS_WINDOW_MINUTES", "10")
+    monkeypatch.setenv("HEALTH_NO_PROGRESS_MIN_BACKLOG", "3")
+    monkeypatch.setenv("HEALTH_NO_PROGRESS_SCAN_ERROR_COOLDOWN_SECONDS", "300")
+
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+
+    with Session_() as s:
+        for i in range(3):
+            _insert_tx(
+                s,
+                tx_hash=f"0xe0{i:062x}",
+                to_address="0x" + "e0" * 20,
+                status="PENDING",
+                nonce=i,
+                created_at=now - timedelta(minutes=20 + i),
+            )
+        s.commit()
+
+    progress_scan_count = 0
+
+    def fail_on_first_progress_scan(
+        conn, cursor, statement, parameters, context, executemany
+    ):
+        nonlocal progress_scan_count
+        if "current_monitoring" in statement:
+            progress_scan_count += 1
+            if progress_scan_count == 1:
+                raise RuntimeError("simulated progress scan timeout")
+            raise AssertionError("progress history scan should be in cooldown")
+
+    event.listen(engine, "before_cursor_execute", fail_on_first_progress_scan)
+    try:
+        from backend.protocol_rpc import health as health_module
+
+        first = await health_module._check_consensus_health()
+        second = await health_module._check_consensus_health()
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_on_first_progress_scan)
+
+    assert first["no_progress_check_error"] is True
+    assert first["no_progress_scan_suppressed"] is False
+    assert second["no_progress_check_error"] is True
+    assert second["no_progress_scan_suppressed"] is True
+    assert progress_scan_count == 1
 
 
 @pytest.mark.asyncio

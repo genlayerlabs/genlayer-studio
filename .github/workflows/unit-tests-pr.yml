@@ -21,6 +21,24 @@ jobs:
     secrets:
       codecov_token: ${{ secrets.CODECOV_TOKEN }}
 
+  explorer-unit-tests:
+    if: (github.actor != 'dependabot[bot]' && github.actor != 'renovate[bot]')
+    name: Explorer Unit Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: explorer
+    steps:
+      - uses: actions/checkout@v6
+      - name: Use Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm run test:fee-accounting
+      - run: npm run lint
+      - run: npm run build
+
   backend-unit-tests:
     if: (github.actor != 'dependabot[bot]' && github.actor != 'renovate[bot]')
     runs-on: ubuntu-latest

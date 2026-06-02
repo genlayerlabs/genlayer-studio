@@ -49,6 +49,17 @@ from .error_codes import (
     GenVMInternalError,
 )
 
+GENVM_GASLESS_GAS_DATA: dict[str, str] = {
+    "storageUnitPrice": "0",
+    "receiptGasPerByte": "0",
+    "gasPerChangedSlot": "0",
+    "intrinsicGas": "0",
+    "bootloaderOverhead": "0",
+    "fixedProposeReceiptGas": "0",
+    "fixedMessageRevealGas": "0",
+    "genPerTimeUnit": "0",
+}
+
 
 @dataclass
 class ExecutionError:
@@ -234,6 +245,46 @@ class ExecutionResult:
     processing_time: int
     nondet_disagree: int | None
     execution_stats: dict | None = None
+    data_fee_bucket_totals: list[int] | None = None
+    data_fees_remaining: list[int] | None = None
+
+
+def _emission_value(emission: dict, name: str):
+    snake = "".join(f"_{char.lower()}" if char.isupper() else char for char in name)
+    return emission.get(name, emission.get(snake))
+
+
+def _emission_bytes(emission: dict, name: str) -> bytes:
+    value = _emission_value(emission, name)
+    if value is None:
+        return b""
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        raw = value.removeprefix("0x")
+        try:
+            return bytes.fromhex(raw)
+        except ValueError:
+            return base64.b64decode(value)
+    return bytes(value)
+
+
+def _emission_int(emission: dict, name: str) -> int:
+    return int(_emission_value(emission, name) or 0)
+
+
+def _emission_hex(emission: dict, name: str) -> str:
+    value = _emission_value(emission, name)
+    if value is None:
+        return "0x" + ("0" * 64)
+    if isinstance(value, bytes):
+        return "0x" + value.hex().rjust(64, "0")[-64:]
+    return "0x" + str(value).removeprefix("0x").lower().rjust(64, "0")[-64:]
+
+
+def _emission_list(emission: dict, name: str) -> list:
+    value = _emission_value(emission, name)
+    return value if isinstance(value, list) else []
 
 
 class Host(genvmhost.IHost):
@@ -355,6 +406,12 @@ class Host(genvmhost.IHost):
                             salt_nonce=0,
                             value=emission["value"],
                             on=emission["on"],
+                            fee_params=_emission_bytes(emission, "feeParams"),
+                            declared_budget=_emission_int(emission, "declaredBudget"),
+                            call_key=_emission_hex(emission, "callKey"),
+                            allocation_subtree=_emission_list(
+                                emission, "allocationSubtree"
+                            ),
                         )
                     )
                 case "DeployContract":
@@ -366,6 +423,12 @@ class Host(genvmhost.IHost):
                             salt_nonce=emission["salt_nonce"],
                             value=emission["value"],
                             on=emission["on"],
+                            fee_params=_emission_bytes(emission, "feeParams"),
+                            declared_budget=_emission_int(emission, "declaredBudget"),
+                            call_key=_emission_hex(emission, "callKey"),
+                            allocation_subtree=_emission_list(
+                                emission, "allocationSubtree"
+                            ),
                         )
                     )
                 case "EthSend":
@@ -378,6 +441,13 @@ class Host(genvmhost.IHost):
                             value=emission["value"],
                             on="finalized",
                             is_eth_send=True,
+                            fee_params=_emission_bytes(emission, "feeParams"),
+                            declared_budget=_emission_int(emission, "declaredBudget"),
+                            call_key=_emission_hex(emission, "callKey"),
+                            allocation_subtree=_emission_list(
+                                emission, "allocationSubtree"
+                            ),
+                            gas_used=_emission_int(emission, "gasUsed"),
                         )
                     )
 
@@ -395,6 +465,7 @@ class Host(genvmhost.IHost):
             processing_time=0,
             nondet_disagree=self._nondet_disagreement,
             execution_stats=ctx.stats,
+            data_fees_remaining=res.data_fees_remaining,
         )
 
     async def loop_enter(self, cancellation) -> socket.socket:
@@ -499,6 +570,7 @@ def _create_timeout_result(
         state=state_proxy,
         processing_time=processing_time,
         nondet_disagree=None,
+        data_fees_remaining=[],
     )
 
 
@@ -527,10 +599,15 @@ async def run_genvm_host(
     extra_args: list[str] = [],
     permissions: str = "rwscn",
     code: bytes | None = None,
+    bucket_totals: list[int] | None = None,
+    gas_data: dict[str, str] | None = None,
+    message_fee_allocation: list[dict] | None = None,
 ) -> ExecutionResult:
     if logger is None:
         logger = genvm_logger.NoLogger()
     ctx = Context(logger=logger)
+    effective_bucket_totals = bucket_totals or [10_000_000, 10_000_000, 10_000_000]
+    effective_gas_data = dict(gas_data) if gas_data else dict(GENVM_GASLESS_GAS_DATA)
     tmpdir = Path(tempfile.mkdtemp())
     try:
         base_delay = 5  # seconds
@@ -602,6 +679,9 @@ async def run_genvm_host(
                         host=f"unix://{sock_path}",
                         extra_args=extra_args,
                         code=code,
+                        bucket_totals=effective_bucket_totals,
+                        gas_data=effective_gas_data,
+                        message_fee_allocation=message_fee_allocation or [],
                         calldata=fresh_args.get(
                             "calldata_bytes", host_args.get("calldata_bytes", b"")
                         ),
@@ -613,6 +693,7 @@ async def run_genvm_host(
                         fresh_args.get("state_proxy", host_args.get("state_proxy")),
                         ctx,
                     )
+                    execution_result.data_fee_bucket_totals = effective_bucket_totals
 
                     execution_result.processing_time = math.ceil(
                         (time.time() - start_time) * 1000
