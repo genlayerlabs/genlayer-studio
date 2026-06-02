@@ -103,17 +103,14 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
   const decodedResult = execResult?.decodedResult;
   const eqOutputs = execResult?.eqOutputs;
 
-  const dataObj =
-    tx.data && typeof tx.data === 'object'
-      ? (tx.data as Record<string, unknown>)
-      : null;
+  const dataObj = tx.data && typeof tx.data === 'object' ? tx.data : null;
   const calldataB64 =
     (tx.type === 1 || tx.type === 2) && dataObj
-      ? (dataObj.calldata as string | undefined)
+      ? stringField(dataObj, 'calldata')
       : undefined;
   const contractCodeB64 =
     tx.type === 1 && dataObj
-      ? (dataObj.contract_code as string | undefined)
+      ? stringField(dataObj, 'contract_code')
       : undefined;
 
   return (
@@ -158,11 +155,11 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
       <InfoRow label="Value" value={formatGenValue(tx.value)} />
       <InfoRow
         label="Nonce"
-        value={tx.nonce !== null ? tx.nonce.toString() : '-'}
+        value={tx.nonce === null ? '-' : tx.nonce.toString()}
       />
       <InfoRow
         label="Gas Limit"
-        value={tx.gaslimit !== null ? tx.gaslimit.toString() : '-'}
+        value={tx.gaslimit === null ? '-' : tx.gaslimit.toString()}
       />
       <InfoRow
         label="Created At"
@@ -336,4 +333,12 @@ export function OverviewTab({ transaction: tx }: OverviewTabProps) {
       </div>
     </div>
   );
+}
+
+function stringField(
+  record: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const value = record[key];
+  return typeof value === 'string' ? value : undefined;
 }

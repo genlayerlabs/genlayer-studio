@@ -42,10 +42,6 @@ class VmError(StrEnum):
     OOM = "OOM"
     INVALID_CONTRACT = "invalid_contract"
 
-    @staticmethod
-    def timeout() -> "VmError":
-        return VmError.TIMEOUT
-
 
 EVENT_MAX_TOPICS: typing.Final[int] = 4
 

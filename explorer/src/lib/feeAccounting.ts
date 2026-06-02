@@ -63,7 +63,7 @@ export function getStudioFeeAccounting(tx: Transaction): StudioFeeAccounting | n
     genvmResult?.fee_accounting,
   ];
   const found = candidates.find(isNonEmptyRecord);
-  return found ? (found as StudioFeeAccounting) : null;
+  return found ?? null;
 }
 
 export function toBigIntAmount(value: unknown): bigint | null {
@@ -136,7 +136,7 @@ export function formatFeeParamsDecoded(value: unknown): string {
     ...feeParamsDecodedOrder.filter((key) => key in record),
     ...Object.keys(record)
       .filter((key) => !(key in feeParamsDecodedLabels))
-      .sort(),
+      .sort((left, right) => left.localeCompare(right)),
   ];
 
   const rows = orderedKeys

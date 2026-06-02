@@ -1708,67 +1708,121 @@ def _pending_transaction_with_value(
     return adjusted
 
 
-def _apply_message_value_withdrawals_for_phase(
+def _debit_external_message_value_for_phase(
     context: TransactionContext,
-    pending_transactions: Iterable[PendingTransaction],
+    pending_transactions: list[PendingTransaction],
     on: Literal["accepted", "finalized"],
+) -> bool:
+    external_value = _external_message_value_for_phase(pending_transactions, on)
+    if external_value <= 0:
+        return True
+
+    debited = context.accounts_manager.debit_account_balance(
+        context.transaction.to_address, external_value
+    )
+    if not debited:
+        _log_message_value_debit_failure(
+            context,
+            on,
+            external_value,
+            "external",
+            "Skipping value-bearing external child emission.",
+        )
+    return debited
+
+
+def _debit_internal_message_value_for_phase(
+    context: TransactionContext,
+    pending_transactions: list[PendingTransaction],
+    on: Literal["accepted", "finalized"],
+) -> bool:
+    internal_value = _internal_message_value_for_phase(pending_transactions, on)
+    if internal_value <= 0:
+        return True
+
+    internal_cap = _internal_message_value_cap(context, pending_transactions, on)
+    if internal_value > internal_cap:
+        _log_internal_message_value_cap_failure(
+            context,
+            on,
+            internal_value,
+            internal_cap,
+            pending_transactions,
+        )
+        return False
+
+    debited = context.accounts_manager.debit_account_balance(
+        context.transaction.to_address, internal_value
+    )
+    if not debited:
+        _log_message_value_debit_failure(
+            context,
+            on,
+            internal_value,
+            "internal",
+            "Emitting internal children with value=0.",
+        )
+    return debited
+
+
+def _internal_message_value_cap(
+    context: TransactionContext,
+    pending_transactions: list[PendingTransaction],
+    on: Literal["accepted", "finalized"],
+) -> int:
+    frozen_after_phase = _remaining_external_freeze_after_phase(
+        context, pending_transactions, on
+    )
+    balance_after_external = context.accounts_manager.get_account_balance(
+        context.transaction.to_address
+    )
+    return max(balance_after_external - frozen_after_phase, 0)
+
+
+def _log_internal_message_value_cap_failure(
+    context: TransactionContext,
+    on: Literal["accepted", "finalized"],
+    amount: int,
+    available: int,
+    pending_transactions: list[PendingTransaction],
+) -> None:
+    from loguru import logger
+
+    reserved_external = _remaining_external_freeze_after_phase(
+        context, pending_transactions, on
+    )
+    logger.error(
+        f"Contract internal message value is not backed for {context.transaction.to_address}, "
+        f"phase={on}, amount={amount}, available={available}, "
+        f"reserved_external={reserved_external}, tx={context.transaction.hash}. "
+        f"Emitting internal children with value=0."
+    )
+
+
+def _log_message_value_debit_failure(
+    context: TransactionContext,
+    on: Literal["accepted", "finalized"],
+    amount: int,
+    message_kind: str,
+    consequence: str,
+) -> None:
+    from loguru import logger
+
+    logger.error(
+        f"Contract {message_kind} message debit failed for {context.transaction.to_address}, "
+        f"phase={on}, amount={amount}, tx={context.transaction.hash}. {consequence}"
+    )
+
+
+def _adjust_unbacked_message_values(
+    pending_transactions: list[PendingTransaction],
+    on: Literal["accepted", "finalized"],
+    *,
+    external_value_backed: bool,
+    internal_value_backed: bool,
 ) -> list[PendingTransaction]:
-    pending_list = list(pending_transactions)
-    external_value = _external_message_value_for_phase(pending_list, on)
-    external_value_backed = True
-
-    if external_value > 0:
-        external_value_backed = context.accounts_manager.debit_account_balance(
-            context.transaction.to_address, external_value
-        )
-        if not external_value_backed:
-            from loguru import logger
-
-            logger.error(
-                f"Contract external message debit failed for {context.transaction.to_address}, "
-                f"phase={on}, amount={external_value}, tx={context.transaction.hash}. "
-                f"Skipping value-bearing external child emission."
-            )
-
-    internal_value = _internal_message_value_for_phase(pending_list, on)
-    internal_value_backed = True
-
-    if internal_value > 0:
-        frozen_after_phase = _remaining_external_freeze_after_phase(
-            context, pending_list, on
-        )
-        balance_after_external = context.accounts_manager.get_account_balance(
-            context.transaction.to_address
-        )
-        internal_cap = max(balance_after_external - frozen_after_phase, 0)
-        if internal_value > internal_cap:
-            internal_value_backed = False
-            from loguru import logger
-
-            logger.error(
-                f"Contract internal message value is not backed for {context.transaction.to_address}, "
-                f"phase={on}, amount={internal_value}, available={internal_cap}, "
-                f"reserved_external={frozen_after_phase}, tx={context.transaction.hash}. "
-                f"Emitting internal children with value=0."
-            )
-        else:
-            internal_value_backed = context.accounts_manager.debit_account_balance(
-                context.transaction.to_address, internal_value
-            )
-            if not internal_value_backed:
-                from loguru import logger
-
-                logger.error(
-                    f"Contract internal message debit failed for {context.transaction.to_address}, "
-                    f"phase={on}, amount={internal_value}, tx={context.transaction.hash}. "
-                    f"Emitting internal children with value=0."
-                )
-
-    if external_value_backed and internal_value_backed:
-        return pending_list
-
     adjusted_pending_transactions = []
-    for pending_transaction in pending_list:
+    for pending_transaction in pending_transactions:
         value = int(pending_transaction.value or 0)
         if pending_transaction.on == on and value > 0:
             if pending_transaction.is_eth_send and not external_value_backed:
@@ -1782,6 +1836,30 @@ def _apply_message_value_withdrawals_for_phase(
         adjusted_pending_transactions.append(pending_transaction)
 
     return adjusted_pending_transactions
+
+
+def _apply_message_value_withdrawals_for_phase(
+    context: TransactionContext,
+    pending_transactions: Iterable[PendingTransaction],
+    on: Literal["accepted", "finalized"],
+) -> list[PendingTransaction]:
+    pending_list = list(pending_transactions)
+    external_value_backed = _debit_external_message_value_for_phase(
+        context, pending_list, on
+    )
+    internal_value_backed = _debit_internal_message_value_for_phase(
+        context, pending_list, on
+    )
+
+    if external_value_backed and internal_value_backed:
+        return pending_list
+
+    return _adjust_unbacked_message_values(
+        pending_list,
+        on,
+        external_value_backed=external_value_backed,
+        internal_value_backed=internal_value_backed,
+    )
 
 
 class PendingState(TransactionState):
@@ -2986,91 +3064,22 @@ def _get_messages_data(
     base_nonce = context.transactions_processor.get_transaction_count(
         context.transaction.to_address
     )
-    nonce_offset = 0
-    for pending_transaction in filter(lambda t: t.on == on, pending_transactions):
+    for nonce_offset, pending_transaction in enumerate(
+        _pending_transactions_for_phase(pending_transactions, on)
+    ):
         nonce = base_nonce + nonce_offset
-        nonce_offset += 1
-        data: dict
-        transaction_type: TransactionType
-        if pending_transaction.is_eth_send:
-            transaction_type = TransactionType.SEND
-            data = {}
-        elif pending_transaction.is_deploy():
-            transaction_type = TransactionType.DEPLOY_CONTRACT
-            new_contract_address: str
-            if pending_transaction.salt_nonce == 0:
-                # NOTE: this address is random, which doesn't 100% align with consensus spec
-                new_contract_address = (
-                    context.accounts_manager.create_new_account().address
-                )
-            else:
-                from eth_utils.crypto import keccak
-                from backend.node.types import Address
-                from backend.node.base import get_simulator_chain_id
+        transaction_type, data = _child_transaction_payload(
+            context, pending_transaction
+        )
 
-                arr = bytearray()
-                arr.append(1)
-                arr.extend(Address(context.transaction.to_address).as_bytes)
-                arr.extend(
-                    pending_transaction.salt_nonce.to_bytes(32, "big", signed=False)
-                )
-                arr.extend(get_simulator_chain_id().to_bytes(32, "big", signed=False))
-                new_contract_address = Address(keccak(arr)[:20]).as_hex
-                context.accounts_manager.create_new_account_with_address(
-                    new_contract_address
-                )
-            pending_transaction.address = new_contract_address
-            data = {
-                "contract_address": new_contract_address,
-                "contract_code": pending_transaction.code,
-                "calldata": pending_transaction.calldata,
-            }
-        else:
-            transaction_type = TransactionType.RUN_CONTRACT
-            data = {
-                "calldata": pending_transaction.calldata,
-            }
-
-        if parent_fee_accounting and pending_transaction.is_eth_send:
-            message_fee_payloads.append(
-                _pending_transaction_fee_payload(pending_transaction, on)
-            )
-        elif parent_fee_accounting:
-            try:
-                message_payload = fill_message_fee_payload_from_allocation(
-                    parent_fee_accounting,
-                    _pending_transaction_fee_payload(pending_transaction, on),
-                )
-            except FeeValidationError as exc:
-                raise RuntimeError(str(exc)) from exc
-
-            message_fee_payloads.append(message_payload)
-            if int(message_payload.get("declaredBudget", 0) or 0) > 0:
-                try:
-                    child_fees, child_fee_accounting = create_child_fee_accounting(
-                        message=message_payload,
-                        parent_fees_distribution=parent_fee_accounting.get(
-                            "fees_distribution"
-                        ),
-                        message_allocations=message_payload.get("allocationSubtree")
-                        or [],
-                        sender=context.transaction.origin_address
-                        or context.transaction.from_address,
-                        policy=StudioFeePolicy.from_env(),
-                    )
-                except FeeValidationError as exc:
-                    raise RuntimeError(str(exc)) from exc
-                data.update(
-                    {
-                        "fee_value": int(message_payload["declaredBudget"]),
-                        "user_value": pending_transaction.value,
-                        "fees_distribution": child_fees,
-                        "message_allocations_count": len(
-                            child_fee_accounting.get("message_allocations") or []
-                        ),
-                        FEE_ACCOUNTING_KEY: child_fee_accounting,
-                    }
-                )
+        _append_message_fee_payload(
+            context,
+            pending_transaction,
+            parent_fee_accounting,
+            message_fee_payloads,
+            data,
+            on,
+        )
 
         insert_transactions_data.append(
             [
@@ -3082,46 +3091,220 @@ def _get_messages_data(
             ]
         )
 
-        serializable_data = data.copy()
-        if "contract_code" in serializable_data:
-            serializable_data["contract_code"] = serializable_data[
-                "contract_code"
-            ].decode()
-        if "calldata" in serializable_data:
-            # Encode binary calldata as base64 instead of trying to decode as UTF-8
-            serializable_data["calldata"] = base64.b64encode(
-                serializable_data["calldata"]
-            ).decode("utf-8")
-
         internal_messages_data.append(
-            {
-                "sender": context.transaction.to_address,
-                "recipient": pending_transaction.address,
-                "data": json.dumps(serializable_data).encode(),
-            }
+            _internal_message_event_data(context, pending_transaction, data)
         )
 
-    if parent_fee_accounting and message_fee_payloads:
-        try:
-            if reveal_recorded:
-                updated_accounting = record_external_message_execution_fees(
-                    parent_fee_accounting,
-                    message_fee_payloads,
-                )
-            else:
-                updated_accounting = consume_message_fees(
-                    parent_fee_accounting,
-                    message_fee_payloads,
-                )
-        except FeeValidationError as exc:
-            raise RuntimeError(str(exc)) from exc
-        context.transaction.data = dict(context.transaction.data or {})
-        context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
-        context.transactions_processor.update_transaction_fee_accounting(
-            context.transaction.hash, updated_accounting
-        )
+    _record_parent_message_fee_consumption(
+        context,
+        parent_fee_accounting,
+        message_fee_payloads,
+        reveal_recorded,
+    )
 
     return internal_messages_data, insert_transactions_data
+
+
+def _pending_transactions_for_phase(
+    pending_transactions: Iterable[PendingTransaction],
+    on: Literal["accepted", "finalized"],
+) -> Iterable[PendingTransaction]:
+    return (
+        pending_transaction
+        for pending_transaction in pending_transactions
+        if pending_transaction.on == on
+    )
+
+
+def _child_transaction_payload(
+    context: TransactionContext,
+    pending_transaction: PendingTransaction,
+) -> tuple[TransactionType, dict]:
+    if pending_transaction.is_eth_send:
+        return TransactionType.SEND, {}
+    if pending_transaction.is_deploy():
+        return _deploy_child_transaction_payload(context, pending_transaction)
+    return TransactionType.RUN_CONTRACT, {"calldata": pending_transaction.calldata}
+
+
+def _deploy_child_transaction_payload(
+    context: TransactionContext,
+    pending_transaction: PendingTransaction,
+) -> tuple[TransactionType, dict]:
+    new_contract_address = _child_contract_address(context, pending_transaction)
+    pending_transaction.address = new_contract_address
+    return (
+        TransactionType.DEPLOY_CONTRACT,
+        {
+            "contract_address": new_contract_address,
+            "contract_code": pending_transaction.code,
+            "calldata": pending_transaction.calldata,
+        },
+    )
+
+
+def _child_contract_address(
+    context: TransactionContext,
+    pending_transaction: PendingTransaction,
+) -> str:
+    if pending_transaction.salt_nonce == 0:
+        # NOTE: this address is random, which doesn't 100% align with consensus spec
+        return context.accounts_manager.create_new_account().address
+
+    from eth_utils.crypto import keccak
+    from backend.node.types import Address
+    from backend.node.base import get_simulator_chain_id
+
+    arr = bytearray()
+    arr.append(1)
+    arr.extend(Address(context.transaction.to_address).as_bytes)
+    arr.extend(pending_transaction.salt_nonce.to_bytes(32, "big", signed=False))
+    arr.extend(get_simulator_chain_id().to_bytes(32, "big", signed=False))
+    new_contract_address = Address(keccak(arr)[:20]).as_hex
+    context.accounts_manager.create_new_account_with_address(new_contract_address)
+    return new_contract_address
+
+
+def _append_message_fee_payload(
+    context: TransactionContext,
+    pending_transaction: PendingTransaction,
+    parent_fee_accounting: dict[str, Any] | None,
+    message_fee_payloads: list[dict[str, Any]],
+    data: dict,
+    on: Literal["accepted", "finalized"],
+) -> None:
+    if not parent_fee_accounting:
+        return
+
+    message_payload = _parent_message_fee_payload(
+        parent_fee_accounting,
+        pending_transaction,
+        on,
+    )
+    message_fee_payloads.append(message_payload)
+    if pending_transaction.is_eth_send:
+        return
+
+    _attach_child_fee_accounting(
+        context,
+        parent_fee_accounting,
+        message_payload,
+        pending_transaction,
+        data,
+    )
+
+
+def _parent_message_fee_payload(
+    parent_fee_accounting: dict[str, Any],
+    pending_transaction: PendingTransaction,
+    on: Literal["accepted", "finalized"],
+) -> dict[str, Any]:
+    payload = _pending_transaction_fee_payload(pending_transaction, on)
+    if pending_transaction.is_eth_send:
+        return payload
+
+    try:
+        return fill_message_fee_payload_from_allocation(parent_fee_accounting, payload)
+    except FeeValidationError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
+def _attach_child_fee_accounting(
+    context: TransactionContext,
+    parent_fee_accounting: dict[str, Any],
+    message_payload: dict[str, Any],
+    pending_transaction: PendingTransaction,
+    data: dict,
+) -> None:
+    if int(message_payload.get("declaredBudget", 0) or 0) <= 0:
+        return
+
+    try:
+        child_fees, child_fee_accounting = create_child_fee_accounting(
+            message=message_payload,
+            parent_fees_distribution=parent_fee_accounting.get("fees_distribution"),
+            message_allocations=message_payload.get("allocationSubtree") or [],
+            sender=context.transaction.origin_address
+            or context.transaction.from_address,
+            policy=StudioFeePolicy.from_env(),
+        )
+    except FeeValidationError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    data.update(
+        {
+            "fee_value": int(message_payload["declaredBudget"]),
+            "user_value": pending_transaction.value,
+            "fees_distribution": child_fees,
+            "message_allocations_count": len(
+                child_fee_accounting.get("message_allocations") or []
+            ),
+            FEE_ACCOUNTING_KEY: child_fee_accounting,
+        }
+    )
+
+
+def _internal_message_event_data(
+    context: TransactionContext,
+    pending_transaction: PendingTransaction,
+    data: dict,
+) -> dict[str, Any]:
+    return {
+        "sender": context.transaction.to_address,
+        "recipient": pending_transaction.address,
+        "data": json.dumps(_serializable_message_data(data)).encode(),
+    }
+
+
+def _serializable_message_data(data: dict) -> dict:
+    serializable_data = data.copy()
+    if "contract_code" in serializable_data:
+        serializable_data["contract_code"] = serializable_data["contract_code"].decode()
+    if "calldata" in serializable_data:
+        serializable_data["calldata"] = base64.b64encode(
+            serializable_data["calldata"]
+        ).decode("utf-8")
+    return serializable_data
+
+
+def _record_parent_message_fee_consumption(
+    context: TransactionContext,
+    parent_fee_accounting: dict[str, Any] | None,
+    message_fee_payloads: list[dict[str, Any]],
+    reveal_recorded: bool,
+) -> None:
+    if not parent_fee_accounting or not message_fee_payloads:
+        return
+
+    updated_accounting = _consume_parent_message_fee_payloads(
+        parent_fee_accounting,
+        message_fee_payloads,
+        reveal_recorded,
+    )
+    context.transaction.data = dict(context.transaction.data or {})
+    context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
+    context.transactions_processor.update_transaction_fee_accounting(
+        context.transaction.hash, updated_accounting
+    )
+
+
+def _consume_parent_message_fee_payloads(
+    parent_fee_accounting: dict[str, Any],
+    message_fee_payloads: list[dict[str, Any]],
+    reveal_recorded: bool,
+) -> dict[str, Any]:
+    try:
+        if reveal_recorded:
+            return record_external_message_execution_fees(
+                parent_fee_accounting,
+                message_fee_payloads,
+            )
+        return consume_message_fees(
+            parent_fee_accounting,
+            message_fee_payloads,
+        )
+    except FeeValidationError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def _sync_reveal_message_fee_accounting(

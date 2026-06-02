@@ -394,14 +394,10 @@ class TransactionParser:
                                 ),
                             }
                             # Convert the decoded data into proper dataclasses
-                            if decoded_data["function"] == "addTransaction":
-                                params = decoded_data["params"]
-                                decoded_data, value, fee_value = (
-                                    self._decode_add_transaction_data(
-                                        decoded_data["function"], params, value
-                                    )
-                                )
-                            elif decoded_data["function"] == "deploySalted":
+                            if decoded_data["function"] in {
+                                "addTransaction",
+                                "deploySalted",
+                            }:
                                 params = decoded_data["params"]
                                 decoded_data, value, fee_value = (
                                     self._decode_add_transaction_data(

@@ -152,7 +152,11 @@ export interface StudioRecommendedFeePreset {
   distribution?: StudioFeesDistribution;
   feeValue?: string | number;
   messageAllocations?: unknown[];
-  messageBudgetMode?: 'current' | 'observed' | 'allocation-preserved' | string;
+  messageBudgetMode?:
+    | 'current'
+    | 'observed'
+    | 'allocation-preserved'
+    | (string & {});
   observed?: {
     executionFee?: string | number;
     messageFeeBudget?: string | number;

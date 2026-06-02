@@ -217,6 +217,13 @@ const feeParamsDecodedIntegerKeys = new Set([
   'gasLimit',
   'rotations',
 ]);
+const feeDistributionAmountLabels = new Set([
+  'Execution budget per round',
+  'Message fee budget',
+  'Max price per time unit',
+  'Storage gas price',
+  'Receipt gas price',
+]);
 
 function formatFeeParamsDecodedValue(key: string, value: unknown): string {
   if (Array.isArray(value)) {
@@ -238,7 +245,7 @@ function formatFeeParamsDecoded(value: unknown): string {
     ...feeParamsDecodedOrder.filter((key) => key in record),
     ...Object.keys(record)
       .filter((key) => !(key in feeParamsDecodedLabels))
-      .sort(),
+      .sort((left, right) => left.localeCompare(right)),
   ];
   const rows = orderedKeys
     .filter((key) => record[key] !== undefined && record[key] !== null)
@@ -248,6 +255,13 @@ function formatFeeParamsDecoded(value: unknown): string {
     });
 
   return rows.length > 0 ? rows.join(', ') : '-';
+}
+
+function formatFeeDistributionValue(label: unknown, value: unknown): string {
+  if (feeDistributionAmountLabels.has(String(label)))
+    return formatFeeAmount(value);
+  if (Array.isArray(value)) return value.join(' / ');
+  return String(value);
 }
 
 function feeBucketRows(
@@ -323,20 +337,9 @@ const feeDistributionRows = computed(() => {
   ]
     .filter(([, value]) => value !== undefined && value !== null)
     .map(([label, value]) => {
-      const amountLabels = new Set([
-        'Execution budget per round',
-        'Message fee budget',
-        'Max price per time unit',
-        'Storage gas price',
-        'Receipt gas price',
-      ]);
       return {
         label: String(label),
-        value: amountLabels.has(String(label))
-          ? formatFeeAmount(value)
-          : Array.isArray(value)
-            ? value.join(' / ')
-            : String(value),
+        value: formatFeeDistributionValue(label, value),
       };
     });
 });

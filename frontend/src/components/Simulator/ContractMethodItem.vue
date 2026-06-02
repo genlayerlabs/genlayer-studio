@@ -107,6 +107,15 @@ const formatFeeAmount = (
   return formatted ? `${formatted} wei` : '';
 };
 
+const formatPaddingBps = (
+  value: string | number | bigint | null | undefined,
+): string => {
+  if (value === undefined || value === null) {
+    return '';
+  }
+  return `${formatIntegerLike(value)} bps`;
+};
+
 const formatRotations = (rotations: unknown): string => {
   if (!Array.isArray(rotations)) {
     return '';
@@ -166,7 +175,9 @@ const formatFeeParamsDecoded = (value: unknown): string => {
 
   const orderedKeys = [
     ...feeParamsDecodedOrder.filter((key) => key in record),
-    ...keys.filter((key) => !(key in feeParamsDecodedLabels)).sort(),
+    ...keys
+      .filter((key) => !(key in feeParamsDecodedLabels))
+      .sort((left, right) => left.localeCompare(right)),
   ];
   return orderedKeys
     .filter((key) => record[key] !== undefined && record[key] !== null)
@@ -290,13 +301,7 @@ const feeEstimateRows = computed<FeeEstimateRow[]>(() => {
     'Message reveal gas',
     formatIntegerLike(messageReveal?.estimatedGas),
   );
-  addFeeEstimateRow(
-    rows,
-    'Padding',
-    preset?.paddingBps !== undefined
-      ? `${formatIntegerLike(preset.paddingBps)} bps`
-      : '',
-  );
+  addFeeEstimateRow(rows, 'Padding', formatPaddingBps(preset?.paddingBps));
   addFeeEstimateRow(
     rows,
     'Message budget mode',

@@ -34,7 +34,7 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 24
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run test:fee-accounting
       - run: npm run lint
       - run: npm run build

@@ -61,6 +61,7 @@ from backend.database_handler.transactions_processor import (
 
 
 logger = logging.getLogger(__name__)
+TRANSACTION_NOT_FOUND_MESSAGE = "Transaction not found"
 from backend.node.base import Node, get_simulator_chain_id
 from backend.node.types import ExecutionMode, ExecutionResultStatus
 from backend.consensus.base import ConsensusAlgorithm
@@ -892,7 +893,7 @@ def cancel_transaction(
     )
     if not transaction:
         raise NotFoundError(
-            message="Transaction not found",
+            message=TRANSACTION_NOT_FOUND_MESSAGE,
             data={"transaction_hash": transaction_hash},
         )
 
@@ -1723,7 +1724,7 @@ def _handle_top_up_fees(
     tx_id = _tx_id_to_hex(decoded_rollup_transaction.data.tx_id)
     tx = transactions_processor.get_transaction_by_hash(tx_id)
     if tx is None:
-        raise NotFoundError(message="Transaction not found", data={"hash": tx_id})
+        raise NotFoundError(message=TRANSACTION_NOT_FOUND_MESSAGE, data={"hash": tx_id})
 
     status = tx.get("status")
     if status in {
@@ -1770,7 +1771,7 @@ def _handle_appeal_or_top_up_and_submit(
     tx_id = _tx_id_to_hex(decoded_rollup_transaction.data.tx_id)
     tx = transactions_processor.get_transaction_by_hash(tx_id)
     if tx is None:
-        raise NotFoundError(message="Transaction not found", data={"hash": tx_id})
+        raise NotFoundError(message=TRANSACTION_NOT_FOUND_MESSAGE, data={"hash": tx_id})
 
     fee_accounting = (tx.get("data") or {}).get(FEE_ACCOUNTING_KEY)
     if fee_accounting is not None and decoded_rollup_transaction.total_spend > 0:

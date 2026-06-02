@@ -15,10 +15,10 @@ import {
 import { truncateAddress, truncateHash } from '@/lib/formatters';
 
 interface FeeAccountingPanelProps {
-  transaction: Transaction;
+  readonly transaction: Transaction;
 }
 
-export function FeeAccountingPanel({ transaction }: FeeAccountingPanelProps) {
+export function FeeAccountingPanel({ transaction }: Readonly<FeeAccountingPanelProps>) {
   const accounting = getStudioFeeAccounting(transaction);
   if (!accounting) return null;
 
@@ -345,7 +345,10 @@ export function FeeAccountingPanel({ transaction }: FeeAccountingPanelProps) {
   );
 }
 
-function ReportRow({ label, value }: { label: string; value: string }) {
+function ReportRow({
+  label,
+  value,
+}: Readonly<{ label: string; value: string }>) {
   return (
     <div className="grid grid-cols-[120px_1fr] gap-2 py-1 text-xs">
       <span className="text-muted-foreground">{label}</span>
@@ -354,7 +357,7 @@ function ReportRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-function SectionLabel({ children }: { children: string }) {
+function SectionLabel({ children }: Readonly<{ children: string }>) {
   return (
     <div className="mt-3 border-b border-border pb-1 text-[11px] font-semibold uppercase text-muted-foreground first:mt-0">
       {children}

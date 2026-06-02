@@ -448,44 +448,15 @@ def calculate_round_fees(
     policy = policy or StudioFeePolicy()
 
     if round == 0:
-        validator_index = _validator_index(num_of_validators)
-        if int(fees["appealRounds"]) != len(fees["rotations"]) - 1:
-            raise InvalidAppealRounds("InvalidAppealRounds")
-        total = _calculate_fees(fees, validator_index)
+        total = _calculate_initial_round_total(fees, num_of_validators)
     else:
-        if round >= len(VALIDATORS_PER_ROUND):
-            raise InvalidNumOfValidators("InvalidNumOfValidators")
-        rotations = (
-            int(fees["rotations"][round - 1])
-            if round - 1 < len(fees["rotations"])
-            else 0
-        )
-        total = _calculate_fee_for_round(
-            VALIDATORS_PER_ROUND[round],
-            rotations,
-            int(fees["leaderTimeunitsAllocation"]),
-            int(fees["validatorTimeunitsAllocation"]),
-        )
+        total = _calculate_appeal_round_total(fees, round)
 
-    max_price = int(fees["maxPriceGenPerTimeUnit"])
-    if policy.gen_per_time_unit > 0:
-        if max_price > 0 and policy.gen_per_time_unit > max_price:
-            raise MaxPriceExceeded("MaxPriceExceeded")
-        total *= policy.gen_per_time_unit
-
-    storage_fee_max_gas_price = int(fees["storageFeeMaxGasPrice"])
-    if (
-        storage_fee_max_gas_price > 0
-        and policy.storage_unit_price > storage_fee_max_gas_price
-    ):
-        raise MaxPriceExceeded("MaxPriceExceeded")
-
-    receipt_fee_max_gas_price = int(fees["receiptFeeMaxGasPrice"])
-    if (
-        receipt_fee_max_gas_price > 0
-        and policy.receipt_gas_price > receipt_fee_max_gas_price
-    ):
-        raise MaxPriceExceeded("MaxPriceExceeded")
+    total = _apply_time_unit_price(total, int(fees["maxPriceGenPerTimeUnit"]), policy)
+    _enforce_gas_price_cap(
+        policy.storage_unit_price, int(fees["storageFeeMaxGasPrice"])
+    )
+    _enforce_gas_price_cap(policy.receipt_gas_price, int(fees["receiptFeeMaxGasPrice"]))
 
     if round == 0:
         total += int(fees["executionBudgetPerRound"]) * get_leader_rounds(fees)
@@ -800,39 +771,7 @@ def genvm_message_fee_allocation(
         node = _serializable_message_allocation(raw_node)
         if int(node["parentIndex"]) != NODE_ROOT_SENTINEL:
             continue
-        recipient = str(node["recipient"]).lower()
-        call_key = _normalize_call_key(node["callKey"])
-        message_type = (
-            "External"
-            if int(node["messageType"]) == MESSAGE_TYPE_EXTERNAL
-            else (
-                "InternalAccepted"
-                if bool(node["onAcceptance"])
-                else "InternalFinalized"
-            )
-        )
-        nodes.append(
-            {
-                "message_type": message_type,
-                "parent_index": (
-                    None
-                    if int(node["parentIndex"]) == NODE_ROOT_SENTINEL
-                    else int(node["parentIndex"])
-                ),
-                "recipient": (
-                    None
-                    if recipient == ""
-                    else address_factory(recipient) if address_factory else recipient
-                ),
-                "call_key": (
-                    None
-                    if call_key == CALL_KEY_WILDCARD
-                    else bytes.fromhex(call_key.removeprefix("0x"))
-                ),
-                "budget": int(node["budget"]),
-                "fee_params": _genvm_message_fee_params(node),
-            }
-        )
+        nodes.append(_genvm_message_allocation_node(node, address_factory))
     if nodes:
         nodes.append(_genvm_external_legacy_fallback_message_fee_allocation())
     return nodes
@@ -1049,38 +988,22 @@ def consume_message_fees(
     external_reimbursement_total = 0
 
     for message in messages:
-        if (
-            int(message.get("messageType", MESSAGE_TYPE_INTERNAL))
-            == MESSAGE_TYPE_EXTERNAL
-        ):
-            if int(message.get("declaredBudget", 0) or 0) != 0:
-                raise MessageDeclaredBudgetInsufficient(
-                    "MessageDeclaredBudgetInsufficient"
-                )
-            external_reimbursement_total += _reserve_external_execution(
-                updated, message, policy, reimburse=reimburse_external
+        message_type = _message_type_value(message)
+        if message_type == MESSAGE_TYPE_EXTERNAL:
+            external_reimbursement_total += _consume_external_message_fee(
+                updated,
+                message,
+                policy,
+                reimburse_external,
             )
             continue
 
-        if (
-            int(message.get("messageType", MESSAGE_TYPE_INTERNAL))
-            != MESSAGE_TYPE_INTERNAL
-        ):
-            continue
-
-        declared_budget = int(message.get("declaredBudget", 0) or 0)
-        fee_params = decode_internal_message_fee_params(message.get("feeParams", b""))
-        if (
-            int(fee_params["executionBudgetPerRound"]) > 0
-            and int(fee_params["executionBudgetPerRound"])
-            < policy.message_fee_params_budget_floor()
-        ):
-            raise BudgetTooLow("BudgetTooLow")
-        min_required = min_message_primary_fees(fee_params, policy)
-        if declared_budget < min_required:
-            raise MessageDeclaredBudgetInsufficient("MessageDeclaredBudgetInsufficient")
-        recalculated_total += declared_budget
-        _consume_against_allocation(updated, message, declared_budget)
+        if message_type == MESSAGE_TYPE_INTERNAL:
+            recalculated_total += _consume_internal_message_fee(
+                updated,
+                message,
+                policy,
+            )
 
     if reported_total is not None and int(reported_total) < recalculated_total:
         raise MessageFeesReportMismatch("MessageFeesReportMismatch")
@@ -1105,6 +1028,55 @@ def consume_message_fees(
     )
     _refresh_message_fee_accounting_report_if_present(updated, policy)
     return updated
+
+
+def _message_type_value(message: dict[str, Any]) -> int:
+    return int(message.get("messageType", MESSAGE_TYPE_INTERNAL))
+
+
+def _consume_external_message_fee(
+    accounting: dict[str, Any],
+    message: dict[str, Any],
+    policy: StudioFeePolicy,
+    reimburse_external: bool,
+) -> int:
+    if int(message.get("declaredBudget", 0) or 0) != 0:
+        raise MessageDeclaredBudgetInsufficient("MessageDeclaredBudgetInsufficient")
+    return _reserve_external_execution(
+        accounting,
+        message,
+        policy,
+        reimburse=reimburse_external,
+    )
+
+
+def _consume_internal_message_fee(
+    accounting: dict[str, Any],
+    message: dict[str, Any],
+    policy: StudioFeePolicy,
+) -> int:
+    declared_budget = int(message.get("declaredBudget", 0) or 0)
+    fee_params = decode_internal_message_fee_params(message.get("feeParams", b""))
+    _validate_internal_execution_budget_floor(fee_params, policy)
+
+    min_required = min_message_primary_fees(fee_params, policy)
+    if declared_budget < min_required:
+        raise MessageDeclaredBudgetInsufficient("MessageDeclaredBudgetInsufficient")
+
+    _consume_against_allocation(accounting, message, declared_budget)
+    return declared_budget
+
+
+def _validate_internal_execution_budget_floor(
+    fee_params: dict[str, Any],
+    policy: StudioFeePolicy,
+) -> None:
+    execution_budget_per_round = int(fee_params["executionBudgetPerRound"])
+    if (
+        execution_budget_per_round > 0
+        and execution_budget_per_round < policy.message_fee_params_budget_floor()
+    ):
+        raise BudgetTooLow("BudgetTooLow")
 
 
 def record_reveal_message_fees(
@@ -1554,70 +1526,130 @@ def validate_message_allocations(
     min_required_by_index: dict[int, int] = {}
 
     for index, raw_node in enumerate(message_allocations):
-        node = _normalize_message_allocation(raw_node)
-        parent_index = int(node["parentIndex"])
-        if parent_index != NODE_ROOT_SENTINEL and parent_index >= index:
-            raise AllocationTreeMalformed("AllocationTreeMalformed")
-        if parent_index != NODE_ROOT_SENTINEL:
-            parent_node = _normalize_message_allocation(
-                message_allocations[parent_index]
-            )
-            if int(parent_node["messageType"]) == MESSAGE_TYPE_EXTERNAL:
-                raise AllocationTreeMalformed("AllocationTreeMalformed")
-
-        if int(node["messageType"]) == MESSAGE_TYPE_EXTERNAL:
-            _validate_external_allocation(node, external_keys)
-            root_sum += int(node["budget"])
-            continue
-
-        if int(node["messageType"]) != MESSAGE_TYPE_INTERNAL:
-            raise AllocationTreeMalformed("AllocationTreeMalformed")
-
-        internal_fee_params = decode_internal_message_fee_params(node["feeParams"])
-        min_primary = min_message_primary_fees(internal_fee_params, policy)
-        lifecycle_multiplier = (
-            int(internal_fee_params["appealRounds"]) + 1
-            if bool(node["onAcceptance"])
-            else 1
+        root_sum += _validate_message_allocation_node(
+            index,
+            raw_node,
+            message_allocations,
+            root_keys,
+            external_keys,
+            min_required_by_index,
+            policy,
         )
-        min_required = min_primary * lifecycle_multiplier
-        min_required_by_index[index] = min_required
-        if int(node["budget"]) < min_required:
-            raise AllocationLifecycleBudgetInsufficient(
-                "AllocationLifecycleBudgetInsufficient"
-            )
-
-        execution_budget_per_round = int(internal_fee_params["executionBudgetPerRound"])
-        if (
-            execution_budget_per_round > 0
-            and execution_budget_per_round < policy.message_fee_params_budget_floor()
-        ):
-            raise BudgetTooLow("BudgetTooLow")
-
-        if parent_index == NODE_ROOT_SENTINEL:
-            key = _allocation_key(node)
-            if key in root_keys:
-                raise AllocationDuplicateKey("AllocationDuplicateKey")
-            root_keys.add(key)
-            root_sum += int(node["budget"])
 
     if root_sum != total_message_fees:
         raise MessageAllocationsNotEqualBudget("MessageAllocationsNotEqualBudget")
 
+    _validate_child_budget_consistency(message_allocations, min_required_by_index)
+    _validate_allocation_tree_depth(message_allocations, policy)
+    _validate_sibling_duplicates(message_allocations)
+
+
+def _validate_message_allocation_node(
+    index: int,
+    raw_node: dict[str, Any],
+    message_allocations: list[dict[str, Any]],
+    root_keys: set[tuple[int, str, str]],
+    external_keys: set[tuple[str, str]],
+    min_required_by_index: dict[int, int],
+    policy: StudioFeePolicy,
+) -> int:
+    node = _normalize_message_allocation(raw_node)
+    _validate_allocation_parent(index, node, message_allocations)
+
+    if int(node["messageType"]) == MESSAGE_TYPE_EXTERNAL:
+        _validate_external_allocation(node, external_keys)
+        return int(node["budget"])
+
+    if int(node["messageType"]) != MESSAGE_TYPE_INTERNAL:
+        raise AllocationTreeMalformed("AllocationTreeMalformed")
+
+    min_required = _validate_internal_allocation_budget(node, policy)
+    min_required_by_index[index] = min_required
+    return _root_allocation_budget(node, root_keys)
+
+
+def _validate_allocation_parent(
+    index: int,
+    node: dict[str, Any],
+    message_allocations: list[dict[str, Any]],
+) -> None:
+    parent_index = int(node["parentIndex"])
+    if parent_index == NODE_ROOT_SENTINEL:
+        return
+    if parent_index >= index:
+        raise AllocationTreeMalformed("AllocationTreeMalformed")
+
+    parent_node = _normalize_message_allocation(message_allocations[parent_index])
+    if int(parent_node["messageType"]) == MESSAGE_TYPE_EXTERNAL:
+        raise AllocationTreeMalformed("AllocationTreeMalformed")
+
+
+def _validate_internal_allocation_budget(
+    node: dict[str, Any],
+    policy: StudioFeePolicy,
+) -> int:
+    internal_fee_params = decode_internal_message_fee_params(node["feeParams"])
+    min_required = _internal_allocation_min_required(node, internal_fee_params, policy)
+    if int(node["budget"]) < min_required:
+        raise AllocationLifecycleBudgetInsufficient(
+            "AllocationLifecycleBudgetInsufficient"
+        )
+
+    _validate_internal_execution_budget_floor(internal_fee_params, policy)
+    return min_required
+
+
+def _internal_allocation_min_required(
+    node: dict[str, Any],
+    internal_fee_params: dict[str, Any],
+    policy: StudioFeePolicy,
+) -> int:
+    min_primary = min_message_primary_fees(internal_fee_params, policy)
+    lifecycle_multiplier = (
+        int(internal_fee_params["appealRounds"]) + 1
+        if bool(node["onAcceptance"])
+        else 1
+    )
+    return min_primary * lifecycle_multiplier
+
+
+def _root_allocation_budget(
+    node: dict[str, Any],
+    root_keys: set[tuple[int, str, str]],
+) -> int:
+    if int(node["parentIndex"]) != NODE_ROOT_SENTINEL:
+        return 0
+
+    key = _allocation_key(node)
+    if key in root_keys:
+        raise AllocationDuplicateKey("AllocationDuplicateKey")
+    root_keys.add(key)
+    return int(node["budget"])
+
+
+def _validate_child_budget_consistency(
+    message_allocations: list[dict[str, Any]],
+    min_required_by_index: dict[int, int],
+) -> None:
     for index, raw_node in enumerate(message_allocations):
         node = _normalize_message_allocation(raw_node)
         if int(node["messageType"]) == MESSAGE_TYPE_EXTERNAL:
             continue
-        child_sum = sum(
-            int(_normalize_message_allocation(child)["budget"])
-            for child in message_allocations[index + 1 :]
-            if int(_normalize_message_allocation(child)["parentIndex"]) == index
-        )
+        child_sum = _child_allocation_budget_sum(message_allocations, index)
         if int(node["budget"]) < min_required_by_index[index] + child_sum:
             raise AllocationTreeBudgetInconsistent("AllocationTreeBudgetInconsistent")
 
-    _validate_allocation_tree_depth(message_allocations, policy)
-    _validate_sibling_duplicates(message_allocations)
+
+def _child_allocation_budget_sum(
+    message_allocations: list[dict[str, Any]],
+    parent_index: int,
+) -> int:
+    child_sum = 0
+    for raw_child in message_allocations[parent_index + 1 :]:
+        child = _normalize_message_allocation(raw_child)
+        if int(child["parentIndex"]) == parent_index:
+            child_sum += int(child["budget"])
+    return child_sum
 
 
 def decode_internal_message_fee_params(fee_params: bytes | str) -> dict[str, Any]:
@@ -1674,6 +1706,51 @@ def min_message_primary_fees(
         0,
         policy,
     )
+
+
+def _calculate_initial_round_total(
+    fees: dict[str, int | list[int]],
+    num_of_validators: int,
+) -> int:
+    validator_index = _validator_index(num_of_validators)
+    if int(fees["appealRounds"]) != len(fees["rotations"]) - 1:
+        raise InvalidAppealRounds("InvalidAppealRounds")
+    return _calculate_fees(fees, validator_index)
+
+
+def _calculate_appeal_round_total(
+    fees: dict[str, int | list[int]],
+    round: int,
+) -> int:
+    if round >= len(VALIDATORS_PER_ROUND):
+        raise InvalidNumOfValidators("InvalidNumOfValidators")
+
+    rotations = (
+        int(fees["rotations"][round - 1]) if round - 1 < len(fees["rotations"]) else 0
+    )
+    return _calculate_fee_for_round(
+        VALIDATORS_PER_ROUND[round],
+        rotations,
+        int(fees["leaderTimeunitsAllocation"]),
+        int(fees["validatorTimeunitsAllocation"]),
+    )
+
+
+def _apply_time_unit_price(
+    total: int,
+    max_price: int,
+    policy: StudioFeePolicy,
+) -> int:
+    if policy.gen_per_time_unit <= 0:
+        return total
+    if max_price > 0 and policy.gen_per_time_unit > max_price:
+        raise MaxPriceExceeded("MaxPriceExceeded")
+    return total * policy.gen_per_time_unit
+
+
+def _enforce_gas_price_cap(actual_price: int, max_price: int) -> None:
+    if max_price > 0 and actual_price > max_price:
+        raise MaxPriceExceeded("MaxPriceExceeded")
 
 
 def _validator_index(num_of_validators: int) -> int:
@@ -1950,6 +2027,48 @@ def _genvm_message_fee_params(node: dict[str, Any]) -> dict[str, Any]:
         "execution_budget_per_round": int(decoded["executionBudgetPerRound"]),
         "rotations": [int(rotation) for rotation in decoded["rotations"]],
     }
+
+
+def _genvm_message_allocation_node(
+    node: dict[str, Any],
+    address_factory: Callable[[str], Any] | None,
+) -> dict[str, Any]:
+    return {
+        "message_type": _genvm_message_type_name(node),
+        "parent_index": _genvm_parent_index(node),
+        "recipient": _genvm_recipient(node, address_factory),
+        "call_key": _genvm_call_key(node),
+        "budget": int(node["budget"]),
+        "fee_params": _genvm_message_fee_params(node),
+    }
+
+
+def _genvm_message_type_name(node: dict[str, Any]) -> str:
+    if int(node["messageType"]) == MESSAGE_TYPE_EXTERNAL:
+        return "External"
+    return "InternalAccepted" if bool(node["onAcceptance"]) else "InternalFinalized"
+
+
+def _genvm_parent_index(node: dict[str, Any]) -> int | None:
+    parent_index = int(node["parentIndex"])
+    return None if parent_index == NODE_ROOT_SENTINEL else parent_index
+
+
+def _genvm_recipient(
+    node: dict[str, Any],
+    address_factory: Callable[[str], Any] | None,
+) -> Any | None:
+    recipient = str(node["recipient"]).lower()
+    if recipient == "":
+        return None
+    return address_factory(recipient) if address_factory else recipient
+
+
+def _genvm_call_key(node: dict[str, Any]) -> bytes | None:
+    call_key = _normalize_call_key(node["callKey"])
+    if call_key == CALL_KEY_WILDCARD:
+        return None
+    return bytes.fromhex(call_key.removeprefix("0x"))
 
 
 def _genvm_unmetered_message_fee_allocation() -> list[dict[str, Any]]:
@@ -3112,22 +3231,38 @@ def _bytes_field(value: Any) -> bytes:
     if isinstance(value, bytearray):
         return bytes(value)
     if isinstance(value, str):
-        raw = value.removeprefix("0x")
-        if value.startswith("0x"):
-            try:
-                return bytes.fromhex(raw)
-            except ValueError:
-                return b""
-        if raw == "":
-            return b""
-        try:
-            return base64.b64decode(raw, validate=True)
-        except Exception:
-            try:
-                return bytes.fromhex(raw)
-            except ValueError:
-                return raw.encode("utf-8")
+        return _bytes_from_string_field(value)
     return bytes(value)
+
+
+def _bytes_from_string_field(value: str) -> bytes:
+    raw = value.removeprefix("0x")
+    if value.startswith("0x"):
+        return _bytes_from_hex_field(raw)
+    if raw == "":
+        return b""
+    return _bytes_from_encoded_text(raw)
+
+
+def _bytes_from_encoded_text(raw: str) -> bytes:
+    try:
+        return base64.b64decode(raw, validate=True)
+    except Exception:
+        return _bytes_from_hex_or_utf8(raw)
+
+
+def _bytes_from_hex_or_utf8(raw: str) -> bytes:
+    try:
+        return bytes.fromhex(raw)
+    except ValueError:
+        return raw.encode("utf-8")
+
+
+def _bytes_from_hex_field(raw: str) -> bytes:
+    try:
+        return bytes.fromhex(raw)
+    except ValueError:
+        return b""
 
 
 def _fee_params_hex(fee_params: bytes | str) -> str:
