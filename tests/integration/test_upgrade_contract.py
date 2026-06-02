@@ -51,6 +51,39 @@ def _wait_for_validator_count(min_count: int, timeout: float = 20.0) -> None:
     )
 
 
+def _mock_llms() -> bool:
+    return os.getenv("TEST_WITH_MOCK_LLMS", "false").lower() == "true"
+
+
+def _create_mock_validators() -> None:
+    from tests.common.request import payload, post_request_localhost
+    from tests.common.response import has_success_status
+
+    provider = os.getenv("TEST_MOCK_PROVIDER", "openrouter")
+    model = os.getenv("TEST_MOCK_MODEL", "@preset/rally-testnet-gpt-5-1")
+    api_key_env_var = os.getenv("TEST_MOCK_API_KEY_ENV_VAR", "OPENROUTERAPIKEY")
+    api_url = os.getenv("TEST_MOCK_API_URL", "https://openrouter.ai/api")
+
+    for _ in range(5):
+        result = post_request_localhost(
+            payload(
+                "sim_createValidator",
+                8,
+                provider,
+                model,
+                {"temperature": 0.75, "max_tokens": 500},
+                "openai-compatible",
+                {
+                    "api_key_env_var": api_key_env_var,
+                    "api_url": api_url,
+                    "mock_response": {},
+                },
+            )
+        ).json()
+        if not has_success_status(result):
+            pytest.fail(f"Failed to create mock validator: {result}")
+
+
 @pytest.fixture(scope="module", autouse=True)
 def ensure_validators_exist():
     """Ensure validators exist before running tests in this module.
@@ -67,14 +100,17 @@ def ensure_validators_exist():
     validators = response.get("result", [])
 
     if not validators:
-        # Match the provider/model configured by CI or the local test env.
-        provider = os.environ.get("TEST_PROVIDER", "openai")
-        model = os.environ.get("TEST_PROVIDER_MODEL", "gpt-4o")
-        result = post_request_localhost(
-            payload("sim_createRandomValidators", 5, 8, 12, [provider], [model])
-        ).json()
-        if not has_success_status(result):
-            pytest.fail(f"Failed to create validators: {result}")
+        if _mock_llms():
+            _create_mock_validators()
+        else:
+            # Match the provider/model configured by CI or the local test env.
+            provider = os.environ.get("TEST_PROVIDER", "openai")
+            model = os.environ.get("TEST_PROVIDER_MODEL", "gpt-4o")
+            result = post_request_localhost(
+                payload("sim_createRandomValidators", 5, 8, 12, [provider], [model])
+            ).json()
+            if not has_success_status(result):
+                pytest.fail(f"Failed to create validators: {result}")
 
     _wait_for_validator_count(5)
 
