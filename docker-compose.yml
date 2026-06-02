@@ -125,25 +125,18 @@ services:
       - RATE_LIMIT_ANON_PER_MINUTE=${RATE_LIMIT_ANON_PER_MINUTE:-30}
       - RATE_LIMIT_ANON_PER_HOUR=${RATE_LIMIT_ANON_PER_HOUR:-500}
       - RATE_LIMIT_ANON_PER_DAY=${RATE_LIMIT_ANON_PER_DAY:-5000}
-      - GENLAYER_STUDIO_GEN_PER_TIME_UNIT=${GENLAYER_STUDIO_GEN_PER_TIME_UNIT:-1000000000000000}
-      - GENLAYER_STUDIO_STORAGE_UNIT_PRICE=${GENLAYER_STUDIO_STORAGE_UNIT_PRICE:-1}
-      - GENLAYER_STUDIO_RECEIPT_GAS_PRICE=${GENLAYER_STUDIO_RECEIPT_GAS_PRICE:-1}
-      - GENLAYER_STUDIO_FIXED_PROPOSE_RECEIPT_GAS=${GENLAYER_STUDIO_FIXED_PROPOSE_RECEIPT_GAS:-210000}
-      - GENLAYER_STUDIO_FIXED_MESSAGE_REVEAL_GAS=${GENLAYER_STUDIO_FIXED_MESSAGE_REVEAL_GAS:-100000}
-      - GENLAYER_STUDIO_RECEIPT_WRAPPER_BYTES=${GENLAYER_STUDIO_RECEIPT_WRAPPER_BYTES:-1024}
       # Per-contract / per-sender PENDING tx caps (admission control on
       # eth_sendRawTransaction). Empty/unset = no cap. Set in shared
       # deployments to keep one heavy user from filling the queue.
       - MAX_PENDING_PER_CONTRACT_DEFAULT=${MAX_PENDING_PER_CONTRACT_DEFAULT:-}
       - MAX_PENDING_PER_SENDER_DEFAULT=${MAX_PENDING_PER_SENDER_DEFAULT:-}
     ports:
-      - "${RPCHOSTPORT:-4000}:${RPCPORT:-4000}"
+      - "${RPCPORT}:${RPCPORT}"
     expose:
       - "${RPCPORT}"
     volumes:
       - ./.env:/app/.env
       - ./backend:/app/backend
-      - ${GENVM_CACHE_DIR:-genvm_cache}:/genvm-cache
       # - hardhat_artifacts:/app/hardhat/artifacts
       # - hardhat_deployments:/app/hardhat/deployments
     depends_on:
@@ -253,7 +246,7 @@ services:
     image: postgres:16-alpine
     command: sh -c "if [ \"$REMOTE_DATABASE\" = \"true\" ]; then echo 'Postgres disabled in hosted environment' && exec tail -f /dev/null; else exec docker-entrypoint.sh postgres; fi"
     ports:
-      - "${DBHOSTPORT:-5432}:5432"
+      - "${DBPORT}:5432"
     environment:
       - POSTGRES_USER=${DBUSER}
       - POSTGRES_PASSWORD=${DBPASSWORD}
@@ -308,16 +301,9 @@ services:
       - WEBDRIVERHOST=${WEBDRIVERHOST}
       - WEBDRIVERPORT=${WEBDRIVERPORT}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-      - GENLAYER_STUDIO_GEN_PER_TIME_UNIT=${GENLAYER_STUDIO_GEN_PER_TIME_UNIT:-1000000000000000}
-      - GENLAYER_STUDIO_STORAGE_UNIT_PRICE=${GENLAYER_STUDIO_STORAGE_UNIT_PRICE:-1}
-      - GENLAYER_STUDIO_RECEIPT_GAS_PRICE=${GENLAYER_STUDIO_RECEIPT_GAS_PRICE:-1}
-      - GENLAYER_STUDIO_FIXED_PROPOSE_RECEIPT_GAS=${GENLAYER_STUDIO_FIXED_PROPOSE_RECEIPT_GAS:-210000}
-      - GENLAYER_STUDIO_FIXED_MESSAGE_REVEAL_GAS=${GENLAYER_STUDIO_FIXED_MESSAGE_REVEAL_GAS:-100000}
-      - GENLAYER_STUDIO_RECEIPT_WRAPPER_BYTES=${GENLAYER_STUDIO_RECEIPT_WRAPPER_BYTES:-1024}
     volumes:
       - ./.env:/app/.env
       - ./backend:/app/backend
-      - ${GENVM_CACHE_DIR:-genvm_cache}:/genvm-cache
     depends_on:
       database-migration:
         condition: service_completed_successfully
@@ -389,7 +375,7 @@ services:
   redis:
     image: redis:8-alpine
     ports:
-      - "${REDISPORT:-6379}:6379"
+      - "6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -436,6 +422,5 @@ volumes:
   # hardhat_deployments:
   ignition_deployments:
   # hardhat_snapshots:
-  genvm_cache:
   postgres_data:
   redis_data:

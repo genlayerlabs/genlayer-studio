@@ -489,7 +489,6 @@ def register_endpoints_for_fastapi(
         partial(endpoints.get_finality_window_time, consensus),
         "sim_getFinalityWindowTime",
     )
-    register(endpoints.get_studio_fee_config, "sim_getFeeConfig")
     register(
         partial(endpoints.get_contract, accounts_manager), "sim_getConsensusContract"
     )
@@ -546,18 +545,6 @@ def register_endpoints_for_fastapi(
             genvm_manager,
         ),
         "sim_call",
-    )
-    register(
-        partial(
-            endpoints.sim_estimate_transaction_fees,
-            request_session,
-            accounts_manager,
-            msg_handler,
-            transactions_parser,
-            validators_manager,
-            genvm_manager,
-        ),
-        "sim_estimateTransactionFees",
     )
 
     # Ethereum-compatible endpoints

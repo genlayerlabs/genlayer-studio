@@ -10,20 +10,12 @@ import type {
   DeleteValidatorRequest,
   GetContractSchemaRequest,
   GetTransactionCountRequest,
-  StudioFeeConfig,
-  StudioFeeEstimateResult,
 } from '@/types';
 
 export interface IJsonRpcService {
   getContractState(
     request: GetContractStateRequest,
   ): Promise<GetContractStateResult>;
-  simulateCall(
-    params: Record<string, unknown>,
-  ): Promise<Record<string, unknown>>;
-  estimateTransactionFees(
-    params: Record<string, unknown>,
-  ): Promise<StudioFeeEstimateResult>;
   sendTransaction(signedTransaction: string): Promise<string>;
   getContractSchema(request: GetContractSchemaRequest): Promise<any>;
   getDeployedContractSchema(
@@ -31,7 +23,6 @@ export interface IJsonRpcService {
   ): Promise<any>;
   getValidators(): Promise<any[]>;
   getProvidersAndModels(): Promise<any[]>;
-  getFeeConfig(): Promise<StudioFeeConfig>;
   addProvider(request: AddProviderRequest): Promise<any>;
   updateProvider(request: UpdateProviderRequest): Promise<any>;
   deleteProvider(request: DeleteProviderRequest): Promise<any>;

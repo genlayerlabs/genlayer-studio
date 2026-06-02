@@ -102,21 +102,6 @@ def _make_context(transaction, accounts_manager=None, snapshot=None):
     return ctx
 
 
-def test_transaction_from_dict_coerces_serialized_value():
-    tx = Transaction.from_dict(
-        {
-            "hash": "0xtxhash",
-            "status": TransactionStatus.PENDING.value,
-            "type": TransactionType.SEND.value,
-            "from_address": "0xsender",
-            "to_address": "0xrecipient",
-            "value": str(3 * 10**18),
-        }
-    )
-
-    assert tx.value == 3 * 10**18
-
-
 class TestActivationCredit:
     """credit_tx_value_once is called on first activation."""
 
