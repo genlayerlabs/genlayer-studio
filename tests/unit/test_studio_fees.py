@@ -5248,6 +5248,25 @@ def test_message_value_withdrawal_reserves_finalized_external_value_before_inter
     ]
 
 
+def test_message_value_withdrawal_drops_unbacked_external_value():
+    context = _message_value_context(balance=3)
+    accepted_external = _pending_external_value(5, on="accepted")
+    accepted_internal = _pending_internal_value(2, on="accepted")
+
+    adjusted = _apply_message_value_withdrawals_for_phase(
+        context,
+        [accepted_external, accepted_internal],
+        "accepted",
+    )
+
+    assert adjusted == [accepted_internal]
+    assert context.accounts_manager.balance == 1
+    assert context.accounts_manager.debits == [
+        (context.transaction.to_address, 5),
+        (context.transaction.to_address, 2),
+    ]
+
+
 def test_message_dispatch_creates_mode1_child_fee_accounting_from_pending_metadata(
     monkeypatch,
 ):
