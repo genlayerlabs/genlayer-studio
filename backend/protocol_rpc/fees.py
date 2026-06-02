@@ -2458,6 +2458,11 @@ def _receipt_execution_allows_messages(receipt: Any) -> bool:
         status = _receipt_value(receipt, "executionResult")
     if hasattr(status, "value"):
         status = status.value
+    if _receipt_budget_exhaustion_reason(receipt) in {
+        "ExecutionBudgetExceeded",
+        "MessageBudgetExceeded",
+    }:
+        return False
     if status is None:
         return True
     return str(status).replace("_", "").upper() in {

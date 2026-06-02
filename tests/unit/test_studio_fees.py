@@ -1945,6 +1945,51 @@ def test_execution_fee_report_preserves_genvm_budget_exhaustion_reason():
     )
 
 
+def test_budget_exhaustion_discards_receipt_messages_from_fee_consumption():
+    fee_params = _encode_internal_fee_params()
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(total_message_fees=55),
+        num_of_validators=5,
+        submitted_value=1_155,
+        user_value=0,
+        sender="0x1111111111111111111111111111111111111111",
+    )
+    receipt = {
+        "genvm_result": {
+            "budgetExhaustionReason": "MessageBudgetExceeded",
+            "data_fees_consumed": [10, 3, 55],
+        },
+        "pending_transactions": [
+            {
+                "messageType": "Internal",
+                "recipient": "0x2222222222222222222222222222222222222222",
+                "data": "0x1234",
+                "onAcceptance": True,
+                "value": 0,
+                "feeParams": fee_params,
+                "declaredBudget": 55,
+                "callKey": CALL_KEY_WILDCARD,
+            }
+        ],
+    }
+
+    recorded = record_execution_fee_consumption(
+        accounting,
+        receipt,
+        StudioFeePolicy(receipt_gas_price=0),
+    )
+
+    report = recorded["execution_fee_report"]
+    assert recorded["message_fee_consumed"] == 0
+    assert recorded["genvm_message_fee_consumed"] == 55
+    assert recorded["execution_fee_consumed_buckets"] == [10, 0]
+    assert "message_fees_recorded_from_receipt" not in recorded
+    assert "messageReveal" not in report
+    assert report["budgetExhaustionReason"] == "MessageBudgetExceeded"
+    assert report["messageFees"]["declaredConsumed"] == 0
+    assert report["messageFees"]["genvmMeteredConsumed"] == 55
+
+
 def test_simulation_fee_consumption_rejects_declared_message_without_bucket():
     fee_params = _encode_internal_fee_params()
     accounting = create_fee_accounting(
