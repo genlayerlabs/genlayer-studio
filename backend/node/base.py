@@ -1074,9 +1074,11 @@ class Node:
                 manager_uri=self.manager.url,
                 timeout=timeout,
                 code=code,
-                bucket_totals=bucket_totals,
-                gas_data=gas_data,
-                message_fee_allocation=message_fee_allocation,
+                fee_context=genvmbase.GenVMFeeContext(
+                    bucket_totals=bucket_totals,
+                    gas_data=gas_data,
+                    message_fee_allocation=message_fee_allocation,
+                ),
                 logger=logger,
             )
         except FeeValidationError as e:

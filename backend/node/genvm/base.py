@@ -10,6 +10,7 @@ __all__ = (
     "ExecutionResult",
     "apply_storage_changes",
     "GenVMInternalError",
+    "GenVMFeeContext",
     "Context",
     "set_genvm_callbacks",
 )
@@ -59,6 +60,13 @@ GENVM_GASLESS_GAS_DATA: dict[str, str] = {
     "fixedMessageRevealGas": "0",
     "genPerTimeUnit": "0",
 }
+
+
+@dataclass(frozen=True)
+class GenVMFeeContext:
+    bucket_totals: list[int] | None = None
+    gas_data: dict[str, str] | None = None
+    message_fee_allocation: list[dict] | None = None
 
 
 @dataclass
@@ -599,15 +607,22 @@ async def run_genvm_host(
     extra_args: list[str] = [],
     permissions: str = "rwscn",
     code: bytes | None = None,
-    bucket_totals: list[int] | None = None,
-    gas_data: dict[str, str] | None = None,
-    message_fee_allocation: list[dict] | None = None,
+    fee_context: GenVMFeeContext | None = None,
 ) -> ExecutionResult:
     if logger is None:
         logger = genvm_logger.NoLogger()
     ctx = Context(logger=logger)
-    effective_bucket_totals = bucket_totals or [10_000_000, 10_000_000, 10_000_000]
-    effective_gas_data = dict(gas_data) if gas_data else dict(GENVM_GASLESS_GAS_DATA)
+    fee_context = fee_context or GenVMFeeContext()
+    effective_bucket_totals = fee_context.bucket_totals or [
+        10_000_000,
+        10_000_000,
+        10_000_000,
+    ]
+    effective_gas_data = (
+        dict(fee_context.gas_data)
+        if fee_context.gas_data
+        else dict(GENVM_GASLESS_GAS_DATA)
+    )
     tmpdir = Path(tempfile.mkdtemp())
     try:
         base_delay = 5  # seconds
@@ -681,7 +696,7 @@ async def run_genvm_host(
                         code=code,
                         bucket_totals=effective_bucket_totals,
                         gas_data=effective_gas_data,
-                        message_fee_allocation=message_fee_allocation or [],
+                        message_fee_allocation=fee_context.message_fee_allocation or [],
                         calldata=fresh_args.get(
                             "calldata_bytes", host_args.get("calldata_bytes", b"")
                         ),

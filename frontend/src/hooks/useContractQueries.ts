@@ -1,6 +1,11 @@
 import { watch, ref, computed } from 'vue';
 import { useQuery, useQueryClient } from '@tanstack/vue-query';
-import type { TransactionItem } from '@/types';
+import type {
+  ExecutionMode,
+  StudioFeeConfig,
+  StudioFeeEstimateResult,
+  TransactionItem,
+} from '@/types';
 import {
   useContractsStore,
   useTransactionsStore,
@@ -24,11 +29,6 @@ import type {
   TransactionHashVariant,
 } from 'genlayer-js/types';
 import { TransactionStatus } from 'genlayer-js/types';
-import type {
-  ExecutionMode,
-  StudioFeeConfig,
-  StudioFeeEstimateResult,
-} from '@/types';
 
 const schema = ref<any>();
 
