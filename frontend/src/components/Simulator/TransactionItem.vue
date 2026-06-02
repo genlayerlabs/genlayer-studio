@@ -179,9 +179,17 @@ function formatGenFromWei(wei: bigint): string {
   if (remainder === 0n) return `${sign}${whole.toLocaleString()}`;
 
   const fraction = remainder.toString().padStart(18, '0');
-  const trimmed = fraction.replace(/0+$/, '');
+  const trimmed = trimTrailingZeroes(fraction);
   const decimals = Math.min(6, Math.max(3, trimmed.length));
   return `${sign}${whole.toLocaleString()}.${fraction.slice(0, decimals)}`;
+}
+
+function trimTrailingZeroes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 48) {
+    end -= 1;
+  }
+  return value.slice(0, end);
 }
 
 function formatFeeAmount(value: unknown): string {

@@ -6,7 +6,11 @@ import pytest
 import rlp
 from eth_abi import encode
 
-from backend.consensus.base import _get_messages_data
+from backend.consensus.base import (
+    _apply_external_message_freeze_check,
+    _apply_message_value_withdrawals_for_phase,
+    _get_messages_data,
+)
 from backend.domain.types import TransactionType
 from backend.errors.errors import InvalidTransactionError
 from backend.protocol_rpc.exceptions import JSONRPCError
@@ -85,7 +89,12 @@ from backend.protocol_rpc.fees import (
     validate_message_allocations,
     validate_transaction_fee_deposit,
 )
-from backend.node.types import PendingTransaction
+from backend.node.types import (
+    ExecutionMode,
+    ExecutionResultStatus,
+    PendingTransaction,
+    Receipt,
+)
 from backend.protocol_rpc.types import (
     DecodedsubmitAppealDataArgs,
     DecodedRollupTransaction,
@@ -5047,6 +5056,196 @@ def _message_dispatch_context(accounting):
         status=None,
     )
     return SimpleNamespace(transaction=tx, transactions_processor=processor), processor
+
+
+class _MessageValueAccountsManager:
+    def __init__(self, balance):
+        self.balance = balance
+        self.debits = []
+
+    def get_account_balance(self, address):
+        return self.balance
+
+    def debit_account_balance(self, address, amount):
+        self.debits.append((address, amount))
+        if self.balance < amount:
+            return False
+        self.balance -= amount
+        return True
+
+
+class _ExternalFreezeQuery:
+    def __init__(self, *, scalar_value=None, rows=None):
+        self.scalar_value = scalar_value
+        self.rows = rows or []
+
+    def filter(self, *args):
+        return self
+
+    def scalar(self):
+        return self.scalar_value
+
+    def all(self):
+        return self.rows
+
+
+class _ExternalFreezeSession:
+    def __init__(self, *, current_created_at=None, accepted_rows=None):
+        self.current_created_at = current_created_at
+        self.accepted_rows = accepted_rows or []
+        self.query_count = 0
+
+    def query(self, *args):
+        self.query_count += 1
+        if self.query_count == 1:
+            return _ExternalFreezeQuery(scalar_value=self.current_created_at)
+        return _ExternalFreezeQuery(rows=self.accepted_rows)
+
+
+def _message_value_context(balance, *, session=None):
+    address = "0x9999999999999999999999999999999999999999"
+    processor = SimpleNamespace()
+    if session is not None:
+        processor.session = session
+    return SimpleNamespace(
+        transaction=SimpleNamespace(
+            hash="0x" + "cd" * 32,
+            to_address=address,
+        ),
+        transactions_processor=processor,
+        accounts_manager=_MessageValueAccountsManager(balance),
+    )
+
+
+def _pending_external_value(value, *, on="accepted", recipient=None):
+    return PendingTransaction(
+        address=recipient or "0x4444444444444444444444444444444444444444",
+        calldata=b"",
+        code=None,
+        salt_nonce=0,
+        on=on,
+        value=value,
+        is_eth_send=True,
+    )
+
+
+def _pending_internal_value(value, *, on="accepted", recipient=None):
+    return PendingTransaction(
+        address=recipient or "0x5555555555555555555555555555555555555555",
+        calldata=b"\x12\x34",
+        code=None,
+        salt_nonce=0,
+        on=on,
+        value=value,
+    )
+
+
+def _leader_receipt_with_messages(pending_transactions):
+    return Receipt(
+        result=b"\x00",
+        calldata=b"",
+        gas_used=0,
+        mode=ExecutionMode.LEADER,
+        contract_state={"balance": "kept"},
+        node_config={"address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        execution_result=ExecutionResultStatus.SUCCESS,
+        pending_transactions=pending_transactions,
+        genvm_result={"stdout": ""},
+    )
+
+
+def test_external_message_freeze_rejects_value_above_available_balance():
+    context = _message_value_context(balance=4)
+    receipt = _leader_receipt_with_messages(
+        [
+            _pending_external_value(3, on="accepted"),
+            _pending_external_value(2, on="finalized"),
+            _pending_internal_value(100, on="accepted"),
+        ]
+    )
+
+    _apply_external_message_freeze_check(context, receipt)
+
+    assert receipt.execution_result == ExecutionResultStatus.ERROR
+    assert receipt.pending_transactions == []
+    assert receipt.contract_state == {}
+    assert receipt.contract_state_hash is None
+    assert b"ExternalMessageFreezeExceeded" in receipt.result
+    assert receipt.genvm_result["error_code"] == "EXTERNAL_MESSAGE_FREEZE_EXCEEDED"
+    assert receipt.genvm_result["external_message_freeze"] == {
+        "declaredValue": 5,
+        "availableLimit": 4,
+        "balance": 4,
+        "reservedExternal": 0,
+    }
+
+
+def test_external_message_freeze_counts_prior_finalization_reservations():
+    prior_finalization_freeze = 6
+    prior_row = SimpleNamespace(
+        consensus_data={
+            "leader_receipt": [
+                {
+                    "execution_result": ExecutionResultStatus.SUCCESS.value,
+                    "pending_transactions": [
+                        {
+                            "is_eth_send": True,
+                            "on": "finalized",
+                            "value": prior_finalization_freeze,
+                        },
+                        {
+                            "is_eth_send": True,
+                            "on": "accepted",
+                            "value": 4,
+                        },
+                        {
+                            "messageType": "1",
+                            "onAcceptance": False,
+                            "value": 100,
+                        },
+                    ],
+                }
+            ]
+        }
+    )
+    context = _message_value_context(
+        balance=10,
+        session=_ExternalFreezeSession(accepted_rows=[prior_row]),
+    )
+    receipt = _leader_receipt_with_messages([_pending_external_value(5, on="accepted")])
+
+    _apply_external_message_freeze_check(context, receipt)
+
+    assert receipt.execution_result == ExecutionResultStatus.ERROR
+    assert receipt.genvm_result["external_message_freeze"] == {
+        "declaredValue": 5,
+        "availableLimit": 4,
+        "balance": 10,
+        "reservedExternal": prior_finalization_freeze,
+    }
+
+
+def test_message_value_withdrawal_reserves_finalized_external_value_before_internal():
+    context = _message_value_context(balance=20)
+    accepted_external = _pending_external_value(7, on="accepted")
+    accepted_internal = _pending_internal_value(5, on="accepted")
+    finalized_external = _pending_external_value(14, on="finalized")
+
+    adjusted = _apply_message_value_withdrawals_for_phase(
+        context,
+        [accepted_external, accepted_internal, finalized_external],
+        "accepted",
+    )
+
+    assert adjusted[0] is accepted_external
+    assert adjusted[0].value == 7
+    assert adjusted[1].address == accepted_internal.address
+    assert adjusted[1].value == 0
+    assert adjusted[2] is finalized_external
+    assert context.accounts_manager.balance == 13
+    assert context.accounts_manager.debits == [
+        (context.transaction.to_address, 7),
+    ]
 
 
 def test_message_dispatch_creates_mode1_child_fee_accounting_from_pending_metadata(
