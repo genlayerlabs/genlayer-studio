@@ -22,8 +22,180 @@ from backend.protocol_rpc.types import (
     DecodedGenlayerTransaction,
     DecodedGenlayerTransactionData,
     DecodedsubmitAppealDataArgs,
+    DecodedTopUpFeesDataArgs,
     ZERO_ADDRESS,
 )
+
+FEE_AWARE_ADD_TRANSACTION_ABI = {
+    "inputs": [
+        {
+            "components": [
+                {"internalType": "address", "name": "sender", "type": "address"},
+                {"internalType": "address", "name": "recipient", "type": "address"},
+                {
+                    "internalType": "uint256",
+                    "name": "numOfInitialValidators",
+                    "type": "uint256",
+                },
+                {"internalType": "uint256", "name": "maxRotations", "type": "uint256"},
+                {"internalType": "uint256", "name": "validUntil", "type": "uint256"},
+                {"internalType": "uint256", "name": "saltNonce", "type": "uint256"},
+                {"internalType": "uint256", "name": "userValue", "type": "uint256"},
+                {
+                    "components": [
+                        {
+                            "internalType": "uint256",
+                            "name": "leaderTimeunitsAllocation",
+                            "type": "uint256",
+                        },
+                        {
+                            "internalType": "uint256",
+                            "name": "validatorTimeunitsAllocation",
+                            "type": "uint256",
+                        },
+                        {
+                            "internalType": "uint256",
+                            "name": "appealRounds",
+                            "type": "uint256",
+                        },
+                        {
+                            "internalType": "uint256",
+                            "name": "executionBudgetPerRound",
+                            "type": "uint256",
+                        },
+                        {
+                            "internalType": "uint256",
+                            "name": "executionConsumed",
+                            "type": "uint256",
+                        },
+                        {
+                            "internalType": "uint256",
+                            "name": "totalMessageFees",
+                            "type": "uint256",
+                        },
+                        {
+                            "internalType": "uint256[]",
+                            "name": "rotations",
+                            "type": "uint256[]",
+                        },
+                        {
+                            "internalType": "uint256",
+                            "name": "maxPriceGenPerTimeUnit",
+                            "type": "uint256",
+                        },
+                        {
+                            "internalType": "uint256",
+                            "name": "storageFeeMaxGasPrice",
+                            "type": "uint256",
+                        },
+                        {
+                            "internalType": "uint256",
+                            "name": "receiptFeeMaxGasPrice",
+                            "type": "uint256",
+                        },
+                    ],
+                    "internalType": "struct IFeeManager.FeesDistribution",
+                    "name": "feesDistribution",
+                    "type": "tuple",
+                },
+                {"internalType": "bytes", "name": "txCalldata", "type": "bytes"},
+                {
+                    "components": [
+                        {
+                            "internalType": "enum IMessages.MessageType",
+                            "name": "messageType",
+                            "type": "uint8",
+                        },
+                        {
+                            "internalType": "bool",
+                            "name": "onAcceptance",
+                            "type": "bool",
+                        },
+                        {
+                            "internalType": "uint256",
+                            "name": "parentIndex",
+                            "type": "uint256",
+                        },
+                        {
+                            "internalType": "address",
+                            "name": "recipient",
+                            "type": "address",
+                        },
+                        {
+                            "internalType": "bytes32",
+                            "name": "callKey",
+                            "type": "bytes32",
+                        },
+                        {
+                            "internalType": "uint256",
+                            "name": "budget",
+                            "type": "uint256",
+                        },
+                        {"internalType": "bytes", "name": "feeParams", "type": "bytes"},
+                    ],
+                    "internalType": "struct IMessages.MessageFeeAllocationNode[]",
+                    "name": "messageAllocations",
+                    "type": "tuple[]",
+                },
+            ],
+            "internalType": "struct IConsensusMainWithFees.AddTransactionParams",
+            "name": "_params",
+            "type": "tuple",
+        }
+    ],
+    "name": "addTransaction",
+    "outputs": [],
+    "stateMutability": "payable",
+    "type": "function",
+}
+
+FEE_AWARE_DEPLOY_SALTED_ABI = {
+    **FEE_AWARE_ADD_TRANSACTION_ABI,
+    "name": "deploySalted",
+}
+
+FEE_AWARE_TOP_UP_FEES_ABI = {
+    "inputs": [
+        {"internalType": "bytes32", "name": "_txId", "type": "bytes32"},
+        FEE_AWARE_ADD_TRANSACTION_ABI["inputs"][0]["components"][7]
+        | {"name": "_feesDistribution"},
+    ],
+    "name": "topUpFees",
+    "outputs": [],
+    "stateMutability": "payable",
+    "type": "function",
+}
+
+FEE_AWARE_TOP_UP_AND_SUBMIT_APPEAL_ABI = {
+    **FEE_AWARE_TOP_UP_FEES_ABI,
+    "name": "topUpAndSubmitAppeal",
+}
+
+FEES_DISTRIBUTION_FIELDS = [
+    "leaderTimeunitsAllocation",
+    "validatorTimeunitsAllocation",
+    "appealRounds",
+    "executionBudgetPerRound",
+    "executionConsumed",
+    "totalMessageFees",
+    "rotations",
+    "maxPriceGenPerTimeUnit",
+    "storageFeeMaxGasPrice",
+    "receiptFeeMaxGasPrice",
+]
+
+ADD_TRANSACTION_PARAMS_FIELDS = [
+    "sender",
+    "recipient",
+    "numOfInitialValidators",
+    "maxRotations",
+    "validUntil",
+    "saltNonce",
+    "userValue",
+    "feesDistribution",
+    "txCalldata",
+    "messageAllocations",
+]
 
 
 class Boolean:
@@ -164,6 +336,8 @@ class TransactionParser:
                 to_address = None
             nonce = signed_transaction_as_dict["nonce"]
             value = signed_transaction_as_dict["value"]
+            submitted_value = int(value)
+            fee_value = 0
             # Some decoders return `data`, others return `input`
             input_raw = (
                 signed_transaction_as_dict.get("data")
@@ -192,7 +366,7 @@ class TransactionParser:
                 for abi_entry in contract_abi:
                     if abi_entry["type"] == "function":
                         # Calculate function selector from ABI
-                        function_signature = f"{abi_entry['name']}({','.join([input['type'] for input in abi_entry['inputs']])})"
+                        function_signature = f"{abi_entry['name']}({','.join([self._canonical_abi_type(input) for input in abi_entry['inputs']])})"
                         calculated_selector = self.web3.keccak(text=function_signature)[
                             :4
                         ].hex()
@@ -200,7 +374,8 @@ class TransactionParser:
                         if calculated_selector == function_selector:
                             # Decode parameters using the input types from ABI
                             input_types = [
-                                input["type"] for input in abi_entry["inputs"]
+                                self._canonical_abi_type(input)
+                                for input in abi_entry["inputs"]
                             ]
                             decoded_params = self.web3.codec.decode(
                                 input_types, bytes.fromhex(parameters)
@@ -219,27 +394,42 @@ class TransactionParser:
                                 ),
                             }
                             # Convert the decoded data into proper dataclasses
-                            if decoded_data["function"] == "addTransaction":
+                            if decoded_data["function"] in {
+                                "addTransaction",
+                                "deploySalted",
+                            }:
                                 params = decoded_data["params"]
-                                decoded_data = DecodedRollupTransactionData(
-                                    function_name=decoded_data["function"],
-                                    args=DecodedRollupTransactionDataArgs(
-                                        sender=to_checksum_address(params["_sender"]),
-                                        recipient=to_checksum_address(
-                                            params["_recipient"]
-                                        ),
-                                        num_of_initial_validators=params[
-                                            "_numOfInitialValidators"
-                                        ],
-                                        max_rotations=params["_maxRotations"],
-                                        data=params["_txData"],
-                                    ),
+                                decoded_data, value, fee_value = (
+                                    self._decode_add_transaction_data(
+                                        decoded_data["function"], params, value
+                                    )
                                 )
                             elif decoded_data["function"] == "submitAppeal":
                                 params = decoded_data["params"]
                                 decoded_data = DecodedsubmitAppealDataArgs(
                                     tx_id=params["_txId"],
                                 )
+                            elif decoded_data["function"] == "topUpFees":
+                                params = decoded_data["params"]
+                                decoded_data = DecodedTopUpFeesDataArgs(
+                                    tx_id=params["_txId"],
+                                    fees_distribution=self._fees_distribution_to_dict(
+                                        params["_feesDistribution"]
+                                    ),
+                                )
+                                fee_value = int(value)
+                                value = 0
+                            elif decoded_data["function"] == "topUpAndSubmitAppeal":
+                                params = decoded_data["params"]
+                                decoded_data = DecodedsubmitAppealDataArgs(
+                                    tx_id=params["_txId"],
+                                    fees_distribution=self._fees_distribution_to_dict(
+                                        params["_feesDistribution"]
+                                    ),
+                                    top_up_and_submit=True,
+                                )
+                                fee_value = int(value)
+                                value = 0
 
             return DecodedRollupTransaction(
                 from_address=sender,
@@ -248,6 +438,8 @@ class TransactionParser:
                 type=signed_transaction_as_dict.get("type", 0),
                 nonce=nonce,
                 value=value,
+                fee_value=fee_value,
+                submitted_value=submitted_value,
             )
 
         except Exception as e:
@@ -484,7 +676,97 @@ class TransactionParser:
     def _get_contract_abi(self) -> list:
         # Get contract ABI from consensus service
         contract_data = self.consensus_service.load_contract("ConsensusMain")
-        return contract_data["abi"] if contract_data else []
+        contract_abi = list(contract_data["abi"]) if contract_data else []
+        contract_abi.extend(
+            [
+                FEE_AWARE_ADD_TRANSACTION_ABI,
+                FEE_AWARE_DEPLOY_SALTED_ABI,
+                FEE_AWARE_TOP_UP_FEES_ABI,
+                FEE_AWARE_TOP_UP_AND_SUBMIT_APPEAL_ABI,
+            ]
+        )
+        return contract_abi
+
+    def _canonical_abi_type(self, abi_input: dict) -> str:
+        input_type = abi_input["type"]
+        if not input_type.startswith("tuple"):
+            return input_type
+
+        suffix = input_type[5:]
+        component_types = ",".join(
+            self._canonical_abi_type(component)
+            for component in abi_input.get("components", [])
+        )
+        return f"({component_types}){suffix}"
+
+    def _decode_add_transaction_data(
+        self, function_name: str, params: dict, msg_value: int
+    ) -> tuple[DecodedRollupTransactionData, int, int]:
+        if "_params" in params:
+            add_params = dict(zip(ADD_TRANSACTION_PARAMS_FIELDS, params["_params"]))
+            user_value = int(add_params["userValue"])
+            fee_value = max(0, int(msg_value) - user_value)
+            return (
+                DecodedRollupTransactionData(
+                    function_name=function_name,
+                    args=DecodedRollupTransactionDataArgs(
+                        sender=to_checksum_address(add_params["sender"]),
+                        recipient=to_checksum_address(add_params["recipient"]),
+                        num_of_initial_validators=int(
+                            add_params["numOfInitialValidators"]
+                        ),
+                        max_rotations=int(add_params["maxRotations"]),
+                        data=add_params["txCalldata"],
+                        valid_until=int(add_params["validUntil"]),
+                        salt_nonce=int(add_params["saltNonce"]),
+                        user_value=user_value,
+                        fees_distribution=self._fees_distribution_to_dict(
+                            add_params["feesDistribution"]
+                        ),
+                        message_allocations=[
+                            self._message_allocation_to_dict(allocation)
+                            for allocation in add_params["messageAllocations"]
+                        ],
+                        message_allocations_count=len(add_params["messageAllocations"]),
+                    ),
+                ),
+                user_value,
+                fee_value,
+            )
+
+        return (
+            DecodedRollupTransactionData(
+                function_name=function_name,
+                args=DecodedRollupTransactionDataArgs(
+                    sender=to_checksum_address(params["_sender"]),
+                    recipient=to_checksum_address(params["_recipient"]),
+                    num_of_initial_validators=int(params["_numOfInitialValidators"]),
+                    max_rotations=int(params["_maxRotations"]),
+                    data=params["_txData"],
+                ),
+            ),
+            int(msg_value),
+            0,
+        )
+
+    def _fees_distribution_to_dict(self, fees_distribution: tuple) -> dict:
+        result = dict(zip(FEES_DISTRIBUTION_FIELDS, fees_distribution))
+        result["rotations"] = [int(rotation) for rotation in result["rotations"]]
+        for key, value in result.items():
+            if key != "rotations":
+                result[key] = int(value)
+        return result
+
+    def _message_allocation_to_dict(self, message_allocation: tuple) -> dict:
+        return {
+            "messageType": int(message_allocation[0]),
+            "onAcceptance": bool(message_allocation[1]),
+            "parentIndex": int(message_allocation[2]),
+            "recipient": to_checksum_address(message_allocation[3]),
+            "callKey": eth_utils.to_hex(message_allocation[4]),
+            "budget": int(message_allocation[5]),
+            "feeParams": bytes(message_allocation[6]),
+        }
 
 
 class DeploymentContractTransactionPayload(rlp.Serializable):

@@ -258,7 +258,7 @@ class TestGenCallContractNotFoundHandling:
 
                 with patch("backend.protocol_rpc.endpoints._check_rate_limit"):
                     with patch(
-                        "backend.protocol_rpc.endpoints._genvm_semaphore"
+                        "backend.protocol_rpc.endpoints._genvm_admission_semaphore"
                     ) as mock_sem:
                         mock_sem.locked.return_value = False
                         mock_sem.__aenter__ = AsyncMock()

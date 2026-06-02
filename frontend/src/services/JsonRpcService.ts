@@ -12,6 +12,8 @@ import type {
   DeleteProviderRequest,
   TransactionItem,
   GetTransactionCountRequest,
+  StudioFeeConfig,
+  StudioFeeEstimateResult,
 } from '@/types';
 
 export class JsonRpcService implements IJsonRpcService {
@@ -45,6 +47,26 @@ export class JsonRpcService implements IJsonRpcService {
       [{ to, from, data }],
       'Error getting contract state',
     );
+  }
+
+  async simulateCall(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.callRpcMethod<Record<string, unknown>>(
+      'sim_call',
+      [params],
+      'Error simulating contract call',
+    ) as Promise<Record<string, unknown>>;
+  }
+
+  async estimateTransactionFees(
+    params: Record<string, unknown>,
+  ): Promise<StudioFeeEstimateResult> {
+    return this.callRpcMethod<StudioFeeEstimateResult>(
+      'sim_estimateTransactionFees',
+      [params],
+      'Error estimating transaction fees',
+    ) as Promise<StudioFeeEstimateResult>;
   }
 
   async sendTransaction(signedTransaction: string): Promise<any> {
@@ -148,6 +170,14 @@ export class JsonRpcService implements IJsonRpcService {
       [],
       'Error getting providers and models',
     );
+  }
+
+  async getFeeConfig(): Promise<StudioFeeConfig> {
+    return this.callRpcMethod<StudioFeeConfig>(
+      'sim_getFeeConfig',
+      [],
+      'Error getting fee config',
+    ) as Promise<StudioFeeConfig>;
   }
 
   async resetDefaultsLlmProviders(): Promise<any> {
