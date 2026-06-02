@@ -16,7 +16,7 @@ class multi_read_erc20(gl.contract.Contract):
         self, account_address: str, token_contracts: list[str]
     ) -> None:
         for token_contract in token_contracts:
-            contract = gl.get_contract_at(Address(token_contract))
+            contract = gl.contract.get_at(Address(token_contract))
             balance = contract.view().get_balance_of(account_address)
             self.balances.get_or_insert_default(Address(account_address))[
                 Address(token_contract)

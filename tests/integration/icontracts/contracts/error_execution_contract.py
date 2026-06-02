@@ -94,4 +94,4 @@ class ErrorExecutionContract(gl.contract.Contract):
     def test_cross_contract_call(self, target_address: str) -> None:
         """Test invalid cross-contract calls"""
         # Try to call a non-existent method on another contract
-        gl.get_contract_at(Address(target_address)).non_existent_method()
+        gl.contract.get_at(Address(target_address)).non_existent_method()

@@ -14,7 +14,7 @@ class read_erc20(gl.contract.Contract):
     @gl.public.view
     def get_balance_of(self, account_address: str) -> int:
         return (
-            gl.get_contract_at(self.token_contract)
+            gl.contract.get_at(self.token_contract)
             .view()
             .get_balance_of(account_address)
         )
