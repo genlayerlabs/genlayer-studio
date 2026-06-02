@@ -254,6 +254,7 @@ describe('TransactionItem fee accounting display', () => {
     expect(text).toContain('Message budget mode');
     expect(text).toContain('allocation-preserved');
     expect(text).toContain('Declared message spent');
+    expect(text).toContain('GenVM metered message');
     expect(text).toContain('External executor reimbursed');
     expect(text).toContain('Chargeable buckets');
     expect(text).toContain('GenVM raw buckets');

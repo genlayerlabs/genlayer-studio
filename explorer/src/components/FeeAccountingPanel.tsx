@@ -190,6 +190,12 @@ export function FeeAccountingPanel({ transaction }: Readonly<FeeAccountingPanelP
                   label="Declared message spent"
                   value={formatFeeAmount(messageFees.declaredConsumed)}
                 />
+                {messageFees.genvmMeteredConsumed !== undefined && (
+                  <ReportRow
+                    label="GenVM metered message"
+                    value={formatFeeAmount(messageFees.genvmMeteredConsumed)}
+                  />
+                )}
                 {messageFees.externalReserved !== undefined && (
                   <ReportRow
                     label="External reserved"

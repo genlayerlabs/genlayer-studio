@@ -105,6 +105,7 @@ describe('ContractMethodItem fee estimation', () => {
         },
         messageFees: {
           declaredConsumed: '55000000000000000',
+          genvmMeteredConsumed: '1234',
           externalReserved: '700',
           externalReimbursed: '400',
           externalRemainder: '300',
@@ -226,6 +227,8 @@ describe('ContractMethodItem fee estimation', () => {
     expect(text).toContain('30,000 wei');
     expect(text).toContain('GenVM raw execution');
     expect(text).toContain('401,234 wei');
+    expect(text).toContain('GenVM metered message');
+    expect(text).toContain('1,234 wei');
     expect(text).toContain('Observed external reserve');
     expect(text).toContain('700 wei');
     expect(text).toContain('External message reserved');

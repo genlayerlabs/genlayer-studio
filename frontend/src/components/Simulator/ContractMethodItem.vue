@@ -359,6 +359,11 @@ const feeEstimateRows = computed<FeeEstimateRow[]>(() => {
   );
   addFeeEstimateRow(
     rows,
+    'GenVM metered message',
+    formatFeeAmount(messageFees?.genvmMeteredConsumed),
+  );
+  addFeeEstimateRow(
+    rows,
     'External message reserved',
     formatFeeAmount(messageFees?.externalReserved),
   );

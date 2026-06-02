@@ -967,6 +967,18 @@ const badgeColorClass = computed(() => {
                       formatFeeAmount(messageFees.declaredConsumed)
                     }}</span>
                     <span
+                      v-if="messageFees.genvmMeteredConsumed !== undefined"
+                      class="text-gray-500 dark:text-gray-400"
+                      >GenVM metered message</span
+                    >
+                    <span
+                      v-if="messageFees.genvmMeteredConsumed !== undefined"
+                      class="break-all font-mono"
+                      >{{
+                        formatFeeAmount(messageFees.genvmMeteredConsumed)
+                      }}</span
+                    >
+                    <span
                       v-if="messageFees.externalReserved !== undefined"
                       class="text-gray-500 dark:text-gray-400"
                       >External reserved</span
