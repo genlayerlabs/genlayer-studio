@@ -1,5 +1,7 @@
 import pytest
 from unittest.mock import Mock, MagicMock
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from backend.database_handler.transactions_processor import TransactionsProcessor
 from backend.database_handler.models import TransactionStatus
 from backend.protocol_rpc.transactions_parser import (
@@ -38,6 +40,54 @@ def test_transaction_rpc_payload_stringifies_unsafe_fee_integers():
     assert payload["fee_value"] == "1100000000001000000"
     assert payload["fee_accounting"]["primary_fee_budget"] == "1100000000001000000"
     assert payload["fee_accounting"]["execution_budget_total"] == 1_000_000
+
+
+def test_parsed_transaction_preserves_value_int_at_processor_boundary():
+    unsafe_value = 456 * 10**18
+    transaction_data = SimpleNamespace(
+        hash="0x" + "01" * 32,
+        from_address="0x4000000000000000000000000000000000000001",
+        to_address="0x5000000000000000000000000000000000000001",
+        data={"nested_value": unsafe_value},
+        value=unsafe_value,
+        type=2,
+        status=TransactionStatus.PENDING,
+        consensus_data=None,
+        nonce=0,
+        r=None,
+        s=None,
+        v=None,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        leader_only=False,
+        execution_mode="NORMAL",
+        origin_address="0x4000000000000000000000000000000000000001",
+        triggered_by_hash=None,
+        triggered_on=None,
+        triggered_transactions=[],
+        appealed=False,
+        timestamp_awaiting_finalization=None,
+        appeal_failed=0,
+        appeal_undetermined=False,
+        consensus_history={},
+        timestamp_appeal=None,
+        appeal_processing_time=0,
+        contract_snapshot=None,
+        config_rotation_rounds=3,
+        num_of_initial_validators=None,
+        last_vote_timestamp=None,
+        rotation_count=0,
+        appeal_leader_timeout=False,
+        leader_timeout_validators=None,
+        appeal_validators_timeout=False,
+        sim_config=None,
+        value_credited=False,
+    )
+
+    parsed = TransactionsProcessor._parse_transaction_data(transaction_data)
+
+    assert parsed["value"] == unsafe_value
+    assert isinstance(parsed["value"], int)
+    assert parsed["data"]["nested_value"] == str(unsafe_value)
 
 
 @pytest.mark.parametrize(
