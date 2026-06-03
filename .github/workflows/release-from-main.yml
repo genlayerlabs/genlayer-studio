@@ -3,8 +3,6 @@ on:
   push:
     branches:
       - main
-  schedule:
-    - cron: "00 08 * * 1-4" # 08:00 AM (UTC) from Monday to Thursday
   workflow_dispatch:
 permissions:
   contents: read # for checkout
