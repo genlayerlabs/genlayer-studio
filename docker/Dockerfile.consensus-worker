@@ -4,7 +4,7 @@ FROM ubuntu:24.04 AS base
 ARG TARGETPLATFORM
 ARG TARGETARCH
 
-ARG GENVM_TAG=v0.3.0-rc3
+ARG GENVM_TAG
 ENV GENVM_TAG=$GENVM_TAG
 
 ARG path=/app
@@ -50,6 +50,7 @@ ENV RUST_BACKTRACE=1
 
 # Download and extract GenVM binaries (sequential for Docker compatibility)
 RUN cd /genvm \
+    && test -n "$GENVM_TAG" \
     && echo "=== Starting GenVM $GENVM_TAG download ===" \
     && if [[ "$TARGETPLATFORM" == "linux/amd64" ]] || [[ -z "$TARGETPLATFORM" ]]; then \
         ARCH_FILE="genvm-linux-amd64.tar.xz" ; \

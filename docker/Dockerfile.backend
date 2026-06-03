@@ -3,7 +3,7 @@ FROM ubuntu:24.04 AS base
 ARG TARGETPLATFORM
 ARG TARGETARCH
 
-ARG GENVM_TAG=v0.3.0-rc3
+ARG GENVM_TAG
 
 ENV GENVM_TAG=$GENVM_TAG
 
@@ -49,6 +49,7 @@ ENV RUST_BACKTRACE=1
 # Download and extract GenVM binaries. Keep downloads in the extraction layer so
 # architecture tarballs do not remain in lower image layers.
 RUN cd /genvm \
+    && test -n "$GENVM_TAG" \
     && if [[ "$TARGETPLATFORM" == "linux/amd64" ]] || [[ -z "$TARGETPLATFORM" ]]; then \
             ARCH_FILE="genvm-linux-amd64.tar.xz" ; \
         elif [[ "$TARGETPLATFORM" == "linux/arm64" ]] ; \

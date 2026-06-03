@@ -112,7 +112,7 @@ services:
       dockerfile: ./docker/Dockerfile.backend
       target: prod
       args:
-        GENVM_TAG: ${GENVM_TAG:-v0.3.0-rc3}
+        GENVM_TAG: ${GENVM_TAG:?GENVM_TAG is required}
     environment:
       - PYTHONUNBUFFERED=1
       - WEBDRIVERHOST=${WEBDRIVERHOST}
@@ -299,7 +299,7 @@ services:
       dockerfile: ./docker/Dockerfile.consensus-worker
       target: ${CONSENSUS_BUILD_TARGET:-base}
       args:
-        GENVM_TAG: ${GENVM_TAG:-v0.3.0-rc3}
+        GENVM_TAG: ${GENVM_TAG:?GENVM_TAG is required}
     environment:
       - DBUSER=${DBUSER}
       - DBPASSWORD=${DBPASSWORD}
