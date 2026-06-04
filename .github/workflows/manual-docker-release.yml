@@ -1,4 +1,4 @@
-name: Create Release Tag
+name: Create Release Tag and Release
 
 on:
   workflow_dispatch:
@@ -21,14 +21,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Validate version format
+        env:
+          RELEASE_BRANCH: ${{ github.event.inputs.branch }}
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
         run: |
-          if [[ ! "${{ github.event.inputs.version }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9-]+)?$ ]]; then
+          set -euo pipefail
+          if [[ ! "$RELEASE_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9-]+)?$ ]]; then
             echo "Error: Version must be in format v*.*.*[-suffix] (e.g., v0.81.0 or v0.81.0-beta)"
             exit 1
           fi
-          expected_branch="$(sed -E 's/^((v[0-9]+)\.([0-9]+))\..*$/\1/' <<< "${{ github.event.inputs.version }}")"
-          if [[ "${{ github.event.inputs.branch }}" != "$expected_branch" ]]; then
-            echo "Error: version ${{ github.event.inputs.version }} must be created from branch ${expected_branch}"
+          expected_branch="$(sed -E 's/^((v[0-9]+)\.([0-9]+))\..*$/\1/' <<< "$RELEASE_VERSION")"
+          if [[ "$RELEASE_BRANCH" != "$expected_branch" ]]; then
+            echo "Error: version $RELEASE_VERSION must be created from branch ${expected_branch}"
             exit 1
           fi
 
@@ -39,9 +43,34 @@ jobs:
           fetch-depth: 0
 
       - name: Create and push tag
+        env:
+          RELEASE_BRANCH: ${{ github.event.inputs.branch }}
+          RELEASE_VERSION: ${{ github.event.inputs.version }}
         run: |
           set -euo pipefail
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
-          git tag -a ${{ github.event.inputs.version }} -m "Release ${{ github.event.inputs.version }} from branch ${{ github.event.inputs.branch }}"
-          git push origin ${{ github.event.inputs.version }}
+          git fetch --force origin "refs/tags/${RELEASE_VERSION}:refs/tags/${RELEASE_VERSION}" || true
+
+          head_commit="$(git rev-parse HEAD)"
+          if git rev-parse --verify --quiet "refs/tags/${RELEASE_VERSION}" >/dev/null; then
+            tag_commit="$(git rev-parse "${RELEASE_VERSION}^{commit}")"
+            if [[ "$tag_commit" != "$head_commit" ]]; then
+              echo "Error: tag $RELEASE_VERSION points at $tag_commit, expected $head_commit" >&2
+              exit 1
+            fi
+            echo "Tag $RELEASE_VERSION already exists at branch head; continuing release."
+          else
+            git tag -a "$RELEASE_VERSION" -m "Release $RELEASE_VERSION from branch $RELEASE_BRANCH"
+            git push origin "refs/tags/${RELEASE_VERSION}"
+          fi
+
+  release-from-tag:
+    name: Build Images and Trigger Release Lane
+    needs: create-release-tag
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release-from-tag.yml
+    with:
+      tag: ${{ github.event.inputs.version }}
+    secrets: inherit
