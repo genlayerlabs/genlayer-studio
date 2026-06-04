@@ -11,8 +11,7 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
@@ -22,6 +21,8 @@ jobs:
   validate-tag:
     name: Validate release tag
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       tag: ${{ steps.validate.outputs.tag }}
       commit: ${{ steps.validate.outputs.commit }}
