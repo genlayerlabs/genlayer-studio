@@ -10,11 +10,18 @@ on:
         description: "Release tag to build and promote"
         required: true
         type: string
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag to build and promote"
+        required: true
+        type: string
 
-permissions: {}
+permissions:
+  contents: read
 
 concurrency:
-  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -74,6 +81,8 @@ jobs:
   push-docker-images:
     name: Build images and push to DockerHub
     needs: validate-tag
+    permissions:
+      contents: read
     uses: ./.github/workflows/docker-build-and-push-all.yml
     with:
       ref: ${{ needs.validate-tag.outputs.tag }}
@@ -83,6 +92,8 @@ jobs:
   trigger-workload-release-lane:
     name: Trigger AWS Release Lane
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     needs:
       - validate-tag
       - push-docker-images
