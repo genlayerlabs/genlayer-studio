@@ -20,6 +20,9 @@ from backend.protocol_rpc.exceptions import RateLimitExceeded
 logger = logging.getLogger(__name__)
 
 TIER_CACHE_TTL = 300  # 5 minutes
+DEFAULT_ANON_PER_MINUTE = 30
+DEFAULT_ANON_PER_HOUR = 500
+DEFAULT_ANON_PER_DAY = 5000
 
 # Lua script that atomically prunes, checks, and records in one round-trip.
 # This eliminates the TOCTOU race where concurrent requests could all read the
@@ -75,9 +78,9 @@ class RateLimiterService:
         redis_client: aioredis.Redis,
         get_session: Callable[[], Session],
         enabled: bool = True,
-        anon_per_minute: int = 10,
-        anon_per_hour: int = 100,
-        anon_per_day: int = 1000,
+        anon_per_minute: int = DEFAULT_ANON_PER_MINUTE,
+        anon_per_hour: int = DEFAULT_ANON_PER_HOUR,
+        anon_per_day: int = DEFAULT_ANON_PER_DAY,
     ):
         self._redis = redis_client
         self._get_session = get_session
@@ -100,9 +103,15 @@ class RateLimiterService:
             redis_client=redis_client,
             get_session=get_session,
             enabled=os.environ.get("RATE_LIMIT_ENABLED", "false").lower() == "true",
-            anon_per_minute=int(os.environ.get("RATE_LIMIT_ANON_PER_MINUTE", "10")),
-            anon_per_hour=int(os.environ.get("RATE_LIMIT_ANON_PER_HOUR", "100")),
-            anon_per_day=int(os.environ.get("RATE_LIMIT_ANON_PER_DAY", "1000")),
+            anon_per_minute=int(
+                os.environ.get("RATE_LIMIT_ANON_PER_MINUTE", DEFAULT_ANON_PER_MINUTE)
+            ),
+            anon_per_hour=int(
+                os.environ.get("RATE_LIMIT_ANON_PER_HOUR", DEFAULT_ANON_PER_HOUR)
+            ),
+            anon_per_day=int(
+                os.environ.get("RATE_LIMIT_ANON_PER_DAY", DEFAULT_ANON_PER_DAY)
+            ),
         )
 
     @property
