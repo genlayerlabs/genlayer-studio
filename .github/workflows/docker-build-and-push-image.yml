@@ -92,15 +92,20 @@ jobs:
           password: ${{ secrets.dockerhub_token }}
 
       - name: Create and push manifest
+        env:
+          DOCKERHUB_REPO: ${{ inputs.dockerhub_repo }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
+          set -euo pipefail
+
           # Create manifest for versioned tag
-          docker manifest create ${{ inputs.dockerhub_repo }}:${{ inputs.image_tag }} \
-            ${{ inputs.dockerhub_repo }}:${{ inputs.image_tag }}-amd64 \
-            ${{ inputs.dockerhub_repo }}:${{ inputs.image_tag }}-arm64
-          docker manifest push ${{ inputs.dockerhub_repo }}:${{ inputs.image_tag }}
+          docker manifest create "${DOCKERHUB_REPO}:${IMAGE_TAG}" \
+            "${DOCKERHUB_REPO}:${IMAGE_TAG}-amd64" \
+            "${DOCKERHUB_REPO}:${IMAGE_TAG}-arm64"
+          docker manifest push "${DOCKERHUB_REPO}:${IMAGE_TAG}"
 
           # Create manifest for latest tag
-          docker manifest create ${{ inputs.dockerhub_repo }}:latest \
-            ${{ inputs.dockerhub_repo }}:${{ inputs.image_tag }}-amd64 \
-            ${{ inputs.dockerhub_repo }}:${{ inputs.image_tag }}-arm64
-          docker manifest push ${{ inputs.dockerhub_repo }}:latest
+          docker manifest create "${DOCKERHUB_REPO}:latest" \
+            "${DOCKERHUB_REPO}:${IMAGE_TAG}-amd64" \
+            "${DOCKERHUB_REPO}:${IMAGE_TAG}-arm64"
+          docker manifest push "${DOCKERHUB_REPO}:latest"
