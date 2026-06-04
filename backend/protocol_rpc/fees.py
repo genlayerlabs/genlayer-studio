@@ -58,6 +58,7 @@ DEFAULT_TRANSACTION_EXECUTION_BUDGET_PER_ROUND = 500_000
 DEFAULT_LEADER_TIMEUNITS_ALLOCATION = 100
 DEFAULT_VALIDATOR_TIMEUNITS_ALLOCATION = 200
 DEFAULT_PRICE_CAP_HEADROOM_BPS = 12_000
+DEFAULT_PARENT_MESSAGE_RECEIPT_HEADROOM = 10_000
 GENVM_UNMETERED_DATA_FEE_BUCKET = (1 << 256) - 1
 
 
@@ -286,12 +287,19 @@ class StudioFeePolicy:
     def minimum_execution_budget_per_round(self) -> int:
         if self.receipt_gas_price <= 0:
             return 0
-        fixed_bucket_gas = self.estimate_receipt_gas(
-            measured_exec_gas=0,
-            calldata_length=MIN_RECEIPT_BYTES,
-            slots_changed=PROPOSE_RECEIPT_SLOTS,
+        message_receipt_start_gas = (
+            self.fixed_propose_receipt_gas
+            + self.intrinsic_gas
+            + self.bootloader_overhead
+            + (PROPOSE_RECEIPT_SLOTS * self.gas_per_changed_slot)
+            + self.fixed_message_reveal_gas
+            + self.intrinsic_gas
+            + self.bootloader_overhead
+            + (MESSAGE_REVEAL_LENGTH_SLOTS * self.gas_per_changed_slot)
         )
-        return fixed_bucket_gas * self.receipt_gas_price
+        return (
+            message_receipt_start_gas + self.estimate_nondet_output_start_gas()
+        ) * self.receipt_gas_price
 
     def fee_accounting_enabled(self) -> bool:
         return (
@@ -578,12 +586,14 @@ def validate_transaction_fee_deposit(
     submitted_value: int,
     user_value: int,
     policy: StudioFeePolicy | None = None,
+    allow_low_execution_budget: bool = False,
 ) -> int:
     policy = policy or StudioFeePolicy()
     fees = normalize_fees_distribution(fees_distribution)
     execution_budget_per_round = int(fees["executionBudgetPerRound"])
     if (
-        execution_budget_per_round > 0
+        not allow_low_execution_budget
+        and execution_budget_per_round > 0
         and execution_budget_per_round < policy.message_fee_params_budget_floor()
     ):
         raise BudgetTooLow("BudgetTooLow")
@@ -614,6 +624,7 @@ def create_fee_accounting(
     user_value: int,
     sender: str | None = None,
     policy: StudioFeePolicy | None = None,
+    allow_low_execution_budget: bool = False,
 ) -> dict[str, Any]:
     policy = policy or StudioFeePolicy()
     required = validate_transaction_fee_deposit(
@@ -623,6 +634,7 @@ def create_fee_accounting(
         submitted_value=submitted_value,
         user_value=user_value,
         policy=policy,
+        allow_low_execution_budget=allow_low_execution_budget,
     )
     fee_value = max(0, int(submitted_value) - int(user_value))
     return _new_fee_accounting(
@@ -678,14 +690,17 @@ def create_child_fee_accounting(
         if parent_fees_distribution
         else normalize_fees_distribution({})
     )
-    child_fees = _fees_distribution_from_internal_params(
-        fee_params,
-        total_message_fees=declared_budget - child_primary,
-        parent_fees_distribution=parent_fees,
-    )
     child_message_allocations = _child_allocations_from_message_subtree(
         message,
         message_allocations or [],
+    )
+    child_message_budget = (
+        declared_budget - child_primary if child_message_allocations else 0
+    )
+    child_fees = _fees_distribution_from_internal_params(
+        fee_params,
+        total_message_fees=child_message_budget,
+        parent_fees_distribution=parent_fees,
     )
     validate_message_allocations(
         child_message_allocations,
@@ -937,9 +952,6 @@ def fill_message_fee_payload_from_allocation(
     accounting: dict[str, Any],
     message: dict[str, Any],
 ) -> dict[str, Any]:
-    if int(message.get("messageType", MESSAGE_TYPE_INTERNAL)) != MESSAGE_TYPE_INTERNAL:
-        return copy.deepcopy(message)
-
     allocations = accounting.get("message_allocations") or []
     if not allocations:
         return copy.deepcopy(message)
@@ -953,6 +965,16 @@ def fill_message_fee_payload_from_allocation(
         raise MessageEmissionPhaseMismatch("MessageEmissionPhaseMismatch")
 
     updated = copy.deepcopy(message)
+    message_type = int(updated.get("messageType", MESSAGE_TYPE_INTERNAL))
+    if message_type == MESSAGE_TYPE_EXTERNAL:
+        if not _message_has_fee_params(updated):
+            updated["feeParams"] = allocation["feeParams"]
+        updated["callKey"] = _normalize_call_key(
+            updated.get("callKey", allocation["callKey"])
+        )
+        updated["messageFeeMode"] = "external"
+        return updated
+
     if int(updated.get("declaredBudget", 0) or 0) == 0:
         updated["declaredBudget"] = int(allocation["budget"])
     if not _message_has_fee_params(updated):
@@ -2444,9 +2466,7 @@ def _receipt_message_fee_payloads(
     payloads: list[dict[str, Any]] = []
     for raw in _receipt_pending_transactions(receipt):
         message = _receipt_pending_transaction_fee_payload(raw)
-        if int(message["messageType"]) == MESSAGE_TYPE_INTERNAL and accounting.get(
-            "message_allocations"
-        ):
+        if accounting.get("message_allocations"):
             message = fill_message_fee_payload_from_allocation(accounting, message)
         payloads.append(message)
     return payloads
@@ -2734,13 +2754,19 @@ def recommended_fee_preset(
     num_validators = int(
         accounting.get("num_of_initial_validators") or VALIDATORS_PER_ROUND[0]
     )
+    emits_messages = bool(message_allocations) or int(fees["totalMessageFees"]) > 0
+    execution_floor = policy.message_fee_params_budget_floor()
+    if emits_messages:
+        execution_floor += (
+            policy.receipt_gas_price * DEFAULT_PARENT_MESSAGE_RECEIPT_HEADROOM
+        )
 
     observed_execution = _observed_chargeable_execution_fee(accounting, report)
     recommended_execution = int(fees["executionBudgetPerRound"])
     if observed_execution > 0:
         recommended_execution = max(
             _with_padding(observed_execution, padding_bps),
-            policy.message_fee_params_budget_floor(),
+            execution_floor,
         )
 
     declared_message = _int_report_field(message_report, "declaredConsumed")
@@ -2974,8 +3000,9 @@ def _receipt_submitted_messages_and_reports(
         fee_params = _bytes_field(
             _message_field(message, "fee_params", "feeParams", b"")
         )
+        submitted_fee_params = fee_params
         if message_type == MESSAGE_TYPE_EXTERNAL:
-            fee_params = b""
+            submitted_fee_params = b""
         declared_budget = int(
             _message_field(
                 message,
@@ -3009,7 +3036,7 @@ def _receipt_submitted_messages_and_reports(
                 data,
                 on_acceptance,
                 salt_nonce,
-                fee_params,
+                submitted_fee_params,
                 declared_budget,
                 allocation_subtree,
                 call_key,

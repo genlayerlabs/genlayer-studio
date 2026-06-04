@@ -17,6 +17,7 @@ from backend.protocol_rpc.exceptions import JSONRPCError
 from backend.protocol_rpc.endpoints import (
     _handle_appeal_or_top_up_and_submit,
     _handle_top_up_fees,
+    _stage_simulated_call_value,
     _simulation_fee_accounting,
     _validate_fee_envelope,
     _with_default_simulation_fees,
@@ -401,6 +402,14 @@ def test_studio_fee_policy_env_allows_explicit_gasless_mode(monkeypatch):
     assert policy.fee_accounting_enabled() is False
 
 
+def test_stage_simulated_call_value_credits_snapshot_only():
+    snapshot = SimpleNamespace(balance=7)
+
+    _stage_simulated_call_value(snapshot, 5)
+
+    assert snapshot.balance == 12
+
+
 def test_studio_fee_policy_matches_consensus_deterministic_receipt_estimators():
     policy = StudioFeePolicy(receipt_gas_price=3, extra_exec_gas=210_000)
 
@@ -412,11 +421,22 @@ def test_studio_fee_policy_matches_consensus_deterministic_receipt_estimators():
         + (receipt_bytes * policy.calldata_gas_per_byte)
         + (PROPOSE_RECEIPT_SLOTS * policy.gas_per_changed_slot)
     )
-    expected_floor_gas = (
+    expected_receipt_floor_gas = (
         policy.intrinsic_gas
         + policy.bootloader_overhead
         + (MIN_RECEIPT_BYTES * policy.calldata_gas_per_byte)
         + (PROPOSE_RECEIPT_SLOTS * policy.gas_per_changed_slot)
+    )
+    expected_genvm_bucket_floor_gas = (
+        policy.fixed_propose_receipt_gas
+        + policy.intrinsic_gas
+        + policy.bootloader_overhead
+        + (PROPOSE_RECEIPT_SLOTS * policy.gas_per_changed_slot)
+        + policy.fixed_message_reveal_gas
+        + policy.intrinsic_gas
+        + policy.bootloader_overhead
+        + (MESSAGE_REVEAL_LENGTH_SLOTS * policy.gas_per_changed_slot)
+        + (NONDET_OUTPUT_LENGTH_BYTES * policy.calldata_gas_per_byte)
     )
     expected_measured_receipt_gas = (
         999
@@ -459,7 +479,7 @@ def test_studio_fee_policy_matches_consensus_deterministic_receipt_estimators():
             calldata_length=MIN_RECEIPT_BYTES,
             slots_changed=PROPOSE_RECEIPT_SLOTS,
         )
-        == expected_floor_gas
+        == expected_receipt_floor_gas
     )
     assert policy.estimate_message_reveal_gas(320, 2) == expected_message_reveal_gas
     assert (
@@ -467,7 +487,9 @@ def test_studio_fee_policy_matches_consensus_deterministic_receipt_estimators():
         == expected_consensus_message_reveal_gas
     )
     assert policy.estimate_nondet_output_start_gas() == expected_nondet_output_start_gas
-    assert policy.message_fee_params_budget_floor() == expected_floor_gas * 3
+    assert (
+        policy.message_fee_params_budget_floor() == expected_genvm_bucket_floor_gas * 3
+    )
 
 
 def test_studio_fee_config_exposes_default_nonzero_fee_policy():
@@ -1147,6 +1169,12 @@ async def test_sim_estimate_transaction_fees_returns_external_message_fee_report
     assert message["messageFeeMode"] == "external"
     assert message["messageType"] == "External"
     assert message["callKey"] == CALL_KEY_WILDCARD
+    assert message["feeParams"] == "0x" + fee_params.hex()
+    assert message["feeParamsDecoded"] == {
+        "gasLimit": gas_limit,
+        "maxGasPrice": max_gas_price,
+    }
+    assert message["feeParamsBytes"] == len(fee_params)
     assert preset["messageBudgetMode"] == "allocation-preserved"
     assert preset["distribution"]["totalMessageFees"] == message_budget
     assert preset["messageAllocations"][0]["messageType"] == 0
@@ -3040,6 +3068,44 @@ def test_recommended_fee_preset_preserves_mode2_allocation_budget():
     assert preset["observed"]["declaredMessageFees"] == 110
 
 
+def test_recommended_fee_preset_adds_message_execution_headroom_over_floor():
+    policy = StudioFeePolicy(
+        gen_per_time_unit=1,
+        storage_unit_price=0,
+        receipt_gas_price=1,
+    )
+    floor = policy.message_fee_params_budget_floor()
+    fee_params = _encode_internal_fee_params()
+    fees_distribution = _fees_distribution(
+        execution_budget_per_round=floor,
+        total_message_fees=55,
+        receipt_fee_max_gas_price=1,
+    )
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        message_allocations=[
+            _allocation(
+                budget=55,
+                fee_params=fee_params,
+            ),
+        ],
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5, policy),
+        user_value=0,
+        sender="0x1111111111111111111111111111111111111111",
+        policy=policy,
+    )
+    recorded = record_execution_fee_consumption(
+        accounting,
+        {"genvm_result": {"data_fees_consumed": [10, 0, 0]}},
+        policy,
+    )
+
+    preset = recorded["recommended_fee_preset"]
+    assert preset["distribution"]["executionBudgetPerRound"] == floor + 10_000
+    assert preset["distribution"]["totalMessageFees"] == 55
+
+
 def test_execution_fee_report_handles_mode1_internal_messages_without_allocations():
     accounting = create_fee_accounting(
         fees_distribution=_fees_distribution(
@@ -4868,7 +4934,7 @@ def test_top_up_and_submit_appeal_refreshes_recommended_fee_preset():
     )
 
 
-def test_create_child_fee_accounting_splits_declared_budget():
+def test_create_child_fee_accounting_refunds_extra_leaf_budget_without_child_allocations():
     child_fees, child_accounting = create_child_fee_accounting(
         message={
             "messageType": 1,
@@ -4887,11 +4953,14 @@ def test_create_child_fee_accounting_splits_declared_budget():
         sender="0x1111111111111111111111111111111111111111",
     )
 
-    assert child_fees["totalMessageFees"] == 15
+    assert child_fees["totalMessageFees"] == 0
     assert child_fees["maxPriceGenPerTimeUnit"] == 999
     assert child_fees["storageFeeMaxGasPrice"] == 888
     assert child_fees["receiptFeeMaxGasPrice"] == 777
     assert child_accounting["paid_fee_value"] == 70
+    assert child_accounting["primary_fee_budget"] == 70
+    assert child_accounting["message_fee_budget"] == 0
+    assert child_accounting["message_allocations"] == []
     assert child_accounting["user_value"] == 7
 
 

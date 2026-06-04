@@ -1,4 +1,5 @@
 # rpc/endpoints.py
+import copy
 import random
 import json
 import time
@@ -45,6 +46,8 @@ from backend.protocol_rpc.fees import (
     StudioFeePolicy,
     apply_fee_top_up,
     create_fee_accounting,
+    get_leader_rounds,
+    normalize_fees_distribution,
     record_appeal_bond,
     record_execution_fee_consumption,
     required_fee_deposit,
@@ -1254,7 +1257,7 @@ async def sim_call(
             genvm_manager,
             params,
         )
-    return receipt.to_dict()
+    return TransactionsProcessor._json_safe_numbers(receipt.to_dict())
 
 
 async def sim_estimate_transaction_fees(
@@ -1267,6 +1270,11 @@ async def sim_estimate_transaction_fees(
     params: dict,
 ) -> dict:
     estimate_params = _with_default_simulation_fees(params)
+    if isinstance(estimate_params, dict):
+        estimate_params = {
+            **estimate_params,
+            "_allow_low_execution_budget_for_estimate": True,
+        }
     receipt = await sim_call(
         session=session,
         accounts_manager=accounts_manager,
@@ -1280,13 +1288,15 @@ async def sim_estimate_transaction_fees(
     fee_accounting = (
         genvm_result.get(FEE_ACCOUNTING_KEY) if isinstance(genvm_result, dict) else {}
     ) or {}
-    return {
-        "scenario": _first_present(params, "scenario", "scenarioName") or "default",
-        "receipt": receipt,
-        "feeAccounting": fee_accounting,
-        "feeReport": fee_accounting.get("execution_fee_report") or {},
-        "recommendedPreset": fee_accounting.get("recommended_fee_preset") or {},
-    }
+    return TransactionsProcessor._json_safe_numbers(
+        {
+            "scenario": _first_present(params, "scenario", "scenarioName") or "default",
+            "receipt": receipt,
+            "feeAccounting": fee_accounting,
+            "feeReport": fee_accounting.get("execution_fee_report") or {},
+            "recommendedPreset": fee_accounting.get("recommended_fee_preset") or {},
+        }
+    )
 
 
 def _with_default_simulation_fees(params: dict) -> dict:
@@ -1323,6 +1333,17 @@ def _with_default_simulation_fees(params: dict) -> dict:
     return updated
 
 
+def _stage_simulated_call_value(
+    contract_snapshot: ContractSnapshot, call_value: int
+) -> None:
+    if call_value <= 0:
+        return
+
+    contract_snapshot.balance = int(
+        getattr(contract_snapshot, "balance", 0) or 0
+    ) + int(call_value)
+
+
 async def _gen_call_with_validator(
     session: Session,
     accounts_manager: AccountsManager,
@@ -1342,6 +1363,9 @@ async def _gen_call_with_validator(
         params,
         sender=from_address,
         user_value=call_value,
+    )
+    genvm_fee_accounting = _effective_simulation_fee_accounting_for_genvm(
+        simulation_fee_accounting
     )
     transaction_hash_variant = (
         params["transaction_hash_variant"]
@@ -1380,6 +1404,8 @@ async def _gen_call_with_validator(
             message=f"Contract {to_address} not found",
             data={"contract_address": to_address},
         )
+    if type in {"write", "deploy"}:
+        _stage_simulated_call_value(contract_snapshot, call_value)
     node = Node(
         contract_snapshot=contract_snapshot,
         contract_snapshot_factory=partial(ContractSnapshot, session=session),
@@ -1437,7 +1463,7 @@ async def _gen_call_with_validator(
                 transaction_created_at=txn_created_at,
                 value=call_value,
                 origin_address=origin_address,
-                fee_accounting=simulation_fee_accounting,
+                fee_accounting=genvm_fee_accounting,
             )
         elif type == "deploy":
             txn_created_at = None
@@ -1459,7 +1485,7 @@ async def _gen_call_with_validator(
                 transaction_created_at=txn_created_at,
                 value=call_value,
                 origin_address=origin_address,
-                fee_accounting=simulation_fee_accounting,
+                fee_accounting=genvm_fee_accounting,
             )
         else:
             raise JSONRPCError(
@@ -1877,9 +1903,38 @@ def _simulation_fee_accounting(
             user_value=int(user_value),
             sender=sender,
             policy=policy,
+            allow_low_execution_budget=bool(
+                params.get("_allow_low_execution_budget_for_estimate")
+            ),
         )
     except FeeValidationError as exc:
         raise JSONRPCError(code=-32602, message=str(exc), data={}) from exc
+
+
+def _effective_simulation_fee_accounting_for_genvm(
+    accounting: dict | None,
+) -> dict | None:
+    if not accounting:
+        return accounting
+
+    snapshot = accounting.get("policy_snapshot")
+    policy = (
+        StudioFeePolicy.from_snapshot(snapshot)
+        if isinstance(snapshot, dict)
+        else StudioFeePolicy.from_env()
+    )
+    fees = normalize_fees_distribution(accounting.get("fees_distribution") or {})
+    execution_budget_per_round = int(fees["executionBudgetPerRound"])
+    floor = policy.message_fee_params_budget_floor()
+    if execution_budget_per_round <= 0 or execution_budget_per_round >= floor:
+        return accounting
+
+    adjusted = copy.deepcopy(accounting)
+    adjusted_fees = dict(fees)
+    adjusted_fees["executionBudgetPerRound"] = floor
+    adjusted["fees_distribution"] = adjusted_fees
+    adjusted["execution_budget_total"] = floor * get_leader_rounds(adjusted_fees)
+    return adjusted
 
 
 def _first_present(source: dict | None, *keys: str):
