@@ -1,11 +1,24 @@
 name: "Docker build and push to Docker Hub"
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
   workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to build"
+        required: true
+        type: string
+      image_tag:
+        description: "Docker image tag to publish"
+        required: true
+        type: string
   workflow_call:
+    inputs:
+      ref:
+        required: true
+        type: string
+      image_tag:
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -18,6 +31,8 @@ jobs:
       dockerfile: docker/Dockerfile.backend
       dockerhub_repo: yeagerai/simulator-jsonrpc
       dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
+      ref: ${{ inputs.ref }}
+      image_tag: ${{ inputs.image_tag }}
     secrets:
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
@@ -28,6 +43,8 @@ jobs:
       dockerfile: docker/Dockerfile.frontend
       dockerhub_repo: yeagerai/simulator-frontend
       dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
+      ref: ${{ inputs.ref }}
+      image_tag: ${{ inputs.image_tag }}
     secrets:
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
@@ -38,6 +55,8 @@ jobs:
       dockerfile: docker/Dockerfile.database-migration
       dockerhub_repo: yeagerai/simulator-database-migration
       dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
+      ref: ${{ inputs.ref }}
+      image_tag: ${{ inputs.image_tag }}
     secrets:
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
@@ -48,6 +67,8 @@ jobs:
       dockerfile: docker/Dockerfile.consensus-worker
       dockerhub_repo: yeagerai/simulator-consensus-worker
       dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
+      ref: ${{ inputs.ref }}
+      image_tag: ${{ inputs.image_tag }}
     secrets:
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
@@ -58,5 +79,7 @@ jobs:
       dockerfile: docker/Dockerfile.explorer
       dockerhub_repo: yeagerai/simulator-explorer
       dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
+      ref: ${{ inputs.ref }}
+      image_tag: ${{ inputs.image_tag }}
     secrets:
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}

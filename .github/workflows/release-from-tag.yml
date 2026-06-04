@@ -1,0 +1,156 @@
+name: Release from version tag
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and promote"
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate-tag:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.validate.outputs.tag }}
+      commit: ${{ steps.validate.outputs.commit }}
+      version_branch: ${{ steps.validate.outputs.version_branch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag belongs to matching version branch
+        id: validate
+        env:
+          INPUT_TAG: ${{ inputs.tag || '' }}
+        run: |
+          set -euo pipefail
+
+          tag="${INPUT_TAG:-${GITHUB_REF_NAME}}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9-]+)?$ ]]; then
+            echo "Invalid release tag: $tag" >&2
+            exit 1
+          fi
+
+          version_branch="$(sed -E 's/^((v[0-9]+)\.([0-9]+))\..*$/\1/' <<< "$tag")"
+
+          git fetch --force origin \
+            "refs/heads/${version_branch}:refs/remotes/origin/${version_branch}" \
+            "refs/tags/${tag}:refs/tags/${tag}"
+
+          tag_commit="$(git rev-parse "${tag}^{commit}")"
+          branch_head="$(git rev-parse "refs/remotes/origin/${version_branch}")"
+
+          if [[ "$tag_commit" != "$branch_head" ]]; then
+            echo "Tag $tag ($tag_commit) must point at the current origin/${version_branch} head ($branch_head)" >&2
+            exit 1
+          fi
+
+          echo "Release tag: $tag"
+          echo "Version branch: origin/${version_branch}"
+          echo "Tag commit: $tag_commit"
+          echo "Version branch head: $branch_head"
+
+          {
+            echo "tag=$tag"
+            echo "commit=$tag_commit"
+            echo "version_branch=$version_branch"
+          } >> "$GITHUB_OUTPUT"
+
+  push-docker-images:
+    name: Build images and push to DockerHub
+    needs: validate-tag
+    uses: ./.github/workflows/docker-build-and-push-all.yml
+    with:
+      ref: ${{ needs.validate-tag.outputs.tag }}
+      image_tag: ${{ needs.validate-tag.outputs.tag }}
+    secrets: inherit
+
+  trigger-workload-release-lane:
+    name: Trigger AWS Release Lane
+    runs-on: ubuntu-latest
+    needs:
+      - validate-tag
+      - push-docker-images
+    steps:
+      - name: Get release-lane token
+        id: release_lane_token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_LANE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_LANE_APP_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: devexp-argocd-apps
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve image digests
+        id: digests
+        env:
+          RELEASE_TAG: ${{ needs.validate-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          resolve_digest() {
+            local image_ref="$1"
+            local digest=""
+            for attempt in {1..20}; do
+              digest="$(docker buildx imagetools inspect "$image_ref" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '\"' || true)"
+              if [[ "$digest" == sha256:* ]]; then
+                echo "$digest"
+                return 0
+              fi
+              echo "Digest not available yet for ${image_ref}; attempt ${attempt}/20" >&2
+              sleep 15
+            done
+            echo "Failed to resolve digest for ${image_ref}" >&2
+            return 1
+          }
+
+          jsonrpc_digest="$(resolve_digest "yeagerai/simulator-jsonrpc:${RELEASE_TAG}")"
+          worker_digest="$(resolve_digest "yeagerai/simulator-consensus-worker:${RELEASE_TAG}")"
+          frontend_digest="$(resolve_digest "yeagerai/simulator-frontend:${RELEASE_TAG}")"
+          explorer_digest="$(resolve_digest "yeagerai/simulator-explorer:${RELEASE_TAG}")"
+          migration_digest="$(resolve_digest "yeagerai/simulator-database-migration:${RELEASE_TAG}")"
+
+          {
+            echo "jsonrpc=yeagerai/simulator-jsonrpc@${jsonrpc_digest}"
+            echo "worker=yeagerai/simulator-consensus-worker@${worker_digest}"
+            echo "frontend=yeagerai/simulator-frontend@${frontend_digest}"
+            echo "explorer=yeagerai/simulator-explorer@${explorer_digest}"
+            echo "migration=yeagerai/simulator-database-migration@${migration_digest}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Trigger AWS release lane (devexp-argocd-apps)
+        env:
+          GH_TOKEN: ${{ steps.release_lane_token.outputs.token }}
+          JSONRPC: ${{ steps.digests.outputs.jsonrpc }}
+          WORKER: ${{ steps.digests.outputs.worker }}
+          FRONTEND: ${{ steps.digests.outputs.frontend }}
+          EXPLORER: ${{ steps.digests.outputs.explorer }}
+          MIGRATION: ${{ steps.digests.outputs.migration }}
+        run: |
+          set -euo pipefail
+          gh api repos/genlayerlabs/devexp-argocd-apps/dispatches \
+            --method POST \
+            -f event_type=release-backend \
+            -F "client_payload[image]=$JSONRPC" \
+            -F "client_payload[consensus_worker_image]=$WORKER" \
+            -F "client_payload[frontend_image]=$FRONTEND" \
+            -F "client_payload[explorer_image]=$EXPLORER" \
+            -F "client_payload[migration_image]=$MIGRATION"

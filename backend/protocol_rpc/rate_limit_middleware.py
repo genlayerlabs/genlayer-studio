@@ -18,9 +18,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TRUSTED_PROXY_CIDRS = (
     "127.0.0.0/8",
-    "10.0.0.0/8",
-    "172.16.0.0/12",
-    "192.168.0.0/16",
+    "10.0.0.0/8",  # NOSONAR - RFC1918 private proxy range.
+    "172.16.0.0/12",  # NOSONAR - RFC1918 private proxy range.
+    "192.168.0.0/16",  # NOSONAR - RFC1918 private proxy range.
     "::1/128",
     "fc00::/7",
 )
