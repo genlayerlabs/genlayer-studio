@@ -275,3 +275,6 @@ class TestFromEnvironment:
                 get_session=MagicMock(),
             )
         assert service.enabled is False
+        assert service._anon_limits.rate_limit_minute == 30
+        assert service._anon_limits.rate_limit_hour == 500
+        assert service._anon_limits.rate_limit_day == 5000
