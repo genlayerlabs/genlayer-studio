@@ -75,6 +75,31 @@ describe('JsonRpcService — RPC method mapping', () => {
         expect.objectContaining({ method: 'sim_cancelTransaction' }),
       );
     });
+
+    it('getFeeConfig calls sim_getFeeConfig', async () => {
+      await service.getFeeConfig();
+      expect(mockCall).toHaveBeenCalledWith(
+        expect.objectContaining({ method: 'sim_getFeeConfig' }),
+      );
+    });
+
+    it('estimateTransactionFees calls sim_estimateTransactionFees', async () => {
+      const params = { scenarioName: 'tip', type: 'write' };
+      await service.estimateTransactionFees(params);
+      expect(mockCall).toHaveBeenCalledWith({
+        method: 'sim_estimateTransactionFees',
+        params: [params],
+      });
+    });
+
+    it('simulateCall calls sim_call', async () => {
+      const params = { type: 'write', data: '0x' };
+      await service.simulateCall(params);
+      expect(mockCall).toHaveBeenCalledWith({
+        method: 'sim_call',
+        params: [params],
+      });
+    });
   });
 
   describe('Universal methods (eth_*, gen_*)', () => {

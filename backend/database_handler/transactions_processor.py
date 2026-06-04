@@ -19,6 +19,8 @@ from backend.consensus.types import ConsensusRound
 from backend.consensus.utils import determine_consensus_from_votes
 from backend.rollup.web3_pool import Web3ConnectionPool
 
+MAX_JSON_SAFE_INTEGER = (2**53) - 1
+
 
 class TransactionAddressFilter(Enum):
     ALL = "all"
@@ -73,6 +75,21 @@ class TransactionsProcessor:
         self.web3 = Web3ConnectionPool.get()
 
     @staticmethod
+    def _json_safe_numbers(value):
+        if isinstance(value, bool) or value is None or isinstance(value, str):
+            return value
+        if isinstance(value, int):
+            return str(value) if abs(value) > MAX_JSON_SAFE_INTEGER else value
+        if isinstance(value, list):
+            return [TransactionsProcessor._json_safe_numbers(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: TransactionsProcessor._json_safe_numbers(item)
+                for key, item in value.items()
+            }
+        return value
+
+    @staticmethod
     def _parse_transaction_data(transaction_data: Transactions) -> dict:
         if transaction_data.consensus_data:
             leader_receipts = transaction_data.consensus_data.get("leader_receipt", [])
@@ -90,12 +107,14 @@ class TransactionsProcessor:
             "hash": transaction_data.hash,
             "from_address": transaction_data.from_address,
             "to_address": transaction_data.to_address,
-            "data": transaction_data.data,
-            "value": transaction_data.value,
+            "data": TransactionsProcessor._json_safe_numbers(transaction_data.data),
+            "value": TransactionsProcessor._json_safe_numbers(transaction_data.value),
             "type": transaction_data.type,
             "status": transaction_data.status.value,
             "result": TransactionsProcessor._decode_base64_data(result),
-            "consensus_data": transaction_data.consensus_data,
+            "consensus_data": TransactionsProcessor._json_safe_numbers(
+                transaction_data.consensus_data
+            ),
             "gaslimit": transaction_data.nonce,
             "nonce": transaction_data.nonce,
             "r": transaction_data.r,
@@ -899,6 +918,40 @@ class TransactionsProcessor:
             return
 
         self.session.commit()
+
+    def update_transaction_data(self, transaction_hash: str, data: dict | None):
+        result = self.session.execute(
+            text(
+                "UPDATE transactions SET data = CAST(:data AS jsonb) WHERE hash = :hash"
+            ),
+            {
+                "hash": transaction_hash,
+                "data": json.dumps(data) if data is not None else None,
+            },
+        )
+        if result.rowcount == 0:
+            print(
+                f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping data update"
+            )
+            return
+        self.session.commit()
+
+    def update_transaction_fee_accounting(
+        self, transaction_hash: str, fee_accounting: dict
+    ):
+        transaction = (
+            self.session.query(Transactions)
+            .filter_by(hash=transaction_hash)
+            .one_or_none()
+        )
+        if transaction is None:
+            print(
+                f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping fee accounting update"
+            )
+            return
+        data = dict(transaction.data or {})
+        data["fee_accounting"] = fee_accounting
+        self.update_transaction_data(transaction_hash, data)
 
     def get_transaction_count(self, address: str) -> int:
         # Normalize address to checksum format

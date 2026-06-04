@@ -3,9 +3,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from backend.node.types import ExecutionResultStatus
 from backend.protocol_rpc import endpoints
 from backend.protocol_rpc.exceptions import JSONRPCError
-from backend.node.types import ExecutionResultStatus
 
 
 class _AsyncSnapshot:

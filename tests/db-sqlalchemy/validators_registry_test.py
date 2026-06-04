@@ -4,6 +4,7 @@ from eth_account import Account
 
 import pytest
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import sessionmaker
 
 from backend.database_handler.validators_registry import ModifiableValidatorsRegistry
 from backend.domain.types import LLMProvider, Validator
@@ -87,3 +88,40 @@ async def test_validators_registry(validators_registry: ModifiableValidatorsRegi
 
     assert len(validators_registry.get_all_validators()) == 0
     assert validators_registry.count_validators() == 0
+
+
+@pytest.mark.asyncio
+async def test_validator_update_and_delete_commit_for_other_sessions(
+    session: Session,
+):
+    llm_provider = LLMProvider(
+        provider="ollama",
+        model="llama3",
+        config={},
+        plugin="ollama",
+        plugin_config={},
+    )
+    validator_account = Account.create()
+    validator = Validator(
+        address=validator_account.address,
+        private_key=validator_account.key,
+        stake=7,
+        llmprovider=llm_provider,
+    )
+
+    registry = ModifiableValidatorsRegistry(session)
+    await registry.create_validator(validator)
+
+    validator.stake = 11
+    await registry.update_validator(validator)
+
+    SessionLocal = sessionmaker(bind=session.get_bind(), expire_on_commit=False)
+    with SessionLocal() as other_session:
+        other_registry = ModifiableValidatorsRegistry(other_session)
+        assert other_registry.get_validator(validator.address, False)["stake"] == 11
+
+    await registry.delete_validator(validator.address)
+
+    with SessionLocal() as other_session:
+        other_registry = ModifiableValidatorsRegistry(other_session)
+        assert other_registry.count_validators() == 0
