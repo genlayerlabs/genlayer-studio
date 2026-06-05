@@ -236,25 +236,7 @@ jobs:
         id: payload
         env:
           PAYLOAD: ${{ github.event_name == 'repository_dispatch' && toJson(github.event.client_payload.dispatch || github.event.client_payload) || inputs.dispatch_payload }}
-        run: |
-          set -euo pipefail
-          node services/e2e-dispatcher/scripts/validate-dispatch-payload.mjs "${PAYLOAD}"
-          echo "target_repo=$(jq -r '.target_repo' <<<"${PAYLOAD}")" >> "$GITHUB_OUTPUT"
-          echo "pr_number=$(jq -r '.pr_number' <<<"${PAYLOAD}")" >> "$GITHUB_OUTPUT"
-          echo "comment_id=$(jq -r '.comment_id // ""' <<<"${PAYLOAD}")" >> "$GITHUB_OUTPUT"
-          echo "check_run_id=$(jq -r '.check_run_id // ""' <<<"${PAYLOAD}")" >> "$GITHUB_OUTPUT"
-          echo "head_sha=$(jq -r '.head_sha' <<<"${PAYLOAD}")" >> "$GITHUB_OUTPUT"
-          echo "combo_cache_bust=$(jq -r '.combo_cache_bust // ""' <<<"${PAYLOAD}")" >> "$GITHUB_OUTPUT"
-          public_result_policy=$(jq -r '.public_result_policy // "detailed"' <<<"${PAYLOAD}")
-          echo "public_result_policy=${public_result_policy}" >> "$GITHUB_OUTPUT"
-          {
-            echo "comment_body<<COMMENT_BODY_EOF"
-            jq -r '.comment_body' <<<"${PAYLOAD}"
-            echo "COMMENT_BODY_EOF"
-            echo "pull_request_body<<PR_BODY_EOF"
-            jq -r '.pull_request_body // ""' <<<"${PAYLOAD}"
-            echo "PR_BODY_EOF"
-          } >> "$GITHUB_OUTPUT"
+        run: bash services/e2e-dispatcher/scripts/emit-dispatch-payload-outputs.sh
 
       - name: Generate GitHub App token
         id: app-token
@@ -353,7 +335,7 @@ jobs:
       # is behind on syncs. The empty literal here is what the source
       # ships with — it stays empty in the genlayer-e2e repo itself
       # (skipped at the check step on the source-side path).
-      template-hash: '515480228889995071837d4d5de2d703e0c2fa7a91370f34f17ad29c1a41bfd5' # SYNC_INJECT(template_hash)
+      template-hash: '0bea0e74a739169d8dedf19fb3b4300aed42dadd43a806438a3fae0ebe8f8f87' # SYNC_INJECT(template_hash)
     secrets: inherit
 
   # ===========================================================================
@@ -672,7 +654,8 @@ jobs:
     # but didn't emit a failure-tag (e.g. internal job-level error
     # before conclusion ran).
     name: ${{ (matrix.component != 'none' && ((matrix.stack-target == 'studio' && needs.build-studio.outputs.build-status != 'success') || (matrix.stack-target != 'studio' && needs.build.outputs.build-status != 'success'))) && format('{0} (skipped - build fails)', matrix.job-name) || (matrix.component != 'none' && needs.wave-1.outputs.failure-label != '') && format('{0} (skipped - {1} fails)', matrix.job-name, needs.wave-1.outputs.failure-label) || (matrix.component != 'none' && needs.wave-2.outputs.failure-label != '') && format('{0} (skipped - {1} fails)', matrix.job-name, needs.wave-2.outputs.failure-label) || (matrix.component != 'none' && (needs.wave-1.result == 'failure' || needs.wave-2.result == 'failure')) && format('{0} (skipped - fails)', matrix.job-name) || matrix.job-name }}
-    needs: [acknowledge, dispatch-context, plan, build, build-studio, wave-1, wave-2]
+    needs:
+      [acknowledge, dispatch-context, plan, build, build-studio, wave-1, wave-2]
     # No cascade gate — wave-3 always runs. If build or any upstream
     # wave failed, with.component is overridden to 'none' below,
     # tripping e2e-run.yml's sentinel path (no GCE provisioned,
@@ -737,7 +720,17 @@ jobs:
     # (first match wins): build → wave-1 → wave-2 → wave-3 failure-
     # label, then generic-fallback via `.result == 'failure'`.
     name: ${{ (matrix.component != 'none' && ((matrix.stack-target == 'studio' && needs.build-studio.outputs.build-status != 'success') || (matrix.stack-target != 'studio' && needs.build.outputs.build-status != 'success'))) && format('{0} (skipped - build fails)', matrix.job-name) || (matrix.component != 'none' && needs.wave-1.outputs.failure-label != '') && format('{0} (skipped - {1} fails)', matrix.job-name, needs.wave-1.outputs.failure-label) || (matrix.component != 'none' && needs.wave-2.outputs.failure-label != '') && format('{0} (skipped - {1} fails)', matrix.job-name, needs.wave-2.outputs.failure-label) || (matrix.component != 'none' && needs.wave-3.outputs.failure-label != '') && format('{0} (skipped - {1} fails)', matrix.job-name, needs.wave-3.outputs.failure-label) || (matrix.component != 'none' && (needs.wave-1.result == 'failure' || needs.wave-2.result == 'failure' || needs.wave-3.result == 'failure')) && format('{0} (skipped - fails)', matrix.job-name) || matrix.job-name }}
-    needs: [acknowledge, dispatch-context, plan, build, build-studio, wave-1, wave-2, wave-3]
+    needs:
+      [
+        acknowledge,
+        dispatch-context,
+        plan,
+        build,
+        build-studio,
+        wave-1,
+        wave-2,
+        wave-3,
+      ]
     # No cascade gate — wave-4 always runs. See wave-2 for the
     # cascade-as-sentinel rationale.
     if: |
