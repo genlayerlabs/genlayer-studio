@@ -323,12 +323,16 @@ class TestBackgroundHealthGenVMOrdering:
                     return FakeResult(rows=[exhausted_tx])
                 if "WHERE status IN ('ACTIVATED'" in query:
                     return FakeResult(SimpleNamespace(n=0))
+                if "SET LOCAL statement_timeout" in query:
+                    return FakeResult()
+                if "last_progress_epoch" in query:
+                    return FakeResult(SimpleNamespace(last_progress_epoch=1))
                 if "backlog_count" in query:
                     return FakeResult(
                         SimpleNamespace(
-                            backlog_count=0,
-                            oldest_created_at=None,
-                            oldest_backlog_age_seconds=None,
+                            backlog_count=3,
+                            oldest_created_at=object(),
+                            oldest_backlog_age_seconds=3600,
                         )
                     )
                 raise AssertionError(f"unexpected query: {query}")
@@ -351,6 +355,8 @@ class TestBackgroundHealthGenVMOrdering:
         assert result["status"] == "degraded"
         assert result["recovery_storm_count"] == 1
         assert result["max_recovery_count"] == 2
+        assert result["no_consensus_progress"] is True
+        assert result["seconds_since_consensus_progress"] is not None
         assert result["max_recovery_exhausted_count"] == 1
         assert result["max_recovery_exhausted_transactions"] == [
             {
