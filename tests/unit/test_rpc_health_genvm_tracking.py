@@ -318,7 +318,7 @@ class TestBackgroundHealthGenVMOrdering:
                 if "timestamp_awaiting_finalization" in query:
                     return FakeResult(SimpleNamespace(n=0))
                 if "COALESCE(MAX(recovery_count), 0)" in query:
-                    return FakeResult(SimpleNamespace(n=0, max_recovery_count=0))
+                    return FakeResult(SimpleNamespace(n=1, max_recovery_count=2))
                 if "max_recovery_cycles_exceeded" in query:
                     return FakeResult(rows=[exhausted_tx])
                 if "WHERE status IN ('ACTIVATED'" in query:
@@ -349,6 +349,8 @@ class TestBackgroundHealthGenVMOrdering:
         result = await health_module._check_consensus_health()
 
         assert result["status"] == "degraded"
+        assert result["recovery_storm_count"] == 1
+        assert result["max_recovery_count"] == 2
         assert result["max_recovery_exhausted_count"] == 1
         assert result["max_recovery_exhausted_transactions"] == [
             {
