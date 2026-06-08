@@ -14,10 +14,12 @@ These tests cover:
 1. claim_next_transaction defers when an eligible finalization exists.
 2. claim_next_transaction proceeds when finalization for the contract is
    already in flight (preserves liveness — no infinite defer loop).
-3. recover_stuck_transactions preserves consensus_data for finalization-
+3. claim_next_transaction does not defer older queue heads to younger
+   finalizations that cannot legally finalize yet.
+4. recover_stuck_transactions preserves consensus_data for finalization-
    eligible statuses (ACCEPTED/UNDETERMINED/*_TIMEOUT).
-4. Safety-net log fires when an ACCEPTED tx's wait exceeds N×finality_window.
-5. Recovered PENDING txs are deprioritized across contracts so other
+5. Safety-net log fires when an ACCEPTED tx's wait exceeds N×finality_window.
+6. Recovered PENDING txs are deprioritized across contracts so other
    contracts keep making progress.
 """
 
@@ -202,6 +204,42 @@ async def test_claim_next_transaction_defers_to_eligible_finalization(
         "same contract — got "
         f"{claimed}"
     )
+
+
+@pytest.mark.asyncio
+async def test_older_activated_head_is_not_blocked_by_younger_finalization(
+    engine: Engine, worker: ConsensusWorker, session: Session
+):
+    """A younger finalization cannot complete while an older ACTIVATED head is
+    non-terminal. claim_next_transaction must claim the older head instead of
+    deferring forever to a finalization that claim_next_finalization rejects."""
+    _setup_contract(engine)
+    activated_hash = "0x" + "2a" * 32
+    finalization_hash = "0x" + "2b" * 32
+
+    _insert_tx(
+        session,
+        tx_hash=activated_hash,
+        status="ACTIVATED",
+        nonce=0,
+        created_at_offset_seconds=-1200,
+    )
+    _insert_tx(
+        session,
+        tx_hash=finalization_hash,
+        status="ACCEPTED",
+        nonce=1,
+        timestamp_awaiting_finalization=int(time.time()) - 600,
+        consensus_data={"leader_receipt": [{}], "votes": {}, "validators": []},
+        created_at_offset_seconds=-600,
+    )
+
+    blocked_finalization = await worker.claim_next_finalization(session)
+    claimed = await worker.claim_next_transaction(session)
+
+    assert blocked_finalization is None
+    assert claimed is not None
+    assert claimed["hash"] == activated_hash
 
 
 @pytest.mark.asyncio
