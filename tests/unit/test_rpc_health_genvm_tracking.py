@@ -3,9 +3,11 @@ Tests for GenVM execution failure tracking in JSON-RPC health check.
 Mirrors test_worker_health_degradation.py pattern for jsonrpc process.
 """
 
-import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import patch, MagicMock, AsyncMock
+
+import pytest
 
 import backend.protocol_rpc.health as health_module
 
@@ -467,6 +469,109 @@ class TestBackgroundHealthGenVMOrdering:
         assert result["no_progress_backlog_count"] == 1
         assert result["oldest_backlog_age_seconds"] is None
         assert health_module._no_progress_scan_suppressed_until == 0.0
+
+
+class TestDetailedConsensusHealthEndpoint:
+    """Unit coverage for the detailed /health/consensus endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_health_consensus_reports_stuck_head_details(self, monkeypatch):
+        now = datetime.now(timezone.utc)
+        stuck_created_at = now - timedelta(minutes=90)
+        blocked_at = now - timedelta(minutes=5)
+
+        contract_rows = [
+            SimpleNamespace(
+                contract_address="0xcontract1",
+                processing_count=4,
+                pending_count=2,
+                created_last_1h=1,
+                created_last_3h=4,
+                created_last_6h=4,
+                created_last_12h=4,
+                created_last_1d=4,
+                oldest_blocked_at=blocked_at,
+                oldest_processing_created_at=stuck_created_at,
+                stuck_head_hash="0xstuck",
+                stuck_head_status="COMMITTING",
+                stuck_head_created_at=stuck_created_at,
+            ),
+            SimpleNamespace(
+                contract_address="0xcontract2",
+                processing_count=3,
+                pending_count=1,
+                created_last_1h=0,
+                created_last_3h=3,
+                created_last_6h=3,
+                created_last_12h=3,
+                created_last_1d=3,
+                oldest_blocked_at=None,
+                oldest_processing_created_at=None,
+                stuck_head_hash=None,
+                stuck_head_status=None,
+                stuck_head_created_at=None,
+            ),
+        ]
+
+        class FakeResult:
+            def __init__(self, row=None, rows=None):
+                self.row = row
+                self.rows = rows or []
+
+            def fetchone(self):
+                return self.row
+
+            def __iter__(self):
+                return iter(self.rows)
+
+        class FakeConnection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, statement, params=None):
+                query = str(statement)
+                if "COUNT(DISTINCT worker_id)" in query:
+                    return FakeResult(SimpleNamespace(n=2))
+                if "WITH contract_stats AS" in query:
+                    assert params == {"head_stuck_minutes": 15, "claim_window": 30}
+                    return FakeResult(rows=contract_rows)
+                raise AssertionError(f"unexpected query: {query}")
+
+        class FakeEngine:
+            def connect(self):
+                return FakeConnection()
+
+        import backend.database_handler.session_factory as session_factory
+
+        monkeypatch.setattr(
+            session_factory,
+            "get_database_manager",
+            lambda: SimpleNamespace(engine=FakeEngine()),
+        )
+
+        result = await health_module.health_consensus(rpc_router=object())
+
+        assert result["status"] == "healthy"
+        assert result["total_processing_transactions"] == 7
+        assert result["total_orphaned_transactions"] == 1
+        assert result["active_workers"] == 2
+
+        stuck_contract = result["contracts"][0]
+        assert stuck_contract["orphaned_transactions"] == 1
+        assert stuck_contract["orphaned_transaction_hashes"] == ["0xstuck"]
+        assert stuck_contract["stuck_head_transaction"] == {
+            "hash": "0xstuck",
+            "status": "COMMITTING",
+            "created_at": stuck_created_at.isoformat(),
+            "elapsed": "1h",
+        }
+
+        active_contract = result["contracts"][1]
+        assert active_contract["orphaned_transactions"] == 0
+        assert "stuck_head_transaction" not in active_contract
 
 
 class TestThresholdConfig:
