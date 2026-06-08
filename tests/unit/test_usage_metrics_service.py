@@ -50,3 +50,49 @@ async def test_system_health_metrics_include_max_recovery_events():
             "occurredAt": 1779938084,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_system_health_metrics_include_stuck_head_events():
+    service = UsageMetricsService()
+    service._enabled = True
+    service._send_to_api = AsyncMock()
+
+    health_cache = SimpleNamespace(
+        status="degraded",
+        genvm_healthy=True,
+        uptime_percent=100.0,
+        pending_transactions=1,
+        total_decisions=2,
+        total_users=3,
+        issues=["orphaned_transactions"],
+        pending_contracts=[],
+        services={
+            "consensus": {
+                "active_workers": 0,
+                "stuck_head_transactions": [
+                    {
+                        "hash": "0xstuck",
+                        "contract_address": "0xcontract",
+                        "status": "COMMITTING",
+                        "created_at": 1780933606,
+                    }
+                ],
+            },
+            "memory": {"percent": 4.0, "cpu_percent": 5.0},
+        },
+    )
+
+    await service.send_system_health_metrics(health_cache)
+
+    service._send_to_api.assert_awaited_once()
+    payload = service._send_to_api.await_args.args[0]
+    assert payload["systemHealth"]["instanceHealthEvents"] == [
+        {
+            "type": "orphaned_transactions",
+            "transactionHash": "0xstuck",
+            "contractAddress": "0xcontract",
+            "status": "COMMITTING",
+            "occurredAt": 1780933606,
+        }
+    ]

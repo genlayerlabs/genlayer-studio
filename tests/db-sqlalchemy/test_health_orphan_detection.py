@@ -363,6 +363,112 @@ async def test_long_running_consensus_within_claim_window_not_stuck(engine: Engi
 
 
 @pytest.mark.asyncio
+async def test_detailed_consensus_endpoint_uses_claim_window_for_stuck_heads(
+    engine: Engine,
+):
+    """The detailed /health/consensus endpoint must use the same claim-window
+    semantics as /health. The old endpoint looked for workers on txs created
+    in the last hour and falsely marked old, actively claimed txs orphaned."""
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    contract = "0x" + "5d" * 20
+
+    with Session_() as s:
+        _insert_tx(
+            s,
+            tx_hash="0x" + "01" * 32,
+            to_address=contract,
+            status="COMMITTING",
+            nonce=0,
+            created_at=now - timedelta(hours=2),
+            blocked_at=now - timedelta(minutes=7),
+            worker_id="worker-busy",
+        )
+        s.commit()
+
+    from backend.protocol_rpc import health as health_module
+
+    result = await health_module.health_consensus(rpc_router=object())
+
+    assert result["active_workers"] == 1
+    assert result["total_orphaned_transactions"] == 0
+    assert result["contracts"][0]["orphaned_transactions"] == 0
+
+
+@pytest.mark.asyncio
+async def test_detailed_consensus_endpoint_excludes_post_consensus_statuses(
+    engine: Engine,
+):
+    """Post-consensus rows are finalization backlog, not stuck consensus heads.
+    The detailed endpoint should not reintroduce the old false-positive class."""
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+
+    with Session_() as s:
+        for i, st in enumerate(
+            ["ACCEPTED", "UNDETERMINED", "LEADER_TIMEOUT", "VALIDATORS_TIMEOUT"]
+        ):
+            _insert_tx(
+                s,
+                tx_hash=f"0x5e{i:062x}",
+                to_address=f"0x{(0x5E + i):02x}" + "00" * 19,
+                status=st,
+                nonce=0,
+                created_at=now - timedelta(hours=2),
+                blocked_at=now - timedelta(minutes=45),
+                worker_id=f"old-worker-{i}",
+            )
+        s.commit()
+
+    from backend.protocol_rpc import health as health_module
+
+    result = await health_module.health_consensus(rpc_router=object())
+
+    assert result["total_orphaned_transactions"] == 0
+    assert all(
+        contract["orphaned_transactions"] == 0 for contract in result["contracts"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_detailed_consensus_endpoint_reports_stuck_head_details(engine: Engine):
+    """When heads are genuinely stuck, the detailed endpoint should expose the
+    affected transaction hashes so alerts can be investigated from the payload."""
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+
+    with Session_() as s:
+        for i in range(3):
+            _insert_tx(
+                s,
+                tx_hash=f"0x5f{i:062x}",
+                to_address=f"0x{(0x5F + i):02x}" + "00" * 19,
+                status="COMMITTING",
+                nonce=0,
+                created_at=now - timedelta(minutes=45 + i),
+            )
+        s.commit()
+
+    from backend.protocol_rpc import health as health_module
+
+    result = await health_module.health_consensus(rpc_router=object())
+
+    assert result["status"] == "degraded"
+    assert result["total_orphaned_transactions"] == 3
+    stuck_contracts = [
+        contract
+        for contract in result["contracts"]
+        if contract["orphaned_transactions"]
+    ]
+    assert len(stuck_contracts) == 3
+    assert all(
+        contract["stuck_head_transaction"]["hash"]
+        in contract["orphaned_transaction_hashes"]
+        for contract in stuck_contracts
+    )
+
+
+@pytest.mark.asyncio
 async def test_expired_claim_counts_contract_as_stuck(engine: Engine):
     """blocked_at older than the claim window means the worker has
     timed out. Recovery would reset it. Until then, the head is
@@ -456,6 +562,8 @@ async def test_status_threshold_matches_dashboard_alert_gate(engine: Engine):
     result = await health_module._check_consensus_health()
 
     assert result["total_orphaned_transactions"] == 3
+    assert len(result["stuck_head_transactions"]) == 3
+    assert result["stuck_head_transactions"][0]["status"] == "COMMITTING"
     assert (
         result["status"] == "degraded"
     ), f"3 stuck contracts must flip status to degraded. Got: {result}"
