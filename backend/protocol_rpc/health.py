@@ -216,6 +216,26 @@ def _evaluate_permit_readiness(
 METRICS_SEND_INTERVAL = 6
 _no_progress_scan_suppressed_until: float = 0.0
 
+# Statuses where the consensus state machine is actively working.
+# The "head of queue stuck" check uses ONLY these: ACCEPTED-class
+# statuses are post-consensus and live under the separate
+# finalization-stall detector below.
+CONSENSUS_ACTIVE_STATUSES_SQL = "'ACTIVATED','PROPOSING','COMMITTING','REVEALING'"
+# Broader set including finalization-pending statuses. Used only
+# in the "is any worker actively claiming on this contract" NOT
+# EXISTS clause — a finalization worker counts as active work and
+# should mask a stuck consensus head.
+ANY_INFLIGHT_STATUSES_SQL = (
+    "'ACTIVATED','PROPOSING','COMMITTING','REVEALING',"
+    "'ACCEPTED','UNDETERMINED','LEADER_TIMEOUT','VALIDATORS_TIMEOUT'"
+)
+FINALIZATION_ELIGIBLE_STATUSES_SQL = (
+    "'ACCEPTED','UNDETERMINED','LEADER_TIMEOUT','VALIDATORS_TIMEOUT'"
+)
+PRE_CONSENSUS_BACKLOG_STATUSES_SQL = (
+    "'PENDING','ACTIVATED','PROPOSING','COMMITTING','REVEALING'"
+)
+
 
 def get_health_check_interval() -> float:
     """Get health check interval from env (default 10s)."""
@@ -311,8 +331,14 @@ async def _run_health_checks() -> None:
             "orphaned_transactions": consensus_health.get(
                 "total_orphaned_transactions", 0
             ),
+            "stuck_head_transactions": consensus_health.get(
+                "stuck_head_transactions", []
+            ),
             "stuck_finalization_count": consensus_health.get(
                 "stuck_finalization_count", 0
+            ),
+            "stuck_finalization_transactions": consensus_health.get(
+                "stuck_finalization_transactions", []
             ),
             "recovery_storm_count": consensus_health.get("recovery_storm_count", 0),
             "max_recovery_count": consensus_health.get("max_recovery_count", 0),
@@ -635,25 +661,9 @@ async def _check_consensus_health() -> Dict[str, Any]:
     MAX_RECOVERY_EXHAUSTED_EVENT_LIMIT = int(
         os.environ.get("HEALTH_MAX_RECOVERY_EXHAUSTED_EVENT_LIMIT", "10")
     )
-
-    # Statuses where the consensus state machine is actively working.
-    # The "head of queue stuck" check uses ONLY these: ACCEPTED-class
-    # statuses are post-consensus and live under the separate
-    # finalization-stall detector below.
-    CONSENSUS_ACTIVE_STATUSES_SQL = "'ACTIVATED','PROPOSING','COMMITTING','REVEALING'"
-    # Broader set including finalization-pending statuses. Used only
-    # in the "is any worker actively claiming on this contract" NOT
-    # EXISTS clause — a finalization worker counts as active work and
-    # should mask a stuck consensus head.
-    ANY_INFLIGHT_STATUSES_SQL = (
-        "'ACTIVATED','PROPOSING','COMMITTING','REVEALING',"
-        "'ACCEPTED','UNDETERMINED','LEADER_TIMEOUT','VALIDATORS_TIMEOUT'"
-    )
-    FINALIZATION_ELIGIBLE_STATUSES_SQL = (
-        "'ACCEPTED','UNDETERMINED','LEADER_TIMEOUT','VALIDATORS_TIMEOUT'"
-    )
-    PRE_CONSENSUS_BACKLOG_STATUSES_SQL = (
-        "'PENDING','ACTIVATED','PROPOSING','COMMITTING','REVEALING'"
+    STUCK_HEAD_EVENT_LIMIT = int(os.environ.get("HEALTH_STUCK_HEAD_EVENT_LIMIT", "10"))
+    STUCK_FINALIZATION_EVENT_LIMIT = int(
+        os.environ.get("HEALTH_STUCK_FINALIZATION_EVENT_LIMIT", "10")
     )
 
     try:
@@ -698,7 +708,7 @@ async def _check_consensus_health() -> Dict[str, Any]:
                 # masks the alarm.
                 # Returns the count of AFFECTED CONTRACTS, not the
                 # count of queued txs behind them.
-                stuck_row = conn.execute(
+                stuck_rows = conn.execute(
                     text(
                         f"""
                         WITH heads AS (
@@ -711,26 +721,52 @@ async def _check_consensus_health() -> Dict[str, Any]:
                             WHERE status IN ({CONSENSUS_ACTIVE_STATUSES_SQL})
                               AND to_address IS NOT NULL
                             ORDER BY to_address, created_at ASC, hash ASC
+                        ),
+                        stuck_heads AS (
+                            SELECT
+                                h.to_address,
+                                h.hash,
+                                h.status,
+                                h.created_at
+                            FROM heads h
+                            WHERE h.created_at < NOW() - make_interval(mins => :head_stuck_minutes)
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM transactions t2
+                                  WHERE t2.to_address = h.to_address
+                                    AND t2.status IN ({ANY_INFLIGHT_STATUSES_SQL})
+                                    AND t2.blocked_at IS NOT NULL
+                                    AND t2.blocked_at > NOW() - make_interval(mins => :claim_window)
+                              )
                         )
-                        SELECT COUNT(*) AS stuck_heads
-                        FROM heads h
-                        WHERE h.created_at < NOW() - make_interval(mins => :head_stuck_minutes)
-                          AND NOT EXISTS (
-                              SELECT 1
-                              FROM transactions t2
-                              WHERE t2.to_address = h.to_address
-                                AND t2.status IN ({ANY_INFLIGHT_STATUSES_SQL})
-                                AND t2.blocked_at IS NOT NULL
-                                AND t2.blocked_at > NOW() - make_interval(mins => :claim_window)
-                          )
+                        SELECT
+                            COUNT(*) OVER() AS total_count,
+                            hash AS tx_hash,
+                            to_address,
+                            status,
+                            EXTRACT(EPOCH FROM created_at)::bigint
+                                AS created_at_epoch
+                        FROM stuck_heads
+                        ORDER BY created_at ASC, hash ASC
+                        LIMIT :event_limit
                         """
                     ),
                     {
                         "head_stuck_minutes": HEAD_STUCK_AFTER_MINUTES,
                         "claim_window": CLAIM_WINDOW_MINUTES,
+                        "event_limit": STUCK_HEAD_EVENT_LIMIT,
                     },
-                ).fetchone()
-                stuck_head_contracts = stuck_row.stuck_heads if stuck_row else 0
+                ).fetchall()
+                stuck_head_contracts = stuck_rows[0].total_count if stuck_rows else 0
+                stuck_head_transactions = [
+                    {
+                        "hash": row.tx_hash,
+                        "contract_address": row.to_address,
+                        "status": row.status,
+                        "created_at": row.created_at_epoch,
+                    }
+                    for row in stuck_rows
+                ]
 
                 # Stuck finalizations: ACCEPTED-class txs waiting too
                 # long to reach FINALIZED. Two paths:
@@ -742,27 +778,82 @@ async def _check_consensus_health() -> Dict[str, Any]:
                 #      reached UNDETERMINED without ever stamping the
                 #      timestamp — invisible to claim_next_finalization
                 #      forever)
-                stuck_fin_row = conn.execute(
+                stuck_fin_rows = conn.execute(
                     text(
                         f"""
-                        SELECT COUNT(*) AS n
-                        FROM transactions
-                        WHERE status IN ({FINALIZATION_ELIGIBLE_STATUSES_SQL})
-                          AND (
-                              (timestamp_awaiting_finalization IS NOT NULL
-                               AND EXTRACT(EPOCH FROM NOW())::bigint
-                                   - timestamp_awaiting_finalization
-                                   > :stuck_seconds)
-                              OR
-                              (timestamp_awaiting_finalization IS NULL
-                               AND created_at
-                                   < NOW() - make_interval(secs => :stuck_seconds))
-                          )
+                        WITH stuck_finalizations AS (
+                            SELECT
+                                hash AS tx_hash,
+                                to_address,
+                                status,
+                                created_at,
+                                timestamp_awaiting_finalization,
+                                blocked_at,
+                                worker_id,
+                                CASE
+                                    WHEN timestamp_awaiting_finalization IS NOT NULL
+                                    THEN EXTRACT(EPOCH FROM NOW())::bigint
+                                        - timestamp_awaiting_finalization
+                                    ELSE EXTRACT(EPOCH FROM NOW() - created_at)::bigint
+                                END AS waiting_seconds
+                            FROM transactions
+                            WHERE status IN ({FINALIZATION_ELIGIBLE_STATUSES_SQL})
+                              AND (
+                                  (timestamp_awaiting_finalization IS NOT NULL
+                                   AND EXTRACT(EPOCH FROM NOW())::bigint
+                                       - timestamp_awaiting_finalization
+                                       > :stuck_seconds)
+                                  OR
+                                  (timestamp_awaiting_finalization IS NULL
+                                   AND created_at
+                                       < NOW() - make_interval(secs => :stuck_seconds))
+                              )
+                        )
+                        SELECT
+                            COUNT(*) OVER() AS total_count,
+                            tx_hash,
+                            to_address,
+                            status,
+                            EXTRACT(EPOCH FROM created_at)::bigint
+                                AS created_at_epoch,
+                            timestamp_awaiting_finalization,
+                            EXTRACT(EPOCH FROM blocked_at)::bigint
+                                AS blocked_at_epoch,
+                            worker_id,
+                            waiting_seconds
+                        FROM stuck_finalizations
+                        ORDER BY
+                            COALESCE(
+                                timestamp_awaiting_finalization,
+                                EXTRACT(EPOCH FROM created_at)::bigint
+                            ) ASC,
+                            tx_hash ASC
+                        LIMIT :event_limit
                         """
                     ),
-                    {"stuck_seconds": STUCK_FINALIZATION_AFTER_SECONDS},
-                ).fetchone()
-                stuck_finalization_count = stuck_fin_row.n if stuck_fin_row else 0
+                    {
+                        "stuck_seconds": STUCK_FINALIZATION_AFTER_SECONDS,
+                        "event_limit": STUCK_FINALIZATION_EVENT_LIMIT,
+                    },
+                ).fetchall()
+                stuck_finalization_count = (
+                    stuck_fin_rows[0].total_count if stuck_fin_rows else 0
+                )
+                stuck_finalization_transactions = [
+                    {
+                        "hash": row.tx_hash,
+                        "contract_address": row.to_address,
+                        "status": row.status,
+                        "created_at": row.created_at_epoch,
+                        "timestamp_awaiting_finalization": (
+                            row.timestamp_awaiting_finalization
+                        ),
+                        "blocked_at": row.blocked_at_epoch,
+                        "worker_id": row.worker_id,
+                        "waiting_seconds": row.waiting_seconds,
+                    }
+                    for row in stuck_fin_rows
+                ]
 
                 # Recovery storm: a non-terminal transaction that has already
                 # been reset several times is a high-confidence poison-tx
@@ -1018,7 +1109,11 @@ async def _check_consensus_health() -> Dict[str, Any]:
                     # external dashboard. Semantics: count of CONTRACTS
                     # whose consensus head is stuck.
                     "total_orphaned_transactions": stuck_head_contracts,
+                    "stuck_head_transactions": stuck_head_transactions,
                     "stuck_finalization_count": stuck_finalization_count,
+                    "stuck_finalization_transactions": (
+                        stuck_finalization_transactions
+                    ),
                     "recovery_storm_count": recovery_storm_count,
                     "max_recovery_count": max_recovery_count,
                     "max_recovery_exhausted_count": max_recovery_exhausted_count,
@@ -1798,8 +1893,7 @@ async def health_consensus(
     rpc_router: Optional[FastAPIRPCRouter] = Depends(get_rpc_router_optional),
 ) -> Dict[str, Any]:
     """Show consensus system status with detailed contract-level transaction metrics."""
-    from datetime import datetime, timedelta, timezone
-    from backend.database_handler.models import Transactions
+    from datetime import datetime, timezone
     from backend.database_handler.session_factory import get_database_manager
 
     try:
@@ -1807,23 +1901,18 @@ async def health_consensus(
             return {"status": "not_initialized", "error": "RPC router not available"}
 
         def _query_consensus_detail():
-            # Get active worker IDs from recent transactions
+            import os
+
             db_manager = get_database_manager()
-            with db_manager.engine.connect() as worker_conn:
-                now = datetime.now(timezone.utc)
-                recent_threshold = now - timedelta(hours=1)
-
-                from sqlalchemy import select, distinct, and_
-
-                worker_query = select(distinct(Transactions.worker_id)).where(
-                    and_(
-                        Transactions.worker_id.isnot(None),
-                        Transactions.created_at > recent_threshold,
-                    )
-                )
-
-                worker_result = worker_conn.execute(worker_query)
-                active_workers = {row[0] for row in worker_result if row[0]}
+            HEAD_STUCK_AFTER_MINUTES = int(
+                os.environ.get("HEALTH_HEAD_STUCK_AFTER_MINUTES", "15")
+            )
+            CLAIM_WINDOW_MINUTES = int(
+                os.environ.get("TRANSACTION_TIMEOUT_MINUTES", "30")
+            )
+            DEGRADED_AT_STUCK_HEADS = int(
+                os.environ.get("HEALTH_DEGRADED_AT_STUCK_HEADS", "3")
+            )
 
             # Query transaction statistics by contract
             with db_manager.engine.connect() as conn:
@@ -1831,38 +1920,90 @@ async def health_consensus(
 
                 from sqlalchemy import text
 
+                active_workers_row = conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(DISTINCT worker_id) AS n
+                        FROM transactions
+                        WHERE worker_id IS NOT NULL
+                          AND blocked_at IS NOT NULL
+                          AND blocked_at > NOW() - make_interval(mins => :claim_window)
+                        """
+                    ),
+                    {"claim_window": CLAIM_WINDOW_MINUTES},
+                ).fetchone()
+                active_workers_count = active_workers_row.n if active_workers_row else 0
+
                 query = text(
-                    """
+                    f"""
+                    WITH contract_stats AS (
+                        SELECT
+                            to_address as contract_address,
+                            COUNT(*) FILTER (WHERE status IN ({ANY_INFLIGHT_STATUSES_SQL})) as processing_count,
+                            COUNT(*) FILTER (WHERE status = 'PENDING') as pending_count,
+                            COUNT(*) FILTER (WHERE created_at > NOW() - interval '1 hour') as created_last_1h,
+                            COUNT(*) FILTER (WHERE created_at > NOW() - interval '3 hours') as created_last_3h,
+                            COUNT(*) FILTER (WHERE created_at > NOW() - interval '6 hours') as created_last_6h,
+                            COUNT(*) FILTER (WHERE created_at > NOW() - interval '12 hours') as created_last_12h,
+                            COUNT(*) FILTER (WHERE created_at > NOW() - interval '1 day') as created_last_1d,
+                            MIN(blocked_at) as oldest_blocked_at,
+                            MIN(created_at) FILTER (
+                                WHERE status = 'PENDING'
+                                   OR status IN ({ANY_INFLIGHT_STATUSES_SQL})
+                            ) as oldest_processing_created_at
+                        FROM transactions
+                        WHERE to_address IS NOT NULL
+                        GROUP BY to_address
+                        HAVING COUNT(*) FILTER (
+                            WHERE status = 'PENDING'
+                               OR status IN ({ANY_INFLIGHT_STATUSES_SQL})
+                        ) > 0
+                    ),
+                    heads AS (
+                        SELECT DISTINCT ON (to_address)
+                            to_address,
+                            hash,
+                            status,
+                            created_at
+                        FROM transactions
+                        WHERE status IN ({CONSENSUS_ACTIVE_STATUSES_SQL})
+                          AND to_address IS NOT NULL
+                        ORDER BY to_address, created_at ASC, hash ASC
+                    ),
+                    stuck_heads AS (
+                        SELECT
+                            h.to_address,
+                            h.hash,
+                            h.status,
+                            h.created_at
+                        FROM heads h
+                        WHERE h.created_at < NOW() - make_interval(mins => :head_stuck_minutes)
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM transactions t2
+                              WHERE t2.to_address = h.to_address
+                                AND t2.status IN ({ANY_INFLIGHT_STATUSES_SQL})
+                                AND t2.blocked_at IS NOT NULL
+                                AND t2.blocked_at > NOW() - make_interval(mins => :claim_window)
+                          )
+                    )
                     SELECT
-                        to_address as contract_address,
-                        COUNT(*) FILTER (WHERE status IN ('ACTIVATED', 'PROPOSING', 'COMMITTING', 'REVEALING', 'ACCEPTED', 'UNDETERMINED')) as processing_count,
-                        COUNT(*) FILTER (WHERE status = 'PENDING') as pending_count,
-                        COUNT(*) FILTER (WHERE created_at > :one_hour_ago) as created_last_1h,
-                        COUNT(*) FILTER (WHERE created_at > :three_hours_ago) as created_last_3h,
-                        COUNT(*) FILTER (WHERE created_at > :six_hours_ago) as created_last_6h,
-                        COUNT(*) FILTER (WHERE created_at > :twelve_hours_ago) as created_last_12h,
-                        COUNT(*) FILTER (WHERE created_at > :one_day_ago) as created_last_1d,
-                        MIN(blocked_at) as oldest_blocked_at,
-                        MIN(created_at) FILTER (WHERE status IN ('PENDING', 'ACTIVATED', 'PROPOSING', 'COMMITTING', 'REVEALING', 'ACCEPTED', 'UNDETERMINED')) as oldest_processing_created_at,
-                        COUNT(*) FILTER (WHERE worker_id IS NOT NULL AND status IN ('PENDING', 'ACTIVATED', 'PROPOSING', 'COMMITTING', 'REVEALING', 'ACCEPTED', 'UNDETERMINED')) as blocked_count,
-                        json_agg(DISTINCT jsonb_build_object('worker_id', worker_id, 'hash', hash))
-                            FILTER (WHERE worker_id IS NOT NULL AND status IN ('PENDING', 'ACTIVATED', 'PROPOSING', 'COMMITTING', 'REVEALING', 'ACCEPTED', 'UNDETERMINED')) as worker_transactions
-                    FROM transactions
-                    WHERE to_address IS NOT NULL
-                    GROUP BY to_address
-                    HAVING COUNT(*) FILTER (WHERE status IN ('PENDING', 'ACTIVATED', 'PROPOSING', 'COMMITTING', 'REVEALING', 'ACCEPTED', 'UNDETERMINED')) > 0
-                    ORDER BY processing_count DESC
-                """
+                        cs.*,
+                        sh.hash AS stuck_head_hash,
+                        sh.status AS stuck_head_status,
+                        sh.created_at AS stuck_head_created_at
+                    FROM contract_stats cs
+                    LEFT JOIN stuck_heads sh
+                      ON sh.to_address = cs.contract_address
+                    ORDER BY cs.processing_count DESC, cs.pending_count DESC
+                    """
                 )
 
                 result = conn.execute(
                     query,
                     {
-                        "one_hour_ago": now - timedelta(hours=1),
-                        "three_hours_ago": now - timedelta(hours=3),
-                        "six_hours_ago": now - timedelta(hours=6),
-                        "twelve_hours_ago": now - timedelta(hours=12),
-                        "one_day_ago": now - timedelta(days=1),
+                        "head_stuck_minutes": HEAD_STUCK_AFTER_MINUTES,
+                        "claim_window": CLAIM_WINDOW_MINUTES,
                     },
                 )
 
@@ -1907,28 +2048,42 @@ async def health_consensus(
                         contract_data["oldest_processing_created_at"] = None
                         contract_data["oldest_processing_elapsed"] = None
 
-                    orphaned_tx_hashes = []
-                    if row.worker_transactions:
-                        for tx_info in row.worker_transactions:
-                            if (
-                                tx_info
-                                and tx_info.get("worker_id") not in active_workers
-                            ):
-                                orphaned_tx_hashes.append(tx_info.get("hash"))
-
-                    contract_data["orphaned_transactions"] = len(orphaned_tx_hashes)
-                    if orphaned_tx_hashes:
+                    if row.stuck_head_hash:
+                        orphaned_tx_hashes = [row.stuck_head_hash]
+                        contract_data["orphaned_transactions"] = 1
                         contract_data["orphaned_transaction_hashes"] = (
                             orphaned_tx_hashes
                         )
-                    total_orphaned += contract_data["orphaned_transactions"]
+                        stuck_head_created_at = None
+                        stuck_head_elapsed = None
+                        if row.stuck_head_created_at:
+                            stuck_head_created_at = (
+                                row.stuck_head_created_at.isoformat()
+                            )
+                            elapsed = now - row.stuck_head_created_at
+                            minutes = int(elapsed.total_seconds() / 60)
+                            stuck_head_elapsed = (
+                                f"{minutes}m" if minutes < 60 else f"{minutes // 60}h"
+                            )
+                        contract_data["stuck_head_transaction"] = {
+                            "hash": row.stuck_head_hash,
+                            "status": row.stuck_head_status,
+                            "created_at": stuck_head_created_at,
+                            "elapsed": stuck_head_elapsed,
+                        }
+                        total_orphaned += 1
+                    else:
+                        contract_data["orphaned_transactions"] = 0
 
                     contracts.append(contract_data)
 
                 total_processing = sum(c["processing_count"] for c in contracts)
                 status = (
                     "healthy"
-                    if total_processing < 100 and total_orphaned == 0
+                    if (
+                        total_processing < 100
+                        and total_orphaned < DEGRADED_AT_STUCK_HEADS
+                    )
                     else "degraded"
                 )
 
@@ -1936,7 +2091,7 @@ async def health_consensus(
                     "status": status,
                     "total_processing_transactions": total_processing,
                     "total_orphaned_transactions": total_orphaned,
-                    "active_workers": len(active_workers),
+                    "active_workers": active_workers_count,
                     "contracts": contracts,
                 }
 
