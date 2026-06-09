@@ -594,6 +594,7 @@ async def test_stuck_finalization_with_stale_timestamp_is_flagged(engine: Engine
     Session_ = sessionmaker(bind=engine, expire_on_commit=False)
     now = datetime.now(timezone.utc)
     stale_ts = int(time.time()) - 24 * 3600  # 1 day ago
+    created_at = now - timedelta(days=1)
 
     with Session_() as s:
         _insert_tx(
@@ -602,7 +603,7 @@ async def test_stuck_finalization_with_stale_timestamp_is_flagged(engine: Engine
             to_address="0x" + "f1" * 20,
             status="ACCEPTED",
             nonce=0,
-            created_at=now - timedelta(days=1),
+            created_at=created_at,
             timestamp_awaiting_finalization=stale_ts,
         )
         s.commit()
@@ -619,7 +620,7 @@ async def test_stuck_finalization_with_stale_timestamp_is_flagged(engine: Engine
             "hash": "0x" + "f1" * 32,
             "contract_address": "0x" + "f1" * 20,
             "status": "ACCEPTED",
-            "created_at": pytest.approx(int(now.timestamp()), abs=1),
+            "created_at": pytest.approx(int(created_at.timestamp()), abs=1),
             "timestamp_awaiting_finalization": stale_ts,
             "blocked_at": None,
             "worker_id": None,
@@ -636,6 +637,7 @@ async def test_stuck_finalization_with_null_timestamp_is_flagged(engine: Engine)
     to claim_next_finalization)."""
     Session_ = sessionmaker(bind=engine, expire_on_commit=False)
     now = datetime.now(timezone.utc)
+    created_at = now - timedelta(hours=2)
 
     with Session_() as s:
         _insert_tx(
@@ -644,7 +646,7 @@ async def test_stuck_finalization_with_null_timestamp_is_flagged(engine: Engine)
             to_address="0x" + "f2" * 20,
             status="UNDETERMINED",
             nonce=0,
-            created_at=now - timedelta(hours=2),
+            created_at=created_at,
             timestamp_awaiting_finalization=None,
         )
         s.commit()
@@ -662,7 +664,7 @@ async def test_stuck_finalization_with_null_timestamp_is_flagged(engine: Engine)
             "hash": "0x" + "f2" * 32,
             "contract_address": "0x" + "f2" * 20,
             "status": "UNDETERMINED",
-            "created_at": pytest.approx(int(now.timestamp()), abs=1),
+            "created_at": pytest.approx(int(created_at.timestamp()), abs=1),
             "timestamp_awaiting_finalization": None,
             "blocked_at": None,
             "worker_id": None,
