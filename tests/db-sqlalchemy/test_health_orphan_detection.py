@@ -614,6 +614,18 @@ async def test_stuck_finalization_with_stale_timestamp_is_flagged(engine: Engine
     assert (
         result["stuck_finalization_count"] == 1
     ), f"Stale timestamp_awaiting_finalization must be flagged. Got: {result}"
+    assert result["stuck_finalization_transactions"] == [
+        {
+            "hash": "0x" + "f1" * 32,
+            "contract_address": "0x" + "f1" * 20,
+            "status": "ACCEPTED",
+            "created_at": pytest.approx(int(now.timestamp()), abs=1),
+            "timestamp_awaiting_finalization": stale_ts,
+            "blocked_at": None,
+            "worker_id": None,
+            "waiting_seconds": pytest.approx(24 * 3600, abs=5),
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -645,6 +657,18 @@ async def test_stuck_finalization_with_null_timestamp_is_flagged(engine: Engine)
         "NULL timestamp + old row must be flagged so a regression of the "
         f"insufficient-balance SEND bug is caught. Got: {result}"
     )
+    assert result["stuck_finalization_transactions"] == [
+        {
+            "hash": "0x" + "f2" * 32,
+            "contract_address": "0x" + "f2" * 20,
+            "status": "UNDETERMINED",
+            "created_at": pytest.approx(int(now.timestamp()), abs=1),
+            "timestamp_awaiting_finalization": None,
+            "blocked_at": None,
+            "worker_id": None,
+            "waiting_seconds": pytest.approx(2 * 3600, abs=5),
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -676,6 +700,7 @@ async def test_recent_finalization_eligible_row_is_not_flagged(engine: Engine):
     assert (
         result["stuck_finalization_count"] == 0
     ), f"Fresh finalization-eligible row must not be flagged. Got: {result}"
+    assert result["stuck_finalization_transactions"] == []
 
 
 @pytest.mark.asyncio
