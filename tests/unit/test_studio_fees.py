@@ -1,4 +1,5 @@
 import base64
+from datetime import datetime
 import json
 from types import SimpleNamespace
 
@@ -13,10 +14,14 @@ from backend.consensus.base import (
 )
 from backend.domain.types import TransactionType
 from backend.errors.errors import InvalidTransactionError
+from backend.database_handler.accounts_manager import _infer_final_round
+from backend.database_handler.transactions_processor import TransactionsProcessor
 from backend.protocol_rpc.exceptions import JSONRPCError
 from backend.protocol_rpc.endpoints import (
+    _current_fee_round,
     _handle_appeal_or_top_up_and_submit,
     _handle_top_up_fees,
+    get_transaction_status,
     _stage_simulated_call_value,
     _simulation_fee_accounting,
     _validate_fee_envelope,
@@ -368,6 +373,46 @@ def test_time_unit_fees_through_round_refunds_unused_appeal_budget():
     assert get_leader_rounds_through_round(fees_distribution, 0) == 1
     assert calculate_time_unit_fees_through_round(fees_distribution, 5, 0) == 1100
     assert calculate_round_fees(fees_distribution, 5) == 12300
+
+
+def test_time_unit_fees_through_round_uses_actual_rotation_history():
+    fees_distribution = _fees_distribution(rotations=[2])
+    consensus_history = {
+        "consensus_results": [
+            {"consensus_round": "Accepted"},
+        ]
+    }
+
+    assert (
+        calculate_time_unit_fees_through_round(
+            fees_distribution,
+            5,
+            0,
+            consensus_history=consensus_history,
+        )
+        == 1100
+    )
+
+
+def test_time_unit_fees_through_round_caps_actual_rotations_to_funded_slots():
+    fees_distribution = _fees_distribution(rotations=[1])
+    consensus_history = {
+        "consensus_results": [
+            {"consensus_round": "Leader Rotation"},
+            {"consensus_round": "Leader Rotation"},
+            {"consensus_round": "Accepted"},
+        ]
+    }
+
+    assert (
+        calculate_time_unit_fees_through_round(
+            fees_distribution,
+            5,
+            0,
+            consensus_history=consensus_history,
+        )
+        == 2200
+    )
 
 
 def test_required_fee_deposit_includes_message_fee_bucket():
@@ -3552,6 +3597,31 @@ def test_settle_fee_accounting_uses_actual_round_for_primary_refund():
     assert refund == 11200
 
 
+def test_settle_fee_accounting_charges_half_leader_allocation_for_timeout_round():
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(),
+        num_of_validators=5,
+        submitted_value=1100,
+        user_value=0,
+        sender="0x1111111111111111111111111111111111111111",
+    )
+    consensus_history = {
+        "consensus_results": [
+            {"consensus_round": "Leader Timeout"},
+        ]
+    }
+
+    settled, refund = settle_fee_accounting(
+        accounting,
+        actual_final_round=0,
+        num_of_validators=5,
+        consensus_history=consensus_history,
+    )
+
+    assert settled["primary_fee_spent"] == 1050
+    assert refund == 50
+
+
 def test_cancel_fee_accounting_refunds_unspent_buckets_and_is_idempotent():
     accounting = create_fee_accounting(
         fees_distribution=_fees_distribution(total_message_fees=55),
@@ -4773,6 +4843,107 @@ def test_record_appeal_bond_validates_minimum_and_keeps_bond_separate():
     assert updated["primary_fee_budget"] == 1100
     assert updated["top_ups"] == accounting["top_ups"]
     assert updated["appeal_bonds"][0]["minimumRequired"] == 1400
+
+
+def test_settle_fee_accounting_pays_successful_appeal_bond_plus_profit():
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(appeals=1, rotations=[0, 0]),
+        num_of_validators=5,
+        submitted_value=4900,
+        user_value=0,
+    )
+    recorded = record_appeal_bond(
+        accounting,
+        amount=1400,
+        appealer="0x1111111111111111111111111111111111111111",
+        current_round=0,
+        status="ACCEPTED",
+    )
+    consensus_history = {
+        "consensus_results": [
+            {"consensus_round": "Accepted"},
+            {"consensus_round": "Leader Appeal Successful"},
+        ]
+    }
+
+    settled, refund = settle_fee_accounting(
+        recorded,
+        actual_final_round=1,
+        num_of_validators=5,
+        consensus_history=consensus_history,
+    )
+
+    assert refund == 2300
+    assert settled["appeal_bonds_payout_total"] == 2100
+    assert settled["appeal_bond_settlements"] == [
+        {
+            "bondIndex": 0,
+            "appealer": "0x1111111111111111111111111111111111111111",
+            "amount": 1400,
+            "round": 0,
+            "status": "successful",
+            "payout": 2100,
+            "outcomeRound": 1,
+            "outcome": "Leader Appeal Successful",
+        }
+    ]
+
+
+def test_settle_fee_accounting_explicitly_forfeits_failed_appeal_bond():
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(appeals=1, rotations=[0, 0]),
+        num_of_validators=5,
+        submitted_value=4900,
+        user_value=0,
+    )
+    recorded = record_appeal_bond(
+        accounting,
+        amount=1400,
+        appealer="0x1111111111111111111111111111111111111111",
+        current_round=0,
+        status="ACCEPTED",
+    )
+    consensus_history = {
+        "consensus_results": [
+            {"consensus_round": "Accepted"},
+            {"consensus_round": "Leader Appeal Failed"},
+        ]
+    }
+
+    settled, refund = settle_fee_accounting(
+        recorded,
+        actual_final_round=1,
+        num_of_validators=5,
+        consensus_history=consensus_history,
+    )
+
+    assert refund == 2300
+    assert settled["appeal_bonds_payout_total"] == 0
+    assert settled["appeal_bond_settlements"][0]["status"] == "forfeited"
+    assert settled["appeal_bond_settlements"][0]["bond_forfeited"] == 1400
+
+
+def test_cancel_fee_accounting_returns_unadjudicated_appeal_bond():
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(),
+        num_of_validators=5,
+        submitted_value=1100,
+        user_value=0,
+    )
+    recorded = record_appeal_bond(
+        accounting,
+        amount=1400,
+        appealer="0x1111111111111111111111111111111111111111",
+        current_round=0,
+        status="ACCEPTED",
+    )
+
+    canceled, refund = cancel_fee_accounting(recorded)
+
+    assert refund == 1100
+    assert canceled["appeal_bonds_payout_total"] == 1400
+    assert canceled["appeal_bond_settlements"][0]["status"] == "returned"
+    assert canceled["appeal_bond_settlements"][0]["payout"] == 1400
 
 
 def test_top_up_and_submit_appeal_skips_generic_top_up_bookkeeping():
@@ -6065,3 +6236,162 @@ def test_submit_appeal_endpoint_rejects_bond_below_required_minimum():
 
     assert transactions.updated_fee_accounting is None
     assert transactions.appeal_updates == []
+
+
+def test_submit_appeal_endpoint_rejects_zero_bond_when_fee_accounting_enabled():
+    tx = _fee_accounted_tx(status="ACCEPTED", accounting=_env_fee_accounting())
+    transactions = _FakeTransactionsProcessor(tx)
+
+    class _MsgHandler:
+        def send_message(self, log_event, log_to_terminal=True):
+            pass
+
+    with pytest.raises(InvalidTransactionError, match="InvalidAppealBond"):
+        _handle_appeal_or_top_up_and_submit(
+            accounts_manager=_FakeAccountsManager(balance=5000),
+            transactions_processor=transactions,
+            msg_handler=_MsgHandler(),
+            decoded_rollup_transaction=_decoded_appeal(tx["hash"], amount=0),
+        )
+
+    assert transactions.updated_fee_accounting is None
+    assert transactions.appeal_updates == []
+
+
+def test_current_fee_round_ignores_leader_rotation_events():
+    consensus_history = {
+        "consensus_results": [
+            {"consensus_round": "Accepted"},
+            {"consensus_round": "Leader Rotation"},
+            {"consensus_round": "Leader Rotation Appeal"},
+            {"consensus_round": "Leader Appeal Failed"},
+        ]
+    }
+
+    assert _current_fee_round(consensus_history) == 1
+    assert _infer_final_round(consensus_history) == 1
+
+
+def _processor_transaction(*, accounting=None, execution_result=None):
+    consensus_data = None
+    if execution_result is not None:
+        consensus_data = {
+            "leader_receipt": [
+                {
+                    "execution_result": execution_result,
+                    "result": {"raw": base64.b64encode(b"ok").decode("ascii")},
+                }
+            ]
+        }
+    return SimpleNamespace(
+        hash="0x" + "34" * 32,
+        from_address="0x1111111111111111111111111111111111111111",
+        to_address="0x2222222222222222222222222222222222222222",
+        data={FEE_ACCOUNTING_KEY: accounting} if accounting is not None else {},
+        value=0,
+        type=2,
+        status=SimpleNamespace(value="ACCEPTED"),
+        consensus_data=consensus_data,
+        nonce=1,
+        r=0,
+        s=0,
+        v=0,
+        created_at=datetime.fromtimestamp(0),
+        leader_only=False,
+        execution_mode="NORMAL",
+        origin_address=None,
+        triggered_by_hash=None,
+        triggered_on=None,
+        triggered_transactions=[],
+        appealed=False,
+        timestamp_awaiting_finalization=None,
+        appeal_failed=0,
+        appeal_undetermined=False,
+        consensus_history=None,
+        timestamp_appeal=None,
+        appeal_processing_time=None,
+        contract_snapshot=None,
+        config_rotation_rounds=0,
+        num_of_initial_validators=5,
+        last_vote_timestamp=0,
+        rotation_count=0,
+        appeal_leader_timeout=False,
+        leader_timeout_validators=None,
+        appeal_validators_timeout=False,
+        sim_config=None,
+        value_credited=False,
+    )
+
+
+def test_transaction_status_rpc_shape_includes_canonical_status_code():
+    class _Processor:
+        def get_transaction_status(self, transaction_hash):
+            return TransactionsProcessor._status_payload("ACCEPTED")
+
+    assert get_transaction_status(_Processor(), "0x1234") == {
+        "status": "ACCEPTED",
+        "statusCode": 5,
+    }
+
+
+def test_transaction_payload_maps_execution_result_name():
+    parsed = TransactionsProcessor._parse_transaction_data(
+        _processor_transaction(execution_result="SUCCESS")
+    )
+    failed = TransactionsProcessor._parse_transaction_data(
+        _processor_transaction(execution_result="ERROR")
+    )
+
+    assert parsed["txExecutionResult"] == 1
+    assert parsed["txExecutionResultName"] == "FINISHED_WITH_RETURN"
+    assert failed["txExecutionResult"] == 2
+    assert failed["txExecutionResultName"] == "FINISHED_WITH_ERROR"
+
+
+def test_transaction_payload_includes_canonical_fee_object_with_decimal_strings():
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(
+            execution_budget_per_round=100,
+            total_message_fees=55,
+            storage_fee_max_gas_price=1,
+            receipt_fee_max_gas_price=1,
+        ),
+        num_of_validators=5,
+        submitted_value=1355,
+        user_value=100,
+        policy=StudioFeePolicy(storage_unit_price=1, receipt_gas_price=1),
+        allow_low_execution_budget=True,
+    )
+    recorded = record_execution_fee_consumption(
+        accounting,
+        {"genvm_result": {"data_fees_consumed": [20, 3, 0]}},
+        StudioFeePolicy(storage_unit_price=1, receipt_gas_price=1),
+    )
+
+    parsed = TransactionsProcessor._parse_transaction_data(
+        _processor_transaction(accounting=recorded, execution_result="SUCCESS")
+    )
+
+    assert parsed["fees"]["deposit"] == "1255"
+    assert parsed["fees"]["userValue"] == "100"
+    assert parsed["fees"]["distribution"]["leaderTimeunitsAllocation"] == "100"
+    assert parsed["fees"]["distribution"]["rotations"] == ["0"]
+    assert parsed["fees"]["locked"] == {
+        "genPerTimeUnit": "0",
+        "storageUnitPrice": "1",
+        "receiptGasPrice": "1",
+    }
+    assert parsed["fees"]["consumed"] == {
+        "executionConsumed": str(recorded["execution_fee_consumed"]),
+        "storageFeeUsed": "3",
+        "messageFeesConsumed": "0",
+        "messageFeesBudgetTotal": "55",
+    }
+
+
+def test_transaction_payload_fees_null_when_fee_accounting_disabled():
+    parsed = TransactionsProcessor._parse_transaction_data(_processor_transaction())
+
+    assert parsed["fees"] is None
+    assert parsed["txExecutionResult"] == 0
+    assert parsed["txExecutionResultName"] == "NOT_VOTED"

@@ -54,6 +54,7 @@ from backend.protocol_rpc.fees import (
     studio_fee_config,
     validate_transaction_fee_deposit,
 )
+from backend.consensus.history import completed_consensus_round_index
 from backend.errors.errors import InvalidAddressError, InvalidTransactionError
 from backend.database_handler.errors import ContractNotFoundError
 
@@ -1570,7 +1571,7 @@ def get_studio_transaction_by_hash(
 
 def get_transaction_status(
     transactions_processor: TransactionsProcessor, transaction_hash: str
-) -> str:
+) -> dict:
     status = transactions_processor.get_transaction_status(transaction_hash)
     if status is None:
         raise NotFoundError(
@@ -1800,7 +1801,7 @@ def _handle_appeal_or_top_up_and_submit(
         raise NotFoundError(message=TRANSACTION_NOT_FOUND_MESSAGE, data={"hash": tx_id})
 
     fee_accounting = (tx.get("data") or {}).get(FEE_ACCOUNTING_KEY)
-    if fee_accounting is not None and decoded_rollup_transaction.total_spend > 0:
+    if fee_accounting is not None:
         try:
             updated = record_appeal_bond(
                 fee_accounting,
@@ -1841,12 +1842,7 @@ def _tx_id_to_hex(tx_id: str | bytes) -> str:
 
 
 def _current_fee_round(consensus_history: dict | None) -> int:
-    if not isinstance(consensus_history, dict):
-        return 0
-    rounds = consensus_history.get("consensus_results")
-    if not isinstance(rounds, list) or len(rounds) == 0:
-        return 0
-    return max(0, len(rounds) - 1)
+    return completed_consensus_round_index(consensus_history)
 
 
 def _simulation_fee_accounting(
