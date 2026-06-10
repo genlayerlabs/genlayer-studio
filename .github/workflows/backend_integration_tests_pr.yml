@@ -43,6 +43,16 @@ jobs:
       - name: Copy .env file
         run: cp .env.example .env
 
+      - name: Set GenVM tag for CI builds
+        env:
+          GENVM_TAG_DEFAULT: ${{ vars.GENVM_TAG || 'v0.3.0-rc4' }}
+        run: |
+          # docker-compose.yml hard-requires GENVM_TAG (963f9359); .env.example ships it
+          # empty. Default from the GENVM_TAG repo variable so the release train can pin it.
+          sed -i "s|^GENVM_TAG=.*|GENVM_TAG=\"$GENVM_TAG_DEFAULT\"|" .env
+          echo "GENVM_TAG=$GENVM_TAG_DEFAULT" >> "$GITHUB_ENV"
+          grep "^GENVM_TAG=" .env
+
       # TODO: we should also add also heuristai and anthropic keys to the e2e tests and test all providers
 
       - name: Configure LLM provider
