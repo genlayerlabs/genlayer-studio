@@ -1,11 +1,66 @@
 # Consensus worker Dockerfile - based on Ubuntu for compatibility
+FROM nixos/nix:2.30.2 AS genvm-source-build
+
+ARG TARGETARCH
+ARG GENVM_REF
+
+# nixos/nix ships bash only inside the default nix profile (no /bin/bash).
+SHELL ["/nix/var/nix/profiles/default/bin/bash", "-x", "-c"]
+
+# Source builds are the CI path for binding Studio to a GenVM branch/SHA.
+# linux/amd64 is the supported path; arm64 usually succeeds only when the
+# runner preload can avoid rebuilding x86_64-linux-pinned runner packages.
+# Recipe mirrors genvm's own release CI (.github/workflows/release.yaml +
+# support/ci/pipelines/build.sh): patch flake-config.json, prefetch deps,
+# nix build manager/executor/runners-all, merge the outputs.
+RUN set -euo pipefail ; \
+    if [ -n "$GENVM_REF" ]; then \
+        echo "experimental-features = nix-command flakes" >> /etc/nix/nix.conf ; \
+        nix-env -iA nixpkgs.python3 ; \
+        git clone https://github.com/genlayerlabs/genvm /src/genvm ; \
+        cd /src/genvm ; \
+        git checkout "$GENVM_REF" ; \
+        FULL_SHA="$(git rev-parse HEAD)" ; \
+        SHORT_SHA="$(git rev-parse --short HEAD)" ; \
+        printf '{"executor-version":"v0.0.0-dev%s","repo-url":"https://github.com/genlayerlabs/genvm.git","head-revision":"%s"}\n' "$SHORT_SHA" "$FULL_SHA" > flake-config.json ; \
+        if [[ "$TARGETARCH" == "amd64" ]] || [[ -z "$TARGETARCH" ]]; then \
+            GT="amd64-linux" ; \
+        elif [[ "$TARGETARCH" == "arm64" ]]; then \
+            GT="arm64-linux" ; \
+        else \
+            echo "ERROR: Unsupported TARGETARCH $TARGETARCH" ; exit 1 ; \
+        fi ; \
+        python3 support/runner-script.py dependencies prefetch-needed --all --target "manager-$GT" --target "executor-$GT" --target runners-all ; \
+        nix build -o /out-manager ".#manager-$GT" ; \
+        nix build -o /out-executor ".#executor-$GT" ; \
+        # Preload prebuilt runner tars (fixed-output derivations) from genvm's
+        # public GCS cache so `runners-all` rarely compiles anything; the same
+        # trick genvm CI uses (support/ci/pipelines/test-rust.sh). Best-effort:
+        # anything missing is built from source by the next nix build.
+        python3 support/runner-script.py download --nix-preload --allow-partial --dest /tmp/runners-dl --registry /out-executor/executor/*/data/all.json || true ; \
+        nix build -o /out-runners ".#runners-all" ; \
+        mkdir -p /genvm-out ; \
+        cp -rL --no-preserve=mode,ownership /out-manager/. /genvm-out/ ; \
+        cp -rL --no-preserve=mode,ownership /out-executor/. /genvm-out/ ; \
+        cp -rL --no-preserve=mode,ownership /out-runners/. /genvm-out/ ; \
+        # Drop sources + nix store build artifacts so this layer (and the
+        # buildx/gha cache entry for it) stays close to the size of /genvm-out.
+        rm -f /out-manager /out-executor /out-runners ; \
+        rm -rf /src/genvm /tmp/runners-dl ; \
+        nix-collect-garbage -d || true ; \
+    else \
+        mkdir -p /genvm-out ; \
+    fi
+
 FROM ubuntu:24.04 AS base
 
 ARG TARGETPLATFORM
 ARG TARGETARCH
 
 ARG GENVM_TAG
+ARG GENVM_REF
 ENV GENVM_TAG=$GENVM_TAG
+ENV GENVM_REF=$GENVM_REF
 
 ARG path=/app
 WORKDIR $path
@@ -49,10 +104,14 @@ ENV RUST_BACKTRACE=1
 
 
 # Download and extract GenVM binaries (sequential for Docker compatibility)
+COPY --from=genvm-source-build /genvm-out/ /genvm/
 RUN cd /genvm \
-    && test -n "$GENVM_TAG" \
+    && if [[ -n "$GENVM_TAG" && -n "$GENVM_REF" ]] || [[ -z "$GENVM_TAG" && -z "$GENVM_REF" ]]; then \
+        echo "ERROR: exactly one of GENVM_TAG or GENVM_REF must be set" ; exit 1 ; \
+    fi \
     && echo "=== Starting GenVM $GENVM_TAG download ===" \
-    && if [[ "$TARGETPLATFORM" == "linux/amd64" ]] || [[ -z "$TARGETPLATFORM" ]]; then \
+    && if [[ -z "$GENVM_REF" ]]; then \
+    if [[ "$TARGETPLATFORM" == "linux/amd64" ]] || [[ -z "$TARGETPLATFORM" ]]; then \
         ARCH_FILE="genvm-linux-amd64.tar.xz" ; \
     elif [[ "$TARGETPLATFORM" == "linux/arm64" ]]; then \
         ARCH_FILE="genvm-linux-arm64.tar.xz" ; \
@@ -84,7 +143,8 @@ RUN cd /genvm \
     && echo "Extracting archives..." \
     && tar -xf "$ARCH_FILE" \
     && tar -xf "genvm-runners-all.tar.xz" \
-    && rm *.tar.xz \
+    && rm *.tar.xz ; \
+    fi \
     && echo "Configuring GenVM manager threads..." \
     && CONFIG_FILE="/genvm/config/genvm-manager.yaml" \
     && if [[ -f "$CONFIG_FILE" ]]; then \
@@ -98,7 +158,11 @@ RUN cd /genvm \
     && echo "GenVM installed successfully:" \
     && ls -la \
     && chown -R worker-user:worker-group /genvm \
-    && su - worker-user -c "/genvm/bin/post-install.py --precompile false" \
+    && if [[ -n "$GENVM_REF" ]]; then \
+        su - worker-user -c "/genvm/bin/post-install.py --precompile false --default-download false" ; \
+    else \
+        su - worker-user -c "/genvm/bin/post-install.py --precompile false" ; \
+    fi \
     && find /genvm -name genvm.yaml -exec sed -i 's|cache_dir:.*|cache_dir: /genvm-cache/|' {} + \
     && mkdir -p /genvm-cache && chown worker-user:worker-group /genvm-cache
 
