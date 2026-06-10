@@ -27,7 +27,13 @@ RUN set -euo pipefail ; \
         git checkout "$GENVM_REF" ; \
         FULL_SHA="$(git rev-parse HEAD)" ; \
         SHORT_SHA="$(git rev-parse --short HEAD)" ; \
-        printf '{"executor-version":"v0.0.0-dev%s","repo-url":"https://github.com/genlayerlabs/genvm.git","head-revision":"%s"}\n' "$SHORT_SHA" "$FULL_SHA" > flake-config.json ; \
+        # Executor version must extend a version the committed manifest knows:
+        # genvm's patch-manifest renames the highest base `vX.Y.Z` entry to our
+        # `vX.Y.Z-dev<sha>` tag (suffix branch of its version matching), so
+        # derive the base from the bound ref's own manifest.
+        BASE_VER="$(grep -oE '^  v[0-9]+\.[0-9]+\.[0-9]+:' modules/install/data/manifest.yaml | tr -d ' :' | sort -V | tail -n1)" ; \
+        test -n "$BASE_VER" ; \
+        printf '{"executor-version":"%s-dev%s","repo-url":"https://github.com/genlayerlabs/genvm.git","head-revision":"%s"}\n' "$BASE_VER" "$SHORT_SHA" "$FULL_SHA" > flake-config.json ; \
         if [[ "$TARGETARCH" == "amd64" ]] || [[ -z "$TARGETARCH" ]]; then \
             GT="amd64-linux" ; \
         elif [[ "$TARGETARCH" == "arm64" ]]; then \
