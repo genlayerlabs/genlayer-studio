@@ -104,7 +104,9 @@ def encode_default_parameter(b):
     return {field.name: getattr(b, field.name) for field in dataclasses.fields(b)}
 
 
-def encode[T](
+def encode[
+    T
+](
     x: EncodableWithDefault[T],
     *,
     default: typing.Callable[
