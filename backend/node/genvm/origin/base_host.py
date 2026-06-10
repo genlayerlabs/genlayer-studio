@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 from .calldata import Address
 from . import calldata as gvm_calldata
+from . import fees
 from . import host_fns
 from . import public_abi
 
@@ -114,28 +115,13 @@ class ResultFingerprint(typing.TypedDict):
     module_instances: dict[str, typing.Any]
 
 
-class MessageFeeParams(typing.TypedDict):
-    leader_timeunits_allocation: int
-    validator_timeunits_allocation: int
-    execution_budget_per_round: int
-    rotations: list[int]
-
-
-class MessageFeeAllocationNode(typing.TypedDict):
-    message_type: typing.Literal["InternalAccepted", "InternalFinalized", "External"]
-    parent_index: int | None
-    recipient: Address | None
-    call_key: bytes | None
-    budget: int
-    fee_params: MessageFeeParams
-
-
 class EthSendInner(typing.TypedDict):
     type: typing.Literal["EthSend"]
     address: Address
     calldata: bytes
     value: int
     feeParams: typing.NotRequired[bytes]
+    fee_params: typing.NotRequired[fees.ExternalMessageParams]
     declaredBudget: typing.NotRequired[int]
     callKey: typing.NotRequired[bytes]
     allocationSubtree: typing.NotRequired[list[dict]]
@@ -148,9 +134,11 @@ class PostMessageInner(typing.TypedDict):
     value: int
     on: typing.Literal["finalized", "accepted"]
     feeParams: typing.NotRequired[bytes]
+    fee_params: typing.NotRequired[fees.InternalMessageParams]
     declaredBudget: typing.NotRequired[int]
     callKey: typing.NotRequired[bytes]
     allocationSubtree: typing.NotRequired[list[dict]]
+    subtree: typing.NotRequired[bytes]
 
 
 class DeployContractInner(typing.TypedDict):
@@ -161,9 +149,11 @@ class DeployContractInner(typing.TypedDict):
     on: typing.Literal["finalized", "accepted"]
     salt_nonce: int
     feeParams: typing.NotRequired[bytes]
+    fee_params: typing.NotRequired[fees.InternalMessageParams]
     declaredBudget: typing.NotRequired[int]
     callKey: typing.NotRequired[bytes]
     allocationSubtree: typing.NotRequired[list[dict]]
+    subtree: typing.NotRequired[bytes]
 
 
 class EmitEventInner(typing.TypedDict):
@@ -477,7 +467,7 @@ async def run_genvm(
     code: bytes | None = None,
     calldata: bytes,
     leader_nondet_results: list[bytes] | None = None,
-    message_fee_allocation: list[MessageFeeAllocationNode] | None = None,
+    message_fee_allocation: list[fees.MessageAllocationNode] | None = None,
     request_extra: dict[str, gvm_calldata.Encodable] = {},
 ) -> RunHostAndProgramRes:
     logger = ctx.logger

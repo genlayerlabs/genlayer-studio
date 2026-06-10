@@ -95,7 +95,12 @@ def test_host_provide_result_preserves_fee_metadata_from_genvm_emissions():
         leader_results=None,
     )
     post_fee_params = _encode_internal_fee_params(leader_timeunits=6)
+    post_fee_params_with_caps = encode(
+        ["(uint256,uint256,uint256,uint256,uint256[],uint256,uint256,uint256)"],
+        [(6, 10, 0, 0, [0], 11, 12, 13)],
+    )
     deploy_fee_params = _encode_internal_fee_params(leader_timeunits=7)
+    eth_send_fee_params = encode(["(uint256,uint256)"], [(21_000, 10)])
     allocation_subtree = [
         {
             "messageType": 1,
@@ -107,6 +112,22 @@ def test_host_provide_result_preserves_fee_metadata_from_genvm_emissions():
             "feeParams": "0x" + post_fee_params.hex(),
         }
     ]
+    genvm_subtree = encode(
+        ["(uint8,bool,uint256,address,bytes32,uint256,bytes)[]"],
+        [
+            [
+                (
+                    1,
+                    True,
+                    (1 << 256) - 1,
+                    "0x" + "22" * 20,
+                    bytes.fromhex("12" * 32),
+                    60,
+                    post_fee_params_with_caps,
+                )
+            ]
+        ],
+    )
     res = RunHostAndProgramRes(
         stdout="",
         stderr="",
@@ -124,10 +145,18 @@ def test_host_provide_result_preserves_fee_metadata_from_genvm_emissions():
                 "calldata": ["post", 1],
                 "value": 7,
                 "on": "accepted",
-                "feeParams": post_fee_params,
+                "fee_params": {
+                    "leader_timeunits_allocation": 6,
+                    "validator_timeunits_allocation": 10,
+                    "execution_budget_per_round": 0,
+                    "rotations": [0],
+                    "max_price_gen_per_time_unit": 11,
+                    "storage_fee_max_gas_price": 12,
+                    "receipt_fee_max_gas_price": 13,
+                },
                 "declaredBudget": 60,
                 "callKey": bytes.fromhex("12" * 32),
-                "allocationSubtree": allocation_subtree,
+                "subtree": genvm_subtree,
             },
             {
                 "type": "DeployContract",
@@ -146,7 +175,10 @@ def test_host_provide_result_preserves_fee_metadata_from_genvm_emissions():
                 "address": Address("0x" + "44" * 20),
                 "calldata": b"\xab\xcd",
                 "value": 5,
-                "feeParams": b"\x99",
+                "fee_params": {
+                    "gas_limit": 21_000,
+                    "max_gas_price": 10,
+                },
                 "declaredBudget": 0,
                 "callKey": bytes.fromhex("56" * 32),
                 "allocationSubtree": [],
@@ -185,7 +217,7 @@ def test_host_provide_result_preserves_fee_metadata_from_genvm_emissions():
     assert eth_send.calldata == b"\xab\xcd"
     assert eth_send.value == 5
     assert eth_send.on == "finalized"
-    assert eth_send.fee_params == b"\x99"
+    assert eth_send.fee_params == eth_send_fee_params
     assert eth_send.declared_budget == 0
     assert eth_send.call_key == "0x" + "56" * 32
     assert eth_send.gas_used == 123
@@ -370,28 +402,34 @@ async def test_run_genvm_passes_mode2_message_fee_allocations_to_genvm():
     allocations = run_genvm_host.await_args.kwargs["fee_context"].message_fee_allocation
     assert len(allocations) == 2
     allocation = allocations[0]
-    assert allocation["message_type"] == "InternalFinalized"
-    assert allocation["parent_index"] is None
     assert allocation["recipient"].as_hex.lower() == recipient
     assert allocation["call_key"] == bytes.fromhex("34" * 32)
     assert allocation["budget"] == 120
+    assert allocation["on"] == "finalized"
     assert allocation["fee_params"] == {
-        "leader_timeunits_allocation": 6,
-        "validator_timeunits_allocation": 10,
-        "execution_budget_per_round": 0,
-        "rotations": [0],
+        "Internal": {
+            "leader_timeunits_allocation": 6,
+            "validator_timeunits_allocation": 10,
+            "execution_budget_per_round": 0,
+            "rotations": [0],
+            "max_price_gen_per_time_unit": 0,
+            "storage_fee_max_gas_price": 0,
+            "receipt_fee_max_gas_price": 0,
+        },
     }
+    assert allocation["children"][0]["recipient"].as_hex.lower() == child_recipient
+    assert allocation["children"][0]["call_key"] == bytes.fromhex("56" * 32)
+    assert allocation["children"][0]["budget"] == 60
     fallback = allocations[1]
-    assert fallback["message_type"] == "External"
-    assert fallback["parent_index"] is None
     assert fallback["recipient"] is None
     assert fallback["call_key"] is None
     assert fallback["budget"] == 2**200
+    assert fallback["on"] == "finalized"
     assert fallback["fee_params"] == {
-        "leader_timeunits_allocation": 0,
-        "validator_timeunits_allocation": 0,
-        "execution_budget_per_round": 0,
-        "rotations": [0],
+        "External": {
+            "gas_limit": 2**200,
+            "max_gas_price": 0,
+        },
     }
 
 
@@ -452,9 +490,8 @@ async def test_run_genvm_rejects_fee_bearing_mode1_before_genvm():
     assert receipt.genvm_result["raw_error"] == {
         "fatal": False,
         "causes": [
-            "Mode1MessageFeesRequireGenVMPerEmissionSupport: GenVM v0.3.x "
-            "message emissions do not carry per-emission feeParams/declaredBudget "
-            "without a message allocation tree"
+            "Mode1MessageFeesRequireGenVMPerEmissionSupport: fee-bearing "
+            "GenVM messages require a message allocation tree"
         ],
         "ctx": {"source": "studio_fee_accounting"},
     }

@@ -1615,7 +1615,12 @@ def test_genvm_fee_context_sets_message_bucket_independently():
 def test_genvm_message_fee_allocation_maps_studio_nodes():
     fee_params = _encode_internal_fee_params(leader_timeunits=6)
     accounting = create_fee_accounting(
-        fees_distribution=_fees_distribution(total_message_fees=60),
+        fees_distribution=_fees_distribution(
+            total_message_fees=60,
+            max_price_gen_per_time_unit=11,
+            storage_fee_max_gas_price=12,
+            receipt_fee_max_gas_price=13,
+        ),
         message_allocations=[
             _allocation(
                 budget=60,
@@ -1632,34 +1637,39 @@ def test_genvm_message_fee_allocation_maps_studio_nodes():
     allocations = genvm_message_fee_allocation(accounting)
 
     assert allocations[0] == {
-        "message_type": "InternalAccepted",
-        "parent_index": None,
         "recipient": "0x2222222222222222222222222222222222222222",
         "call_key": bytes.fromhex("12" * 32),
         "budget": 60,
+        "on": "accepted",
         "fee_params": {
-            "leader_timeunits_allocation": 6,
-            "validator_timeunits_allocation": 10,
-            "execution_budget_per_round": 0,
-            "rotations": [0],
+            "Internal": {
+                "leader_timeunits_allocation": 6,
+                "validator_timeunits_allocation": 10,
+                "execution_budget_per_round": 0,
+                "rotations": [0],
+                "max_price_gen_per_time_unit": 11,
+                "storage_fee_max_gas_price": 12,
+                "receipt_fee_max_gas_price": 13,
+            },
         },
+        "children": [],
     }
     assert allocations[1] == {
-        "message_type": "External",
-        "parent_index": None,
         "recipient": None,
         "call_key": None,
         "budget": 2**200,
+        "on": "finalized",
         "fee_params": {
-            "leader_timeunits_allocation": 0,
-            "validator_timeunits_allocation": 0,
-            "execution_budget_per_round": 0,
-            "rotations": [0],
+            "External": {
+                "gas_limit": 2**200,
+                "max_gas_price": 0,
+            },
         },
+        "children": [],
     }
 
 
-def test_genvm_message_fee_allocation_exposes_only_current_roots():
+def test_genvm_message_fee_allocation_nests_descendants_under_roots():
     root_fee_params = _encode_internal_fee_params(leader_timeunits=6)
     child_fee_params = _encode_internal_fee_params(leader_timeunits=7)
     root = _allocation(
@@ -1689,7 +1699,27 @@ def test_genvm_message_fee_allocation_exposes_only_current_roots():
     assert allocations[0]["recipient"] == root["recipient"]
     assert allocations[0]["call_key"] == bytes.fromhex("12" * 32)
     assert allocations[0]["budget"] == 120
-    assert allocations[1]["message_type"] == "External"
+    assert allocations[0]["children"] == [
+        {
+            "recipient": descendant["recipient"],
+            "call_key": bytes.fromhex("34" * 32),
+            "budget": 60,
+            "on": "accepted",
+            "fee_params": {
+                "Internal": {
+                    "leader_timeunits_allocation": 7,
+                    "validator_timeunits_allocation": 10,
+                    "execution_budget_per_round": 0,
+                    "rotations": [0],
+                    "max_price_gen_per_time_unit": 0,
+                    "storage_fee_max_gas_price": 0,
+                    "receipt_fee_max_gas_price": 0,
+                },
+            },
+            "children": [],
+        }
+    ]
+    assert "External" in allocations[1]["fee_params"]
     assert allocations[1]["recipient"] is None
     assert allocations[1]["call_key"] is None
 
@@ -1713,13 +1743,19 @@ def test_genvm_message_fee_allocation_adds_external_legacy_fallback_after_roots(
 
     allocations = genvm_message_fee_allocation(accounting)
 
-    assert allocations[0]["message_type"] == "External"
     assert allocations[0]["recipient"] == external["recipient"]
     assert allocations[0]["call_key"] == bytes.fromhex(
         _external_selector_call_key(b"\x12\x34\x56\x78").removeprefix("0x")
     )
     assert allocations[0]["budget"] == 210_000
-    assert allocations[1]["message_type"] == "External"
+    assert allocations[0]["on"] == "finalized"
+    assert allocations[0]["fee_params"] == {
+        "External": {
+            "gas_limit": 21_000,
+            "max_gas_price": 10,
+        },
+    }
+    assert "External" in allocations[1]["fee_params"]
     assert allocations[1]["recipient"] is None
     assert allocations[1]["call_key"] is None
     assert allocations[1]["budget"] == 2**200
@@ -1728,10 +1764,15 @@ def test_genvm_message_fee_allocation_adds_external_legacy_fallback_after_roots(
 def test_genvm_message_fee_allocation_keeps_legacy_gasless_messages_unmetered():
     allocations = genvm_message_fee_allocation(None)
 
-    assert [node["message_type"] for node in allocations] == [
+    assert [next(iter(node["fee_params"])) for node in allocations] == [
         "External",
-        "InternalFinalized",
-        "InternalAccepted",
+        "Internal",
+        "Internal",
+    ]
+    assert [node["on"] for node in allocations] == [
+        "finalized",
+        "finalized",
+        "accepted",
     ]
     assert all(node["recipient"] is None for node in allocations)
     assert all(node["call_key"] is None for node in allocations)
