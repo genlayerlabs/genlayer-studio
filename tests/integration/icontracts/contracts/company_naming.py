@@ -1,6 +1,7 @@
 # { "Depends": "py-genlayer:test" }
 
 import json
+import genlayer as gl
 from genlayer import *
 
 MAX_SCORE_DIFFERENCE = 3

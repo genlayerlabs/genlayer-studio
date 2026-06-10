@@ -102,6 +102,21 @@ jobs:
       - name: Prepare GenVM cache directory
         run: mkdir -p /tmp/genvm-cache/pc && chmod -R 0777 /tmp/genvm-cache
 
+      - name: Free up disk space
+        run: |
+          echo "=== Disk space before cleanup ==="
+          df -h
+          echo ""
+          echo "Removing unused hosted-runner tools and Docker artifacts..."
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker system prune --all --force --volumes
+          echo ""
+          echo "=== Disk space after cleanup ==="
+          df -h
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -167,47 +182,47 @@ jobs:
           fi
 
       - name: Setup validators
+        timeout-minutes: 5
+        env:
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'openrouter' }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'deepseek/deepseek-v3.2' }}
         run: |
-          echo "Creating 5 validators with retry logic..."
-          created=0
-          for i in {1..5}; do
-            success=false
-            for attempt in 1 2 3; do
-              echo "Creating validator $i/5 (attempt $attempt/3)..."
-              response=$(curl -s -X POST http://localhost:4000/api \
-                -H "Content-Type: application/json" \
-                -d "{\"jsonrpc\":\"2.0\",\"method\":\"sim_createRandomValidator\",\"params\":[1],\"id\":$i}")
-
-              has_result=$(python3 -c "import json,sys; r=json.loads(sys.argv[1]); print('yes' if 'result' in r else 'no')" "$response" 2>/dev/null || echo "no")
-              if [ "$has_result" = "yes" ]; then
-                echo "Validator $i created"
-                created=$((created + 1))
+          echo "Creating 5 validators for $LLM_PROVIDER/$LLM_MODEL with retry logic..."
+          payload=$(python3 -c 'import json, os; print(json.dumps({"jsonrpc":"2.0","method":"sim_createRandomValidators","params":[5,8,12,[os.environ["LLM_PROVIDER"]],[os.environ["LLM_MODEL"]]],"id":1}))')
+          success=false
+          for attempt in 1 2 3; do
+            echo "Creating validators (attempt $attempt/3)..."
+            if response=$(curl --max-time 60 -sS -X POST http://localhost:4000/api \
+              -H "Content-Type: application/json" \
+              -d "$payload"); then
+              created=$(python3 -c "import json,sys; r=json.loads(sys.argv[1]); result=r.get('result', []); print(len(result) if isinstance(result, list) else 0)" "$response" 2>/dev/null || echo "0")
+              if [ "$created" -ge 5 ]; then
+                echo "Created $created validators"
                 success=true
                 break
               fi
-
               echo "Failed: $response"
-              if [ "$attempt" -lt 3 ]; then
-                echo "Retrying in 3s..."
-                sleep 3
-              fi
-            done
-
-            if [ "$success" = false ]; then
-              echo "ERROR: Could not create validator $i after 3 attempts"
-              exit 1
+            else
+              echo "Validator creation request failed"
             fi
 
-            # Brief pause between validators
-            if [ "$i" -lt 5 ]; then sleep 2; fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Retrying in 5s..."
+              sleep 5
+            fi
           done
+
+          if [ "$success" = false ]; then
+            echo "ERROR: Could not create validators after 3 attempts"
+            exit 1
+          fi
 
           echo "Waiting 5 seconds for validators to register..."
           sleep 5
 
           # Verify validator count with retry
           for attempt in 1 2 3; do
-            response=$(curl -s -X POST http://localhost:4000/api \
+            response=$(curl --max-time 20 -sS -X POST http://localhost:4000/api \
               -H "Content-Type: application/json" \
               -d '{"jsonrpc":"2.0","method":"sim_countValidators","params":[],"id":100}')
             count=$(python3 -c "import json,sys; r=json.loads(sys.argv[1]); print(r.get('result',0))" "$response" 2>/dev/null || echo "0")
@@ -223,7 +238,7 @@ jobs:
 
           if [ "$count" -lt 5 ]; then
             echo "ERROR: Expected at least 5 validators, found $count"
-            curl -s -X POST http://localhost:4000/api \
+            curl --max-time 20 -sS -X POST http://localhost:4000/api \
               -H "Content-Type: application/json" \
               -d '{"jsonrpc":"2.0","method":"sim_getAllValidators","params":[],"id":101}'
             exit 1
@@ -451,40 +466,46 @@ jobs:
           fi
 
       - name: Re-setup validators for state integrity test
+        timeout-minutes: 5
+        env:
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'openrouter' }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'deepseek/deepseek-v3.2' }}
         run: |
-          echo "Re-creating validators (previous step cleaned them up)..."
-          for i in {1..5}; do
-            success=false
-            for attempt in 1 2 3; do
-              echo "Creating validator $i/5 (attempt $attempt/3)..."
-              response=$(curl -s -X POST http://localhost:4000/api \
-                -H "Content-Type: application/json" \
-                -d "{\"jsonrpc\":\"2.0\",\"method\":\"sim_createRandomValidator\",\"params\":[1],\"id\":$i}")
-
-              has_result=$(python3 -c "import json,sys; r=json.loads(sys.argv[1]); print('yes' if 'result' in r else 'no')" "$response" 2>/dev/null || echo "no")
-              if [ "$has_result" = "yes" ]; then
-                echo "Validator $i created"
+          echo "Re-creating validators for $LLM_PROVIDER/$LLM_MODEL (previous step cleaned them up)..."
+          payload=$(python3 -c 'import json, os; print(json.dumps({"jsonrpc":"2.0","method":"sim_createRandomValidators","params":[5,8,12,[os.environ["LLM_PROVIDER"]],[os.environ["LLM_MODEL"]]],"id":1}))')
+          success=false
+          for attempt in 1 2 3; do
+            echo "Creating validators (attempt $attempt/3)..."
+            if response=$(curl --max-time 60 -sS -X POST http://localhost:4000/api \
+              -H "Content-Type: application/json" \
+              -d "$payload"); then
+              created=$(python3 -c "import json,sys; r=json.loads(sys.argv[1]); result=r.get('result', []); print(len(result) if isinstance(result, list) else 0)" "$response" 2>/dev/null || echo "0")
+              if [ "$created" -ge 5 ]; then
+                echo "Created $created validators"
                 success=true
                 break
               fi
-
               echo "Failed: $response"
-              if [ "$attempt" -lt 3 ]; then sleep 3; fi
-            done
-
-            if [ "$success" = false ]; then
-              echo "ERROR: Could not create validator $i after 3 attempts"
-              exit 1
+            else
+              echo "Validator creation request failed"
             fi
 
-            if [ "$i" -lt 5 ]; then sleep 2; fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Retrying in 5s..."
+              sleep 5
+            fi
           done
+
+          if [ "$success" = false ]; then
+            echo "ERROR: Could not create validators after 3 attempts"
+            exit 1
+          fi
 
           echo "Waiting 5 seconds for validators to register..."
           sleep 5
 
           # Verify validators exist
-          response=$(curl -s -X POST http://localhost:4000/api \
+          response=$(curl --max-time 20 -sS -X POST http://localhost:4000/api \
             -H "Content-Type: application/json" \
             -d '{"jsonrpc":"2.0","method":"sim_countValidators","params":[],"id":100}')
           count=$(python3 -c "import json,sys; r=json.loads(sys.argv[1]); print(r.get('result',0))" "$response" 2>/dev/null || echo "0")

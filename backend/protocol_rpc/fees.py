@@ -589,7 +589,7 @@ def studio_fee_config(policy: StudioFeePolicy | None = None) -> dict[str, Any]:
             "messageFees": {
                 "mode1": {
                     "accounting": True,
-                    "genvmExecution": False,
+                    "genvmExecution": True,
                 },
                 "mode2": {
                     "accounting": True,

@@ -6,7 +6,6 @@ on:
       - "examples/contracts/**"
       - "tests/load/contracts/**"
       - "tests/direct/contracts/**"
-      - "tests/integration/icontracts/contracts/**"
   push:
     branches:
       - main
@@ -14,7 +13,6 @@ on:
       - "examples/contracts/**"
       - "tests/load/contracts/**"
       - "tests/direct/contracts/**"
-      - "tests/integration/icontracts/contracts/**"
 
 jobs:
   lint-contracts:
@@ -30,9 +28,14 @@ jobs:
           python-version: "3.12"
 
       - name: Install genvm-linter
-        run: pip install genvm-linter
+        # This commit packages as 0.10.0 and includes SDK artifact resolution fixes
+        # needed by `genvm-lint check` for the v0.2.16 runner hashes below.
+        run: pip install "genvm-linter @ git+https://github.com/genlayerlabs/genvm-linter.git@fe426bcc28de0523294f5fb6b93280b1bb8de302"
 
       - name: Lint example contracts
+        env:
+          # These examples currently pin v0.2.x runner hashes.
+          GENVM_VERSION: v0.2.16
         run: |
           failed=0
           for f in examples/contracts/*.py; do
@@ -45,6 +48,9 @@ jobs:
           exit $failed
 
       - name: Lint test contracts
+        env:
+          # These test contracts currently pin v0.2.x runner hashes.
+          GENVM_VERSION: v0.2.16
         run: |
           failed=0
           for f in tests/load/contracts/*.py tests/direct/contracts/*.py; do

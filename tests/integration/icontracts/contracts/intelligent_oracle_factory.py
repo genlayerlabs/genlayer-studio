@@ -1,6 +1,7 @@
 # v0.1.0
 # { "Depends": "py-genlayer:test" }
 
+import genlayer as gl
 from genlayer import *
 
 
@@ -25,7 +26,7 @@ class Registry(gl.Contract):
         earliest_resolution_date: str,
     ) -> None:
         registered_contracts = len(self.contract_addresses)
-        contract_address = gl.deploy_contract(
+        contract_address = gl.contract.deploy(
             code=self.intelligent_oracle_code.encode("utf-8"),
             args=[
                 prediction_market_id,

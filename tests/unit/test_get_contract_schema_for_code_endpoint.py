@@ -14,7 +14,8 @@ class TestGetContractSchemaForCodeEndpoint:
         self.msg_handler.with_client_session = Mock(return_value=self.msg_handler)
 
         # Sample contract code in different formats
-        self.simple_contract = """from genlayer import *
+        self.simple_contract = """import genlayer as gl
+from genlayer import *
 
 @gl_class
 class SimpleContract:
@@ -113,7 +114,8 @@ class SimpleContract:
     async def test_non_hex_string_with_special_characters(self):
         """Test UTF-8 fallback with contract code containing non-ASCII characters."""
         # Contract with non-ASCII characters (comments with unicode)
-        contract_with_unicode = """from genlayer import *
+        contract_with_unicode = """import genlayer as gl
+from genlayer import *
 
 @gl_class
 class UnicodeContract:

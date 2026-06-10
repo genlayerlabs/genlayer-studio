@@ -117,6 +117,21 @@ jobs:
       - name: Prepare GenVM cache directory
         run: mkdir -p /tmp/genvm-cache/pc && chmod -R 0777 /tmp/genvm-cache
 
+      - name: Free up disk space
+        run: |
+          echo "=== Disk space before cleanup ==="
+          df -h
+          echo ""
+          echo "Removing unused hosted-runner tools and Docker artifacts..."
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker system prune --all --force --volumes
+          echo ""
+          echo "=== Disk space after cleanup ==="
+          df -h
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -152,6 +167,7 @@ jobs:
             http://0.0.0.0:4000/api
 
       - name: Run tests (parallel)
+        timeout-minutes: 90
         env:
           TEST_PROVIDER: ${{ vars.LLM_PROVIDER || 'openrouter' }}
           TEST_PROVIDER_MODEL: ${{ vars.LLM_MODEL || 'deepseek/deepseek-v3.2' }}
@@ -160,6 +176,7 @@ jobs:
       # Validator smoke test runs serial (GenVM LLM module restarts on each CRUD op).
       # Full CRUD coverage is in db-sqlalchemy/validators_registry_test.py (<1s).
       - name: Run validator smoke test (serial)
+        timeout-minutes: 20
         env:
           TEST_PROVIDER: ${{ vars.LLM_PROVIDER || 'openrouter' }}
           TEST_PROVIDER_MODEL: ${{ vars.LLM_MODEL || 'deepseek/deepseek-v3.2' }}

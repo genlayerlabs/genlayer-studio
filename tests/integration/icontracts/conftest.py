@@ -1,5 +1,6 @@
 import pytest
 import os
+import time
 from dotenv import load_dotenv
 from typing import Any
 
@@ -40,6 +41,27 @@ def get_mock_provider_config() -> dict[str, str]:
         "api_key_env_var": os.getenv("TEST_MOCK_API_KEY_ENV_VAR", "OPENROUTERAPIKEY"),
         "api_url": os.getenv("TEST_MOCK_API_URL", "https://openrouter.ai/api"),
     }
+
+
+def _wait_for_validator_count(min_count: int, timeout: float = 20.0) -> None:
+    deadline = time.monotonic() + timeout
+    last_count = 0
+    while time.monotonic() < deadline:
+        validators_result = post_request_localhost(
+            payload("sim_getAllValidators")
+        ).json()
+        assert has_success_status(validators_result)
+        last_count = len(validators_result.get("result", []))
+        if last_count >= min_count:
+            # Validator changes are delivered to workers via reload events.
+            # Give the consensus worker a short window to consume the update
+            # before the test submits a transaction.
+            time.sleep(2)
+            return
+        time.sleep(0.5)
+    raise AssertionError(
+        f"Expected at least {min_count} validators, found {last_count} after {timeout}s"
+    )
 
 
 @pytest.fixture
@@ -86,6 +108,7 @@ def setup_validators():
                 ).json()
                 assert has_success_status(result)
                 created_validator_addresses.append(result["result"]["address"])
+            _wait_for_validator_count(5)
         else:
             cfg = get_provider_config()
             # Non-mock mode: only create the validators that are still missing
@@ -110,6 +133,7 @@ def setup_validators():
                 # Track created validators for cleanup
                 for validator in result.get("result", []):
                     created_validator_addresses.append(validator["address"])
+            _wait_for_validator_count(5)
 
     yield _setup
 

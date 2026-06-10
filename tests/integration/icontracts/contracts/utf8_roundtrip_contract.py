@@ -1,7 +1,7 @@
 # v0.1.0
 # { "Depends": "py-genlayer:test" }
 
-from genlayer import *
+import genlayer as gl
 
 
 class Utf8RoundtripContract(gl.Contract):

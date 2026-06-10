@@ -28,6 +28,62 @@ RPC_URL = "http://localhost:4000/api"
 pytestmark = pytest.mark.xdist_group(name="mock_validators")
 
 
+def _wait_for_validator_count(min_count: int, timeout: float = 20.0) -> None:
+    from tests.common.request import payload, post_request_localhost
+    from tests.common.response import has_success_status
+
+    deadline = time.monotonic() + timeout
+    last_count = 0
+    while time.monotonic() < deadline:
+        response = post_request_localhost(payload("sim_getAllValidators")).json()
+        assert has_success_status(response)
+        last_count = len(response.get("result", []))
+        if last_count >= min_count:
+            # Validator registry changes are consumed by consensus workers via
+            # reload events; give workers time to observe the current registry
+            # before this module submits deploy/write transactions.
+            time.sleep(5)
+            return
+        time.sleep(0.5)
+
+    pytest.fail(
+        f"Expected at least {min_count} validators, found {last_count} after {timeout}s"
+    )
+
+
+def _mock_llms() -> bool:
+    return os.getenv("TEST_WITH_MOCK_LLMS", "false").lower() == "true"
+
+
+def _create_mock_validators() -> None:
+    from tests.common.request import payload, post_request_localhost
+    from tests.common.response import has_success_status
+
+    provider = os.getenv("TEST_MOCK_PROVIDER", "openrouter")
+    model = os.getenv("TEST_MOCK_MODEL", "@preset/rally-testnet-gpt-5-1")
+    api_key_env_var = os.getenv("TEST_MOCK_API_KEY_ENV_VAR", "OPENROUTERAPIKEY")
+    api_url = os.getenv("TEST_MOCK_API_URL", "https://openrouter.ai/api")
+
+    for _ in range(5):
+        result = post_request_localhost(
+            payload(
+                "sim_createValidator",
+                8,
+                provider,
+                model,
+                {"temperature": 0.75, "max_tokens": 500},
+                "openai-compatible",
+                {
+                    "api_key_env_var": api_key_env_var,
+                    "api_url": api_url,
+                    "mock_response": {},
+                },
+            )
+        ).json()
+        if not has_success_status(result):
+            pytest.fail(f"Failed to create mock validator: {result}")
+
+
 @pytest.fixture(scope="module", autouse=True)
 def ensure_validators_exist():
     """Ensure validators exist before running tests in this module.
@@ -44,14 +100,19 @@ def ensure_validators_exist():
     validators = response.get("result", [])
 
     if not validators:
-        # Match the provider/model configured by CI or the local test env.
-        provider = os.environ.get("TEST_PROVIDER", "openai")
-        model = os.environ.get("TEST_PROVIDER_MODEL", "gpt-4o")
-        result = post_request_localhost(
-            payload("sim_createRandomValidators", 5, 8, 12, [provider], [model])
-        ).json()
-        if not has_success_status(result):
-            pytest.fail(f"Failed to create validators: {result}")
+        if _mock_llms():
+            _create_mock_validators()
+        else:
+            # Match the provider/model configured by CI or the local test env.
+            provider = os.environ.get("TEST_PROVIDER", "openai")
+            model = os.environ.get("TEST_PROVIDER_MODEL", "gpt-4o")
+            result = post_request_localhost(
+                payload("sim_createRandomValidators", 5, 8, 12, [provider], [model])
+            ).json()
+            if not has_success_status(result):
+                pytest.fail(f"Failed to create validators: {result}")
+
+    _wait_for_validator_count(5)
 
     yield
 
@@ -164,9 +225,10 @@ def write_contract_method(
 CONTRACT_V1 = """# v0.1.0
 # { "Depends": "py-genlayer:latest" }
 
+import genlayer as gl
 from genlayer import *
 
-class UpgradeTest(gl.Contract):
+class UpgradeTest(gl.contract.Contract):
     counter: u64
     name: str
 
@@ -198,9 +260,10 @@ class UpgradeTest(gl.Contract):
 CONTRACT_V2 = """# v0.1.0
 # { "Depends": "py-genlayer:latest" }
 
+import genlayer as gl
 from genlayer import *
 
-class UpgradeTest(gl.Contract):
+class UpgradeTest(gl.contract.Contract):
     counter: u64
     name: str
 
@@ -236,9 +299,10 @@ class UpgradeTest(gl.Contract):
 CONTRACT_V3_WITH_NEW_STATE = """# v0.1.0
 # { "Depends": "py-genlayer:latest" }
 
+import genlayer as gl
 from genlayer import *
 
-class UpgradeTest(gl.Contract):
+class UpgradeTest(gl.contract.Contract):
     counter: u64
     name: str
     extra_field: str  # NEW FIELD
@@ -276,9 +340,10 @@ class UpgradeTest(gl.Contract):
 INVALID_CONTRACT = """# v0.1.0
 # { "Depends": "py-genlayer:latest" }
 
+import genlayer as gl
 from genlayer import *
 
-class BrokenContract(gl.Contract):
+class BrokenContract(gl.contract.Contract):
     def __init__(self):
         this is not valid python syntax!!!
 """
@@ -286,9 +351,10 @@ class BrokenContract(gl.Contract):
 SIMPLE_CONTRACT = """# v0.1.0
 # { "Depends": "py-genlayer:latest" }
 
+import genlayer as gl
 from genlayer import *
 
-class SimpleContract(gl.Contract):
+class SimpleContract(gl.contract.Contract):
     value: u64
 
     def __init__(self):

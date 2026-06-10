@@ -571,7 +571,7 @@ def test_studio_fee_config_exposes_default_nonzero_fee_policy():
     )
     assert config["capabilities"]["messageFees"]["mode1"] == {
         "accounting": True,
-        "genvmExecution": False,
+        "genvmExecution": True,
     }
     assert config["capabilities"]["messageFees"]["mode2"]["genvmExecution"] is True
     assert config["defaultFees"]["distribution"]["maxPriceGenPerTimeUnit"] == str(
@@ -3797,6 +3797,33 @@ def test_mode1_message_fees_reject_declared_budget_below_child_minimum():
                     "onAcceptance": True,
                     "feeParams": _encode_internal_fee_params(),
                     "declaredBudget": 54,
+                }
+            ],
+        )
+
+
+def test_external_messages_reject_nonzero_declared_budget_at_reveal():
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(total_message_fees=100),
+        num_of_validators=5,
+        submitted_value=1200,
+        user_value=0,
+    )
+
+    with pytest.raises(MessageDeclaredBudgetInsufficient):
+        consume_message_fees(
+            accounting,
+            [
+                {
+                    "messageType": 0,
+                    "recipient": "0x2222222222222222222222222222222222222222",
+                    "onAcceptance": False,
+                    "feeParams": _encode_external_fee_params(
+                        gas_limit=10,
+                        max_gas_price=1,
+                    ),
+                    "declaredBudget": 1,
+                    "callKey": "0x" + "12" * 32,
                 }
             ],
         )
