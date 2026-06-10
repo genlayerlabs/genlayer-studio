@@ -6386,6 +6386,9 @@ def test_transaction_payload_includes_canonical_fee_object_with_decimal_strings(
         "storageFeeUsed": "3",
         "messageFeesConsumed": "0",
         "messageFeesBudgetTotal": "55",
+        "leaderTimeunitsUsed": "0",
+        "validatorTimeunitsUsed": "0",
+        "perRound": [],
     }
 
 

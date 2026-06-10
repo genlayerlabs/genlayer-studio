@@ -16,6 +16,7 @@ import time
 from backend.domain.types import TransactionType
 from web3 import Web3
 from backend.consensus.types import ConsensusRound
+from backend.consensus.history import time_unit_consumption
 from backend.consensus.utils import determine_consensus_from_votes
 from backend.protocol_rpc.fees import FEE_ACCOUNTING_KEY, normalize_fees_distribution
 from backend.rollup.web3_pool import Web3ConnectionPool
@@ -151,7 +152,11 @@ class TransactionsProcessor:
             "status": transaction_data.status.value,
             "txExecutionResult": execution_result,
             "txExecutionResultName": execution_result_name,
-            "fees": TransactionsProcessor._canonical_fees(fee_accounting),
+            "fees": TransactionsProcessor._canonical_fees(
+                fee_accounting,
+                consensus_history=transaction_data.consensus_history,
+                consensus_data=transaction_data.consensus_data,
+            ),
             "result": TransactionsProcessor._decode_base64_data(result),
             "consensus_data": TransactionsProcessor._json_safe_numbers(
                 transaction_data.consensus_data
@@ -225,10 +230,15 @@ class TransactionsProcessor:
         return None
 
     @staticmethod
-    def _canonical_fees(accounting: dict | None) -> dict | None:
+    def _canonical_fees(
+        accounting: dict | None,
+        consensus_history: dict | None = None,
+        consensus_data: dict | None = None,
+    ) -> dict | None:
         if not isinstance(accounting, dict):
             return None
         fees = normalize_fees_distribution(accounting.get("fees_distribution") or {})
+        tu = time_unit_consumption(consensus_history, consensus_data)
         policy = accounting.get("policy_snapshot")
         report = accounting.get("execution_fee_report") or {}
         genvm_buckets = report.get("genvmBuckets") if isinstance(report, dict) else {}
@@ -297,6 +307,25 @@ class TransactionsProcessor:
                 "messageFeesBudgetTotal": str(
                     int(accounting.get("message_fee_budget", 0) or 0)
                 ),
+                # Protocol unit matches distribution.leaderTimeunitsAllocation and
+                # validatorTimeunitsAllocation: 1 TU = 1s GenVM runtime. Values
+                # are derived from measured per-execution wall time in ms,
+                # rounded UP per execution. validatorTimeunitsUsed is the SUM
+                # across validator-mode executions; compare per-validator
+                # allocations against maxValidatorTimeunits. This is the
+                # reference shape mirrored by nodes.
+                "leaderTimeunitsUsed": str(tu["leader_timeunits_used"]),
+                "validatorTimeunitsUsed": str(tu["validator_timeunits_used"]),
+                "perRound": [
+                    {
+                        "round": entry["round"],
+                        "consensusRound": entry["consensus_round"],
+                        "leaderTimeunits": str(entry["leader_timeunits"]),
+                        "validatorTimeunits": str(entry["validator_timeunits"]),
+                        "maxValidatorTimeunits": str(entry["max_validator_timeunits"]),
+                    }
+                    for entry in tu["per_round"]
+                ],
             },
         }
 
