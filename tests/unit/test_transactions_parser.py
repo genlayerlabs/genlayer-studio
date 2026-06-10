@@ -10,6 +10,7 @@ from backend.protocol_rpc.transactions_parser import (
 import re
 from typing import Optional, List, Any
 from rlp import encode
+from web3 import Web3
 import backend.node.genvm.origin.calldata as calldata
 
 
@@ -21,6 +22,22 @@ def transaction_parser():
     # Ensure no ABI is returned so function decoding is skipped
     consensus_service.load_contract = Mock(return_value=None)
     return TransactionParser(consensus_service)
+
+
+def test_transaction_rpc_payload_stringifies_unsafe_fee_integers():
+    payload = TransactionsProcessor._json_safe_numbers(
+        {
+            "fee_value": 1_100_000_000_001_000_000,
+            "fee_accounting": {
+                "primary_fee_budget": 1_100_000_000_001_000_000,
+                "execution_budget_total": 1_000_000,
+            },
+        }
+    )
+
+    assert payload["fee_value"] == "1100000000001000000"
+    assert payload["fee_accounting"]["primary_fee_budget"] == "1100000000001000000"
+    assert payload["fee_accounting"]["execution_budget_total"] == 1_000_000
 
 
 @pytest.mark.parametrize(
@@ -327,3 +344,238 @@ def test_decode_signed_transaction_typed_eip2930_minimal(
     assert decoded.nonce == 7
     assert decoded.value == 2000
     assert decoded.data is None
+
+
+def _fee_aware_call_data(parser, function_name: str, params: tuple) -> bytes:
+    abi_entry = next(
+        entry
+        for entry in parser._get_contract_abi()
+        if entry["type"] == "function"
+        and entry["name"] == function_name
+        and len(entry["inputs"]) == 1
+    )
+    input_type = parser._canonical_abi_type(abi_entry["inputs"][0])
+    selector = parser.web3.keccak(text=f"{function_name}({input_type})")[:4]
+    return selector + parser.web3.codec.encode([input_type], [params])
+
+
+def _contract_call_data(parser, function_name: str, params: list) -> bytes:
+    abi_entry = next(
+        entry
+        for entry in parser._get_contract_abi()
+        if entry["type"] == "function" and entry["name"] == function_name
+    )
+    input_types = [
+        parser._canonical_abi_type(abi_input) for abi_input in abi_entry["inputs"]
+    ]
+    selector = parser.web3.keccak(text=f"{function_name}({','.join(input_types)})")[:4]
+    return selector + parser.web3.codec.encode(input_types, params)
+
+
+@pytest.mark.parametrize("function_name", ["addTransaction", "deploySalted"])
+def test_decode_signed_transaction_fee_aware_v06(function_name, monkeypatch):
+    monkeypatch.setattr(
+        "backend.protocol_rpc.transactions_parser.Account.recover_transaction",
+        lambda raw: "0x3333333333333333333333333333333333333333",
+    )
+
+    consensus_service = Mock()
+    consensus_service.web3 = Web3()
+    consensus_service.load_contract = Mock(return_value={"abi": []})
+    parser = TransactionParser(consensus_service)
+
+    recipient = (
+        "0x0000000000000000000000000000000000000000"
+        if function_name == "deploySalted"
+        else "0x4444444444444444444444444444444444444444"
+    )
+    tx_calldata = b"\xc3\x01"
+    fees_distribution = (
+        11,
+        22,
+        2,
+        333,
+        44,
+        55,
+        [3, 4],
+        66,
+        77,
+        88,
+    )
+    message_allocations = [
+        (
+            1,
+            True,
+            2**256 - 1,
+            "0x5555555555555555555555555555555555555555",
+            b"\x00" * 32,
+            99,
+            b"\x12\x34",
+        )
+    ]
+    params = (
+        "0x3333333333333333333333333333333333333333",
+        recipient,
+        5,
+        6,
+        123456,
+        9 if function_name == "deploySalted" else 0,
+        12,
+        fees_distribution,
+        tx_calldata,
+        message_allocations,
+    )
+
+    raw = _build_eip1559_raw(
+        nonce=8,
+        to=bytes.fromhex("0000000000000000000000000000000000000000"),
+        value=70,
+        data=_fee_aware_call_data(parser, function_name, params),
+    )
+
+    decoded = parser.decode_signed_transaction(raw)
+
+    assert decoded is not None
+    assert decoded.value == 12
+    assert decoded.fee_value == 58
+    assert decoded.submitted_value == 70
+    assert decoded.total_spend == 70
+    assert decoded.data.function_name == function_name
+    assert decoded.data.args.sender == "0x3333333333333333333333333333333333333333"
+    assert decoded.data.args.recipient == Web3.to_checksum_address(recipient)
+    assert decoded.data.args.num_of_initial_validators == 5
+    assert decoded.data.args.max_rotations == 6
+    assert decoded.data.args.valid_until == 123456
+    assert decoded.data.args.salt_nonce == (9 if function_name == "deploySalted" else 0)
+    assert decoded.data.args.user_value == 12
+    assert decoded.data.args.data == tx_calldata
+    assert decoded.data.args.message_allocations_count == 1
+    assert decoded.data.args.message_allocations == [
+        {
+            "messageType": 1,
+            "onAcceptance": True,
+            "parentIndex": 2**256 - 1,
+            "recipient": "0x5555555555555555555555555555555555555555",
+            "callKey": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "budget": 99,
+            "feeParams": b"\x12\x34",
+        }
+    ]
+    assert decoded.data.args.fees_distribution == {
+        "leaderTimeunitsAllocation": 11,
+        "validatorTimeunitsAllocation": 22,
+        "appealRounds": 2,
+        "executionBudgetPerRound": 333,
+        "executionConsumed": 44,
+        "totalMessageFees": 55,
+        "rotations": [3, 4],
+        "maxPriceGenPerTimeUnit": 66,
+        "storageFeeMaxGasPrice": 77,
+        "receiptFeeMaxGasPrice": 88,
+    }
+
+
+@pytest.mark.parametrize(
+    "function_name,top_up_and_submit",
+    [
+        ("topUpFees", False),
+        ("topUpAndSubmitAppeal", True),
+    ],
+)
+def test_decode_signed_transaction_fee_top_up_calls(
+    function_name, top_up_and_submit, monkeypatch
+):
+    monkeypatch.setattr(
+        "backend.protocol_rpc.transactions_parser.Account.recover_transaction",
+        lambda raw: "0x3333333333333333333333333333333333333333",
+    )
+
+    consensus_service = Mock()
+    consensus_service.web3 = Web3()
+    consensus_service.load_contract = Mock(return_value={"abi": []})
+    parser = TransactionParser(consensus_service)
+
+    tx_id = b"\x12" * 32
+    fees_distribution = (
+        11,
+        22,
+        2,
+        333,
+        44,
+        55,
+        [3, 4, 5],
+        66,
+        77,
+        88,
+    )
+    raw = _build_eip1559_raw(
+        nonce=8,
+        to=bytes.fromhex("0000000000000000000000000000000000000000"),
+        value=1400,
+        data=_contract_call_data(parser, function_name, [tx_id, fees_distribution]),
+    )
+
+    decoded = parser.decode_signed_transaction(raw)
+
+    assert decoded is not None
+    assert decoded.value == 0
+    assert decoded.fee_value == 1400
+    assert decoded.total_spend == 1400
+    assert decoded.data.tx_id == tx_id
+    assert decoded.data.fees_distribution == {
+        "leaderTimeunitsAllocation": 11,
+        "validatorTimeunitsAllocation": 22,
+        "appealRounds": 2,
+        "executionBudgetPerRound": 333,
+        "executionConsumed": 44,
+        "totalMessageFees": 55,
+        "rotations": [3, 4, 5],
+        "maxPriceGenPerTimeUnit": 66,
+        "storageFeeMaxGasPrice": 77,
+        "receiptFeeMaxGasPrice": 88,
+    }
+    assert getattr(decoded.data, "top_up_and_submit", False) is top_up_and_submit
+
+
+def test_decode_signed_transaction_submit_appeal_uses_value_as_bond(monkeypatch):
+    monkeypatch.setattr(
+        "backend.protocol_rpc.transactions_parser.Account.recover_transaction",
+        lambda raw: "0x3333333333333333333333333333333333333333",
+    )
+
+    consensus_service = Mock()
+    consensus_service.web3 = Web3()
+    consensus_service.load_contract = Mock(
+        return_value={
+            "abi": [
+                {
+                    "inputs": [
+                        {"internalType": "bytes32", "name": "_txId", "type": "bytes32"}
+                    ],
+                    "name": "submitAppeal",
+                    "outputs": [],
+                    "stateMutability": "payable",
+                    "type": "function",
+                }
+            ]
+        }
+    )
+    parser = TransactionParser(consensus_service)
+
+    tx_id = b"\x34" * 32
+    raw = _build_eip1559_raw(
+        nonce=9,
+        to=bytes.fromhex("0000000000000000000000000000000000000000"),
+        value=1400,
+        data=_contract_call_data(parser, "submitAppeal", [tx_id]),
+    )
+
+    decoded = parser.decode_signed_transaction(raw)
+
+    assert decoded is not None
+    assert decoded.value == 1400
+    assert decoded.fee_value == 0
+    assert decoded.total_spend == 1400
+    assert decoded.data.tx_id == tx_id
+    assert decoded.data.fees_distribution is None
+    assert decoded.data.top_up_and_submit is False
