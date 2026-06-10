@@ -5155,7 +5155,7 @@ def test_top_up_and_submit_appeal_refreshes_recommended_fee_preset():
     )
 
 
-def test_create_child_fee_accounting_refunds_extra_leaf_budget_without_child_allocations():
+def test_create_child_fee_accounting_seeds_mode1_bucket_without_child_allocations():
     child_fees, child_accounting = create_child_fee_accounting(
         message={
             "messageType": 1,
@@ -5174,13 +5174,13 @@ def test_create_child_fee_accounting_refunds_extra_leaf_budget_without_child_all
         sender="0x1111111111111111111111111111111111111111",
     )
 
-    assert child_fees["totalMessageFees"] == 0
+    assert child_fees["totalMessageFees"] == 15
     assert child_fees["maxPriceGenPerTimeUnit"] == 999
     assert child_fees["storageFeeMaxGasPrice"] == 888
     assert child_fees["receiptFeeMaxGasPrice"] == 777
     assert child_accounting["paid_fee_value"] == 70
-    assert child_accounting["primary_fee_budget"] == 70
-    assert child_accounting["message_fee_budget"] == 0
+    assert child_accounting["primary_fee_budget"] == 55
+    assert child_accounting["message_fee_budget"] == 15
     assert child_accounting["message_allocations"] == []
     assert child_accounting["user_value"] == 7
 

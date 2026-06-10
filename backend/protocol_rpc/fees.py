@@ -731,9 +731,9 @@ def create_child_fee_accounting(
         message,
         message_allocations or [],
     )
-    child_message_budget = (
-        declared_budget - child_primary if child_message_allocations else 0
-    )
+    # Mode 1 children have no allocation subtree but still receive the remainder
+    # of their declared budget as a message-fee bucket for their own children.
+    child_message_budget = declared_budget - child_primary
     child_fees = _fees_distribution_from_internal_params(
         fee_params,
         total_message_fees=child_message_budget,
@@ -1015,12 +1015,12 @@ def fill_message_fee_payload_from_allocation(
         raise MessageNoMatchingAllocation("MessageNoMatchingAllocation")
 
     index, allocation = resolved
-    if bool(allocation["onAcceptance"]) != bool(message.get("onAcceptance", False)):
-        raise MessageEmissionPhaseMismatch("MessageEmissionPhaseMismatch")
-
     updated = copy.deepcopy(message)
     message_type = int(updated.get("messageType", MESSAGE_TYPE_INTERNAL))
     if message_type == MESSAGE_TYPE_EXTERNAL:
+        # External messages have no accepted/finalized lifecycle. GenVM main
+        # carries `on: finalized` on external allocation nodes only to satisfy
+        # the request schema, so do not phase-check them here.
         if not _message_has_fee_params(updated):
             updated["feeParams"] = allocation["feeParams"]
         updated["callKey"] = _normalize_call_key(
@@ -1028,6 +1028,9 @@ def fill_message_fee_payload_from_allocation(
         )
         updated["messageFeeMode"] = "external"
         return updated
+
+    if bool(allocation["onAcceptance"]) != bool(message.get("onAcceptance", False)):
+        raise MessageEmissionPhaseMismatch("MessageEmissionPhaseMismatch")
 
     if int(updated.get("declaredBudget", 0) or 0) == 0:
         updated["declaredBudget"] = int(allocation["budget"])
