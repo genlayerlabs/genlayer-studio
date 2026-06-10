@@ -185,8 +185,13 @@ RUN cd /genvm \
     && echo "GenVM installed successfully:" \
     && ls -la \
     && chown -R worker-user:worker-group /genvm \
+    # Source path: skip lief bin-patch — nix outputs are already
+    # $ORIGIN-rpath-patched by genvm's patch-rpath, and lief SIGABRTs on the
+    # zig/musl-linked amd64 executor ("Can't read got entries"). bin-check
+    # still validates the binaries execute. --default-download false: nothing
+    # to download for an unreleased SHA.
     && if [[ -n "$GENVM_REF" ]]; then \
-        su - worker-user -c "/genvm/bin/post-install.py --precompile false --default-download false" ; \
+        su - worker-user -c "/genvm/bin/post-install.py --precompile false --default-download false --bin-patch false" ; \
     else \
         su - worker-user -c "/genvm/bin/post-install.py --precompile false" ; \
     fi \
