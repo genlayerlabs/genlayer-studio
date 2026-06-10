@@ -10,9 +10,9 @@ ARG GENVM_BUILD_CORES=0
 # nixos/nix ships bash only inside the default nix profile (no /bin/bash).
 SHELL ["/nix/var/nix/profiles/default/bin/bash", "-x", "-c"]
 
-# Source builds are the CI path for binding Studio to a GenVM branch/SHA.
-# linux/amd64 is the supported path; arm64 usually succeeds only when the
-# runner preload can avoid rebuilding x86_64-linux-pinned runner packages.
+# Source builds bind Studio to a GenVM branch/SHA. The flake target follows
+# TARGETARCH (amd64-linux / arm64-linux); both build natively — runners are
+# universal wasm and come prebuilt from genvm's GCS cache either way.
 # Recipe mirrors genvm's own release CI (.github/workflows/release.yaml +
 # support/ci/pipelines/build.sh): patch flake-config.json, prefetch deps,
 # nix build manager/executor/runners-all, merge the outputs.
@@ -52,9 +52,12 @@ RUN set -euo pipefail ; \
         python3 support/runner-script.py download --nix-preload --allow-partial --dest /tmp/runners-dl --registry /out-executor/executor/*/data/all.json || true ; \
         nix build -o /out-runners ".#runners-all" ; \
         mkdir -p /genvm-out ; \
-        cp -rL --no-preserve=mode,ownership /out-manager/. /genvm-out/ ; \
-        cp -rL --no-preserve=mode,ownership /out-executor/. /genvm-out/ ; \
-        cp -rL --no-preserve=mode,ownership /out-runners/. /genvm-out/ ; \
+        cp -rL --no-preserve=ownership /out-manager/. /genvm-out/ ; \
+        cp -rL --no-preserve=ownership /out-executor/. /genvm-out/ ; \
+        cp -rL --no-preserve=ownership /out-runners/. /genvm-out/ ; \
+        # Keep nix-store modes (exec bits!) but make everything owner-writable
+        # so post-install can create venvs/cache dirs inside /genvm later.
+        chmod -R u+w /genvm-out ; \
         # Drop sources + nix store build artifacts so this layer (and the
         # buildx/gha cache entry for it) stays close to the size of /genvm-out.
         rm -f /out-manager /out-executor /out-runners ; \
