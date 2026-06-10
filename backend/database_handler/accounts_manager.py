@@ -10,6 +10,7 @@ from backend.protocol_rpc.fees import (
     cancel_fee_accounting,
     settle_fee_accounting,
 )
+from backend.consensus.history import completed_consensus_round_index
 
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -197,11 +198,14 @@ class AccountsManager:
         accounting = data.get(FEE_ACCOUNTING_KEY)
         if not accounting:
             return 0
+        was_terminal = accounting.get("status") in {"settled", "canceled"}
         updated, refund = cancel_fee_accounting(accounting, reason=reason)
         data[FEE_ACCOUNTING_KEY] = updated
         transaction.data = data
         if refund > 0:
             self.credit_account_balance(sender_address, refund)
+        if not was_terminal:
+            self._credit_appeal_bond_payouts(updated)
         return refund
 
     def settle_tx_fee_accounting_once(
@@ -222,24 +226,32 @@ class AccountsManager:
         accounting = data.get(FEE_ACCOUNTING_KEY)
         if not accounting:
             return 0
+        was_terminal = accounting.get("status") in {"settled", "canceled"}
         updated, refund = settle_fee_accounting(
             accounting,
             receipt=receipt,
             reason=reason,
             actual_final_round=_infer_final_round(transaction.consensus_history),
             num_of_validators=transaction.num_of_initial_validators,
+            consensus_history=transaction.consensus_history,
         )
         data[FEE_ACCOUNTING_KEY] = updated
         transaction.data = data
         if refund > 0:
             self.credit_account_balance(sender_address, refund)
+        if not was_terminal:
+            self._credit_appeal_bond_payouts(updated)
         return refund
+
+    def _credit_appeal_bond_payouts(self, accounting: dict) -> None:
+        for payout in accounting.get("appeal_bond_settlements") or []:
+            if not isinstance(payout, dict):
+                continue
+            amount = int(payout.get("payout", 0) or 0)
+            appealer = payout.get("appealer")
+            if amount > 0 and appealer:
+                self.credit_account_balance(appealer, amount)
 
 
 def _infer_final_round(consensus_history: dict | None) -> int:
-    if not isinstance(consensus_history, dict):
-        return 0
-    rounds = consensus_history.get("consensus_results")
-    if not isinstance(rounds, list) or len(rounds) == 0:
-        return 0
-    return max(0, len(rounds) - 1)
+    return completed_consensus_round_index(consensus_history)

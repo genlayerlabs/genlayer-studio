@@ -9,6 +9,12 @@ from typing import Any, Callable
 import rlp
 from eth_abi import decode, encode
 
+from backend.consensus.history import (
+    actual_leader_rotations_by_round,
+    completed_consensus_rounds,
+)
+from backend.consensus.types import ConsensusRound
+
 
 VALIDATORS_PER_ROUND = (
     5,
@@ -40,6 +46,22 @@ CALL_KEY_WILDCARD = "0x" + ("0" * 64)
 MESSAGE_TYPE_EXTERNAL = 0
 MESSAGE_TYPE_INTERNAL = 1
 FEE_ACCOUNTING_KEY = "fee_accounting"
+
+APPEAL_SUCCESS_ROUNDS = {
+    ConsensusRound.VALIDATOR_APPEAL_SUCCESSFUL.value,
+    ConsensusRound.LEADER_APPEAL_SUCCESSFUL.value,
+    ConsensusRound.LEADER_TIMEOUT_APPEAL_SUCCESSFUL.value,
+    ConsensusRound.VALIDATOR_TIMEOUT_APPEAL_SUCCESSFUL.value,
+}
+APPEAL_FAILED_ROUNDS = {
+    ConsensusRound.VALIDATOR_APPEAL_FAILED.value,
+    ConsensusRound.LEADER_APPEAL_FAILED.value,
+    ConsensusRound.LEADER_TIMEOUT_APPEAL_FAILED.value,
+    ConsensusRound.VALIDATORS_TIMEOUT_APPEAL_FAILED.value,
+}
+ROUND_LEADER_MULTIPLIERS = {
+    ConsensusRound.LEADER_TIMEOUT.value: (1, 2),
+}
 
 INTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE = "(uint256,uint256,uint256,uint256,uint256[])"
 EXTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE = "(uint256,uint256)"
@@ -380,7 +402,9 @@ def get_leader_rounds(fees_distribution: dict[str, Any]) -> int:
 
 
 def get_leader_rounds_through_round(
-    fees_distribution: dict[str, Any], final_round: int
+    fees_distribution: dict[str, Any],
+    final_round: int,
+    consensus_history: dict[str, Any] | None = None,
 ) -> int:
     fees = normalize_fees_distribution(fees_distribution)
     rotations = fees["rotations"]
@@ -388,13 +412,16 @@ def get_leader_rounds_through_round(
         raise InvalidAppealRounds("InvalidAppealRounds")
 
     final_round = max(0, int(final_round))
-    total = int(rotations[0]) + 1
+    actual_rotations = actual_leader_rotations_by_round(consensus_history)
+    total = _leader_slots_for_round(rotations, 0, actual_rotations)
     rotations_index = 1
     for offset in range(1, min(final_round, int(fees["appealRounds"]) * 2) + 1):
         if offset % 2 == 1:
             total += 1
         elif rotations_index < len(rotations):
-            total += int(rotations[rotations_index]) + 1
+            total += _leader_slots_for_round(
+                rotations, rotations_index, actual_rotations, round_index=offset
+            )
             rotations_index += 1
     return total
 
@@ -404,6 +431,7 @@ def calculate_time_unit_fees_through_round(
     num_of_validators: int,
     final_round: int,
     policy: StudioFeePolicy | None = None,
+    consensus_history: dict[str, Any] | None = None,
 ) -> int:
     fees = normalize_fees_distribution(fees_distribution)
     policy = policy or StudioFeePolicy()
@@ -418,16 +446,24 @@ def calculate_time_unit_fees_through_round(
 
     leader_timeunits = int(fees["leaderTimeunitsAllocation"])
     validator_timeunits = int(fees["validatorTimeunitsAllocation"])
+    actual_rotations = actual_leader_rotations_by_round(consensus_history)
+    round_outcomes = _round_outcomes(consensus_history)
     total = _calculate_fee_for_round(
         VALIDATORS_PER_ROUND[validator_index],
-        int(rotations[0]) + 1,
+        _leader_slots_for_round(rotations, 0, actual_rotations),
         leader_timeunits,
         validator_timeunits,
+        leader_multiplier=_round_leader_multiplier(round_outcomes.get(0)),
     )
     rotations_index = 1
     for offset in range(1, capped_final_round + 1):
         if offset % 2 == 0 and rotations_index < len(rotations):
-            rotations_this_round = int(rotations[rotations_index]) + 1
+            rotations_this_round = _leader_slots_for_round(
+                rotations,
+                rotations_index,
+                actual_rotations,
+                round_index=offset,
+            )
             rotations_index += 1
         else:
             rotations_this_round = 1
@@ -436,6 +472,7 @@ def calculate_time_unit_fees_through_round(
             rotations_this_round,
             leader_timeunits,
             validator_timeunits,
+            leader_multiplier=_round_leader_multiplier(round_outcomes.get(offset)),
         )
 
     max_price = int(fees["maxPriceGenPerTimeUnit"])
@@ -1390,6 +1427,7 @@ def settle_fee_accounting(
     reason: str = "finalized",
     actual_final_round: int | None = None,
     num_of_validators: int | None = None,
+    consensus_history: dict[str, Any] | None = None,
     policy: StudioFeePolicy | None = None,
 ) -> tuple[dict[str, Any], int]:
     policy = _accounting_policy(accounting, policy)
@@ -1410,10 +1448,15 @@ def settle_fee_accounting(
             validators,
             actual_final_round,
             policy,
+            consensus_history=consensus_history,
         )
         execution_budget = int(
             normalize_fees_distribution(fees_distribution)["executionBudgetPerRound"]
-        ) * get_leader_rounds_through_round(fees_distribution, actual_final_round)
+        ) * get_leader_rounds_through_round(
+            fees_distribution,
+            actual_final_round,
+            consensus_history=consensus_history,
+        )
         updated["actual_final_round"] = int(actual_final_round)
     else:
         time_unit_budget = max(0, primary_required - execution_budget)
@@ -1432,6 +1475,11 @@ def settle_fee_accounting(
         - int(updated.get("message_fee_refunded", 0)),
     )
     refund = primary_refund + message_refund
+    bond_settlements, bond_payout = _settle_appeal_bonds(
+        updated,
+        consensus_history=consensus_history,
+        cancel=False,
+    )
 
     updated["status"] = "settled"
     updated["settlement_reason"] = reason
@@ -1443,6 +1491,10 @@ def settle_fee_accounting(
         int(updated.get("message_fee_refunded", 0)) + message_refund
     )
     updated["total_refunded"] = int(updated.get("total_refunded", 0)) + refund
+    updated["appeal_bonds_payout_total"] = (
+        int(updated.get("appeal_bonds_payout_total", 0)) + bond_payout
+    )
+    updated["appeal_bond_settlements"] = bond_settlements
     updated.setdefault("refunds", []).append(
         {
             "reason": reason,
@@ -1477,6 +1529,11 @@ def cancel_fee_accounting(
         - int(updated.get("message_fee_refunded", 0)),
     )
     refund = primary_refund + message_refund
+    bond_settlements, bond_payout = _settle_appeal_bonds(
+        updated,
+        consensus_history=None,
+        cancel=True,
+    )
     updated["status"] = "canceled"
     updated["settlement_reason"] = reason
     updated["primary_fee_refunded"] = (
@@ -1486,6 +1543,10 @@ def cancel_fee_accounting(
         int(updated.get("message_fee_refunded", 0)) + message_refund
     )
     updated["total_refunded"] = int(updated.get("total_refunded", 0)) + refund
+    updated["appeal_bonds_payout_total"] = (
+        int(updated.get("appeal_bonds_payout_total", 0)) + bond_payout
+    )
+    updated["appeal_bond_settlements"] = bond_settlements
     updated.setdefault("refunds", []).append(
         {
             "reason": reason,
@@ -1830,11 +1891,98 @@ def _calculate_fee_for_round(
     rotations: int,
     leader_timeunits_allocation: int,
     validator_timeunits_allocation: int,
+    leader_multiplier: tuple[int, int] = (1, 1),
 ) -> int:
-    return rotations * (
-        leader_timeunits_allocation
-        + (num_of_validators * validator_timeunits_allocation)
-    )
+    leader_num, leader_den = leader_multiplier
+    leader_total = rotations * leader_timeunits_allocation
+    leader_fee = leader_total * leader_num // leader_den
+    validator_fee = rotations * (num_of_validators * validator_timeunits_allocation)
+    return leader_fee + validator_fee
+
+
+def _leader_slots_for_round(
+    funded_rotations: list[int],
+    funded_index: int,
+    actual_rotations: dict[int, int],
+    *,
+    round_index: int | None = None,
+) -> int:
+    funded_slots = int(funded_rotations[funded_index]) + 1
+    if not actual_rotations:
+        return funded_slots
+    actual_round_index = funded_index if round_index is None else round_index
+    actual_slots = int(actual_rotations.get(actual_round_index, 0)) + 1
+    return min(funded_slots, actual_slots)
+
+
+def _round_outcomes(consensus_history: dict[str, Any] | None) -> dict[int, str]:
+    return {
+        index: str(entry.get("consensus_round") or "")
+        for index, entry in enumerate(completed_consensus_rounds(consensus_history))
+    }
+
+
+def _round_leader_multiplier(outcome: str | None) -> tuple[int, int]:
+    return ROUND_LEADER_MULTIPLIERS.get(str(outcome or ""), (1, 1))
+
+
+def _settle_appeal_bonds(
+    accounting: dict[str, Any],
+    *,
+    consensus_history: dict[str, Any] | None,
+    cancel: bool,
+) -> tuple[list[dict[str, Any]], int]:
+    existing = accounting.get("appeal_bond_settlements")
+    if isinstance(existing, list) and existing:
+        return copy.deepcopy(existing), 0
+
+    outcomes = _round_outcomes(consensus_history)
+    settlements: list[dict[str, Any]] = []
+    payout_total = 0
+    for index, bond in enumerate(accounting.get("appeal_bonds") or []):
+        if not isinstance(bond, dict):
+            continue
+        amount = int(bond.get("amount", 0) or 0)
+        appealer = bond.get("appealer")
+        appealed_round = int(bond.get("round", 0) or 0)
+        outcome_index, outcome = _appeal_outcome_after_round(outcomes, appealed_round)
+        if cancel and outcome is None:
+            status = "returned"
+            payout = amount
+        elif outcome in APPEAL_SUCCESS_ROUNDS:
+            status = "successful"
+            payout = amount * 3 // 2
+        else:
+            status = "forfeited"
+            payout = 0
+        payout_total += payout
+        entry = {
+            "bondIndex": index,
+            "appealer": appealer,
+            "amount": amount,
+            "round": appealed_round,
+            "status": status,
+            "payout": payout,
+        }
+        if outcome is not None:
+            entry["outcomeRound"] = outcome_index
+            entry["outcome"] = outcome
+        if status == "forfeited":
+            entry["bond_forfeited"] = amount
+        settlements.append(entry)
+    return settlements, payout_total
+
+
+def _appeal_outcome_after_round(
+    outcomes: dict[int, str], appealed_round: int
+) -> tuple[int | None, str | None]:
+    for round_index in sorted(outcomes):
+        if round_index <= appealed_round:
+            continue
+        outcome = outcomes[round_index]
+        if outcome in APPEAL_SUCCESS_ROUNDS or outcome in APPEAL_FAILED_ROUNDS:
+            return round_index, outcome
+    return None, None
 
 
 def _normalize_message_allocation(node: dict[str, Any]) -> dict[str, Any]:

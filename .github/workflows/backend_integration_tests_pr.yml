@@ -97,7 +97,16 @@ jobs:
 
       - name: Extract GenVM version for cache key
         id: genvm
-        run: echo "tag=$(grep -m1 'ARG GENVM_TAG=' docker/Dockerfile.backend | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+        run: |
+          GENVM_TAG_VALUE="${GENVM_TAG:-}"
+          if [[ -z "$GENVM_TAG_VALUE" && -f .env ]]; then
+            GENVM_TAG_VALUE="$(sed -n 's/^GENVM_TAG=["'\'']\{0,1\}\([^"'\'']*\)["'\'']\{0,1\}.*/\1/p' .env | head -n1)"
+          fi
+          if [[ -z "$GENVM_TAG_VALUE" ]]; then
+            echo "::warning::GENVM_TAG not set (this job runs prebuilt images) — using shared 'untagged' precompile cache key that will not invalidate across GenVM upgrades"
+            GENVM_TAG_VALUE="untagged"
+          fi
+          echo "tag=$GENVM_TAG_VALUE" >> "$GITHUB_OUTPUT"
 
       - name: Restore GenVM precompile cache
         uses: actions/cache@v5
@@ -212,4 +221,3 @@ jobs:
 
   #     - name: Run Docker Compose
   #       run: docker compose -f tests/hardhat/docker-compose.yml --project-directory . up tests --build --force-recreate --always-recreate-deps
-

@@ -500,7 +500,7 @@ def get_studio_transaction_by_hash(
 def get_transaction_status(
     transaction_hash: str,
     transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
-) -> str:
+) -> dict:
     return impl.get_transaction_status(
         transactions_processor=transactions_processor,
         transaction_hash=transaction_hash,
