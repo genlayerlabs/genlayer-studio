@@ -63,25 +63,47 @@ jobs:
       - name: Copy .env file
         run: cp .env.example .env
 
-      - name: Set GenVM source for CI builds
+      - name: Resolve GenVM binding
         env:
-          GENVM_TAG_DEFAULT: ${{ vars.GENVM_TAG || 'v0.3.0-rc3' }}
-          GENVM_REF_REQUESTED: ${{ vars.GENVM_REF || '' }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [[ -n "$GENVM_REF_REQUESTED" ]]; then
-            GENVM_REF_SHA="$(gh api "repos/genlayerlabs/genvm/commits/$GENVM_REF_REQUESTED" --jq .sha)"
-            sed -i "s|^GENVM_TAG=.*|GENVM_TAG=\"\"|" .env
-            sed -i "s|^GENVM_REF=.*|GENVM_REF=\"$GENVM_REF_SHA\"|" .env
-            echo "GENVM_TAG=" >> "$GITHUB_ENV"
-            echo "GENVM_REF=$GENVM_REF_SHA" >> "$GITHUB_ENV"
-          else
-            # Default from the GENVM_TAG repo variable so the release train can pin it.
-            sed -i "s|^GENVM_TAG=.*|GENVM_TAG=\"$GENVM_TAG_DEFAULT\"|" .env
-            sed -i "s|^GENVM_REF=.*|GENVM_REF=\"\"|" .env
-            echo "GENVM_TAG=$GENVM_TAG_DEFAULT" >> "$GITHUB_ENV"
-            echo "GENVM_REF=" >> "$GITHUB_ENV"
+          # Binding model: codebase default < env override.
+          # third_party/genvm/version (same convention as genlayer-node) pins
+          # the GenVM this branch's host protocol speaks; it is flipped to the
+          # release tag at release cut. The e2e pipeline / release train can
+          # override by injecting GENVM_TAG or GENVM_REF into the environment.
+          # Auto-detection for the file value: ^v[0-9] => release tag (tarball
+          # build), anything else => git ref (source build, pinned to a SHA so
+          # caches invalidate exactly when genvm moves).
+          if [[ -n "${GENVM_TAG:-}" && -n "${GENVM_REF:-}" ]]; then
+            echo "::error::GENVM_TAG and GENVM_REF are both set; they are mutually exclusive"
+            exit 1
           fi
+          GENVM_TAG_VALUE="${GENVM_TAG:-}"
+          GENVM_REF_VALUE="${GENVM_REF:-}"
+          if [[ -z "$GENVM_TAG_VALUE" && -z "$GENVM_REF_VALUE" ]]; then
+            if [[ ! -f third_party/genvm/version ]]; then
+              echo "::error::third_party/genvm/version is missing and no GENVM_TAG/GENVM_REF env override is set"
+              exit 1
+            fi
+            BINDING="$(head -n1 third_party/genvm/version | tr -d '[:space:]')"
+            if [[ -z "$BINDING" ]]; then
+              echo "::error::third_party/genvm/version is empty"
+              exit 1
+            fi
+            if [[ "$BINDING" =~ ^v[0-9] ]]; then
+              GENVM_TAG_VALUE="$BINDING"
+            else
+              GENVM_REF_VALUE="$BINDING"
+            fi
+          fi
+          if [[ -n "$GENVM_REF_VALUE" ]]; then
+            GENVM_REF_VALUE="$(gh api "repos/genlayerlabs/genvm/commits/$GENVM_REF_VALUE" --jq .sha)"
+          fi
+          sed -i "s|^GENVM_TAG=.*|GENVM_TAG=\"$GENVM_TAG_VALUE\"|" .env
+          sed -i "s|^GENVM_REF=.*|GENVM_REF=\"$GENVM_REF_VALUE\"|" .env
+          echo "GENVM_TAG=$GENVM_TAG_VALUE" >> "$GITHUB_ENV"
+          echo "GENVM_REF=$GENVM_REF_VALUE" >> "$GITHUB_ENV"
           grep "^GENVM_TAG=" .env
           grep "^GENVM_REF=" .env
 
