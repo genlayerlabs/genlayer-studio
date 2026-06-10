@@ -141,7 +141,12 @@ class TransactionsProcessor:
             "from_address": transaction_data.from_address,
             "to_address": transaction_data.to_address,
             "data": TransactionsProcessor._json_safe_numbers(transaction_data.data),
-            "value": TransactionsProcessor._json_safe_numbers(transaction_data.value),
+            # Numeric-columns contract (tests/db-sqlalchemy/test_numeric_types.py):
+            # top-level "value" is a plain int. The blanket _json_safe_numbers
+            # stringification (fee-accounting era) broke that contract for
+            # values > 2^53; big-int JSON consumers should read the canonical
+            # decimal-string fees object instead.
+            "value": transaction_data.value,
             "type": transaction_data.type,
             "status": transaction_data.status.value,
             "txExecutionResult": execution_result,
@@ -237,9 +242,7 @@ class TransactionsProcessor:
             "deposit": str(int(accounting.get("paid_fee_value", 0) or 0)),
             "userValue": str(int(accounting.get("user_value", 0) or 0)),
             "distribution": {
-                "leaderTimeunitsAllocation": str(
-                    fees["leaderTimeunitsAllocation"]
-                ),
+                "leaderTimeunitsAllocation": str(fees["leaderTimeunitsAllocation"]),
                 "validatorTimeunitsAllocation": str(
                     fees["validatorTimeunitsAllocation"]
                 ),

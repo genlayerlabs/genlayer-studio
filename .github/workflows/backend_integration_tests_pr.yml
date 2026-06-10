@@ -103,8 +103,8 @@ jobs:
             GENVM_TAG_VALUE="$(sed -n 's/^GENVM_TAG=["'\'']\{0,1\}\([^"'\'']*\)["'\'']\{0,1\}.*/\1/p' .env | head -n1)"
           fi
           if [[ -z "$GENVM_TAG_VALUE" ]]; then
-            echo "GENVM_TAG is required for the GenVM precompile cache key" >&2
-            exit 1
+            echo "::warning::GENVM_TAG not set (this job runs prebuilt images) — using shared 'untagged' precompile cache key that will not invalidate across GenVM upgrades"
+            GENVM_TAG_VALUE="untagged"
           fi
           echo "tag=$GENVM_TAG_VALUE" >> "$GITHUB_OUTPUT"
 
