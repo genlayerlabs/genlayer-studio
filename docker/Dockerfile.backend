@@ -14,7 +14,10 @@ SHELL ["/nix/var/nix/profiles/default/bin/bash", "-x", "-c"]
 # nix build manager/executor/runners-all, merge the outputs.
 RUN set -euo pipefail ; \
     if [ -n "$GENVM_REF" ]; then \
-        echo "experimental-features = nix-command flakes" >> /etc/nix/nix.conf ; \
+        # filter-syscalls=false: nix's seccomp filter cannot load under
+        # qemu/Rosetta emulation (cross-platform local builds); harmless on
+        # native hosts since the image already runs with sandbox disabled.
+        printf 'experimental-features = nix-command flakes\nfilter-syscalls = false\n' >> /etc/nix/nix.conf ; \
         nix-env -iA nixpkgs.python3 ; \
         git clone https://github.com/genlayerlabs/genvm /src/genvm ; \
         cd /src/genvm ; \
