@@ -66,7 +66,11 @@ jobs:
               echo "::error::third_party/genvm/version is missing and no GENVM_TAG/GENVM_REF env override is set"
               exit 1
             fi
-            BINDING="$(head -n1 third_party/genvm/version | tr -d '[:space:]')"
+            BINDING="$(head -n1 third_party/genvm/version | sed -e 's/\r$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            if [[ "$BINDING" =~ ^\".*\"$ || "$BINDING" =~ ^\'.*\'$ ]]; then
+              BINDING="${BINDING:1:${#BINDING}-2}"
+              BINDING="$(printf '%s' "$BINDING" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            fi
             if [[ -z "$BINDING" ]]; then
               echo "::error::third_party/genvm/version is empty"
               exit 1
