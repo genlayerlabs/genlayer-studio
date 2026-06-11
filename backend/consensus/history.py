@@ -4,6 +4,12 @@ from typing import Any
 
 from backend.consensus.types import ConsensusRound
 
+TIME_UNIT_MILLISECONDS = 1000
+# Protocol mapping for node parity:
+# 1 time unit (TU) == 1 second of GenVM wall-clock runtime. Studio receipts
+# measure each execution as processing_time milliseconds, so TU consumption is
+# ceil(processing_time_ms / 1000) per receipt. Missing, zero, negative, or
+# malformed processing_time values consume 0 TU.
 
 NON_ROUND_CONSENSUS_EVENTS = {
     ConsensusRound.LEADER_ROTATION.value,
@@ -57,3 +63,187 @@ def actual_leader_rotations_by_round(
         pending_rotations = 0
         round_index += 1
     return rotations
+
+
+def receipt_time_units(receipt: dict | None) -> int:
+    if not isinstance(receipt, dict):
+        return 0
+    try:
+        processing_time_ms = int(receipt.get("processing_time") or 0)
+    except (TypeError, ValueError):
+        return 0
+    if processing_time_ms <= 0:
+        return 0
+    return (processing_time_ms + TIME_UNIT_MILLISECONDS - 1) // TIME_UNIT_MILLISECONDS
+
+
+def _receipt_iter(receipts: Any):
+    if isinstance(receipts, list):
+        yield from receipts
+    elif isinstance(receipts, dict):
+        yield receipts
+
+
+def _entry_receipts(entry: dict[str, Any]):
+    yield from _receipt_iter(entry.get("leader_result"))
+    yield from _receipt_iter(entry.get("validator_results"))
+
+
+def _consensus_data_receipts(consensus_data: dict[str, Any]):
+    yield from _receipt_iter(consensus_data.get("leader_receipt"))
+    validators = consensus_data.get("validators")
+    if isinstance(validators, list):
+        for validator in validators:
+            if isinstance(validator, dict) and "receipt" in validator:
+                yield from _receipt_iter(validator.get("receipt"))
+            else:
+                yield from _receipt_iter(validator)
+    else:
+        yield from _receipt_iter(validators)
+
+
+def _bucket_time_units(receipts: Any) -> tuple[int, int, int]:
+    leader_timeunits = 0
+    validator_timeunits = 0
+    max_validator_timeunits = 0
+    for receipt in receipts:
+        if not isinstance(receipt, dict):
+            continue
+        time_units = receipt_time_units(receipt)
+        mode = receipt.get("mode")
+        if mode == "leader":
+            leader_timeunits += time_units
+        elif mode == "validator":
+            validator_timeunits += time_units
+            max_validator_timeunits = max(max_validator_timeunits, time_units)
+    return leader_timeunits, validator_timeunits, max_validator_timeunits
+
+
+def _has_receipts(receipts: list[Any]) -> bool:
+    # Only receipts with a recognized execution mode carry attributable
+    # time-unit consumption; mode-less dicts (e.g. partial or legacy
+    # payloads) must not produce a per-round entry.
+    return any(
+        isinstance(receipt, dict) and receipt.get("mode") in ("leader", "validator")
+        for receipt in receipts
+    )
+
+
+def _round_entry(
+    *,
+    round_index: int,
+    consensus_round: str,
+    leader_timeunits: int,
+    validator_timeunits: int,
+    max_validator_timeunits: int,
+) -> dict[str, int | str]:
+    return {
+        "round": round_index,
+        "consensus_round": consensus_round,
+        "leader_timeunits": leader_timeunits,
+        "validator_timeunits": validator_timeunits,
+        "max_validator_timeunits": max_validator_timeunits,
+    }
+
+
+def time_unit_consumption(
+    consensus_history: dict | None,
+    consensus_data: dict | None,
+) -> dict:
+    per_round = []
+    pending_leader_timeunits = 0
+    pending_validator_timeunits = 0
+    pending_max_validator_timeunits = 0
+    pending_consensus_round = ""
+    pending_rotation_entry = False
+    leader_timeunits_used = 0
+    validator_timeunits_used = 0
+
+    results = (
+        consensus_history.get("consensus_results")
+        if isinstance(consensus_history, dict)
+        else None
+    )
+    if isinstance(results, list):
+        for entry in results:
+            if not isinstance(entry, dict):
+                continue
+            consensus_round = str(entry.get("consensus_round") or "")
+            leader_timeunits, validator_timeunits, max_validator_timeunits = (
+                _bucket_time_units(_entry_receipts(entry))
+            )
+            if consensus_round in NON_ROUND_CONSENSUS_EVENTS:
+                pending_leader_timeunits += leader_timeunits
+                pending_validator_timeunits += validator_timeunits
+                pending_max_validator_timeunits = max(
+                    pending_max_validator_timeunits, max_validator_timeunits
+                )
+                pending_consensus_round = consensus_round
+                pending_rotation_entry = True
+                continue
+
+            leader_timeunits += pending_leader_timeunits
+            validator_timeunits += pending_validator_timeunits
+            max_validator_timeunits = max(
+                max_validator_timeunits, pending_max_validator_timeunits
+            )
+            pending_leader_timeunits = 0
+            pending_validator_timeunits = 0
+            pending_max_validator_timeunits = 0
+            pending_consensus_round = ""
+            pending_rotation_entry = False
+
+            per_round.append(
+                _round_entry(
+                    round_index=len(per_round),
+                    consensus_round=consensus_round,
+                    leader_timeunits=leader_timeunits,
+                    validator_timeunits=validator_timeunits,
+                    max_validator_timeunits=max_validator_timeunits,
+                )
+            )
+            leader_timeunits_used += leader_timeunits
+            validator_timeunits_used += validator_timeunits
+
+    if (
+        not per_round
+        and pending_leader_timeunits == 0
+        and pending_validator_timeunits == 0
+        and not pending_rotation_entry
+        and isinstance(consensus_data, dict)
+    ):
+        receipts = list(_consensus_data_receipts(consensus_data))
+        leader_timeunits, validator_timeunits, max_validator_timeunits = (
+            _bucket_time_units(receipts)
+        )
+        if _has_receipts(receipts):
+            per_round.append(
+                _round_entry(
+                    round_index=0,
+                    consensus_round="",
+                    leader_timeunits=leader_timeunits,
+                    validator_timeunits=validator_timeunits,
+                    max_validator_timeunits=max_validator_timeunits,
+                )
+            )
+            leader_timeunits_used += leader_timeunits
+            validator_timeunits_used += validator_timeunits
+
+    if pending_rotation_entry:
+        per_round.append(
+            _round_entry(
+                round_index=len(per_round),
+                consensus_round=pending_consensus_round,
+                leader_timeunits=pending_leader_timeunits,
+                validator_timeunits=pending_validator_timeunits,
+                max_validator_timeunits=pending_max_validator_timeunits,
+            )
+        )
+        leader_timeunits_used += pending_leader_timeunits
+        validator_timeunits_used += pending_validator_timeunits
+
+    return {
+        "leader_timeunits_used": leader_timeunits_used,
+        "validator_timeunits_used": validator_timeunits_used,
+        "per_round": per_round,
+    }
