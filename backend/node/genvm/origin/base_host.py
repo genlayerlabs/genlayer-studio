@@ -370,7 +370,9 @@ async def host_loop(
                 )
                 return None
             case host_fns.Methods.CONSUME_FUEL:
-                gas = await recv_int(8)
+                # GenVM main sends fuel as a 32-byte little-endian U256
+                # (rc3 used 8 bytes); see executor/src/host/mod.rs consume_fuel.
+                gas = await recv_int(32)
                 await handler.consume_gas(gas)
             case host_fns.Methods.ETH_CALL:
                 account = await read_exact(ACCOUNT_ADDR_SIZE)
@@ -402,7 +404,14 @@ async def host_loop(
                 else:
                     res = min(res, 2**53 - 1)
                     await send_all(bytes([host_fns.Errors.OK]))
-                    await send_all(res.to_bytes(8, byteorder="little", signed=False))
+                    # GenVM main reads a 32-byte little-endian U256 here (rc3
+                    # read 8 bytes). Sending only 8 left the executor blocked
+                    # on the remaining 24 bytes while this loop waited for the
+                    # next method — a read-read deadlock that stalled every
+                    # nondet (exec_prompt/web) execution in PROPOSING until
+                    # LEADER_TIMEOUT. See executor/src/host/mod.rs
+                    # remaining_fuel_as_gen and wasi/genlayer_sdk.rs call sites.
+                    await send_all(res.to_bytes(32, byteorder="little", signed=False))
             case host_fns.Methods.NOTIFY_NONDET_DISAGREEMENT:
                 call_no = await recv_int()
                 await handler.notify_nondet_disagreement(call_no)
