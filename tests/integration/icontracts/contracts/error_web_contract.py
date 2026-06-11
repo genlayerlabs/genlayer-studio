@@ -1,10 +1,10 @@
 # v0.1.0
-# { "Depends": "py-genlayer:test" }
+# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
 
-from genlayer import *
+import genlayer as gl
 
 
-class ErrorWebContract(gl.Contract):
+class ErrorWebContract(gl.contract.Contract):
     def __init__(self, testcase: int, url: str):
 
         if testcase == 1:

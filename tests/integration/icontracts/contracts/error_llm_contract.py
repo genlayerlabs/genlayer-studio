@@ -1,11 +1,11 @@
 # v0.1.0
-# { "Depends": "py-genlayer:test" }
+# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
 
-from genlayer import *
+import genlayer as gl
 import json
 
 
-class ErrorLLMContract(gl.Contract):
+class ErrorLLMContract(gl.contract.Contract):
     def __init__(self, testcase: int):
         if testcase == 1:
             self.test_execute_prompt()
@@ -29,7 +29,7 @@ This result should be perfectly parseable by a JSON parser without errors.
 """
 
         def get_llm_answer():
-            result = gl.nondet.exec_prompt(prompt)
+            result = gl.nondet.exec_prompt(prompt, response_format="text")
             result = result.replace("```json", "").replace("```", "")
             return result
 
@@ -37,7 +37,7 @@ This result should be perfectly parseable by a JSON parser without errors.
 
     def test_system_error(self):
         prompt = "What is 2+2?"
-        result = gl.nondet.exec_prompt(prompt)
+        result = gl.nondet.exec_prompt(prompt, response_format="text")
 
     def test_invalid_json(self):
         prompt = """What is 2+2?
@@ -47,7 +47,7 @@ This result should not be parseable by a JSON parser.
 """
 
         def get_llm_answer():
-            result = gl.nondet.exec_prompt(prompt)
+            result = gl.nondet.exec_prompt(prompt, response_format="text")
             result = result.replace("```json", "").replace("```", "")
             result = json.loads(result)
             return result

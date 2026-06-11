@@ -43,20 +43,53 @@ jobs:
       - name: Copy .env file
         run: cp .env.example .env
 
-      - name: Set GenVM tag for CI builds
+      - name: Resolve GenVM binding
         env:
-          GENVM_TAG_DEFAULT: ${{ vars.GENVM_TAG || 'v0.3.0-rc3' }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # docker-compose.yml hard-requires GENVM_TAG (963f9359); .env.example ships it
-          # empty. Default from the GENVM_TAG repo variable so the release train can pin it.
-          # Pinned to v0.3.0-rc3: the v0.6 fee host protocol (MessageFeeAllocationNode with
-          # message_type/parent_index + flat MessageFeeParams) matches rc3; rc4 switched to
-          # the tagged Internal/External MessageAllocationNode schema and rejects our
-          # /genvm/run payload with 500 "unknown variant `execution_budget_per_round`",
-          # which stalls every deploy in PROPOSING until LEADER_TIMEOUT.
-          sed -i "s|^GENVM_TAG=.*|GENVM_TAG=\"$GENVM_TAG_DEFAULT\"|" .env
-          echo "GENVM_TAG=$GENVM_TAG_DEFAULT" >> "$GITHUB_ENV"
+          # Binding model: codebase default < env override.
+          # third_party/genvm/version (same convention as genlayer-node) pins
+          # the GenVM this branch's host protocol speaks; it is flipped to the
+          # release tag at release cut. The e2e pipeline / release train can
+          # override by injecting GENVM_TAG or GENVM_REF into the environment.
+          # Auto-detection for the file value: ^v[0-9] => release tag (tarball
+          # build), anything else => git ref (source build, pinned to a SHA so
+          # caches invalidate exactly when genvm moves).
+          if [[ -n "${GENVM_TAG:-}" && -n "${GENVM_REF:-}" ]]; then
+            echo "::error::GENVM_TAG and GENVM_REF are both set; they are mutually exclusive"
+            exit 1
+          fi
+          GENVM_TAG_VALUE="${GENVM_TAG:-}"
+          GENVM_REF_VALUE="${GENVM_REF:-}"
+          if [[ -z "$GENVM_TAG_VALUE" && -z "$GENVM_REF_VALUE" ]]; then
+            if [[ ! -f third_party/genvm/version ]]; then
+              echo "::error::third_party/genvm/version is missing and no GENVM_TAG/GENVM_REF env override is set"
+              exit 1
+            fi
+            BINDING="$(head -n1 third_party/genvm/version | sed -e 's/\r$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            if [[ "$BINDING" =~ ^\".*\"$ || "$BINDING" =~ ^\'.*\'$ ]]; then
+              BINDING="${BINDING:1:${#BINDING}-2}"
+              BINDING="$(printf '%s' "$BINDING" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            fi
+            if [[ -z "$BINDING" ]]; then
+              echo "::error::third_party/genvm/version is empty"
+              exit 1
+            fi
+            if [[ "$BINDING" =~ ^v[0-9] ]]; then
+              GENVM_TAG_VALUE="$BINDING"
+            else
+              GENVM_REF_VALUE="$BINDING"
+            fi
+          fi
+          if [[ -n "$GENVM_REF_VALUE" ]]; then
+            GENVM_REF_VALUE="$(gh api "repos/genlayerlabs/genvm/commits/$GENVM_REF_VALUE" --jq .sha)"
+          fi
+          sed -i "s|^GENVM_TAG=.*|GENVM_TAG=\"$GENVM_TAG_VALUE\"|" .env
+          sed -i "s|^GENVM_REF=.*|GENVM_REF=\"$GENVM_REF_VALUE\"|" .env
+          echo "GENVM_TAG=$GENVM_TAG_VALUE" >> "$GITHUB_ENV"
+          echo "GENVM_REF=$GENVM_REF_VALUE" >> "$GITHUB_ENV"
           grep "^GENVM_TAG=" .env
+          grep "^GENVM_REF=" .env
 
       # TODO: we should also add also heuristai and anthropic keys to the e2e tests and test all providers
 
@@ -113,15 +146,25 @@ jobs:
       - name: Extract GenVM version for cache key
         id: genvm
         run: |
-          GENVM_TAG_VALUE="${GENVM_TAG:-}"
-          if [[ -z "$GENVM_TAG_VALUE" && -f .env ]]; then
-            GENVM_TAG_VALUE="$(sed -n 's/^GENVM_TAG=["'\'']\{0,1\}\([^"'\'']*\)["'\'']\{0,1\}.*/\1/p' .env | head -n1)"
+          GENVM_REF_VALUE="${GENVM_REF:-}"
+          if [[ -z "$GENVM_REF_VALUE" && -f .env ]]; then
+            GENVM_REF_VALUE="$(sed -n 's/^GENVM_REF=["'\'']\{0,1\}\([^"'\'']*\)["'\'']\{0,1\}.*/\1/p' .env | head -n1)"
           fi
-          if [[ -z "$GENVM_TAG_VALUE" ]]; then
-            echo "::warning::GENVM_TAG not set (this job runs prebuilt images) — using shared 'untagged' precompile cache key that will not invalidate across GenVM upgrades"
-            GENVM_TAG_VALUE="untagged"
+          if [[ -n "$GENVM_REF_VALUE" ]]; then
+            echo "tag=ref-$GENVM_REF_VALUE" >> "$GITHUB_OUTPUT"
+            echo "bake_cache=,scope=genvm-$GENVM_REF_VALUE" >> "$GITHUB_OUTPUT"
+          else
+            GENVM_TAG_VALUE="${GENVM_TAG:-}"
+            if [[ -z "$GENVM_TAG_VALUE" && -f .env ]]; then
+              GENVM_TAG_VALUE="$(sed -n 's/^GENVM_TAG=["'\'']\{0,1\}\([^"'\'']*\)["'\'']\{0,1\}.*/\1/p' .env | head -n1)"
+            fi
+            if [[ -z "$GENVM_TAG_VALUE" ]]; then
+              echo "::warning::GENVM_TAG not set (this job runs prebuilt images) — using shared 'untagged' precompile cache key that will not invalidate across GenVM upgrades"
+              GENVM_TAG_VALUE="untagged"
+            fi
+            echo "tag=$GENVM_TAG_VALUE" >> "$GITHUB_OUTPUT"
+            echo "bake_cache=" >> "$GITHUB_OUTPUT"
           fi
-          echo "tag=$GENVM_TAG_VALUE" >> "$GITHUB_OUTPUT"
 
       - name: Restore GenVM precompile cache
         uses: actions/cache@v5
@@ -146,8 +189,8 @@ jobs:
             jsonrpc
             consensus-worker
           set: |
-            *.cache-from=type=gha
-            *.cache-to=type=gha,mode=max
+            *.cache-from=type=gha${{ steps.genvm.outputs.bake_cache }}
+            *.cache-to=type=gha,mode=max${{ steps.genvm.outputs.bake_cache }}
             database-migration.tags=genlayer-studio-database-migration:latest
             jsonrpc.tags=genlayer-studio-jsonrpc:latest
             consensus-worker.tags=genlayer-studio-consensus-worker:latest

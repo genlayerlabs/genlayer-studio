@@ -32,6 +32,8 @@ import abc
 import time
 import copy
 
+from eth_abi import decode, encode
+
 from backend.node.types import (
     PendingTransaction,
     Address,
@@ -60,6 +62,19 @@ GENVM_GASLESS_GAS_DATA: dict[str, str] = {
     "fixedMessageRevealGas": "0",
     "genPerTimeUnit": "0",
 }
+
+INTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE = "(uint256,uint256,uint256,uint256,uint256[])"
+INTERNAL_MESSAGE_FEE_PARAMS_WITH_CAPS_ABI_TYPE = (
+    "(uint256,uint256,uint256,uint256,uint256[],uint256,uint256,uint256)"
+)
+EXTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE = "(uint256,uint256)"
+MESSAGE_ALLOCATION_NODE_ABI_TYPE = (
+    "(uint8,bool,uint256,address,bytes32,uint256,bytes)[]"
+)
+MESSAGE_TYPE_EXTERNAL = 0
+MESSAGE_TYPE_INTERNAL = 1
+NODE_ROOT_SENTINEL = (1 << 256) - 1
+CALL_KEY_WILDCARD = "0x" + ("0" * 64)
 
 
 @dataclass(frozen=True)
@@ -264,6 +279,10 @@ def _emission_value(emission: dict, name: str):
 
 def _emission_bytes(emission: dict, name: str) -> bytes:
     value = _emission_value(emission, name)
+    return _bytes_from_emission_value(value)
+
+
+def _bytes_from_emission_value(value) -> bytes:
     if value is None:
         return b""
     if isinstance(value, bytes):
@@ -275,6 +294,100 @@ def _emission_bytes(emission: dict, name: str) -> bytes:
         except ValueError:
             return base64.b64decode(value)
     return bytes(value)
+
+
+def _emission_internal_fee_params(emission: dict) -> bytes:
+    value = _emission_value(emission, "feeParams")
+    if isinstance(value, dict):
+        rotations = [int(rotation) for rotation in value.get("rotations", [])]
+        appeal_rounds = max(len(rotations) - 1, 0)
+        return encode(
+            [INTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE],
+            [
+                (
+                    int(value.get("leader_timeunits_allocation", 0)),
+                    int(value.get("validator_timeunits_allocation", 0)),
+                    appeal_rounds,
+                    int(value.get("execution_budget_per_round", 0)),
+                    rotations,
+                )
+            ],
+        )
+    return _bytes_from_emission_value(value)
+
+
+def _emission_external_fee_params(emission: dict) -> bytes:
+    value = _emission_value(emission, "feeParams")
+    if isinstance(value, dict):
+        return encode(
+            [EXTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE],
+            [
+                (
+                    int(value.get("gas_limit", 0)),
+                    int(value.get("max_gas_price", 0)),
+                )
+            ],
+        )
+    return _bytes_from_emission_value(value)
+
+
+def _emission_allocation_subtree(emission: dict) -> list[dict]:
+    value = _emission_value(emission, "allocationSubtree")
+    if isinstance(value, list):
+        return value
+
+    subtree = _emission_value(emission, "subtree")
+    if subtree is None:
+        return []
+
+    raw = _bytes_from_emission_value(subtree)
+    if not raw:
+        return []
+
+    try:
+        decoded = decode([MESSAGE_ALLOCATION_NODE_ABI_TYPE], raw)[0]
+    except Exception:
+        return []
+
+    allocation_subtree = []
+    for node in decoded:
+        message_type = int(node[0])
+        fee_params = bytes(node[6])
+        if message_type == MESSAGE_TYPE_INTERNAL:
+            fee_params = _canonical_internal_fee_params_from_genvm(fee_params)
+        allocation_subtree.append(
+            {
+                "messageType": message_type,
+                "onAcceptance": bool(node[1]),
+                "parentIndex": int(node[2]),
+                "recipient": str(node[3]).lower(),
+                "callKey": "0x" + bytes(node[4]).hex(),
+                "budget": int(node[5]),
+                "feeParams": "0x" + fee_params.hex(),
+            }
+        )
+    return allocation_subtree
+
+
+def _canonical_internal_fee_params_from_genvm(fee_params: bytes) -> bytes:
+    try:
+        decoded = decode([INTERNAL_MESSAGE_FEE_PARAMS_WITH_CAPS_ABI_TYPE], fee_params)[
+            0
+        ]
+    except Exception:
+        return fee_params
+    return encode(
+        [INTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE],
+        [
+            (
+                int(decoded[0]),
+                int(decoded[1]),
+                int(decoded[2]),
+                int(decoded[3]),
+                [int(rotation) for rotation in decoded[4]],
+            )
+        ],
+    )
 
 
 def _emission_int(emission: dict, name: str) -> int:
@@ -399,7 +512,13 @@ class Host(genvmhost.IHost):
         else:
             raise Exception(f"invalid result {res.result_kind}")
 
-        apply_storage_changes(res.result_storage_changes, state)
+        # Readonly (view) executions can still report storage changes on GenVM
+        # main — e.g. lazy data-structure initialization on first access
+        # (genlayer-embeddings VecDB._do_init inside a view knn). Those writes
+        # are ephemeral VM-side effects: discard them instead of tripping the
+        # storage_write readonly assertion.
+        if not getattr(state, "readonly", False):
+            apply_storage_changes(res.result_storage_changes, state)
 
         # Extract pending_transactions from result_emissions
         pending_transactions = []
@@ -414,12 +533,10 @@ class Host(genvmhost.IHost):
                             salt_nonce=0,
                             value=emission["value"],
                             on=emission["on"],
-                            fee_params=_emission_bytes(emission, "feeParams"),
+                            fee_params=_emission_internal_fee_params(emission),
                             declared_budget=_emission_int(emission, "declaredBudget"),
                             call_key=_emission_hex(emission, "callKey"),
-                            allocation_subtree=_emission_list(
-                                emission, "allocationSubtree"
-                            ),
+                            allocation_subtree=_emission_allocation_subtree(emission),
                         )
                     )
                 case "DeployContract":
@@ -431,12 +548,10 @@ class Host(genvmhost.IHost):
                             salt_nonce=emission["salt_nonce"],
                             value=emission["value"],
                             on=emission["on"],
-                            fee_params=_emission_bytes(emission, "feeParams"),
+                            fee_params=_emission_internal_fee_params(emission),
                             declared_budget=_emission_int(emission, "declaredBudget"),
                             call_key=_emission_hex(emission, "callKey"),
-                            allocation_subtree=_emission_list(
-                                emission, "allocationSubtree"
-                            ),
+                            allocation_subtree=_emission_allocation_subtree(emission),
                         )
                     )
                 case "EthSend":
@@ -449,12 +564,10 @@ class Host(genvmhost.IHost):
                             value=emission["value"],
                             on="finalized",
                             is_eth_send=True,
-                            fee_params=_emission_bytes(emission, "feeParams"),
+                            fee_params=_emission_external_fee_params(emission),
                             declared_budget=_emission_int(emission, "declaredBudget"),
                             call_key=_emission_hex(emission, "callKey"),
-                            allocation_subtree=_emission_list(
-                                emission, "allocationSubtree"
-                            ),
+                            allocation_subtree=_emission_allocation_subtree(emission),
                             gas_used=_emission_int(emission, "gasUsed"),
                         )
                     )

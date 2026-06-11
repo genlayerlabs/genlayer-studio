@@ -1,12 +1,13 @@
-# { "Depends": "py-genlayer:test" }
+# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
 
 import json
+import genlayer as gl
 from genlayer import *
 
 MAX_SCORE_DIFFERENCE = 3
 
 
-class CompanyNaming(gl.Contract):
+class CompanyNaming(gl.contract.Contract):
     scores: TreeMap[str, u256]
 
     def __init__(self):
@@ -48,7 +49,7 @@ This result should be perfectly parseable by a JSON parser without errors.
 """
 
         def leader_fn():
-            result = gl.nondet.exec_prompt(task)
+            result = gl.nondet.exec_prompt(task, response_format="text")
             result = _extract_json_from_string(result)
             result = json.loads(result)
             return result

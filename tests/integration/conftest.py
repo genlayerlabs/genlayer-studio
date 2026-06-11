@@ -1,7 +1,13 @@
 import json
+import os
 
 import pytest
 import requests
+
+from tests.integration import gltest_compat
+
+# gltest 0.24 discovers only the legacy base; remove after the gltest pin moves.
+gltest_compat.apply()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -12,7 +18,7 @@ def ensure_rate_limiting_disabled():
     rate limits unless someone explicitly enables it.  This guard prevents
     confusing 429 errors during test runs.
     """
-    url = "http://localhost:4000/api"
+    url = os.environ.get("TEST_JSONRPC_URL", "http://localhost:4000/api")
     # Send a burst of rapid requests — if we get a 429, rate limiting is on.
     for _ in range(15):
         resp = requests.post(

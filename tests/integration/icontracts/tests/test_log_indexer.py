@@ -34,8 +34,10 @@ def test_log_indexer(setup_validators):
     # ########################################
     closest_vector_log_0 = contract.get_closest_vector(args=["I like mango"]).call()
     closest_vector_log_0 = closest_vector_log_0
-    assert float(closest_vector_log_0["similarity"]) > 0.94
-    assert float(closest_vector_log_0["similarity"]) < 0.95
+    # similarity = 1 - EuclideanDistanceSquared on the main embeddings runner
+    # (the old runner used a cosine-style distance; values recalibrated)
+    assert float(closest_vector_log_0["similarity"]) > 0.80
+    assert float(closest_vector_log_0["similarity"]) < 0.81
 
     # ########################################
     # ############## Add log 1 ###############
@@ -67,8 +69,8 @@ def test_log_indexer(setup_validators):
         args=["I like mango a lot"]
     ).call()
     closest_vector_log_0_2 = closest_vector_log_0_2
-    assert float(closest_vector_log_0_2["similarity"]) > 0.94
-    assert float(closest_vector_log_0_2["similarity"]) < 0.95
+    assert float(closest_vector_log_0_2["similarity"]) > 0.81
+    assert float(closest_vector_log_0_2["similarity"]) < 0.82
 
     # ########################################
     # ########### Remove log 0 ##############
@@ -83,8 +85,10 @@ def test_log_indexer(setup_validators):
         args=["I like to eat mango"]
     ).call()
     closest_vector_log_0_3 = closest_vector_log_0_3
-    assert float(closest_vector_log_0_3["similarity"]) > 0.67
-    assert float(closest_vector_log_0_3["similarity"]) < 0.68
+    # negative because similarity = 1 - squared-euclidean distance, and the
+    # only remaining log ("I like carrots") is far from the query
+    assert float(closest_vector_log_0_3["similarity"]) > -0.18
+    assert float(closest_vector_log_0_3["similarity"]) < -0.17
 
     # ########################################
     # ##### Test id uniqueness after deletion #
