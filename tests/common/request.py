@@ -46,6 +46,18 @@ def post_request(
 
 
 def post_request_localhost(payload: dict):
+    # TEST_JSONRPC_URL (full endpoint, e.g. http://127.0.0.1:14000/api) lets
+    # the suite target a stack that is not on localhost:4000. A dedicated
+    # variable is used instead of JSONRPC_SERVER_URL because the latter is
+    # defined in .env with a docker-internal hostname and conftest loads .env
+    # with override=True.
+    url = os.environ.get("TEST_JSONRPC_URL")
+    if url:
+        return requests.post(
+            url,
+            data=json.dumps(payload),
+            headers={"Content-Type": "application/json"},
+        )
     return post_request(payload, "http", "localhost", "4000")
 
 

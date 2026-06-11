@@ -20,7 +20,7 @@ import pytest
 from genlayer_py import create_client, create_account, localnet
 
 
-RPC_URL = "http://localhost:4000/api"
+RPC_URL = os.environ.get("TEST_JSONRPC_URL", "http://localhost:4000/api")
 
 # Upgrade tests rely on the global validator registry for deploy/read/upgrade.
 # Keep them on the same xdist worker as icontract tests that temporarily wipe
@@ -162,7 +162,7 @@ def write_contract_method(
 # =============================================================================
 
 CONTRACT_V1 = """# v0.1.0
-# { "Depends": "py-genlayer:latest" }
+# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 from genlayer import *
 
@@ -196,7 +196,7 @@ class UpgradeTest(gl.Contract):
 """
 
 CONTRACT_V2 = """# v0.1.0
-# { "Depends": "py-genlayer:latest" }
+# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 from genlayer import *
 
@@ -234,7 +234,7 @@ class UpgradeTest(gl.Contract):
 """
 
 CONTRACT_V3_WITH_NEW_STATE = """# v0.1.0
-# { "Depends": "py-genlayer:latest" }
+# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 from genlayer import *
 
@@ -274,7 +274,7 @@ class UpgradeTest(gl.Contract):
 """
 
 INVALID_CONTRACT = """# v0.1.0
-# { "Depends": "py-genlayer:latest" }
+# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 from genlayer import *
 
@@ -284,7 +284,7 @@ class BrokenContract(gl.Contract):
 """
 
 SIMPLE_CONTRACT = """# v0.1.0
-# { "Depends": "py-genlayer:latest" }
+# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 from genlayer import *
 

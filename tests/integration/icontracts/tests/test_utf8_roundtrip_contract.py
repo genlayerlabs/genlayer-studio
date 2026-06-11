@@ -1,3 +1,5 @@
+import os
+
 import eth_utils
 import requests
 from eth_account import Account
@@ -5,6 +7,8 @@ from gltest import get_contract_factory
 from gltest.utils import extract_contract_address
 
 import backend.node.genvm.origin.calldata as calldata
+
+RPC_URL = os.environ.get("TEST_JSONRPC_URL", "http://127.0.0.1:4000/api")
 
 
 def test_utf8_roundtrip_contract_over_rpc(setup_validators):
@@ -20,7 +24,7 @@ def test_utf8_roundtrip_contract_over_rpc(setup_validators):
         calldata.encode({"method": "get_enriched_submission", "args": []})
     )
     raw_response = requests.post(
-        "http://127.0.0.1:4000/api",
+        RPC_URL,
         json={
             "jsonrpc": "2.0",
             "method": "eth_call",
@@ -45,7 +49,7 @@ def test_utf8_roundtrip_contract_over_rpc(setup_validators):
     assert decoded_from_raw["analysis"][0]["analysis"] == "clichéd"
 
     gen_call_response = requests.post(
-        "http://127.0.0.1:4000/api",
+        RPC_URL,
         json={
             "jsonrpc": "2.0",
             "method": "gen_call",
