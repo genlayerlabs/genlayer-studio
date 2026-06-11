@@ -811,7 +811,9 @@ class ConsensusWorker:
                         # (each validator change stops+starts the module; a
                         # burst of 5 creations churns for several seconds).
                         await asyncio.sleep(
-                            float(os.environ.get("GENVM_TRANSIENT_FATAL_BACKOFF_S", "3"))
+                            float(
+                                os.environ.get("GENVM_TRANSIENT_FATAL_BACKOFF_S", "3")
+                            )
                         )
                     # Retryable leader error — reset for another worker to pick up.
                     try:
