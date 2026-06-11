@@ -594,6 +594,7 @@ async def test_stuck_finalization_with_stale_timestamp_is_flagged(engine: Engine
     Session_ = sessionmaker(bind=engine, expire_on_commit=False)
     now = datetime.now(timezone.utc)
     stale_ts = int(time.time()) - 24 * 3600  # 1 day ago
+    created_at = now - timedelta(days=1)
 
     with Session_() as s:
         _insert_tx(
@@ -602,7 +603,7 @@ async def test_stuck_finalization_with_stale_timestamp_is_flagged(engine: Engine
             to_address="0x" + "f1" * 20,
             status="ACCEPTED",
             nonce=0,
-            created_at=now - timedelta(days=1),
+            created_at=created_at,
             timestamp_awaiting_finalization=stale_ts,
         )
         s.commit()
@@ -614,6 +615,18 @@ async def test_stuck_finalization_with_stale_timestamp_is_flagged(engine: Engine
     assert (
         result["stuck_finalization_count"] == 1
     ), f"Stale timestamp_awaiting_finalization must be flagged. Got: {result}"
+    assert result["stuck_finalization_transactions"] == [
+        {
+            "hash": "0x" + "f1" * 32,
+            "contract_address": "0x" + "f1" * 20,
+            "status": "ACCEPTED",
+            "created_at": pytest.approx(int(created_at.timestamp()), abs=1),
+            "timestamp_awaiting_finalization": stale_ts,
+            "blocked_at": None,
+            "worker_id": None,
+            "waiting_seconds": pytest.approx(24 * 3600, abs=5),
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -624,6 +637,7 @@ async def test_stuck_finalization_with_null_timestamp_is_flagged(engine: Engine)
     to claim_next_finalization)."""
     Session_ = sessionmaker(bind=engine, expire_on_commit=False)
     now = datetime.now(timezone.utc)
+    created_at = now - timedelta(hours=2)
 
     with Session_() as s:
         _insert_tx(
@@ -632,7 +646,7 @@ async def test_stuck_finalization_with_null_timestamp_is_flagged(engine: Engine)
             to_address="0x" + "f2" * 20,
             status="UNDETERMINED",
             nonce=0,
-            created_at=now - timedelta(hours=2),
+            created_at=created_at,
             timestamp_awaiting_finalization=None,
         )
         s.commit()
@@ -645,6 +659,18 @@ async def test_stuck_finalization_with_null_timestamp_is_flagged(engine: Engine)
         "NULL timestamp + old row must be flagged so a regression of the "
         f"insufficient-balance SEND bug is caught. Got: {result}"
     )
+    assert result["stuck_finalization_transactions"] == [
+        {
+            "hash": "0x" + "f2" * 32,
+            "contract_address": "0x" + "f2" * 20,
+            "status": "UNDETERMINED",
+            "created_at": pytest.approx(int(created_at.timestamp()), abs=1),
+            "timestamp_awaiting_finalization": None,
+            "blocked_at": None,
+            "worker_id": None,
+            "waiting_seconds": pytest.approx(2 * 3600, abs=5),
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -676,6 +702,7 @@ async def test_recent_finalization_eligible_row_is_not_flagged(engine: Engine):
     assert (
         result["stuck_finalization_count"] == 0
     ), f"Fresh finalization-eligible row must not be flagged. Got: {result}"
+    assert result["stuck_finalization_transactions"] == []
 
 
 @pytest.mark.asyncio
