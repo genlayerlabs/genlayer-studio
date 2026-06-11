@@ -1,12 +1,13 @@
 # v0.2.16
-# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
 
 import json
 
+import genlayer as gl
 from genlayer import *
 
 
-class LlmErc20(gl.Contract):
+class LlmErc20(gl.contract.Contract):
     balances: TreeMap[Address, u256]
 
     def __init__(self, total_supply: int) -> None:
@@ -54,7 +55,7 @@ The total sum of all balances should remain the same before and after the transa
 
         def get_transfer_result() -> str:
             return (
-                gl.nondet.exec_prompt(prompt_input + task)
+                gl.nondet.exec_prompt(prompt_input + task, response_format="text")
                 .replace("```json", "")
                 .replace("```", "")
             )

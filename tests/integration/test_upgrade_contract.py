@@ -162,11 +162,12 @@ def write_contract_method(
 # =============================================================================
 
 CONTRACT_V1 = """# v0.1.0
-# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
 
+import genlayer as gl
 from genlayer import *
 
-class UpgradeTest(gl.Contract):
+class UpgradeTest(gl.contract.Contract):
     counter: u64
     name: str
 
@@ -196,11 +197,12 @@ class UpgradeTest(gl.Contract):
 """
 
 CONTRACT_V2 = """# v0.1.0
-# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
 
+import genlayer as gl
 from genlayer import *
 
-class UpgradeTest(gl.Contract):
+class UpgradeTest(gl.contract.Contract):
     counter: u64
     name: str
 
@@ -234,11 +236,12 @@ class UpgradeTest(gl.Contract):
 """
 
 CONTRACT_V3_WITH_NEW_STATE = """# v0.1.0
-# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
 
+import genlayer as gl
 from genlayer import *
 
-class UpgradeTest(gl.Contract):
+class UpgradeTest(gl.contract.Contract):
     counter: u64
     name: str
     extra_field: str  # NEW FIELD
@@ -274,21 +277,23 @@ class UpgradeTest(gl.Contract):
 """
 
 INVALID_CONTRACT = """# v0.1.0
-# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
 
+import genlayer as gl
 from genlayer import *
 
-class BrokenContract(gl.Contract):
+class BrokenContract(gl.contract.Contract):
     def __init__(self):
         this is not valid python syntax!!!
 """
 
 SIMPLE_CONTRACT = """# v0.1.0
-# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
 
+import genlayer as gl
 from genlayer import *
 
-class SimpleContract(gl.Contract):
+class SimpleContract(gl.contract.Contract):
     value: u64
 
     def __init__(self):

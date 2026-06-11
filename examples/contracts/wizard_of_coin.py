@@ -1,11 +1,12 @@
 # v0.2.16
-# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
+import genlayer as gl
 from genlayer import *
 
 import json
 
 
-class WizardOfCoin(gl.Contract):
+class WizardOfCoin(gl.contract.Contract):
     have_coin: bool
 
     def __init__(self, have_coin: bool):
@@ -40,7 +41,7 @@ This result should be perfectly parseable by a JSON parser without errors.
 """
 
         def get_wizard_answer():
-            result = gl.nondet.exec_prompt(prompt)
+            result = gl.nondet.exec_prompt(prompt, response_format="text")
             result = result.replace("```json", "").replace("```", "")
             print(result)
             return result

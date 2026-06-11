@@ -1,10 +1,11 @@
 # v0.1.0
-# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
 
 import json
 from enum import Enum
 from datetime import datetime
 from urllib.parse import urlparse
+import genlayer as gl
 from genlayer import *
 
 
@@ -14,7 +15,7 @@ class Status(Enum):
     ERROR = "Error"
 
 
-class IntelligentOracle(gl.Contract):
+class IntelligentOracle(gl.contract.Contract):
     # Declare persistent storage fields
     prediction_market_id: str
     title: str
@@ -224,13 +225,14 @@ Provide your response in **valid JSON** format with the following structure:
 - **Clarity:** Make sure your reasoning is easy to understand.
 - **Validity:** Ensure the JSON output is properly formatted and free of errors. Do not include trailing commas.
                 """
-                result = gl.nondet.exec_prompt(task)
+                result = gl.nondet.exec_prompt(task, response_format="text")
                 print(result)
                 return result
 
             result = gl.eq_principle.prompt_comparative(
                 evaluate_single_source,
-                principle="`outcome` field must be exactly the same. All other fields must be similar",
+                # main SDK: prompt_comparative's principle is positional-only
+                "`outcome` field must be exactly the same. All other fields must be similar",
             )
 
             result_dict = _parse_json_dict(result)
@@ -306,13 +308,14 @@ Provide your response in **valid JSON** format with the following structure:
 
             """
 
-            result = gl.nondet.exec_prompt(task)
+            result = gl.nondet.exec_prompt(task, response_format="text")
             print(result)
             return result
 
         result = gl.eq_principle.prompt_comparative(
             evaluate_all_sources,
-            principle="`outcome` field must be exactly the same. All other fields must be similar",
+            # main SDK: prompt_comparative's principle is positional-only
+            "`outcome` field must be exactly the same. All other fields must be similar",
         )
 
         result_dict = _parse_json_dict(result)

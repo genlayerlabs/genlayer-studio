@@ -1,8 +1,9 @@
-# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
+import genlayer as gl
 from genlayer import *
 
 
-class GenVMSmoke(gl.Contract):
+class GenVMSmoke(gl.contract.Contract):
     web_data: str
     prompt_result: str
 
@@ -14,16 +15,17 @@ class GenVMSmoke(gl.Contract):
 
         def ask_llm() -> str:
             return gl.nondet.exec_prompt(
-                "Respond with exactly the two characters OK and nothing else."
+                "Respond with exactly the two characters OK and nothing else.",
+                response_format="text",
             ).strip()
 
         self.prompt_result = gl.eq_principle.strict_eq(ask_llm).strip()
 
         if "example" not in self.web_data.lower():
-            raise gl.Rollback("Web smoke check failed")
+            raise gl.vm.UserError("Web smoke check failed")
 
         if self.prompt_result != "OK":
-            raise gl.Rollback("LLM smoke check failed")
+            raise gl.vm.UserError("LLM smoke check failed")
 
     @gl.public.view
     def get_web_data(self) -> str:

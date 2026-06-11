@@ -4,6 +4,11 @@ import os
 import pytest
 import requests
 
+from tests.integration import gltest_compat
+
+# gltest 0.24 discovers only the legacy base; remove after the gltest pin moves.
+gltest_compat.apply()
+
 
 @pytest.fixture(scope="session", autouse=True)
 def ensure_rate_limiting_disabled():

@@ -1,20 +1,22 @@
 # v0.2.16
 # {
 #   "Seq": [
-#     { "Depends": "py-lib-genlayer-embeddings:0bmbm3cyfwxsyh454z53vxqjf47wz2q7smcqp1q4g4a6k2kidnyk" },
-#     { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+#     { "Depends": "py-lib-genlayer-embeddings:0wcvi35grdr47ynkckzriz5sjn5080w2njk7v2cqx3xpp6p1989y" },
+#     { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
 #   ]
 # }
 
 import numpy as np
+import genlayer as gl
 from genlayer import *
+from genlayer.storage import allow
 import genlayer_embeddings as gle
 
 from dataclasses import dataclass
 import typing
 
 
-@allow_storage
+@allow
 @dataclass
 class StoreValue:
     log_id: u256
@@ -22,9 +24,9 @@ class StoreValue:
 
 
 # contract class
-class LogIndexer(gl.Contract):
-    # The 0bmbm3cy embeddings runner's VecDB takes an explicit Distance type
-    # parameter (the 09h0i209 runner it replaces defaulted to euclidean).
+class LogIndexer(gl.contract.Contract):
+    # The 0wcvi35 embeddings runner's VecDB takes an explicit Distance type
+    # parameter.
     vector_store: gle.VecDB[
         np.float32, typing.Literal[384], StoreValue, gle.EuclideanDistanceSquared
     ]
@@ -61,8 +63,13 @@ class LogIndexer(gl.Contract):
 
     @gl.public.write
     def update_log(self, log_id: int, log: str) -> None:
-        emb = self.get_embedding(log)
-        for elem in self.vector_store.knn(emb, 2):
+        # Locate the element by exact text match via plain iteration instead
+        # of knn: the nearest-neighbour search ends in the same text-equality
+        # check anyway, and the cover-tree knn currently trips GenVM main's
+        # deterministic-mode float trap (wasm_trap DeterministicMode) when
+        # invoked from a write method. Views (get_closest_vector) still
+        # exercise knn.
+        for elem in self.vector_store:
             if elem.value.text == log:
                 elem.value.log_id = u256(log_id)
 
