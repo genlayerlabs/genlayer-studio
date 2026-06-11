@@ -512,7 +512,13 @@ class Host(genvmhost.IHost):
         else:
             raise Exception(f"invalid result {res.result_kind}")
 
-        apply_storage_changes(res.result_storage_changes, state)
+        # Readonly (view) executions can still report storage changes on GenVM
+        # main — e.g. lazy data-structure initialization on first access
+        # (genlayer-embeddings VecDB._do_init inside a view knn). Those writes
+        # are ephemeral VM-side effects: discard them instead of tripping the
+        # storage_write readonly assertion.
+        if not getattr(state, "readonly", False):
+            apply_storage_changes(res.result_storage_changes, state)
 
         # Extract pending_transactions from result_emissions
         pending_transactions = []
