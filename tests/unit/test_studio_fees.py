@@ -16,11 +16,12 @@ from backend.domain.types import TransactionType
 from backend.errors.errors import InvalidTransactionError
 from backend.database_handler.accounts_manager import _infer_final_round
 from backend.database_handler.transactions_processor import TransactionsProcessor
-from backend.protocol_rpc.exceptions import JSONRPCError
+from backend.protocol_rpc.exceptions import JSONRPCError, NotFoundError
 from backend.protocol_rpc.endpoints import (
     _current_fee_round,
     _handle_appeal_or_top_up_and_submit,
     _handle_top_up_fees,
+    get_transaction_status_details,
     get_transaction_status,
     _stage_simulated_call_value,
     _simulation_fee_accounting,
@@ -6364,15 +6365,34 @@ def _processor_transaction(*, accounting=None, execution_result=None):
     )
 
 
-def test_transaction_status_rpc_shape_includes_canonical_status_code():
+def test_transaction_status_rpc_returns_legacy_status_string():
     class _Processor:
         def get_transaction_status(self, transaction_hash):
             return TransactionsProcessor._status_payload("ACCEPTED")
 
-    assert get_transaction_status(_Processor(), "0x1234") == {
+    assert get_transaction_status(_Processor(), "0x1234") == "ACCEPTED"
+
+
+def test_transaction_status_details_rpc_shape_includes_canonical_status_code():
+    class _Processor:
+        def get_transaction_status(self, transaction_hash):
+            return TransactionsProcessor._status_payload("ACCEPTED")
+
+    assert get_transaction_status_details(_Processor(), "0x1234") == {
         "status": "ACCEPTED",
         "statusCode": 5,
     }
+
+
+def test_transaction_status_details_rpc_raises_not_found():
+    class _Processor:
+        def get_transaction_status(self, transaction_hash):
+            return None
+
+    with pytest.raises(NotFoundError) as exc_info:
+        get_transaction_status_details(_Processor(), "0xmissing")
+
+    assert exc_info.value.data == {"hash": "0xmissing"}
 
 
 def test_transaction_payload_maps_execution_result_name():

@@ -1571,6 +1571,20 @@ def get_studio_transaction_by_hash(
 
 def get_transaction_status(
     transactions_processor: TransactionsProcessor, transaction_hash: str
+) -> str:
+    status = transactions_processor.get_transaction_status(transaction_hash)
+    if status is None:
+        raise NotFoundError(
+            message=f"Transaction {transaction_hash} not found",
+            data={"hash": transaction_hash},
+        )
+    # Compatibility contract for deployed apps (Rally): this legacy RPC returns
+    # the status string only. Extensions belong in gen_getTransactionStatusDetails.
+    return status["status"]
+
+
+def get_transaction_status_details(
+    transactions_processor: TransactionsProcessor, transaction_hash: str
 ) -> dict:
     status = transactions_processor.get_transaction_status(transaction_hash)
     if status is None:
