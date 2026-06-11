@@ -6,6 +6,11 @@
 
 This Studio is an interactive sandbox designed for developers to explore the potential of the [GenLayer Protocol](https://genlayer.com/). It replicates the GenLayer network's execution environment and consensus algorithm, but offers a controlled and local environment to test different ideas and behaviors.
 
+## Branching
+
+See [docs/BRANCHING.md](docs/BRANCHING.md) for the release-train model used by
+this repo.
+
 ## Prerequisites
 Before installing the GenLayer CLI, ensure you have the following prerequisites installed:
 
