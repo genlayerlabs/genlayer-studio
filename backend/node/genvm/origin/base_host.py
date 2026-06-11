@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 from .calldata import Address
 from . import calldata as gvm_calldata
+from . import fees
 from . import host_fns
 from . import public_abi
 
@@ -94,6 +95,28 @@ class HostException(Exception):
         super().__init__(message or f"GenVM error: {error_code}")
 
 
+# Studio-local retry shim for transient manager module restart races.
+class GenVMManagerRetryableError(Exception):
+    def __init__(self, status: int, body: typing.Any):
+        self.status = status
+        self.body = body
+        super().__init__(f"genvm manager /genvm/run failed: {status} {body}")
+
+
+def _is_retryable_manager_run_error(status: int, body: typing.Any) -> bool:
+    if status != 500 or not isinstance(body, dict):
+        return False
+
+    error = body.get("error")
+    if not isinstance(error, str):
+        return False
+
+    return (
+        "modules are required but not running" in error
+        or "modules are required but not all are running" in error
+    )
+
+
 class Message(typing.TypedDict):
     contract_address: Address
     sender_address: Address
@@ -114,28 +137,13 @@ class ResultFingerprint(typing.TypedDict):
     module_instances: dict[str, typing.Any]
 
 
-class MessageFeeParams(typing.TypedDict):
-    leader_timeunits_allocation: int
-    validator_timeunits_allocation: int
-    execution_budget_per_round: int
-    rotations: list[int]
-
-
-class MessageFeeAllocationNode(typing.TypedDict):
-    message_type: typing.Literal["InternalAccepted", "InternalFinalized", "External"]
-    parent_index: int | None
-    recipient: Address | None
-    call_key: bytes | None
-    budget: int
-    fee_params: MessageFeeParams
-
-
 class EthSendInner(typing.TypedDict):
     type: typing.Literal["EthSend"]
     address: Address
     calldata: bytes
     value: int
     feeParams: typing.NotRequired[bytes]
+    fee_params: typing.NotRequired[fees.ExternalMessageParams]
     declaredBudget: typing.NotRequired[int]
     callKey: typing.NotRequired[bytes]
     allocationSubtree: typing.NotRequired[list[dict]]
@@ -148,9 +156,11 @@ class PostMessageInner(typing.TypedDict):
     value: int
     on: typing.Literal["finalized", "accepted"]
     feeParams: typing.NotRequired[bytes]
+    fee_params: typing.NotRequired[fees.InternalMessageParams]
     declaredBudget: typing.NotRequired[int]
     callKey: typing.NotRequired[bytes]
     allocationSubtree: typing.NotRequired[list[dict]]
+    subtree: typing.NotRequired[bytes]
 
 
 class DeployContractInner(typing.TypedDict):
@@ -161,9 +171,11 @@ class DeployContractInner(typing.TypedDict):
     on: typing.Literal["finalized", "accepted"]
     salt_nonce: int
     feeParams: typing.NotRequired[bytes]
+    fee_params: typing.NotRequired[fees.InternalMessageParams]
     declaredBudget: typing.NotRequired[int]
     callKey: typing.NotRequired[bytes]
     allocationSubtree: typing.NotRequired[list[dict]]
+    subtree: typing.NotRequired[bytes]
 
 
 class EmitEventInner(typing.TypedDict):
@@ -358,7 +370,9 @@ async def host_loop(
                 )
                 return None
             case host_fns.Methods.CONSUME_FUEL:
-                gas = await recv_int(8)
+                # GenVM main sends fuel as a 32-byte little-endian U256
+                # (rc3 used 8 bytes); see executor/src/host/mod.rs consume_fuel.
+                gas = await recv_int(32)
                 await handler.consume_gas(gas)
             case host_fns.Methods.ETH_CALL:
                 account = await read_exact(ACCOUNT_ADDR_SIZE)
@@ -390,7 +404,14 @@ async def host_loop(
                 else:
                     res = min(res, 2**53 - 1)
                     await send_all(bytes([host_fns.Errors.OK]))
-                    await send_all(res.to_bytes(8, byteorder="little", signed=False))
+                    # GenVM main reads a 32-byte little-endian U256 here (rc3
+                    # read 8 bytes). Sending only 8 left the executor blocked
+                    # on the remaining 24 bytes while this loop waited for the
+                    # next method — a read-read deadlock that stalled every
+                    # nondet (exec_prompt/web) execution in PROPOSING until
+                    # LEADER_TIMEOUT. See executor/src/host/mod.rs
+                    # remaining_fuel_as_gen and wasi/genlayer_sdk.rs call sites.
+                    await send_all(res.to_bytes(32, byteorder="little", signed=False))
             case host_fns.Methods.NOTIFY_NONDET_DISAGREEMENT:
                 call_no = await recv_int()
                 await handler.notify_nondet_disagreement(call_no)
@@ -477,7 +498,7 @@ async def run_genvm(
     code: bytes | None = None,
     calldata: bytes,
     leader_nondet_results: list[bytes] | None = None,
-    message_fee_allocation: list[MessageFeeAllocationNode] | None = None,
+    message_fee_allocation: list[fees.MessageAllocationNode] | None = None,
     request_extra: dict[str, gvm_calldata.Encodable] = {},
 ) -> RunHostAndProgramRes:
     logger = ctx.logger
@@ -535,6 +556,8 @@ async def run_genvm(
                 logger.error(
                     f"genvm manager /genvm/run failed", status=resp.status, body=data
                 )
+                if _is_retryable_manager_run_error(resp.status, data):
+                    raise GenVMManagerRetryableError(resp.status, data)
                 raise Exception(
                     f"genvm manager /genvm/run failed: {resp.status} {data}"
                 )
@@ -564,19 +587,23 @@ async def run_genvm(
                     },
                 )
                 break
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except (
+                aiohttp.ClientError,
+                asyncio.TimeoutError,
+                GenVMManagerRetryableError,
+            ) as exc:
                 delay = ctx.retry_delay(TimeoutAction.GenVMRun, attempt)
-                ctx.add_stat(
-                    f"manager_run_attempt_{attempt}_error",
-                    {
-                        "attempt": attempt,
-                        "error_type": type(exc).__name__,
-                        "duration_ms": round(
-                            (time.perf_counter() - attempt_start) * 1000
-                        ),
-                        "will_retry": delay is not None,
-                    },
-                )
+                error_stat = {
+                    "attempt": attempt,
+                    "error_type": type(exc).__name__,
+                    "duration_ms": round((time.perf_counter() - attempt_start) * 1000),
+                    "will_retry": delay is not None,
+                }
+                if isinstance(exc, GenVMManagerRetryableError):
+                    error_stat["status"] = exc.status
+                    error_stat["body"] = exc.body
+                    error_stat["retry_reason"] = "manager_modules_not_running"
+                ctx.add_stat(f"manager_run_attempt_{attempt}_error", error_stat)
                 if delay is None:
                     logger.error(
                         "genvm manager request failed after all retries",

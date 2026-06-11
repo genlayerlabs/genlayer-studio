@@ -1,11 +1,11 @@
 # v0.2.16
-# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
 
-from genlayer import *
+import genlayer as gl
 
 
 # contract class
-class Storage(gl.Contract):
+class Storage(gl.contract.Contract):
     storage: str
 
     # constructor

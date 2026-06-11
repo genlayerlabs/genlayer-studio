@@ -1,11 +1,93 @@
+FROM nixos/nix:2.30.2 AS genvm-source-build
+
+ARG TARGETARCH
+ARG GENVM_REF
+# Nix `cores` for the genvm build (0 = all). Cap on memory-constrained or
+# emulated builders where a full-parallel rust build can OOM.
+ARG GENVM_BUILD_CORES=0
+
+# nixos/nix ships bash only inside the default nix profile (no /bin/bash).
+SHELL ["/nix/var/nix/profiles/default/bin/bash", "-x", "-c"]
+
+# Source builds bind Studio to a GenVM branch/SHA. The flake target follows
+# TARGETARCH (amd64-linux / arm64-linux); both build natively — runners are
+# universal wasm and come prebuilt from genvm's GCS cache either way.
+# Recipe mirrors genvm's own release CI (.github/workflows/release.yaml +
+# support/ci/pipelines/build.sh): patch flake-config.json, prefetch deps,
+# nix build manager/executor/runners-all, merge the outputs.
+RUN set -euo pipefail ; \
+    if [ -n "$GENVM_REF" ]; then \
+        # filter-syscalls=false: nix's seccomp filter cannot load under
+        # qemu/Rosetta emulation (cross-platform local builds); harmless on
+        # native hosts since the image already runs with sandbox disabled.
+        printf 'experimental-features = nix-command flakes\nfilter-syscalls = false\ncores = %s\n' "$GENVM_BUILD_CORES" >> /etc/nix/nix.conf ; \
+        nix-env -iA nixpkgs.python3 nixpkgs.gnused ; \
+        git clone https://github.com/genlayerlabs/genvm /src/genvm ; \
+        cd /src/genvm ; \
+        git checkout "$GENVM_REF" ; \
+        FULL_SHA="$(git rev-parse HEAD)" ; \
+        SHORT_SHA="$(git rev-parse --short HEAD)" ; \
+        # Executor version must extend a version the committed manifest knows:
+        # genvm's patch-manifest renames the highest base `vX.Y.Z` entry to our
+        # `vX.Y.Z-dev<sha>` tag (suffix branch of its version matching), so
+        # derive the base from the bound ref's own manifest.
+        BASE_VER="$(grep -oE '^  v[0-9]+\.[0-9]+\.[0-9]+:' modules/install/data/manifest.yaml | tr -d ' :' | sort -V | tail -n1)" ; \
+        test -n "$BASE_VER" ; \
+        printf '{"executor-version":"%s-dev%s","repo-url":"https://github.com/genlayerlabs/genvm.git","head-revision":"%s"}\n' "$BASE_VER" "$SHORT_SHA" "$FULL_SHA" > flake-config.json ; \
+        if [[ "$TARGETARCH" == "amd64" ]] || [[ -z "$TARGETARCH" ]]; then \
+            GT="amd64-linux" ; \
+        elif [[ "$TARGETARCH" == "arm64" ]]; then \
+            GT="arm64-linux" ; \
+        else \
+            echo "ERROR: Unsupported TARGETARCH $TARGETARCH" ; exit 1 ; \
+        fi ; \
+        # Upstream workaround: genvm support/rust.nix patchelf's its rust
+        # toolchain with a hardcoded x86-64 ELF loader, which breaks native
+        # aarch64-linux builds ('.cargo-wrapped: cannot execute'). Point it at
+        # the aarch64 loader on arm64. Drop once fixed in genvm.
+        if [[ "$GT" == "arm64-linux" ]]; then \
+            LOADER_MATCHES="$(grep -c 'ld-linux-x86-64\.so\.2' support/rust.nix || true)" ; \
+            if [[ "$LOADER_MATCHES" == "1" ]]; then \
+                sed -i 's|ld-linux-x86-64\.so\.2|ld-linux-aarch64.so.1|' support/rust.nix ; \
+            elif [[ "$LOADER_MATCHES" != "0" ]]; then \
+                echo "ERROR: unexpected ld-linux-x86-64 matches ($LOADER_MATCHES) in support/rust.nix — revisit the arm64 loader workaround" ; exit 1 ; \
+            fi ; \
+        fi ; \
+        python3 support/runner-script.py dependencies prefetch-needed --all --target "manager-$GT" --target "executor-$GT" --target runners-all ; \
+        nix build -o /out-manager ".#manager-$GT" ; \
+        nix build -o /out-executor ".#executor-$GT" ; \
+        # Preload prebuilt runner tars (fixed-output derivations) from genvm's
+        # public GCS cache so `runners-all` rarely compiles anything; the same
+        # trick genvm CI uses (support/ci/pipelines/test-rust.sh). Best-effort:
+        # anything missing is built from source by the next nix build.
+        python3 support/runner-script.py download --nix-preload --allow-partial --dest /tmp/runners-dl --registry /out-executor/executor/*/data/all.json || true ; \
+        nix build -o /out-runners ".#runners-all" ; \
+        mkdir -p /genvm-out ; \
+        cp -rL --no-preserve=ownership /out-manager/. /genvm-out/ ; \
+        cp -rL --no-preserve=ownership /out-executor/. /genvm-out/ ; \
+        cp -rL --no-preserve=ownership /out-runners/. /genvm-out/ ; \
+        # Keep nix-store modes (exec bits!) but make everything owner-writable
+        # so post-install can create venvs/cache dirs inside /genvm later.
+        chmod -R u+w /genvm-out ; \
+        # Drop sources + nix store build artifacts so this layer (and the
+        # buildx/gha cache entry for it) stays close to the size of /genvm-out.
+        rm -f /out-manager /out-executor /out-runners ; \
+        rm -rf /src/genvm /tmp/runners-dl ; \
+        nix-collect-garbage -d || true ; \
+    else \
+        mkdir -p /genvm-out ; \
+    fi
+
 FROM ubuntu:24.04 AS base
 
 ARG TARGETPLATFORM
 ARG TARGETARCH
 
 ARG GENVM_TAG
+ARG GENVM_REF
 
 ENV GENVM_TAG=$GENVM_TAG
+ENV GENVM_REF=$GENVM_REF
 
 ARG path=/app
 WORKDIR $path
@@ -48,9 +130,13 @@ ENV RUST_BACKTRACE=1
 
 # Download and extract GenVM binaries. Keep downloads in the extraction layer so
 # architecture tarballs do not remain in lower image layers.
+COPY --from=genvm-source-build /genvm-out/ /genvm/
 RUN cd /genvm \
-    && test -n "$GENVM_TAG" \
-    && if [[ "$TARGETPLATFORM" == "linux/amd64" ]] || [[ -z "$TARGETPLATFORM" ]]; then \
+    && if [[ -n "$GENVM_TAG" && -n "$GENVM_REF" ]] || [[ -z "$GENVM_TAG" && -z "$GENVM_REF" ]]; then \
+            echo "ERROR: exactly one of GENVM_TAG or GENVM_REF must be set" ; exit 1 ; \
+        fi \
+    && if [[ -z "$GENVM_REF" ]]; then \
+        if [[ "$TARGETPLATFORM" == "linux/amd64" ]] || [[ -z "$TARGETPLATFORM" ]]; then \
             ARCH_FILE="genvm-linux-amd64.tar.xz" ; \
         elif [[ "$TARGETPLATFORM" == "linux/arm64" ]] ; \
         then \
@@ -72,9 +158,19 @@ RUN cd /genvm \
         "https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-runners-all.tar.xz" \
     && tar -xf "$ARCH_FILE" \
     && tar -xf genvm-runners-all.tar.xz \
-    && rm *.tar.xz \
+    && rm *.tar.xz ; \
+    fi \
     && chown -R backend-user:backend-group /genvm \
-    && su - backend-user -c "/genvm/bin/post-install.py --precompile false" \
+    # Source path: skip lief bin-patch — nix outputs are already
+    # $ORIGIN-rpath-patched by genvm's patch-rpath, and lief SIGABRTs on the
+    # zig/musl-linked amd64 executor ("Can't read got entries"). bin-check
+    # still validates the binaries execute. --default-download false: nothing
+    # to download for an unreleased SHA.
+    && if [[ -n "$GENVM_REF" ]]; then \
+            su - backend-user -c "/genvm/bin/post-install.py --precompile false --default-download false --bin-patch false" ; \
+        else \
+            su - backend-user -c "/genvm/bin/post-install.py --precompile false" ; \
+        fi \
     && find /genvm -name genvm.yaml -exec sed -i 's|cache_dir:.*|cache_dir: /genvm-cache/|' {} + \
     && mkdir -p /genvm-cache && chown backend-user:backend-group /genvm-cache \
     && cd "$path" \

@@ -731,9 +731,9 @@ def create_child_fee_accounting(
         message,
         message_allocations or [],
     )
-    child_message_budget = (
-        declared_budget - child_primary if child_message_allocations else 0
-    )
+    # Mode 1 children have no allocation subtree but still receive the remainder
+    # of their declared budget as a message-fee bucket for their own children.
+    child_message_budget = declared_budget - child_primary
     child_fees = _fees_distribution_from_internal_params(
         fee_params,
         total_message_fees=child_message_budget,
@@ -812,21 +812,38 @@ def genvm_message_fee_allocation(
     if not accounting.get("message_allocations"):
         if int(accounting.get("message_fee_budget", 0) or 0) > 0:
             raise Mode1MessageFeesRequireGenVMPerEmissionSupport(
-                "Mode1MessageFeesRequireGenVMPerEmissionSupport: GenVM v0.3.x "
-                "message emissions do not carry per-emission feeParams/"
-                "declaredBudget without a message allocation tree"
+                "Mode1MessageFeesRequireGenVMPerEmissionSupport: fee-bearing "
+                "GenVM messages require a message allocation tree"
             )
         return []
 
-    nodes: list[dict[str, Any]] = []
-    for raw_node in accounting.get("message_allocations") or []:
-        node = _serializable_message_allocation(raw_node)
-        if int(node["parentIndex"]) != NODE_ROOT_SENTINEL:
+    fees_distribution = normalize_fees_distribution(
+        accounting.get("fees_distribution") or {}
+    )
+    studio_nodes = [
+        _serializable_message_allocation(raw_node)
+        for raw_node in accounting.get("message_allocations") or []
+    ]
+    genvm_nodes = [
+        _genvm_message_allocation_node(
+            node,
+            address_factory,
+            fees_distribution,
+        )
+        for node in studio_nodes
+    ]
+    roots: list[dict[str, Any]] = []
+    for index, node in enumerate(studio_nodes):
+        parent_index = int(node["parentIndex"])
+        if parent_index == NODE_ROOT_SENTINEL:
+            roots.append(genvm_nodes[index])
             continue
-        nodes.append(_genvm_message_allocation_node(node, address_factory))
-    if nodes:
-        nodes.append(_genvm_external_legacy_fallback_message_fee_allocation())
-    return nodes
+        if 0 <= parent_index < len(genvm_nodes):
+            genvm_nodes[parent_index]["children"].append(genvm_nodes[index])
+
+    if roots:
+        roots.append(_genvm_external_legacy_fallback_message_fee_allocation())
+    return roots
 
 
 def apply_fee_top_up(
@@ -998,12 +1015,12 @@ def fill_message_fee_payload_from_allocation(
         raise MessageNoMatchingAllocation("MessageNoMatchingAllocation")
 
     index, allocation = resolved
-    if bool(allocation["onAcceptance"]) != bool(message.get("onAcceptance", False)):
-        raise MessageEmissionPhaseMismatch("MessageEmissionPhaseMismatch")
-
     updated = copy.deepcopy(message)
     message_type = int(updated.get("messageType", MESSAGE_TYPE_INTERNAL))
     if message_type == MESSAGE_TYPE_EXTERNAL:
+        # External messages have no accepted/finalized lifecycle. GenVM main
+        # carries `on: finalized` on external allocation nodes only to satisfy
+        # the request schema, so do not phase-check them here.
         if not _message_has_fee_params(updated):
             updated["feeParams"] = allocation["feeParams"]
         updated["callKey"] = _normalize_call_key(
@@ -1011,6 +1028,9 @@ def fill_message_fee_payload_from_allocation(
         )
         updated["messageFeeMode"] = "external"
         return updated
+
+    if bool(allocation["onAcceptance"]) != bool(message.get("onAcceptance", False)):
+        raise MessageEmissionPhaseMismatch("MessageEmissionPhaseMismatch")
 
     if int(updated.get("declaredBudget", 0) or 0) == 0:
         updated["declaredBudget"] = int(allocation["budget"])
@@ -2181,47 +2201,63 @@ def _fees_distribution_from_internal_params(
     }
 
 
-def _genvm_message_fee_params(node: dict[str, Any]) -> dict[str, Any]:
+def _genvm_message_fee_params(
+    node: dict[str, Any],
+    fees_distribution: dict[str, Any],
+) -> dict[str, Any]:
     if int(node["messageType"]) == MESSAGE_TYPE_EXTERNAL:
+        decoded = decode_external_message_fee_params(node["feeParams"])
         return {
-            "leader_timeunits_allocation": 0,
-            "validator_timeunits_allocation": 0,
-            "execution_budget_per_round": 0,
-            "rotations": [0],
+            "External": {
+                "gas_limit": int(decoded["gasLimit"]),
+                "max_gas_price": int(decoded["maxGasPrice"]),
+            },
         }
 
     decoded = decode_internal_message_fee_params(node["feeParams"])
     return {
-        "leader_timeunits_allocation": int(decoded["leaderTimeunitsAllocation"]),
-        "validator_timeunits_allocation": int(decoded["validatorTimeunitsAllocation"]),
-        "execution_budget_per_round": int(decoded["executionBudgetPerRound"]),
-        "rotations": [int(rotation) for rotation in decoded["rotations"]],
+        "Internal": {
+            "leader_timeunits_allocation": int(decoded["leaderTimeunitsAllocation"]),
+            "validator_timeunits_allocation": int(
+                decoded["validatorTimeunitsAllocation"]
+            ),
+            "execution_budget_per_round": int(decoded["executionBudgetPerRound"]),
+            "rotations": [int(rotation) for rotation in decoded["rotations"]],
+            # Studio's chain-canonical per-node ABI carries only the first five
+            # internal fields. The three price caps live on fees_distribution,
+            # so add them only at the GenVM manager boundary.
+            "max_price_gen_per_time_unit": int(
+                fees_distribution.get("maxPriceGenPerTimeUnit", 0)
+            ),
+            "storage_fee_max_gas_price": int(
+                fees_distribution.get("storageFeeMaxGasPrice", 0)
+            ),
+            "receipt_fee_max_gas_price": int(
+                fees_distribution.get("receiptFeeMaxGasPrice", 0)
+            ),
+        },
     }
 
 
 def _genvm_message_allocation_node(
     node: dict[str, Any],
     address_factory: Callable[[str], Any] | None,
+    fees_distribution: dict[str, Any],
 ) -> dict[str, Any]:
     return {
-        "message_type": _genvm_message_type_name(node),
-        "parent_index": _genvm_parent_index(node),
         "recipient": _genvm_recipient(node, address_factory),
         "call_key": _genvm_call_key(node),
         "budget": int(node["budget"]),
-        "fee_params": _genvm_message_fee_params(node),
+        "on": _genvm_message_on(node),
+        "fee_params": _genvm_message_fee_params(node, fees_distribution),
+        "children": [],
     }
 
 
-def _genvm_message_type_name(node: dict[str, Any]) -> str:
+def _genvm_message_on(node: dict[str, Any]) -> str:
     if int(node["messageType"]) == MESSAGE_TYPE_EXTERNAL:
-        return "External"
-    return "InternalAccepted" if bool(node["onAcceptance"]) else "InternalFinalized"
-
-
-def _genvm_parent_index(node: dict[str, Any]) -> int | None:
-    parent_index = int(node["parentIndex"])
-    return None if parent_index == NODE_ROOT_SENTINEL else parent_index
+        return "finalized"
+    return "accepted" if bool(node["onAcceptance"]) else "finalized"
 
 
 def _genvm_recipient(
@@ -2242,54 +2278,70 @@ def _genvm_call_key(node: dict[str, Any]) -> bytes | None:
 
 
 def _genvm_unmetered_message_fee_allocation() -> list[dict[str, Any]]:
-    fee_params = {
-        "leader_timeunits_allocation": 5,
-        "validator_timeunits_allocation": 5,
-        "execution_budget_per_round": 2**10,
-        "rotations": [4, 4, 4, 4, 4],
-    }
     budget = 2**200
+    internal_fee_params = {
+        "Internal": {
+            "leader_timeunits_allocation": 5,
+            "validator_timeunits_allocation": 5,
+            "execution_budget_per_round": 2**10,
+            "rotations": [4, 4, 4, 4, 4],
+            "max_price_gen_per_time_unit": 2**200,
+            "storage_fee_max_gas_price": 2**200,
+            "receipt_fee_max_gas_price": 2**200,
+        },
+    }
     return [
         {
-            "message_type": "External",
-            "parent_index": None,
             "recipient": None,
             "call_key": None,
             "budget": budget,
-            "fee_params": fee_params,
+            "on": "finalized",
+            "fee_params": {
+                "External": {
+                    "gas_limit": 2**200,
+                    "max_gas_price": 0,
+                },
+            },
+            "children": [],
         },
         {
-            "message_type": "InternalFinalized",
-            "parent_index": None,
             "recipient": None,
             "call_key": None,
             "budget": budget,
-            "fee_params": fee_params,
+            "on": "finalized",
+            "fee_params": {
+                "Internal": {
+                    **internal_fee_params["Internal"],
+                    "storage_fee_max_gas_price": 20,
+                    "receipt_fee_max_gas_price": 20,
+                },
+            },
+            "children": [],
         },
         {
-            "message_type": "InternalAccepted",
-            "parent_index": None,
             "recipient": None,
             "call_key": None,
             "budget": budget,
-            "fee_params": fee_params,
+            "on": "accepted",
+            "fee_params": internal_fee_params,
+            "children": [],
         },
     ]
 
 
 def _genvm_external_legacy_fallback_message_fee_allocation() -> dict[str, Any]:
     return {
-        "message_type": "External",
-        "parent_index": None,
         "recipient": None,
         "call_key": None,
         "budget": 2**200,
+        "on": "finalized",
         "fee_params": {
-            "leader_timeunits_allocation": 0,
-            "validator_timeunits_allocation": 0,
-            "execution_budget_per_round": 0,
-            "rotations": [0],
+            "External": {
+                "gas_limit": 2**200,
+                "max_gas_price": 0,
+            },
         },
+        "children": [],
     }
 
 

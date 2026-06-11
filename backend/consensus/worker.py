@@ -26,6 +26,13 @@ from loguru import logger
 from backend.node.base import Manager as GenVMManager
 from backend.services.usage_metrics_service import UsageMetricsService
 
+# GenVM-module error causes that are reported as fatal but are transient in
+# Studio: validator changes stop+restart the llm module, so a leader run
+# claimed inside that window can race the provider-table rebuild and get
+# NO_PROVIDER_FOR_PROMPT for its own node address. These must not trip the
+# stop-the-worker circuit breaker (see _transaction_context).
+_TRANSIENT_LEADER_FATAL_CAUSES = frozenset({"NO_PROVIDER_FOR_PROMPT"})
+
 
 class ConsensusWorker:
     """
@@ -795,6 +802,19 @@ class ConsensusWorker:
                     # helper above. Don't release/reset — it's in ACCEPTED now.
                     transaction_reset = True
                 else:
+                    if e.is_fatal and _TRANSIENT_LEADER_FATAL_CAUSES.intersection(
+                        e.causes or []
+                    ):
+                        # Hold the claim briefly before resetting so the retry
+                        # doesn't burn through its recovery cycles inside the
+                        # same llm-module restart window that caused the error
+                        # (each validator change stops+starts the module; a
+                        # burst of 5 creations churns for several seconds).
+                        await asyncio.sleep(
+                            float(
+                                os.environ.get("GENVM_TRANSIENT_FATAL_BACKOFF_S", "3")
+                            )
+                        )
                     # Retryable leader error — reset for another worker to pick up.
                     try:
                         with self.get_session() as reset_session:
@@ -808,11 +828,32 @@ class ConsensusWorker:
 
                     # For fatal leader errors, stop the worker to trigger K8s restart via health check
                     if e.is_fatal:
-                        logger.warning(
-                            f"[Worker {self.worker_id}] Fatal GenVM error in leader - stopping worker. "
-                            f"{tx_type.capitalize()} {tx_hash} will be reset for another worker."
+                        transient_causes = _TRANSIENT_LEADER_FATAL_CAUSES.intersection(
+                            e.causes or []
                         )
-                        self.running = False
+                        if transient_causes:
+                            # The module reports these as fatal, but in Studio
+                            # they are transient config races: every validator
+                            # change stops+restarts the llm module, and a run
+                            # claimed inside that window can see a provider
+                            # table that lacks the leader's address
+                            # (NO_PROVIDER_FOR_PROMPT). The tx was already
+                            # reset above with a bounded retry budget
+                            # (recovery cycles escalate to CANCELED), so keep
+                            # the worker alive instead of draining claim
+                            # capacity — with all workers stopped the queue
+                            # stalls silently.
+                            logger.warning(
+                                f"[Worker {self.worker_id}] Transient fatal GenVM error in leader "
+                                f"({', '.join(sorted(transient_causes))}) - keeping worker alive. "
+                                f"{tx_type.capitalize()} {tx_hash} was reset for retry."
+                            )
+                        else:
+                            logger.warning(
+                                f"[Worker {self.worker_id}] Fatal GenVM error in leader - stopping worker. "
+                                f"{tx_type.capitalize()} {tx_hash} will be reset for another worker."
+                            )
+                            self.running = False
         except (ContractNotFoundError, _NoValidatorsError):
             # Re-raise for specific handling by caller
             raise

@@ -32,12 +32,18 @@ jobs:
       - name: Install genvm-linter
         run: pip install genvm-linter
 
+      # Contracts pinned to the genvm-main runner use the new SDK layout,
+      # which released genvm-linter (<= 0.11.0) cannot load yet
+      # ("No module named 'genlayer.py'"). Skip them until a linter release
+      # supports it (genvm-linter dxp-694), then drop this filter.
       - name: Lint example contracts
         run: |
           failed=0
           for f in examples/contracts/*.py; do
             echo "::group::$f"
-            if ! genvm-lint check "$f"; then
+            if grep -q "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" "$f"; then
+              echo "SKIP: pinned to the genvm-main runner (unsupported by released genvm-linter)"
+            elif ! genvm-lint check "$f"; then
               failed=1
             fi
             echo "::endgroup::"
@@ -50,7 +56,9 @@ jobs:
           for f in tests/load/contracts/*.py tests/direct/contracts/*.py; do
             [ -f "$f" ] || continue
             echo "::group::$f"
-            if ! genvm-lint check "$f"; then
+            if grep -q "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" "$f"; then
+              echo "SKIP: pinned to the genvm-main runner (unsupported by released genvm-linter)"
+            elif ! genvm-lint check "$f"; then
               failed=1
             fi
             echo "::endgroup::"
