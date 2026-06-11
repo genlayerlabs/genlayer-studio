@@ -95,6 +95,28 @@ class HostException(Exception):
         super().__init__(message or f"GenVM error: {error_code}")
 
 
+# Studio-local retry shim for transient manager module restart races.
+class GenVMManagerRetryableError(Exception):
+    def __init__(self, status: int, body: typing.Any):
+        self.status = status
+        self.body = body
+        super().__init__(f"genvm manager /genvm/run failed: {status} {body}")
+
+
+def _is_retryable_manager_run_error(status: int, body: typing.Any) -> bool:
+    if status != 500 or not isinstance(body, dict):
+        return False
+
+    error = body.get("error")
+    if not isinstance(error, str):
+        return False
+
+    return (
+        "modules are required but not running" in error
+        or "modules are required but not all are running" in error
+    )
+
+
 class Message(typing.TypedDict):
     contract_address: Address
     sender_address: Address
@@ -525,6 +547,8 @@ async def run_genvm(
                 logger.error(
                     f"genvm manager /genvm/run failed", status=resp.status, body=data
                 )
+                if _is_retryable_manager_run_error(resp.status, data):
+                    raise GenVMManagerRetryableError(resp.status, data)
                 raise Exception(
                     f"genvm manager /genvm/run failed: {resp.status} {data}"
                 )
@@ -554,19 +578,23 @@ async def run_genvm(
                     },
                 )
                 break
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except (
+                aiohttp.ClientError,
+                asyncio.TimeoutError,
+                GenVMManagerRetryableError,
+            ) as exc:
                 delay = ctx.retry_delay(TimeoutAction.GenVMRun, attempt)
-                ctx.add_stat(
-                    f"manager_run_attempt_{attempt}_error",
-                    {
-                        "attempt": attempt,
-                        "error_type": type(exc).__name__,
-                        "duration_ms": round(
-                            (time.perf_counter() - attempt_start) * 1000
-                        ),
-                        "will_retry": delay is not None,
-                    },
-                )
+                error_stat = {
+                    "attempt": attempt,
+                    "error_type": type(exc).__name__,
+                    "duration_ms": round((time.perf_counter() - attempt_start) * 1000),
+                    "will_retry": delay is not None,
+                }
+                if isinstance(exc, GenVMManagerRetryableError):
+                    error_stat["status"] = exc.status
+                    error_stat["body"] = exc.body
+                    error_stat["retry_reason"] = "manager_modules_not_running"
+                ctx.add_stat(f"manager_run_attempt_{attempt}_error", error_stat)
                 if delay is None:
                     logger.error(
                         "genvm manager request failed after all retries",

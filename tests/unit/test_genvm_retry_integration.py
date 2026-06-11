@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pytest
 
 import backend.node.genvm.base as base_host
+from backend.node.genvm.origin import base_host as origin_base_host
 
 
 class MockAsyncContextManager:
@@ -23,6 +24,87 @@ class MockAsyncContextManager:
 
     async def __aexit__(self, *args):
         pass
+
+
+class MockResponse:
+    """Helper for mocking aiohttp responses."""
+
+    def __init__(self, status, body):
+        self.status = status
+        self.body = body
+
+    async def json(self):
+        return self.body
+
+
+class NoopLogger:
+    def trace(self, *args, **kwargs):
+        pass
+
+    def debug(self, *args, **kwargs):
+        pass
+
+    def warning(self, *args, **kwargs):
+        pass
+
+    def error(self, *args, **kwargs):
+        pass
+
+
+class RecordingCtx:
+    logger = NoopLogger()
+
+    def __init__(self):
+        self.stats = {}
+        self.successes = 0
+        self.failures = 0
+
+    def on_genvm_success(self):
+        self.successes += 1
+
+    def on_genvm_failure(self):
+        self.failures += 1
+
+    def add_stat(self, key, value):
+        self.stats[key] = value
+
+    def get_timeout(self, _action, _timeout_type):
+        return None
+
+    def retry_delay(self, _action, attempt_no):
+        return 0 if attempt_no < 2 else None
+
+
+class NoopHandler:
+    pass
+
+
+def _consumed_return_result():
+    return list(
+        bytes([origin_base_host.public_abi.ResultCode.RETURN])
+        + origin_base_host.gvm_calldata.encode(
+            {
+                "execution_hash": b"",
+                "data": b"ok",
+                "fingerprint": None,
+                "storage_changes": [],
+                "emissions": [],
+                "nondet_results": [],
+                "data_fees_remaining": [],
+            }
+        )
+    )
+
+
+async def _fake_host_loop(_handler, _cancellation, *, ctx):
+    return None
+
+
+async def _fake_prob_died_wait(*awaitables):
+    for awaitable in awaitables:
+        close = getattr(awaitable, "close", None)
+        if close is not None:
+            close()
 
 
 class TestRetryBehavior:
@@ -119,6 +201,121 @@ class TestRetryBehavior:
         base_host.set_genvm_callbacks(on_success=second_callback, on_failure=None)
         base_host._on_genvm_success()
         assert second_called is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "manager_error",
+        [
+            "modules are required but not running (is_sync=false with 'n' permission)",
+            "modules are required but not all are running",
+        ],
+    )
+    async def test_modules_not_running_500_is_retried_and_can_succeed(
+        self, monkeypatch, manager_error
+    ):
+        """Transient manager module restart 500 retries /genvm/run."""
+        ctx = RecordingCtx()
+        post_bodies = [
+            {"error": manager_error},
+            {"id": "genvm-1"},
+        ]
+        post_attempts = 0
+
+        def fake_request(method, url, **_kwargs):
+            nonlocal post_attempts
+            if method == "POST" and url.endswith("/genvm/run"):
+                body = post_bodies[post_attempts]
+                status = 500 if post_attempts == 0 else 200
+                post_attempts += 1
+                return MockAsyncContextManager(MockResponse(status, body))
+            if method == "DELETE":
+                return MockAsyncContextManager(MockResponse(200, {}))
+            if method == "GET" and url.endswith("/genvm/genvm-1"):
+                return MockAsyncContextManager(
+                    MockResponse(
+                        200,
+                        {
+                            "status": {
+                                "consumed_result": _consumed_return_result(),
+                                "stdout": "",
+                                "stderr": "",
+                                "genvm_log": [],
+                            }
+                        },
+                    )
+                )
+            raise AssertionError(f"unexpected request: {method} {url}")
+
+        monkeypatch.setattr(origin_base_host, "host_loop", _fake_host_loop)
+        monkeypatch.setattr(
+            origin_base_host, "_await_first_cancel_others", _fake_prob_died_wait
+        )
+        monkeypatch.setattr(origin_base_host.aiohttp, "request", fake_request)
+
+        result = await origin_base_host.run_genvm(
+            NoopHandler(),
+            ctx=ctx,
+            is_sync=False,
+            message={},
+            host="unix://test",
+            calldata=b"",
+        )
+
+        assert post_attempts == 2
+        assert result.result_data == b"ok"
+        assert ctx.successes == 1
+        assert ctx.failures == 0
+        assert ctx.stats["manager_run_attempt_0_error"]["will_retry"] is True
+        assert (
+            ctx.stats["manager_run_attempt_0_error"]["error_type"]
+            == "GenVMManagerRetryableError"
+        )
+        assert (
+            ctx.stats["manager_run_attempt_0_error"]["retry_reason"]
+            == "manager_modules_not_running"
+        )
+        assert ctx.stats["manager_run_attempt_success"]["attempt"] == 1
+
+    @pytest.mark.asyncio
+    async def test_other_500_is_not_retried(self, monkeypatch):
+        """Non-transient manager 500s still fail fast."""
+        ctx = RecordingCtx()
+        post_attempts = 0
+
+        def fake_request(method, url, **_kwargs):
+            nonlocal post_attempts
+            if method == "POST" and url.endswith("/genvm/run"):
+                post_attempts += 1
+                return MockAsyncContextManager(
+                    MockResponse(
+                        500,
+                        {
+                            "error": "unknown variant `foo`, expected one of `bar`, `baz`"
+                        },
+                    )
+                )
+            raise AssertionError(f"unexpected request: {method} {url}")
+
+        monkeypatch.setattr(origin_base_host, "host_loop", _fake_host_loop)
+        monkeypatch.setattr(
+            origin_base_host, "_await_first_cancel_others", _fake_prob_died_wait
+        )
+        monkeypatch.setattr(origin_base_host.aiohttp, "request", fake_request)
+
+        with pytest.raises(Exception, match="genvm execution failed"):
+            await origin_base_host.run_genvm(
+                NoopHandler(),
+                ctx=ctx,
+                is_sync=False,
+                message={},
+                host="unix://test",
+                calldata=b"",
+            )
+
+        assert post_attempts == 1
+        assert ctx.successes == 0
+        assert ctx.failures == 0
+        assert ctx.stats["manager_run_attempt_0_error"]["outcome"] == "fatal_error"
 
 
 class TestRetryConfiguration:
