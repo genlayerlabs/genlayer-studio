@@ -2,6 +2,7 @@
 Tests for worker health degradation based on GenVM consecutive failures
 """
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
 
 # Import the module-level functions and variables
@@ -168,3 +169,85 @@ class TestEnvVarThresholdConfig:
 
             threshold = int(os.environ.get("GENVM_FAILURE_UNHEALTHY_THRESHOLD", "3"))
             assert threshold == 3
+
+
+class TestBlockedTransactionHealthThreshold:
+    """Test health handling for long-running claimed transactions"""
+
+    def setup_method(self):
+        worker_service._genvm_consecutive_failures = 0
+        worker_service._genvm_failure_unhealthy_threshold = 3
+        worker_service._genvm_health_last_check = 0.0
+        worker_service._genvm_health_last_ok = True
+        worker_service._genvm_health_last_error = None
+        worker_service.worker_permanently_failed = False
+
+    def _set_worker_with_blocked_tx(self, blocked_at, transaction_timeout_minutes=30):
+        mock_worker = MagicMock()
+        mock_worker.worker_id = "test-worker-123"
+        mock_worker.running = True
+        mock_worker.transaction_timeout_minutes = transaction_timeout_minutes
+        mock_worker.current_transactions = {"0xabc": {"blocked_at": blocked_at}}
+        mock_worker._active_tasks = set()
+        mock_worker._generic_error_retries = {}
+        mock_worker.max_parallel_txs = 1
+        worker_service.worker = mock_worker
+
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        worker_service.worker_task = mock_task
+
+    def test_blocked_tx_threshold_defaults_above_transaction_timeout(self):
+        """Default blocked-tx liveness threshold is tx timeout plus buffer"""
+        with patch.dict("os.environ", {}, clear=True):
+            assert worker_service._get_blocked_tx_unhealthy_after_minutes(30) == 35
+
+    def test_blocked_tx_threshold_clamps_too_low_env_value(self):
+        """Too-low explicit threshold cannot undercut transaction timeout"""
+        with patch.dict(
+            "os.environ", {"WORKER_BLOCKED_TX_UNHEALTHY_AFTER_MINUTES": "14"}
+        ):
+            assert worker_service._get_blocked_tx_unhealthy_after_minutes(30) == 35
+
+    def test_blocked_tx_threshold_respects_higher_env_value(self):
+        """Higher explicit threshold is preserved"""
+        with patch.dict(
+            "os.environ", {"WORKER_BLOCKED_TX_UNHEALTHY_AFTER_MINUTES": "90"}
+        ):
+            assert worker_service._get_blocked_tx_unhealthy_after_minutes(30) == 90
+
+    def test_health_allows_claimed_tx_before_transaction_timeout(self):
+        """A 20-minute claimed tx with a 30-minute timeout remains healthy"""
+        self._set_worker_with_blocked_tx(
+            datetime.now(timezone.utc) - timedelta(minutes=20)
+        )
+
+        with patch.dict(
+            "os.environ", {"WORKER_BLOCKED_TX_UNHEALTHY_AFTER_MINUTES": "14"}
+        ), patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.status = 200
+            mock_urlopen.return_value = mock_resp
+
+            response = worker_service.health_check()
+
+        assert isinstance(response, dict)
+        assert response["status"] == "healthy"
+
+    def test_health_fails_for_claimed_tx_after_liveness_threshold(self):
+        """A claimed tx past tx timeout plus buffer still marks pod unhealthy"""
+        self._set_worker_with_blocked_tx(
+            datetime.now(timezone.utc) - timedelta(minutes=36)
+        )
+
+        with patch.dict("os.environ", {}, clear=True), patch(
+            "urllib.request.urlopen"
+        ) as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.status = 200
+            mock_urlopen.return_value = mock_resp
+
+            response = worker_service.health_check()
+
+        assert response.status_code == 500
+        assert "more than 35 minutes" in response.body.decode()
