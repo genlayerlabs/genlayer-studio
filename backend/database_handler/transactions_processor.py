@@ -16,8 +16,34 @@ import time
 from backend.domain.types import TransactionType
 from web3 import Web3
 from backend.consensus.types import ConsensusRound
+from backend.consensus.history import time_unit_consumption
 from backend.consensus.utils import determine_consensus_from_votes
+from backend.protocol_rpc.fees import FEE_ACCOUNTING_KEY, normalize_fees_distribution
 from backend.rollup.web3_pool import Web3ConnectionPool
+
+MAX_JSON_SAFE_INTEGER = (2**53) - 1
+
+# Canonical v0.6 ITransactions.TransactionStatus ordinals (0-14). Studio-only
+# states map to their on-chain equivalents (ACTIVATED -> Proposing: activation
+# transitions the on-chain tx into Proposing).
+TRANSACTION_STATUS_CODES = {
+    "UNINITIALIZED": 0,
+    "PENDING": 1,
+    "ACTIVATED": 2,
+    "PROPOSING": 2,
+    "COMMITTING": 3,
+    "REVEALING": 4,
+    "ACCEPTED": 5,
+    "UNDETERMINED": 6,
+    "FINALIZED": 7,
+    "CANCELED": 8,
+    "APPEAL_REVEALING": 9,
+    "APPEAL_COMMITTING": 10,
+    "READY_TO_FINALIZE": 11,
+    "VALIDATORS_TIMEOUT": 12,
+    "LEADER_TIMEOUT": 13,
+    "LEADER_REVEALING": 14,
+}
 
 
 class TransactionAddressFilter(Enum):
@@ -73,7 +99,32 @@ class TransactionsProcessor:
         self.web3 = Web3ConnectionPool.get()
 
     @staticmethod
+    def _json_safe_numbers(value):
+        if isinstance(value, bool) or value is None or isinstance(value, str):
+            return value
+        if isinstance(value, int):
+            return str(value) if abs(value) > MAX_JSON_SAFE_INTEGER else value
+        if isinstance(value, list):
+            return [TransactionsProcessor._json_safe_numbers(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: TransactionsProcessor._json_safe_numbers(item)
+                for key, item in value.items()
+            }
+        return value
+
+    @staticmethod
     def _parse_transaction_data(transaction_data: Transactions) -> dict:
+        fee_accounting = (
+            transaction_data.data.get(FEE_ACCOUNTING_KEY)
+            if isinstance(transaction_data.data, dict)
+            else None
+        )
+        execution_result, execution_result_name = (
+            TransactionsProcessor._execution_result_fields(
+                transaction_data.consensus_data
+            )
+        )
         if transaction_data.consensus_data:
             leader_receipts = transaction_data.consensus_data.get("leader_receipt", [])
             if isinstance(leader_receipts, dict):
@@ -90,12 +141,26 @@ class TransactionsProcessor:
             "hash": transaction_data.hash,
             "from_address": transaction_data.from_address,
             "to_address": transaction_data.to_address,
-            "data": transaction_data.data,
+            "data": TransactionsProcessor._json_safe_numbers(transaction_data.data),
+            # Numeric-columns contract (tests/db-sqlalchemy/test_numeric_types.py):
+            # top-level "value" is a plain int. The blanket _json_safe_numbers
+            # stringification (fee-accounting era) broke that contract for
+            # values > 2^53; big-int JSON consumers should read the canonical
+            # decimal-string fees object instead.
             "value": transaction_data.value,
             "type": transaction_data.type,
             "status": transaction_data.status.value,
+            "txExecutionResult": execution_result,
+            "txExecutionResultName": execution_result_name,
+            "fees": TransactionsProcessor._canonical_fees(
+                fee_accounting,
+                consensus_history=transaction_data.consensus_history,
+                consensus_data=transaction_data.consensus_data,
+            ),
             "result": TransactionsProcessor._decode_base64_data(result),
-            "consensus_data": transaction_data.consensus_data,
+            "consensus_data": TransactionsProcessor._json_safe_numbers(
+                transaction_data.consensus_data
+            ),
             "gaslimit": transaction_data.nonce,
             "nonce": transaction_data.nonce,
             "r": transaction_data.r,
@@ -131,6 +196,145 @@ class TransactionsProcessor:
             # field caused the guard to always read None/false, double-crediting
             # SEND txs created by sim_fundAccount.
             "value_credited": transaction_data.value_credited,
+        }
+
+    @staticmethod
+    def _status_payload(status: str) -> dict:
+        status_name = str(status)
+        return {
+            "status": status_name,
+            "statusCode": TRANSACTION_STATUS_CODES.get(status_name.upper(), 0),
+        }
+
+    @staticmethod
+    def _execution_result_fields(consensus_data: dict | None) -> tuple[int, str]:
+        receipt = TransactionsProcessor._leader_receipt(consensus_data)
+        if not isinstance(receipt, dict):
+            return 0, "NOT_VOTED"
+        value = str(receipt.get("execution_result") or "").upper()
+        if value == "SUCCESS":
+            return 1, "FINISHED_WITH_RETURN"
+        if value in {"ERROR", "FAILURE", "FINISHEDWITHERROR", "FINISHED_WITH_ERROR"}:
+            return 2, "FINISHED_WITH_ERROR"
+        return 0, "NOT_VOTED"
+
+    @staticmethod
+    def _leader_receipt(consensus_data: dict | None) -> dict | None:
+        if not isinstance(consensus_data, dict):
+            return None
+        leader_receipts = consensus_data.get("leader_receipt")
+        if isinstance(leader_receipts, dict):
+            return leader_receipts
+        if isinstance(leader_receipts, list) and len(leader_receipts) > 0:
+            return leader_receipts[0]
+        return None
+
+    @staticmethod
+    def _storage_fee_used(accounting: dict) -> int:
+        report = accounting.get("execution_fee_report") or {}
+        genvm_buckets = report.get("genvmBuckets") if isinstance(report, dict) else {}
+        if isinstance(genvm_buckets, dict):
+            return int(genvm_buckets.get("storage", 0) or 0)
+
+        consumed_buckets = accounting.get("genvm_fee_consumed_buckets") or []
+        if len(consumed_buckets) > 1:
+            return int(consumed_buckets[1])
+        return 0
+
+    @staticmethod
+    def _policy_int(policy: dict, camel_key: str, snake_key: str) -> int:
+        return int(policy.get(camel_key, policy.get(snake_key, 0)) or 0)
+
+    @staticmethod
+    def _locked_fee_policy(policy: dict | None) -> dict | None:
+        if not isinstance(policy, dict):
+            return None
+        return {
+            "genPerTimeUnit": str(
+                TransactionsProcessor._policy_int(
+                    policy, "genPerTimeUnit", "gen_per_time_unit"
+                )
+            ),
+            "storageUnitPrice": str(
+                TransactionsProcessor._policy_int(
+                    policy, "storageUnitPrice", "storage_unit_price"
+                )
+            ),
+            "receiptGasPrice": str(
+                TransactionsProcessor._policy_int(
+                    policy, "receiptGasPrice", "receipt_gas_price"
+                )
+            ),
+        }
+
+    @staticmethod
+    def _fee_distribution_fields(fees: dict) -> dict:
+        return {
+            "leaderTimeunitsAllocation": str(fees["leaderTimeunitsAllocation"]),
+            "validatorTimeunitsAllocation": str(fees["validatorTimeunitsAllocation"]),
+            "appealRounds": str(fees["appealRounds"]),
+            "executionBudgetPerRound": str(fees["executionBudgetPerRound"]),
+            "totalMessageFees": str(fees["totalMessageFees"]),
+            "rotations": [str(rotation) for rotation in fees["rotations"]],
+            "maxPriceGenPerTimeUnit": str(fees["maxPriceGenPerTimeUnit"]),
+            "storageFeeMaxGasPrice": str(fees["storageFeeMaxGasPrice"]),
+            "receiptFeeMaxGasPrice": str(fees["receiptFeeMaxGasPrice"]),
+        }
+
+    @staticmethod
+    def _time_unit_rounds(tu: dict) -> list[dict]:
+        return [
+            {
+                "round": entry["round"],
+                "consensusRound": entry["consensus_round"],
+                "leaderTimeunits": str(entry["leader_timeunits"]),
+                "validatorTimeunits": str(entry["validator_timeunits"]),
+                "maxValidatorTimeunits": str(entry["max_validator_timeunits"]),
+            }
+            for entry in tu["per_round"]
+        ]
+
+    @staticmethod
+    def _canonical_fees(
+        accounting: dict | None,
+        consensus_history: dict | None = None,
+        consensus_data: dict | None = None,
+    ) -> dict | None:
+        if not isinstance(accounting, dict):
+            return None
+        fees = normalize_fees_distribution(accounting.get("fees_distribution") or {})
+        tu = time_unit_consumption(consensus_history, consensus_data)
+        policy = accounting.get("policy_snapshot")
+
+        return {
+            "deposit": str(int(accounting.get("paid_fee_value", 0) or 0)),
+            "userValue": str(int(accounting.get("user_value", 0) or 0)),
+            "distribution": TransactionsProcessor._fee_distribution_fields(fees),
+            "locked": TransactionsProcessor._locked_fee_policy(policy),
+            "consumed": {
+                "executionConsumed": str(
+                    int(accounting.get("execution_fee_consumed", 0) or 0)
+                ),
+                "storageFeeUsed": str(
+                    TransactionsProcessor._storage_fee_used(accounting)
+                ),
+                "messageFeesConsumed": str(
+                    int(accounting.get("message_fee_consumed", 0) or 0)
+                ),
+                "messageFeesBudgetTotal": str(
+                    int(accounting.get("message_fee_budget", 0) or 0)
+                ),
+                # Protocol unit matches distribution.leaderTimeunitsAllocation and
+                # validatorTimeunitsAllocation: 1 TU = 1s GenVM runtime. Values
+                # are derived from measured per-execution wall time in ms,
+                # rounded UP per execution. validatorTimeunitsUsed is the SUM
+                # across validator-mode executions; compare per-validator
+                # allocations against maxValidatorTimeunits. This is the
+                # reference shape mirrored by nodes.
+                "leaderTimeunitsUsed": str(tu["leader_timeunits_used"]),
+                "validatorTimeunitsUsed": str(tu["validator_timeunits_used"]),
+                "perRound": TransactionsProcessor._time_unit_rounds(tu),
+            },
         }
 
     @staticmethod
@@ -900,6 +1104,40 @@ class TransactionsProcessor:
 
         self.session.commit()
 
+    def update_transaction_data(self, transaction_hash: str, data: dict | None):
+        result = self.session.execute(
+            text(
+                "UPDATE transactions SET data = CAST(:data AS jsonb) WHERE hash = :hash"
+            ),
+            {
+                "hash": transaction_hash,
+                "data": json.dumps(data) if data is not None else None,
+            },
+        )
+        if result.rowcount == 0:
+            print(
+                f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping data update"
+            )
+            return
+        self.session.commit()
+
+    def update_transaction_fee_accounting(
+        self, transaction_hash: str, fee_accounting: dict
+    ):
+        transaction = (
+            self.session.query(Transactions)
+            .filter_by(hash=transaction_hash)
+            .one_or_none()
+        )
+        if transaction is None:
+            print(
+                f"[TRANSACTIONS_PROCESSOR]: Transaction {transaction_hash} not found, skipping fee accounting update"
+            )
+            return
+        data = dict(transaction.data or {})
+        data["fee_accounting"] = fee_accounting
+        self.update_transaction_data(transaction_hash, data)
+
     def get_transaction_count(self, address: str) -> int:
         # Normalize address to checksum format
         try:
@@ -1400,14 +1638,14 @@ class TransactionsProcessor:
         )
         return count
 
-    def get_transaction_status(self, transaction_hash: str) -> str | None:
+    def get_transaction_status(self, transaction_hash: str) -> dict | None:
         transaction = (
             self.session.query(Transactions).filter_by(hash=transaction_hash).first()
         )
         if not transaction:
             return None
         transaction_status = transaction.status
-        return transaction_status.value
+        return self._status_payload(transaction_status.value)
 
     def get_processing_transaction_for_contract(
         self, contract_address: str

@@ -1,13 +1,14 @@
 # v0.2.16
-# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
 
+import genlayer as gl
 from genlayer import *
 
 import json
 import typing
 
 
-class PredictionMarket(gl.Contract):
+class PredictionMarket(gl.contract.Contract):
     has_resolved: bool
     team1: str
     team2: str
@@ -77,7 +78,9 @@ your output must be only JSON without any formatting prefix or suffix.
 This result should be perfectly parsable by a JSON parser without errors.
             """
             result = (
-                gl.nondet.exec_prompt(task).replace("```json", "").replace("```", "")
+                gl.nondet.exec_prompt(task, response_format="text")
+                .replace("```json", "")
+                .replace("```", "")
             )
             print(result)
             return json.loads(result)

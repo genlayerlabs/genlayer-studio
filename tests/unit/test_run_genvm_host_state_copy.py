@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 from backend.node.genvm.base import (
     ExecutionResult,
     ExecutionReturn,
+    GENVM_GASLESS_GAS_DATA,
     StateProxy,
     run_genvm_host,
 )
@@ -57,7 +58,7 @@ async def test_run_genvm_host_skips_state_copy_on_first_attempt():
         "backend.node.genvm.base.base_host.run_genvm",
         new_callable=AsyncMock,
         return_value=object(),
-    ), patch(
+    ) as run_mock, patch(
         "backend.node.genvm.base._copy_state_proxy",
         new_callable=AsyncMock,
         side_effect=lambda s: s,
@@ -72,6 +73,7 @@ async def test_run_genvm_host_skips_state_copy_on_first_attempt():
 
     assert copy_mock.await_count == 0
     assert result.state is original_state
+    assert run_mock.await_args.kwargs["gas_data"] == GENVM_GASLESS_GAS_DATA
 
 
 @pytest.mark.asyncio

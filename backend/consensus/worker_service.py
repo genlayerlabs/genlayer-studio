@@ -102,6 +102,52 @@ def get_genvm_failure_count() -> int:
     return _genvm_consecutive_failures
 
 
+def _get_blocked_tx_unhealthy_after_minutes(transaction_timeout_minutes=None) -> int:
+    """Return the liveness threshold for a claimed transaction.
+
+    The worker recovery timeout owns deciding when a transaction is stuck.
+    Liveness must stay above that timeout so Kubernetes does not kill a
+    legitimately long consensus attempt and force a recovery cycle.
+    """
+    if isinstance(transaction_timeout_minutes, (int, str)) and not isinstance(
+        transaction_timeout_minutes, bool
+    ):
+        raw_transaction_timeout = transaction_timeout_minutes
+    else:
+        raw_transaction_timeout = os.getenv("TRANSACTION_TIMEOUT_MINUTES", "30")
+
+    try:
+        transaction_timeout = int(raw_transaction_timeout)
+    except (TypeError, ValueError):
+        transaction_timeout = 30
+    if transaction_timeout <= 0:
+        transaction_timeout = 30
+
+    try:
+        buffer_minutes = int(
+            os.getenv("WORKER_BLOCKED_TX_UNHEALTHY_BUFFER_MINUTES", "5")
+        )
+    except ValueError:
+        buffer_minutes = 5
+    if buffer_minutes <= 0:
+        buffer_minutes = 5
+
+    minimum_threshold = max(14, transaction_timeout + buffer_minutes)
+
+    configured_threshold = os.getenv("WORKER_BLOCKED_TX_UNHEALTHY_AFTER_MINUTES")
+    if configured_threshold is None:
+        return minimum_threshold
+
+    try:
+        configured_threshold_minutes = int(configured_threshold)
+    except ValueError:
+        return minimum_threshold
+    if configured_threshold_minutes <= 0:
+        return minimum_threshold
+
+    return max(configured_threshold_minutes, minimum_threshold)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage the worker lifecycle."""
@@ -432,7 +478,7 @@ def health_check():
     long-running synchronous DB operations in the consensus worker.
     """
     import psutil
-    from datetime import datetime
+    from datetime import datetime, timezone
     from fastapi.responses import JSONResponse
     from urllib.request import urlopen, Request
     from urllib.error import URLError
@@ -556,16 +602,9 @@ def health_check():
     # Check if ANY transaction is blocked for too long
     current_txs = []
     if worker.current_transactions:
-        # Get unhealthy threshold from env
-        try:
-            blocked_tx_unhealthy_after_minutes = int(
-                os.getenv("WORKER_BLOCKED_TX_UNHEALTHY_AFTER_MINUTES", "14")
-            )
-        except ValueError:
-            blocked_tx_unhealthy_after_minutes = 14
-        if blocked_tx_unhealthy_after_minutes <= 0:
-            blocked_tx_unhealthy_after_minutes = 14
-
+        blocked_tx_unhealthy_after_minutes = _get_blocked_tx_unhealthy_after_minutes(
+            getattr(worker, "transaction_timeout_minutes", None)
+        )
         blocked_tx_unhealthy_after_seconds = blocked_tx_unhealthy_after_minutes * 60
 
         for tx_hash, tx_info in worker.current_transactions.items():
@@ -584,7 +623,8 @@ def health_check():
                     if blocked_at.tzinfo is not None:
                         blocked_at = blocked_at.replace(tzinfo=None)
 
-                    elapsed = datetime.utcnow() - blocked_at
+                    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+                    elapsed = now_utc - blocked_at
 
                     # Check if blocked for too long - pod is unhealthy
                     if elapsed.total_seconds() > blocked_tx_unhealthy_after_seconds:

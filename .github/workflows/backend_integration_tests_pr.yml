@@ -35,6 +35,7 @@ jobs:
     env:
       PYTHONPATH: ${{ github.workspace }}
       COMPOSE_PROFILES: hardhat
+      GENVM_CACHE_DIR: /tmp/genvm-cache
 
     steps:
       - name: Checkout code
@@ -43,7 +44,53 @@ jobs:
       - name: Copy .env file
         run: cp .env.example .env
 
-      # TODO: we should also add also heuristai and anthropic keys to the e2e tests and test all providers
+      - name: Resolve GenVM binding
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Binding model: codebase default < env override.
+          # third_party/genvm/version (same convention as genlayer-node) pins
+          # the GenVM this branch's host protocol speaks; it is flipped to the
+          # release tag at release cut. The e2e pipeline / release train can
+          # override by injecting GENVM_TAG or GENVM_REF into the environment.
+          # Auto-detection for the file value: ^v[0-9] => release tag (tarball
+          # build), anything else => git ref (source build, pinned to a SHA so
+          # caches invalidate exactly when genvm moves).
+          if [[ -n "${GENVM_TAG:-}" && -n "${GENVM_REF:-}" ]]; then
+            echo "::error::GENVM_TAG and GENVM_REF are both set; they are mutually exclusive"
+            exit 1
+          fi
+          GENVM_TAG_VALUE="${GENVM_TAG:-}"
+          GENVM_REF_VALUE="${GENVM_REF:-}"
+          if [[ -z "$GENVM_TAG_VALUE" && -z "$GENVM_REF_VALUE" ]]; then
+            if [[ ! -f third_party/genvm/version ]]; then
+              echo "::error::third_party/genvm/version is missing and no GENVM_TAG/GENVM_REF env override is set"
+              exit 1
+            fi
+            BINDING="$(head -n1 third_party/genvm/version | sed -e 's/\r$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            if [[ "$BINDING" =~ ^\".*\"$ || "$BINDING" =~ ^\'.*\'$ ]]; then
+              BINDING="${BINDING:1:${#BINDING}-2}"
+              BINDING="$(printf '%s' "$BINDING" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            fi
+            if [[ -z "$BINDING" ]]; then
+              echo "::error::third_party/genvm/version is empty"
+              exit 1
+            fi
+            if [[ "$BINDING" =~ ^v[0-9] ]]; then
+              GENVM_TAG_VALUE="$BINDING"
+            else
+              GENVM_REF_VALUE="$BINDING"
+            fi
+          fi
+          if [[ -n "$GENVM_REF_VALUE" ]]; then
+            GENVM_REF_VALUE="$(gh api "repos/genlayerlabs/genvm/commits/$GENVM_REF_VALUE" --jq .sha)"
+          fi
+          sed -i "s|^GENVM_TAG=.*|GENVM_TAG=\"$GENVM_TAG_VALUE\"|" .env
+          sed -i "s|^GENVM_REF=.*|GENVM_REF=\"$GENVM_REF_VALUE\"|" .env
+          echo "GENVM_TAG=$GENVM_TAG_VALUE" >> "$GITHUB_ENV"
+          echo "GENVM_REF=$GENVM_REF_VALUE" >> "$GITHUB_ENV"
+          grep "^GENVM_TAG=" .env
+          grep "^GENVM_REF=" .env
 
       - name: Configure LLM provider
         env:
@@ -97,16 +144,31 @@ jobs:
 
       - name: Extract GenVM version for cache key
         id: genvm
-        run: echo "tag=$(grep -m1 'ARG GENVM_TAG=' docker/Dockerfile.backend | cut -d= -f2)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore GenVM precompile cache
-        uses: actions/cache@v5
-        with:
-          path: /tmp/genvm-cache
-          key: genvm-precompile-${{ steps.genvm.outputs.tag }}-amd64
+        run: |
+          GENVM_REF_VALUE="${GENVM_REF:-}"
+          if [[ -z "$GENVM_REF_VALUE" && -f .env ]]; then
+            GENVM_REF_VALUE="$(sed -n 's/^GENVM_REF=["'\'']\{0,1\}\([^"'\'']*\)["'\'']\{0,1\}.*/\1/p' .env | head -n1)"
+          fi
+          if [[ -n "$GENVM_REF_VALUE" ]]; then
+            echo "tag=ref-$GENVM_REF_VALUE" >> "$GITHUB_OUTPUT"
+            echo "bake_cache=,scope=genvm-$GENVM_REF_VALUE" >> "$GITHUB_OUTPUT"
+          else
+            GENVM_TAG_VALUE="${GENVM_TAG:-}"
+            if [[ -z "$GENVM_TAG_VALUE" && -f .env ]]; then
+              GENVM_TAG_VALUE="$(sed -n 's/^GENVM_TAG=["'\'']\{0,1\}\([^"'\'']*\)["'\'']\{0,1\}.*/\1/p' .env | head -n1)"
+            fi
+            if [[ -z "$GENVM_TAG_VALUE" ]]; then
+              echo "::warning::GENVM_TAG not set (this job runs prebuilt images) — using shared 'untagged' precompile cache key that will not invalidate across GenVM upgrades"
+              GENVM_TAG_VALUE="untagged"
+            fi
+            echo "tag=$GENVM_TAG_VALUE" >> "$GITHUB_OUTPUT"
+            echo "bake_cache=" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Prepare GenVM cache directory
-        run: mkdir -p /tmp/genvm-cache/pc && chmod -R 0777 /tmp/genvm-cache
+        run: |
+          sudo mkdir -p "$GENVM_CACHE_DIR/pc"
+          sudo chown -R 999:999 "$GENVM_CACHE_DIR"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -122,8 +184,8 @@ jobs:
             jsonrpc
             consensus-worker
           set: |
-            *.cache-from=type=gha
-            *.cache-to=type=gha,mode=max
+            *.cache-from=type=gha${{ steps.genvm.outputs.bake_cache }}
+            *.cache-to=type=gha,mode=max${{ steps.genvm.outputs.bake_cache }}
             database-migration.tags=genlayer-studio-database-migration:latest
             jsonrpc.tags=genlayer-studio-jsonrpc:latest
             consensus-worker.tags=genlayer-studio-consensus-worker:latest
@@ -155,6 +217,201 @@ jobs:
           TEST_PROVIDER: ${{ vars.LLM_PROVIDER || 'openrouter' }}
           TEST_PROVIDER_MODEL: ${{ vars.LLM_MODEL || 'deepseek/deepseek-v3.2' }}
         run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/test_validators.py -svv
+
+      - name: Dump Docker Compose logs
+        run: docker compose logs
+        if: failure()
+
+      - name: Shutdown Docker Compose
+        if: always()
+        run: docker compose down
+
+  test-gasless:
+    needs: triggers
+    if: ${{ needs.triggers.outputs.is_pull_request_opened == 'true' || needs.triggers.outputs.is_pull_request_review_approved == 'true' || needs.triggers.outputs.is_pull_request_labeled_with_run_tests == 'true' }}
+
+    runs-on: ubuntu-latest
+
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      COMPOSE_PROFILES: hardhat
+      GENVM_CACHE_DIR: /tmp/genvm-cache
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Copy .env file
+        run: cp .env.example .env
+
+      - name: Resolve GenVM binding
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Binding model: codebase default < env override.
+          # third_party/genvm/version (same convention as genlayer-node) pins
+          # the GenVM this branch's host protocol speaks; it is flipped to the
+          # release tag at release cut. The e2e pipeline / release train can
+          # override by injecting GENVM_TAG or GENVM_REF into the environment.
+          # Auto-detection for the file value: ^v[0-9] => release tag (tarball
+          # build), anything else => git ref (source build, pinned to a SHA so
+          # caches invalidate exactly when genvm moves).
+          if [[ -n "${GENVM_TAG:-}" && -n "${GENVM_REF:-}" ]]; then
+            echo "::error::GENVM_TAG and GENVM_REF are both set; they are mutually exclusive"
+            exit 1
+          fi
+          GENVM_TAG_VALUE="${GENVM_TAG:-}"
+          GENVM_REF_VALUE="${GENVM_REF:-}"
+          if [[ -z "$GENVM_TAG_VALUE" && -z "$GENVM_REF_VALUE" ]]; then
+            if [[ ! -f third_party/genvm/version ]]; then
+              echo "::error::third_party/genvm/version is missing and no GENVM_TAG/GENVM_REF env override is set"
+              exit 1
+            fi
+            BINDING="$(head -n1 third_party/genvm/version | sed -e 's/\r$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            if [[ "$BINDING" =~ ^\".*\"$ || "$BINDING" =~ ^\'.*\'$ ]]; then
+              BINDING="${BINDING:1:${#BINDING}-2}"
+              BINDING="$(printf '%s' "$BINDING" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            fi
+            if [[ -z "$BINDING" ]]; then
+              echo "::error::third_party/genvm/version is empty"
+              exit 1
+            fi
+            if [[ "$BINDING" =~ ^v[0-9] ]]; then
+              GENVM_TAG_VALUE="$BINDING"
+            else
+              GENVM_REF_VALUE="$BINDING"
+            fi
+          fi
+          if [[ -n "$GENVM_REF_VALUE" ]]; then
+            GENVM_REF_VALUE="$(gh api "repos/genlayerlabs/genvm/commits/$GENVM_REF_VALUE" --jq .sha)"
+          fi
+          sed -i "s|^GENVM_TAG=.*|GENVM_TAG=\"$GENVM_TAG_VALUE\"|" .env
+          sed -i "s|^GENVM_REF=.*|GENVM_REF=\"$GENVM_REF_VALUE\"|" .env
+          echo "GENVM_TAG=$GENVM_TAG_VALUE" >> "$GITHUB_ENV"
+          echo "GENVM_REF=$GENVM_REF_VALUE" >> "$GITHUB_ENV"
+          grep "^GENVM_TAG=" .env
+          grep "^GENVM_REF=" .env
+
+      # TODO: we should also add also heuristai and anthropic keys to the e2e tests and test all providers
+
+      - name: Configure LLM provider
+        env:
+          OPENROUTERAPIKEY: ${{ secrets.OPENROUTERAPIKEY }}
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'openrouter' }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'deepseek/deepseek-v3.2' }}
+        run: |
+          # Inject OpenRouter API key
+          sed -i "/^OPENROUTERAPIKEY *= *'<add_your_openrouter_api_key_here>'$/d" .env
+          printf "\nOPENROUTERAPIKEY='$OPENROUTERAPIKEY'\n" >> .env
+
+          # Override validators config with configured provider/model
+          sed -i "/^VALIDATORS_CONFIG_JSON=/,/^]'/d" .env
+          printf "\nVALIDATORS_CONFIG_JSON='[\n  {\"stake\": 100, \"provider\": \"$LLM_PROVIDER\", \"model\": \"$LLM_MODEL\", \"amount\": 5}\n]'\n" >> .env
+
+      - name: Configure CI environment
+        run: |
+          sed -i "s/VITE_FINALITY_WINDOW=\".*\"/VITE_FINALITY_WINDOW=\"10\"/" .env
+          sed -i "s/COMPOSE_RPC_CPU_LIMIT=\".*\"/COMPOSE_RPC_CPU_LIMIT=\"4\"/" .env
+          sed -i "s/COMPOSE_WORKER_CPU_LIMIT=\".*\"/COMPOSE_WORKER_CPU_LIMIT=\"4\"/" .env
+          sed -i "s/COMPOSE_RPC_MEM_LIMIT=\".*\"/COMPOSE_RPC_MEM_LIMIT=\"6gb\"/" .env
+          sed -i "s/COMPOSE_WORKER_MEM_LIMIT=\".*\"/COMPOSE_WORKER_MEM_LIMIT=\"6gb\"/" .env
+          sed -i "s/COMPOSE_RPC_MEM_RESERVATION=\".*\"/COMPOSE_RPC_MEM_RESERVATION=\"2gb\"/" .env
+          sed -i "s/COMPOSE_WORKER_MEM_RESERVATION=\".*\"/COMPOSE_WORKER_MEM_RESERVATION=\"2gb\"/" .env
+          sed -i "s/JSONRPC_REPLICAS=\".*\"/JSONRPC_REPLICAS=\"1\"/" .env
+          sed -i "s/CONSENSUS_WORKERS=\".*\"/CONSENSUS_WORKERS=\"3\"/" .env
+          sed -i "s/MAX_PARALLEL_TXS_PER_WORKER=\".*\"/MAX_PARALLEL_TXS_PER_WORKER=\"2\"/" .env
+          echo >> .env
+          echo "TEST_WITH_MOCK_LLMS=true" >> .env
+
+      - name: Configure gasless mode
+        run: |
+          sed -i "s/^GENLAYER_STUDIO_GEN_PER_TIME_UNIT=.*/GENLAYER_STUDIO_GEN_PER_TIME_UNIT='0'/" .env
+          sed -i "s/^GENLAYER_STUDIO_STORAGE_UNIT_PRICE=.*/GENLAYER_STUDIO_STORAGE_UNIT_PRICE='0'/" .env
+          sed -i "s/^GENLAYER_STUDIO_RECEIPT_GAS_PRICE=.*/GENLAYER_STUDIO_RECEIPT_GAS_PRICE='0'/" .env
+          grep "^GENLAYER_STUDIO_" .env
+
+      # Set up Python + pip early so it overlaps with Docker build
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements.test.txt
+            backend/requirements.txt
+
+      - name: Install Python dependencies
+        run: |
+          bash .github/scripts/install-python-dependencies.sh
+
+      - name: Extract GenVM version for cache key
+        id: genvm
+        run: |
+          GENVM_REF_VALUE="${GENVM_REF:-}"
+          if [[ -z "$GENVM_REF_VALUE" && -f .env ]]; then
+            GENVM_REF_VALUE="$(sed -n 's/^GENVM_REF=["'\'']\{0,1\}\([^"'\'']*\)["'\'']\{0,1\}.*/\1/p' .env | head -n1)"
+          fi
+          if [[ -n "$GENVM_REF_VALUE" ]]; then
+            echo "tag=ref-$GENVM_REF_VALUE" >> "$GITHUB_OUTPUT"
+            echo "bake_cache=,scope=genvm-$GENVM_REF_VALUE" >> "$GITHUB_OUTPUT"
+          else
+            GENVM_TAG_VALUE="${GENVM_TAG:-}"
+            if [[ -z "$GENVM_TAG_VALUE" && -f .env ]]; then
+              GENVM_TAG_VALUE="$(sed -n 's/^GENVM_TAG=["'\'']\{0,1\}\([^"'\'']*\)["'\'']\{0,1\}.*/\1/p' .env | head -n1)"
+            fi
+            if [[ -z "$GENVM_TAG_VALUE" ]]; then
+              echo "::warning::GENVM_TAG not set (this job runs prebuilt images) — using shared 'untagged' precompile cache key that will not invalidate across GenVM upgrades"
+              GENVM_TAG_VALUE="untagged"
+            fi
+            echo "tag=$GENVM_TAG_VALUE" >> "$GITHUB_OUTPUT"
+            echo "bake_cache=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare GenVM cache directory
+        run: |
+          sudo mkdir -p "$GENVM_CACHE_DIR/pc"
+          sudo chown -R 999:999 "$GENVM_CACHE_DIR"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      # Build only backend images with Buildx Bake and enable GHA cache
+      - name: Build backend images with cache (buildx bake)
+        uses: docker/bake-action@5be5f02ff8819ecd3092ea6b2e6261c31774f2b4 # v6
+        with:
+          files: |
+            ./docker-compose.yml
+          targets: |
+            database-migration
+            jsonrpc
+            consensus-worker
+          set: |
+            *.cache-from=type=gha${{ steps.genvm.outputs.bake_cache }}
+            database-migration.tags=genlayer-studio-database-migration:latest
+            jsonrpc.tags=genlayer-studio-jsonrpc:latest
+            consensus-worker.tags=genlayer-studio-consensus-worker:latest
+          load: true
+
+      # Start services without rebuilding images; CI override provides fast healthcheck timings.
+      # --wait blocks until all healthchecks pass (jsonrpc /ready + consensus-worker /health).
+      - name: Run Docker Compose
+        timeout-minutes: 5
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --no-build --wait database-migration jsonrpc consensus-worker
+
+      - name: Verify gasless stack is ready
+        run: |
+          echo "Services passed healthchecks, verifying gasless RPC endpoint..."
+          curl -sS -X POST -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","method":"sim_getFeeConfig","params":[],"id":1}' \
+            0.0.0.0:4000/api | tee /tmp/feeconfig.json
+          python3 -c "import json;cfg=json.load(open('/tmp/feeconfig.json'))['result'];assert cfg['enabled'] is False, cfg"
+
+      - name: Run gasless tests
+        env:
+          TEST_PROVIDER: ${{ vars.LLM_PROVIDER || 'openrouter' }}
+          TEST_PROVIDER_MODEL: ${{ vars.LLM_MODEL || 'deepseek/deepseek-v3.2' }}
+        run: gltest --contracts-dir . --default-wait-retries 140 tests/integration/test_gasless_mode.py -svv -m gasless
 
       - name: Dump Docker Compose logs
         run: docker compose logs
@@ -212,4 +469,3 @@ jobs:
 
   #     - name: Run Docker Compose
   #       run: docker compose -f tests/hardhat/docker-compose.yml --project-directory . up tests --build --force-recreate --always-recreate-deps
-

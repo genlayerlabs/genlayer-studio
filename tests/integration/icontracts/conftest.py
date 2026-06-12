@@ -46,7 +46,10 @@ def get_mock_provider_config() -> dict[str, str]:
 def setup_validators():
     created_validator_addresses = []
 
-    def _setup(mock_response: Any = None) -> None:
+    def _setup(
+        mock_response: Any = None,
+        mock_web_response: Any = None,
+    ) -> None:
         nonlocal created_validator_addresses
         if mock_llms():
             # Wipe ALL existing validators before seeding this test's mocks.
@@ -80,6 +83,11 @@ def setup_validators():
                             "api_url": mock_cfg["api_url"],
                             "mock_response": (
                                 mock_response if mock_response is not None else {}
+                            ),
+                            "mock_web_response": (
+                                mock_web_response
+                                if mock_web_response is not None
+                                else {}
                             ),
                         },
                     )

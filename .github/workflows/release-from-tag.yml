@@ -16,6 +16,11 @@ on:
         description: "Release tag to build and promote"
         required: true
         type: string
+    secrets:
+      DOCKERHUB_TOKEN:
+        required: true
+      RELEASE_LANE_APP_KEY:
+        required: true
 
 permissions:
   contents: read
@@ -87,7 +92,8 @@ jobs:
     with:
       ref: ${{ needs.validate-tag.outputs.tag }}
       image_tag: ${{ needs.validate-tag.outputs.tag }}
-    secrets: inherit
+    secrets:
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
   trigger-workload-release-lane:
     name: Trigger AWS Release Lane
@@ -108,7 +114,7 @@ jobs:
           repositories: devexp-argocd-apps
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
 
       - name: Resolve image digests
         id: digests

@@ -1,6 +1,13 @@
 # v0.2.16
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
+# BACKWARD-COMPAT CANARY - DO NOT UPGRADE TO THE MAIN-SDK IDIOM.
+# This contract is deliberately kept on the v0.3.0-rc3 runner (old SDK:
+# star-exported `gl`, gl.Contract base) to verify that contracts deployed
+# against older runners keep executing on the genvm-main executor.
+# (The blank line above is load-bearing: the executor parses the leading
+# comment block as version + runner JSON, so the note must sit outside it.)
+
 from genlayer import *
 
 

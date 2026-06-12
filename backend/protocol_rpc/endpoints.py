@@ -1,4 +1,5 @@
 # rpc/endpoints.py
+import copy
 import random
 import json
 import time
@@ -39,6 +40,21 @@ from backend.node.create_nodes.create_nodes import (
 )
 
 from backend.protocol_rpc.transactions_parser import TransactionParser
+from backend.protocol_rpc.fees import (
+    FEE_ACCOUNTING_KEY,
+    FeeValidationError,
+    StudioFeePolicy,
+    apply_fee_top_up,
+    create_fee_accounting,
+    get_leader_rounds,
+    normalize_fees_distribution,
+    record_appeal_bond,
+    record_execution_fee_consumption,
+    required_fee_deposit,
+    studio_fee_config,
+    validate_transaction_fee_deposit,
+)
+from backend.consensus.history import completed_consensus_round_index
 from backend.errors.errors import InvalidAddressError, InvalidTransactionError
 from backend.database_handler.errors import ContractNotFoundError
 
@@ -49,6 +65,7 @@ from backend.database_handler.transactions_processor import (
 
 
 logger = logging.getLogger(__name__)
+TRANSACTION_NOT_FOUND_MESSAGE = "Transaction not found"
 from backend.node.base import Node, get_simulator_chain_id
 from backend.node.types import ExecutionMode, ExecutionResultStatus
 from backend.consensus.base import ConsensusAlgorithm
@@ -59,7 +76,11 @@ import hashlib
 import os
 import secrets as secrets_module
 from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope
-from backend.protocol_rpc.types import DecodedsubmitAppealDataArgs
+from backend.protocol_rpc.types import (
+    DecodedRollupTransaction,
+    DecodedTopUpFeesDataArgs,
+    DecodedsubmitAppealDataArgs,
+)
 from backend.database_handler.snapshot_manager import SnapshotManager
 from backend.node.base import Manager as GenVMManager
 import asyncio
@@ -69,7 +90,6 @@ import asyncio
 # Workers use asyncio.Semaphore(8) in consensus/base.py; keep the RPC path
 # bounded too.
 _GENVM_CONCURRENCY = int(os.environ.get("GENVM_MAX_CONCURRENT", "8"))
-_genvm_semaphore = asyncio.Semaphore(_GENVM_CONCURRENCY)
 _genvm_admission_semaphore = asyncio.Semaphore(_GENVM_CONCURRENCY)
 
 # ---------------------------------------------------------------------------
@@ -228,6 +248,10 @@ def _enforce_pending_queue_caps(
                     "limit": _MAX_PENDING_PER_SENDER,
                 },
             )
+
+
+def get_studio_fee_config() -> dict[str, Any]:
+    return studio_fee_config(StudioFeePolicy.from_env())
 
 
 ####### ADMIN ACCESS CONTROL #######
@@ -873,7 +897,7 @@ def cancel_transaction(
     )
     if not transaction:
         raise NotFoundError(
-            message="Transaction not found",
+            message=TRANSACTION_NOT_FOUND_MESSAGE,
             data={"transaction_hash": transaction_hash},
         )
 
@@ -948,6 +972,11 @@ def cancel_transaction(
         AccountsManager(session).refund_tx_value(
             transaction_hash, transaction.from_address
         )
+    if transaction.from_address:
+        AccountsManager(session).cancel_tx_fee_accounting_once(
+            transaction_hash, transaction.from_address, "canceled"
+        )
+    session.commit()
 
     # Notify frontend via WebSocket
     msg_handler.send_transaction_status_update(transaction_hash, "CANCELED")
@@ -1229,7 +1258,91 @@ async def sim_call(
             genvm_manager,
             params,
         )
-    return receipt.to_dict()
+    return TransactionsProcessor._json_safe_numbers(receipt.to_dict())
+
+
+async def sim_estimate_transaction_fees(
+    session: Session,
+    accounts_manager: AccountsManager,
+    msg_handler: IMessageHandler,
+    transactions_parser: TransactionParser,
+    validators_manager: validators.Manager,
+    genvm_manager: GenVMManager,
+    params: dict,
+) -> dict:
+    estimate_params = _with_default_simulation_fees(params)
+    if isinstance(estimate_params, dict):
+        estimate_params = {
+            **estimate_params,
+            "_allow_low_execution_budget_for_estimate": True,
+        }
+    receipt = await sim_call(
+        session=session,
+        accounts_manager=accounts_manager,
+        msg_handler=msg_handler,
+        transactions_parser=transactions_parser,
+        validators_manager=validators_manager,
+        genvm_manager=genvm_manager,
+        params=estimate_params,
+    )
+    genvm_result = receipt.get("genvm_result") or {}
+    fee_accounting = (
+        genvm_result.get(FEE_ACCOUNTING_KEY) if isinstance(genvm_result, dict) else {}
+    ) or {}
+    return TransactionsProcessor._json_safe_numbers(
+        {
+            "scenario": _first_present(params, "scenario", "scenarioName") or "default",
+            "receipt": receipt,
+            "feeAccounting": fee_accounting,
+            "feeReport": fee_accounting.get("execution_fee_report") or {},
+            "recommendedPreset": fee_accounting.get("recommended_fee_preset") or {},
+        }
+    )
+
+
+def _with_default_simulation_fees(params: dict) -> dict:
+    if not isinstance(params, dict):
+        return params
+    fees = params.get("fees") if isinstance(params.get("fees"), dict) else {}
+    has_fee_params = any(
+        key in params
+        for key in (
+            "fees_distribution",
+            "feesDistribution",
+            "message_allocations",
+            "messageAllocations",
+            "fee_value",
+            "feeValue",
+        )
+    ) or any(
+        key in fees
+        for key in (
+            "distribution",
+            "fees_distribution",
+            "feesDistribution",
+            "message_allocations",
+            "messageAllocations",
+            "fee_value",
+            "feeValue",
+        )
+    )
+    if has_fee_params:
+        return params
+
+    updated = dict(params)
+    updated["fees"] = studio_fee_config(StudioFeePolicy.from_env())["defaultFees"]
+    return updated
+
+
+def _stage_simulated_call_value(
+    contract_snapshot: ContractSnapshot, call_value: int
+) -> None:
+    if call_value <= 0:
+        return
+
+    contract_snapshot.balance = int(
+        getattr(contract_snapshot, "balance", 0) or 0
+    ) + int(call_value)
 
 
 async def _gen_call_with_validator(
@@ -1247,6 +1360,14 @@ async def _gen_call_with_validator(
     from_address = params["from"]
     origin_address = params.get("origin_address")
     call_value = int(params.get("value", "0x0"), 16) if params.get("value") else 0
+    simulation_fee_accounting = _simulation_fee_accounting(
+        params,
+        sender=from_address,
+        user_value=call_value,
+    )
+    genvm_fee_accounting = _effective_simulation_fee_accounting_for_genvm(
+        simulation_fee_accounting
+    )
     transaction_hash_variant = (
         params["transaction_hash_variant"]
         if "transaction_hash_variant" in params
@@ -1284,6 +1405,8 @@ async def _gen_call_with_validator(
             message=f"Contract {to_address} not found",
             data={"contract_address": to_address},
         )
+    if type in {"write", "deploy"}:
+        _stage_simulated_call_value(contract_snapshot, call_value)
     node = Node(
         contract_snapshot=contract_snapshot,
         contract_snapshot_factory=partial(ContractSnapshot, session=session),
@@ -1301,89 +1424,87 @@ async def _gen_call_with_validator(
         sim_config is not None and sim_config.genvm_datetime is not None
     )
 
-    if _genvm_semaphore.locked():
-        _rate_limit_logger.warning(
-            f"GenVM at capacity ({_GENVM_CONCURRENCY} concurrent) — rejecting gen_call to {to_address}"
-        )
-        raise JSONRPCError(
-            code=-32006,
-            message=f"Server busy: all {_GENVM_CONCURRENCY} execution slots occupied, retry later",
-            data={"retry_after_seconds": 2},
-        )
+    try:
+        if type == "read":
+            # Pre-parse timestamp override and map errors
+            txn_dt = None
+            if sim_config and override_transaction_datetime:
+                try:
+                    txn_dt = sim_config.genvm_datetime_as_datetime
+                except ValueError as e:
+                    raise JSONRPCError(
+                        code=-32602,
+                        message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                        data={},
+                    ) from e
+            decoded_data = transactions_parser.decode_method_call_data(data)
+            receipt = await node.get_contract_data(
+                from_address=from_address,
+                calldata=decoded_data.calldata,
+                state_status=state_status,
+                transaction_datetime=txn_dt,
+                origin_address=origin_address,
+            )
+        elif type == "write":
+            txn_created_at = None
+            if sim_config and override_transaction_datetime:
+                try:
+                    _ = sim_config.genvm_datetime_as_datetime  # validation only
+                    txn_created_at = sim_config.genvm_datetime
+                except ValueError as e:
+                    raise JSONRPCError(
+                        code=-32602,
+                        message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                        data={},
+                    ) from e
+            decoded_data = transactions_parser.decode_method_send_data(data)
+            receipt = await node.run_contract(
+                from_address=from_address,
+                calldata=decoded_data.calldata,
+                transaction_created_at=txn_created_at,
+                value=call_value,
+                origin_address=origin_address,
+                fee_accounting=genvm_fee_accounting,
+            )
+        elif type == "deploy":
+            txn_created_at = None
+            if sim_config and override_transaction_datetime:
+                try:
+                    _ = sim_config.genvm_datetime_as_datetime  # validation only
+                    txn_created_at = sim_config.genvm_datetime
+                except ValueError as e:
+                    raise JSONRPCError(
+                        code=-32602,
+                        message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
+                        data={},
+                    ) from e
+            decoded_data = transactions_parser.decode_deployment_data(data)
+            receipt = await node.deploy_contract(
+                from_address=from_address,
+                code_to_deploy=decoded_data.contract_code,
+                calldata=decoded_data.calldata,
+                transaction_created_at=txn_created_at,
+                value=call_value,
+                origin_address=origin_address,
+                fee_accounting=genvm_fee_accounting,
+            )
+        else:
+            raise JSONRPCError(
+                code=-32602,
+                message=f"Invalid type '{type}': must be 'read', 'write', or 'deploy'",
+            )
+    except ContractNotFoundError as e:
+        raise NotFoundError(
+            message=f"Contract {e.address} not found",
+            data={"contract_address": e.address},
+        ) from e
 
-    async with _genvm_semaphore:
-        try:
-            if type == "read":
-                # Pre-parse timestamp override and map errors
-                txn_dt = None
-                if sim_config and override_transaction_datetime:
-                    try:
-                        txn_dt = sim_config.genvm_datetime_as_datetime
-                    except ValueError as e:
-                        raise JSONRPCError(
-                            code=-32602,
-                            message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
-                            data={},
-                        ) from e
-                decoded_data = transactions_parser.decode_method_call_data(data)
-                receipt = await node.get_contract_data(
-                    from_address=from_address,
-                    calldata=decoded_data.calldata,
-                    state_status=state_status,
-                    transaction_datetime=txn_dt,
-                    origin_address=origin_address,
-                )
-            elif type == "write":
-                txn_created_at = None
-                if sim_config and override_transaction_datetime:
-                    try:
-                        _ = sim_config.genvm_datetime_as_datetime  # validation only
-                        txn_created_at = sim_config.genvm_datetime
-                    except ValueError as e:
-                        raise JSONRPCError(
-                            code=-32602,
-                            message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
-                            data={},
-                        ) from e
-                decoded_data = transactions_parser.decode_method_send_data(data)
-                receipt = await node.run_contract(
-                    from_address=from_address,
-                    calldata=decoded_data.calldata,
-                    transaction_created_at=txn_created_at,
-                    value=call_value,
-                    origin_address=origin_address,
-                )
-            elif type == "deploy":
-                txn_created_at = None
-                if sim_config and override_transaction_datetime:
-                    try:
-                        _ = sim_config.genvm_datetime_as_datetime  # validation only
-                        txn_created_at = sim_config.genvm_datetime
-                    except ValueError as e:
-                        raise JSONRPCError(
-                            code=-32602,
-                            message=f"Invalid sim_config.genvm_datetime: {sim_config.genvm_datetime}",
-                            data={},
-                        ) from e
-                decoded_data = transactions_parser.decode_deployment_data(data)
-                receipt = await node.deploy_contract(
-                    from_address=from_address,
-                    code_to_deploy=decoded_data.contract_code,
-                    calldata=decoded_data.calldata,
-                    transaction_created_at=txn_created_at,
-                    value=call_value,
-                    origin_address=origin_address,
-                )
-            else:
-                raise JSONRPCError(
-                    code=-32602,
-                    message=f"Invalid type '{type}': must be 'read', 'write', or 'deploy'",
-                )
-        except ContractNotFoundError as e:
-            raise NotFoundError(
-                message=f"Contract {e.address} not found",
-                data={"contract_address": e.address},
-            ) from e
+    if simulation_fee_accounting is not None:
+        receipt.genvm_result = dict(receipt.genvm_result or {})
+        receipt.genvm_result["fee_accounting"] = record_execution_fee_consumption(
+            simulation_fee_accounting,
+            receipt,
+        )
 
     # Return the result of the write method
     if receipt.execution_result != ExecutionResultStatus.SUCCESS:
@@ -1451,6 +1572,20 @@ def get_studio_transaction_by_hash(
 def get_transaction_status(
     transactions_processor: TransactionsProcessor, transaction_hash: str
 ) -> str:
+    status = transactions_processor.get_transaction_status(transaction_hash)
+    if status is None:
+        raise NotFoundError(
+            message=f"Transaction {transaction_hash} not found",
+            data={"hash": transaction_hash},
+        )
+    # Compatibility contract for deployed apps (Rally): this legacy RPC returns
+    # the status string only. Extensions belong in gen_getTransactionStatusDetails.
+    return status["status"]
+
+
+def get_transaction_status_details(
+    transactions_processor: TransactionsProcessor, transaction_hash: str
+) -> dict:
     status = transactions_processor.get_transaction_status(transaction_hash)
     if status is None:
         raise NotFoundError(
@@ -1546,6 +1681,289 @@ async def eth_call(
     return eth_utils.hexadecimal.encode_hex(receipt.result[1:])
 
 
+def _fee_metadata(decoded_rollup_transaction: DecodedRollupTransaction) -> dict:
+    if (
+        decoded_rollup_transaction.data is None
+        or isinstance(decoded_rollup_transaction.data, DecodedsubmitAppealDataArgs)
+        or isinstance(decoded_rollup_transaction.data, DecodedTopUpFeesDataArgs)
+        or not hasattr(decoded_rollup_transaction.data, "args")
+        or decoded_rollup_transaction.data.args is None
+    ):
+        return {}
+
+    args = decoded_rollup_transaction.data.args
+    if args.fees_distribution is None and decoded_rollup_transaction.fee_value == 0:
+        return {}
+
+    metadata = {
+        "fee_value": decoded_rollup_transaction.fee_value,
+        "user_value": args.user_value,
+        "valid_until": args.valid_until,
+        "salt_nonce": args.salt_nonce,
+        "fees_distribution": args.fees_distribution,
+        "message_allocations_count": args.message_allocations_count,
+    }
+    metadata[FEE_ACCOUNTING_KEY] = create_fee_accounting(
+        fees_distribution=args.fees_distribution,
+        message_allocations=args.message_allocations,
+        num_of_validators=args.num_of_initial_validators,
+        submitted_value=decoded_rollup_transaction.total_spend,
+        user_value=int(args.user_value or 0),
+        sender=decoded_rollup_transaction.from_address,
+        policy=StudioFeePolicy.from_env(),
+    )
+    return metadata
+
+
+def _validate_fee_envelope(
+    decoded_rollup_transaction: DecodedRollupTransaction,
+) -> None:
+    if (
+        decoded_rollup_transaction.data is None
+        or isinstance(decoded_rollup_transaction.data, DecodedsubmitAppealDataArgs)
+        or isinstance(decoded_rollup_transaction.data, DecodedTopUpFeesDataArgs)
+        or not hasattr(decoded_rollup_transaction.data, "args")
+        or decoded_rollup_transaction.data.args is None
+    ):
+        return
+
+    args = decoded_rollup_transaction.data.args
+    if args.fees_distribution is None:
+        return
+
+    try:
+        validate_transaction_fee_deposit(
+            fees_distribution=args.fees_distribution,
+            message_allocations=args.message_allocations,
+            num_of_validators=args.num_of_initial_validators,
+            submitted_value=decoded_rollup_transaction.total_spend,
+            user_value=int(args.user_value or 0),
+            policy=StudioFeePolicy.from_env(),
+        )
+    except FeeValidationError as exc:
+        raise InvalidTransactionError(str(exc)) from exc
+
+
+def _sandbox_debit_sender(
+    accounts_manager: AccountsManager, from_address: str, amount: int
+) -> None:
+    if amount <= 0:
+        return
+    sender_balance = accounts_manager.get_account_balance(from_address)
+    if sender_balance < amount:
+        accounts_manager.credit_account_balance(from_address, amount - sender_balance)
+    accounts_manager.debit_account_balance(from_address, amount)
+
+
+def _handle_top_up_fees(
+    *,
+    accounts_manager: AccountsManager,
+    transactions_processor: TransactionsProcessor,
+    decoded_rollup_transaction: DecodedRollupTransaction,
+) -> str:
+    assert isinstance(decoded_rollup_transaction.data, DecodedTopUpFeesDataArgs)
+    tx_id = _tx_id_to_hex(decoded_rollup_transaction.data.tx_id)
+    tx = transactions_processor.get_transaction_by_hash(tx_id)
+    if tx is None:
+        raise NotFoundError(message=TRANSACTION_NOT_FOUND_MESSAGE, data={"hash": tx_id})
+
+    status = tx.get("status")
+    if status in {
+        TransactionStatus.ACCEPTED.value,
+        TransactionStatus.UNDETERMINED.value,
+        TransactionStatus.FINALIZED.value,
+        TransactionStatus.CANCELED.value,
+    }:
+        raise InvalidTransactionError("InvalidTransactionStatus")
+
+    fee_accounting = (tx.get("data") or {}).get(FEE_ACCOUNTING_KEY)
+    if fee_accounting is None:
+        raise InvalidTransactionError("FeeAccountingMissing")
+
+    try:
+        updated = apply_fee_top_up(
+            fee_accounting,
+            fees_distribution=decoded_rollup_transaction.data.fees_distribution,
+            amount=decoded_rollup_transaction.total_spend,
+            sender=decoded_rollup_transaction.from_address,
+            num_of_validators=int(tx.get("num_of_initial_validators") or 5),
+            policy=StudioFeePolicy.from_env(),
+        )
+    except FeeValidationError as exc:
+        raise InvalidTransactionError(str(exc)) from exc
+
+    _sandbox_debit_sender(
+        accounts_manager,
+        decoded_rollup_transaction.from_address,
+        decoded_rollup_transaction.total_spend,
+    )
+    transactions_processor.update_transaction_fee_accounting(tx_id, updated)
+    return tx_id
+
+
+def _handle_appeal_or_top_up_and_submit(
+    *,
+    accounts_manager: AccountsManager,
+    transactions_processor: TransactionsProcessor,
+    msg_handler: IMessageHandler,
+    decoded_rollup_transaction: DecodedRollupTransaction,
+) -> str:
+    assert isinstance(decoded_rollup_transaction.data, DecodedsubmitAppealDataArgs)
+    tx_id = _tx_id_to_hex(decoded_rollup_transaction.data.tx_id)
+    tx = transactions_processor.get_transaction_by_hash(tx_id)
+    if tx is None:
+        raise NotFoundError(message=TRANSACTION_NOT_FOUND_MESSAGE, data={"hash": tx_id})
+
+    fee_accounting = (tx.get("data") or {}).get(FEE_ACCOUNTING_KEY)
+    if fee_accounting is not None:
+        try:
+            updated = record_appeal_bond(
+                fee_accounting,
+                amount=decoded_rollup_transaction.total_spend,
+                appealer=decoded_rollup_transaction.from_address,
+                current_round=_current_fee_round(tx.get("consensus_history")),
+                status=str(tx.get("status") or ""),
+                fees_distribution=decoded_rollup_transaction.data.fees_distribution,
+                top_up_and_submit=decoded_rollup_transaction.data.top_up_and_submit,
+            )
+        except FeeValidationError as exc:
+            raise InvalidTransactionError(str(exc)) from exc
+        _sandbox_debit_sender(
+            accounts_manager,
+            decoded_rollup_transaction.from_address,
+            decoded_rollup_transaction.total_spend,
+        )
+        transactions_processor.update_transaction_fee_accounting(tx_id, updated)
+
+    transactions_processor.set_transaction_appeal(tx_id, True)
+    msg_handler.send_message(
+        log_event=LogEvent(
+            "transaction_appeal_updated",
+            EventType.INFO,
+            EventScope.CONSENSUS,
+            "Set transaction appealed",
+            {
+                "hash": tx_id,
+            },
+        ),
+        log_to_terminal=False,
+    )
+    return tx_id
+
+
+def _tx_id_to_hex(tx_id: str | bytes) -> str:
+    return "0x" + tx_id.hex() if isinstance(tx_id, bytes) else tx_id
+
+
+def _current_fee_round(consensus_history: dict | None) -> int:
+    return completed_consensus_round_index(consensus_history)
+
+
+def _simulation_fee_accounting(
+    params: dict,
+    *,
+    sender: str,
+    user_value: int,
+) -> dict | None:
+    fees = params.get("fees") if isinstance(params.get("fees"), dict) else {}
+    fees_distribution = _first_present(
+        params,
+        "fees_distribution",
+        "feesDistribution",
+    ) or _first_present(fees, "distribution", "fees_distribution", "feesDistribution")
+    message_allocations = _first_present(
+        params,
+        "message_allocations",
+        "messageAllocations",
+    )
+    if message_allocations is None:
+        message_allocations = _first_present(
+            fees,
+            "message_allocations",
+            "messageAllocations",
+        )
+    raw_fee_value = _first_present(params, "fee_value", "feeValue")
+    if raw_fee_value is None:
+        raw_fee_value = _first_present(fees, "fee_value", "feeValue")
+
+    if fees_distribution is None and not message_allocations and raw_fee_value is None:
+        return None
+
+    fees_distribution = fees_distribution or {}
+    message_allocations = message_allocations or []
+    num_of_initial_validators = _int_param(
+        _first_present(params, "num_of_initial_validators", "numOfInitialValidators"),
+        5,
+    )
+    policy = StudioFeePolicy.from_env()
+    fee_value = _int_param(raw_fee_value, None)
+    if fee_value is None:
+        fee_value = required_fee_deposit(
+            fees_distribution,
+            num_of_initial_validators,
+            policy,
+        )
+
+    try:
+        return create_fee_accounting(
+            fees_distribution=fees_distribution,
+            message_allocations=message_allocations,
+            num_of_validators=num_of_initial_validators,
+            submitted_value=int(user_value) + int(fee_value),
+            user_value=int(user_value),
+            sender=sender,
+            policy=policy,
+            allow_low_execution_budget=bool(
+                params.get("_allow_low_execution_budget_for_estimate")
+            ),
+        )
+    except FeeValidationError as exc:
+        raise JSONRPCError(code=-32602, message=str(exc), data={}) from exc
+
+
+def _effective_simulation_fee_accounting_for_genvm(
+    accounting: dict | None,
+) -> dict | None:
+    if not accounting:
+        return accounting
+
+    snapshot = accounting.get("policy_snapshot")
+    policy = (
+        StudioFeePolicy.from_snapshot(snapshot)
+        if isinstance(snapshot, dict)
+        else StudioFeePolicy.from_env()
+    )
+    fees = normalize_fees_distribution(accounting.get("fees_distribution") or {})
+    execution_budget_per_round = int(fees["executionBudgetPerRound"])
+    floor = policy.message_fee_params_budget_floor()
+    if execution_budget_per_round <= 0 or execution_budget_per_round >= floor:
+        return accounting
+
+    adjusted = copy.deepcopy(accounting)
+    adjusted_fees = dict(fees)
+    adjusted_fees["executionBudgetPerRound"] = floor
+    adjusted["fees_distribution"] = adjusted_fees
+    adjusted["execution_budget_total"] = floor * get_leader_rounds(adjusted_fees)
+    return adjusted
+
+
+def _first_present(source: dict | None, *keys: str):
+    if not isinstance(source, dict):
+        return None
+    for key in keys:
+        if key in source:
+            return source[key]
+    return None
+
+
+def _int_param(value: Any, default: int | None = None) -> int | None:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return int(value, 16) if value.startswith("0x") else int(value)
+    return int(value)
+
+
 def send_raw_transaction(
     session: Session,
     msg_handler: IMessageHandler,
@@ -1570,6 +1988,7 @@ def send_raw_transaction(
 
     from_address = decoded_rollup_transaction.from_address
     value = decoded_rollup_transaction.value
+    total_spend = getattr(decoded_rollup_transaction, "total_spend", value)
 
     if not accounts_manager.is_valid_address(from_address):
         raise InvalidAddressError(
@@ -1587,29 +2006,27 @@ def send_raw_transaction(
         raise InvalidTransactionError("Transaction signature verification failed")
 
     if isinstance(decoded_rollup_transaction.data, DecodedsubmitAppealDataArgs):
-        tx_id = decoded_rollup_transaction.data.tx_id
-        tx_id_hex = "0x" + tx_id.hex() if isinstance(tx_id, bytes) else tx_id
-        transactions_processor.set_transaction_appeal(tx_id_hex, True)
-        msg_handler.send_message(
-            log_event=LogEvent(
-                "transaction_appeal_updated",
-                EventType.INFO,
-                EventScope.CONSENSUS,
-                "Set transaction appealed",
-                {
-                    "hash": tx_id_hex,
-                },
-            ),
-            log_to_terminal=False,
+        return _handle_appeal_or_top_up_and_submit(
+            accounts_manager=accounts_manager,
+            transactions_processor=transactions_processor,
+            msg_handler=msg_handler,
+            decoded_rollup_transaction=decoded_rollup_transaction,
         )
-        return tx_id_hex
+    elif isinstance(decoded_rollup_transaction.data, DecodedTopUpFeesDataArgs):
+        return _handle_top_up_fees(
+            accounts_manager=accounts_manager,
+            transactions_processor=transactions_processor,
+            decoded_rollup_transaction=decoded_rollup_transaction,
+        )
     else:
+        _validate_fee_envelope(decoded_rollup_transaction)
         transaction_hash = consensus_service.generate_transaction_hash(
             signed_rollup_transaction
         )
         to_address = decoded_rollup_transaction.to_address
         nonce = decoded_rollup_transaction.nonce
         value = decoded_rollup_transaction.value
+        total_spend = getattr(decoded_rollup_transaction, "total_spend", value)
         genlayer_transaction = transactions_parser.get_genlayer_transaction(
             decoded_rollup_transaction
         )
@@ -1659,6 +2076,8 @@ def send_raw_transaction(
                 "contract_code": genlayer_transaction.data.contract_code,
                 "calldata": genlayer_transaction.data.calldata,
             }
+            if fee_metadata := _fee_metadata(decoded_rollup_transaction):
+                transaction_data.update(fee_metadata)
             to_address = new_contract_address
         elif genlayer_transaction.type == TransactionType.RUN_CONTRACT:
             # Contract Call
@@ -1675,6 +2094,8 @@ def send_raw_transaction(
                 )
 
             transaction_data = {"calldata": genlayer_transaction.data.calldata}
+            if fee_metadata := _fee_metadata(decoded_rollup_transaction):
+                transaction_data.update(fee_metadata)
 
         # Check for duplicate before debit+insert to avoid TOCTOU races
         is_duplicate = transactions_processor.get_transaction_by_hash(transaction_hash)
@@ -1699,16 +2120,12 @@ def send_raw_transaction(
         # Debit sender BEFORE insert. Mint on demand if insufficient (Studio sandbox).
         # Skip for SEND (execute_transfer handles it) and duplicates.
         if (
-            value > 0
+            total_spend > 0
             and from_address
             and genlayer_transaction.type != TransactionType.SEND
             and is_duplicate is None
         ):
-            sender_balance = accounts_manager.get_account_balance(from_address)
-            if sender_balance < value:
-                shortfall = value - sender_balance
-                accounts_manager.credit_account_balance(from_address, shortfall)
-            accounts_manager.debit_account_balance(from_address, value)
+            _sandbox_debit_sender(accounts_manager, from_address, total_spend)
 
         # Insert transaction into the database
         transactions_processor.insert_transaction(

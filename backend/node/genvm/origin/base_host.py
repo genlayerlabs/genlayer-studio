@@ -19,11 +19,24 @@ from dataclasses import dataclass
 
 from .calldata import Address
 from . import calldata as gvm_calldata
+from . import fees
 from . import host_fns
 from . import public_abi
 
 ACCOUNT_ADDR_SIZE = 20
 SLOT_ID_SIZE = 32
+
+DEFAULT_GAS_DATA: dict[str, str] = {
+    "storageUnitPrice": "1",
+    "receiptGasPerByte": "1",
+    "gasPerChangedSlot": "1",
+    "intrinsicGas": "0",
+    "bootloaderOverhead": "0",
+    "fixedProposeReceiptGas": "0",
+    "fixedMessageRevealGas": "0",
+    "genPerTimeUnit": "0",
+}
+DEFAULT_INITIAL_TIME_UNITS_ALLOCATION = 10 * 60
 
 from .logger import Logger
 
@@ -82,6 +95,28 @@ class HostException(Exception):
         super().__init__(message or f"GenVM error: {error_code}")
 
 
+# Studio-local retry shim for transient manager module restart races.
+class GenVMManagerRetryableError(Exception):
+    def __init__(self, status: int, body: typing.Any):
+        self.status = status
+        self.body = body
+        super().__init__(f"genvm manager /genvm/run failed: {status} {body}")
+
+
+def _is_retryable_manager_run_error(status: int, body: typing.Any) -> bool:
+    if status != 500 or not isinstance(body, dict):
+        return False
+
+    error = body.get("error")
+    if not isinstance(error, str):
+        return False
+
+    return (
+        "modules are required but not running" in error
+        or "modules are required but not all are running" in error
+    )
+
+
 class Message(typing.TypedDict):
     contract_address: Address
     sender_address: Address
@@ -107,6 +142,11 @@ class EthSendInner(typing.TypedDict):
     address: Address
     calldata: bytes
     value: int
+    feeParams: typing.NotRequired[bytes]
+    fee_params: typing.NotRequired[fees.ExternalMessageParams]
+    declaredBudget: typing.NotRequired[int]
+    callKey: typing.NotRequired[bytes]
+    allocationSubtree: typing.NotRequired[list[dict]]
 
 
 class PostMessageInner(typing.TypedDict):
@@ -115,6 +155,12 @@ class PostMessageInner(typing.TypedDict):
     calldata: gvm_calldata.Decoded
     value: int
     on: typing.Literal["finalized", "accepted"]
+    feeParams: typing.NotRequired[bytes]
+    fee_params: typing.NotRequired[fees.InternalMessageParams]
+    declaredBudget: typing.NotRequired[int]
+    callKey: typing.NotRequired[bytes]
+    allocationSubtree: typing.NotRequired[list[dict]]
+    subtree: typing.NotRequired[bytes]
 
 
 class DeployContractInner(typing.TypedDict):
@@ -124,6 +170,12 @@ class DeployContractInner(typing.TypedDict):
     value: int
     on: typing.Literal["finalized", "accepted"]
     salt_nonce: int
+    feeParams: typing.NotRequired[bytes]
+    fee_params: typing.NotRequired[fees.InternalMessageParams]
+    declaredBudget: typing.NotRequired[int]
+    callKey: typing.NotRequired[bytes]
+    allocationSubtree: typing.NotRequired[list[dict]]
+    subtree: typing.NotRequired[bytes]
 
 
 class EmitEventInner(typing.TypedDict):
@@ -318,7 +370,9 @@ async def host_loop(
                 )
                 return None
             case host_fns.Methods.CONSUME_FUEL:
-                gas = await recv_int(8)
+                # GenVM main sends fuel as a 32-byte little-endian U256
+                # (rc3 used 8 bytes); see executor/src/host/mod.rs consume_fuel.
+                gas = await recv_int(32)
                 await handler.consume_gas(gas)
             case host_fns.Methods.ETH_CALL:
                 account = await read_exact(ACCOUNT_ADDR_SIZE)
@@ -350,7 +404,14 @@ async def host_loop(
                 else:
                     res = min(res, 2**53 - 1)
                     await send_all(bytes([host_fns.Errors.OK]))
-                    await send_all(res.to_bytes(8, byteorder="little", signed=False))
+                    # GenVM main reads a 32-byte little-endian U256 here (rc3
+                    # read 8 bytes). Sending only 8 left the executor blocked
+                    # on the remaining 24 bytes while this loop waited for the
+                    # next method — a read-read deadlock that stalled every
+                    # nondet (exec_prompt/web) execution in PROPOSING until
+                    # LEADER_TIMEOUT. See executor/src/host/mod.rs
+                    # remaining_fuel_as_gen and wasi/genlayer_sdk.rs call sites.
+                    await send_all(res.to_bytes(32, byteorder="little", signed=False))
             case host_fns.Methods.NOTIFY_NONDET_DISAGREEMENT:
                 call_no = await recv_int()
                 await handler.notify_nondet_disagreement(call_no)
@@ -375,6 +436,7 @@ class RunHostAndProgramRes:
     result_storage_changes: list[tuple[bytes, bytes]]
     result_emissions: list[ResultEmission]
     result_nondet_results: list[bytes]
+    data_fees_remaining: list[int]
     vm_error_description: str | None = None
 
 
@@ -429,17 +491,20 @@ async def run_genvm(
     capture_output: bool = True,
     message: Message,
     host_data: str = "",
+    gas_data: dict[str, str] | None = None,
     host: str,
     extra_args: list[str] = [],
-    data_fees_limit: int = 10_000_000,
-    storage_page_cost: int = 1,
-    receipt_word_cost: int = 1,
+    bucket_totals: list[int] | None = None,
     code: bytes | None = None,
     calldata: bytes,
     leader_nondet_results: list[bytes] | None = None,
+    message_fee_allocation: list[fees.MessageAllocationNode] | None = None,
     request_extra: dict[str, gvm_calldata.Encodable] = {},
 ) -> RunHostAndProgramRes:
     logger = ctx.logger
+    effective_bucket_totals = bucket_totals or [10_000_000, 10_000_000, 10_000_000]
+    effective_gas_data = DEFAULT_GAS_DATA if gas_data is None else gas_data
+    effective_message_fee_allocation = message_fee_allocation or []
 
     perf_timeline: dict[str, typing.Any] = {
         "run_started_s": time.perf_counter(),
@@ -475,9 +540,10 @@ async def run_genvm(
                     "code": code,
                     "calldata": calldata,
                     "leader_nondet_results": leader_nondet_results,
-                    "data_fees_limit": data_fees_limit,
-                    "storage_page_cost": storage_page_cost,
-                    "receipt_word_cost": receipt_word_cost,
+                    "bucket_totals": effective_bucket_totals,
+                    "gas_data": effective_gas_data,
+                    "message_fee_allocation": effective_message_fee_allocation,
+                    "initial_time_units_allocation": DEFAULT_INITIAL_TIME_UNITS_ALLOCATION,
                     **request_extra,
                 }
             ),
@@ -490,6 +556,8 @@ async def run_genvm(
                 logger.error(
                     f"genvm manager /genvm/run failed", status=resp.status, body=data
                 )
+                if _is_retryable_manager_run_error(resp.status, data):
+                    raise GenVMManagerRetryableError(resp.status, data)
                 raise Exception(
                     f"genvm manager /genvm/run failed: {resp.status} {data}"
                 )
@@ -519,19 +587,23 @@ async def run_genvm(
                     },
                 )
                 break
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except (
+                aiohttp.ClientError,
+                asyncio.TimeoutError,
+                GenVMManagerRetryableError,
+            ) as exc:
                 delay = ctx.retry_delay(TimeoutAction.GenVMRun, attempt)
-                ctx.add_stat(
-                    f"manager_run_attempt_{attempt}_error",
-                    {
-                        "attempt": attempt,
-                        "error_type": type(exc).__name__,
-                        "duration_ms": round(
-                            (time.perf_counter() - attempt_start) * 1000
-                        ),
-                        "will_retry": delay is not None,
-                    },
-                )
+                error_stat = {
+                    "attempt": attempt,
+                    "error_type": type(exc).__name__,
+                    "duration_ms": round((time.perf_counter() - attempt_start) * 1000),
+                    "will_retry": delay is not None,
+                }
+                if isinstance(exc, GenVMManagerRetryableError):
+                    error_stat["status"] = exc.status
+                    error_stat["body"] = exc.body
+                    error_stat["retry_reason"] = "manager_modules_not_running"
+                ctx.add_stat(f"manager_run_attempt_{attempt}_error", error_stat)
                 if delay is None:
                     logger.error(
                         "genvm manager request failed after all retries",
@@ -791,6 +863,7 @@ async def run_genvm(
             result_storage_changes = decoded.get("storage_changes", [])
             result_emissions = decoded.get("emissions", [])
             nondet_results = decoded.get("nondet_results", [])
+            data_fees_remaining = decoded.get("data_fees_remaining", [])
         else:
             execution_hash = b""
             result_kind = public_abi.ResultCode.INTERNAL_ERROR
@@ -799,10 +872,11 @@ async def run_genvm(
             result_storage_changes = []
             result_emissions = []
             nondet_results = []
+            data_fees_remaining = []
 
         if timeout_fired.is_set() and result_kind != public_abi.ResultCode.RETURN:
             result_kind = public_abi.ResultCode.VM_ERROR
-            result_data = public_abi.VmError.TIMEOUT.value
+            result_data = str(public_abi.VmError.TIMEOUT)
 
         vm_error_description: str | None = None
         if result_kind == public_abi.ResultCode.VM_ERROR and isinstance(
@@ -832,6 +906,7 @@ async def run_genvm(
             result_storage_changes=result_storage_changes,
             result_emissions=result_emissions,
             result_nondet_results=nondet_results,
+            data_fees_remaining=data_fees_remaining,
             vm_error_description=vm_error_description,
             execution_time=time.time() - started_at[0],
         )

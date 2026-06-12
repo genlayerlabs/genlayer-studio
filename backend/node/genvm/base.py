@@ -10,6 +10,7 @@ __all__ = (
     "ExecutionResult",
     "apply_storage_changes",
     "GenVMInternalError",
+    "GenVMFeeContext",
     "Context",
     "set_genvm_callbacks",
 )
@@ -31,6 +32,8 @@ import abc
 import time
 import copy
 
+from eth_abi import decode, encode
+
 from backend.node.types import (
     PendingTransaction,
     Address,
@@ -48,6 +51,37 @@ from .error_codes import (
     parse_ctx_from_module_error_string,
     GenVMInternalError,
 )
+
+GENVM_GASLESS_GAS_DATA: dict[str, str] = {
+    "storageUnitPrice": "0",
+    "receiptGasPerByte": "0",
+    "gasPerChangedSlot": "0",
+    "intrinsicGas": "0",
+    "bootloaderOverhead": "0",
+    "fixedProposeReceiptGas": "0",
+    "fixedMessageRevealGas": "0",
+    "genPerTimeUnit": "0",
+}
+
+INTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE = "(uint256,uint256,uint256,uint256,uint256[])"
+INTERNAL_MESSAGE_FEE_PARAMS_WITH_CAPS_ABI_TYPE = (
+    "(uint256,uint256,uint256,uint256,uint256[],uint256,uint256,uint256)"
+)
+EXTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE = "(uint256,uint256)"
+MESSAGE_ALLOCATION_NODE_ABI_TYPE = (
+    "(uint8,bool,uint256,address,bytes32,uint256,bytes)[]"
+)
+MESSAGE_TYPE_EXTERNAL = 0
+MESSAGE_TYPE_INTERNAL = 1
+NODE_ROOT_SENTINEL = (1 << 256) - 1
+CALL_KEY_WILDCARD = "0x" + ("0" * 64)
+
+
+@dataclass(frozen=True)
+class GenVMFeeContext:
+    bucket_totals: list[int] | None = None
+    gas_data: dict[str, str] | None = None
+    message_fee_allocation: list[dict] | None = None
 
 
 @dataclass
@@ -234,6 +268,144 @@ class ExecutionResult:
     processing_time: int
     nondet_disagree: int | None
     execution_stats: dict | None = None
+    data_fee_bucket_totals: list[int] | None = None
+    data_fees_remaining: list[int] | None = None
+
+
+def _emission_value(emission: dict, name: str):
+    snake = "".join(f"_{char.lower()}" if char.isupper() else char for char in name)
+    return emission.get(name, emission.get(snake))
+
+
+def _emission_bytes(emission: dict, name: str) -> bytes:
+    value = _emission_value(emission, name)
+    return _bytes_from_emission_value(value)
+
+
+def _bytes_from_emission_value(value) -> bytes:
+    if value is None:
+        return b""
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        raw = value.removeprefix("0x")
+        try:
+            return bytes.fromhex(raw)
+        except ValueError:
+            return base64.b64decode(value)
+    return bytes(value)
+
+
+def _emission_internal_fee_params(emission: dict) -> bytes:
+    value = _emission_value(emission, "feeParams")
+    if isinstance(value, dict):
+        rotations = [int(rotation) for rotation in value.get("rotations", [])]
+        appeal_rounds = max(len(rotations) - 1, 0)
+        return encode(
+            [INTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE],
+            [
+                (
+                    int(value.get("leader_timeunits_allocation", 0)),
+                    int(value.get("validator_timeunits_allocation", 0)),
+                    appeal_rounds,
+                    int(value.get("execution_budget_per_round", 0)),
+                    rotations,
+                )
+            ],
+        )
+    return _bytes_from_emission_value(value)
+
+
+def _emission_external_fee_params(emission: dict) -> bytes:
+    value = _emission_value(emission, "feeParams")
+    if isinstance(value, dict):
+        return encode(
+            [EXTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE],
+            [
+                (
+                    int(value.get("gas_limit", 0)),
+                    int(value.get("max_gas_price", 0)),
+                )
+            ],
+        )
+    return _bytes_from_emission_value(value)
+
+
+def _emission_allocation_subtree(emission: dict) -> list[dict]:
+    value = _emission_value(emission, "allocationSubtree")
+    if isinstance(value, list):
+        return value
+
+    subtree = _emission_value(emission, "subtree")
+    if subtree is None:
+        return []
+
+    raw = _bytes_from_emission_value(subtree)
+    if not raw:
+        return []
+
+    try:
+        decoded = decode([MESSAGE_ALLOCATION_NODE_ABI_TYPE], raw)[0]
+    except Exception:
+        return []
+
+    allocation_subtree = []
+    for node in decoded:
+        message_type = int(node[0])
+        fee_params = bytes(node[6])
+        if message_type == MESSAGE_TYPE_INTERNAL:
+            fee_params = _canonical_internal_fee_params_from_genvm(fee_params)
+        allocation_subtree.append(
+            {
+                "messageType": message_type,
+                "onAcceptance": bool(node[1]),
+                "parentIndex": int(node[2]),
+                "recipient": str(node[3]).lower(),
+                "callKey": "0x" + bytes(node[4]).hex(),
+                "budget": int(node[5]),
+                "feeParams": "0x" + fee_params.hex(),
+            }
+        )
+    return allocation_subtree
+
+
+def _canonical_internal_fee_params_from_genvm(fee_params: bytes) -> bytes:
+    try:
+        decoded = decode([INTERNAL_MESSAGE_FEE_PARAMS_WITH_CAPS_ABI_TYPE], fee_params)[
+            0
+        ]
+    except Exception:
+        return fee_params
+    return encode(
+        [INTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE],
+        [
+            (
+                int(decoded[0]),
+                int(decoded[1]),
+                int(decoded[2]),
+                int(decoded[3]),
+                [int(rotation) for rotation in decoded[4]],
+            )
+        ],
+    )
+
+
+def _emission_int(emission: dict, name: str) -> int:
+    return int(_emission_value(emission, name) or 0)
+
+
+def _emission_hex(emission: dict, name: str) -> str:
+    value = _emission_value(emission, name)
+    if value is None:
+        return "0x" + ("0" * 64)
+    if isinstance(value, bytes):
+        return "0x" + value.hex().rjust(64, "0")[-64:]
+    return "0x" + str(value).removeprefix("0x").lower().rjust(64, "0")[-64:]
+
+
+def _emission_list(emission: dict, name: str) -> list:
+    value = _emission_value(emission, name)
+    return value if isinstance(value, list) else []
 
 
 class Host(genvmhost.IHost):
@@ -340,7 +512,13 @@ class Host(genvmhost.IHost):
         else:
             raise Exception(f"invalid result {res.result_kind}")
 
-        apply_storage_changes(res.result_storage_changes, state)
+        # Readonly (view) executions can still report storage changes on GenVM
+        # main — e.g. lazy data-structure initialization on first access
+        # (genlayer-embeddings VecDB._do_init inside a view knn). Those writes
+        # are ephemeral VM-side effects: discard them instead of tripping the
+        # storage_write readonly assertion.
+        if not getattr(state, "readonly", False):
+            apply_storage_changes(res.result_storage_changes, state)
 
         # Extract pending_transactions from result_emissions
         pending_transactions = []
@@ -355,6 +533,10 @@ class Host(genvmhost.IHost):
                             salt_nonce=0,
                             value=emission["value"],
                             on=emission["on"],
+                            fee_params=_emission_internal_fee_params(emission),
+                            declared_budget=_emission_int(emission, "declaredBudget"),
+                            call_key=_emission_hex(emission, "callKey"),
+                            allocation_subtree=_emission_allocation_subtree(emission),
                         )
                     )
                 case "DeployContract":
@@ -366,6 +548,10 @@ class Host(genvmhost.IHost):
                             salt_nonce=emission["salt_nonce"],
                             value=emission["value"],
                             on=emission["on"],
+                            fee_params=_emission_internal_fee_params(emission),
+                            declared_budget=_emission_int(emission, "declaredBudget"),
+                            call_key=_emission_hex(emission, "callKey"),
+                            allocation_subtree=_emission_allocation_subtree(emission),
                         )
                     )
                 case "EthSend":
@@ -378,6 +564,11 @@ class Host(genvmhost.IHost):
                             value=emission["value"],
                             on="finalized",
                             is_eth_send=True,
+                            fee_params=_emission_external_fee_params(emission),
+                            declared_budget=_emission_int(emission, "declaredBudget"),
+                            call_key=_emission_hex(emission, "callKey"),
+                            allocation_subtree=_emission_allocation_subtree(emission),
+                            gas_used=_emission_int(emission, "gasUsed"),
                         )
                     )
 
@@ -395,6 +586,7 @@ class Host(genvmhost.IHost):
             processing_time=0,
             nondet_disagree=self._nondet_disagreement,
             execution_stats=ctx.stats,
+            data_fees_remaining=res.data_fees_remaining,
         )
 
     async def loop_enter(self, cancellation) -> socket.socket:
@@ -499,6 +691,7 @@ def _create_timeout_result(
         state=state_proxy,
         processing_time=processing_time,
         nondet_disagree=None,
+        data_fees_remaining=[],
     )
 
 
@@ -527,10 +720,22 @@ async def run_genvm_host(
     extra_args: list[str] = [],
     permissions: str = "rwscn",
     code: bytes | None = None,
+    fee_context: GenVMFeeContext | None = None,
 ) -> ExecutionResult:
     if logger is None:
         logger = genvm_logger.NoLogger()
     ctx = Context(logger=logger)
+    fee_context = fee_context or GenVMFeeContext()
+    effective_bucket_totals = fee_context.bucket_totals or [
+        10_000_000,
+        10_000_000,
+        10_000_000,
+    ]
+    effective_gas_data = (
+        dict(fee_context.gas_data)
+        if fee_context.gas_data
+        else dict(GENVM_GASLESS_GAS_DATA)
+    )
     tmpdir = Path(tempfile.mkdtemp())
     try:
         base_delay = 5  # seconds
@@ -602,6 +807,9 @@ async def run_genvm_host(
                         host=f"unix://{sock_path}",
                         extra_args=extra_args,
                         code=code,
+                        bucket_totals=effective_bucket_totals,
+                        gas_data=effective_gas_data,
+                        message_fee_allocation=fee_context.message_fee_allocation or [],
                         calldata=fresh_args.get(
                             "calldata_bytes", host_args.get("calldata_bytes", b"")
                         ),
@@ -613,6 +821,7 @@ async def run_genvm_host(
                         fresh_args.get("state_proxy", host_args.get("state_proxy")),
                         ctx,
                     )
+                    execution_result.data_fee_bucket_totals = effective_bucket_totals
 
                     execution_result.processing_time = math.ceil(
                         (time.time() - start_time) * 1000

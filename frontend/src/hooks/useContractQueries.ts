@@ -1,6 +1,11 @@
 import { watch, ref, computed } from 'vue';
 import { useQuery, useQueryClient } from '@tanstack/vue-query';
-import type { TransactionItem } from '@/types';
+import type {
+  ExecutionMode,
+  StudioFeeConfig,
+  StudioFeeEstimateResult,
+  TransactionItem,
+} from '@/types';
 import {
   useContractsStore,
   useTransactionsStore,
@@ -12,9 +17,11 @@ import { useMockContractData } from './useMockContractData';
 import {
   useEventTracking,
   useGenlayer,
+  useRpcClient,
   useWallet,
   useChainEnforcer,
 } from '@/hooks';
+import { useNetworkStore } from '@/stores/network';
 import type {
   Address,
   TransactionHash,
@@ -22,9 +29,50 @@ import type {
   TransactionHashVariant,
 } from 'genlayer-js/types';
 import { TransactionStatus } from 'genlayer-js/types';
-import type { ExecutionMode } from '@/types';
 
 const schema = ref<any>();
+
+type TrustedFeeEstimate = {
+  policy?: {
+    enabled?: boolean;
+  };
+  distribution: StudioFeeConfig['defaultFees']['distribution'];
+  feeValue: bigint | number | string;
+};
+
+function feeNumberToRpc(value: bigint | number | string) {
+  return typeof value === 'bigint' ? value.toString() : String(value);
+}
+
+function feesToRpcParams(fees: {
+  distribution: StudioFeeConfig['defaultFees']['distribution'];
+  feeValue: bigint | number | string;
+}) {
+  return {
+    distribution: Object.fromEntries(
+      Object.entries(fees.distribution).map(([key, value]) => [
+        key,
+        Array.isArray(value)
+          ? value.map(feeNumberToRpc)
+          : feeNumberToRpc(value),
+      ]),
+    ),
+    feeValue: feeNumberToRpc(fees.feeValue),
+  };
+}
+
+async function encodeWriteMethodCalldata(
+  method: string,
+  args: CalldataEncodable[],
+) {
+  const { abi } = await import('genlayer-js');
+  const { toRlp, toHex } = await import('viem');
+  const calldataObj = abi.calldata.makeCalldataObject(method, args, undefined);
+  const encoded = abi.calldata.encode(calldataObj);
+  return toRlp(
+    [toHex(encoded), toHex(false)].map((item) => item as `0x${string}`),
+  );
+}
 
 /**
  * Shim: SDK v0.28.2 guards getContractSchema/Code/SchemaForCode behind
@@ -52,6 +100,8 @@ async function sdkCallWithFallback<T>(
 export function useContractQueries() {
   const genlayer = useGenlayer();
   const genlayerClient = computed(() => genlayer.client.value);
+  const networkStore = useNetworkStore();
+  const rpcClient = useRpcClient();
   const wallet = useWallet();
   const accountsStore = useAccountsStore();
   const transactionsStore = useTransactionsStore();
@@ -60,6 +110,7 @@ export function useContractQueries() {
   const { trackEvent } = useEventTracking();
   const { ensureCorrectChain } = useChainEnforcer();
   const contract = computed(() => contractsStore.currentContract);
+  const studioFeeConfig = ref<StudioFeeConfig | null>(null);
 
   const { mockContractId, mockContractSchema } = useMockContractData();
 
@@ -86,6 +137,50 @@ export function useContractQueries() {
       });
     },
   );
+
+  watch(
+    () => networkStore.rpcUrl,
+    () => {
+      studioFeeConfig.value = null;
+    },
+  );
+
+  async function getDefaultStudioFees() {
+    if (!networkStore.isStudio) {
+      return undefined;
+    }
+
+    const estimateTransactionFees = (
+      genlayerClient.value as unknown as
+        | {
+            estimateTransactionFees?: () => Promise<TrustedFeeEstimate>;
+          }
+        | undefined
+    )?.estimateTransactionFees;
+    if (estimateTransactionFees) {
+      const estimate = await estimateTransactionFees();
+      if (estimate.policy?.enabled === false) {
+        return undefined;
+      }
+      return {
+        distribution: estimate.distribution,
+        feeValue: BigInt(estimate.feeValue),
+      };
+    }
+
+    if (!studioFeeConfig.value) {
+      studioFeeConfig.value = await rpcClient.getFeeConfig();
+    }
+
+    if (!studioFeeConfig.value.enabled) {
+      return undefined;
+    }
+
+    return {
+      distribution: studioFeeConfig.value.defaultFees.distribution,
+      feeValue: BigInt(studioFeeConfig.value.defaultFees.feeValue),
+    };
+  }
 
   const contractSchemaQuery = useQuery({
     queryKey: ['schema', () => contract.value?.id],
@@ -142,12 +237,14 @@ export function useContractQueries() {
 
       const code = contract.value?.content ?? '';
       const code_bytes = new TextEncoder().encode(code);
+      const fees = await getDefaultStudioFees();
 
       const result = await genlayerClient.value?.deployContract({
         code: code_bytes as any as string, // FIXME: code should accept both bytes and string in genlayer-js
         args: args.args,
         leaderOnly,
         consensusMaxRotations,
+        ...(fees ? { fees } : {}),
       });
 
       const tx: TransactionItem = {
@@ -266,6 +363,7 @@ export function useContractQueries() {
       }
 
       await ensureCorrectChain();
+      const fees = await getDefaultStudioFees();
 
       const result = await genlayerClient.value?.writeContract({
         address: address.value as Address,
@@ -274,6 +372,7 @@ export function useContractQueries() {
         value,
         leaderOnly,
         consensusMaxRotations,
+        ...(fees ? { fees } : {}),
       });
 
       transactionsStore.addTransaction({
@@ -308,23 +407,28 @@ export function useContractQueries() {
     value?: bigint;
   }) {
     try {
+      const fees = await getDefaultStudioFees();
+      const from =
+        accountsStore.selectedAccount?.address ||
+        '0x0000000000000000000000000000000000000000';
+
+      if (networkStore.isStudio) {
+        const serialized = await encodeWriteMethodCalldata(method, args.args);
+        return await rpcClient.simulateCall({
+          type: 'write',
+          to: address.value,
+          from,
+          data: serialized,
+          value: value ? '0x' + value.toString(16) : '0x0',
+          transaction_hash_variant: 'latest-nonfinal',
+          ...(fees ? { fees: feesToRpcParams(fees) } : {}),
+        });
+      }
+
       // Use simulateWriteContract for non-payable, but for payable we need
       // to call gen_call directly since the SDK doesn't support value param.
       if (value && value > 0n) {
-        const { abi } = await import('genlayer-js');
-        const { toRlp, toHex } = await import('viem');
-        const calldataObj = abi.calldata.makeCalldataObject(
-          method,
-          args.args,
-          undefined,
-        );
-        const encoded = abi.calldata.encode(calldataObj);
-        const serialized = toRlp(
-          [toHex(encoded), toHex(false)].map((d) => d as `0x${string}`),
-        );
-        const from =
-          accountsStore.selectedAccount?.address ||
-          '0x0000000000000000000000000000000000000000';
+        const serialized = await encodeWriteMethodCalldata(method, args.args);
         const result = await (genlayerClient.value as any).request({
           method: 'gen_call',
           params: [
@@ -335,22 +439,69 @@ export function useContractQueries() {
               data: serialized,
               value: '0x' + value.toString(16),
               transaction_hash_variant: 'latest-nonfinal',
+              ...(fees ? { fees: feesToRpcParams(fees) } : {}),
             },
           ],
         });
         return result;
       }
 
-      const result = await genlayerClient.value?.simulateWriteContract({
+      const result = await (
+        genlayerClient.value as unknown as
+          | {
+              simulateWriteContract?: (
+                args: Record<string, unknown>,
+              ) => Promise<unknown>;
+            }
+          | undefined
+      )?.simulateWriteContract?.({
         address: address.value as Address,
         functionName: method,
         args: args.args,
+        value,
+        ...(fees ? { fees } : {}),
       });
 
       return result;
     } catch (error: any) {
       const serverMsg = error?.details || error?.message || '';
       throw new Error(serverMsg || 'Error simulating write method');
+    }
+  }
+
+  async function estimateWriteMethodFees({
+    method,
+    args,
+    value,
+  }: {
+    method: string;
+    args: {
+      args: CalldataEncodable[];
+      kwargs: { [key: string]: CalldataEncodable };
+    };
+    value?: bigint;
+  }): Promise<StudioFeeEstimateResult> {
+    if (!networkStore.isStudio) {
+      throw new Error('Fee estimation is only available in Studio');
+    }
+
+    try {
+      const from =
+        accountsStore.selectedAccount?.address ||
+        '0x0000000000000000000000000000000000000000';
+      const serialized = await encodeWriteMethodCalldata(method, args.args);
+      return await rpcClient.estimateTransactionFees({
+        scenarioName: method,
+        type: 'write',
+        to: address.value,
+        from,
+        data: serialized,
+        value: value ? '0x' + value.toString(16) : '0x0',
+        transaction_hash_variant: 'latest-nonfinal',
+      });
+    } catch (error: any) {
+      const serverMsg = error?.details || error?.message || '';
+      throw new Error(serverMsg || 'Error estimating transaction fees');
     }
   }
 
@@ -509,6 +660,7 @@ export function useContractQueries() {
     callReadMethod,
     callWriteMethod,
     simulateWriteMethod,
+    estimateWriteMethodFees,
     fetchContractCode,
     upgradeContract,
     isUpgrading,
