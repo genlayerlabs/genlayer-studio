@@ -170,7 +170,7 @@ RUN cd /genvm \
     && echo "Extracting archives..." \
     && tar -xf "$ARCH_FILE" \
     && tar -xf "genvm-runners-all.tar.xz" \
-    && rm *.tar.xz ; \
+    && rm -- ./*.tar.xz ; \
     fi \
     && echo "Configuring GenVM manager threads..." \
     && CONFIG_FILE="/genvm/config/genvm-manager.yaml" \

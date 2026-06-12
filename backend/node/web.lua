@@ -9,6 +9,38 @@ function Render(ctx, payload)
     ---@cast payload WebRenderPayload
     web.check_url(payload.url)
 
+    -- Return mock render output if it exists and matches.
+    if ctx.host_data.mock_web_response and ctx.host_data.mock_web_response.nondet_web_render then
+        for url, mock_response_data in pairs(ctx.host_data.mock_web_response.nondet_web_render) do
+            if url == payload.url and (not mock_response_data.mode or payload.mode == mock_response_data.mode) then
+                lib.log{level = "debug", message = "executed with mock web render response", url = url}
+                local status = tonumber(mock_response_data.status or 200)
+                if not status_is_good(status) then
+                    lib.rs.user_error({
+                        causes = {"WEBPAGE_LOAD_FAILED"},
+                        fatal = false,
+                        ctx = {
+                            url = payload.url,
+                            status = status,
+                            body = mock_response_data.body,
+                        }
+                    })
+                end
+                if payload.mode == "screenshot" then
+                    return {
+                        image = mock_response_data.body
+                    }
+                else
+                    return {
+                        text = mock_response_data.body,
+                    }
+                end
+            end
+        end
+        -- Only log if no match was found, then fall through to real render.
+        lib.log{level = "debug", message = "no mock web render response match found, falling through to real render"}
+    end
+
     local url_params = '?url=' .. lib.rs.url_encode(payload.url) ..
         '&mode=' .. payload.mode ..
         '&waitAfterLoaded=' .. tostring(payload.wait_after_loaded or 0)
@@ -55,7 +87,7 @@ function Request(ctx, payload)
     web.check_url(payload.url)
 
     -- Return mock response if it exists and matches
-    if ctx.host_data.mock_web_response then
+    if ctx.host_data.mock_web_response and ctx.host_data.mock_web_response.nondet_web_request then
         for url, mock_response_data in pairs(ctx.host_data.mock_web_response.nondet_web_request) do
             if url == payload.url and payload.method == mock_response_data.method then
                 lib.log{level = "debug", message = "executed with mock web response", url = url}

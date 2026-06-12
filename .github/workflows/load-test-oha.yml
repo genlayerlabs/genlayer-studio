@@ -158,7 +158,9 @@ jobs:
           key: genvm-precompile-${{ steps.genvm.outputs.tag }}-amd64
 
       - name: Prepare GenVM cache directory
-        run: mkdir -p /tmp/genvm-cache/pc && chmod -R 0777 /tmp/genvm-cache
+        run: |
+          sudo mkdir -p /tmp/genvm-cache/pc
+          sudo chown -R 999:999 /tmp/genvm-cache
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -169,24 +171,20 @@ jobs:
           files: |
             ./docker-compose.yml
           targets: |
-            frontend
             database-migration
             jsonrpc
             consensus-worker
-            explorer
           set: |
             *.cache-from=type=gha${{ steps.genvm.outputs.bake_cache }}
             *.cache-to=type=gha,mode=max${{ steps.genvm.outputs.bake_cache }}
-            frontend.tags=genlayer-studio-frontend:latest
             database-migration.tags=genlayer-studio-database-migration:latest
             jsonrpc.tags=genlayer-studio-jsonrpc:latest
             consensus-worker.tags=genlayer-studio-consensus-worker:latest
-            explorer.tags=genlayer-studio-explorer:latest
           load: true
 
-      - name: Run Docker Compose with multiple workers
+      - name: Run backend stack with multiple workers
         timeout-minutes: 5
-        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --no-build --wait
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --no-build --wait database-migration jsonrpc consensus-worker
         env:
           CONSENSUS_WORKERS: 3
 

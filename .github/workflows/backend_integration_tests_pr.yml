@@ -35,6 +35,7 @@ jobs:
     env:
       PYTHONPATH: ${{ github.workspace }}
       COMPOSE_PROFILES: hardhat
+      GENVM_CACHE_DIR: /tmp/genvm-cache
 
     steps:
       - name: Checkout code
@@ -90,8 +91,6 @@ jobs:
           echo "GENVM_REF=$GENVM_REF_VALUE" >> "$GITHUB_ENV"
           grep "^GENVM_TAG=" .env
           grep "^GENVM_REF=" .env
-
-      # TODO: we should also add also heuristai and anthropic keys to the e2e tests and test all providers
 
       - name: Configure LLM provider
         env:
@@ -166,14 +165,10 @@ jobs:
             echo "bake_cache=" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Restore GenVM precompile cache
-        uses: actions/cache@v5
-        with:
-          path: /tmp/genvm-cache
-          key: genvm-precompile-${{ steps.genvm.outputs.tag }}-amd64
-
       - name: Prepare GenVM cache directory
-        run: mkdir -p /tmp/genvm-cache/pc && chmod -R 0777 /tmp/genvm-cache
+        run: |
+          sudo mkdir -p "$GENVM_CACHE_DIR/pc"
+          sudo chown -R 999:999 "$GENVM_CACHE_DIR"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -240,6 +235,7 @@ jobs:
     env:
       PYTHONPATH: ${{ github.workspace }}
       COMPOSE_PROFILES: hardhat
+      GENVM_CACHE_DIR: /tmp/genvm-cache
 
     steps:
       - name: Checkout code
@@ -347,9 +343,7 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install -r requirements.txt
-          pip install -r requirements.test.txt
-          pip install -r backend/requirements.txt
+          bash .github/scripts/install-python-dependencies.sh
 
       - name: Extract GenVM version for cache key
         id: genvm
@@ -374,14 +368,10 @@ jobs:
             echo "bake_cache=" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Restore GenVM precompile cache
-        uses: actions/cache@v5
-        with:
-          path: /tmp/genvm-cache
-          key: genvm-precompile-${{ steps.genvm.outputs.tag }}-amd64
-
       - name: Prepare GenVM cache directory
-        run: mkdir -p /tmp/genvm-cache/pc && chmod -R 0777 /tmp/genvm-cache
+        run: |
+          sudo mkdir -p "$GENVM_CACHE_DIR/pc"
+          sudo chown -R 999:999 "$GENVM_CACHE_DIR"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
