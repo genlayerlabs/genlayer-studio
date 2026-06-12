@@ -146,101 +146,158 @@ def _round_entry(
     }
 
 
-def time_unit_consumption(
-    consensus_history: dict | None,
-    consensus_data: dict | None,
-) -> dict:
-    per_round = []
-    pending_leader_timeunits = 0
-    pending_validator_timeunits = 0
-    pending_max_validator_timeunits = 0
-    pending_consensus_round = ""
-    pending_rotation_entry = False
-    leader_timeunits_used = 0
-    validator_timeunits_used = 0
+def _empty_pending_time_units() -> dict[str, int | str | bool]:
+    return {
+        "leader_timeunits": 0,
+        "validator_timeunits": 0,
+        "max_validator_timeunits": 0,
+        "consensus_round": "",
+        "has_rotation": False,
+    }
 
+
+def _record_round(
+    per_round: list[dict[str, int | str]],
+    *,
+    consensus_round: str,
+    leader_timeunits: int,
+    validator_timeunits: int,
+    max_validator_timeunits: int,
+) -> tuple[int, int]:
+    per_round.append(
+        _round_entry(
+            round_index=len(per_round),
+            consensus_round=consensus_round,
+            leader_timeunits=leader_timeunits,
+            validator_timeunits=validator_timeunits,
+            max_validator_timeunits=max_validator_timeunits,
+        )
+    )
+    return leader_timeunits, validator_timeunits
+
+
+def _history_results(consensus_history: dict | None) -> list[Any]:
     results = (
         consensus_history.get("consensus_results")
         if isinstance(consensus_history, dict)
         else None
     )
-    if isinstance(results, list):
-        for entry in results:
-            if not isinstance(entry, dict):
-                continue
-            consensus_round = str(entry.get("consensus_round") or "")
-            leader_timeunits, validator_timeunits, max_validator_timeunits = (
-                _bucket_time_units(_entry_receipts(entry))
-            )
-            if consensus_round in NON_ROUND_CONSENSUS_EVENTS:
-                pending_leader_timeunits += leader_timeunits
-                pending_validator_timeunits += validator_timeunits
-                pending_max_validator_timeunits = max(
-                    pending_max_validator_timeunits, max_validator_timeunits
-                )
-                pending_consensus_round = consensus_round
-                pending_rotation_entry = True
-                continue
+    return results if isinstance(results, list) else []
 
-            leader_timeunits += pending_leader_timeunits
-            validator_timeunits += pending_validator_timeunits
-            max_validator_timeunits = max(
-                max_validator_timeunits, pending_max_validator_timeunits
-            )
-            pending_leader_timeunits = 0
-            pending_validator_timeunits = 0
-            pending_max_validator_timeunits = 0
-            pending_consensus_round = ""
-            pending_rotation_entry = False
 
-            per_round.append(
-                _round_entry(
-                    round_index=len(per_round),
-                    consensus_round=consensus_round,
-                    leader_timeunits=leader_timeunits,
-                    validator_timeunits=validator_timeunits,
-                    max_validator_timeunits=max_validator_timeunits,
-                )
+def _accumulate_pending_rotation(
+    pending: dict[str, int | str | bool],
+    consensus_round: str,
+    leader_timeunits: int,
+    validator_timeunits: int,
+    max_validator_timeunits: int,
+) -> None:
+    pending["leader_timeunits"] = int(pending["leader_timeunits"]) + leader_timeunits
+    pending["validator_timeunits"] = (
+        int(pending["validator_timeunits"]) + validator_timeunits
+    )
+    pending["max_validator_timeunits"] = max(
+        int(pending["max_validator_timeunits"]), max_validator_timeunits
+    )
+    pending["consensus_round"] = consensus_round
+    pending["has_rotation"] = True
+
+
+def _consume_history_time_units(
+    results: list[Any],
+) -> tuple[list[dict[str, int | str]], int, int, dict[str, int | str | bool]]:
+    per_round: list[dict[str, int | str]] = []
+    pending = _empty_pending_time_units()
+    leader_timeunits_used = 0
+    validator_timeunits_used = 0
+
+    for entry in results:
+        if not isinstance(entry, dict):
+            continue
+        consensus_round = str(entry.get("consensus_round") or "")
+        leader_timeunits, validator_timeunits, max_validator_timeunits = (
+            _bucket_time_units(_entry_receipts(entry))
+        )
+        if consensus_round in NON_ROUND_CONSENSUS_EVENTS:
+            _accumulate_pending_rotation(
+                pending,
+                consensus_round,
+                leader_timeunits,
+                validator_timeunits,
+                max_validator_timeunits,
             )
-            leader_timeunits_used += leader_timeunits
-            validator_timeunits_used += validator_timeunits
+            continue
+
+        leader_timeunits += int(pending["leader_timeunits"])
+        validator_timeunits += int(pending["validator_timeunits"])
+        max_validator_timeunits = max(
+            max_validator_timeunits, int(pending["max_validator_timeunits"])
+        )
+        pending = _empty_pending_time_units()
+        leader_used, validator_used = _record_round(
+            per_round,
+            consensus_round=consensus_round,
+            leader_timeunits=leader_timeunits,
+            validator_timeunits=validator_timeunits,
+            max_validator_timeunits=max_validator_timeunits,
+        )
+        leader_timeunits_used += leader_used
+        validator_timeunits_used += validator_used
+
+    return per_round, leader_timeunits_used, validator_timeunits_used, pending
+
+
+def _fallback_consensus_data_round(
+    per_round: list[dict[str, int | str]],
+    consensus_data: dict | None,
+) -> tuple[int, int]:
+    if not isinstance(consensus_data, dict):
+        return 0, 0
+    receipts = list(_consensus_data_receipts(consensus_data))
+    if not _has_receipts(receipts):
+        return 0, 0
+    leader_timeunits, validator_timeunits, max_validator_timeunits = _bucket_time_units(
+        receipts
+    )
+    return _record_round(
+        per_round,
+        consensus_round="",
+        leader_timeunits=leader_timeunits,
+        validator_timeunits=validator_timeunits,
+        max_validator_timeunits=max_validator_timeunits,
+    )
+
+
+def time_unit_consumption(
+    consensus_history: dict | None,
+    consensus_data: dict | None,
+) -> dict:
+    per_round, leader_timeunits_used, validator_timeunits_used, pending = (
+        _consume_history_time_units(_history_results(consensus_history))
+    )
 
     if (
         not per_round
-        and pending_leader_timeunits == 0
-        and pending_validator_timeunits == 0
-        and not pending_rotation_entry
-        and isinstance(consensus_data, dict)
+        and pending["leader_timeunits"] == 0
+        and pending["validator_timeunits"] == 0
+        and not pending["has_rotation"]
     ):
-        receipts = list(_consensus_data_receipts(consensus_data))
-        leader_timeunits, validator_timeunits, max_validator_timeunits = (
-            _bucket_time_units(receipts)
+        leader_used, validator_used = _fallback_consensus_data_round(
+            per_round, consensus_data
         )
-        if _has_receipts(receipts):
-            per_round.append(
-                _round_entry(
-                    round_index=0,
-                    consensus_round="",
-                    leader_timeunits=leader_timeunits,
-                    validator_timeunits=validator_timeunits,
-                    max_validator_timeunits=max_validator_timeunits,
-                )
-            )
-            leader_timeunits_used += leader_timeunits
-            validator_timeunits_used += validator_timeunits
+        leader_timeunits_used += leader_used
+        validator_timeunits_used += validator_used
 
-    if pending_rotation_entry:
-        per_round.append(
-            _round_entry(
-                round_index=len(per_round),
-                consensus_round=pending_consensus_round,
-                leader_timeunits=pending_leader_timeunits,
-                validator_timeunits=pending_validator_timeunits,
-                max_validator_timeunits=pending_max_validator_timeunits,
-            )
+    if pending["has_rotation"]:
+        leader_used, validator_used = _record_round(
+            per_round,
+            consensus_round=str(pending["consensus_round"]),
+            leader_timeunits=int(pending["leader_timeunits"]),
+            validator_timeunits=int(pending["validator_timeunits"]),
+            max_validator_timeunits=int(pending["max_validator_timeunits"]),
         )
-        leader_timeunits_used += pending_leader_timeunits
-        validator_timeunits_used += pending_validator_timeunits
+        leader_timeunits_used += leader_used
+        validator_timeunits_used += validator_used
 
     return {
         "leader_timeunits_used": leader_timeunits_used,
