@@ -158,7 +158,7 @@ RUN cd /genvm \
         "https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-runners-all.tar.xz" \
     && tar -xf "$ARCH_FILE" \
     && tar -xf genvm-runners-all.tar.xz \
-    && rm *.tar.xz ; \
+    && rm -- ./*.tar.xz ; \
     fi \
     && chown -R backend-user:backend-group /genvm \
     # Source path: skip lief bin-patch — nix outputs are already

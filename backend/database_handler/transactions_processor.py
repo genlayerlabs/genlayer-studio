@@ -230,6 +230,71 @@ class TransactionsProcessor:
         return None
 
     @staticmethod
+    def _storage_fee_used(accounting: dict) -> int:
+        report = accounting.get("execution_fee_report") or {}
+        genvm_buckets = report.get("genvmBuckets") if isinstance(report, dict) else {}
+        if isinstance(genvm_buckets, dict):
+            return int(genvm_buckets.get("storage", 0) or 0)
+
+        consumed_buckets = accounting.get("genvm_fee_consumed_buckets") or []
+        if len(consumed_buckets) > 1:
+            return int(consumed_buckets[1])
+        return 0
+
+    @staticmethod
+    def _policy_int(policy: dict, camel_key: str, snake_key: str) -> int:
+        return int(policy.get(camel_key, policy.get(snake_key, 0)) or 0)
+
+    @staticmethod
+    def _locked_fee_policy(policy: dict | None) -> dict | None:
+        if not isinstance(policy, dict):
+            return None
+        return {
+            "genPerTimeUnit": str(
+                TransactionsProcessor._policy_int(
+                    policy, "genPerTimeUnit", "gen_per_time_unit"
+                )
+            ),
+            "storageUnitPrice": str(
+                TransactionsProcessor._policy_int(
+                    policy, "storageUnitPrice", "storage_unit_price"
+                )
+            ),
+            "receiptGasPrice": str(
+                TransactionsProcessor._policy_int(
+                    policy, "receiptGasPrice", "receipt_gas_price"
+                )
+            ),
+        }
+
+    @staticmethod
+    def _fee_distribution_fields(fees: dict) -> dict:
+        return {
+            "leaderTimeunitsAllocation": str(fees["leaderTimeunitsAllocation"]),
+            "validatorTimeunitsAllocation": str(fees["validatorTimeunitsAllocation"]),
+            "appealRounds": str(fees["appealRounds"]),
+            "executionBudgetPerRound": str(fees["executionBudgetPerRound"]),
+            "totalMessageFees": str(fees["totalMessageFees"]),
+            "rotations": [str(rotation) for rotation in fees["rotations"]],
+            "maxPriceGenPerTimeUnit": str(fees["maxPriceGenPerTimeUnit"]),
+            "storageFeeMaxGasPrice": str(fees["storageFeeMaxGasPrice"]),
+            "receiptFeeMaxGasPrice": str(fees["receiptFeeMaxGasPrice"]),
+        }
+
+    @staticmethod
+    def _time_unit_rounds(tu: dict) -> list[dict]:
+        return [
+            {
+                "round": entry["round"],
+                "consensusRound": entry["consensus_round"],
+                "leaderTimeunits": str(entry["leader_timeunits"]),
+                "validatorTimeunits": str(entry["validator_timeunits"]),
+                "maxValidatorTimeunits": str(entry["max_validator_timeunits"]),
+            }
+            for entry in tu["per_round"]
+        ]
+
+    @staticmethod
     def _canonical_fees(
         accounting: dict | None,
         consensus_history: dict | None = None,
@@ -240,67 +305,19 @@ class TransactionsProcessor:
         fees = normalize_fees_distribution(accounting.get("fees_distribution") or {})
         tu = time_unit_consumption(consensus_history, consensus_data)
         policy = accounting.get("policy_snapshot")
-        report = accounting.get("execution_fee_report") or {}
-        genvm_buckets = report.get("genvmBuckets") if isinstance(report, dict) else {}
-        storage_fee_used = 0
-        if isinstance(genvm_buckets, dict):
-            storage_fee_used = int(genvm_buckets.get("storage", 0) or 0)
-        elif len(accounting.get("genvm_fee_consumed_buckets") or []) > 1:
-            storage_fee_used = int(accounting["genvm_fee_consumed_buckets"][1])
 
         return {
             "deposit": str(int(accounting.get("paid_fee_value", 0) or 0)),
             "userValue": str(int(accounting.get("user_value", 0) or 0)),
-            "distribution": {
-                "leaderTimeunitsAllocation": str(fees["leaderTimeunitsAllocation"]),
-                "validatorTimeunitsAllocation": str(
-                    fees["validatorTimeunitsAllocation"]
-                ),
-                "appealRounds": str(fees["appealRounds"]),
-                "executionBudgetPerRound": str(fees["executionBudgetPerRound"]),
-                "totalMessageFees": str(fees["totalMessageFees"]),
-                "rotations": [str(rotation) for rotation in fees["rotations"]],
-                "maxPriceGenPerTimeUnit": str(fees["maxPriceGenPerTimeUnit"]),
-                "storageFeeMaxGasPrice": str(fees["storageFeeMaxGasPrice"]),
-                "receiptFeeMaxGasPrice": str(fees["receiptFeeMaxGasPrice"]),
-            },
-            "locked": (
-                {
-                    "genPerTimeUnit": str(
-                        int(
-                            policy.get(
-                                "genPerTimeUnit", policy.get("gen_per_time_unit", 0)
-                            )
-                            or 0
-                        )
-                    ),
-                    "storageUnitPrice": str(
-                        int(
-                            policy.get(
-                                "storageUnitPrice",
-                                policy.get("storage_unit_price", 0),
-                            )
-                            or 0
-                        )
-                    ),
-                    "receiptGasPrice": str(
-                        int(
-                            policy.get(
-                                "receiptGasPrice",
-                                policy.get("receipt_gas_price", 0),
-                            )
-                            or 0
-                        )
-                    ),
-                }
-                if isinstance(policy, dict)
-                else None
-            ),
+            "distribution": TransactionsProcessor._fee_distribution_fields(fees),
+            "locked": TransactionsProcessor._locked_fee_policy(policy),
             "consumed": {
                 "executionConsumed": str(
                     int(accounting.get("execution_fee_consumed", 0) or 0)
                 ),
-                "storageFeeUsed": str(storage_fee_used),
+                "storageFeeUsed": str(
+                    TransactionsProcessor._storage_fee_used(accounting)
+                ),
                 "messageFeesConsumed": str(
                     int(accounting.get("message_fee_consumed", 0) or 0)
                 ),
@@ -316,16 +333,7 @@ class TransactionsProcessor:
                 # reference shape mirrored by nodes.
                 "leaderTimeunitsUsed": str(tu["leader_timeunits_used"]),
                 "validatorTimeunitsUsed": str(tu["validator_timeunits_used"]),
-                "perRound": [
-                    {
-                        "round": entry["round"],
-                        "consensusRound": entry["consensus_round"],
-                        "leaderTimeunits": str(entry["leader_timeunits"]),
-                        "validatorTimeunits": str(entry["validator_timeunits"]),
-                        "maxValidatorTimeunits": str(entry["max_validator_timeunits"]),
-                    }
-                    for entry in tu["per_round"]
-                ],
+                "perRound": TransactionsProcessor._time_unit_rounds(tu),
             },
         }
 
