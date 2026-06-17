@@ -29,7 +29,7 @@ def get_database_url() -> str:
         return explicit_url
 
     db_user = os.getenv("DBUSER", "postgres")
-    db_password = os.getenv("DBPASSWORD", "postgres")
+    db_password = os.getenv("DBPASSWORD", "postgres")  # NOSONAR - local dev fallback
     db_host = os.getenv("DBHOST", "localhost")
     db_port = os.getenv("DBPORT", "5432")
     db_name = os.getenv("DBNAME") or _get_db_name("genlayer")
