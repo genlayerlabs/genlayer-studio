@@ -34,3 +34,4 @@ prometheus-client==0.24.1
 psutil==7.2.2
 sentry-sdk==2.54.0
 boto3==1.43.30
+google-cloud-storage==2.18.2

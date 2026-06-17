@@ -17,6 +17,10 @@ from backend.domain.types import TransactionType
 from web3 import Web3
 from backend.consensus.types import ConsensusRound
 from backend.consensus.utils import determine_consensus_from_votes
+from backend.database_handler.terminal_snapshot_pruner import (
+    SnapshotArchiveReader,
+    snapshot_archive_read_through_enabled,
+)
 from backend.rollup.web3_pool import Web3ConnectionPool
 
 
@@ -66,8 +70,12 @@ class TransactionsProcessor:
     def __init__(
         self,
         session: Session,
+        snapshot_archive: SnapshotArchiveReader | None = None,
     ):
         self.session = session
+        self.snapshot_archive = snapshot_archive
+        if self.snapshot_archive is None and snapshot_archive_read_through_enabled():
+            self.snapshot_archive = SnapshotArchiveReader.from_environment()
 
         # Use singleton Web3 connection pool
         self.web3 = Web3ConnectionPool.get()
@@ -132,6 +140,19 @@ class TransactionsProcessor:
             # SEND txs created by sim_fundAccount.
             "value_credited": transaction_data.value_credited,
         }
+
+    def _hydrate_archived_contract_snapshot(self, transaction_data: dict) -> None:
+        if transaction_data.get("contract_snapshot") is not None:
+            return
+        if self.snapshot_archive is None:
+            return
+        tx_hash = transaction_data.get("hash")
+        if not tx_hash:
+            return
+
+        snapshot = self.snapshot_archive.load_snapshot(self.session, tx_hash)
+        if snapshot is not None:
+            transaction_data["contract_snapshot"] = snapshot
 
     @staticmethod
     def _transaction_data_to_str(data: dict) -> str:
@@ -646,6 +667,7 @@ class TransactionsProcessor:
             return None
 
         transaction_data = self._parse_transaction_data(transaction)
+        self._hydrate_archived_contract_snapshot(transaction_data)
 
         # Handle contract_state based on sim_config
         include_contract_state = sim_config and sim_config.get(
@@ -692,6 +714,8 @@ class TransactionsProcessor:
             return None
 
         transaction_data = self._parse_transaction_data(transaction)
+        if full:
+            self._hydrate_archived_contract_snapshot(transaction_data)
 
         # Transform studio fields to testnet fields
         transaction_data["tx_id"] = transaction_data.pop("hash", None)

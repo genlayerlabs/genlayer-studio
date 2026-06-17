@@ -4,11 +4,13 @@ import asyncio
 import base64
 import gzip
 import hashlib
+import json
 import logging
 import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from sqlalchemy import text
@@ -19,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 
 TERMINAL_STATUSES = ("FINALIZED", "CANCELED")
+ARCHIVE_FORMAT = "full-json-gzip-v1"
+DEFAULT_ARCHIVE_PREFIX = "studio/terminal-contract-snapshots"
+DEFAULT_FILE_ARCHIVE_DIR = "data/terminal-contract-snapshot-archive"
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -45,6 +50,19 @@ def _env_int(name: str, default: int, minimum: int | None = None) -> int:
     return value
 
 
+def snapshot_archive_read_through_enabled() -> bool:
+    return _env_bool("STUDIO_CONTRACT_SNAPSHOT_ARCHIVE_RETRIEVAL_ENABLED")
+
+
+def _configured_archive_backend() -> str:
+    backend = os.getenv("STUDIO_CONTRACT_SNAPSHOT_PRUNER_ARCHIVE_BACKEND")
+    if backend:
+        return backend.strip().lower()
+    if os.getenv("STUDIO_CONTRACT_SNAPSHOT_PRUNER_GCS_BUCKET"):
+        return "gcs"
+    return "s3"
+
+
 @dataclass(frozen=True)
 class TerminalSnapshotPrunerConfig:
     enabled: bool = False
@@ -53,8 +71,13 @@ class TerminalSnapshotPrunerConfig:
     batch_size: int = 5
     retention_hours: int = 24
     interval_seconds: int = 300
+    archive_backend: str = "s3"
+    file_dir: str = DEFAULT_FILE_ARCHIVE_DIR
+    gcs_bucket: str | None = None
+    gcs_prefix: str = DEFAULT_ARCHIVE_PREFIX
+    gcs_storage_class: str | None = None
     s3_bucket: str | None = None
-    s3_prefix: str = "studio/terminal-contract-snapshots"
+    s3_prefix: str = DEFAULT_ARCHIVE_PREFIX
     s3_region: str | None = None
     s3_storage_class: str | None = None
     s3_sse: str | None = None
@@ -75,9 +98,19 @@ class TerminalSnapshotPrunerConfig:
             interval_seconds=_env_int(
                 "STUDIO_CONTRACT_SNAPSHOT_PRUNER_INTERVAL_SECONDS", 300, 1
             ),
+            archive_backend=_configured_archive_backend(),
+            file_dir=os.getenv("STUDIO_CONTRACT_SNAPSHOT_PRUNER_FILE_DIR")
+            or DEFAULT_FILE_ARCHIVE_DIR,
+            gcs_bucket=os.getenv("STUDIO_CONTRACT_SNAPSHOT_PRUNER_GCS_BUCKET") or None,
+            gcs_prefix=os.getenv("STUDIO_CONTRACT_SNAPSHOT_PRUNER_GCS_PREFIX")
+            or DEFAULT_ARCHIVE_PREFIX,
+            gcs_storage_class=os.getenv(
+                "STUDIO_CONTRACT_SNAPSHOT_PRUNER_GCS_STORAGE_CLASS"
+            )
+            or None,
             s3_bucket=os.getenv("STUDIO_CONTRACT_SNAPSHOT_PRUNER_S3_BUCKET") or None,
             s3_prefix=os.getenv("STUDIO_CONTRACT_SNAPSHOT_PRUNER_S3_PREFIX")
-            or "studio/terminal-contract-snapshots",
+            or DEFAULT_ARCHIVE_PREFIX,
             s3_region=os.getenv("AWS_REGION")
             or os.getenv("AWS_DEFAULT_REGION")
             or os.getenv("STUDIO_CONTRACT_SNAPSHOT_PRUNER_S3_REGION")
@@ -92,10 +125,29 @@ class TerminalSnapshotPrunerConfig:
         )
 
     def validate_for_run(self) -> None:
-        if self.archive_enabled and not self.dry_run and not self.s3_bucket:
+        if not self.archive_enabled or self.dry_run:
+            return
+
+        backend = self.archive_backend.lower()
+        if backend not in {"file", "gcs", "s3"}:
+            raise RuntimeError(
+                "STUDIO_CONTRACT_SNAPSHOT_PRUNER_ARCHIVE_BACKEND must be one of "
+                "file, gcs, or s3"
+            )
+        if backend == "file" and not self.file_dir:
+            raise RuntimeError(
+                "STUDIO_CONTRACT_SNAPSHOT_PRUNER_FILE_DIR is required when "
+                "STUDIO_CONTRACT_SNAPSHOT_PRUNER_ARCHIVE_BACKEND=file"
+            )
+        if backend == "gcs" and not self.gcs_bucket:
+            raise RuntimeError(
+                "STUDIO_CONTRACT_SNAPSHOT_PRUNER_GCS_BUCKET is required when "
+                "STUDIO_CONTRACT_SNAPSHOT_PRUNER_ARCHIVE_BACKEND=gcs"
+            )
+        if backend == "s3" and not self.s3_bucket:
             raise RuntimeError(
                 "STUDIO_CONTRACT_SNAPSHOT_PRUNER_S3_BUCKET is required when "
-                "STUDIO_CONTRACT_SNAPSHOT_PRUNER_ARCHIVE_ENABLED=true"
+                "STUDIO_CONTRACT_SNAPSHOT_PRUNER_ARCHIVE_BACKEND=s3"
             )
 
 
@@ -110,12 +162,16 @@ class SnapshotCandidate:
 
 @dataclass(frozen=True)
 class ArchiveResult:
-    bucket: str
+    backend: str
+    bucket: str | None
     key: str
+    uri: str
+    format: str
     uncompressed_bytes: int
     compressed_bytes: int
     uncompressed_sha256: str
     compressed_sha256: str
+    metadata: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -132,7 +188,167 @@ class SnapshotArchiveWriter(Protocol):
     def archive(self, candidate: SnapshotCandidate) -> ArchiveResult: ...
 
 
+def _object_key_for_hash(prefix: str, tx_hash: str) -> str:
+    normalized = tx_hash.lower().removeprefix("0x")
+    shard = normalized[:2] if len(normalized) >= 2 else "unknown"
+    filename = f"{tx_hash}.contract_snapshot.json.gz"
+    clean_prefix = prefix.strip("/")
+    if not clean_prefix:
+        return f"v1/{shard}/{filename}"
+    return f"{clean_prefix}/v1/{shard}/{filename}"
+
+
+def _archive_body(candidate: SnapshotCandidate) -> tuple[bytes, bytes, str, str]:
+    raw = candidate.snapshot_json.encode("utf-8")
+    body = gzip.compress(raw, compresslevel=6, mtime=0)
+    raw_sha256 = hashlib.sha256(raw).hexdigest()
+    compressed_sha256 = hashlib.sha256(body).hexdigest()
+    return raw, body, raw_sha256, compressed_sha256
+
+
+def _archive_metadata(
+    candidate: SnapshotCandidate,
+    *,
+    raw_sha256: str,
+    compressed_sha256: str,
+    raw_bytes: int,
+    compressed_bytes: int,
+) -> dict[str, str]:
+    return {
+        "schema-version": "1",
+        "archive-format": ARCHIVE_FORMAT,
+        "tx-hash": candidate.tx_hash,
+        "tx-status": candidate.status,
+        "snapshot-sha256": raw_sha256,
+        "compressed-sha256": compressed_sha256,
+        "snapshot-bytes": str(raw_bytes),
+        "compressed-bytes": str(compressed_bytes),
+    }
+
+
+class FileSnapshotArchiveWriter:
+    backend = "file"
+
+    def __init__(self, *, base_dir: str | Path, prefix: str) -> None:
+        self.base_dir = Path(base_dir)
+        self.prefix = prefix.strip("/")
+
+    @classmethod
+    def from_config(cls, config: TerminalSnapshotPrunerConfig):
+        return cls(base_dir=config.file_dir, prefix=DEFAULT_ARCHIVE_PREFIX)
+
+    def key_for_hash(self, tx_hash: str) -> str:
+        return _object_key_for_hash(self.prefix, tx_hash)
+
+    def archive(self, candidate: SnapshotCandidate) -> ArchiveResult:
+        raw, body, raw_sha256, compressed_sha256 = _archive_body(candidate)
+        metadata = _archive_metadata(
+            candidate,
+            raw_sha256=raw_sha256,
+            compressed_sha256=compressed_sha256,
+            raw_bytes=len(raw),
+            compressed_bytes=len(body),
+        )
+        key = self.key_for_hash(candidate.tx_hash)
+        destination = self.base_dir / key
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = destination.with_name(
+            f".{destination.name}.{os.getpid()}.{time.monotonic_ns()}.tmp"
+        )
+        tmp_path.write_bytes(body)
+        tmp_path.replace(destination)
+
+        return ArchiveResult(
+            backend=self.backend,
+            bucket=None,
+            key=key,
+            uri=f"file://{destination.resolve()}",
+            format=ARCHIVE_FORMAT,
+            uncompressed_bytes=len(raw),
+            compressed_bytes=len(body),
+            uncompressed_sha256=raw_sha256,
+            compressed_sha256=compressed_sha256,
+            metadata=metadata,
+        )
+
+
+class GCSSnapshotArchiveWriter:
+    backend = "gcs"
+
+    def __init__(
+        self,
+        *,
+        bucket: str,
+        prefix: str,
+        storage_class: str | None = None,
+        client: Any | None = None,
+    ) -> None:
+        self.bucket = bucket
+        self.prefix = prefix.strip("/")
+        self.storage_class = storage_class
+        self._client = client
+
+    @classmethod
+    def from_config(cls, config: TerminalSnapshotPrunerConfig):
+        if not config.gcs_bucket:
+            raise RuntimeError("GCS bucket is required for snapshot archiving")
+        return cls(
+            bucket=config.gcs_bucket,
+            prefix=config.gcs_prefix,
+            storage_class=config.gcs_storage_class,
+        )
+
+    @property
+    def client(self):
+        if self._client is None:
+            try:
+                from google.cloud import storage
+            except ImportError as exc:  # pragma: no cover - depends on image deps
+                raise RuntimeError(
+                    "google-cloud-storage is required for GCS contract snapshot "
+                    "archiving"
+                ) from exc
+            self._client = storage.Client()
+        return self._client
+
+    def key_for_hash(self, tx_hash: str) -> str:
+        return _object_key_for_hash(self.prefix, tx_hash)
+
+    def archive(self, candidate: SnapshotCandidate) -> ArchiveResult:
+        raw, body, raw_sha256, compressed_sha256 = _archive_body(candidate)
+        metadata = _archive_metadata(
+            candidate,
+            raw_sha256=raw_sha256,
+            compressed_sha256=compressed_sha256,
+            raw_bytes=len(raw),
+            compressed_bytes=len(body),
+        )
+        key = self.key_for_hash(candidate.tx_hash)
+        bucket = self.client.bucket(self.bucket)
+        blob = bucket.blob(key)
+        blob.content_encoding = "gzip"
+        blob.metadata = metadata
+        if self.storage_class:
+            blob.storage_class = self.storage_class
+        blob.upload_from_string(body, content_type="application/json")
+
+        return ArchiveResult(
+            backend=self.backend,
+            bucket=self.bucket,
+            key=key,
+            uri=f"gs://{self.bucket}/{key}",
+            format=ARCHIVE_FORMAT,
+            uncompressed_bytes=len(raw),
+            compressed_bytes=len(body),
+            uncompressed_sha256=raw_sha256,
+            compressed_sha256=compressed_sha256,
+            metadata=metadata,
+        )
+
+
 class S3SnapshotArchiveWriter:
+    backend = "s3"
+
     def __init__(
         self,
         *,
@@ -178,20 +394,19 @@ class S3SnapshotArchiveWriter:
         return self._client
 
     def key_for_hash(self, tx_hash: str) -> str:
-        normalized = tx_hash.lower().removeprefix("0x")
-        shard = normalized[:2] if len(normalized) >= 2 else "unknown"
-        filename = f"{tx_hash}.contract_snapshot.json.gz"
-        if not self.prefix:
-            return f"v1/{shard}/{filename}"
-        return f"{self.prefix}/v1/{shard}/{filename}"
+        return _object_key_for_hash(self.prefix, tx_hash)
 
     def archive(self, candidate: SnapshotCandidate) -> ArchiveResult:
-        raw = candidate.snapshot_json.encode("utf-8")
-        body = gzip.compress(raw, compresslevel=6, mtime=0)
-        raw_sha256 = hashlib.sha256(raw).hexdigest()
-        compressed_digest = hashlib.sha256(body).digest()
-        compressed_sha256 = compressed_digest.hex()
+        raw, body, raw_sha256, compressed_sha256 = _archive_body(candidate)
+        metadata = _archive_metadata(
+            candidate,
+            raw_sha256=raw_sha256,
+            compressed_sha256=compressed_sha256,
+            raw_bytes=len(raw),
+            compressed_bytes=len(body),
+        )
         key = self.key_for_hash(candidate.tx_hash)
+        compressed_digest = bytes.fromhex(compressed_sha256)
 
         put_kwargs: dict[str, Any] = {
             "Bucket": self.bucket,
@@ -200,14 +415,7 @@ class S3SnapshotArchiveWriter:
             "ContentEncoding": "gzip",
             "ContentType": "application/json",
             "ChecksumSHA256": base64.b64encode(compressed_digest).decode("ascii"),
-            "Metadata": {
-                "schema-version": "1",
-                "tx-hash": candidate.tx_hash,
-                "tx-status": candidate.status,
-                "snapshot-sha256": raw_sha256,
-                "compressed-sha256": compressed_sha256,
-                "snapshot-bytes": str(candidate.snapshot_bytes),
-            },
+            "Metadata": metadata,
         }
         if self.storage_class:
             put_kwargs["StorageClass"] = self.storage_class
@@ -219,13 +427,166 @@ class S3SnapshotArchiveWriter:
         self.client.put_object(**put_kwargs)
 
         return ArchiveResult(
+            backend=self.backend,
             bucket=self.bucket,
             key=key,
+            uri=f"s3://{self.bucket}/{key}",
+            format=ARCHIVE_FORMAT,
             uncompressed_bytes=len(raw),
             compressed_bytes=len(body),
             uncompressed_sha256=raw_sha256,
             compressed_sha256=compressed_sha256,
+            metadata=metadata,
         )
+
+
+def build_snapshot_archive_writer(
+    config: TerminalSnapshotPrunerConfig,
+) -> SnapshotArchiveWriter:
+    backend = config.archive_backend.lower()
+    if backend == "file":
+        return FileSnapshotArchiveWriter.from_config(config)
+    if backend == "gcs":
+        return GCSSnapshotArchiveWriter.from_config(config)
+    if backend == "s3":
+        return S3SnapshotArchiveWriter.from_config(config)
+    raise RuntimeError(f"Unsupported contract snapshot archive backend: {backend}")
+
+
+class SnapshotArchiveReader:
+    def __init__(
+        self,
+        *,
+        file_dir: str | Path | None = None,
+        s3_region: str | None = None,
+        s3_client: Any | None = None,
+        gcs_client: Any | None = None,
+    ) -> None:
+        self.file_dir = Path(file_dir) if file_dir else None
+        self.s3_region = s3_region
+        self._s3_client = s3_client
+        self._gcs_client = gcs_client
+
+    @classmethod
+    def from_environment(cls) -> "SnapshotArchiveReader":
+        return cls(
+            file_dir=os.getenv("STUDIO_CONTRACT_SNAPSHOT_PRUNER_FILE_DIR")
+            or DEFAULT_FILE_ARCHIVE_DIR,
+            s3_region=os.getenv("AWS_REGION")
+            or os.getenv("AWS_DEFAULT_REGION")
+            or os.getenv("STUDIO_CONTRACT_SNAPSHOT_PRUNER_S3_REGION")
+            or None,
+        )
+
+    @property
+    def s3_client(self):
+        if self._s3_client is None:
+            try:
+                import boto3
+            except ImportError as exc:  # pragma: no cover - depends on image deps
+                raise RuntimeError(
+                    "boto3 is required for S3 contract snapshot retrieval"
+                ) from exc
+            self._s3_client = boto3.client("s3", region_name=self.s3_region)
+        return self._s3_client
+
+    @property
+    def gcs_client(self):
+        if self._gcs_client is None:
+            try:
+                from google.cloud import storage
+            except ImportError as exc:  # pragma: no cover - depends on image deps
+                raise RuntimeError(
+                    "google-cloud-storage is required for GCS contract snapshot "
+                    "retrieval"
+                ) from exc
+            self._gcs_client = storage.Client()
+        return self._gcs_client
+
+    def load_snapshot(self, session: Session, tx_hash: str) -> dict | list | None:
+        row = (
+            session.execute(
+                text(
+                    """
+                    SELECT
+                        tx_hash,
+                        backend,
+                        bucket,
+                        object_key,
+                        uri,
+                        format,
+                        snapshot_sha256,
+                        compressed_sha256,
+                        snapshot_bytes,
+                        compressed_bytes
+                    FROM transaction_snapshot_archives
+                    WHERE tx_hash = :hash
+                      AND archive_status IN ('archived', 'pruned')
+                    ORDER BY archived_at DESC
+                    LIMIT 1
+                    """
+                ),
+                {"hash": tx_hash},
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            return None
+        if row["format"] != ARCHIVE_FORMAT:
+            raise RuntimeError(
+                f"Unsupported contract snapshot archive format: {row['format']}"
+            )
+
+        body = self._download(row)
+        compressed_sha256 = hashlib.sha256(body).hexdigest()
+        if row["compressed_sha256"] and compressed_sha256 != row["compressed_sha256"]:
+            raise RuntimeError(
+                f"Archived contract snapshot checksum mismatch for {tx_hash}"
+            )
+
+        raw = gzip.decompress(body)
+        snapshot_sha256 = hashlib.sha256(raw).hexdigest()
+        if row["snapshot_sha256"] and snapshot_sha256 != row["snapshot_sha256"]:
+            raise RuntimeError(
+                f"Archived contract snapshot content checksum mismatch for {tx_hash}"
+            )
+        return json.loads(raw.decode("utf-8"))
+
+    def _download(self, row: dict[str, Any]) -> bytes:
+        backend = row["backend"].lower()
+        if backend == "file":
+            return self._download_file(row)
+        if backend == "gcs":
+            return self._download_gcs(row)
+        if backend == "s3":
+            return self._download_s3(row)
+        raise RuntimeError(f"Unsupported contract snapshot archive backend: {backend}")
+
+    def _download_file(self, row: dict[str, Any]) -> bytes:
+        uri = row.get("uri")
+        if uri and uri.startswith("file://"):
+            path = Path(uri[7:])
+        elif self.file_dir is not None:
+            path = self.file_dir / row["object_key"]
+        else:
+            path = Path(row["object_key"])
+        return path.read_bytes()
+
+    def _download_gcs(self, row: dict[str, Any]) -> bytes:
+        bucket = row["bucket"]
+        if not bucket:
+            raise RuntimeError("GCS archive row is missing bucket")
+        return (
+            self.gcs_client.bucket(bucket).blob(row["object_key"]).download_as_bytes()
+        )
+
+    def _download_s3(self, row: dict[str, Any]) -> bytes:
+        bucket = row["bucket"]
+        if not bucket:
+            raise RuntimeError("S3 archive row is missing bucket")
+        response = self.s3_client.get_object(Bucket=bucket, Key=row["object_key"])
+        return response["Body"].read()
 
 
 class TerminalSnapshotPruner:
@@ -241,7 +602,7 @@ class TerminalSnapshotPruner:
 
     def _archive_writer(self) -> SnapshotArchiveWriter:
         if self.archive_writer is None:
-            self.archive_writer = S3SnapshotArchiveWriter.from_config(self.config)
+            self.archive_writer = build_snapshot_archive_writer(self.config)
         return self.archive_writer
 
     def _cutoff(self) -> datetime:
@@ -287,6 +648,89 @@ class TerminalSnapshotPruner:
             for row in rows
         ]
 
+    def _record_archive(
+        self,
+        session: Session,
+        candidate: SnapshotCandidate,
+        archive_result: ArchiveResult,
+    ) -> None:
+        session.execute(
+            text(
+                """
+                INSERT INTO transaction_snapshot_archives (
+                    tx_hash,
+                    backend,
+                    bucket,
+                    object_key,
+                    uri,
+                    format,
+                    snapshot_sha256,
+                    compressed_sha256,
+                    snapshot_bytes,
+                    compressed_bytes,
+                    archive_status,
+                    archived_at,
+                    object_metadata
+                )
+                VALUES (
+                    :tx_hash,
+                    :backend,
+                    :bucket,
+                    :object_key,
+                    :uri,
+                    :format,
+                    :snapshot_sha256,
+                    :compressed_sha256,
+                    :snapshot_bytes,
+                    :compressed_bytes,
+                    'archived',
+                    CURRENT_TIMESTAMP,
+                    CAST(:object_metadata AS jsonb)
+                )
+                ON CONFLICT (tx_hash) DO UPDATE SET
+                    backend = EXCLUDED.backend,
+                    bucket = EXCLUDED.bucket,
+                    object_key = EXCLUDED.object_key,
+                    uri = EXCLUDED.uri,
+                    format = EXCLUDED.format,
+                    snapshot_sha256 = EXCLUDED.snapshot_sha256,
+                    compressed_sha256 = EXCLUDED.compressed_sha256,
+                    snapshot_bytes = EXCLUDED.snapshot_bytes,
+                    compressed_bytes = EXCLUDED.compressed_bytes,
+                    archive_status = 'archived',
+                    archived_at = CURRENT_TIMESTAMP,
+                    pruned_at = NULL,
+                    object_metadata = EXCLUDED.object_metadata
+                """
+            ),
+            {
+                "tx_hash": candidate.tx_hash,
+                "backend": archive_result.backend,
+                "bucket": archive_result.bucket,
+                "object_key": archive_result.key,
+                "uri": archive_result.uri,
+                "format": archive_result.format,
+                "snapshot_sha256": archive_result.uncompressed_sha256,
+                "compressed_sha256": archive_result.compressed_sha256,
+                "snapshot_bytes": archive_result.uncompressed_bytes,
+                "compressed_bytes": archive_result.compressed_bytes,
+                "object_metadata": json.dumps(archive_result.metadata),
+            },
+        )
+
+    def _mark_archive_pruned(self, session: Session, tx_hash: str) -> None:
+        session.execute(
+            text(
+                """
+                UPDATE transaction_snapshot_archives
+                SET archive_status = 'pruned',
+                    pruned_at = CURRENT_TIMESTAMP
+                WHERE tx_hash = :hash
+                """
+            ),
+            {"hash": tx_hash},
+        )
+
     def prune_once(self) -> PruneBatchResult:
         self.config.validate_for_run()
         session = self.get_session()
@@ -316,6 +760,7 @@ class TerminalSnapshotPruner:
                 logical_bytes += candidate.snapshot_bytes
                 if writer is not None:
                     archive_result = writer.archive(candidate)
+                    self._record_archive(session, candidate, archive_result)
                     archived += 1
                     compressed_bytes += archive_result.compressed_bytes
 
@@ -330,7 +775,10 @@ class TerminalSnapshotPruner:
                     ),
                     {"hash": candidate.tx_hash},
                 )
-                pruned += result.rowcount or 0
+                rowcount = result.rowcount or 0
+                pruned += rowcount
+                if rowcount and writer is not None:
+                    self._mark_archive_pruned(session, candidate.tx_hash)
 
             session.commit()
             return PruneBatchResult(
@@ -360,10 +808,12 @@ async def run_terminal_snapshot_pruner_loop(
     pruner = TerminalSnapshotPruner(get_session, config, archive_writer)
     logger.info(
         "Terminal contract snapshot pruner started "
-        "(batch_size=%s retention_hours=%s archive_enabled=%s dry_run=%s)",
+        "(batch_size=%s retention_hours=%s archive_enabled=%s "
+        "archive_backend=%s dry_run=%s)",
         config.batch_size,
         config.retention_hours,
         config.archive_enabled,
+        config.archive_backend,
         config.dry_run,
     )
 

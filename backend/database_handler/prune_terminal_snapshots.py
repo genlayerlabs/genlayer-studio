@@ -41,8 +41,8 @@ def get_database_url() -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Archive terminal transaction contract snapshots to S3 and prune them "
-            "from the hot transactions table."
+            "Archive terminal transaction contract snapshots and prune them from "
+            "the hot transactions table."
         )
     )
     parser.add_argument(
@@ -72,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Count candidates in batches without writing S3 objects or pruning rows.",
+        help="Count candidates in batches without writing archive objects or pruning rows.",
     )
     return parser
 
@@ -110,10 +110,12 @@ def main() -> int:
 
     logger.info(
         "Starting terminal snapshot pruning "
-        "(batch_size=%s retention_hours=%s archive_enabled=%s dry_run=%s)",
+        "(batch_size=%s retention_hours=%s archive_enabled=%s "
+        "archive_backend=%s dry_run=%s)",
         config.batch_size,
         config.retention_hours,
         config.archive_enabled,
+        config.archive_backend,
         config.dry_run,
     )
 
