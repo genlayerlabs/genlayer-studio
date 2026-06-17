@@ -477,9 +477,14 @@ class ConsensusWorker:
                     -- This clause makes PENDING/ACTIVATED claims defer when an
                     -- ACCEPTED-class tx for the same contract is past its
                     -- finality window — letting finalization drain the queue.
+                    -- Only older finalizations can preempt this candidate:
+                    -- claim_next_finalization will not claim a younger tx while
+                    -- this candidate is still non-terminal, so deferring here
+                    -- would deadlock the contract head.
                     AND NOT EXISTS (
                         SELECT 1 FROM transactions t3
                         WHERE t3.to_address IS NOT DISTINCT FROM t.to_address
+                            AND t3.created_at < t.created_at
                             AND t3.status IN ('ACCEPTED', 'UNDETERMINED', 'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT')
                             AND t3.appealed = false
                             AND t3.timestamp_awaiting_finalization IS NOT NULL

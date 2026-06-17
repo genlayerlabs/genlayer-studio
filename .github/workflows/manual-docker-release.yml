@@ -73,4 +73,6 @@ jobs:
     uses: ./.github/workflows/release-from-tag.yml
     with:
       tag: ${{ github.event.inputs.version }}
-    secrets: inherit
+    secrets:
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      RELEASE_LANE_APP_KEY: ${{ secrets.RELEASE_LANE_APP_KEY }}
