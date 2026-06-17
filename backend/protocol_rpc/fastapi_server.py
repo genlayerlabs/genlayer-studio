@@ -14,6 +14,7 @@ from starlette.requests import ClientDisconnect
 load_dotenv()
 
 from backend.protocol_rpc.app_lifespan import RPCAppSettings, rpc_app_lifespan
+from backend.protocol_rpc.analytics_router import analytics_router
 from backend.protocol_rpc.dependencies import (
     get_rpc_router_optional,
     websocket_broadcast,
@@ -78,6 +79,9 @@ app.include_router(health_router)
 
 # Include explorer API endpoints
 app.include_router(explorer_router)
+
+# Include analytics-only endpoints
+app.include_router(analytics_router)
 
 
 # JSON-RPC endpoint (supports single and batch requests)

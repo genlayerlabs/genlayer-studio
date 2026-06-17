@@ -1,16 +1,30 @@
 import { watch } from 'vue';
 import { useWallet } from './useWallet';
 import { useAccountsStore } from '@/stores';
+import { recordWalletConnection } from '@/services/walletAnalytics';
+import type { Address } from '@/types';
 
 export function useWalletSync() {
   const wallet = useWallet();
   const accountsStore = useAccountsStore();
   let initialized = false;
+  let lastRecordedAddress: string | null = null;
+
+  const recordAnalytics = (address: Address) => {
+    const normalizedAddress = address.toLowerCase();
+    if (lastRecordedAddress === normalizedAddress) return;
+
+    lastRecordedAddress = normalizedAddress;
+    void recordWalletConnection(address).catch((error) => {
+      console.debug('Wallet connection analytics failed', error);
+    });
+  };
 
   watch(
     [() => wallet.isConnected.value, () => wallet.address.value],
     ([isConnected, address], [wasConnected]) => {
       if (isConnected && address) {
+        recordAnalytics(address);
         if (!initialized) {
           // Auto-reconnect on page load: add/update wallet but don't switch to it
           initialized = true;
@@ -20,6 +34,7 @@ export function useWalletSync() {
           accountsStore.connectExternalWallet(address);
         }
       } else if (wasConnected && !isConnected) {
+        lastRecordedAddress = null;
         accountsStore.disconnectExternalWallet();
       }
     },

@@ -293,3 +293,39 @@ class ApiKey(Base):
     last_used_at: Mapped[Optional[datetime.datetime]] = mapped_column(
         DateTime(True), nullable=True, init=False
     )
+
+
+class WalletConnectionAnalytics(Base):
+    __tablename__ = "wallet_connection_analytics"
+    __table_args__ = (
+        PrimaryKeyConstraint("wallet_address", name="wallet_connection_analytics_pkey"),
+    )
+
+    wallet_address: Mapped[str] = mapped_column(String(42), primary_key=True)
+    connect_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1", default=1
+    )
+    first_observed_ip: Mapped[Optional[str]] = mapped_column(
+        String(45), nullable=True, default=None
+    )
+    last_observed_ip: Mapped[Optional[str]] = mapped_column(
+        String(45), nullable=True, default=None
+    )
+    first_user_agent: Mapped[Optional[str]] = mapped_column(
+        String(512), nullable=True, default=None
+    )
+    last_user_agent: Mapped[Optional[str]] = mapped_column(
+        String(512), nullable=True, default=None
+    )
+    first_origin: Mapped[Optional[str]] = mapped_column(
+        String(512), nullable=True, default=None
+    )
+    last_origin: Mapped[Optional[str]] = mapped_column(
+        String(512), nullable=True, default=None
+    )
+    first_connected_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(True), server_default=func.current_timestamp(), init=False
+    )
+    last_connected_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(True), server_default=func.current_timestamp(), init=False
+    )
