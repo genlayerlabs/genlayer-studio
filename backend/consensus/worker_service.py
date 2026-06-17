@@ -148,6 +148,51 @@ def _get_blocked_tx_unhealthy_after_minutes(transaction_timeout_minutes=None) ->
     return max(configured_threshold_minutes, minimum_threshold)
 
 
+def _get_worker_graceful_shutdown_timeout_seconds() -> int:
+    """Return how long shutdown should wait before releasing claimed txs.
+
+    Kubernetes sends SIGKILL when terminationGracePeriodSeconds expires. The
+    worker must release claims before that hard deadline, otherwise scale-down
+    strands in-flight transactions until the 30m stale-claim recovery path bumps
+    recovery_count.
+    """
+    default_termination_grace = 180
+    try:
+        termination_grace = int(
+            os.getenv(
+                "WORKER_TERMINATION_GRACE_SECONDS", str(default_termination_grace)
+            )
+        )
+    except ValueError:
+        termination_grace = default_termination_grace
+    if termination_grace <= 0:
+        termination_grace = default_termination_grace
+
+    try:
+        release_buffer = int(os.getenv("WORKER_SHUTDOWN_RELEASE_BUFFER_SECONDS", "30"))
+    except ValueError:
+        release_buffer = 30
+    if release_buffer <= 0:
+        release_buffer = 30
+
+    default_timeout = max(1, termination_grace - release_buffer)
+
+    configured_timeout = os.getenv("WORKER_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS")
+    if configured_timeout is None:
+        return default_timeout
+
+    try:
+        timeout = int(configured_timeout)
+    except ValueError:
+        return default_timeout
+    if timeout <= 0:
+        return default_timeout
+
+    # Preserve a release buffer even when the configured value is too close to
+    # Kubernetes' hard kill deadline.
+    return min(timeout, default_timeout)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage the worker lifecycle."""
@@ -369,11 +414,10 @@ async def lifespan(app: FastAPI):
                 f"Waiting for {tx_count} transactions / {task_count} tasks to complete before shutdown..."
             )
 
-            # Get graceful shutdown timeout from env (default: 180 seconds)
-            # This gives the transactions time to finish before we force-stop
-            graceful_timeout = int(
-                os.environ.get("WORKER_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS", "180")
-            )
+            # Release claims before Kubernetes' SIGKILL deadline. This gives
+            # in-flight work time to complete, but still leaves a buffer for
+            # cleanup/requeue if the pod is being scaled down.
+            graceful_timeout = _get_worker_graceful_shutdown_timeout_seconds()
             start_time = time.time()
 
             while (worker.current_transactions or worker._active_tasks) and (
