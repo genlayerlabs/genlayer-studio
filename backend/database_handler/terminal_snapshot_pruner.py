@@ -67,6 +67,8 @@ def _configured_archive_backend() -> str:
 class TerminalSnapshotPrunerConfig:
     enabled: bool = False
     archive_enabled: bool = True
+    verify_archive: bool = True
+    allow_lossy_prune: bool = False
     dry_run: bool = False
     batch_size: int = 5
     retention_hours: int = 24
@@ -89,6 +91,12 @@ class TerminalSnapshotPrunerConfig:
             enabled=_env_bool("STUDIO_CONTRACT_SNAPSHOT_PRUNER_ENABLED"),
             archive_enabled=_env_bool(
                 "STUDIO_CONTRACT_SNAPSHOT_PRUNER_ARCHIVE_ENABLED", default=True
+            ),
+            verify_archive=_env_bool(
+                "STUDIO_CONTRACT_SNAPSHOT_PRUNER_VERIFY_ARCHIVE", default=True
+            ),
+            allow_lossy_prune=_env_bool(
+                "STUDIO_CONTRACT_SNAPSHOT_PRUNER_ALLOW_LOSSY_PRUNE"
             ),
             dry_run=_env_bool("STUDIO_CONTRACT_SNAPSHOT_PRUNER_DRY_RUN"),
             batch_size=_env_int("STUDIO_CONTRACT_SNAPSHOT_PRUNER_BATCH_SIZE", 5, 1),
@@ -125,8 +133,17 @@ class TerminalSnapshotPrunerConfig:
         )
 
     def validate_for_run(self) -> None:
-        if not self.archive_enabled or self.dry_run:
+        if self.dry_run:
             return
+        if not self.archive_enabled:
+            if self.allow_lossy_prune:
+                return
+            raise RuntimeError(
+                "Refusing to prune terminal contract snapshots without archiving. "
+                "Set STUDIO_CONTRACT_SNAPSHOT_PRUNER_ARCHIVE_ENABLED=true, or set "
+                "STUDIO_CONTRACT_SNAPSHOT_PRUNER_ALLOW_LOSSY_PRUNE=true to make "
+                "the data-loss mode explicit."
+            )
 
         backend = self.archive_backend.lower()
         if backend not in {"file", "gcs", "s3"}:
@@ -187,6 +204,8 @@ class PruneBatchResult:
 class SnapshotArchiveWriter(Protocol):
     def archive(self, candidate: SnapshotCandidate) -> ArchiveResult: ...
 
+    def verify(self, archive_result: ArchiveResult) -> None: ...
+
 
 def _object_key_for_hash(prefix: str, tx_hash: str) -> str:
     normalized = tx_hash.lower().removeprefix("0x")
@@ -224,6 +243,44 @@ def _archive_metadata(
         "snapshot-bytes": str(raw_bytes),
         "compressed-bytes": str(compressed_bytes),
     }
+
+
+def _decode_verified_archive_body(
+    *,
+    body: bytes,
+    tx_hash: str,
+    archive_format: str,
+    uncompressed_sha256: str | None,
+    compressed_sha256: str | None,
+) -> dict | list:
+    if archive_format != ARCHIVE_FORMAT:
+        raise RuntimeError(
+            f"Unsupported contract snapshot archive format: {archive_format}"
+        )
+
+    actual_compressed_sha256 = hashlib.sha256(body).hexdigest()
+    if compressed_sha256 and actual_compressed_sha256 != compressed_sha256:
+        raise RuntimeError(
+            f"Archived contract snapshot checksum mismatch for {tx_hash}"
+        )
+
+    raw = gzip.decompress(body)
+    actual_uncompressed_sha256 = hashlib.sha256(raw).hexdigest()
+    if uncompressed_sha256 and actual_uncompressed_sha256 != uncompressed_sha256:
+        raise RuntimeError(
+            f"Archived contract snapshot content checksum mismatch for {tx_hash}"
+        )
+    return json.loads(raw.decode("utf-8"))
+
+
+def _verify_archive_result_body(archive_result: ArchiveResult, body: bytes) -> None:
+    _decode_verified_archive_body(
+        body=body,
+        tx_hash=archive_result.metadata.get("tx-hash", archive_result.key),
+        archive_format=archive_result.format,
+        uncompressed_sha256=archive_result.uncompressed_sha256,
+        compressed_sha256=archive_result.compressed_sha256,
+    )
 
 
 class FileSnapshotArchiveWriter:
@@ -270,6 +327,14 @@ class FileSnapshotArchiveWriter:
             compressed_sha256=compressed_sha256,
             metadata=metadata,
         )
+
+    def verify(self, archive_result: ArchiveResult) -> None:
+        uri = archive_result.uri
+        if uri.startswith("file://"):
+            path = Path(uri[7:])
+        else:
+            path = self.base_dir / archive_result.key
+        _verify_archive_result_body(archive_result, path.read_bytes())
 
 
 class GCSSnapshotArchiveWriter:
@@ -344,6 +409,16 @@ class GCSSnapshotArchiveWriter:
             compressed_sha256=compressed_sha256,
             metadata=metadata,
         )
+
+    def verify(self, archive_result: ArchiveResult) -> None:
+        if not archive_result.bucket:
+            raise RuntimeError("GCS archive result is missing bucket")
+        body = (
+            self.client.bucket(archive_result.bucket)
+            .blob(archive_result.key)
+            .download_as_bytes()
+        )
+        _verify_archive_result_body(archive_result, body)
 
 
 class S3SnapshotArchiveWriter:
@@ -439,6 +514,15 @@ class S3SnapshotArchiveWriter:
             metadata=metadata,
         )
 
+    def verify(self, archive_result: ArchiveResult) -> None:
+        if not archive_result.bucket:
+            raise RuntimeError("S3 archive result is missing bucket")
+        response = self.client.get_object(
+            Bucket=archive_result.bucket,
+            Key=archive_result.key,
+        )
+        _verify_archive_result_body(archive_result, response["Body"].read())
+
 
 def build_snapshot_archive_writer(
     config: TerminalSnapshotPrunerConfig,
@@ -533,25 +617,14 @@ class SnapshotArchiveReader:
         )
         if row is None:
             return None
-        if row["format"] != ARCHIVE_FORMAT:
-            raise RuntimeError(
-                f"Unsupported contract snapshot archive format: {row['format']}"
-            )
-
         body = self._download(row)
-        compressed_sha256 = hashlib.sha256(body).hexdigest()
-        if row["compressed_sha256"] and compressed_sha256 != row["compressed_sha256"]:
-            raise RuntimeError(
-                f"Archived contract snapshot checksum mismatch for {tx_hash}"
-            )
-
-        raw = gzip.decompress(body)
-        snapshot_sha256 = hashlib.sha256(raw).hexdigest()
-        if row["snapshot_sha256"] and snapshot_sha256 != row["snapshot_sha256"]:
-            raise RuntimeError(
-                f"Archived contract snapshot content checksum mismatch for {tx_hash}"
-            )
-        return json.loads(raw.decode("utf-8"))
+        return _decode_verified_archive_body(
+            body=body,
+            tx_hash=tx_hash,
+            archive_format=row["format"],
+            uncompressed_sha256=row["snapshot_sha256"],
+            compressed_sha256=row["compressed_sha256"],
+        )
 
     def _download(self, row: dict[str, Any]) -> bytes:
         backend = row["backend"].lower()
@@ -760,6 +833,8 @@ class TerminalSnapshotPruner:
                 logical_bytes += candidate.snapshot_bytes
                 if writer is not None:
                     archive_result = writer.archive(candidate)
+                    if self.config.verify_archive:
+                        writer.verify(archive_result)
                     self._record_archive(session, candidate, archive_result)
                     archived += 1
                     compressed_bytes += archive_result.compressed_bytes

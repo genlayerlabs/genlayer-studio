@@ -24,9 +24,22 @@ from backend.database_handler.terminal_snapshot_pruner import (
 class FakeS3Client:
     def __init__(self):
         self.calls = []
+        self.objects = {}
 
     def put_object(self, **kwargs):
         self.calls.append(kwargs)
+        self.objects[(kwargs["Bucket"], kwargs["Key"])] = kwargs["Body"]
+
+    def get_object(self, Bucket, Key):
+        return {"Body": FakeBody(self.objects[(Bucket, Key)])}
+
+
+class FakeBody:
+    def __init__(self, data):
+        self.data = data
+
+    def read(self):
+        return self.data
 
 
 class FakeGCSBlob:
@@ -39,6 +52,10 @@ class FakeGCSBlob:
 
     def upload_from_string(self, data, content_type):
         self.uploads.append({"data": data, "content_type": content_type})
+        self.data = data
+
+    def download_as_bytes(self):
+        return self.data
 
 
 class FakeGCSBucket:
@@ -47,9 +64,7 @@ class FakeGCSBucket:
         self.blobs = {}
 
     def blob(self, key):
-        blob = FakeGCSBlob(key)
-        self.blobs[key] = blob
-        return blob
+        return self.blobs.setdefault(key, FakeGCSBlob(key))
 
 
 class FakeGCSClient:
@@ -80,12 +95,20 @@ class FakeUpdateResult:
 
 
 class FakeSession:
-    def __init__(self, rows, archive_rows=None):
+    def __init__(
+        self,
+        rows,
+        archive_rows=None,
+        fail_on_archive_insert=False,
+        fail_on_transaction_update=False,
+    ):
         self.rows = rows
         self.archive_rows = archive_rows or []
         self.archive_inserts = []
         self.pruned_archive_hashes = []
         self.updated_hashes = []
+        self.fail_on_archive_insert = fail_on_archive_insert
+        self.fail_on_transaction_update = fail_on_transaction_update
         self.committed = False
         self.rolled_back = False
         self.closed = False
@@ -95,6 +118,8 @@ class FakeSession:
         if "FROM transaction_snapshot_archives" in sql:
             return FakeMappingsResult(self.archive_rows)
         if "INSERT INTO transaction_snapshot_archives" in sql:
+            if self.fail_on_archive_insert:
+                raise RuntimeError("archive index insert failed")
             self.archive_inserts.append(params)
             return FakeUpdateResult()
         if "UPDATE transaction_snapshot_archives" in sql:
@@ -103,6 +128,8 @@ class FakeSession:
         if "SELECT" in sql:
             return FakeMappingsResult(self.rows)
         if "UPDATE transactions" in sql:
+            if self.fail_on_transaction_update:
+                raise RuntimeError("transaction prune failed")
             self.updated_hashes.append(params["hash"])
             return FakeUpdateResult()
         raise AssertionError(f"unexpected SQL: {sql}")
@@ -118,9 +145,11 @@ class FakeSession:
 
 
 class RecordingArchiveWriter:
-    def __init__(self, fail=False):
+    def __init__(self, fail=False, verify_fail=False):
         self.fail = fail
+        self.verify_fail = verify_fail
         self.archived = []
+        self.verified = []
 
     def archive(self, candidate):
         if self.fail:
@@ -138,6 +167,11 @@ class RecordingArchiveWriter:
             compressed_sha256="1" * 64,
             metadata={"tx-hash": candidate.tx_hash},
         )
+
+    def verify(self, archive_result):
+        if self.verify_fail:
+            raise RuntimeError("archive verification failed")
+        self.verified.append(archive_result.key)
 
 
 def _candidate_row(tx_hash="0xabc"):
@@ -186,6 +220,7 @@ def test_s3_archive_writer_compresses_snapshot_with_checksum_and_metadata():
     assert call["ChecksumSHA256"] == base64.b64encode(expected_digest).decode("ascii")
     assert call["Metadata"]["tx-hash"] == "0xABCDEF"
     assert call["Metadata"]["snapshot-sha256"] == hashlib.sha256(b'{"x":1}').hexdigest()
+    writer.verify(result)
 
 
 def test_file_archive_writer_writes_snapshot_and_reader_loads_it(tmp_path):
@@ -229,6 +264,77 @@ def test_file_archive_writer_writes_snapshot_and_reader_loads_it(tmp_path):
     assert reader.load_snapshot(session, candidate.tx_hash) == {"x": 1}
 
 
+def test_archive_reader_rejects_checksum_mismatch(tmp_path):
+    writer = FileSnapshotArchiveWriter(base_dir=tmp_path, prefix="studio/rally")
+    candidate = SnapshotCandidate(
+        tx_hash="0xABCDEF",
+        status="FINALIZED",
+        created_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        snapshot_bytes=7,
+        snapshot_json='{"x":1}',
+    )
+    result = writer.archive(candidate)
+    archive_path = tmp_path / result.key
+    archive_path.write_bytes(gzip.compress(b'{"x":2}', compresslevel=6, mtime=0))
+    session = FakeSession(
+        [],
+        archive_rows=[
+            {
+                "tx_hash": candidate.tx_hash,
+                "backend": result.backend,
+                "bucket": result.bucket,
+                "object_key": result.key,
+                "uri": result.uri,
+                "format": result.format,
+                "snapshot_sha256": result.uncompressed_sha256,
+                "compressed_sha256": result.compressed_sha256,
+                "snapshot_bytes": result.uncompressed_bytes,
+                "compressed_bytes": result.compressed_bytes,
+            }
+        ],
+    )
+    reader = SnapshotArchiveReader(file_dir=tmp_path)
+
+    with pytest.raises(RuntimeError, match="checksum mismatch"):
+        reader.load_snapshot(session, candidate.tx_hash)
+
+
+def test_archive_reader_rejects_bad_gzip_payload(tmp_path):
+    writer = FileSnapshotArchiveWriter(base_dir=tmp_path, prefix="studio/rally")
+    candidate = SnapshotCandidate(
+        tx_hash="0xABCDEF",
+        status="FINALIZED",
+        created_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        snapshot_bytes=7,
+        snapshot_json='{"x":1}',
+    )
+    result = writer.archive(candidate)
+    archive_path = tmp_path / result.key
+    bad_payload = b"not gzip"
+    archive_path.write_bytes(bad_payload)
+    session = FakeSession(
+        [],
+        archive_rows=[
+            {
+                "tx_hash": candidate.tx_hash,
+                "backend": result.backend,
+                "bucket": result.bucket,
+                "object_key": result.key,
+                "uri": result.uri,
+                "format": result.format,
+                "snapshot_sha256": result.uncompressed_sha256,
+                "compressed_sha256": hashlib.sha256(bad_payload).hexdigest(),
+                "snapshot_bytes": result.uncompressed_bytes,
+                "compressed_bytes": len(bad_payload),
+            }
+        ],
+    )
+    reader = SnapshotArchiveReader(file_dir=tmp_path)
+
+    with pytest.raises(gzip.BadGzipFile):
+        reader.load_snapshot(session, candidate.tx_hash)
+
+
 def test_gcs_archive_writer_uploads_compressed_snapshot_with_metadata():
     client = FakeGCSClient()
     writer = GCSSnapshotArchiveWriter(
@@ -257,6 +363,7 @@ def test_gcs_archive_writer_uploads_compressed_snapshot_with_metadata():
     assert blob.metadata["snapshot-sha256"] == hashlib.sha256(b'{"x":1}').hexdigest()
     assert blob.uploads[0]["content_type"] == "application/json"
     assert gzip.decompress(blob.uploads[0]["data"]) == b'{"x":1}'
+    writer.verify(result)
 
 
 def test_pruner_archives_before_pruning_and_commits():
@@ -271,6 +378,7 @@ def test_pruner_archives_before_pruning_and_commits():
     result = pruner.prune_once()
 
     assert writer.archived == ["0x1", "0x2"]
+    assert writer.verified == ["studio/v1/0x1.json.gz", "studio/v1/0x2.json.gz"]
     assert [row["tx_hash"] for row in session.archive_inserts] == ["0x1", "0x2"]
     assert session.pruned_archive_hashes == ["0x1", "0x2"]
     assert session.updated_hashes == ["0x1", "0x2"]
@@ -294,6 +402,64 @@ def test_pruner_rolls_back_and_does_not_prune_when_archive_fails():
         pruner.prune_once()
 
     assert session.updated_hashes == []
+    assert session.committed is False
+    assert session.rolled_back is True
+    assert session.closed is True
+
+
+def test_pruner_rolls_back_and_does_not_prune_when_archive_verification_fails():
+    session = FakeSession([_candidate_row("0x1")])
+    pruner = TerminalSnapshotPruner(
+        lambda: session,
+        TerminalSnapshotPrunerConfig(enabled=True, s3_bucket="archive-bucket"),
+        archive_writer=RecordingArchiveWriter(verify_fail=True),
+    )
+
+    with pytest.raises(RuntimeError, match="archive verification failed"):
+        pruner.prune_once()
+
+    assert session.archive_inserts == []
+    assert session.updated_hashes == []
+    assert session.committed is False
+    assert session.rolled_back is True
+    assert session.closed is True
+
+
+def test_pruner_rolls_back_and_does_not_prune_when_archive_index_insert_fails():
+    session = FakeSession([_candidate_row("0x1")], fail_on_archive_insert=True)
+    writer = RecordingArchiveWriter()
+    pruner = TerminalSnapshotPruner(
+        lambda: session,
+        TerminalSnapshotPrunerConfig(enabled=True, s3_bucket="archive-bucket"),
+        archive_writer=writer,
+    )
+
+    with pytest.raises(RuntimeError, match="archive index insert failed"):
+        pruner.prune_once()
+
+    assert writer.archived == ["0x1"]
+    assert writer.verified == ["studio/v1/0x1.json.gz"]
+    assert session.updated_hashes == []
+    assert session.committed is False
+    assert session.rolled_back is True
+    assert session.closed is True
+
+
+def test_pruner_rolls_back_when_prune_update_fails_after_archive_index_insert():
+    session = FakeSession([_candidate_row("0x1")], fail_on_transaction_update=True)
+    writer = RecordingArchiveWriter()
+    pruner = TerminalSnapshotPruner(
+        lambda: session,
+        TerminalSnapshotPrunerConfig(enabled=True, s3_bucket="archive-bucket"),
+        archive_writer=writer,
+    )
+
+    with pytest.raises(RuntimeError, match="transaction prune failed"):
+        pruner.prune_once()
+
+    assert writer.archived == ["0x1"]
+    assert writer.verified == ["studio/v1/0x1.json.gz"]
+    assert [row["tx_hash"] for row in session.archive_inserts] == ["0x1"]
     assert session.committed is False
     assert session.rolled_back is True
     assert session.closed is True
@@ -323,7 +489,10 @@ def test_pruner_can_prune_without_archive_when_disabled():
     pruner = TerminalSnapshotPruner(
         lambda: session,
         TerminalSnapshotPrunerConfig(
-            enabled=True, archive_enabled=False, s3_bucket=None
+            enabled=True,
+            archive_enabled=False,
+            allow_lossy_prune=True,
+            s3_bucket=None,
         ),
         archive_writer=writer,
     )
@@ -354,6 +523,8 @@ def test_pruner_rolls_back_when_no_candidates_found():
 def test_config_from_environment_reads_pruner_settings(monkeypatch):
     monkeypatch.setenv("STUDIO_CONTRACT_SNAPSHOT_PRUNER_ENABLED", "true")
     monkeypatch.setenv("STUDIO_CONTRACT_SNAPSHOT_PRUNER_ARCHIVE_ENABLED", "false")
+    monkeypatch.setenv("STUDIO_CONTRACT_SNAPSHOT_PRUNER_VERIFY_ARCHIVE", "false")
+    monkeypatch.setenv("STUDIO_CONTRACT_SNAPSHOT_PRUNER_ALLOW_LOSSY_PRUNE", "true")
     monkeypatch.setenv("STUDIO_CONTRACT_SNAPSHOT_PRUNER_DRY_RUN", "yes")
     monkeypatch.setenv("STUDIO_CONTRACT_SNAPSHOT_PRUNER_BATCH_SIZE", "17")
     monkeypatch.setenv("STUDIO_CONTRACT_SNAPSHOT_PRUNER_RETENTION_HOURS", "48")
@@ -374,6 +545,8 @@ def test_config_from_environment_reads_pruner_settings(monkeypatch):
 
     assert config.enabled is True
     assert config.archive_enabled is False
+    assert config.verify_archive is False
+    assert config.allow_lossy_prune is True
     assert config.dry_run is True
     assert config.batch_size == 17
     assert config.retention_hours == 48
@@ -413,6 +586,17 @@ def test_config_validate_requires_bucket_when_archive_enabled():
     )
 
     with pytest.raises(RuntimeError, match="S3_BUCKET is required"):
+        config.validate_for_run()
+
+
+def test_config_validate_rejects_lossy_prune_without_explicit_override():
+    config = TerminalSnapshotPrunerConfig(
+        enabled=True,
+        archive_enabled=False,
+        dry_run=False,
+    )
+
+    with pytest.raises(RuntimeError, match="Refusing to prune"):
         config.validate_for_run()
 
 

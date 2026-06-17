@@ -33,6 +33,7 @@ GCS example for current GCP production:
 ```bash
 STUDIO_CONTRACT_SNAPSHOT_PRUNER_ENABLED=true
 STUDIO_CONTRACT_SNAPSHOT_PRUNER_ARCHIVE_ENABLED=true
+STUDIO_CONTRACT_SNAPSHOT_PRUNER_VERIFY_ARCHIVE=true
 STUDIO_CONTRACT_SNAPSHOT_PRUNER_ARCHIVE_BACKEND=gcs
 STUDIO_CONTRACT_SNAPSHOT_PRUNER_GCS_BUCKET=<bucket>
 STUDIO_CONTRACT_SNAPSHOT_PRUNER_GCS_PREFIX=studio/terminal-contract-snapshots
@@ -48,6 +49,7 @@ S3 example for AWS:
 ```bash
 STUDIO_CONTRACT_SNAPSHOT_PRUNER_ENABLED=true
 STUDIO_CONTRACT_SNAPSHOT_PRUNER_ARCHIVE_ENABLED=true
+STUDIO_CONTRACT_SNAPSHOT_PRUNER_VERIFY_ARCHIVE=true
 STUDIO_CONTRACT_SNAPSHOT_PRUNER_ARCHIVE_BACKEND=s3
 STUDIO_CONTRACT_SNAPSHOT_PRUNER_S3_BUCKET=<bucket>
 STUDIO_CONTRACT_SNAPSHOT_PRUNER_S3_PREFIX=studio/terminal-contract-snapshots
@@ -63,6 +65,7 @@ Local development example:
 STUDIO_CONTRACT_SNAPSHOT_PRUNER_ENABLED=true
 STUDIO_CONTRACT_SNAPSHOT_PRUNER_ARCHIVE_BACKEND=file
 STUDIO_CONTRACT_SNAPSHOT_PRUNER_FILE_DIR=data/terminal-contract-snapshot-archive
+STUDIO_CONTRACT_SNAPSHOT_PRUNER_VERIFY_ARCHIVE=true
 STUDIO_CONTRACT_SNAPSHOT_ARCHIVE_RETRIEVAL_ENABLED=true
 ```
 
@@ -71,11 +74,17 @@ Each batch:
 1. Locks a small set of `FINALIZED` or `CANCELED` rows with
    `contract_snapshot IS NOT NULL`.
 2. Writes each snapshot to the configured backend as deterministic gzip JSON.
-3. Stores object location and checksums in `transaction_snapshot_archives`.
-4. Sets `transactions.contract_snapshot = NULL` only after the archive write and
-   index row succeed.
+3. Reads the archived object back and verifies the compressed checksum, gzip
+   payload, and raw JSON checksum.
+4. Stores object location and checksums in `transaction_snapshot_archives`.
+5. Sets `transactions.contract_snapshot = NULL` only after the archive write,
+   read-back verification, and index row succeed.
 
-If the archive write fails, the row is not pruned.
+If the archive write or read-back verification fails, the row is not pruned.
+
+`STUDIO_CONTRACT_SNAPSHOT_PRUNER_ARCHIVE_ENABLED=false` is treated as a lossy
+mode and is rejected unless
+`STUDIO_CONTRACT_SNAPSHOT_PRUNER_ALLOW_LOSSY_PRUNE=true` is also set.
 
 ## One-Time Historical Drain
 
