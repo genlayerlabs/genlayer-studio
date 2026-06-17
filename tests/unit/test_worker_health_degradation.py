@@ -171,6 +171,76 @@ class TestEnvVarThresholdConfig:
             assert threshold == 3
 
 
+class TestGracefulShutdownTimeoutConfig:
+    """Test worker shutdown timeout leaves time to release claimed transactions"""
+
+    def test_shutdown_timeout_defaults_to_termination_grace_minus_buffer(self):
+        """Default timeout preserves a release buffer before Kubernetes SIGKILL"""
+        with patch.dict("os.environ", {}, clear=True):
+            assert worker_service._get_worker_graceful_shutdown_timeout_seconds() == 150
+
+    def test_shutdown_timeout_clamps_configured_value_to_release_buffer(self):
+        """Configured timeout cannot consume the whole termination grace window"""
+        with patch.dict(
+            "os.environ",
+            {
+                "WORKER_TERMINATION_GRACE_SECONDS": "180",
+                "WORKER_SHUTDOWN_RELEASE_BUFFER_SECONDS": "30",
+                "WORKER_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS": "180",
+            },
+            clear=True,
+        ):
+            assert worker_service._get_worker_graceful_shutdown_timeout_seconds() == 150
+
+    def test_shutdown_timeout_respects_lower_configured_value(self):
+        """Lower configured timeout is preserved"""
+        with patch.dict(
+            "os.environ",
+            {
+                "WORKER_TERMINATION_GRACE_SECONDS": "180",
+                "WORKER_SHUTDOWN_RELEASE_BUFFER_SECONDS": "30",
+                "WORKER_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS": "90",
+            },
+            clear=True,
+        ):
+            assert worker_service._get_worker_graceful_shutdown_timeout_seconds() == 90
+
+    def test_shutdown_timeout_uses_custom_termination_grace(self):
+        """Custom termination grace still keeps the default release buffer"""
+        with patch.dict(
+            "os.environ",
+            {"WORKER_TERMINATION_GRACE_SECONDS": "300"},
+            clear=True,
+        ):
+            assert worker_service._get_worker_graceful_shutdown_timeout_seconds() == 270
+
+    def test_shutdown_timeout_handles_invalid_env_values(self):
+        """Invalid env values fall back to the safe default"""
+        with patch.dict(
+            "os.environ",
+            {
+                "WORKER_TERMINATION_GRACE_SECONDS": "bad",
+                "WORKER_SHUTDOWN_RELEASE_BUFFER_SECONDS": "bad",
+                "WORKER_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS": "bad",
+            },
+            clear=True,
+        ):
+            assert worker_service._get_worker_graceful_shutdown_timeout_seconds() == 150
+
+    def test_shutdown_timeout_handles_non_positive_env_values(self):
+        """Non-positive env values fall back to the safe default"""
+        with patch.dict(
+            "os.environ",
+            {
+                "WORKER_TERMINATION_GRACE_SECONDS": "0",
+                "WORKER_SHUTDOWN_RELEASE_BUFFER_SECONDS": "-1",
+                "WORKER_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS": "0",
+            },
+            clear=True,
+        ):
+            assert worker_service._get_worker_graceful_shutdown_timeout_seconds() == 150
+
+
 class TestBlockedTransactionHealthThreshold:
     """Test health handling for long-running claimed transactions"""
 
