@@ -169,6 +169,7 @@ async def update_validator(
     stake: int | None = None,
     provider: str | None = None,
     model: str | None = None,
+    config: dict | None = None,
     plugin: str | None = None,
     plugin_config: dict | None = None,
     session: Session = Depends(get_db_session),
@@ -181,6 +182,7 @@ async def update_validator(
         stake=stake,
         provider=provider,
         model=model,
+        config=config,
         plugin=plugin,
         plugin_config=plugin_config,
     )
