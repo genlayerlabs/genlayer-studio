@@ -352,19 +352,28 @@ async def check_provider_is_available(
             url = provider.plugin_config["api_url"]
             plugin = provider.plugin
             key = provider.plugin_config["api_key_env_var"]
-            temperature = provider.config.get("temperature", 1)
-            use_max_completion_tokens = provider.config.get(
-                "use_max_completion_tokens", False
-            )
+            config = provider.config or {}
         else:
             model = provider["model"]
             url = provider["plugin_config"]["api_url"]
             plugin = provider["plugin"]
             key = provider["plugin_config"]["api_key_env_var"]
-            temperature = provider["config"].get("temperature", 1)
-            use_max_completion_tokens = provider["config"].get(
-                "use_max_completion_tokens", False
-            )
+            config = provider["config"] or {}
+        temperature = config.get("temperature", 1)
+        use_max_completion_tokens = config.get("use_max_completion_tokens", False)
+        max_tokens = config.get("max_tokens", 500)
+        known_config_keys = {"temperature", "max_tokens", "use_max_completion_tokens"}
+        extra = {k: v for k, v in config.items() if k not in known_config_keys}
+        prompt = {
+            "system_message": "",
+            "user_message": "respond with two letters 'ok' and nothing else. No quotes, no repetition",
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "use_max_completion_tokens": use_max_completion_tokens,
+            "images": [],
+        }
+        if extra:
+            prompt["extra"] = extra
         key = f"${{ENV[{key}]}}"
         timeout_s = float(
             os.environ.get("LLM_PROVIDER_AVAILABILITY_TIMEOUT_SECONDS", "20")
@@ -379,14 +388,7 @@ async def check_provider_is_available(
                         "key": key,
                     }
                 ],
-                prompt={
-                    "system_message": "",
-                    "user_message": "respond with two letters 'ok' and nothing else. No quotes, no repetition",
-                    "temperature": temperature,
-                    "max_tokens": 500,
-                    "use_max_completion_tokens": use_max_completion_tokens,
-                    "images": [],
-                },
+                prompt=prompt,
             ),
             timeout=timeout_s,
         )
