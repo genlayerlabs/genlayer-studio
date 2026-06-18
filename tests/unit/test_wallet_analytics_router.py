@@ -1,17 +1,20 @@
-from collections.abc import Generator
+from types import SimpleNamespace
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+from starlette.datastructures import Headers
 
 from backend.database_handler.models import WalletConnectionAnalytics
-from backend.protocol_rpc.analytics_router import analytics_router
-from backend.protocol_rpc.dependencies import get_db_session
+from backend.protocol_rpc.analytics_router import (
+    WalletConnectionRequest,
+    record_wallet_connection_endpoint,
+)
 
 
-def test_wallet_connection_endpoint_records_server_observed_metadata():
+def _make_sqlite_session():
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -19,43 +22,46 @@ def test_wallet_connection_endpoint_records_server_observed_metadata():
     )
     WalletConnectionAnalytics.__table__.create(engine)
     maker = sessionmaker(bind=engine, expire_on_commit=False)
+    session = maker()
+    return engine, session
 
-    app = FastAPI()
 
-    def override_session() -> Generator[Session, None, None]:
-        session = maker()
-        try:
-            yield session
-            session.commit()
-        finally:
-            session.close()
-
-    app.dependency_overrides[get_db_session] = override_session
-    app.include_router(analytics_router)
-
-    client = TestClient(app)
-    response = client.post(
-        "/api/analytics/wallet-connections",
-        json={"wallet_address": "0xAABBcc0000000000000000000000000000000000"},
-        headers={
-            "Origin": "https://studio.example.com",
-            "User-Agent": "UnitTest/1.0",
-        },
+def _make_request(headers: dict[str, str] | None = None, client_host="127.0.0.1"):
+    return SimpleNamespace(
+        headers=Headers(headers or {}),
+        client=SimpleNamespace(host=client_host),
     )
 
-    assert response.status_code == 200
-    assert response.json() == {
-        "wallet_address": "0xaabbcc0000000000000000000000000000000000",
-        "recorded": True,
-    }
 
-    session = maker()
+def test_wallet_connection_endpoint_records_server_observed_metadata():
+    engine, session = _make_sqlite_session()
+
     try:
+        response = record_wallet_connection_endpoint(
+            WalletConnectionRequest(
+                wallet_address="0xAABBcc0000000000000000000000000000000000"
+            ),
+            _make_request(
+                headers={
+                    "Origin": "https://studio.example.com",
+                    "User-Agent": "UnitTest/1.0",
+                    "X-Forwarded-For": "198.51.100.7",
+                }
+            ),
+            session,
+        )
+        session.commit()
+
+        assert response.wallet_address == "0xaabbcc0000000000000000000000000000000000"
+        assert response.recorded is True
+
         record = session.get(
             WalletConnectionAnalytics,
             "0xaabbcc0000000000000000000000000000000000",
         )
         assert record is not None
+        assert record.first_observed_ip == "198.51.100.7"
+        assert record.last_observed_ip == "198.51.100.7"
         assert record.first_origin == "https://studio.example.com"
         assert record.last_origin == "https://studio.example.com"
         assert record.first_user_agent == "UnitTest/1.0"
@@ -66,33 +72,18 @@ def test_wallet_connection_endpoint_records_server_observed_metadata():
 
 
 def test_wallet_connection_endpoint_rejects_invalid_wallet_address():
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    WalletConnectionAnalytics.__table__.create(engine)
-    maker = sessionmaker(bind=engine)
+    engine, session = _make_sqlite_session()
 
-    app = FastAPI()
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            record_wallet_connection_endpoint(
+                WalletConnectionRequest(wallet_address="0x123"),
+                _make_request(),
+                session,
+            )
 
-    def override_session() -> Generator[Session, None, None]:
-        session = maker()
-        try:
-            yield session
-            session.commit()
-        finally:
-            session.close()
-
-    app.dependency_overrides[get_db_session] = override_session
-    app.include_router(analytics_router)
-
-    client = TestClient(app)
-    response = client.post(
-        "/api/analytics/wallet-connections",
-        json={"wallet_address": "0x123"},
-    )
-
-    assert response.status_code == 422
-    assert "wallet_address" in response.json()["detail"]
-    engine.dispose()
+        assert exc_info.value.status_code == 422
+        assert "wallet_address" in exc_info.value.detail
+    finally:
+        session.close()
+        engine.dispose()
