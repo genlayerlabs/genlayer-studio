@@ -20,7 +20,7 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
-def upgrade() -> None:
+def upgrade() -> None:  # pragma: no cover
     op.create_table(
         "transaction_snapshot_archives",
         sa.Column(
@@ -81,7 +81,7 @@ def upgrade() -> None:
     )
 
 
-def downgrade() -> None:
+def downgrade() -> None:  # pragma: no cover
     op.drop_index(
         "idx_transaction_snapshot_archives_backend",
         table_name="transaction_snapshot_archives",

@@ -18,7 +18,7 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
-def upgrade() -> None:
+def upgrade() -> None:  # pragma: no cover
     # The transactions table can be multi-TB in prod. Build the candidate
     # index concurrently so enabling the worker does not block writes.
     op.execute("COMMIT")
@@ -33,7 +33,7 @@ def upgrade() -> None:
     )
 
 
-def downgrade() -> None:
+def downgrade() -> None:  # pragma: no cover
     op.execute("COMMIT")
     op.execute(
         """
