@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import gzip
 import hashlib
@@ -7,6 +8,7 @@ from datetime import datetime, timezone
 import pytest
 
 from backend.database_handler import prune_terminal_snapshots as prune_cli
+from backend.database_handler import terminal_snapshot_pruner as pruner_mod
 from backend.database_handler.terminal_snapshot_pruner import (
     ARCHIVE_FORMAT,
     ArchiveResult,
@@ -18,6 +20,9 @@ from backend.database_handler.terminal_snapshot_pruner import (
     SnapshotArchiveReader,
     TerminalSnapshotPruner,
     TerminalSnapshotPrunerConfig,
+    build_snapshot_archive_writer,
+    run_terminal_snapshot_pruner_loop,
+    snapshot_archive_read_through_enabled,
 )
 
 
@@ -185,6 +190,21 @@ def _candidate_row(tx_hash="0xabc"):
     }
 
 
+def _archive_row(result):
+    return {
+        "tx_hash": result.metadata["tx-hash"],
+        "backend": result.backend,
+        "bucket": result.bucket,
+        "object_key": result.key,
+        "uri": result.uri,
+        "format": result.format,
+        "snapshot_sha256": result.uncompressed_sha256,
+        "compressed_sha256": result.compressed_sha256,
+        "snapshot_bytes": result.uncompressed_bytes,
+        "compressed_bytes": result.compressed_bytes,
+    }
+
+
 def test_s3_archive_writer_compresses_snapshot_with_checksum_and_metadata():
     client = FakeS3Client()
     writer = S3SnapshotArchiveWriter(
@@ -221,6 +241,43 @@ def test_s3_archive_writer_compresses_snapshot_with_checksum_and_metadata():
     assert call["Metadata"]["tx-hash"] == "0xABCDEF"
     assert call["Metadata"]["snapshot-sha256"] == hashlib.sha256(b'{"x":1}').hexdigest()
     writer.verify(result)
+
+
+def test_archive_writers_handle_minimal_cloud_options():
+    s3_client = FakeS3Client()
+    s3_writer = S3SnapshotArchiveWriter(
+        bucket="archive-bucket",
+        prefix="studio/rally",
+        client=s3_client,
+    )
+    candidate = SnapshotCandidate(
+        tx_hash="0xABCDEF",
+        status="FINALIZED",
+        created_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        snapshot_bytes=7,
+        snapshot_json='{"x":1}',
+    )
+
+    s3_result = s3_writer.archive(candidate)
+
+    s3_call = s3_client.calls[0]
+    assert "StorageClass" not in s3_call
+    assert "ServerSideEncryption" not in s3_call
+    assert "SSEKMSKeyId" not in s3_call
+    assert s3_result.uri == f"s3://archive-bucket/{s3_result.key}"
+
+    gcs_client = FakeGCSClient()
+    gcs_writer = GCSSnapshotArchiveWriter(
+        bucket="archive-bucket",
+        prefix="studio/rally",
+        client=gcs_client,
+    )
+
+    gcs_result = gcs_writer.archive(candidate)
+
+    blob = gcs_client.buckets["archive-bucket"].blobs[gcs_result.key]
+    assert blob.storage_class is None
+    assert gcs_result.uri == f"gs://archive-bucket/{gcs_result.key}"
 
 
 def test_file_archive_writer_writes_snapshot_and_reader_loads_it(tmp_path):
@@ -264,6 +321,74 @@ def test_file_archive_writer_writes_snapshot_and_reader_loads_it(tmp_path):
     assert reader.load_snapshot(session, candidate.tx_hash) == {"x": 1}
 
 
+def test_archive_reader_loads_cloud_backends():
+    candidate = SnapshotCandidate(
+        tx_hash="0xABCDEF",
+        status="FINALIZED",
+        created_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        snapshot_bytes=7,
+        snapshot_json='{"x":1}',
+    )
+    s3_client = FakeS3Client()
+    s3_result = S3SnapshotArchiveWriter(
+        bucket="archive-bucket",
+        prefix="studio/rally",
+        client=s3_client,
+    ).archive(candidate)
+    s3_session = FakeSession([], archive_rows=[_archive_row(s3_result)])
+
+    assert SnapshotArchiveReader(s3_client=s3_client).load_snapshot(
+        s3_session, candidate.tx_hash
+    ) == {"x": 1}
+
+    gcs_client = FakeGCSClient()
+    gcs_result = GCSSnapshotArchiveWriter(
+        bucket="archive-bucket",
+        prefix="studio/rally",
+        client=gcs_client,
+    ).archive(candidate)
+    gcs_session = FakeSession([], archive_rows=[_archive_row(gcs_result)])
+
+    assert SnapshotArchiveReader(gcs_client=gcs_client).load_snapshot(
+        gcs_session, candidate.tx_hash
+    ) == {"x": 1}
+
+
+def test_archive_reader_file_download_fallbacks(tmp_path):
+    candidate = SnapshotCandidate(
+        tx_hash="0xABCDEF",
+        status="FINALIZED",
+        created_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        snapshot_bytes=7,
+        snapshot_json='{"x":1}',
+    )
+    result = FileSnapshotArchiveWriter(
+        base_dir=tmp_path, prefix="studio/rally"
+    ).archive(candidate)
+    row = _archive_row(result)
+    row["uri"] = None
+
+    assert SnapshotArchiveReader(file_dir=tmp_path).load_snapshot(
+        FakeSession([], archive_rows=[row]), candidate.tx_hash
+    ) == {"x": 1}
+
+    absolute_path = tmp_path / "absolute.contract_snapshot.json.gz"
+    absolute_path.write_bytes((tmp_path / result.key).read_bytes())
+    absolute_row = _archive_row(result)
+    absolute_row["uri"] = None
+    absolute_row["object_key"] = str(absolute_path)
+
+    assert SnapshotArchiveReader(file_dir=None).load_snapshot(
+        FakeSession([], archive_rows=[absolute_row]), candidate.tx_hash
+    ) == {"x": 1}
+
+
+def test_archive_reader_returns_none_without_archive_row():
+    reader = SnapshotArchiveReader()
+
+    assert reader.load_snapshot(FakeSession([], archive_rows=[]), "0xmissing") is None
+
+
 def test_archive_reader_rejects_checksum_mismatch(tmp_path):
     writer = FileSnapshotArchiveWriter(base_dir=tmp_path, prefix="studio/rally")
     candidate = SnapshotCandidate(
@@ -297,6 +422,48 @@ def test_archive_reader_rejects_checksum_mismatch(tmp_path):
 
     with pytest.raises(RuntimeError, match="checksum mismatch"):
         reader.load_snapshot(session, candidate.tx_hash)
+
+
+def test_archive_reader_rejects_uncompressed_checksum_mismatch(tmp_path):
+    writer = FileSnapshotArchiveWriter(base_dir=tmp_path, prefix="studio/rally")
+    candidate = SnapshotCandidate(
+        tx_hash="0xABCDEF",
+        status="FINALIZED",
+        created_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        snapshot_bytes=7,
+        snapshot_json='{"x":1}',
+    )
+    result = writer.archive(candidate)
+    row = _archive_row(result)
+    row["snapshot_sha256"] = "0" * 64
+    session = FakeSession([], archive_rows=[row])
+
+    with pytest.raises(RuntimeError, match="content checksum mismatch"):
+        SnapshotArchiveReader(file_dir=tmp_path).load_snapshot(
+            session, candidate.tx_hash
+        )
+
+
+def test_archive_reader_rejects_unsupported_archive_format(tmp_path):
+    writer = FileSnapshotArchiveWriter(base_dir=tmp_path, prefix="studio/rally")
+    candidate = SnapshotCandidate(
+        tx_hash="0xABCDEF",
+        status="FINALIZED",
+        created_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        snapshot_bytes=7,
+        snapshot_json='{"x":1}',
+    )
+    result = writer.archive(candidate)
+    row = _archive_row(result)
+    row["format"] = "legacy-json"
+    session = FakeSession([], archive_rows=[row])
+
+    with pytest.raises(
+        RuntimeError, match="Unsupported contract snapshot archive format"
+    ):
+        SnapshotArchiveReader(file_dir=tmp_path).load_snapshot(
+            session, candidate.tx_hash
+        )
 
 
 def test_archive_reader_rejects_bad_gzip_payload(tmp_path):
@@ -364,6 +531,60 @@ def test_gcs_archive_writer_uploads_compressed_snapshot_with_metadata():
     assert blob.uploads[0]["content_type"] == "application/json"
     assert gzip.decompress(blob.uploads[0]["data"]) == b'{"x":1}'
     writer.verify(result)
+
+
+def test_archive_writers_require_bucket_for_verification():
+    archive_result = ArchiveResult(
+        backend="s3",
+        bucket=None,
+        key="studio/rally/v1/ab/0xABCDEF.contract_snapshot.json.gz",
+        uri="s3://archive-bucket/studio/rally/v1/ab/0xABCDEF.contract_snapshot.json.gz",
+        format=ARCHIVE_FORMAT,
+        uncompressed_bytes=7,
+        compressed_bytes=7,
+        uncompressed_sha256="0" * 64,
+        compressed_sha256="1" * 64,
+        metadata={"tx-hash": "0xABCDEF"},
+    )
+
+    with pytest.raises(RuntimeError, match="S3 archive result is missing bucket"):
+        S3SnapshotArchiveWriter(
+            bucket="archive-bucket",
+            prefix="studio/rally",
+            client=FakeS3Client(),
+        ).verify(archive_result)
+
+    with pytest.raises(RuntimeError, match="GCS archive result is missing bucket"):
+        GCSSnapshotArchiveWriter(
+            bucket="archive-bucket",
+            prefix="studio/rally",
+            client=FakeGCSClient(),
+        ).verify(archive_result)
+
+
+def test_archive_reader_rejects_missing_cloud_bucket():
+    s3_row = {
+        "backend": "s3",
+        "bucket": None,
+        "object_key": "snapshot.json.gz",
+    }
+    with pytest.raises(RuntimeError, match="S3 archive row is missing bucket"):
+        SnapshotArchiveReader(s3_client=FakeS3Client())._download(s3_row)
+
+    gcs_row = {
+        "backend": "gcs",
+        "bucket": None,
+        "object_key": "snapshot.json.gz",
+    }
+    with pytest.raises(RuntimeError, match="GCS archive row is missing bucket"):
+        SnapshotArchiveReader(gcs_client=FakeGCSClient())._download(gcs_row)
+
+
+def test_archive_reader_rejects_unknown_backend():
+    with pytest.raises(
+        RuntimeError, match="Unsupported contract snapshot archive backend"
+    ):
+        SnapshotArchiveReader()._download({"backend": "ftp"})
 
 
 def test_pruner_archives_before_pruning_and_commits():
@@ -576,6 +797,22 @@ def test_config_from_environment_falls_back_for_bad_numbers(monkeypatch):
     assert config.interval_seconds == 300
 
 
+def test_config_from_environment_defaults_to_gcs_when_bucket_is_configured(
+    monkeypatch,
+):
+    monkeypatch.delenv("STUDIO_CONTRACT_SNAPSHOT_PRUNER_ARCHIVE_BACKEND", raising=False)
+    monkeypatch.setenv("STUDIO_CONTRACT_SNAPSHOT_PRUNER_GCS_BUCKET", "gcs-bucket")
+    monkeypatch.setenv(
+        "STUDIO_CONTRACT_SNAPSHOT_ARCHIVE_RETRIEVAL_ENABLED",
+        "on",
+    )
+
+    config = TerminalSnapshotPrunerConfig.from_environment()
+
+    assert config.archive_backend == "gcs"
+    assert snapshot_archive_read_through_enabled() is True
+
+
 def test_config_validate_requires_bucket_when_archive_enabled():
     config = TerminalSnapshotPrunerConfig(
         enabled=True,
@@ -600,6 +837,40 @@ def test_config_validate_rejects_lossy_prune_without_explicit_override():
         config.validate_for_run()
 
 
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        (
+            TerminalSnapshotPrunerConfig(
+                enabled=True,
+                archive_backend="archivefs",
+                s3_bucket="archive-bucket",
+            ),
+            "ARCHIVE_BACKEND must be one of",
+        ),
+        (
+            TerminalSnapshotPrunerConfig(
+                enabled=True,
+                archive_backend="file",
+                file_dir="",
+            ),
+            "FILE_DIR is required",
+        ),
+        (
+            TerminalSnapshotPrunerConfig(
+                enabled=True,
+                archive_backend="gcs",
+                gcs_bucket=None,
+            ),
+            "GCS_BUCKET is required",
+        ),
+    ],
+)
+def test_config_validate_rejects_invalid_archive_settings(config, message):
+    with pytest.raises(RuntimeError, match=message):
+        config.validate_for_run()
+
+
 def test_s3_writer_requires_bucket_and_handles_empty_prefix():
     with pytest.raises(RuntimeError, match="S3 bucket is required"):
         S3SnapshotArchiveWriter.from_config(
@@ -609,6 +880,92 @@ def test_s3_writer_requires_bucket_and_handles_empty_prefix():
     writer = S3SnapshotArchiveWriter(bucket="archive-bucket", prefix="")
 
     assert writer.key_for_hash("0xA") == "v1/unknown/0xA.contract_snapshot.json.gz"
+
+
+def test_build_snapshot_archive_writer_selects_backend_classes(tmp_path):
+    file_writer = build_snapshot_archive_writer(
+        TerminalSnapshotPrunerConfig(archive_backend="file", file_dir=str(tmp_path))
+    )
+    gcs_writer = build_snapshot_archive_writer(
+        TerminalSnapshotPrunerConfig(archive_backend="gcs", gcs_bucket="gcs-bucket")
+    )
+    s3_writer = build_snapshot_archive_writer(
+        TerminalSnapshotPrunerConfig(archive_backend="s3", s3_bucket="s3-bucket")
+    )
+
+    assert isinstance(file_writer, FileSnapshotArchiveWriter)
+    assert isinstance(gcs_writer, GCSSnapshotArchiveWriter)
+    assert isinstance(s3_writer, S3SnapshotArchiveWriter)
+
+    with pytest.raises(
+        RuntimeError, match="Unsupported contract snapshot archive backend"
+    ):
+        build_snapshot_archive_writer(
+            TerminalSnapshotPrunerConfig(archive_backend="archivefs")
+        )
+
+
+def test_gcs_writer_requires_bucket():
+    with pytest.raises(RuntimeError, match="GCS bucket is required"):
+        GCSSnapshotArchiveWriter.from_config(
+            TerminalSnapshotPrunerConfig(gcs_bucket=None)
+        )
+
+
+@pytest.mark.asyncio
+async def test_pruner_loop_returns_when_disabled():
+    await run_terminal_snapshot_pruner_loop(
+        lambda: None,
+        TerminalSnapshotPrunerConfig(enabled=False),
+    )
+
+
+@pytest.mark.asyncio
+async def test_pruner_loop_runs_batch_until_cancelled(monkeypatch):
+    created_pruners = []
+    slept = []
+
+    class FakePruner:
+        def __init__(self, get_session, config, archive_writer):
+            self.get_session = get_session
+            self.config = config
+            self.archive_writer = archive_writer
+            created_pruners.append(self)
+
+        def prune_once(self):
+            return PruneBatchResult(
+                candidates=1,
+                archived=1,
+                pruned=1,
+                logical_bytes=7,
+                compressed_bytes=5,
+            )
+
+    async def fake_to_thread(callback):
+        return callback()
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(pruner_mod, "TerminalSnapshotPruner", FakePruner)
+    monkeypatch.setattr(pruner_mod.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(pruner_mod.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_terminal_snapshot_pruner_loop(
+            lambda: None,
+            TerminalSnapshotPrunerConfig(
+                enabled=True,
+                archive_enabled=False,
+                allow_lossy_prune=True,
+                interval_seconds=11,
+            ),
+            archive_writer=object(),
+        )
+
+    assert len(created_pruners) == 1
+    assert slept == [11]
 
 
 def test_prune_cli_database_url_prefers_explicit_url(monkeypatch):
