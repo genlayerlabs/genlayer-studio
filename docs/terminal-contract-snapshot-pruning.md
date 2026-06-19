@@ -106,6 +106,22 @@ python -m backend.database_handler.prune_terminal_snapshots --dry-run --max-batc
 Set `--max-batches` for controlled partial runs. Omit it or pass `0` to continue
 until no eligible rows remain.
 
+Use `--workers` for bounded parallel one-time drains:
+
+```bash
+python -m backend.database_handler.prune_terminal_snapshots \
+  --batch-size 5 \
+  --retention-hours 24 \
+  --workers 4 \
+  --max-batches 100 \
+  --sleep-seconds 0
+```
+
+Each worker uses its own database session and the shared candidate query uses
+`FOR UPDATE SKIP LOCKED`, so workers claim different rows. The CLI caps its
+database connection pool to the worker count. Keep the background pruner disabled
+while running a one-time parallel drain.
+
 ## Read-Through Retrieval
 
 Set `STUDIO_CONTRACT_SNAPSHOT_ARCHIVE_RETRIEVAL_ENABLED=true` on RPC services to
@@ -115,6 +131,187 @@ checksum, and returns the snapshot as if it had been read from Postgres.
 
 This read-through is intentionally limited to direct transaction reads. Broad
 transaction listings do not retrieve archived snapshots.
+
+## Stable 121.x RPC State Scope
+
+The stable `v0.121` line should keep the transaction response shape stable while
+removing accidental large state payloads from ETH-compatible reads.
+
+Current stable scope:
+
+- `gen_call` accepts an additive `status` parameter with public values
+  `decided` and `finalized`.
+- `status=decided` maps to Studio's current internal accepted/decided state
+  bucket. `status=finalized` maps to finalized state.
+- The legacy Studio `transaction_hash_variant` selector remains accepted for
+  compatibility. `latest-final` maps to finalized state; omitted or other
+  values keep the previous decided-state behavior.
+- ETH-compatible responses do not include Studio `contract_snapshot` payloads:
+  `eth_getTransactionByHash`, `eth_getTransactionReceipt`,
+  `eth_getBlockByNumber`, and `eth_getBlockByHash`.
+- Explicit Studio/debug direct reads can still request and hydrate archived
+  `contract_snapshot` data where that API is intended to expose full state.
+
+Do not add broad historical state semantics to `v0.121` as a compatibility
+patch. A stable patch can remove accidental state payloads and add the correct
+new selector, but it should not change execution semantics or require client
+library shape changes.
+
+## Next-Version Historical State Scope
+
+The next version should make historical state behavior explicit instead of
+relying on the current mutable `current_state` lookup.
+
+Target behavior:
+
+- A transaction records the activation block/state point used for execution.
+- Cross-contract reads during execution resolve against that locked activation
+  block so validators read the same historical view.
+- `gen_call` supports calling at a past block/state point, with `status`
+  constrained to `decided` or `finalized`.
+- Node, Studio, CLI, and client libraries should converge on `decided` and
+  `finalized`; node's older `accepted` selector should be migrated in the next
+  release.
+- The historical resolver should work against hot state first and archived
+  state second, with read-through hidden behind the storage abstraction.
+
+## Throughput Sizing
+
+The current pruner is correctness-first. Each batch locks candidate rows and
+then processes each row sequentially:
+
+1. Read `contract_snapshot::text` and `pg_column_size(contract_snapshot)` from
+   Postgres.
+2. Serialize and gzip the snapshot.
+3. Write the gzip object to the archive backend.
+4. Read the object back for verification.
+5. Insert or update the archive index row.
+6. Set `transactions.contract_snapshot = NULL`.
+
+That means a large one-time drain is bounded by Postgres read throughput,
+compression throughput, S3 PUT latency, S3 GET verification latency, and the
+final Postgres update volume. The verify step intentionally doubles object-store
+read/write traffic for compressed bytes, but it does not double the Postgres
+read volume.
+
+Rough 2 TB logical hot-state drain estimates:
+
+```text
+Sustained logical throughput   Approximate wall time
+10 MB/s                        56 hours
+25 MB/s                        22 hours
+50 MB/s                        11 hours
+100 MB/s                       5.6 hours
+```
+
+Object count can dominate if snapshots are small. At 100 ms of sequential
+archive/verify overhead per object, one million snapshots adds about 28 hours
+before accounting for bytes. For Rally-scale drains, measure row count and size
+distribution before deciding whether the one-worker implementation is enough or
+whether to add bounded parallel archive workers.
+
+The one-time CLI logs per-batch and total elapsed time plus logical and
+compressed throughput. For production-size drains, use `--sleep-seconds 0` only
+inside an approved maintenance/controlled run; the default sleep is intentionally
+gentle and can add meaningful wall time across many batches.
+
+Recommended Rally measurement before a production drain:
+
+```sql
+SELECT
+  count(*) AS eligible_rows,
+  pg_size_pretty(sum(pg_column_size(contract_snapshot))) AS logical_size,
+  percentile_disc(0.50) WITHIN GROUP (ORDER BY pg_column_size(contract_snapshot)) AS p50_bytes,
+  percentile_disc(0.90) WITHIN GROUP (ORDER BY pg_column_size(contract_snapshot)) AS p90_bytes,
+  percentile_disc(0.99) WITHIN GROUP (ORDER BY pg_column_size(contract_snapshot)) AS p99_bytes,
+  max(pg_column_size(contract_snapshot)) AS max_bytes
+FROM transactions
+WHERE contract_snapshot IS NOT NULL
+  AND status IN ('FINALIZED', 'CANCELED');
+```
+
+Also sample real compression ratio on production-like rows before estimating S3
+bytes and cost. The safe default is still `VERIFY_ARCHIVE=true`; if the drain is
+too slow, optimize with measured parallelism rather than removing verification
+as the first lever.
+
+### Rally Production Measurement 2026-06-19
+
+Read-only measurements against Rally production on 2026-06-19:
+
+- Cloud SQL instance: PostgreSQL 17, regional, PD_SSD, 3850 GB allocated.
+- `transactions` table total size: about 3.80 TB.
+- `transactions` TOAST size: about 3.80 TB.
+- Live rows: about 227k.
+- Eligible terminal rows with snapshots: 227,684.
+- Eligible `pg_column_size(contract_snapshot)` total: 2,429,083,876,044 bytes
+  (about 2.21 TiB).
+- Snapshot size distribution by `pg_column_size`: p50 5.3 MB, p90 27.4 MB,
+  p99 71.2 MB, max 87.3 MB.
+- Sampled gzip archive ratio: about 0.61 of `pg_column_size`, implying roughly
+  1.35 TiB of compressed archive objects before verification reads.
+- Single 4-CPU JSON-RPC pod sample: DB fetch plus gzip/checksum was about
+  10.8 MiB/s against `pg_column_size`; gzip/checksum alone was about
+  14.7 MiB/s.
+- Read-only parallel fetch plus gzip/checksum probe against 48 sampled snapshots:
+  1 worker 11.2 MiB/s, 2 workers 20.6 MiB/s, 4 workers 37.5 MiB/s, 8 workers
+  34.8 MiB/s. The 8-worker run showed higher summed fetch time, so 4 workers
+  looked like the local knee for this pod/sample.
+- A second 4-worker probe biased to snapshots above 5 MB measured 37.1 MiB/s.
+
+Implications:
+
+- One-object-per-snapshot is not obviously wasteful for Rally because compressed
+  objects average several MB, well above small-object minimum billing thresholds.
+- A single sequential worker is likely a multi-day drain. The read-only probe
+  implies about 58 hours at 1 worker and about 17 hours at 4 workers before
+  object-store write/read-back overhead. Use controlled parallel workers/jobs
+  after the candidate index is deployed and remeasure actual archive/prune
+  throughput before going wider than 4 workers.
+- Use the one-time CLI with `--workers`, `--max-batches`, and `--sleep-seconds 0`
+  for the benchmark ladder. Keep each first run small enough that rollback is
+  operationally boring, then scale only while DB CPU, DB IO, object-store errors,
+  and RPC latency remain healthy.
+- The current production database will not immediately return allocated disk
+  after pruning. The AWS migration/fresh restore is the right time to materialize
+  the smaller database size.
+
+### Studio Dev Full Drain Validation 2026-06-19
+
+`studio-dev` was validated with a full one-time archive/verify/prune drain on
+2026-06-19. Background pruning remained disabled.
+
+Runtime configuration:
+
+- Backend: `s3`
+- Bucket: `devexp-dev-studio-snapshot-archives`
+- Prefix: `studio-dev/terminal-contract-snapshots`
+- Storage class: `STANDARD_IA`
+- Archive verification: enabled
+- Retrieval/read-through: enabled
+
+Command:
+
+```bash
+python3 -m backend.database_handler.prune_terminal_snapshots \
+  --batch-size 5 \
+  --retention-hours 0 \
+  --sleep-seconds 0
+```
+
+Result:
+
+- Before run: 17 eligible terminal snapshots, 2,720 logical bytes.
+- Run completed in 4 batches: 17 candidates, 17 archived, 17 pruned.
+- Written compressed bytes: 2,159.
+- After run: 0 remaining eligible terminal snapshots.
+- All 17 hot transaction rows had `contract_snapshot IS NULL`.
+- All 17 archive rows had `archive_status='pruned'` and `backend='s3'`.
+- All 17 S3 objects were fetched, gzip-decoded, and verified against archive
+  row checksums.
+- `eth_getTransactionByHash` for a pruned transaction hydrated the archived
+  snapshot through the read path.
+- `/health` was healthy and `eth_chainId` returned `0xf22d` after the run.
 
 ## GCP to AWS Migration
 

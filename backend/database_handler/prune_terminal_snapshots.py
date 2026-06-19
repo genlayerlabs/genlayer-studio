@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import os
+import threading
 import time
 from dataclasses import replace
 
@@ -17,6 +19,112 @@ from backend.database_handler.terminal_snapshot_pruner import (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+
+class BatchBudget:
+    def __init__(self, max_batches: int):
+        self.max_batches = max_batches
+        self.started_batches = 0
+        self._lock = threading.Lock()
+
+    def reserve(self) -> int | None:
+        with self._lock:
+            if self.max_batches and self.started_batches >= self.max_batches:
+                return None
+            self.started_batches += 1
+            return self.started_batches
+
+
+def _format_mib_per_second(byte_count: int, elapsed_seconds: float) -> str:
+    if elapsed_seconds <= 0:
+        return "n/a"
+    return f"{byte_count / elapsed_seconds / (1024 * 1024):.2f} MiB/s"
+
+
+def _empty_totals() -> dict:
+    return {
+        "batches": 0,
+        "candidates": 0,
+        "archived": 0,
+        "pruned": 0,
+        "logical_bytes": 0,
+        "compressed_bytes": 0,
+    }
+
+
+def _add_batch_result(totals: dict, result) -> None:
+    totals["batches"] += 1
+    totals["candidates"] += result.candidates
+    totals["archived"] += result.archived
+    totals["pruned"] += result.pruned
+    totals["logical_bytes"] += result.logical_bytes
+    totals["compressed_bytes"] += result.compressed_bytes
+
+
+def _log_batch_result(
+    *,
+    batch_number: int,
+    worker_id: int,
+    result,
+    elapsed_seconds: float,
+) -> None:
+    logger.info(
+        "Batch %s complete: worker=%s candidates=%s archived=%s pruned=%s "
+        "logical_bytes=%s compressed_bytes=%s dry_run=%s elapsed=%.2fs "
+        "logical_rate=%s compressed_rate=%s",
+        batch_number,
+        worker_id,
+        result.candidates,
+        result.archived,
+        result.pruned,
+        result.logical_bytes,
+        result.compressed_bytes,
+        result.dry_run,
+        elapsed_seconds,
+        _format_mib_per_second(result.logical_bytes, elapsed_seconds),
+        _format_mib_per_second(result.compressed_bytes, elapsed_seconds),
+    )
+
+
+def _run_pruner_worker(
+    *,
+    worker_id: int,
+    session_factory,
+    config: TerminalSnapshotPrunerConfig,
+    batch_budget: BatchBudget,
+    sleep_seconds: float,
+    totals: dict,
+    totals_lock: threading.Lock,
+) -> None:
+    pruner = TerminalSnapshotPruner(session_factory, config)
+
+    while True:
+        batch_number = batch_budget.reserve()
+        if batch_number is None:
+            return
+
+        batch_started_at = time.monotonic()
+        result = pruner.prune_once()
+        batch_elapsed = time.monotonic() - batch_started_at
+        if result.candidates == 0:
+            logger.info(
+                "Worker %s found no eligible terminal contract snapshots",
+                worker_id,
+            )
+            return
+
+        with totals_lock:
+            _add_batch_result(totals, result)
+
+        _log_batch_result(
+            batch_number=batch_number,
+            worker_id=worker_id,
+            result=result,
+            elapsed_seconds=batch_elapsed,
+        )
+
+        if sleep_seconds > 0:
+            time.sleep(sleep_seconds)
 
 
 def _get_db_name(database: str) -> str:
@@ -61,7 +169,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-batches",
         type=int,
         default=0,
-        help="Stop after this many batches. 0 means run until no candidates remain.",
+        help=(
+            "Stop after this many claimed batch attempts across all workers. "
+            "0 means run until no candidates remain."
+        ),
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel pruner workers. Each worker uses its own DB session.",
     )
     parser.add_argument(
         "--sleep-seconds",
@@ -79,6 +196,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.workers < 1:
+        raise SystemExit("--workers must be at least 1")
+
     config = TerminalSnapshotPrunerConfig.from_environment()
     config = replace(
         config,
@@ -93,65 +213,62 @@ def main() -> int:
     )
     config.validate_for_run()
 
-    engine = create_engine(get_database_url(), pool_pre_ping=True, pool_recycle=3600)
+    engine = create_engine(
+        get_database_url(),
+        pool_pre_ping=True,
+        pool_recycle=3600,
+        pool_size=args.workers,
+        max_overflow=0,
+    )
     SessionLocal = sessionmaker(
         autocommit=False, autoflush=False, bind=engine, expire_on_commit=False
     )
 
-    pruner = TerminalSnapshotPruner(SessionLocal, config)
-    totals = {
-        "batches": 0,
-        "candidates": 0,
-        "archived": 0,
-        "pruned": 0,
-        "logical_bytes": 0,
-        "compressed_bytes": 0,
-    }
+    totals = _empty_totals()
+    totals_lock = threading.Lock()
+    batch_budget = BatchBudget(args.max_batches)
 
     logger.info(
         "Starting terminal snapshot pruning "
         "(batch_size=%s retention_hours=%s archive_enabled=%s "
-        "archive_backend=%s dry_run=%s)",
+        "archive_backend=%s dry_run=%s workers=%s max_batches=%s)",
         config.batch_size,
         config.retention_hours,
         config.archive_enabled,
         config.archive_backend,
         config.dry_run,
+        args.workers,
+        args.max_batches,
     )
 
-    while True:
-        result = pruner.prune_once()
-        if result.candidates == 0:
-            logger.info("No more eligible terminal contract snapshots found")
-            break
+    started_at = time.monotonic()
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        futures = [
+            executor.submit(
+                _run_pruner_worker,
+                worker_id=worker_id,
+                session_factory=SessionLocal,
+                config=config,
+                batch_budget=batch_budget,
+                sleep_seconds=args.sleep_seconds,
+                totals=totals,
+                totals_lock=totals_lock,
+            )
+            for worker_id in range(1, args.workers + 1)
+        ]
+        for future in futures:
+            future.result()
 
-        totals["batches"] += 1
-        totals["candidates"] += result.candidates
-        totals["archived"] += result.archived
-        totals["pruned"] += result.pruned
-        totals["logical_bytes"] += result.logical_bytes
-        totals["compressed_bytes"] += result.compressed_bytes
-
-        logger.info(
-            "Batch %s complete: candidates=%s archived=%s pruned=%s "
-            "logical_bytes=%s compressed_bytes=%s dry_run=%s",
-            totals["batches"],
-            result.candidates,
-            result.archived,
-            result.pruned,
-            result.logical_bytes,
-            result.compressed_bytes,
-            result.dry_run,
-        )
-
-        if args.max_batches and totals["batches"] >= args.max_batches:
-            logger.info("Reached max batch limit: %s", args.max_batches)
-            break
-
-        if args.sleep_seconds > 0:
-            time.sleep(args.sleep_seconds)
-
-    logger.info("Finished terminal snapshot pruning: %s", totals)
+    total_elapsed = time.monotonic() - started_at
+    logger.info(
+        "Finished terminal snapshot pruning: elapsed=%.2fs logical_rate=%s "
+        "compressed_rate=%s attempted_batches=%s totals=%s",
+        total_elapsed,
+        _format_mib_per_second(totals["logical_bytes"], total_elapsed),
+        _format_mib_per_second(totals["compressed_bytes"], total_elapsed),
+        batch_budget.started_batches,
+        totals,
+    )
     return 0
 
 

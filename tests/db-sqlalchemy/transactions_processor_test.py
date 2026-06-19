@@ -656,6 +656,38 @@ class TestContractSnapshot:
         tx = tp.get_transaction_by_hash(tx_hash)
         assert tx["contract_snapshot"] == snapshot
 
+    def test_get_transaction_by_hash_can_skip_contract_snapshot(self, tp):
+        tx_hash = _make_tx(tp)
+        snapshot = {"state": "deployed", "code": "abc"}
+        tp.set_transaction_contract_snapshot(tx_hash, snapshot)
+        tp.session.expire_all()
+
+        tx = tp.get_transaction_by_hash(tx_hash, include_contract_snapshot=False)
+
+        assert tx is not None
+        assert tx["hash"] == tx_hash
+        assert "contract_snapshot" not in tx
+
+    def test_skip_contract_snapshot_does_not_hydrate_archive(self, session):
+        class FakeArchive:
+            def __init__(self):
+                self.calls = []
+
+            def load_snapshot(self, session, tx_hash):
+                self.calls.append((session, tx_hash))
+                return {"state": "archived"}
+
+        archive = FakeArchive()
+        tp = TransactionsProcessor(session, snapshot_archive=archive)
+        tx_hash = _make_tx(tp)
+        tp.session.expire_all()
+
+        tx = tp.get_transaction_by_hash(tx_hash, include_contract_snapshot=False)
+
+        assert tx is not None
+        assert "contract_snapshot" not in tx
+        assert archive.calls == []
+
 
 class TestRotationCount:
     def test_increase_transaction_rotation_count(self, tp, session):

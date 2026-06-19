@@ -3,6 +3,7 @@ import base64
 import gzip
 import hashlib
 import sys
+import threading
 from datetime import datetime, timezone
 
 import pytest
@@ -1060,7 +1061,80 @@ def test_prune_cli_main_runs_until_empty_and_applies_cli_overrides(monkeypatch):
     session_factory, session_kwargs = pruner.session_factory
     assert session_factory == "SessionLocal"
     assert session_kwargs["bind"] is engine
+    assert session_kwargs["expire_on_commit"] is False
     assert pruner.config.enabled is True
     assert pruner.config.batch_size == 7
     assert pruner.config.retention_hours == 12
     assert sleep_calls == [0.5]
+
+
+def test_prune_cli_main_runs_parallel_workers_with_shared_batch_budget(monkeypatch):
+    created_pruners = []
+    engine = object()
+    call_count = 0
+    call_lock = threading.Lock()
+
+    class FakePruner:
+        def __init__(self, session_factory, config):
+            self.session_factory = session_factory
+            self.config = config
+            created_pruners.append(self)
+
+        def prune_once(self):
+            nonlocal call_count
+            with call_lock:
+                call_count += 1
+            return PruneBatchResult(
+                candidates=1,
+                archived=1,
+                pruned=1,
+                logical_bytes=20,
+                compressed_bytes=10,
+            )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prune_terminal_snapshots",
+            "--workers",
+            "3",
+            "--max-batches",
+            "5",
+            "--sleep-seconds",
+            "0",
+        ],
+    )
+    monkeypatch.setattr(
+        prune_cli.TerminalSnapshotPrunerConfig,
+        "from_environment",
+        staticmethod(
+            lambda: TerminalSnapshotPrunerConfig(
+                enabled=False,
+                dry_run=False,
+                batch_size=5,
+                retention_hours=24,
+                s3_bucket="archive-bucket",
+            )
+        ),
+    )
+    monkeypatch.setattr(prune_cli, "get_database_url", lambda: "postgresql://db")
+    engine_kwargs = {}
+    monkeypatch.setattr(
+        prune_cli,
+        "create_engine",
+        lambda url, **kwargs: engine_kwargs.update(kwargs) or engine,
+    )
+    monkeypatch.setattr(
+        prune_cli,
+        "sessionmaker",
+        lambda **kwargs: ("SessionLocal", kwargs),
+    )
+    monkeypatch.setattr(prune_cli, "TerminalSnapshotPruner", FakePruner)
+
+    assert prune_cli.main() == 0
+
+    assert call_count == 5
+    assert len(created_pruners) == 3
+    assert engine_kwargs["pool_size"] == 3
+    assert engine_kwargs["max_overflow"] == 0
