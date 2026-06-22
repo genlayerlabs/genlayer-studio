@@ -437,6 +437,7 @@ class RunHostAndProgramRes:
     result_emissions: list[ResultEmission]
     result_nondet_results: list[bytes]
     data_fees_remaining: list[int]
+    metrics: dict[str, typing.Any] | None = None
     vm_error_description: str | None = None
 
 
@@ -899,6 +900,7 @@ async def run_genvm(
             stdout=status["stdout"],
             stderr=status["stderr"],
             genvm_log=status.get("genvm_log") or [],
+            metrics=status.get("metrics") if isinstance(status, dict) else None,
             execution_hash=execution_hash,
             result_kind=result_kind,
             result_data=result_data,

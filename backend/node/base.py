@@ -722,6 +722,7 @@ class Node:
 
             if fallback_validator:
                 enhanced_node_config["secondary_model"] = {
+                    "address": fallback_validator.address,
                     "provider": fallback_validator.llmprovider.provider,
                     "model": fallback_validator.llmprovider.model,
                     "plugin": fallback_validator.llmprovider.plugin,
