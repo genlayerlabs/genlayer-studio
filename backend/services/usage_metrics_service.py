@@ -1,8 +1,8 @@
 # backend/services/usage_metrics_service.py
 
-import os
 import asyncio
-from typing import Optional
+import os
+from typing import Any, Optional
 from datetime import datetime
 import aiohttp
 from loguru import logger
@@ -292,46 +292,140 @@ class UsageMetricsService:
         # Process leader receipts
         if consensus_data.leader_receipt:
             for receipt in consensus_data.leader_receipt:
-                llm_call = self._extract_llm_call_from_receipt(receipt)
-                if llm_call:
-                    llm_calls.append(llm_call)
+                llm_calls.extend(self._extract_llm_calls_from_receipt(receipt))
 
         # Process validator receipts
         if consensus_data.validators:
             for receipt in consensus_data.validators:
-                llm_call = self._extract_llm_call_from_receipt(receipt)
-                if llm_call:
-                    llm_calls.append(llm_call)
+                llm_calls.extend(self._extract_llm_calls_from_receipt(receipt))
 
         return llm_calls
 
-    def _extract_llm_call_from_receipt(self, receipt) -> Optional[dict]:
-        """Extract LLM info from a single receipt."""
+    def _extract_llm_calls_from_receipt(self, receipt) -> list[dict]:
+        """Extract one or more LLM call summaries from a single receipt."""
         if receipt is None:
-            return None
+            return []
 
-        node_config = getattr(receipt, "node_config", None)
+        node_config = self._receipt_field(receipt, "node_config")
         if node_config is None or not isinstance(node_config, dict):
-            return None
+            return []
 
         primary_model = node_config.get("primary_model", {})
         if not primary_model:
+            return []
+
+        token_metrics = self._extract_llm_token_metrics(receipt)
+        if token_metrics:
+            configured_by_key = self._configured_models_by_token_key(node_config)
+            calls = []
+            for token_key, tokens in token_metrics.items():
+                configured_model = configured_by_key.get(token_key)
+                if configured_model is None:
+                    configured_model = self._configured_model_from_token_key(
+                        primary_model, token_key
+                    )
+                call = self._build_llm_call(configured_model, tokens)
+                if call:
+                    calls.append(call)
+
+            if calls:
+                return calls
+
+        call = self._build_llm_call(primary_model)
+        return [call] if call else []
+
+    def _extract_llm_call_from_receipt(self, receipt) -> Optional[dict]:
+        """Extract the first LLM call from a receipt for legacy callers."""
+        calls = self._extract_llm_calls_from_receipt(receipt)
+        return calls[0] if calls else None
+
+    def _build_llm_call(
+        self, model_config: dict | None, tokens: dict | None = None
+    ) -> Optional[dict]:
+        if not model_config:
             return None
 
-        provider = primary_model.get("provider", "unknown")
-        model = primary_model.get("model", "unknown")
+        provider = model_config.get("provider", "unknown")
+        model = model_config.get("model", "unknown")
 
         # Skip if both are unknown (no meaningful data)
         if provider == "unknown" and model == "unknown":
             return None
 
+        tokens = tokens if isinstance(tokens, dict) else {}
+
         return {
             "provider": provider,
             "model": model,
-            "inputTokens": 0,  # Not tracked yet
-            "outputTokens": 0,  # Not tracked yet
+            "inputTokens": self._safe_int(tokens.get("input")),
+            "outputTokens": self._safe_int(tokens.get("output")),
             "costUsd": 0,  # Not tracked yet
         }
+
+    def _configured_models_by_token_key(self, node_config: dict) -> dict[str, dict]:
+        configured = {}
+
+        primary_model = node_config.get("primary_model")
+        primary_key = self._token_metric_key(
+            node_config.get("address"),
+            primary_model.get("model") if isinstance(primary_model, dict) else None,
+        )
+        if primary_key and isinstance(primary_model, dict):
+            configured[primary_key] = primary_model
+
+        secondary_model = node_config.get("secondary_model")
+        secondary_key = self._token_metric_key(
+            (
+                secondary_model.get("address")
+                if isinstance(secondary_model, dict)
+                else None
+            ),
+            secondary_model.get("model") if isinstance(secondary_model, dict) else None,
+        )
+        if secondary_key and isinstance(secondary_model, dict):
+            configured[secondary_key] = secondary_model
+
+        return configured
+
+    def _configured_model_from_token_key(
+        self, primary_model: dict, token_key: str
+    ) -> dict:
+        _, _, token_model = token_key.partition("/")
+        if not token_model:
+            token_model = primary_model.get("model", "unknown")
+
+        return {
+            "provider": primary_model.get("provider", "unknown"),
+            "model": token_model,
+        }
+
+    def _extract_llm_token_metrics(self, receipt) -> dict:
+        execution_stats = self._receipt_field(receipt, "execution_stats")
+        if not isinstance(execution_stats, dict):
+            return {}
+
+        llm_stats = execution_stats.get("llm")
+        if not isinstance(llm_stats, dict):
+            return {}
+
+        token_metrics = llm_stats.get("tokens")
+        return token_metrics if isinstance(token_metrics, dict) else {}
+
+    def _receipt_field(self, receipt, field: str) -> Any:
+        if isinstance(receipt, dict):
+            return receipt.get(field)
+        return getattr(receipt, field, None)
+
+    def _token_metric_key(self, address: Any, model: Any) -> str | None:
+        if not address or not model:
+            return None
+        return f"node-{address}/{model}"
+
+    def _safe_int(self, value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
 
     def _format_created_at(self, created_at) -> str:
         """Format created_at to ISO8601 string."""
