@@ -340,6 +340,174 @@ WHERE backend = 'gcs'
 This keeps the database migration smaller without coupling every GCP pruning
 batch to cross-cloud object writes.
 
+## Production Rollout Checklist
+
+Use this checklist for each Studio namespace. Keep the background pruner disabled
+until the one-time drain has been measured and the steady-state settings are
+chosen.
+
+### 1. Preflight
+
+- Confirm the deployed image contains this pruning code and migrations.
+- Confirm `transaction_snapshot_archives` exists.
+- Confirm `idx_transactions_terminal_snapshot_archive_candidates` exists and is
+  valid.
+- Confirm object-storage credentials from the JSON-RPC pod or one-time job:
+  write, read, and, if applicable, KMS encrypt/decrypt.
+- Confirm RPC services have
+  `STUDIO_CONTRACT_SNAPSHOT_ARCHIVE_RETRIEVAL_ENABLED=true`.
+- Confirm background pruning is off:
+  `STUDIO_CONTRACT_SNAPSHOT_PRUNER_ENABLED=false`.
+- Confirm object lifecycle/retention policy is intentional for the archive
+  bucket or prefix.
+- Record the candidate count and byte distribution with the Rally measurement
+  query above.
+
+Index check:
+
+```sql
+SELECT
+  indexrelid::regclass AS index_name,
+  indisvalid,
+  indisready
+FROM pg_index
+WHERE indexrelid::regclass::text =
+  'idx_transactions_terminal_snapshot_archive_candidates';
+```
+
+Archive table check:
+
+```sql
+SELECT to_regclass('public.transaction_snapshot_archives') AS archive_table;
+```
+
+### 2. Rollout Ladder
+
+Start with lossless archive verification enabled. Do not set
+`STUDIO_CONTRACT_SNAPSHOT_PRUNER_ALLOW_LOSSY_PRUNE=true` for production drains.
+
+1. Deploy code and migrations with pruning off.
+2. Enable archive retrieval on RPC services.
+3. Run a dry-run:
+
+   ```bash
+   python -m backend.database_handler.prune_terminal_snapshots \
+     --dry-run \
+     --batch-size 5 \
+     --retention-hours 24 \
+     --max-batches 10 \
+     --workers 1 \
+     --sleep-seconds 0
+   ```
+
+4. Run one real batch:
+
+   ```bash
+   python -m backend.database_handler.prune_terminal_snapshots \
+     --batch-size 1 \
+     --retention-hours 24 \
+     --max-batches 1 \
+     --workers 1 \
+     --sleep-seconds 0
+   ```
+
+5. Verify the pruned transaction end to end:
+   archive row, object metadata, checksum, hot row null, and direct read
+   hydration.
+6. Run a small measured batch ladder while watching DB CPU/IO, object-store
+   errors, RPC latency, and application logs:
+   `workers=1`, then `workers=2`, then `workers=4`.
+7. Continue the one-time drain only at the highest worker count that remains
+   healthy. The Rally probe suggests starting with `workers=4` as the likely
+   practical ceiling unless live metrics prove otherwise.
+8. After the historical drain, enable the background pruner only if steady-state
+   pruning is desired. Use a conservative retention window and batch size first,
+   for example `retention_hours=24`, `batch_size=5`, `interval_seconds=300`.
+
+### 3. Per-Batch Validation
+
+Use these checks after a tiny real batch and periodically during larger drains.
+
+Archive row:
+
+```sql
+SELECT
+  tx_hash,
+  archive_status,
+  backend,
+  bucket,
+  object_key,
+  snapshot_sha256,
+  compressed_sha256,
+  snapshot_bytes,
+  compressed_bytes,
+  archived_at,
+  pruned_at
+FROM transaction_snapshot_archives
+WHERE tx_hash = '<tx-hash>';
+```
+
+Hot row:
+
+```sql
+SELECT
+  hash,
+  status,
+  contract_snapshot IS NULL AS snapshot_pruned
+FROM transactions
+WHERE hash = '<tx-hash>';
+```
+
+Progress:
+
+```sql
+SELECT
+  count(*) AS remaining_rows,
+  pg_size_pretty(sum(pg_column_size(contract_snapshot))) AS remaining_logical_size
+FROM transactions
+WHERE contract_snapshot IS NOT NULL
+  AND status IN ('FINALIZED', 'CANCELED');
+```
+
+Archive totals:
+
+```sql
+SELECT
+  archive_status,
+  backend,
+  count(*) AS rows,
+  pg_size_pretty(sum(snapshot_bytes)) AS logical_size,
+  pg_size_pretty(sum(compressed_bytes)) AS compressed_size
+FROM transaction_snapshot_archives
+GROUP BY archive_status, backend
+ORDER BY archive_status, backend;
+```
+
+### 4. Rollback And Stop Conditions
+
+Immediate stop switches:
+
+- Stop the one-time job.
+- Keep or set `STUDIO_CONTRACT_SNAPSHOT_PRUNER_ENABLED=false`.
+- If archive reads are causing user-visible RPC issues, set
+  `STUDIO_CONTRACT_SNAPSHOT_ARCHIVE_RETRIEVAL_ENABLED=false`. This disables
+  hydration but does not restore hot snapshots.
+
+Stop the drain and investigate if any of these happen:
+
+- Archive write or read-back verification errors.
+- Checksum mismatch.
+- Sustained object-store throttling or 5xx errors.
+- DB CPU/IO saturation or material RPC latency regression.
+- Pruned transaction cannot hydrate through the direct read path.
+- Archive rows are missing for pruned hot rows.
+
+Rollback from a successful prune is restore-oriented: the lossless copy is the
+archive object plus `transaction_snapshot_archives` metadata. If hot-state
+restoration is required, write a targeted restore job that loads verified
+archive objects and updates `transactions.contract_snapshot` for selected hashes.
+Do not delete archive objects during or immediately after rollout.
+
 ## Reclaiming Disk
 
 Pruning removes logical JSONB payloads and reduces future database growth, but
