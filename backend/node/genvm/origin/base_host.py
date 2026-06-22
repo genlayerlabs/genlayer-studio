@@ -364,6 +364,7 @@ class RunHostAndProgramRes:
     stdout: str
     stderr: str
     genvm_log: list[dict[str, typing.Any]]
+    metrics: dict[str, typing.Any] | None
 
     execution_time: float
 
@@ -825,6 +826,7 @@ async def run_genvm(
             stdout=status["stdout"],
             stderr=status["stderr"],
             genvm_log=status.get("genvm_log") or [],
+            metrics=status.get("metrics") if isinstance(status, dict) else None,
             execution_hash=execution_hash,
             result_kind=result_kind,
             result_data=result_data,
