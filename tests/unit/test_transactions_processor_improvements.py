@@ -93,6 +93,42 @@ class TestLeaderReceiptCompatibility:
         assert transaction_data["last_round"]["validator_votes_name"] == ["AGREE"]
 
 
+class FakeSnapshotArchive:
+    def __init__(self, snapshot):
+        self.snapshot = snapshot
+        self.calls = []
+
+    def load_snapshot(self, session, tx_hash):
+        self.calls.append((session, tx_hash))
+        return self.snapshot
+
+
+class TestArchivedContractSnapshotHydration:
+    def test_hydrates_missing_contract_snapshot_from_archive(self):
+        session = Mock(spec=Session)
+        archive = FakeSnapshotArchive({"state": {"accepted": {"x": 1}}})
+        processor = TransactionsProcessor(session, snapshot_archive=archive)
+        transaction_data = {"hash": "0xabc", "contract_snapshot": None}
+
+        processor._hydrate_archived_contract_snapshot(transaction_data)
+
+        assert transaction_data["contract_snapshot"] == {
+            "state": {"accepted": {"x": 1}}
+        }
+        assert archive.calls == [(session, "0xabc")]
+
+    def test_keeps_hot_contract_snapshot_without_archive_lookup(self):
+        session = Mock(spec=Session)
+        archive = FakeSnapshotArchive({"state": "archived"})
+        processor = TransactionsProcessor(session, snapshot_archive=archive)
+        transaction_data = {"hash": "0xabc", "contract_snapshot": {"state": "hot"}}
+
+        processor._hydrate_archived_contract_snapshot(transaction_data)
+
+        assert transaction_data["contract_snapshot"] == {"state": "hot"}
+        assert archive.calls == []
+
+
 class TestGetTransactionCount:
     """Test the improved get_transaction_count method"""
 

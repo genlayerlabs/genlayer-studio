@@ -1,8 +1,115 @@
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from backend.protocol_rpc import endpoints
 from backend.protocol_rpc import rpc_methods
+from backend.protocol_rpc.exceptions import JSONRPCError
+
+
+def test_call_status_selector_accepts_decided_and_finalized():
+    assert endpoints._state_status_from_call_params({"status": "decided"}) == "accepted"
+    assert (
+        endpoints._state_status_from_call_params({"status": "finalized"}) == "finalized"
+    )
+
+
+def test_call_status_selector_preserves_legacy_transaction_hash_variant():
+    assert (
+        endpoints._state_status_from_call_params(
+            {"transaction_hash_variant": "latest-final"}
+        )
+        == "finalized"
+    )
+    assert (
+        endpoints._state_status_from_call_params(
+            {"transaction_hash_variant": "latest-nonfinal"}
+        )
+        == "accepted"
+    )
+
+
+def test_call_status_selector_rejects_node_legacy_accepted_value():
+    with pytest.raises(JSONRPCError) as exc:
+        endpoints._state_status_from_call_params({"status": "accepted"})
+
+    assert exc.value.code == -32602
+    assert "decided" in exc.value.message
+
+
+def test_eth_get_transaction_by_hash_requests_no_contract_snapshot():
+    transactions_processor = MagicMock()
+    transactions_processor.get_transaction_by_hash.return_value = {"hash": "0xabc"}
+
+    result = endpoints.get_transaction_by_hash(
+        transactions_processor=transactions_processor,
+        transaction_hash="0xabc",
+    )
+
+    assert result == {"hash": "0xabc"}
+    transactions_processor.get_transaction_by_hash.assert_called_once_with(
+        "0xabc", None, include_contract_snapshot=False
+    )
+
+
+def test_eth_transaction_receipt_requests_no_contract_snapshot():
+    transactions_processor = MagicMock()
+    transactions_processor.get_transaction_by_hash.return_value = {
+        "hash": "0xabc",
+        "from_address": "0x1111111111111111111111111111111111111111",
+        "to_address": "0x2222222222222222222222222222222222222222",
+        "status": "FINALIZED",
+    }
+
+    receipt = endpoints.get_transaction_receipt(transactions_processor, "0xabc")
+
+    assert receipt["transactionHash"] == "0xabc"
+    transactions_processor.get_transaction_by_hash.assert_called_once_with(
+        "0xabc", include_contract_snapshot=False
+    )
+
+
+def test_eth_get_block_by_number_requests_no_contract_snapshot_for_full_tx():
+    transactions_processor = MagicMock()
+    transactions_processor.get_transactions_for_block.return_value = {
+        "number": "0x1",
+        "transactions": [{"hash": "0xabc"}],
+    }
+
+    result = endpoints.get_block_by_number(
+        transactions_processor=transactions_processor,
+        block_number="0x1",
+        full_tx=True,
+    )
+
+    assert result == {"number": "0x1", "transactions": [{"hash": "0xabc"}]}
+    transactions_processor.get_transactions_for_block.assert_called_once_with(
+        1,
+        include_full_tx=True,
+        include_contract_snapshot=False,
+    )
+
+
+def test_eth_get_block_by_hash_requests_no_contract_snapshot():
+    transactions_processor = MagicMock()
+    transactions_processor.get_transaction_by_hash.return_value = {
+        "hash": "0xabc",
+        "block_number": 1,
+        "timestamp": 2,
+    }
+
+    result = endpoints.get_block_by_hash(
+        transactions_processor=transactions_processor,
+        block_hash="0xabc",
+        full_tx=True,
+    )
+
+    assert result["transactions"] == [
+        {"hash": "0xabc", "block_number": 1, "timestamp": 2}
+    ]
+    transactions_processor.get_transaction_by_hash.assert_called_once_with(
+        "0xabc", include_contract_snapshot=False
+    )
 
 
 @pytest.mark.asyncio

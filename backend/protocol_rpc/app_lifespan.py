@@ -20,6 +20,10 @@ from backend.database_handler.session_factory import (
     DatabaseSessionManager,
     set_database_manager,
 )
+from backend.database_handler.terminal_snapshot_pruner import (
+    TerminalSnapshotPrunerConfig,
+    run_terminal_snapshot_pruner_loop,
+)
 from backend.protocol_rpc.transactions_parser import TransactionParser
 from backend.protocol_rpc.configuration import GlobalConfiguration
 from backend.protocol_rpc.fastapi_rpc_router import FastAPIRPCRouter
@@ -302,6 +306,15 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
     logger.info(
         "[STARTUP] RPC process will not run consensus loops (handled by worker services)"
     )
+
+    snapshot_pruner_config = TerminalSnapshotPrunerConfig.from_environment()
+    if snapshot_pruner_config.enabled:
+        snapshot_pruner_config.validate_for_run()
+        logger.info("[STARTUP] Starting terminal contract snapshot pruner")
+        snapshot_pruner_task = asyncio.create_task(
+            run_terminal_snapshot_pruner_loop(get_session, snapshot_pruner_config)
+        )
+        background_tasks.append(snapshot_pruner_task)
 
     sql_db = _SQLAlchemyDBWrapper(db_manager)
 

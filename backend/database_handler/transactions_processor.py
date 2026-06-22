@@ -4,7 +4,7 @@ from enum import Enum
 import rlp
 import re
 import random
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, defer, selectinload
 from sqlalchemy import or_, desc, and_, JSON, type_coerce, text
 
 from backend.node.types import Vote, Receipt, ExecutionResultStatus
@@ -19,6 +19,10 @@ from backend.consensus.types import ConsensusRound
 from backend.consensus.history import time_unit_consumption
 from backend.consensus.utils import determine_consensus_from_votes
 from backend.protocol_rpc.fees import FEE_ACCOUNTING_KEY, normalize_fees_distribution
+from backend.database_handler.terminal_snapshot_pruner import (
+    SnapshotArchiveReader,
+    snapshot_archive_read_through_enabled,
+)
 from backend.rollup.web3_pool import Web3ConnectionPool
 
 MAX_JSON_SAFE_INTEGER = (2**53) - 1
@@ -92,8 +96,12 @@ class TransactionsProcessor:
     def __init__(
         self,
         session: Session,
+        snapshot_archive: SnapshotArchiveReader | None = None,
     ):
         self.session = session
+        self.snapshot_archive = snapshot_archive
+        if self.snapshot_archive is None and snapshot_archive_read_through_enabled():
+            self.snapshot_archive = SnapshotArchiveReader.from_environment()
 
         # Use singleton Web3 connection pool
         self.web3 = Web3ConnectionPool.get()
@@ -124,7 +132,11 @@ class TransactionsProcessor:
         return value
 
     @staticmethod
-    def _parse_transaction_data(transaction_data: Transactions) -> dict:
+    def _parse_transaction_data(
+        transaction_data: Transactions,
+        *,
+        include_contract_snapshot: bool = True,
+    ) -> dict:
         fee_accounting = (
             transaction_data.data.get(FEE_ACCOUNTING_KEY)
             if isinstance(transaction_data.data, dict)
@@ -193,7 +205,11 @@ class TransactionsProcessor:
             "consensus_history": transaction_data.consensus_history,
             "timestamp_appeal": transaction_data.timestamp_appeal,
             "appeal_processing_time": transaction_data.appeal_processing_time,
-            "contract_snapshot": transaction_data.contract_snapshot,
+            "contract_snapshot": (
+                transaction_data.contract_snapshot
+                if include_contract_snapshot
+                else None
+            ),
             "config_rotation_rounds": transaction_data.config_rotation_rounds,
             "num_of_initial_validators": transaction_data.num_of_initial_validators,
             "last_vote_timestamp": transaction_data.last_vote_timestamp,
@@ -207,6 +223,19 @@ class TransactionsProcessor:
             # SEND txs created by sim_fundAccount.
             "value_credited": transaction_data.value_credited,
         }
+
+    def _hydrate_archived_contract_snapshot(self, transaction_data: dict) -> None:
+        if transaction_data.get("contract_snapshot") is not None:
+            return
+        if self.snapshot_archive is None:
+            return
+        tx_hash = transaction_data.get("hash")
+        if not tx_hash:
+            return
+
+        snapshot = self.snapshot_archive.load_snapshot(self.session, tx_hash)
+        if snapshot is not None:
+            transaction_data["contract_snapshot"] = snapshot
 
     @staticmethod
     def _status_payload(status: str) -> dict:
@@ -865,20 +894,28 @@ class TransactionsProcessor:
         return transaction_data
 
     def get_transaction_by_hash(
-        self, transaction_hash: str, sim_config: dict | None = None
+        self,
+        transaction_hash: str,
+        sim_config: dict | None = None,
+        include_contract_snapshot: bool = True,
     ) -> dict | None:
         # Expire cached ORM objects to ensure we read fresh data after raw SQL writes
         self.session.expire_all()
-        transaction = (
-            self.session.query(Transactions)
-            .filter_by(hash=transaction_hash)
-            .one_or_none()
-        )
+        query = self.session.query(Transactions)
+        if not include_contract_snapshot:
+            query = query.options(defer(Transactions.contract_snapshot))
+        transaction = query.filter_by(hash=transaction_hash).one_or_none()
 
         if transaction is None:
             return None
 
-        transaction_data = self._parse_transaction_data(transaction)
+        transaction_data = self._parse_transaction_data(
+            transaction, include_contract_snapshot=include_contract_snapshot
+        )
+        if include_contract_snapshot:
+            self._hydrate_archived_contract_snapshot(transaction_data)
+        else:
+            transaction_data.pop("contract_snapshot", None)
 
         # Handle contract_state based on sim_config
         include_contract_state = sim_config and sim_config.get(
@@ -925,6 +962,8 @@ class TransactionsProcessor:
             return None
 
         transaction_data = self._parse_transaction_data(transaction)
+        if full:
+            self._hydrate_archived_contract_snapshot(transaction_data)
 
         # Transform studio fields to testnet fields
         transaction_data["tx_id"] = transaction_data.pop("hash", None)
@@ -1295,7 +1334,10 @@ class TransactionsProcessor:
         return transaction.timestamp_awaiting_finalization
 
     def get_transactions_for_block(
-        self, block_number: int, include_full_tx: bool
+        self,
+        block_number: int,
+        include_full_tx: bool,
+        include_contract_snapshot: bool = True,
     ) -> dict:
         query = self.session.query(Transactions).filter(
             Transactions.timestamp_awaiting_finalization == block_number
@@ -1303,6 +1345,8 @@ class TransactionsProcessor:
         # Only eager load triggered_transactions if we need full transaction data
         if include_full_tx:
             query = query.options(selectinload(Transactions.triggered_transactions))
+            if not include_contract_snapshot:
+                query = query.options(defer(Transactions.contract_snapshot))
         transactions = query.all()
 
         block_hash = "0x" + "0" * 64
@@ -1314,7 +1358,15 @@ class TransactionsProcessor:
         )
 
         if include_full_tx:
-            transaction_data = [self._parse_transaction_data(tx) for tx in transactions]
+            transaction_data = [
+                self._parse_transaction_data(
+                    tx, include_contract_snapshot=include_contract_snapshot
+                )
+                for tx in transactions
+            ]
+            if not include_contract_snapshot:
+                for transaction in transaction_data:
+                    transaction.pop("contract_snapshot", None)
         else:
             transaction_data = [tx.hash for tx in transactions]
 

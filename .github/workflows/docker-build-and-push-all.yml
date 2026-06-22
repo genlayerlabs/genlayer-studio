@@ -11,6 +11,11 @@ on:
         description: "Docker image tag to publish"
         required: true
         type: string
+      push_latest:
+        description: "Also publish Docker Hub latest manifests"
+        required: false
+        type: boolean
+        default: true
   workflow_call:
     inputs:
       ref:
@@ -19,6 +24,10 @@ on:
       image_tag:
         required: true
         type: string
+      push_latest:
+        required: false
+        type: boolean
+        default: true
     secrets:
       DOCKERHUB_TOKEN:
         required: true
@@ -36,6 +45,7 @@ jobs:
       dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
       ref: ${{ inputs.ref }}
       image_tag: ${{ inputs.image_tag }}
+      push_latest: ${{ inputs.push_latest }}
     secrets:
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
@@ -48,6 +58,7 @@ jobs:
       dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
       ref: ${{ inputs.ref }}
       image_tag: ${{ inputs.image_tag }}
+      push_latest: ${{ inputs.push_latest }}
     secrets:
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
@@ -60,6 +71,7 @@ jobs:
       dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
       ref: ${{ inputs.ref }}
       image_tag: ${{ inputs.image_tag }}
+      push_latest: ${{ inputs.push_latest }}
     secrets:
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
@@ -72,6 +84,7 @@ jobs:
       dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
       ref: ${{ inputs.ref }}
       image_tag: ${{ inputs.image_tag }}
+      push_latest: ${{ inputs.push_latest }}
     secrets:
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
@@ -84,5 +97,6 @@ jobs:
       dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
       ref: ${{ inputs.ref }}
       image_tag: ${{ inputs.image_tag }}
+      push_latest: ${{ inputs.push_latest }}
     secrets:
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
