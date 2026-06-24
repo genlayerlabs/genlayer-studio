@@ -99,6 +99,16 @@ class TransactionsProcessor:
         self.web3 = Web3ConnectionPool.get()
 
     @staticmethod
+    def _select_receipt(receipts, index: int = 0) -> dict | None:
+        if isinstance(receipts, dict):
+            return receipts
+        if isinstance(receipts, list) and 0 <= index < len(receipts):
+            receipt = receipts[index]
+            if isinstance(receipt, dict):
+                return receipt
+        return None
+
+    @staticmethod
     def _json_safe_numbers(value):
         if isinstance(value, bool) or value is None or isinstance(value, str):
             return value
@@ -530,12 +540,13 @@ class TransactionsProcessor:
                 len(transaction_data["consensus_history"]["consensus_results"]) - 1
             )
             last_round = transaction_data["consensus_history"]["consensus_results"][-1]
+            leader = self._select_receipt(last_round.get("leader_result"), index=1)
             if (
-                "leader_result" in last_round
-                and last_round["leader_result"] is not None
-                and len(last_round["leader_result"]) > 1
+                leader is not None
+                and leader.get("vote") is not None
+                and isinstance(leader.get("node_config"), dict)
+                and leader["node_config"].get("address") is not None
             ):
-                leader = last_round["leader_result"][1]
                 validator_votes_name.append(leader["vote"].upper())
                 vote_number = int(Vote.from_string(leader["vote"]))
                 validator_votes.append(vote_number)
@@ -634,18 +645,35 @@ class TransactionsProcessor:
             transaction_data["consensus_history"] is not None
             and "consensus_results" in transaction_data["consensus_history"]
         ):
-            transaction_data["activator"] = transaction_data["consensus_history"][
-                "consensus_results"
-            ][0]["leader_result"][0]["node_config"]["address"]
+            first_round = transaction_data["consensus_history"]["consensus_results"][0]
+            leader = self._select_receipt(first_round.get("leader_result"), index=0)
+            if (
+                leader is not None
+                and isinstance(leader.get("node_config"), dict)
+                and leader["node_config"].get("address") is not None
+            ):
+                transaction_data["activator"] = leader["node_config"]["address"]
+            else:
+                transaction_data["activator"] = ""
         else:
             transaction_data["activator"] = ""
 
         if (transaction_data["consensus_data"] is not None) and (
             "leader_receipt" in transaction_data["consensus_data"]
         ):
-            transaction_data["last_leader"] = transaction_data["consensus_data"][
-                "leader_receipt"
-            ][0]["node_config"]["address"]
+            leader_receipt = self._select_receipt(
+                transaction_data["consensus_data"]["leader_receipt"], index=0
+            )
+            if (
+                leader_receipt is not None
+                and isinstance(leader_receipt.get("node_config"), dict)
+                and leader_receipt["node_config"].get("address") is not None
+            ):
+                transaction_data["last_leader"] = leader_receipt["node_config"][
+                    "address"
+                ]
+            else:
+                transaction_data["last_leader"] = ""
         else:
             transaction_data["last_leader"] = ""
         return transaction_data
@@ -671,21 +699,24 @@ class TransactionsProcessor:
         return transaction_data
 
     def _process_execution_hash(self, transaction_data: dict) -> dict:
+        leader_receipt = None
         if (
             transaction_data["consensus_data"] is not None
             and "leader_receipt" in transaction_data["consensus_data"]
-            and len(transaction_data["consensus_data"]["leader_receipt"]) > 1
-            and "node_config" in transaction_data["consensus_data"]["leader_receipt"][1]
+        ):
+            leader_receipt = self._select_receipt(
+                transaction_data["consensus_data"]["leader_receipt"], index=1
+            )
+
+        if (
+            leader_receipt is not None
+            and isinstance(leader_receipt.get("node_config"), dict)
+            and leader_receipt["node_config"].get("address") is not None
+            and leader_receipt.get("vote") is not None
         ):
             transaction_data["tx_execution_hash"] = get_tx_execution_hash(
-                transaction_data["consensus_data"]["leader_receipt"][1]["node_config"][
-                    "address"
-                ],
-                int(
-                    Vote.from_string(
-                        transaction_data["consensus_data"]["leader_receipt"][1]["vote"]
-                    )
-                ),
+                leader_receipt["node_config"]["address"],
+                int(Vote.from_string(leader_receipt["vote"])),
             )
         else:
             transaction_data["tx_execution_hash"] = ""
@@ -702,46 +733,44 @@ class TransactionsProcessor:
             for consensus_round in transaction_data["consensus_history"][
                 "consensus_results"
             ]:
-                if consensus_round["leader_result"] is not None:
+                leader_result = self._select_receipt(
+                    consensus_round.get("leader_result"), index=0
+                )
+                if (
+                    leader_result is not None
+                    and leader_result.get("result") is not None
+                ):
                     eq_output.append(
                         [
                             len(eq_output),  # key
                             [
-                                base64.b64decode(
-                                    consensus_round["leader_result"][0]["result"]
-                                )[
-                                    0
-                                ],  # kind
+                                base64.b64decode(leader_result["result"])[0],  # kind
                                 "\x00",
                             ],
                         ]
                     )  # data
 
         kind = 0
+        leader_receipt = None
         if (
             transaction_data["consensus_data"] is not None
             and "leader_receipt" in transaction_data["consensus_data"]
-            and "result" in transaction_data["consensus_data"]["leader_receipt"]
         ):
-            kind = base64.b64decode(
-                transaction_data["consensus_data"]["leader_receipt"][0]["result"]
-            )[0]
+            leader_receipt = self._select_receipt(
+                transaction_data["consensus_data"]["leader_receipt"], index=0
+            )
+        if leader_receipt is not None and leader_receipt.get("result") is not None:
+            kind = base64.b64decode(leader_receipt["result"])[0]
+
         pending_transactions = []
         messages = []
-        if (
-            transaction_data["consensus_data"] is not None
-            and "leader_receipt" in transaction_data["consensus_data"]
-            and transaction_data["consensus_data"]["leader_receipt"] is not None
-            and "pending_transactions"
-            in transaction_data["consensus_data"]["leader_receipt"][0]
-            and transaction_data["consensus_data"]["leader_receipt"][0][
-                "pending_transactions"
-            ]
-            is not None
-        ):
-            for message in transaction_data["consensus_data"]["leader_receipt"][0][
-                "pending_transactions"
-            ]:
+        pending_messages = (
+            leader_receipt.get("pending_transactions")
+            if leader_receipt is not None
+            else None
+        )
+        if pending_messages is not None:
+            for message in pending_messages:
                 pending_transactions.append(
                     [
                         message.get("address", ""),  # Account

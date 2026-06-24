@@ -2,8 +2,95 @@
 
 from unittest.mock import Mock, patch
 from backend.database_handler.transactions_processor import TransactionsProcessor
-from backend.database_handler.models import Transactions
+from backend.database_handler.models import TransactionStatus, Transactions
 from sqlalchemy.orm import Session
+
+
+class TestLeaderReceiptCompatibility:
+    def setup_method(self):
+        self.processor = TransactionsProcessor(Mock())
+
+    def test_processor_helpers_accept_dict_shaped_leader_receipts(self):
+        address = "0xaAaAaAaaAaAaAaaAaAAAAAAAAaaaAaAaAaaAaaAa"
+        receipt = {
+            "vote": "agree",
+            "result": "AG9r",
+            "node_config": {"address": address},
+            "pending_transactions": [
+                {
+                    "address": "0xbBbBBBBbbBBBbbbBbbBbbbbBBbBbbbbBbBbbBBbB",
+                    "calldata": "0x1234",
+                    "value": 3,
+                    "on": "accepted",
+                    "code": "",
+                    "salt_nonce": 0,
+                }
+            ],
+        }
+        transaction_data = {
+            "hash": "0xabc",
+            "from_address": address,
+            "to_address": address,
+            "data": {},
+            "value": 0,
+            "type": 1,
+            "status": TransactionStatus.FINALIZED.value,
+            "result": {},
+            "consensus_data": {"leader_receipt": receipt},
+            "gaslimit": 0,
+            "nonce": 7,
+            "created_at": "2026-06-24T12:00:00+00:00",
+            "leader_only": True,
+            "execution_mode": "LEADER_ONLY",
+            "origin_address": None,
+            "triggered_by": None,
+            "triggered_on": None,
+            "triggered_transactions": [],
+            "appealed": False,
+            "timestamp_awaiting_finalization": None,
+            "appeal_failed": False,
+            "appeal_undetermined": False,
+            "consensus_history": {
+                "consensus_results": [
+                    {
+                        "leader_result": receipt,
+                        "validator_results": [],
+                    }
+                ]
+            },
+            "timestamp_appeal": None,
+            "appeal_processing_time": None,
+            "config_rotation_rounds": 3,
+            "num_of_initial_validators": 1,
+            "last_vote_timestamp": None,
+            "rotation_count": 0,
+            "appeal_leader_timeout": False,
+            "leader_timeout_validators": [],
+            "appeal_validators_timeout": [],
+            "sim_config": None,
+            "value_credited": False,
+        }
+
+        transaction_data = self.processor._prepare_basic_transaction_data(
+            transaction_data
+        )
+        transaction_data = self.processor._process_execution_hash(transaction_data)
+        transaction_data = self.processor._process_messages(transaction_data)
+        transaction_data = self.processor._process_round_data(transaction_data)
+
+        assert transaction_data["activator"] == address
+        assert transaction_data["last_leader"] == address
+        assert transaction_data["tx_execution_hash"].startswith("0x")
+        assert transaction_data["messages"] == [
+            {
+                "messageType": "0",
+                "recipient": "0xbBbBBBBbbBBBbbbBbbBbbbbBBbBbbbbBbBbbBBbB",
+                "value": 3,
+                "data": "0x1234",
+                "onAcceptance": True,
+            }
+        ]
+        assert transaction_data["last_round"]["validator_votes_name"] == ["AGREE"]
 
 
 class TestGetTransactionCount:
