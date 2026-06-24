@@ -126,6 +126,7 @@ class FakeSession:
         self.rows = rows
         self.archive_rows = archive_rows or []
         self.archive_inserts = []
+        self.verified_archive_hashes = []
         self.pruned_archive_hashes = []
         self.updated_hashes = []
         self.fail_on_archive_insert = fail_on_archive_insert
@@ -136,6 +137,8 @@ class FakeSession:
 
     def execute(self, statement, params=None):
         sql = str(statement)
+        if "FROM transactions" in sql and "JOIN transactions" not in sql:
+            return FakeMappingsResult(self.rows)
         if "FROM transaction_snapshot_archives" in sql:
             return FakeMappingsResult(self.archive_rows)
         if "INSERT INTO transaction_snapshot_archives" in sql:
@@ -144,7 +147,10 @@ class FakeSession:
             self.archive_inserts.append(params)
             return FakeUpdateResult()
         if "UPDATE transaction_snapshot_archives" in sql:
-            self.pruned_archive_hashes.append(params["hash"])
+            if "archive_status = 'pruned'" in sql:
+                self.pruned_archive_hashes.append(params["hash"])
+            else:
+                self.verified_archive_hashes.append(params["hash"])
             return FakeUpdateResult()
         if "SELECT" in sql:
             return FakeMappingsResult(self.rows)
@@ -686,6 +692,116 @@ def test_pruner_archives_before_pruning_and_commits():
     assert result.compressed_bytes == 84
 
 
+def test_archive_phase_records_archive_without_pruning_or_verifying():
+    session = FakeSession([_candidate_row("0x1"), _candidate_row("0x2")])
+    writer = RecordingArchiveWriter()
+    pruner = TerminalSnapshotPruner(
+        lambda: session,
+        TerminalSnapshotPrunerConfig(enabled=True, s3_bucket="archive-bucket"),
+        archive_writer=writer,
+    )
+
+    result = pruner.archive_once()
+
+    assert writer.archived == ["0x1", "0x2"]
+    assert writer.verified == []
+    assert [row["tx_hash"] for row in session.archive_inserts] == ["0x1", "0x2"]
+    assert [row["verified"] for row in session.archive_inserts] == [False, False]
+    assert session.updated_hashes == []
+    assert session.pruned_archive_hashes == []
+    assert session.committed is True
+    assert result.archived == 2
+    assert result.verified == 0
+    assert result.pruned == 0
+
+
+def test_archive_phase_can_inline_verify():
+    session = FakeSession([_candidate_row("0x1")])
+    writer = RecordingArchiveWriter()
+    pruner = TerminalSnapshotPruner(
+        lambda: session,
+        TerminalSnapshotPrunerConfig(enabled=True, s3_bucket="archive-bucket"),
+        archive_writer=writer,
+    )
+
+    result = pruner.archive_once(verify_inline=True)
+
+    assert writer.archived == ["0x1"]
+    assert writer.verified == ["studio/v1/0x1.json.gz"]
+    assert [row["verified"] for row in session.archive_inserts] == [True]
+    assert session.updated_hashes == []
+    assert result.archived == 1
+    assert result.verified == 1
+    assert result.pruned == 0
+
+
+def test_verify_phase_marks_archives_without_pruning():
+    writer = RecordingArchiveWriter()
+    archive_result = writer.archive(
+        SnapshotCandidate(
+            tx_hash="0x1",
+            status="FINALIZED",
+            created_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            snapshot_bytes=7,
+            snapshot_json='{"x":1}',
+        )
+    )
+    session = FakeSession([], archive_rows=[_archive_row(archive_result)])
+    writer.archived = []
+    pruner = TerminalSnapshotPruner(
+        lambda: session,
+        TerminalSnapshotPrunerConfig(enabled=True, s3_bucket="archive-bucket"),
+        archive_writer=writer,
+    )
+
+    result = pruner.verify_archives_once()
+
+    assert writer.archived == []
+    assert writer.verified == ["studio/v1/0x1.json.gz"]
+    assert session.verified_archive_hashes == ["0x1"]
+    assert session.updated_hashes == []
+    assert session.pruned_archive_hashes == []
+    assert session.committed is True
+    assert result.verified == 1
+    assert result.pruned == 0
+
+
+def test_prune_verified_phase_only_deletes_preverified_archives():
+    session = FakeSession(
+        [],
+        archive_rows=[
+            {
+                "tx_hash": "0x1",
+                "backend": "file",
+                "bucket": None,
+                "object_key": "studio/v1/0x1.json.gz",
+                "uri": "file:///tmp/0x1.json.gz",
+                "format": ARCHIVE_FORMAT,
+                "snapshot_sha256": "0" * 64,
+                "compressed_sha256": "1" * 64,
+                "snapshot_bytes": 123,
+                "compressed_bytes": 45,
+            }
+        ],
+    )
+    pruner = TerminalSnapshotPruner(
+        lambda: session,
+        TerminalSnapshotPrunerConfig(enabled=True, s3_bucket="archive-bucket"),
+    )
+
+    result = pruner.prune_verified_once()
+
+    assert session.updated_hashes == ["0x1"]
+    assert session.pruned_archive_hashes == ["0x1"]
+    assert session.archive_inserts == []
+    assert session.committed is True
+    assert result.archived == 0
+    assert result.verified == 0
+    assert result.pruned == 1
+    assert result.logical_bytes == 123
+    assert result.compressed_bytes == 45
+
+
 def test_pruner_rolls_back_and_does_not_prune_when_archive_fails():
     session = FakeSession([_candidate_row("0x1")])
     pruner = TerminalSnapshotPruner(
@@ -1140,6 +1256,143 @@ def test_prune_cli_main_runs_until_empty_and_applies_cli_overrides(monkeypatch):
     assert pruner.config.batch_size == 7
     assert pruner.config.retention_hours == 12
     assert sleep_calls == [0.5]
+
+
+def test_prune_cli_main_runs_archive_phase_without_inline_verify(monkeypatch):
+    created_pruners = []
+    engine = object()
+
+    class FakePruner:
+        def __init__(self, session_factory, config):
+            self.session_factory = session_factory
+            self.config = config
+            self.archive_calls = []
+            created_pruners.append(self)
+
+        def archive_once(self, *, verify_inline=False):
+            self.archive_calls.append(verify_inline)
+            if len(self.archive_calls) == 1:
+                return PruneBatchResult(candidates=1, archived=1, logical_bytes=20)
+            return PruneBatchResult()
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prune_terminal_snapshots",
+            "--phase",
+            "archive",
+            "--max-batches",
+            "2",
+            "--sleep-seconds",
+            "0",
+        ],
+    )
+    monkeypatch.setattr(
+        prune_cli.TerminalSnapshotPrunerConfig,
+        "from_environment",
+        staticmethod(
+            lambda: TerminalSnapshotPrunerConfig(
+                enabled=False,
+                dry_run=False,
+                batch_size=5,
+                retention_hours=24,
+                s3_bucket="archive-bucket",
+            )
+        ),
+    )
+    monkeypatch.setattr(prune_cli, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(
+        prune_cli,
+        "create_engine",
+        lambda url, **kwargs: engine,
+    )
+    monkeypatch.setattr(
+        prune_cli,
+        "sessionmaker",
+        lambda **kwargs: ("SessionLocal", kwargs),
+    )
+    monkeypatch.setattr(prune_cli, "TerminalSnapshotPruner", FakePruner)
+
+    assert prune_cli.main() == 0
+
+    assert created_pruners[0].archive_calls == [False, False]
+
+
+def test_prune_cli_main_runs_verify_and_prune_phases(monkeypatch):
+    phase_calls = []
+    engine = object()
+
+    class FakePruner:
+        def __init__(self, session_factory, config):
+            self.session_factory = session_factory
+            self.config = config
+
+        def verify_archives_once(self):
+            phase_calls.append("verify")
+            return PruneBatchResult(candidates=1, verified=1, logical_bytes=20)
+
+        def prune_verified_once(self):
+            phase_calls.append("prune")
+            return PruneBatchResult(candidates=1, pruned=1, logical_bytes=20)
+
+    monkeypatch.setattr(
+        prune_cli.TerminalSnapshotPrunerConfig,
+        "from_environment",
+        staticmethod(
+            lambda: TerminalSnapshotPrunerConfig(
+                enabled=False,
+                dry_run=False,
+                batch_size=5,
+                retention_hours=24,
+                s3_bucket="archive-bucket",
+            )
+        ),
+    )
+    monkeypatch.setattr(prune_cli, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(
+        prune_cli,
+        "create_engine",
+        lambda url, **kwargs: engine,
+    )
+    monkeypatch.setattr(
+        prune_cli,
+        "sessionmaker",
+        lambda **kwargs: ("SessionLocal", kwargs),
+    )
+    monkeypatch.setattr(prune_cli, "TerminalSnapshotPruner", FakePruner)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prune_terminal_snapshots",
+            "--phase",
+            "verify",
+            "--max-batches",
+            "1",
+            "--sleep-seconds",
+            "0",
+        ],
+    )
+    assert prune_cli.main() == 0
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prune_terminal_snapshots",
+            "--phase",
+            "prune",
+            "--max-batches",
+            "1",
+            "--sleep-seconds",
+            "0",
+        ],
+    )
+    assert prune_cli.main() == 0
+
+    assert phase_calls == ["verify", "prune"]
 
 
 def test_prune_cli_main_runs_parallel_workers_with_shared_batch_budget(monkeypatch):
