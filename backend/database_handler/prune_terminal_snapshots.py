@@ -46,6 +46,7 @@ def _empty_totals() -> dict:
         "batches": 0,
         "candidates": 0,
         "archived": 0,
+        "verified": 0,
         "pruned": 0,
         "logical_bytes": 0,
         "compressed_bytes": 0,
@@ -56,6 +57,7 @@ def _add_batch_result(totals: dict, result) -> None:
     totals["batches"] += 1
     totals["candidates"] += result.candidates
     totals["archived"] += result.archived
+    totals["verified"] += result.verified
     totals["pruned"] += result.pruned
     totals["logical_bytes"] += result.logical_bytes
     totals["compressed_bytes"] += result.compressed_bytes
@@ -63,19 +65,22 @@ def _add_batch_result(totals: dict, result) -> None:
 
 def _log_batch_result(
     *,
+    phase: str,
     batch_number: int,
     worker_id: int,
     result,
     elapsed_seconds: float,
 ) -> None:
     logger.info(
-        "Batch %s complete: worker=%s candidates=%s archived=%s pruned=%s "
-        "logical_bytes=%s compressed_bytes=%s dry_run=%s elapsed=%.2fs "
-        "logical_rate=%s compressed_rate=%s",
+        "Batch %s complete: phase=%s worker=%s candidates=%s archived=%s "
+        "verified=%s pruned=%s logical_bytes=%s compressed_bytes=%s "
+        "dry_run=%s elapsed=%.2fs logical_rate=%s compressed_rate=%s",
         batch_number,
+        phase,
         worker_id,
         result.candidates,
         result.archived,
+        result.verified,
         result.pruned,
         result.logical_bytes,
         result.compressed_bytes,
@@ -95,6 +100,8 @@ def _run_pruner_worker(
     sleep_seconds: float,
     totals: dict,
     totals_lock: threading.Lock,
+    phase: str,
+    verify_inline: bool,
 ) -> None:
     pruner = TerminalSnapshotPruner(session_factory, config)
 
@@ -104,12 +111,21 @@ def _run_pruner_worker(
             return
 
         batch_started_at = time.monotonic()
-        result = pruner.prune_once()
+        if phase == "archive":
+            result = pruner.archive_once(verify_inline=verify_inline)
+        elif phase == "verify":
+            result = pruner.verify_archives_once()
+        elif phase == "prune":
+            result = pruner.prune_verified_once()
+        else:
+            result = pruner.prune_once()
         batch_elapsed = time.monotonic() - batch_started_at
         if result.candidates == 0:
             logger.info(
-                "Worker %s found no eligible terminal contract snapshots",
+                "Worker %s found no eligible terminal contract snapshots "
+                "for phase %s",
                 worker_id,
+                phase,
             )
             return
 
@@ -117,6 +133,7 @@ def _run_pruner_worker(
             _add_batch_result(totals, result)
 
         _log_batch_result(
+            phase=phase,
             batch_number=batch_number,
             worker_id=worker_id,
             result=result,
@@ -152,6 +169,26 @@ def build_parser() -> argparse.ArgumentParser:
             "Archive terminal transaction contract snapshots and prune them from "
             "the hot transactions table."
         )
+    )
+    parser.add_argument(
+        "--phase",
+        choices=("full", "archive", "verify", "prune"),
+        default="full",
+        help=(
+            "Pipeline phase to run. full preserves the original archive, verify, "
+            "and prune behavior in one pass. archive writes archive rows without "
+            "pruning. verify reads archived objects back and marks them verified. "
+            "prune removes hot snapshots only for verified archive rows."
+        ),
+    )
+    parser.add_argument(
+        "--inline-verify",
+        action="store_true",
+        help=(
+            "When --phase archive is used, read each object back immediately and "
+            "mark it verified. Off by default so archive and verification can be "
+            "scaled independently."
+        ),
     )
     parser.add_argument(
         "--batch-size",
@@ -211,7 +248,12 @@ def main() -> int:
             else config.retention_hours
         ),
     )
-    config.validate_for_run()
+    if args.phase == "archive":
+        config.validate_for_archive()
+    elif args.phase == "verify":
+        config.validate_for_verify()
+    elif args.phase == "full":
+        config.validate_for_run()
 
     engine = create_engine(
         get_database_url(),
@@ -230,8 +272,10 @@ def main() -> int:
 
     logger.info(
         "Starting terminal snapshot pruning "
-        "(batch_size=%s retention_hours=%s archive_enabled=%s "
-        "archive_backend=%s dry_run=%s workers=%s max_batches=%s)",
+        "(phase=%s batch_size=%s retention_hours=%s archive_enabled=%s "
+        "archive_backend=%s dry_run=%s workers=%s max_batches=%s "
+        "inline_verify=%s)",
+        args.phase,
         config.batch_size,
         config.retention_hours,
         config.archive_enabled,
@@ -239,6 +283,7 @@ def main() -> int:
         config.dry_run,
         args.workers,
         args.max_batches,
+        args.inline_verify,
     )
 
     started_at = time.monotonic()
@@ -253,6 +298,8 @@ def main() -> int:
                 sleep_seconds=args.sleep_seconds,
                 totals=totals,
                 totals_lock=totals_lock,
+                phase=args.phase,
+                verify_inline=args.inline_verify,
             )
             for worker_id in range(1, args.workers + 1)
         ]
