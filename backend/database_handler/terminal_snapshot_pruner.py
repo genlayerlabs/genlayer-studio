@@ -416,7 +416,7 @@ class GCSSnapshotArchiveWriter:
         body = (
             self.client.bucket(archive_result.bucket)
             .blob(archive_result.key)
-            .download_as_bytes()
+            .download_as_bytes(raw_download=True)
         )
         _verify_archive_result_body(archive_result, body)
 
@@ -651,7 +651,9 @@ class SnapshotArchiveReader:
         if not bucket:
             raise RuntimeError("GCS archive row is missing bucket")
         return (
-            self.gcs_client.bucket(bucket).blob(row["object_key"]).download_as_bytes()
+            self.gcs_client.bucket(bucket)
+            .blob(row["object_key"])
+            .download_as_bytes(raw_download=True)
         )
 
     def _download_s3(self, row: dict[str, Any]) -> bytes:
