@@ -823,9 +823,7 @@ class TerminalSnapshotPruner:
                         SELECT
                             hash,
                             status::text AS status,
-                            created_at,
-                            pg_column_size(contract_snapshot) AS snapshot_bytes,
-                            contract_snapshot::text AS snapshot_json
+                            created_at
                         FROM transactions
                         WHERE contract_snapshot IS NOT NULL
                           AND status IN ('FINALIZED', 'CANCELED')
@@ -833,22 +831,31 @@ class TerminalSnapshotPruner:
                         ORDER BY created_at ASC, hash ASC
                         LIMIT :candidate_scan_limit
                         FOR UPDATE SKIP LOCKED
+                    ),
+                    selected_rows AS MATERIALIZED (
+                        SELECT
+                            hash,
+                            status,
+                            created_at
+                        FROM candidate_rows
+                        WHERE NOT EXISTS (
+                              SELECT 1
+                              FROM transaction_snapshot_archives archives
+                              WHERE archives.tx_hash = candidate_rows.hash
+                                AND archives.archive_status IN ('archived', 'pruned')
+                          )
+                        ORDER BY created_at ASC, hash ASC
+                        LIMIT :batch_size
                     )
                     SELECT
-                        hash,
-                        status,
-                        created_at,
-                        snapshot_bytes,
-                        snapshot_json
-                    FROM candidate_rows
-                    WHERE NOT EXISTS (
-                          SELECT 1
-                          FROM transaction_snapshot_archives archives
-                          WHERE archives.tx_hash = candidate_rows.hash
-                            AND archives.archive_status IN ('archived', 'pruned')
-                      )
-                    ORDER BY created_at ASC, hash ASC
-                    LIMIT :batch_size
+                        selected_rows.hash,
+                        selected_rows.status,
+                        selected_rows.created_at,
+                        pg_column_size(transactions.contract_snapshot) AS snapshot_bytes,
+                        transactions.contract_snapshot::text AS snapshot_json
+                    FROM selected_rows
+                    JOIN transactions ON transactions.hash = selected_rows.hash
+                    ORDER BY selected_rows.created_at ASC, selected_rows.hash ASC
                     """
                 ),
                 {
