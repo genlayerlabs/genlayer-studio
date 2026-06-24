@@ -27,6 +27,10 @@ from backend.database_handler.terminal_snapshot_pruner import (
 )
 
 
+class PreconditionFailed(Exception):
+    code = 412
+
+
 class FakeS3Client:
     def __init__(self):
         self.calls = []
@@ -57,8 +61,12 @@ class FakeGCSBlob:
         self.uploads = []
         self.download_calls = []
 
-    def upload_from_string(self, data, content_type):
-        self.uploads.append({"data": data, "content_type": content_type})
+    def upload_from_string(self, data, content_type, **kwargs):
+        if kwargs.get("if_generation_match") == 0 and hasattr(self, "data"):
+            raise PreconditionFailed("object already exists")
+        self.uploads.append(
+            {"data": data, "content_type": content_type, "kwargs": kwargs}
+        )
         self.data = data
 
     def download_as_bytes(self, raw_download=False):
@@ -75,6 +83,9 @@ class FakeGCSBucket:
 
     def blob(self, key):
         return self.blobs.setdefault(key, FakeGCSBlob(key))
+
+    def get_blob(self, key):
+        return self.blobs.get(key)
 
 
 class FakeGCSClient:
@@ -536,9 +547,65 @@ def test_gcs_archive_writer_uploads_compressed_snapshot_with_metadata():
     assert blob.metadata["tx-hash"] == "0xABCDEF"
     assert blob.metadata["snapshot-sha256"] == hashlib.sha256(b'{"x":1}').hexdigest()
     assert blob.uploads[0]["content_type"] == "application/json"
+    assert blob.uploads[0]["kwargs"] == {"if_generation_match": 0}
     assert gzip.decompress(blob.uploads[0]["data"]) == b'{"x":1}'
     writer.verify(result)
     assert blob.download_calls == [True]
+
+
+def test_gcs_archive_writer_reuses_matching_existing_object():
+    client = FakeGCSClient()
+    writer = GCSSnapshotArchiveWriter(
+        bucket="archive-bucket",
+        prefix="studio/rally",
+        client=client,
+    )
+    candidate = SnapshotCandidate(
+        tx_hash="0xABCDEF",
+        status="FINALIZED",
+        created_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        snapshot_bytes=7,
+        snapshot_json='{"x":1}',
+    )
+
+    first_result = writer.archive(candidate)
+    second_result = writer.archive(candidate)
+
+    blob = client.buckets["archive-bucket"].blobs[first_result.key]
+    assert second_result == first_result
+    assert len(blob.uploads) == 1
+    assert blob.download_calls == [True]
+
+
+def test_gcs_archive_writer_rejects_mismatched_existing_object():
+    client = FakeGCSClient()
+    writer = GCSSnapshotArchiveWriter(
+        bucket="archive-bucket",
+        prefix="studio/rally",
+        client=client,
+    )
+    first_candidate = SnapshotCandidate(
+        tx_hash="0xABCDEF",
+        status="FINALIZED",
+        created_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        snapshot_bytes=7,
+        snapshot_json='{"x":1}',
+    )
+    second_candidate = SnapshotCandidate(
+        tx_hash="0xABCDEF",
+        status="FINALIZED",
+        created_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        snapshot_bytes=7,
+        snapshot_json='{"x":2}',
+    )
+
+    result = writer.archive(first_candidate)
+    blob = client.buckets["archive-bucket"].blobs[result.key]
+
+    with pytest.raises(RuntimeError, match="checksum mismatch"):
+        writer.archive(second_candidate)
+
+    assert len(blob.uploads) == 1
 
 
 def test_archive_writers_require_bucket_for_verification():

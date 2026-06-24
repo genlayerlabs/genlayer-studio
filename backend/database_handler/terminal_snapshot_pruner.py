@@ -283,6 +283,12 @@ def _verify_archive_result_body(archive_result: ArchiveResult, body: bytes) -> N
     )
 
 
+def _is_precondition_failed(exc: Exception) -> bool:
+    if exc.__class__.__name__ == "PreconditionFailed":
+        return True
+    return getattr(exc, "code", None) == 412
+
+
 class FileSnapshotArchiveWriter:
     backend = "file"
 
@@ -395,9 +401,7 @@ class GCSSnapshotArchiveWriter:
         blob.metadata = metadata
         if self.storage_class:
             blob.storage_class = self.storage_class
-        blob.upload_from_string(body, content_type="application/json")
-
-        return ArchiveResult(
+        archive_result = ArchiveResult(
             backend=self.backend,
             bucket=self.bucket,
             key=key,
@@ -409,6 +413,43 @@ class GCSSnapshotArchiveWriter:
             compressed_sha256=compressed_sha256,
             metadata=metadata,
         )
+        try:
+            blob.upload_from_string(
+                body,
+                content_type="application/json",
+                if_generation_match=0,
+            )
+        except Exception as exc:
+            if not _is_precondition_failed(exc):
+                raise
+            self._verify_existing_object(bucket, key, archive_result, metadata)
+
+        return archive_result
+
+    def _verify_existing_object(
+        self,
+        bucket,
+        key: str,
+        archive_result: ArchiveResult,
+        expected_metadata: dict[str, str],
+    ) -> None:
+        existing_blob = bucket.get_blob(key)
+        if existing_blob is None:
+            raise RuntimeError(
+                f"GCS archive object already exists but could not be read: {key}"
+            )
+
+        body = existing_blob.download_as_bytes(raw_download=True)
+        _verify_archive_result_body(archive_result, body)
+
+        actual_metadata = existing_blob.metadata or {}
+        for metadata_key, expected_value in expected_metadata.items():
+            actual_value = actual_metadata.get(metadata_key)
+            if actual_value != expected_value:
+                raise RuntimeError(
+                    "Existing GCS archive metadata mismatch for "
+                    f"{archive_result.key}: {metadata_key}"
+                )
 
     def verify(self, archive_result: ArchiveResult) -> None:
         if not archive_result.bucket:
