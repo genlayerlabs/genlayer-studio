@@ -55,12 +55,16 @@ class FakeGCSBlob:
         self.metadata = None
         self.storage_class = None
         self.uploads = []
+        self.download_calls = []
 
     def upload_from_string(self, data, content_type):
         self.uploads.append({"data": data, "content_type": content_type})
         self.data = data
 
-    def download_as_bytes(self):
+    def download_as_bytes(self, raw_download=False):
+        self.download_calls.append(raw_download)
+        if self.content_encoding == "gzip" and not raw_download:
+            return gzip.decompress(self.data)
         return self.data
 
 
@@ -353,6 +357,8 @@ def test_archive_reader_loads_cloud_backends():
     assert SnapshotArchiveReader(gcs_client=gcs_client).load_snapshot(
         gcs_session, candidate.tx_hash
     ) == {"x": 1}
+    gcs_blob = gcs_client.buckets["archive-bucket"].blobs[gcs_result.key]
+    assert gcs_blob.download_calls == [True]
 
 
 def test_archive_reader_file_download_fallbacks(tmp_path):
@@ -532,6 +538,7 @@ def test_gcs_archive_writer_uploads_compressed_snapshot_with_metadata():
     assert blob.uploads[0]["content_type"] == "application/json"
     assert gzip.decompress(blob.uploads[0]["data"]) == b'{"x":1}'
     writer.verify(result)
+    assert blob.download_calls == [True]
 
 
 def test_archive_writers_require_bucket_for_verification():
