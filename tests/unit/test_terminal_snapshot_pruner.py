@@ -137,6 +137,8 @@ class FakeSession:
 
     def execute(self, statement, params=None):
         sql = str(statement)
+        if "FROM selected_rows" in sql and "JOIN transactions" in sql:
+            return FakeMappingsResult(self.rows)
         if "FROM transactions" in sql and "JOIN transactions" not in sql:
             return FakeMappingsResult(self.rows)
         if "FROM transaction_snapshot_archives" in sql:
