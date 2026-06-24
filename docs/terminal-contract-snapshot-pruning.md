@@ -23,8 +23,14 @@ All backends use the same deterministic gzip JSON object format:
 
 An archive index row is written to `transaction_snapshot_archives` with the
 backend, object URI, uncompressed/compressed byte counts, and SHA-256 checksums.
-The pruner only sets `transactions.contract_snapshot = NULL` after the archive
-write and index row succeed.
+The fastest production drain should run as a three-phase pipeline:
+
+1. Archive snapshots and write archive index rows.
+2. Verify archived objects by reading them back and setting `verified_at`.
+3. Prune only hot snapshots whose archive row has been verified.
+
+The legacy/default `full` CLI phase still performs archive, read-back
+verification, and pruning in one pass for small/manual runs.
 
 ## Runtime Auto-Pruner
 
@@ -69,14 +75,15 @@ STUDIO_CONTRACT_SNAPSHOT_PRUNER_VERIFY_ARCHIVE=true
 STUDIO_CONTRACT_SNAPSHOT_ARCHIVE_RETRIEVAL_ENABLED=true
 ```
 
-Each batch:
+The default `full` phase performs all work in one batch:
 
 1. Locks a small set of `FINALIZED` or `CANCELED` rows with
    `contract_snapshot IS NOT NULL`.
 2. Writes each snapshot to the configured backend as deterministic gzip JSON.
 3. Reads the archived object back and verifies the compressed checksum, gzip
    payload, and raw JSON checksum.
-4. Stores object location and checksums in `transaction_snapshot_archives`.
+4. Stores object location, checksums, and `verified_at` in
+   `transaction_snapshot_archives`.
 5. Sets `transactions.contract_snapshot = NULL` only after the archive write,
    read-back verification, and index row succeed.
 
@@ -88,10 +95,49 @@ mode and is rejected unless
 
 ## One-Time Historical Drain
 
-Use the same implementation for one-time cleanup:
+For large one-time cleanup, prefer the split pipeline. Keep the background
+pruner disabled while these commands run.
+
+Archive phase, no deletion:
 
 ```bash
 python -m backend.database_handler.prune_terminal_snapshots \
+  --phase archive \
+  --batch-size 25 \
+  --retention-hours 24 \
+  --workers 4 \
+  --max-batches 100 \
+  --sleep-seconds 0
+```
+
+Verify phase, no deletion:
+
+```bash
+python -m backend.database_handler.prune_terminal_snapshots \
+  --phase verify \
+  --batch-size 25 \
+  --workers 4 \
+  --max-batches 100 \
+  --sleep-seconds 0
+```
+
+Prune phase, deletes only verified archive rows:
+
+```bash
+python -m backend.database_handler.prune_terminal_snapshots \
+  --phase prune \
+  --batch-size 100 \
+  --retention-hours 24 \
+  --workers 4 \
+  --max-batches 100 \
+  --sleep-seconds 0
+```
+
+Use the legacy all-in-one phase for tiny/manual checks:
+
+```bash
+python -m backend.database_handler.prune_terminal_snapshots \
+  --phase full \
   --batch-size 5 \
   --retention-hours 24
 ```
@@ -110,6 +156,7 @@ Use `--workers` for bounded parallel one-time drains:
 
 ```bash
 python -m backend.database_handler.prune_terminal_snapshots \
+  --phase archive \
   --batch-size 5 \
   --retention-hours 24 \
   --workers 4 \
@@ -117,10 +164,9 @@ python -m backend.database_handler.prune_terminal_snapshots \
   --sleep-seconds 0
 ```
 
-Each worker uses its own database session and the shared candidate query uses
-`FOR UPDATE SKIP LOCKED`, so workers claim different rows. The CLI caps its
-database connection pool to the worker count. Keep the background pruner disabled
-while running a one-time parallel drain.
+Each worker uses its own database session and the shared queue queries use
+`FOR UPDATE SKIP LOCKED`, so workers claim different rows/archive rows. The CLI
+caps its database connection pool to the worker count.
 
 ## Read-Through Retrieval
 
@@ -392,6 +438,7 @@ Start with lossless archive verification enabled. Do not set
 
    ```bash
    python -m backend.database_handler.prune_terminal_snapshots \
+     --phase archive \
      --dry-run \
      --batch-size 5 \
      --retention-hours 24 \
@@ -404,6 +451,7 @@ Start with lossless archive verification enabled. Do not set
 
    ```bash
    python -m backend.database_handler.prune_terminal_snapshots \
+     --phase full \
      --batch-size 1 \
      --retention-hours 24 \
      --max-batches 1 \
@@ -414,13 +462,41 @@ Start with lossless archive verification enabled. Do not set
 5. Verify the pruned transaction end to end:
    archive row, object metadata, checksum, hot row null, and direct read
    hydration.
-6. Run a small measured batch ladder while watching DB CPU/IO, object-store
+6. For the real historical drain, switch to the split pipeline:
+
+   ```bash
+   python -m backend.database_handler.prune_terminal_snapshots \
+     --phase archive \
+     --batch-size 25 \
+     --retention-hours 24 \
+     --max-batches 100 \
+     --workers 4 \
+     --sleep-seconds 0
+
+   python -m backend.database_handler.prune_terminal_snapshots \
+     --phase verify \
+     --batch-size 25 \
+     --max-batches 100 \
+     --workers 4 \
+     --sleep-seconds 0
+
+   python -m backend.database_handler.prune_terminal_snapshots \
+     --phase prune \
+     --batch-size 100 \
+     --retention-hours 24 \
+     --max-batches 100 \
+     --workers 4 \
+     --sleep-seconds 0
+   ```
+
+7. Run a small measured batch ladder while watching DB CPU/IO, object-store
    errors, RPC latency, and application logs:
-   `workers=1`, then `workers=2`, then `workers=4`.
-7. Continue the one-time drain only at the highest worker count that remains
-   healthy. The Rally probe suggests starting with `workers=4` as the likely
-   practical ceiling unless live metrics prove otherwise.
-8. After the historical drain, enable the background pruner only if steady-state
+   `workers=1`, then `workers=2`, then `workers=4`. Use dedicated one-off
+   Kubernetes Jobs for large drains instead of execing inside serving RPC pods.
+8. Continue the one-time drain only at the highest worker/job count that remains
+   healthy. Keep verification and pruning behind the archive phase; do not prune
+   rows whose archive row lacks `verified_at`.
+9. After the historical drain, enable the background pruner only if steady-state
    pruning is desired. Use a conservative retention window and batch size first,
    for example `retention_hours=24`, `batch_size=5`, `interval_seconds=300`.
 

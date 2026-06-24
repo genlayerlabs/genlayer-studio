@@ -227,6 +227,9 @@ class TransactionSnapshotArchive(Base):
     pruned_at: Mapped[Optional[datetime.datetime]] = mapped_column(
         DateTime(True), nullable=True, default=None
     )
+    verified_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), nullable=True, default=None
+    )
     object_metadata: Mapped[Optional[dict]] = mapped_column(
         JSONB, nullable=True, default=None
     )
