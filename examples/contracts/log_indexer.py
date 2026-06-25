@@ -62,15 +62,18 @@ class LogIndexer(gl.contract.Contract):
 
     @gl.public.write
     def update_log(self, log_id: int, log: str) -> None:
-        # Locate the element by exact text match via plain iteration instead
-        # of knn: the nearest-neighbour search ends in the same text-equality
-        # check anyway, and the cover-tree knn currently trips GenVM main's
-        # deterministic-mode float trap (wasm_trap DeterministicMode) when
-        # invoked from a write method. Views (get_closest_vector) still
-        # exercise knn.
+        emb = self.get_embedding(log)
+
+        # Locate the element by id via plain iteration instead of knn: the
+        # cover-tree knn currently trips GenVM main's deterministic-mode
+        # float trap (wasm_trap DeterministicMode) when invoked from a write
+        # method. Views (get_closest_vector) still exercise knn.
         for elem in self.vector_store:
-            if elem.value.text == log:
-                elem.value.log_id = u256(log_id)
+            if elem.value.log_id == log_id:
+                elem.remove()
+                break
+
+        self.vector_store.insert(emb, StoreValue(text=log, log_id=u256(log_id)))
 
     @gl.public.write
     def remove_log(self, id: int) -> None:
