@@ -179,10 +179,12 @@ RUN cd /genvm \
     && chown -R backend-user:backend-group /genvm \
     # Source path: skip lief bin-patch — nix outputs are already
     # $ORIGIN-rpath-patched by genvm's patch-rpath, and lief SIGABRTs on the
-    # zig/musl-linked amd64 executor ("Can't read got entries"). bin-check
-    # still validates the binaries execute. --default-download false: nothing
-    # to download for an unreleased SHA.
-    && if [[ "$has_prebuilt" == "1" || -n "$GENVM_REF" ]]; then \
+    # zig/musl-linked amd64 executor ("Can't read got entries"). E2E prebuilt
+    # runtimes come from dev-env and may still point at a host Nix-store loader,
+    # so keep download disabled but let post-install patch them for this image.
+    && if [[ "$has_prebuilt" == "1" ]]; then \
+            su - backend-user -c "/genvm/bin/post-install.py --precompile false --default-download false" ; \
+        elif [[ -n "$GENVM_REF" ]]; then \
             su - backend-user -c "/genvm/bin/post-install.py --precompile false --default-download false --bin-patch false" ; \
         else \
             su - backend-user -c "/genvm/bin/post-install.py --precompile false" ; \
