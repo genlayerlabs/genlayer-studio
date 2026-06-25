@@ -30,6 +30,7 @@ class LogIndexer(gl.contract.Contract):
         np.float32, typing.Literal[384], StoreValue, gle.EuclideanDistance
     ]
     log_vector_ids: TreeMap[u256, u32]
+    removed_log_ids: TreeMap[u256, bool]
 
     def __init__(self):
         pass
@@ -47,6 +48,8 @@ class LogIndexer(gl.contract.Contract):
         emb = self.get_embedding(text)
         for result in self.vector_store.knn(emb, len(self.vector_store)):
             log_id = result.value.log_id
+            if log_id in self.removed_log_ids and self.removed_log_ids[log_id]:
+                continue
             if log_id not in self.log_vector_ids:
                 continue
             if self.log_vector_ids[log_id] != u32(result.id):
@@ -62,6 +65,12 @@ class LogIndexer(gl.contract.Contract):
     @gl.public.write
     def add_log(self, log: str, log_id: int) -> None:
         key = u256(log_id)
+        if key in self.log_vector_ids:
+            self.vector_store.get_by_id(self.log_vector_ids[key]).value = StoreValue(
+                text=log, log_id=key
+            )
+            return
+
         emb = self.get_embedding(log)
         vector_id = self.vector_store.insert(emb, StoreValue(text=log, log_id=key))
         self.log_vector_ids[key] = u32(vector_id)
@@ -69,6 +78,12 @@ class LogIndexer(gl.contract.Contract):
     @gl.public.write
     def update_log(self, log_id: int, log: str) -> None:
         key = u256(log_id)
+        if key in self.log_vector_ids:
+            self.vector_store.get_by_id(self.log_vector_ids[key]).value = StoreValue(
+                text=log, log_id=key
+            )
+            return
+
         emb = self.get_embedding(log)
         vector_id = self.vector_store.insert(emb, StoreValue(text=log, log_id=key))
         self.log_vector_ids[key] = u32(vector_id)
@@ -77,4 +92,4 @@ class LogIndexer(gl.contract.Contract):
     def remove_log(self, id: int) -> None:
         key = u256(id)
         if key in self.log_vector_ids:
-            del self.log_vector_ids[key]
+            self.removed_log_ids[key] = True
