@@ -45,23 +45,23 @@ class LogIndexer(gl.contract.Contract):
     @gl.public.view
     def get_closest_vector(self, text: str) -> dict | None:
         emb = self.get_embedding(text)
-        result = list(self.vector_store.knn(emb, 1))
-        if len(result) == 0:
-            return None
-        result = result[0]
-        return {
-            "vector": list(str(x) for x in result.key),
-            "similarity": str(1 - result.distance),
-            "id": result.value.log_id,
-            "text": result.value.text,
-        }
+        for result in self.vector_store.knn(emb, len(self.vector_store)):
+            log_id = result.value.log_id
+            if log_id not in self.log_vector_ids:
+                continue
+            if self.log_vector_ids[log_id] != u32(result.id):
+                continue
+            return {
+                "vector": list(str(x) for x in result.key),
+                "similarity": str(1 - result.distance),
+                "id": result.value.log_id,
+                "text": result.value.text,
+            }
+        return None
 
     @gl.public.write
     def add_log(self, log: str, log_id: int) -> None:
         key = u256(log_id)
-        if key in self.log_vector_ids:
-            self.vector_store.get_by_id(self.log_vector_ids[key]).remove()
-
         emb = self.get_embedding(log)
         vector_id = self.vector_store.insert(emb, StoreValue(text=log, log_id=key))
         self.log_vector_ids[key] = u32(vector_id)
@@ -69,9 +69,6 @@ class LogIndexer(gl.contract.Contract):
     @gl.public.write
     def update_log(self, log_id: int, log: str) -> None:
         key = u256(log_id)
-        if key in self.log_vector_ids:
-            self.vector_store.get_by_id(self.log_vector_ids[key]).remove()
-
         emb = self.get_embedding(log)
         vector_id = self.vector_store.insert(emb, StoreValue(text=log, log_id=key))
         self.log_vector_ids[key] = u32(vector_id)
@@ -80,5 +77,4 @@ class LogIndexer(gl.contract.Contract):
     def remove_log(self, id: int) -> None:
         key = u256(id)
         if key in self.log_vector_ids:
-            self.vector_store.get_by_id(self.log_vector_ids[key]).remove()
             del self.log_vector_ids[key]
