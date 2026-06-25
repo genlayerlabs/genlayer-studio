@@ -1,7 +1,7 @@
-# v0.2.16
+# v0.3-dev
 # {
 #   "Seq": [
-#     { "Depends": "py-lib-genlayer-embeddings:0wcvi35grdr47ynkckzriz5sjn5080w2njk7v2cqx3xpp6p1989y" },
+#     { "Depends": "py-lib-genlayer-embeddings:1md4i1njqn0h0psgjdl97mz10rpp1268ychpn6l2dmr81fbvxknb" },
 #     { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
 #   ]
 # }
@@ -25,10 +25,9 @@ class StoreValue:
 
 # contract class
 class LogIndexer(gl.contract.Contract):
-    # The 0wcvi35 embeddings runner's VecDB takes an explicit Distance type
-    # parameter.
+    # The v0.3 embeddings runner's VecDB takes an explicit metric type.
     vector_store: gle.VecDB[
-        np.float32, typing.Literal[384], StoreValue, gle.EuclideanDistanceSquared
+        np.float32, typing.Literal[384], StoreValue, gle.EuclideanDistance
     ]
 
     def __init__(self):

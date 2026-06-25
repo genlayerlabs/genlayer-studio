@@ -8,7 +8,16 @@ def test_genvm_smoke_contract(setup_validators):
     This is intentionally small: it validates that web rendering + LLM calls
     can execute inside a contract and that the deployed contract is readable.
     """
-    setup_validators()
+    mock_web_response = {
+        "nondet_web_render": {
+            "https://example.com/": {
+                "mode": "text",
+                "status": 200,
+                "body": "Example Domain",
+            },
+        },
+    }
+    setup_validators(mock_web_response=mock_web_response)
     factory = get_contract_factory("GenVMSmoke")
     contract = factory.deploy(args=[])
 
