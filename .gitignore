@@ -177,3 +177,7 @@ frontend/test-results/
 # Local tool caches
 .vite/
 .claude/scheduled_tasks.lock
+
+# E2E injects a shared GenVM runtime here for Docker builds.
+.e2e-genvm-prebuilt/*
+!.e2e-genvm-prebuilt/.gitkeep
