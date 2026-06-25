@@ -337,6 +337,9 @@ async def _run_health_checks() -> None:
             "stuck_finalization_count": consensus_health.get(
                 "stuck_finalization_count", 0
             ),
+            "stuck_finalization_transactions": consensus_health.get(
+                "stuck_finalization_transactions", []
+            ),
             "recovery_storm_count": consensus_health.get("recovery_storm_count", 0),
             "max_recovery_count": consensus_health.get("max_recovery_count", 0),
             "max_recovery_exhausted_count": consensus_health.get(
@@ -659,6 +662,9 @@ async def _check_consensus_health() -> Dict[str, Any]:
         os.environ.get("HEALTH_MAX_RECOVERY_EXHAUSTED_EVENT_LIMIT", "10")
     )
     STUCK_HEAD_EVENT_LIMIT = int(os.environ.get("HEALTH_STUCK_HEAD_EVENT_LIMIT", "10"))
+    STUCK_FINALIZATION_EVENT_LIMIT = int(
+        os.environ.get("HEALTH_STUCK_FINALIZATION_EVENT_LIMIT", "10")
+    )
 
     try:
         if not _rpc_router_ref:
@@ -772,27 +778,82 @@ async def _check_consensus_health() -> Dict[str, Any]:
                 #      reached UNDETERMINED without ever stamping the
                 #      timestamp — invisible to claim_next_finalization
                 #      forever)
-                stuck_fin_row = conn.execute(
+                stuck_fin_rows = conn.execute(
                     text(
                         f"""
-                        SELECT COUNT(*) AS n
-                        FROM transactions
-                        WHERE status IN ({FINALIZATION_ELIGIBLE_STATUSES_SQL})
-                          AND (
-                              (timestamp_awaiting_finalization IS NOT NULL
-                               AND EXTRACT(EPOCH FROM NOW())::bigint
-                                   - timestamp_awaiting_finalization
-                                   > :stuck_seconds)
-                              OR
-                              (timestamp_awaiting_finalization IS NULL
-                               AND created_at
-                                   < NOW() - make_interval(secs => :stuck_seconds))
-                          )
+                        WITH stuck_finalizations AS (
+                            SELECT
+                                hash AS tx_hash,
+                                to_address,
+                                status,
+                                created_at,
+                                timestamp_awaiting_finalization,
+                                blocked_at,
+                                worker_id,
+                                CASE
+                                    WHEN timestamp_awaiting_finalization IS NOT NULL
+                                    THEN EXTRACT(EPOCH FROM NOW())::bigint
+                                        - timestamp_awaiting_finalization
+                                    ELSE EXTRACT(EPOCH FROM NOW() - created_at)::bigint
+                                END AS waiting_seconds
+                            FROM transactions
+                            WHERE status IN ({FINALIZATION_ELIGIBLE_STATUSES_SQL})
+                              AND (
+                                  (timestamp_awaiting_finalization IS NOT NULL
+                                   AND EXTRACT(EPOCH FROM NOW())::bigint
+                                       - timestamp_awaiting_finalization
+                                       > :stuck_seconds)
+                                  OR
+                                  (timestamp_awaiting_finalization IS NULL
+                                   AND created_at
+                                       < NOW() - make_interval(secs => :stuck_seconds))
+                              )
+                        )
+                        SELECT
+                            COUNT(*) OVER() AS total_count,
+                            tx_hash,
+                            to_address,
+                            status,
+                            EXTRACT(EPOCH FROM created_at)::bigint
+                                AS created_at_epoch,
+                            timestamp_awaiting_finalization,
+                            EXTRACT(EPOCH FROM blocked_at)::bigint
+                                AS blocked_at_epoch,
+                            worker_id,
+                            waiting_seconds
+                        FROM stuck_finalizations
+                        ORDER BY
+                            COALESCE(
+                                timestamp_awaiting_finalization,
+                                EXTRACT(EPOCH FROM created_at)::bigint
+                            ) ASC,
+                            tx_hash ASC
+                        LIMIT :event_limit
                         """
                     ),
-                    {"stuck_seconds": STUCK_FINALIZATION_AFTER_SECONDS},
-                ).fetchone()
-                stuck_finalization_count = stuck_fin_row.n if stuck_fin_row else 0
+                    {
+                        "stuck_seconds": STUCK_FINALIZATION_AFTER_SECONDS,
+                        "event_limit": STUCK_FINALIZATION_EVENT_LIMIT,
+                    },
+                ).fetchall()
+                stuck_finalization_count = (
+                    stuck_fin_rows[0].total_count if stuck_fin_rows else 0
+                )
+                stuck_finalization_transactions = [
+                    {
+                        "hash": row.tx_hash,
+                        "contract_address": row.to_address,
+                        "status": row.status,
+                        "created_at": row.created_at_epoch,
+                        "timestamp_awaiting_finalization": (
+                            row.timestamp_awaiting_finalization
+                        ),
+                        "blocked_at": row.blocked_at_epoch,
+                        "worker_id": row.worker_id,
+                        "waiting_seconds": row.waiting_seconds,
+                    }
+                    for row in stuck_fin_rows
+                ]
 
                 # Recovery storm: a non-terminal transaction that has already
                 # been reset several times is a high-confidence poison-tx
@@ -1050,6 +1111,9 @@ async def _check_consensus_health() -> Dict[str, Any]:
                     "total_orphaned_transactions": stuck_head_contracts,
                     "stuck_head_transactions": stuck_head_transactions,
                     "stuck_finalization_count": stuck_finalization_count,
+                    "stuck_finalization_transactions": (
+                        stuck_finalization_transactions
+                    ),
                     "recovery_storm_count": recovery_storm_count,
                     "max_recovery_count": max_recovery_count,
                     "max_recovery_exhausted_count": max_recovery_exhausted_count,
