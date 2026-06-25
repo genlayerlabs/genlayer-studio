@@ -26,18 +26,18 @@ jobs:
     if: github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.base.ref }}
-
       - name: Retarget PR to active dev branch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
 
-          active_branch="$(tr -d '[:space:]' < support/ci/ACTIVE_DEV_BRANCH)"
+          active_branch="$(
+            gh api "/repos/${GITHUB_REPOSITORY}/contents/support/ci/ACTIVE_DEV_BRANCH?ref=${BASE_REF}" \
+              --jq '.content' | base64 -d | tr -d '[:space:]'
+          )"
           if [[ -z "${active_branch}" || "${active_branch}" == "main" ]]; then
             echo "::error::support/ci/ACTIVE_DEV_BRANCH must name a non-main dev branch"
             exit 1

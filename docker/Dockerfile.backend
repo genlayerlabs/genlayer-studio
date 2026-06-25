@@ -2,6 +2,7 @@ FROM nixos/nix:2.30.2 AS genvm-source-build
 
 ARG TARGETARCH
 ARG GENVM_REF
+ARG GENVM_EXECUTOR_VERSION_NAME
 # Nix `cores` for the genvm build (0 = all). Cap on memory-constrained or
 # emulated builders where a full-parallel rust build can OOM.
 ARG GENVM_BUILD_CORES=0
@@ -27,13 +28,18 @@ RUN set -euo pipefail ; \
         git checkout "$GENVM_REF" ; \
         FULL_SHA="$(git rev-parse HEAD)" ; \
         SHORT_SHA="$(git rev-parse --short HEAD)" ; \
-        # Executor version must extend a version the committed manifest knows:
-        # genvm's patch-manifest renames the highest base `vX.Y.Z` entry to our
-        # `vX.Y.Z-dev<sha>` tag (suffix branch of its version matching), so
-        # derive the base from the bound ref's own manifest.
-        BASE_VER="$(grep -oE '^  v[0-9]+\.[0-9]+\.[0-9]+:' modules/install/data/manifest.yaml | tr -d ' :' | sort -V | tail -n1)" ; \
-        test -n "$BASE_VER" ; \
-        printf '{"executor-version":"%s-dev%s","repo-url":"https://github.com/genlayerlabs/genvm.git","head-revision":"%s"}\n' "$BASE_VER" "$SHORT_SHA" "$FULL_SHA" > flake-config.json ; \
+        if [ -n "${GENVM_EXECUTOR_VERSION_NAME:-}" ]; then \
+            EXECUTOR_VERSION="$GENVM_EXECUTOR_VERSION_NAME" ; \
+        else \
+            # Executor version must extend a version the committed manifest knows:
+            # genvm's patch-manifest renames the highest base `vX.Y.Z` entry to our
+            # `vX.Y.Z-dev<sha>` tag (suffix branch of its version matching), so
+            # derive the base from the bound ref's own manifest.
+            BASE_VER="$(grep -oE '^  v[0-9]+\.[0-9]+\.[0-9]+:' modules/install/data/manifest.yaml | tr -d ' :' | sort -V | tail -n1)" ; \
+            test -n "$BASE_VER" ; \
+            EXECUTOR_VERSION="${BASE_VER}-dev${SHORT_SHA}" ; \
+        fi ; \
+        printf '{"executor-version":"%s","repo-url":"https://github.com/genlayerlabs/genvm.git","head-revision":"%s"}\n' "$EXECUTOR_VERSION" "$FULL_SHA" > flake-config.json ; \
         if [[ "$TARGETARCH" == "amd64" ]] || [[ -z "$TARGETARCH" ]]; then \
             GT="amd64-linux" ; \
         elif [[ "$TARGETARCH" == "arm64" ]]; then \
@@ -85,9 +91,11 @@ ARG TARGETARCH
 
 ARG GENVM_TAG
 ARG GENVM_REF
+ARG GENVM_EXECUTOR_VERSION_NAME
 
 ENV GENVM_TAG=$GENVM_TAG
 ENV GENVM_REF=$GENVM_REF
+ENV GENVM_EXECUTOR_VERSION_NAME=$GENVM_EXECUTOR_VERSION_NAME
 
 ARG path=/app
 WORKDIR $path
@@ -131,11 +139,19 @@ ENV RUST_BACKTRACE=1
 # Download and extract GenVM binaries. Keep downloads in the extraction layer so
 # architecture tarballs do not remain in lower image layers.
 COPY --from=genvm-source-build /genvm-out/ /genvm/
+COPY .e2e-genvm-prebuilt/ /genvm-prebuilt/
 RUN cd /genvm \
-    && if [[ -n "$GENVM_TAG" && -n "$GENVM_REF" ]] || [[ -z "$GENVM_TAG" && -z "$GENVM_REF" ]]; then \
+    && has_prebuilt=0 \
+    && if [[ -x "/genvm-prebuilt/bin/genvm-modules" ]]; then \
+            echo "Using prebuilt GenVM runtime from build context" ; \
+            cp -a /genvm-prebuilt/. /genvm/ ; \
+            rm -f /genvm/.gitkeep ; \
+            has_prebuilt=1 ; \
+        fi \
+    && if [[ "$has_prebuilt" == "0" && -n "$GENVM_TAG" && -n "$GENVM_REF" ]] || [[ "$has_prebuilt" == "0" && -z "$GENVM_TAG" && -z "$GENVM_REF" ]]; then \
             echo "ERROR: exactly one of GENVM_TAG or GENVM_REF must be set" ; exit 1 ; \
         fi \
-    && if [[ -z "$GENVM_REF" ]]; then \
+    && if [[ "$has_prebuilt" == "0" && -z "$GENVM_REF" ]]; then \
         if [[ "$TARGETPLATFORM" == "linux/amd64" ]] || [[ -z "$TARGETPLATFORM" ]]; then \
             ARCH_FILE="genvm-linux-amd64.tar.xz" ; \
         elif [[ "$TARGETPLATFORM" == "linux/arm64" ]] ; \
@@ -163,10 +179,12 @@ RUN cd /genvm \
     && chown -R backend-user:backend-group /genvm \
     # Source path: skip lief bin-patch — nix outputs are already
     # $ORIGIN-rpath-patched by genvm's patch-rpath, and lief SIGABRTs on the
-    # zig/musl-linked amd64 executor ("Can't read got entries"). bin-check
-    # still validates the binaries execute. --default-download false: nothing
-    # to download for an unreleased SHA.
-    && if [[ -n "$GENVM_REF" ]]; then \
+    # zig/musl-linked amd64 executor ("Can't read got entries"). E2E prebuilt
+    # runtimes come from dev-env and may still point at a host Nix-store loader,
+    # so keep download disabled but let post-install patch them for this image.
+    && if [[ "$has_prebuilt" == "1" ]]; then \
+            su - backend-user -c "/genvm/bin/post-install.py --precompile false --default-download false" ; \
+        elif [[ -n "$GENVM_REF" ]]; then \
             su - backend-user -c "/genvm/bin/post-install.py --precompile false --default-download false --bin-patch false" ; \
         else \
             su - backend-user -c "/genvm/bin/post-install.py --precompile false" ; \

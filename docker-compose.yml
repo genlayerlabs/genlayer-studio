@@ -114,6 +114,7 @@ services:
       args:
         GENVM_TAG: ${GENVM_TAG:-}
         GENVM_REF: ${GENVM_REF:-}
+        GENVM_EXECUTOR_VERSION_NAME: ${GENVM_EXECUTOR_VERSION_NAME:-}
     environment:
       - PYTHONUNBUFFERED=1
       - WEBDRIVERHOST=${WEBDRIVERHOST}
@@ -302,6 +303,7 @@ services:
       args:
         GENVM_TAG: ${GENVM_TAG:-}
         GENVM_REF: ${GENVM_REF:-}
+        GENVM_EXECUTOR_VERSION_NAME: ${GENVM_EXECUTOR_VERSION_NAME:-}
     environment:
       - DBUSER=${DBUSER}
       - DBPASSWORD=${DBPASSWORD}

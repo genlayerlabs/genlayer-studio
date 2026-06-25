@@ -1,7 +1,7 @@
-# v0.2.16
+# v0.3-dev
 # {
 #   "Seq": [
-#     { "Depends": "py-lib-genlayer-embeddings:0wcvi35grdr47ynkckzriz5sjn5080w2njk7v2cqx3xpp6p1989y" },
+#     { "Depends": "py-lib-genlayer-embeddings:1md4i1njqn0h0psgjdl97mz10rpp1268ychpn6l2dmr81fbvxknb" },
 #     { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
 #   ]
 # }
@@ -25,11 +25,12 @@ class StoreValue:
 
 # contract class
 class LogIndexer(gl.contract.Contract):
-    # The 0wcvi35 embeddings runner's VecDB takes an explicit Distance type
-    # parameter.
+    # The v0.3 embeddings runner's VecDB takes an explicit metric type.
     vector_store: gle.VecDB[
-        np.float32, typing.Literal[384], StoreValue, gle.EuclideanDistanceSquared
+        np.float32, typing.Literal[384], StoreValue, gle.EuclideanDistance
     ]
+    log_vector_ids: TreeMap[u256, u32]
+    removed_log_ids: TreeMap[u256, bool]
 
     def __init__(self):
         pass
@@ -45,36 +46,50 @@ class LogIndexer(gl.contract.Contract):
     @gl.public.view
     def get_closest_vector(self, text: str) -> dict | None:
         emb = self.get_embedding(text)
-        result = list(self.vector_store.knn(emb, 1))
-        if len(result) == 0:
-            return None
-        result = result[0]
-        return {
-            "vector": list(str(x) for x in result.key),
-            "similarity": str(1 - result.distance),
-            "id": result.value.log_id,
-            "text": result.value.text,
-        }
+        for result in self.vector_store.knn(emb, len(self.vector_store)):
+            log_id = result.value.log_id
+            if log_id in self.removed_log_ids and self.removed_log_ids[log_id]:
+                continue
+            if log_id not in self.log_vector_ids:
+                continue
+            if self.log_vector_ids[log_id] != u32(result.id):
+                continue
+            return {
+                "vector": list(str(x) for x in result.key),
+                "similarity": str(1 - result.distance),
+                "id": result.value.log_id,
+                "text": result.value.text,
+            }
+        return None
 
     @gl.public.write
     def add_log(self, log: str, log_id: int) -> None:
+        key = u256(log_id)
+        if key in self.log_vector_ids:
+            self.vector_store.get_by_id(self.log_vector_ids[key]).value = StoreValue(
+                text=log, log_id=key
+            )
+            return
+
         emb = self.get_embedding(log)
-        self.vector_store.insert(emb, StoreValue(text=log, log_id=u256(log_id)))
+        vector_id = self.vector_store.insert(emb, StoreValue(text=log, log_id=key))
+        self.log_vector_ids[key] = u32(vector_id)
 
     @gl.public.write
     def update_log(self, log_id: int, log: str) -> None:
-        # Locate the element by exact text match via plain iteration instead
-        # of knn: the nearest-neighbour search ends in the same text-equality
-        # check anyway, and the cover-tree knn currently trips GenVM main's
-        # deterministic-mode float trap (wasm_trap DeterministicMode) when
-        # invoked from a write method. Views (get_closest_vector) still
-        # exercise knn.
-        for elem in self.vector_store:
-            if elem.value.text == log:
-                elem.value.log_id = u256(log_id)
+        key = u256(log_id)
+        if key in self.log_vector_ids:
+            self.vector_store.get_by_id(self.log_vector_ids[key]).value = StoreValue(
+                text=log, log_id=key
+            )
+            return
+
+        emb = self.get_embedding(log)
+        vector_id = self.vector_store.insert(emb, StoreValue(text=log, log_id=key))
+        self.log_vector_ids[key] = u32(vector_id)
 
     @gl.public.write
     def remove_log(self, id: int) -> None:
-        for el in self.vector_store:
-            if el.value.log_id == id:
-                el.remove()
+        key = u256(id)
+        if key in self.log_vector_ids:
+            self.removed_log_ids[key] = True
