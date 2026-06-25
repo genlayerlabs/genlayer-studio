@@ -29,6 +29,7 @@ class LogIndexer(gl.contract.Contract):
     vector_store: gle.VecDB[
         np.float32, typing.Literal[384], StoreValue, gle.EuclideanDistance
     ]
+    log_vector_ids: TreeMap[u256, u32]
 
     def __init__(self):
         pass
@@ -57,26 +58,27 @@ class LogIndexer(gl.contract.Contract):
 
     @gl.public.write
     def add_log(self, log: str, log_id: int) -> None:
+        key = u256(log_id)
+        if key in self.log_vector_ids:
+            self.vector_store.get_by_id(self.log_vector_ids[key]).remove()
+
         emb = self.get_embedding(log)
-        self.vector_store.insert(emb, StoreValue(text=log, log_id=u256(log_id)))
+        vector_id = self.vector_store.insert(emb, StoreValue(text=log, log_id=key))
+        self.log_vector_ids[key] = u32(vector_id)
 
     @gl.public.write
     def update_log(self, log_id: int, log: str) -> None:
+        key = u256(log_id)
+        if key in self.log_vector_ids:
+            self.vector_store.get_by_id(self.log_vector_ids[key]).remove()
+
         emb = self.get_embedding(log)
-
-        # Locate the element by id via plain iteration instead of knn: the
-        # cover-tree knn currently trips GenVM main's deterministic-mode
-        # float trap (wasm_trap DeterministicMode) when invoked from a write
-        # method. Views (get_closest_vector) still exercise knn.
-        for elem in self.vector_store:
-            if elem.value.log_id == log_id:
-                elem.remove()
-                break
-
-        self.vector_store.insert(emb, StoreValue(text=log, log_id=u256(log_id)))
+        vector_id = self.vector_store.insert(emb, StoreValue(text=log, log_id=key))
+        self.log_vector_ids[key] = u32(vector_id)
 
     @gl.public.write
     def remove_log(self, id: int) -> None:
-        for el in self.vector_store:
-            if el.value.log_id == id:
-                el.remove()
+        key = u256(id)
+        if key in self.log_vector_ids:
+            self.vector_store.get_by_id(self.log_vector_ids[key]).remove()
+            del self.log_vector_ids[key]
