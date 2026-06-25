@@ -3,7 +3,6 @@
 import os
 import sys
 import asyncio
-import signal
 import time
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -23,7 +22,6 @@ import backend.validators as validators
 from loguru import logger
 
 from backend.protocol_rpc.app_lifespan import create_genvm_manager
-
 
 # Configure loguru to route logs correctly for GCP Cloud Logging
 # GCP determines severity by stream: stdout=INFO, stderr=ERROR
@@ -74,7 +72,7 @@ _genvm_failure_unhealthy_threshold: int = int(
     os.environ.get("GENVM_FAILURE_UNHEALTHY_THRESHOLD", "3")
 )
 
-# Graceful shutdown flag - set when SIGTERM received
+# Graceful shutdown flag - set by /stop and lifespan shutdown
 shutting_down: bool = False
 
 
@@ -105,18 +103,10 @@ def get_genvm_failure_count() -> int:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage the worker lifecycle."""
-    global worker, worker_task
+    global worker, worker_task, shutting_down
 
-    # Set up signal handlers for graceful shutdown
-    def handle_signal(sig, frame):
-        global shutting_down
-        logger.warning(f"Received signal {sig}, initiating graceful shutdown...")
-        shutting_down = True
-        # Worker will check this flag and stop claiming new transactions
-
-    signal.signal(signal.SIGTERM, handle_signal)
-    signal.signal(signal.SIGINT, handle_signal)
-
+    # Uvicorn owns SIGTERM/SIGINT and drives ASGI lifespan shutdown. Installing
+    # process signal handlers here can block this finally block from running.
     logger.info("Starting Consensus Worker Service...")
     print("Starting Consensus Worker Service...")
 
@@ -308,6 +298,8 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        shutting_down = True
+
         # CRITICAL: Always cleanup GenVM processes, even on crash
         # This prevents memory leaks from orphaned genvm subprocesses
 
@@ -315,54 +307,70 @@ async def lifespan(app: FastAPI):
         logger.info("Shutting down Consensus Worker Service...")
         print("Shutting down Consensus Worker Service...")
 
-        # Wait for current transactions to complete (graceful shutdown)
-        if worker and (worker.current_transactions or worker._active_tasks):
-            tx_count = len(worker.current_transactions)
-            task_count = len(worker._active_tasks)
-            logger.info(
-                f"Waiting for {tx_count} transactions / {task_count} tasks to complete before shutdown..."
-            )
-
-            # Get graceful shutdown timeout from env (default: 180 seconds)
-            # This gives the transactions time to finish before we force-stop
-            graceful_timeout = int(
-                os.environ.get("WORKER_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS", "180")
-            )
-            start_time = time.time()
-
-            while (worker.current_transactions or worker._active_tasks) and (
-                time.time() - start_time
-            ) < graceful_timeout:
-                await asyncio.sleep(1)
-                elapsed = int(time.time() - start_time)
-                if elapsed % 10 == 0:  # Log every 10 seconds
-                    logger.info(
-                        f"Still waiting for {len(worker.current_transactions)} transactions / "
-                        f"{len(worker._active_tasks)} tasks to complete ({elapsed}s elapsed)..."
-                    )
-
-            if worker.current_transactions:
-                logger.warning(
-                    f"Graceful shutdown timeout ({graceful_timeout}s) reached. "
-                    f"{len(worker.current_transactions)} transactions will be released back to the queue."
-                )
-                # Actually release the transactions to free the DB locks
-                for tx_hash in list(worker.current_transactions.keys()):
-                    try:
-                        with worker.get_session() as release_session:
-                            worker.release_transaction(release_session, tx_hash)
-                        logger.info(
-                            f"Successfully released transaction {tx_hash} during shutdown"
-                        )
-                    except Exception as e:
-                        logger.exception(
-                            f"Failed to release transaction {tx_hash} during shutdown: {e}"
-                        )
-                # Clear worker state
-                worker.current_transactions.clear()
-
         if worker:
             worker.stop()
+            tracked_hashes = list(worker.current_transactions.keys())
+            active_tasks = list(worker._active_tasks)
+            if tracked_hashes or active_tasks:
+                logger.info(
+                    f"Abandoning shutdown work for {len(tracked_hashes)} tracked transactions / "
+                    f"{len(active_tasks)} active tasks"
+                )
+            for task in active_tasks:
+                task.cancel()
+        else:
+            tracked_hashes = []
+            active_tasks = []
+
+        # Terminate validators/GenVM early. If liveness is killing this pod
+        # because GenVM is wedged, waiting for active tasks first burns the
+        # Kubernetes grace period and can strand DB claims.
+        if validators_manager:
+            terminate_timeout = float(
+                os.environ.get("WORKER_VALIDATORS_TERMINATE_TIMEOUT_SECONDS", "20")
+            )
+            try:
+                logger.info("Terminating validators manager and GenVM subprocesses...")
+                await asyncio.wait_for(
+                    validators_manager.terminate(),
+                    timeout=terminate_timeout,
+                )
+                logger.info("Validators manager terminated successfully")
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"Timed out terminating validators manager after {terminate_timeout}s"
+                )
+            except Exception as e:
+                logger.error(f"Error terminating validators manager: {e}")
+
+        if active_tasks:
+            task_cancel_timeout = float(
+                os.environ.get("WORKER_TASK_CANCEL_TIMEOUT_SECONDS", "10")
+            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*active_tasks, return_exceptions=True),
+                    timeout=task_cancel_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Timed out waiting {task_cancel_timeout}s for active tasks to cancel"
+                )
+
+        if worker:
+            try:
+                with worker.get_session() as shutdown_session:
+                    summary = worker.abandon_owned_claims_for_shutdown(
+                        shutdown_session,
+                        tracked_hashes=tracked_hashes,
+                    )
+                if summary["released"] or summary["reset"]:
+                    logger.info(
+                        "Abandoned shutdown claims: "
+                        f"{summary['released']} released, {summary['reset']} reset"
+                    )
+            except Exception as e:
+                logger.exception(f"Failed to abandon shutdown claims: {e}")
 
         if worker_task:
             worker_task.cancel()
@@ -370,15 +378,6 @@ async def lifespan(app: FastAPI):
                 await worker_task
             except asyncio.CancelledError:
                 pass
-
-        # Terminate validators manager to shut down background tasks
-        if validators_manager:
-            try:
-                logger.info("Terminating validators manager and GenVM subprocesses...")
-                await validators_manager.terminate()
-                logger.info("Validators manager terminated successfully")
-            except Exception as e:
-                logger.error(f"Error terminating validators manager: {e}")
 
         # Clean up message handler
         if msg_handler:
@@ -651,7 +650,9 @@ async def worker_status():
 @app.get("/stop")
 async def stop_worker():
     """Gracefully stop the worker. Used by K8s preStop lifecycle hook."""
-    global worker
+    global worker, shutting_down
+
+    shutting_down = True
 
     if worker:
         worker.stop()

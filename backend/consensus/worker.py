@@ -5,7 +5,7 @@ import asyncio
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Callable, Optional, Any
+from typing import Callable, Optional, Any, Iterable
 from sqlalchemy.orm import Session
 from sqlalchemy import text, bindparam
 
@@ -724,6 +724,130 @@ class ConsensusWorker:
                     exc_info=True,
                 )
             raise
+
+    def abandon_owned_claims_for_shutdown(
+        self, session: Session, tracked_hashes: Iterable[str] | None = None
+    ) -> dict[str, int]:
+        """
+        Make this worker's in-flight claims safe to retry during process shutdown.
+
+        This is intentionally broader than `current_transactions`: a terminating
+        process may have stale or partially-cleared in-memory state, while the
+        database worker_id is the source of truth for ownership. `tracked_hashes`
+        covers the cancellation race where an active task's context manager clears
+        worker_id before this shutdown cleanup runs.
+        """
+        tracked_hashes = tuple(
+            sorted({tx_hash for tx_hash in (tracked_hashes or []) if tx_hash})
+        )
+
+        ownership_clause = "worker_id = :worker_id"
+        bindparams = []
+        params: dict[str, Any] = {
+            "worker_id": self.worker_id,
+            "max_recovery_cycles": self._max_recovery_cycles,
+        }
+        if tracked_hashes:
+            ownership_clause = f"({ownership_clause} OR (worker_id IS NULL AND hash IN :tracked_hashes))"
+            bindparams.append(bindparam("tracked_hashes", expanding=True))
+            params["tracked_hashes"] = tracked_hashes
+
+        release_finalized_query = text(
+            f"""
+            UPDATE transactions
+            SET blocked_at = NULL,
+                worker_id = NULL
+            WHERE {ownership_clause}
+              AND status IN :finalization_statuses
+            RETURNING hash, status
+            """
+        ).bindparams(
+            bindparam("finalization_statuses", expanding=True),
+            *bindparams,
+        )
+
+        reset_consensus_query = text(
+            f"""
+            WITH target AS (
+                SELECT hash, recovery_count
+                FROM transactions
+                WHERE {ownership_clause}
+                  AND status IN :consensus_statuses
+                FOR UPDATE
+            )
+            UPDATE transactions
+            SET blocked_at = NULL,
+                worker_id = NULL,
+                consensus_history = NULL,
+                recovery_count = target.recovery_count + 1,
+                status = CASE
+                    WHEN target.recovery_count + 1 >= :max_recovery_cycles
+                    THEN 'CANCELED'::transaction_status
+                    ELSE 'PENDING'::transaction_status
+                END,
+                consensus_data = CASE
+                    WHEN target.recovery_count + 1 >= :max_recovery_cycles
+                    THEN jsonb_build_object(
+                        'error', 'max_recovery_cycles_exceeded',
+                        'recovery_count', target.recovery_count + 1,
+                        'max_recovery_exhausted_at',
+                        EXTRACT(EPOCH FROM NOW())::bigint
+                    )
+                    ELSE NULL
+                END
+            FROM target
+            WHERE transactions.hash = target.hash
+            RETURNING transactions.hash, transactions.status,
+                      transactions.recovery_count
+            """
+        ).bindparams(
+            bindparam("consensus_statuses", expanding=True),
+            *bindparams,
+        )
+
+        try:
+            released = session.execute(
+                release_finalized_query,
+                {
+                    **params,
+                    "finalization_statuses": list(self._FINALIZATION_ELIGIBLE_STATUSES),
+                },
+            ).fetchall()
+            reset = session.execute(
+                reset_consensus_query,
+                {
+                    **params,
+                    "consensus_statuses": list(self._CONSENSUS_RECOVERABLE_STATUSES),
+                },
+            ).fetchall()
+            session.commit()
+        except Exception:
+            session.rollback()
+            logger.exception(
+                f"[Worker {self.worker_id}] Failed to abandon owned claims during shutdown"
+            )
+            raise
+
+        for row in released:
+            logger.info(
+                f"[Worker {self.worker_id}] Released shutdown finalization claim "
+                f"{row.hash} (status={row.status}, state preserved)"
+            )
+        for row in reset:
+            if row.status == TransactionStatus.CANCELED.value:
+                logger.error(
+                    f"[Worker {self.worker_id}] Canceled shutdown consensus claim "
+                    f"{row.hash} after {row.recovery_count} recovery cycles"
+                )
+            else:
+                logger.info(
+                    f"[Worker {self.worker_id}] Reset shutdown consensus claim "
+                    f"{row.hash} to PENDING "
+                    f"(cycle {row.recovery_count}/{self._max_recovery_cycles})"
+                )
+
+        self.current_transactions.clear()
+        return {"released": len(released), "reset": len(reset)}
 
     @asynccontextmanager
     async def _transaction_context(
