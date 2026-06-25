@@ -4,7 +4,7 @@ set -euo pipefail
 failed=0
 
 error() {
-  echo "::error::$*"
+  echo "::error::$*" >&2
   failed=1
 }
 
@@ -44,10 +44,8 @@ if [[ -n "${base_ref}" && "${base_ref}" == "main" ]]; then
   warning "PR targets main; retarget-main-prs should move it to ${active_branch}."
 fi
 
-if [[ -n "${base_ref}" && -n "${active_branch}" ]]; then
-  if [[ "${base_ref}" == "${release_branch}" && "${head_ref}" != "${active_branch}" && "${ALLOW_DIRECT_RELEASE_PR:-false}" != "true" ]]; then
-    error "PRs into ${release_branch} must come from ${active_branch}. Merge feature work into ${active_branch}, then promote ${active_branch} -> ${release_branch}."
-  fi
+if [[ -n "${base_ref}" && -n "${active_branch}" && "${base_ref}" == "${release_branch}" && "${head_ref}" != "${active_branch}" && "${ALLOW_DIRECT_RELEASE_PR:-false}" != "true" ]]; then
+  error "PRs into ${release_branch} must come from ${active_branch}. Merge feature work into ${active_branch}, then promote ${active_branch} -> ${release_branch}."
 fi
 
 if [[ "${event_name}" == "push" && "${ref_name}" == "main" ]]; then
