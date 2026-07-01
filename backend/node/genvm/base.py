@@ -737,6 +737,7 @@ async def run_genvm_host(
     logger: genvm_logger.Logger | None = None,
     is_sync: bool,
     capture_output: bool = True,
+    debug_mode: str | None = None,
     message: typing.Any,
     host_data: str = "",
     extra_args: list[str] = [],
@@ -749,6 +750,7 @@ async def run_genvm_host(
     ctx = Context(logger=logger)
     fee_context = fee_context or GenVMFeeContext()
     effective_bucket_totals = fee_context.bucket_totals or [
+        10_000_000,
         10_000_000,
         10_000_000,
         10_000_000,
@@ -823,6 +825,7 @@ async def run_genvm_host(
                         message=message,
                         timeout=timeout,
                         capture_output=capture_output,
+                        debug_mode=debug_mode,
                         is_sync=is_sync,
                         host_data=host_data,
                         ctx=ctx,

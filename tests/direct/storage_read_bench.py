@@ -1,15 +1,16 @@
-# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
-from genlayer import *
+# { "Depends": "py-genlayer:9b8kjyda2ycxyq4ea6g4yfpnydxhd52gqba5rb8dw7krkh5mn9p0" }
+import genlayer as gl
+from genlayer.types import *
 
 
-class ReadBench(gl.Contract):
+class ReadBench(gl.contract.Contract):
     value: u256
-    items: DynArray[u256]
+    items: gl.storage.DynArray[u256]
 
     def __init__(self, count: int):
-        self.value = u256(42)
+        self.value = 42
         for i in range(count):
-            self.items.append(u256(i))
+            self.items.append(i)
 
     @gl.public.view
     def read_one(self) -> int:
@@ -17,7 +18,7 @@ class ReadBench(gl.Contract):
 
     @gl.public.view
     def read_n(self, n: int) -> int:
-        total = u256(0)
+        total = 0
         for i in range(int(n)):
             total += self.items[i]
         return int(total)

@@ -90,7 +90,7 @@ def call_contract_method(
     method_args: list,
 ):
     encoded_data = eth_utils.hexadecimal.encode_hex(
-        calldata.encode({"method": method_name, "args": method_args})
+        calldata.encode({"": method_name, "args": method_args})
     )
     method_response = post_request_localhost(
         payload(

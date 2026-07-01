@@ -795,7 +795,12 @@ def genvm_fee_context(
         data_bucket_total = (
             bucket_total if bucket_total > 0 else GENVM_UNMETERED_DATA_FEE_BUCKET
         )
-        bucket_totals = [data_bucket_total, data_bucket_total, message_bucket_total]
+        bucket_totals = [
+            data_bucket_total,
+            message_bucket_total,
+            GENVM_UNMETERED_DATA_FEE_BUCKET,
+            GENVM_UNMETERED_DATA_FEE_BUCKET,
+        ]
     else:
         bucket_totals = None
     return bucket_totals, gas_data

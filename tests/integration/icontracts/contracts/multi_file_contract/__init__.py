@@ -1,5 +1,5 @@
 import genlayer as gl
-from genlayer import *
+from genlayer.types import *
 
 
 class MultiFileContract(gl.contract.Contract):
@@ -11,8 +11,8 @@ class MultiFileContract(gl.contract.Contract):
         self.other_addr = gl.contract.deploy(
             code=text.encode("utf-8"),
             args=["123"],
-            salt_nonce=u256(1),
-            value=u256(0),
+            salt_nonce=1,
+            value=0,
         )
 
     @gl.public.write

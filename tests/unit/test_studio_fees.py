@@ -1554,7 +1554,12 @@ def test_genvm_fee_context_uses_transaction_execution_budget_and_policy():
         ),
     )
 
-    assert bucket_totals == [123, 123, 0]
+    assert bucket_totals == [
+        123,
+        0,
+        GENVM_UNMETERED_DATA_FEE_BUCKET,
+        GENVM_UNMETERED_DATA_FEE_BUCKET,
+    ]
     assert gas_data == {
         "storageUnitPrice": "3",
         "receiptGasPerByte": "36",
@@ -1608,8 +1613,9 @@ def test_genvm_fee_context_sets_message_bucket_independently():
 
     assert bucket_totals == [
         GENVM_UNMETERED_DATA_FEE_BUCKET,
-        GENVM_UNMETERED_DATA_FEE_BUCKET,
         55,
+        GENVM_UNMETERED_DATA_FEE_BUCKET,
+        GENVM_UNMETERED_DATA_FEE_BUCKET,
     ]
 
 
@@ -1876,7 +1882,12 @@ def test_genvm_fee_context_uses_locked_fee_policy_by_default():
 
     bucket_totals, gas_data = genvm_fee_context(accounting)
 
-    assert bucket_totals == [execution_budget, execution_budget, 0]
+    assert bucket_totals == [
+        execution_budget,
+        0,
+        GENVM_UNMETERED_DATA_FEE_BUCKET,
+        GENVM_UNMETERED_DATA_FEE_BUCKET,
+    ]
     assert gas_data["genPerTimeUnit"] == "2"
     assert gas_data["storageUnitPrice"] == "3"
     assert gas_data["receiptGasPerByte"] == "36"

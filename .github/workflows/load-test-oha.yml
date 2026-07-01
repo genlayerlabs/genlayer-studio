@@ -102,7 +102,7 @@ jobs:
             fi
           fi
           if [[ -n "$GENVM_REF_VALUE" ]]; then
-            GENVM_REF_VALUE="$(gh api "repos/genlayerlabs/genvm/commits/$GENVM_REF_VALUE" --jq .sha)"
+            GENVM_REF_VALUE="$(gh api "repos/genlayerlabs/genvm-manager/commits/$GENVM_REF_VALUE" --jq .sha)"
           fi
           sed -i "s|^GENVM_TAG=.*|GENVM_TAG=\"$GENVM_TAG_VALUE\"|" .env
           sed -i "s|^GENVM_REF=.*|GENVM_REF=\"$GENVM_REF_VALUE\"|" .env

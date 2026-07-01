@@ -21,7 +21,7 @@ def test_utf8_roundtrip_contract_over_rpc(setup_validators):
     contract_address = extract_contract_address(deploy_receipt)
 
     method_data = eth_utils.hexadecimal.encode_hex(
-        calldata.encode({"method": "get_enriched_submission", "args": []})
+        calldata.encode({"": "get_enriched_submission", "args": []})
     )
     raw_response = requests.post(
         RPC_URL,

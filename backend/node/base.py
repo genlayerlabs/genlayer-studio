@@ -74,22 +74,16 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _genvm_extra_args() -> list[str]:
-    """Extra CLI args for the genvm executor.
+def _genvm_debug_mode() -> str:
+    """genvm-manager `debug_mode` level for the run request.
 
-    `--debug-mode` enables the `:latest` and `:test` runner version
-    aliases (see genvm/executor/src/exe/run.rs:58-62). Convenient in
-    dev/stg where you want to iterate without pinning a specific runner
-    hash, but a footgun in prd: those aliases float, so two validators
-    on the same tx can resolve different runner binaries — breaks
-    determinism / consensus.
-
-    Gated on GENVM_DEBUG_MODE (default true to preserve dev/stg
-    convenience). Prd manifests should set GENVM_DEBUG_MODE=false so
-    contracts that try to use `py-genlayer:latest` or `py-genlayer:test`
-    fail fast at the executor.
+    `unsafe` (dev/stg default) captures unbounded output and enables the
+    `:latest`/`:test` runner aliases that studio's bundled contracts depend
+    on; only `unsafe`/`unsafe-tracing` resolve those floating aliases. Prd
+    sets GENVM_DEBUG_MODE=false -> `safe` (consensus-safe) so the aliases
+    fail fast.
     """
-    return ["--debug-mode"] if _env_bool("GENVM_DEBUG_MODE", default=True) else []
+    return "unsafe" if _env_bool("GENVM_DEBUG_MODE", default=True) else "safe"
 
 
 def _filter_genvm_log_by_level(genvm_log: list[dict]) -> list[dict]:
@@ -919,6 +913,7 @@ class Node:
             "contract_address": NO_ADDR,
             "sender_address": NO_ADDR,
             "origin_address": NO_ADDR,
+            "signer_address": NO_ADDR,
             "value": 0,
             "chain_id": 0,
         }
@@ -930,16 +925,16 @@ class Node:
             functools.partial(
                 genvmbase.Host,
                 calldata_bytes=calldata.encode(
-                    {"method": public_abi.SpecialMethod.GET_SCHEMA.value}
+                    {"": public_abi.SpecialMethod.GET_SCHEMA.value}
                 ),
                 state_proxy=state_proxy,
                 leader_results=None,
             ),
             message=message,
             permissions="rw",
-            extra_args=_genvm_extra_args(),
             host_data='{"node_address":"0x", "tx_id":"0x"}',
             capture_output=True,
+            debug_mode=_genvm_debug_mode(),
             is_sync=True,
             logger=self.logger,
             timeout=30,
@@ -1040,6 +1035,7 @@ class Node:
             "contract_address": contract_address,
             "sender_address": Address(from_address),
             "origin_address": Address(origin_address or from_address),
+            "signer_address": Address(origin_address or from_address),
             "value": int(value),
             "chain_id": get_simulator_chain_id(),
         }
@@ -1069,8 +1065,8 @@ class Node:
                 message=message,
                 permissions=perms,
                 capture_output=True,
+                debug_mode=_genvm_debug_mode(),
                 host_data=json.dumps(host_data),
-                extra_args=_genvm_extra_args(),
                 is_sync=is_sync,
                 manager_uri=self.manager.url,
                 timeout=timeout,

@@ -1,5 +1,5 @@
-# v0.2.16
-# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
+# v0.3.0
+# { "Depends": "py-genlayer:9b8kjyda2ycxyq4ea6g4yfpnydxhd52gqba5rb8dw7krkh5mn9p0" }
 import genlayer as gl
 
 import json
@@ -40,7 +40,7 @@ This result should be perfectly parseable by a JSON parser without errors.
 """
 
         def get_wizard_answer():
-            result = gl.nondet.exec_prompt(prompt, response_format="text")
+            result = gl.nondet.exec_prompt(prompt)
             result = result.replace("```json", "").replace("```", "")
             print(result)
             return result

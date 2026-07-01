@@ -1,8 +1,8 @@
-# v0.1.0
-# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
+# v0.3.0
+# { "Depends": "py-genlayer:9b8kjyda2ycxyq4ea6g4yfpnydxhd52gqba5rb8dw7krkh5mn9p0" }
 
 import genlayer as gl
-from genlayer import *
+from genlayer.types import *
 
 
 class MultiTentantStorage(gl.contract.Contract):
@@ -13,9 +13,9 @@ class MultiTentantStorage(gl.contract.Contract):
     This is done to test contract calls between different contracts.
     """
 
-    all_storage_contracts: DynArray[Address]
-    available_storage_contracts: DynArray[Address]
-    mappings: TreeMap[
+    all_storage_contracts: gl.storage.DynArray[Address]
+    available_storage_contracts: gl.storage.DynArray[Address]
+    mappings: gl.storage.TreeMap[
         Address, Address
     ]  # mapping of user address to storage contract address
 

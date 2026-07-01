@@ -45,11 +45,19 @@ function Render(ctx, payload)
         '&mode=' .. payload.mode ..
         '&waitAfterLoaded=' .. tostring(payload.wait_after_loaded or 0)
 
+    -- The webdriver is a trusted internal endpoint (studio sets webdriver_host to
+    -- a Docker service hostname, e.g. http://webdriver:5001, which resolves to a
+    -- private address). The web module runs with the SSRF-filtering resolver, which
+    -- drops non-globally-routable addresses, so this internal request must opt out
+    -- via `unfiltered`. The contract-controlled `payload.url` is validated by
+    -- `web.check_url` above and only rendered by the webdriver, never fetched here.
     local result = lib.rs.request(ctx, {
         method = 'GET',
         url = web.rs.config.webdriver_host .. '/render' .. url_params,
         headers = {},
         error_on_status = true,
+        response_body_max_size = payload.size_limit,
+        unfiltered = true,
     })
 
     lib.log({
@@ -84,7 +92,10 @@ end
 function Request(ctx, payload)
     ---@cast payload WebRequestPayload
 
-    web.check_url(payload.url)
+    -- `check_url` returns true when the host is in `always_allow_hosts`; such
+    -- hosts are sent through the unfiltered client, everything else through the
+    -- SSRF-guarded resolver (see the real request call below).
+    local allowlisted = web.check_url(payload.url)
 
     -- Return mock response if it exists and matches
     if ctx.host_data.mock_web_response and ctx.host_data.mock_web_response.nondet_web_request then
@@ -108,6 +119,8 @@ function Request(ctx, payload)
         headers = payload.headers,
         body = payload.body,
         sign = payload.sign,
+        response_body_max_size = payload.size_limit,
+        unfiltered = allowlisted,
     })
 
     if success then

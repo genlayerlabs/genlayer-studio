@@ -1,12 +1,11 @@
-# v0.1.0
-# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
+# v0.3.0
+# { "Depends": "py-genlayer:9b8kjyda2ycxyq4ea6g4yfpnydxhd52gqba5rb8dw7krkh5mn9p0" }
 
 import json
 from enum import Enum
 from datetime import datetime
 from urllib.parse import urlparse
 import genlayer as gl
-from genlayer import *
 
 
 class Status(Enum):
@@ -20,10 +19,10 @@ class IntelligentOracle(gl.contract.Contract):
     prediction_market_id: str
     title: str
     description: str
-    potential_outcomes: DynArray[str]
-    rules: DynArray[str]
-    data_source_domains: DynArray[str]
-    resolution_urls: DynArray[str]
+    potential_outcomes: gl.storage.DynArray[str]
+    rules: gl.storage.DynArray[str]
+    data_source_domains: gl.storage.DynArray[str]
+    resolution_urls: gl.storage.DynArray[str]
     earliest_resolution_date: str  # Store as ISO format string
     status: str  # Store as string since Enum isn't supported
     analysis: str  # Store analysis results
@@ -225,13 +224,12 @@ Provide your response in **valid JSON** format with the following structure:
 - **Clarity:** Make sure your reasoning is easy to understand.
 - **Validity:** Ensure the JSON output is properly formatted and free of errors. Do not include trailing commas.
                 """
-                result = gl.nondet.exec_prompt(task, response_format="text")
+                result = gl.nondet.exec_prompt(task)
                 print(result)
                 return result
 
             result = gl.eq_principle.prompt_comparative(
                 evaluate_single_source,
-                # main SDK: prompt_comparative's principle is positional-only
                 "`outcome` field must be exactly the same. All other fields must be similar",
             )
 
@@ -308,13 +306,12 @@ Provide your response in **valid JSON** format with the following structure:
 
             """
 
-            result = gl.nondet.exec_prompt(task, response_format="text")
+            result = gl.nondet.exec_prompt(task)
             print(result)
             return result
 
         result = gl.eq_principle.prompt_comparative(
             evaluate_all_sources,
-            # main SDK: prompt_comparative's principle is positional-only
             "`outcome` field must be exactly the same. All other fields must be similar",
         )
 

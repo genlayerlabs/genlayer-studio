@@ -1,17 +1,17 @@
-# v0.2.16
-# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
+# v0.3.0
+# { "Depends": "py-genlayer:9b8kjyda2ycxyq4ea6g4yfpnydxhd52gqba5rb8dw7krkh5mn9p0" }
 
 import json
 
 import genlayer as gl
-from genlayer import *
+from genlayer.types import *
 
 
 class LlmErc20(gl.contract.Contract):
-    balances: TreeMap[Address, u256]
+    balances: gl.storage.TreeMap[Address, u256]
 
     def __init__(self, total_supply: int) -> None:
-        self.balances[gl.message.sender_address] = u256(total_supply)
+        self.balances[gl.message.sender_address] = total_supply
 
     @gl.public.write
     def transfer(self, amount: int, to_address: str) -> None:
@@ -55,7 +55,7 @@ The total sum of all balances should remain the same before and after the transa
 
         def get_transfer_result() -> str:
             return (
-                gl.nondet.exec_prompt(prompt_input + task, response_format="text")
+                gl.nondet.exec_prompt(prompt_input + task)
                 .replace("```json", "")
                 .replace("```", "")
             )
