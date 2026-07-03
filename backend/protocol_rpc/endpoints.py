@@ -1392,12 +1392,6 @@ async def _gen_call_with_validator(
     genvm_fee_accounting = _effective_simulation_fee_accounting_for_genvm(
         simulation_fee_accounting
     )
-    transaction_hash_variant = (
-        params["transaction_hash_variant"]
-        if "transaction_hash_variant" in params
-        else None
-    )
-
     if not accounts_manager.is_valid_address(from_address):
         raise InvalidAddressError(from_address)
 
