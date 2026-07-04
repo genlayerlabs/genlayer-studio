@@ -25,6 +25,10 @@ on:
       image_tag:
         required: true
         type: string
+      push_latest:
+        required: false
+        type: boolean
+        default: true
     secrets:
       dockerhub_token:
         required: true
@@ -95,6 +99,7 @@ jobs:
         env:
           DOCKERHUB_REPO: ${{ inputs.dockerhub_repo }}
           IMAGE_TAG: ${{ inputs.image_tag }}
+          PUSH_LATEST: ${{ inputs.push_latest }}
         run: |
           set -euo pipefail
 
@@ -103,6 +108,11 @@ jobs:
             "${DOCKERHUB_REPO}:${IMAGE_TAG}-amd64" \
             "${DOCKERHUB_REPO}:${IMAGE_TAG}-arm64"
           docker manifest push "${DOCKERHUB_REPO}:${IMAGE_TAG}"
+
+          if [[ "${PUSH_LATEST}" != "true" ]]; then
+            echo "Skipping latest manifest push"
+            exit 0
+          fi
 
           # Create manifest for latest tag
           docker manifest create "${DOCKERHUB_REPO}:latest" \

@@ -408,6 +408,23 @@ def _emission_list(emission: dict, name: str) -> list:
     return value if isinstance(value, list) else []
 
 
+def _extract_llm_token_metrics(
+    metrics: dict[str, typing.Any] | None,
+) -> dict[str, typing.Any] | None:
+    if not isinstance(metrics, dict):
+        return None
+
+    llm_metrics = metrics.get("llm")
+    if not isinstance(llm_metrics, dict):
+        return None
+
+    token_metrics = llm_metrics.get("tokens")
+    if not isinstance(token_metrics, dict) or not token_metrics:
+        return None
+
+    return token_metrics
+
+
 class Host(genvmhost.IHost):
     """
     Handles all genvm host methods and accumulates results
@@ -575,6 +592,11 @@ class Host(genvmhost.IHost):
         # Extract eq_outputs from result_nondet_results
         eq_outputs = {i: data for i, data in enumerate(res.result_nondet_results)}
 
+        execution_stats = dict(ctx.stats)
+        llm_token_metrics = _extract_llm_token_metrics(res.metrics)
+        if llm_token_metrics is not None:
+            execution_stats["llm"] = {"tokens": llm_token_metrics}
+
         return ExecutionResult(
             eq_outputs=eq_outputs,
             pending_transactions=pending_transactions,
@@ -585,7 +607,7 @@ class Host(genvmhost.IHost):
             state=state,
             processing_time=0,
             nondet_disagree=self._nondet_disagreement,
-            execution_stats=ctx.stats,
+            execution_stats=execution_stats,
             data_fees_remaining=res.data_fees_remaining,
         )
 

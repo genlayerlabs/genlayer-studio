@@ -352,19 +352,28 @@ async def check_provider_is_available(
             url = provider.plugin_config["api_url"]
             plugin = provider.plugin
             key = provider.plugin_config["api_key_env_var"]
-            temperature = provider.config.get("temperature", 1)
-            use_max_completion_tokens = provider.config.get(
-                "use_max_completion_tokens", False
-            )
+            config = provider.config or {}
         else:
             model = provider["model"]
             url = provider["plugin_config"]["api_url"]
             plugin = provider["plugin"]
             key = provider["plugin_config"]["api_key_env_var"]
-            temperature = provider["config"].get("temperature", 1)
-            use_max_completion_tokens = provider["config"].get(
-                "use_max_completion_tokens", False
-            )
+            config = provider["config"] or {}
+        temperature = config.get("temperature", 1)
+        use_max_completion_tokens = config.get("use_max_completion_tokens", False)
+        max_tokens = config.get("max_tokens", 500)
+        known_config_keys = {"temperature", "max_tokens", "use_max_completion_tokens"}
+        extra = {k: v for k, v in config.items() if k not in known_config_keys}
+        prompt = {
+            "system_message": "",
+            "user_message": "respond with two letters 'ok' and nothing else. No quotes, no repetition",
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "use_max_completion_tokens": use_max_completion_tokens,
+            "images": [],
+        }
+        if extra:
+            prompt["extra"] = extra
         key = f"${{ENV[{key}]}}"
         timeout_s = float(
             os.environ.get("LLM_PROVIDER_AVAILABILITY_TIMEOUT_SECONDS", "20")
@@ -379,14 +388,7 @@ async def check_provider_is_available(
                         "key": key,
                     }
                 ],
-                prompt={
-                    "system_message": "",
-                    "user_message": "respond with two letters 'ok' and nothing else. No quotes, no repetition",
-                    "temperature": temperature,
-                    "max_tokens": 500,
-                    "use_max_completion_tokens": use_max_completion_tokens,
-                    "images": [],
-                },
+                prompt=prompt,
             ),
             timeout=timeout_s,
         )
@@ -1199,6 +1201,28 @@ async def _execute_call_with_snapshot(
         return receipt
 
 
+def _state_status_from_call_params(params: dict) -> str:
+    """Map public call state selectors to Studio's current internal buckets."""
+    status = params.get("status")
+    if status is not None:
+        if status == "decided":
+            return "accepted"
+        if status == "finalized":
+            return "finalized"
+        raise JSONRPCError(
+            code=-32602,
+            message="Invalid status: must be 'decided' or 'finalized'",
+            data={},
+        )
+
+    # Legacy Studio selector. Preserve old fallback semantics: only
+    # latest-final changes the bucket; all other/absent values read decided state.
+    transaction_hash_variant = params.get("transaction_hash_variant")
+    if transaction_hash_variant == "latest-final":
+        return "finalized"
+    return "accepted"
+
+
 async def gen_call(
     session: Session,
     accounts_manager: AccountsManager,
@@ -1368,12 +1392,6 @@ async def _gen_call_with_validator(
     genvm_fee_accounting = _effective_simulation_fee_accounting_for_genvm(
         simulation_fee_accounting
     )
-    transaction_hash_variant = (
-        params["transaction_hash_variant"]
-        if "transaction_hash_variant" in params
-        else None
-    )
-
     if not accounts_manager.is_valid_address(from_address):
         raise InvalidAddressError(from_address)
 
@@ -1383,10 +1401,7 @@ async def _gen_call_with_validator(
     # Rate limit per contract address — reject early before acquiring resources
     _check_rate_limit(to_address)
 
-    if transaction_hash_variant == "latest-final":
-        state_status = "finalized"
-    else:
-        state_status = "accepted"
+    state_status = _state_status_from_call_params(params)
 
     # Get a validator
     if len(validators_snapshot.nodes) > 0:
@@ -1541,7 +1556,7 @@ def get_transaction_by_hash(
     sim_config: dict | None = None,
 ) -> dict:
     transaction = transactions_processor.get_transaction_by_hash(
-        transaction_hash, sim_config
+        transaction_hash, sim_config, include_contract_snapshot=False
     )
 
     if transaction is None:
@@ -2242,7 +2257,9 @@ def get_block_by_number(
             )
 
     block_details = transactions_processor.get_transactions_for_block(
-        block_number_int, include_full_tx=full_tx
+        block_number_int,
+        include_full_tx=full_tx,
+        include_contract_snapshot=False,
     )
 
     if not block_details:
@@ -2293,7 +2310,9 @@ def get_transaction_receipt(
     transaction_hash: str,
 ) -> dict | None:
 
-    transaction = transactions_processor.get_transaction_by_hash(transaction_hash)
+    transaction = transactions_processor.get_transaction_by_hash(
+        transaction_hash, include_contract_snapshot=False
+    )
     if not transaction:
         return None
 
@@ -2360,7 +2379,9 @@ def get_block_by_hash(
     full_tx: bool = False,
 ) -> dict | None:
 
-    transaction = transactions_processor.get_transaction_by_hash(block_hash)
+    transaction = transactions_processor.get_transaction_by_hash(
+        block_hash, include_contract_snapshot=False
+    )
 
     if not transaction:
         return None

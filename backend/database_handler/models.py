@@ -181,6 +181,60 @@ class Transactions(Base):
     )
 
 
+class TransactionSnapshotArchive(Base):
+    __tablename__ = "transaction_snapshot_archives"
+    __table_args__ = (
+        CheckConstraint(
+            "backend IN ('file', 'gcs', 's3')",
+            name="transaction_snapshot_archives_backend_check",
+        ),
+        CheckConstraint(
+            "archive_status IN ('archived', 'pruned')",
+            name="transaction_snapshot_archives_status_check",
+        ),
+    )
+
+    tx_hash: Mapped[str] = mapped_column(
+        String(66),
+        ForeignKey("transactions.hash", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    backend: Mapped[str] = mapped_column(String(20), nullable=False)
+    object_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    uri: Mapped[str] = mapped_column(String(2048), nullable=False)
+    snapshot_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    compressed_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    snapshot_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    compressed_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    bucket: Mapped[Optional[str]] = mapped_column(String(255), default=None)
+    format: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        server_default="full-json-gzip-v1",
+        default="full-json-gzip-v1",
+    )
+    archive_status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default="archived",
+        default="archived",
+    )
+    archived_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(True),
+        server_default=func.current_timestamp(),
+        init=False,
+    )
+    pruned_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), nullable=True, default=None
+    )
+    verified_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), nullable=True, default=None
+    )
+    object_metadata: Mapped[Optional[dict]] = mapped_column(
+        JSONB, nullable=True, default=None
+    )
+
+
 class Validators(Base):
     __tablename__ = "validators"
     __table_args__ = (

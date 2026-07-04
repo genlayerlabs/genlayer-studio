@@ -4,7 +4,7 @@ from enum import Enum
 import rlp
 import re
 import random
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, defer, selectinload
 from sqlalchemy import or_, desc, and_, JSON, type_coerce, text
 
 from backend.node.types import Vote, Receipt, ExecutionResultStatus
@@ -19,6 +19,10 @@ from backend.consensus.types import ConsensusRound
 from backend.consensus.history import time_unit_consumption
 from backend.consensus.utils import determine_consensus_from_votes
 from backend.protocol_rpc.fees import FEE_ACCOUNTING_KEY, normalize_fees_distribution
+from backend.database_handler.terminal_snapshot_pruner import (
+    SnapshotArchiveReader,
+    snapshot_archive_read_through_enabled,
+)
 from backend.rollup.web3_pool import Web3ConnectionPool
 
 MAX_JSON_SAFE_INTEGER = (2**53) - 1
@@ -92,11 +96,25 @@ class TransactionsProcessor:
     def __init__(
         self,
         session: Session,
+        snapshot_archive: SnapshotArchiveReader | None = None,
     ):
         self.session = session
+        self.snapshot_archive = snapshot_archive
+        if self.snapshot_archive is None and snapshot_archive_read_through_enabled():
+            self.snapshot_archive = SnapshotArchiveReader.from_environment()
 
         # Use singleton Web3 connection pool
         self.web3 = Web3ConnectionPool.get()
+
+    @staticmethod
+    def _select_receipt(receipts, index: int = 0) -> dict | None:
+        if isinstance(receipts, dict):
+            return receipts
+        if isinstance(receipts, list) and 0 <= index < len(receipts):
+            receipt = receipts[index]
+            if isinstance(receipt, dict):
+                return receipt
+        return None
 
     @staticmethod
     def _json_safe_numbers(value):
@@ -114,7 +132,11 @@ class TransactionsProcessor:
         return value
 
     @staticmethod
-    def _parse_transaction_data(transaction_data: Transactions) -> dict:
+    def _parse_transaction_data(
+        transaction_data: Transactions,
+        *,
+        include_contract_snapshot: bool = True,
+    ) -> dict:
         fee_accounting = (
             transaction_data.data.get(FEE_ACCOUNTING_KEY)
             if isinstance(transaction_data.data, dict)
@@ -183,7 +205,11 @@ class TransactionsProcessor:
             "consensus_history": transaction_data.consensus_history,
             "timestamp_appeal": transaction_data.timestamp_appeal,
             "appeal_processing_time": transaction_data.appeal_processing_time,
-            "contract_snapshot": transaction_data.contract_snapshot,
+            "contract_snapshot": (
+                transaction_data.contract_snapshot
+                if include_contract_snapshot
+                else None
+            ),
             "config_rotation_rounds": transaction_data.config_rotation_rounds,
             "num_of_initial_validators": transaction_data.num_of_initial_validators,
             "last_vote_timestamp": transaction_data.last_vote_timestamp,
@@ -197,6 +223,19 @@ class TransactionsProcessor:
             # SEND txs created by sim_fundAccount.
             "value_credited": transaction_data.value_credited,
         }
+
+    def _hydrate_archived_contract_snapshot(self, transaction_data: dict) -> None:
+        if transaction_data.get("contract_snapshot") is not None:
+            return
+        if self.snapshot_archive is None:
+            return
+        tx_hash = transaction_data.get("hash")
+        if not tx_hash:
+            return
+
+        snapshot = self.snapshot_archive.load_snapshot(self.session, tx_hash)
+        if snapshot is not None:
+            transaction_data["contract_snapshot"] = snapshot
 
     @staticmethod
     def _status_payload(status: str) -> dict:
@@ -530,12 +569,13 @@ class TransactionsProcessor:
                 len(transaction_data["consensus_history"]["consensus_results"]) - 1
             )
             last_round = transaction_data["consensus_history"]["consensus_results"][-1]
+            leader = self._select_receipt(last_round.get("leader_result"), index=1)
             if (
-                "leader_result" in last_round
-                and last_round["leader_result"] is not None
-                and len(last_round["leader_result"]) > 1
+                leader is not None
+                and leader.get("vote") is not None
+                and isinstance(leader.get("node_config"), dict)
+                and leader["node_config"].get("address") is not None
             ):
-                leader = last_round["leader_result"][1]
                 validator_votes_name.append(leader["vote"].upper())
                 vote_number = int(Vote.from_string(leader["vote"]))
                 validator_votes.append(vote_number)
@@ -634,18 +674,35 @@ class TransactionsProcessor:
             transaction_data["consensus_history"] is not None
             and "consensus_results" in transaction_data["consensus_history"]
         ):
-            transaction_data["activator"] = transaction_data["consensus_history"][
-                "consensus_results"
-            ][0]["leader_result"][0]["node_config"]["address"]
+            first_round = transaction_data["consensus_history"]["consensus_results"][0]
+            leader = self._select_receipt(first_round.get("leader_result"), index=0)
+            if (
+                leader is not None
+                and isinstance(leader.get("node_config"), dict)
+                and leader["node_config"].get("address") is not None
+            ):
+                transaction_data["activator"] = leader["node_config"]["address"]
+            else:
+                transaction_data["activator"] = ""
         else:
             transaction_data["activator"] = ""
 
         if (transaction_data["consensus_data"] is not None) and (
             "leader_receipt" in transaction_data["consensus_data"]
         ):
-            transaction_data["last_leader"] = transaction_data["consensus_data"][
-                "leader_receipt"
-            ][0]["node_config"]["address"]
+            leader_receipt = self._select_receipt(
+                transaction_data["consensus_data"]["leader_receipt"], index=0
+            )
+            if (
+                leader_receipt is not None
+                and isinstance(leader_receipt.get("node_config"), dict)
+                and leader_receipt["node_config"].get("address") is not None
+            ):
+                transaction_data["last_leader"] = leader_receipt["node_config"][
+                    "address"
+                ]
+            else:
+                transaction_data["last_leader"] = ""
         else:
             transaction_data["last_leader"] = ""
         return transaction_data
@@ -671,21 +728,24 @@ class TransactionsProcessor:
         return transaction_data
 
     def _process_execution_hash(self, transaction_data: dict) -> dict:
+        leader_receipt = None
         if (
             transaction_data["consensus_data"] is not None
             and "leader_receipt" in transaction_data["consensus_data"]
-            and len(transaction_data["consensus_data"]["leader_receipt"]) > 1
-            and "node_config" in transaction_data["consensus_data"]["leader_receipt"][1]
+        ):
+            leader_receipt = self._select_receipt(
+                transaction_data["consensus_data"]["leader_receipt"], index=1
+            )
+
+        if (
+            leader_receipt is not None
+            and isinstance(leader_receipt.get("node_config"), dict)
+            and leader_receipt["node_config"].get("address") is not None
+            and leader_receipt.get("vote") is not None
         ):
             transaction_data["tx_execution_hash"] = get_tx_execution_hash(
-                transaction_data["consensus_data"]["leader_receipt"][1]["node_config"][
-                    "address"
-                ],
-                int(
-                    Vote.from_string(
-                        transaction_data["consensus_data"]["leader_receipt"][1]["vote"]
-                    )
-                ),
+                leader_receipt["node_config"]["address"],
+                int(Vote.from_string(leader_receipt["vote"])),
             )
         else:
             transaction_data["tx_execution_hash"] = ""
@@ -702,46 +762,44 @@ class TransactionsProcessor:
             for consensus_round in transaction_data["consensus_history"][
                 "consensus_results"
             ]:
-                if consensus_round["leader_result"] is not None:
+                leader_result = self._select_receipt(
+                    consensus_round.get("leader_result"), index=0
+                )
+                if (
+                    leader_result is not None
+                    and leader_result.get("result") is not None
+                ):
                     eq_output.append(
                         [
                             len(eq_output),  # key
                             [
-                                base64.b64decode(
-                                    consensus_round["leader_result"][0]["result"]
-                                )[
-                                    0
-                                ],  # kind
+                                base64.b64decode(leader_result["result"])[0],  # kind
                                 "\x00",
                             ],
                         ]
                     )  # data
 
         kind = 0
+        leader_receipt = None
         if (
             transaction_data["consensus_data"] is not None
             and "leader_receipt" in transaction_data["consensus_data"]
-            and "result" in transaction_data["consensus_data"]["leader_receipt"]
         ):
-            kind = base64.b64decode(
-                transaction_data["consensus_data"]["leader_receipt"][0]["result"]
-            )[0]
+            leader_receipt = self._select_receipt(
+                transaction_data["consensus_data"]["leader_receipt"], index=0
+            )
+        if leader_receipt is not None and leader_receipt.get("result") is not None:
+            kind = base64.b64decode(leader_receipt["result"])[0]
+
         pending_transactions = []
         messages = []
-        if (
-            transaction_data["consensus_data"] is not None
-            and "leader_receipt" in transaction_data["consensus_data"]
-            and transaction_data["consensus_data"]["leader_receipt"] is not None
-            and "pending_transactions"
-            in transaction_data["consensus_data"]["leader_receipt"][0]
-            and transaction_data["consensus_data"]["leader_receipt"][0][
-                "pending_transactions"
-            ]
-            is not None
-        ):
-            for message in transaction_data["consensus_data"]["leader_receipt"][0][
-                "pending_transactions"
-            ]:
+        pending_messages = (
+            leader_receipt.get("pending_transactions")
+            if leader_receipt is not None
+            else None
+        )
+        if pending_messages is not None:
+            for message in pending_messages:
                 pending_transactions.append(
                     [
                         message.get("address", ""),  # Account
@@ -836,20 +894,28 @@ class TransactionsProcessor:
         return transaction_data
 
     def get_transaction_by_hash(
-        self, transaction_hash: str, sim_config: dict | None = None
+        self,
+        transaction_hash: str,
+        sim_config: dict | None = None,
+        include_contract_snapshot: bool = True,
     ) -> dict | None:
         # Expire cached ORM objects to ensure we read fresh data after raw SQL writes
         self.session.expire_all()
-        transaction = (
-            self.session.query(Transactions)
-            .filter_by(hash=transaction_hash)
-            .one_or_none()
-        )
+        query = self.session.query(Transactions)
+        if not include_contract_snapshot:
+            query = query.options(defer(Transactions.contract_snapshot))
+        transaction = query.filter_by(hash=transaction_hash).one_or_none()
 
         if transaction is None:
             return None
 
-        transaction_data = self._parse_transaction_data(transaction)
+        transaction_data = self._parse_transaction_data(
+            transaction, include_contract_snapshot=include_contract_snapshot
+        )
+        if include_contract_snapshot:
+            self._hydrate_archived_contract_snapshot(transaction_data)
+        else:
+            transaction_data.pop("contract_snapshot", None)
 
         # Handle contract_state based on sim_config
         include_contract_state = sim_config and sim_config.get(
@@ -896,6 +962,8 @@ class TransactionsProcessor:
             return None
 
         transaction_data = self._parse_transaction_data(transaction)
+        if full:
+            self._hydrate_archived_contract_snapshot(transaction_data)
 
         # Transform studio fields to testnet fields
         transaction_data["tx_id"] = transaction_data.pop("hash", None)
@@ -1266,7 +1334,10 @@ class TransactionsProcessor:
         return transaction.timestamp_awaiting_finalization
 
     def get_transactions_for_block(
-        self, block_number: int, include_full_tx: bool
+        self,
+        block_number: int,
+        include_full_tx: bool,
+        include_contract_snapshot: bool = True,
     ) -> dict:
         query = self.session.query(Transactions).filter(
             Transactions.timestamp_awaiting_finalization == block_number
@@ -1274,6 +1345,8 @@ class TransactionsProcessor:
         # Only eager load triggered_transactions if we need full transaction data
         if include_full_tx:
             query = query.options(selectinload(Transactions.triggered_transactions))
+            if not include_contract_snapshot:
+                query = query.options(defer(Transactions.contract_snapshot))
         transactions = query.all()
 
         block_hash = "0x" + "0" * 64
@@ -1285,7 +1358,15 @@ class TransactionsProcessor:
         )
 
         if include_full_tx:
-            transaction_data = [self._parse_transaction_data(tx) for tx in transactions]
+            transaction_data = [
+                self._parse_transaction_data(
+                    tx, include_contract_snapshot=include_contract_snapshot
+                )
+                for tx in transactions
+            ]
+            if not include_contract_snapshot:
+                for transaction in transaction_data:
+                    transaction.pop("contract_snapshot", None)
         else:
             transaction_data = [tx.hash for tx in transactions]
 
