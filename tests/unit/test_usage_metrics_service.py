@@ -61,6 +61,35 @@ async def test_system_health_metrics_include_max_recovery_events():
     ]
 
 
+@pytest.mark.asyncio
+async def test_system_health_metrics_bounds_percentage_values():
+    service = UsageMetricsService()
+    service._enabled = True
+    service._send_to_api = AsyncMock()
+
+    health_cache = SimpleNamespace(
+        status="healthy",
+        genvm_healthy=True,
+        uptime_percent=100.0,
+        pending_transactions=1,
+        total_decisions=2,
+        total_users=3,
+        issues=[],
+        pending_contracts=[],
+        services={
+            "consensus": {"active_workers": 1},
+            "memory": {"percent": -1.0, "cpu_percent": 250.0},
+        },
+    )
+
+    await service.send_system_health_metrics(health_cache)
+
+    service._send_to_api.assert_awaited_once()
+    payload = service._send_to_api.await_args.args[0]
+    assert payload["systemHealth"]["memoryUsage"] == 0.0
+    assert payload["systemHealth"]["cpuUsage"] == 100.0
+
+
 def test_extract_llm_token_metrics_keeps_only_llm_tokens():
     metrics = {
         "llm": {
