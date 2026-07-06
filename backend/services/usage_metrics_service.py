@@ -1,6 +1,7 @@
 # backend/services/usage_metrics_service.py
 
 import asyncio
+import math
 import os
 from typing import Any, Optional
 from datetime import datetime
@@ -92,11 +93,11 @@ class UsageMetricsService:
                 "pendingTransactions": health_cache.pending_transactions,
                 "decisions": health_cache.total_decisions,
                 "users": health_cache.total_users,
-                "memoryUsage": health_cache.services.get("memory", {}).get(
-                    "percent", 0
+                "memoryUsage": self._bounded_percentage(
+                    health_cache.services.get("memory", {}).get("percent", 0)
                 ),
-                "cpuUsage": health_cache.services.get("memory", {}).get(
-                    "cpu_percent", 0
+                "cpuUsage": self._bounded_percentage(
+                    health_cache.services.get("memory", {}).get("cpu_percent", 0)
                 ),
             }
 
@@ -159,6 +160,19 @@ class UsageMetricsService:
             "initializing": "degraded",
         }
         return status_map.get(status, "down")
+
+    @staticmethod
+    def _bounded_percentage(value: Any) -> float:
+        """Return an API-safe percentage value in the inclusive 0-100 range."""
+        try:
+            percentage = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+        if not math.isfinite(percentage):
+            return 0.0
+
+        return min(max(percentage, 0.0), 100.0)
 
     def _build_decision_payload(
         self, transaction: Transaction, finalization_data: dict
