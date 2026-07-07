@@ -106,6 +106,13 @@ _RATE_LIMIT_MAX = int(
 _address_request_log: dict[str, list[float]] = {}  # {address: [timestamp, ...]}
 
 _rate_limit_logger = logging.getLogger(__name__ + ".rate_limit")
+_gen_call_singleflight_logger = logging.getLogger(__name__ + ".singleflight")
+
+_GEN_CALL_SINGLEFLIGHT_ENABLED = os.environ.get(
+    "GEN_CALL_SINGLEFLIGHT_ENABLED", "true"
+).lower() not in {"0", "false", "no", "off"}
+_gen_call_singleflight_tasks: dict[str, asyncio.Task[str]] = {}
+_gen_call_singleflight_lock = asyncio.Lock()
 
 
 def _check_rate_limit(address: str) -> None:
@@ -148,6 +155,66 @@ async def _admit_genvm_call(method: str, to_address: str | None):
         yield
     finally:
         _genvm_admission_semaphore.release()
+
+
+def _gen_call_singleflight_key(params: dict) -> str | None:
+    if not _GEN_CALL_SINGLEFLIGHT_ENABLED:
+        return None
+    if not isinstance(params, dict) or params.get("type") != "read":
+        return None
+
+    payload = json.dumps(params, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+async def _execute_gen_call_with_admission(
+    session: Session,
+    accounts_manager: AccountsManager,
+    msg_handler: IMessageHandler,
+    transactions_parser: TransactionParser,
+    validators_manager: validators.Manager,
+    genvm_manager: GenVMManager,
+    params: dict,
+) -> str:
+    to_address = params.get("to") if isinstance(params, dict) else None
+    async with _admit_genvm_call("gen_call", to_address):
+        receipt = await _execute_call_with_snapshot(
+            session,
+            accounts_manager,
+            msg_handler,
+            transactions_parser,
+            validators_manager,
+            genvm_manager,
+            params,
+        )
+    return eth_utils.hexadecimal.encode_hex(receipt.result[1:])[2:]
+
+
+async def _run_singleflight_gen_call(
+    key: str,
+    session: Session,
+    accounts_manager: AccountsManager,
+    msg_handler: IMessageHandler,
+    transactions_parser: TransactionParser,
+    validators_manager: validators.Manager,
+    genvm_manager: GenVMManager,
+    params: dict,
+) -> str:
+    try:
+        return await _execute_gen_call_with_admission(
+            session,
+            accounts_manager,
+            msg_handler,
+            transactions_parser,
+            validators_manager,
+            genvm_manager,
+            params,
+        )
+    finally:
+        task = asyncio.current_task()
+        async with _gen_call_singleflight_lock:
+            if _gen_call_singleflight_tasks.get(key) is task:
+                _gen_call_singleflight_tasks.pop(key, None)
 
 
 # ---------------------------------------------------------------------------
@@ -1232,9 +1299,9 @@ async def gen_call(
     genvm_manager: GenVMManager,
     params: dict,
 ) -> str:
-    to_address = params.get("to") if isinstance(params, dict) else None
-    async with _admit_genvm_call("gen_call", to_address):
-        receipt = await _execute_call_with_snapshot(
+    singleflight_key = _gen_call_singleflight_key(params)
+    if singleflight_key is None:
+        return await _execute_gen_call_with_admission(
             session,
             accounts_manager,
             msg_handler,
@@ -1243,7 +1310,30 @@ async def gen_call(
             genvm_manager,
             params,
         )
-    return eth_utils.hexadecimal.encode_hex(receipt.result[1:])[2:]
+
+    async with _gen_call_singleflight_lock:
+        task = _gen_call_singleflight_tasks.get(singleflight_key)
+        if task is None:
+            task = asyncio.create_task(
+                _run_singleflight_gen_call(
+                    singleflight_key,
+                    session,
+                    accounts_manager,
+                    msg_handler,
+                    transactions_parser,
+                    validators_manager,
+                    genvm_manager,
+                    params,
+                )
+            )
+            _gen_call_singleflight_tasks[singleflight_key] = task
+        else:
+            _gen_call_singleflight_logger.debug(
+                "Coalescing duplicate gen_call read for key %s",
+                singleflight_key[:12],
+            )
+
+    return await asyncio.shield(task)
 
 
 def sim_lint_contract(source_code: str, filename: str = "contract.py") -> dict:
