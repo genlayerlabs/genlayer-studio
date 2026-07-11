@@ -69,7 +69,6 @@ class SnapshotManager:
                 "appealed": tx.appealed,
                 "appeal_undetermined": tx.appeal_undetermined,
                 "triggered_by_hash": tx.triggered_by_hash,
-                "appealed": tx.appealed,
                 "timestamp_awaiting_finalization": tx.timestamp_awaiting_finalization,
                 "num_of_initial_validators": tx.num_of_initial_validators,
                 "last_vote_timestamp": tx.last_vote_timestamp,
@@ -78,6 +77,14 @@ class SnapshotManager:
                 "leader_timeout_validators": tx.leader_timeout_validators,
                 "appeal_validators_timeout": tx.appeal_validators_timeout,
                 "value_credited": tx.value_credited,
+                # Previously omitted -- restore_snapshot reads sim_config and
+                # these mode/routing fields, so dropping them here silently
+                # rewrote transactions (leader-only -> NORMAL, lost
+                # origin_address/triggered_on/sim_config) on restore.
+                "execution_mode": tx.execution_mode,
+                "origin_address": tx.origin_address,
+                "triggered_on": tx.triggered_on,
+                "sim_config": tx.sim_config,
             }
             for tx in transactions
         }
@@ -155,6 +162,9 @@ class SnapshotManager:
                 appeal_validators_timeout=tx_info["appeal_validators_timeout"],
                 sim_config=tx_info.get("sim_config"),
                 value_credited=tx_info.get("value_credited", False),
+                execution_mode=tx_info.get("execution_mode", "NORMAL"),
+                origin_address=tx_info.get("origin_address"),
+                triggered_on=tx_info.get("triggered_on"),
             )
             if tx_info["created_at"]:
                 new_tx.created_at = datetime.fromisoformat(tx_info["created_at"])

@@ -111,3 +111,62 @@ def test_snapshot_sequence_after_deletion(
     snapshots = session.query(Snapshot).order_by(Snapshot.snapshot_id).all()
     assert len(snapshots) == 3  # Should have 3 snapshots (1, 3, 4)
     assert [s.snapshot_id for s in snapshots] == [1, 3, 4]  # Verify IDs are correct
+
+
+def test_restore_snapshot_preserves_mode_origin_trigger_and_sim_config(
+    snapshot_manager: SnapshotManager, session: Session
+):
+    """Regression: create_snapshot omits execution_mode, origin_address,
+    triggered_on and sim_config from the serialized transaction dict (restore
+    even does tx_info.get("sim_config"), clearly expecting it). So
+    sim_restoreSnapshot silently rewrites transactions: leader-only txs come
+    back as NORMAL (losing their finality-window bypass), fee-settle refunds go
+    to from_address instead of origin_address, per-tx sim config is lost, and
+    triggered_on is dropped.
+    """
+    import json
+
+    from sqlalchemy import text
+
+    from backend.database_handler.models import Transactions
+    from backend.database_handler.transactions_processor import TransactionsProcessor
+
+    tx_hash = "0x" + "ab" * 32
+    origin = "0x" + "33" * 20
+    sim_config = {"validators": [{"provider": "openai", "model": "gpt-4.1"}]}
+
+    TransactionsProcessor(session).insert_transaction(
+        from_address="0x" + "11" * 20,
+        to_address="0x" + "22" * 20,
+        data={},
+        value=0,
+        type=1,
+        nonce=0,
+        leader_only=True,
+        config_rotation_rounds=3,
+        transaction_hash=tx_hash,
+    )
+    session.execute(
+        text(
+            """
+            UPDATE transactions
+            SET execution_mode = 'LEADER_ONLY',
+                origin_address = :origin,
+                triggered_on = 'accepted',
+                sim_config = CAST(:sim_config AS jsonb)
+            WHERE hash = :hash
+            """
+        ),
+        {"origin": origin, "sim_config": json.dumps(sim_config), "hash": tx_hash},
+    )
+    session.commit()
+
+    snap = snapshot_manager.create_snapshot()
+    snapshot_manager.restore_snapshot(snap.snapshot_id)
+    session.expire_all()
+
+    restored = session.query(Transactions).filter_by(hash=tx_hash).one()
+    assert restored.execution_mode == "LEADER_ONLY"
+    assert restored.origin_address == origin
+    assert restored.triggered_on == "accepted"
+    assert restored.sim_config == sim_config

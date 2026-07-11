@@ -806,14 +806,21 @@ class ConsensusAlgorithm:
         ]
 
         # Check if finalization criteria are met
-        time_based_finalization = (
-            time.time()
-            - transaction.timestamp_awaiting_finalization
-            - transaction.appeal_processing_time
-        ) > self.finality_window_time * (
-            (1 - self.finality_window_appeal_failed_reduction)
-            ** transaction.appeal_failed
-        )
+        if transaction.timestamp_awaiting_finalization is None:
+            # A row claimed for finalization with no awaiting-finalization
+            # timestamp (the defensive stranded-row claim path) is by
+            # definition past the finality window. Treat the window as elapsed
+            # instead of crashing on `time.time() - None`.
+            time_based_finalization = True
+        else:
+            time_based_finalization = (
+                time.time()
+                - transaction.timestamp_awaiting_finalization
+                - transaction.appeal_processing_time
+            ) > self.finality_window_time * (
+                (1 - self.finality_window_appeal_failed_reduction)
+                ** transaction.appeal_failed
+            )
 
         if immediate_finalization or time_based_finalization:
             if index == 0:
