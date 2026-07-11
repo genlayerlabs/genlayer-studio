@@ -362,3 +362,85 @@ async def test_eth_call_releases_admission_slot_after_success(monkeypatch):
         from_address=validator.address,
         calldata=decoded_data.calldata,
     )
+
+
+@pytest.mark.asyncio
+async def test_gen_call_singleflight_returns_stale_read_after_state_change(monkeypatch):
+    """Regression: the gen_call singleflight key is sha256(params) only, with no
+    state-version discriminator.
+
+    A slow read R1 of a contract takes its DB snapshot, then a write to that
+    contract reaches ACCEPTED, then an identical read R2 arrives. Because the
+    coalescing key ignores contract state, R2 joins R1's still-in-flight task
+    and receives R1's pre-write result -- even though R2 was issued after the
+    write committed. For the 'latest-nonfinal' variant this is a read-your-
+    writes violation: R2 must observe the post-write state.
+    """
+    semaphore = asyncio.Semaphore(2)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    execute_calls = 0
+
+    # Mutable "contract state" observed by an execution when it takes its
+    # snapshot (at execution start, before the release barrier).
+    current_state = {"value": 0x11}
+
+    monkeypatch.setattr(endpoints, "_GEN_CALL_SINGLEFLIGHT_ENABLED", True)
+    monkeypatch.setattr(endpoints, "_gen_call_singleflight_tasks", {})
+    monkeypatch.setattr(endpoints, "_gen_call_singleflight_lock", asyncio.Lock())
+    monkeypatch.setattr(endpoints, "_genvm_admission_semaphore", semaphore)
+
+    async def fake_execute_call_with_snapshot(*args, **kwargs):
+        nonlocal execute_calls
+        execute_calls += 1
+        captured = current_state["value"]  # snapshot taken at execution start
+        started.set()
+        await release.wait()
+        return MagicMock(result=bytes([0x00, captured]))
+
+    monkeypatch.setattr(
+        endpoints, "_execute_call_with_snapshot", fake_execute_call_with_snapshot
+    )
+
+    params = {
+        "type": "read",
+        "to": "0x" + "ab" * 20,
+        "from": "0x" + "cd" * 20,
+        "data": "0x1234",
+        "transaction_hash_variant": "latest-nonfinal",
+    }
+
+    first = asyncio.create_task(
+        endpoints.gen_call(
+            session=MagicMock(),
+            accounts_manager=MagicMock(),
+            msg_handler=MagicMock(),
+            transactions_parser=MagicMock(),
+            validators_manager=MagicMock(),
+            genvm_manager=MagicMock(),
+            params=dict(params),
+        )
+    )
+    await started.wait()
+
+    # A write lands and the contract state advances after R1 snapshotted.
+    current_state["value"] = 0x22
+
+    second = asyncio.create_task(
+        endpoints.gen_call(
+            session=MagicMock(),
+            accounts_manager=MagicMock(),
+            msg_handler=MagicMock(),
+            transactions_parser=MagicMock(),
+            validators_manager=MagicMock(),
+            genvm_manager=MagicMock(),
+            params=dict(params),
+        )
+    )
+
+    release.set()
+    first_result, second_result = await asyncio.gather(first, second)
+
+    assert first_result == "11"  # R1 legitimately sees the pre-write state
+    # R2 was issued after the write committed and must see the new state.
+    assert second_result == "22"

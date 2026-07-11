@@ -5186,6 +5186,51 @@ def test_create_child_fee_accounting_seeds_mode1_bucket_without_child_allocation
     assert child_accounting["user_value"] == 7
 
 
+def test_seeded_mode1_child_with_budget_slack_is_still_executable():
+    """Regression (commit ab62acc): a mode-1 child whose declared budget
+    exceeds its exact primary fee gets ``message_fee_budget = slack > 0`` with
+    an empty ``message_allocations``. When that child is executed, consensus
+    calls ``genvm_message_fee_allocation(child_accounting)`` — which raises
+    ``Mode1MessageFeesRequireGenVMPerEmissionSupport`` whenever the message-fee
+    budget is positive but there is no allocation tree. So a child that a
+    contract legitimately over-funds (e.g. to leave room for its own emissions)
+    can *never* run: it deterministically fails before GenVM starts.
+
+    Before ab62acc the slack stayed out of ``message_fee_budget`` (it was 0),
+    so ``genvm_message_fee_allocation`` returned ``[]`` and the child executed.
+    Budget slack is explicitly permitted at submission (``budget >= min``), so
+    seeding a child with slack and then rejecting it at execution is
+    inconsistent. A child that carries a message-fee bucket but emits no
+    sub-messages of its own must still be executable.
+    """
+    _child_fees, child_accounting = create_child_fee_accounting(
+        message={
+            "messageType": 1,
+            "recipient": "0x3333333333333333333333333333333333333333",
+            "value": 7,
+            "onAcceptance": True,
+            "feeParams": _encode_internal_fee_params(),
+            "declaredBudget": 70,  # exceeds the 55 primary fee -> 15 slack
+            "callKey": "0x" + "0" * 64,
+        },
+        parent_fees_distribution=_fees_distribution(
+            max_price_gen_per_time_unit=999,
+            storage_fee_max_gas_price=888,
+            receipt_fee_max_gas_price=777,
+        ),
+        sender="0x1111111111111111111111111111111111111111",
+    )
+
+    # Sanity: this is the seeded shape (slack in the message-fee bucket).
+    assert child_accounting["message_fee_budget"] == 15
+    assert child_accounting["message_allocations"] == []
+
+    # The over-funded child must still be executable: producing its GenVM
+    # message-fee allocation must not raise. Currently raises
+    # Mode1MessageFeesRequireGenVMPerEmissionSupport.
+    assert genvm_message_fee_allocation(child_accounting) == []
+
+
 def test_create_child_fee_accounting_validates_primary_before_inherited_caps():
     policy = StudioFeePolicy(
         gen_per_time_unit=2,
