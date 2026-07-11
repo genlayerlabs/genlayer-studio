@@ -1467,3 +1467,71 @@ def test_prune_cli_main_runs_parallel_workers_with_shared_batch_budget(monkeypat
     assert len(created_pruners) == 3
     assert engine_kwargs["pool_size"] == 3
     assert engine_kwargs["max_overflow"] == 0
+
+
+def test_dry_run_terminates_and_counts_each_candidate_once(monkeypatch):
+    """Regression: ``--dry-run`` with the default ``--max-batches 0`` loops
+    forever and re-counts the same rows.
+
+    In dry-run mode every phase rolls back and re-fetches the same first
+    ``batch_size`` rows (there is no keyset/offset and nothing is
+    archived/pruned), so ``result.candidates`` never reaches 0. With the
+    default ``--max-batches 0`` the ``BatchBudget`` never runs out, so the
+    worker loop in ``_run_pruner_worker`` never exits: it spins, and its running
+    ``totals`` grow without bound by counting the identical rows over and over.
+
+    A dry-run is documented as "Count candidates in batches without writing" and
+    must perform a bounded counting pass. This test drives ``main()`` and fails
+    if it does not terminate.
+    """
+    engine = object()
+    max_calls = 50  # guard: real bug spins forever; cap to avoid hanging pytest
+
+    class FakeDryRunPruner:
+        def __init__(self, session_factory, config):
+            self.config = config
+            self.calls = 0
+
+        def prune_once(self):
+            self.calls += 1
+            if self.calls > max_calls:
+                raise RuntimeError(
+                    "dry-run did not terminate: prune_once called "
+                    f"{self.calls} times, re-counting the same candidates"
+                )
+            # Faithful to the real dry-run branch: candidates never decreases
+            # because nothing is consumed and the same rows are re-fetched.
+            return PruneBatchResult(
+                candidates=3,
+                logical_bytes=30,
+                dry_run=True,
+            )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["prune_terminal_snapshots", "--dry-run"],  # default --max-batches 0
+    )
+    monkeypatch.setattr(
+        prune_cli.TerminalSnapshotPrunerConfig,
+        "from_environment",
+        staticmethod(
+            lambda: TerminalSnapshotPrunerConfig(
+                enabled=False,
+                dry_run=False,
+                batch_size=5,
+                retention_hours=24,
+                s3_bucket="archive-bucket",
+            )
+        ),
+    )
+    monkeypatch.setattr(prune_cli, "get_database_url", lambda: "postgresql://db")
+    monkeypatch.setattr(prune_cli, "create_engine", lambda url, **kwargs: engine)
+    monkeypatch.setattr(
+        prune_cli, "sessionmaker", lambda **kwargs: ("SessionLocal", kwargs)
+    )
+    monkeypatch.setattr(prune_cli, "TerminalSnapshotPruner", FakeDryRunPruner)
+    monkeypatch.setattr(prune_cli.time, "sleep", lambda *_: None)
+
+    # Must terminate; the buggy loop raises RuntimeError via the guard above.
+    assert prune_cli.main() == 0
