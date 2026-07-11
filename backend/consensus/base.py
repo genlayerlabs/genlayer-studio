@@ -714,13 +714,18 @@ class ConsensusAlgorithm:
         is_triggered = transaction.triggered_by_hash is not None
 
         if not is_triggered and transaction.from_address is not None:
-            # Get the balance of the sender account
-            from_balance = accounts_manager.get_account_balance(
-                transaction.from_address
+            # Atomic conditional debit (UPDATE ... WHERE balance >= amount)
+            # instead of read-modify-write. Worker claims serialize only on
+            # to_address, so two SENDs from the same sender (A->B and A->C) can
+            # run in parallel; the old get_account_balance + update_account_balance
+            # overwrite let the second commit clobber the first's debit, so the
+            # sender was debited once while both recipients were credited —
+            # minting tokens. A False return means insufficient balance (or a
+            # missing sender account).
+            debited = accounts_manager.debit_account_balance(
+                transaction.from_address, transaction.value
             )
-
-            # Check if the sender has enough balance
-            if from_balance < transaction.value:
+            if not debited:
                 # UNDETERMINED is finalization-eligible: claim_next_finalization
                 # filters on timestamp_awaiting_finalization IS NOT NULL.
                 # Without this stamp the row strands forever (16 such rows
@@ -737,18 +742,10 @@ class ConsensusAlgorithm:
 
                 return
 
-            # Update the balance of the sender account
-            accounts_manager.update_account_balance(
-                transaction.from_address, from_balance - transaction.value
-            )
-
         if transaction.to_address is not None:
-            # Get the balance of the recipient account
-            to_balance = accounts_manager.get_account_balance(transaction.to_address)
-
-            # Update the balance of the recipient account
-            accounts_manager.update_account_balance(
-                transaction.to_address, to_balance + transaction.value
+            # Atomic credit (creates the recipient account if needed).
+            accounts_manager.credit_account_balance(
+                transaction.to_address, transaction.value
             )
 
         # Mark the tx as credited so a later retry (or duplicate sync path)
