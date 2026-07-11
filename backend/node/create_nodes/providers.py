@@ -120,7 +120,18 @@ def get_default_provider_for(provider: str, model: str) -> LLMProvider:
         raise ValueError(f"No default provider found for {provider} and {model}")
     if len(matches) > 1:
         raise ValueError(f"Multiple default providers found for {provider} and {model}")
-    return matches[0]
+    # Return a copy, not the shared cached instance: callers (e.g.
+    # update_validator) mutate `.config`, which would otherwise pollute the
+    # process-wide default for every subsequent caller.
+    match = matches[0]
+    return LLMProvider(
+        provider=match.provider,
+        model=match.model,
+        config=match.config.copy() if match.config else {},
+        plugin=match.plugin,
+        plugin_config=match.plugin_config.copy() if match.plugin_config else {},
+        id=match.id,
+    )
 
 
 # TODO: We could merge part of this logic of getting the available providers by loading the plugins. The plugins could have methods like `is_available` and `get_available_models` that would simplify this logic.

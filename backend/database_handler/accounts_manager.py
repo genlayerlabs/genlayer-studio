@@ -97,10 +97,22 @@ class AccountsManager:
             to_account = self.get_account(account_address)
         to_account.balance = new_balance
 
+    @staticmethod
+    def _normalized_address(address: str) -> str:
+        # Raw-SQL balance ops key on `current_state.id`, which is written in
+        # checksummed form by create_new_account_with_address and read back
+        # checksummed by get_account. Normalize here too so a lowercase address
+        # doesn't create/patch a second, unreadable row.
+        try:
+            return to_checksum_address(address)
+        except Exception:
+            return address
+
     def debit_account_balance(self, account_address: str, amount: int) -> bool:
         """Atomic conditional debit. Returns False if insufficient balance."""
         if amount <= 0:
             return True
+        account_address = self._normalized_address(account_address)
         result = self.session.execute(
             text(
                 "UPDATE current_state SET balance = balance - :amount "
@@ -114,6 +126,7 @@ class AccountsManager:
         """Atomic credit. Creates account if it doesn't exist."""
         if amount <= 0:
             return
+        account_address = self._normalized_address(account_address)
         self.session.execute(
             text(
                 "INSERT INTO current_state (id, data, balance) "
@@ -137,6 +150,7 @@ class AccountsManager:
         Sets value_credited=true atomically. Returns True if credit was applied."""
         if amount <= 0:
             return False
+        target_address = self._normalized_address(target_address)
         # Ensure target account exists
         self.session.execute(
             text(

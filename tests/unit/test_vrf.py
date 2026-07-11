@@ -66,3 +66,23 @@ def test_get_validators_for_transaction_3():
 
     rng.choice.assert_called_once()
     assert validators == [{"stake": 3}, {"stake": 2}, {"stake": 1}]
+
+
+def test_all_zero_stake_does_not_crash():
+    """Regression: when every validator has stake 0, total_stake is 0 and the
+    probability computation raises ZeroDivisionError, crashing all validator
+    selection (consensus wedges). Zero-stake validators are reachable via
+    sim_createValidator(stake=0) and sim_config virtual validators (default
+    stake 0)."""
+    nodes = [{"stake": 0}, {"stake": 0}, {"stake": 0}]
+    result = get_validators_for_transaction(nodes, 3)
+    assert list_of_dicts_to_set(result) == list_of_dicts_to_set(nodes)
+
+
+def test_partial_zero_stake_does_not_crash():
+    """Regression: when some validators have stake 0 and we need at least as
+    many validators as there are non-zero-stake entries, numpy's
+    rng.choice(replace=False) raises 'Fewer non-zero entries in p than size'."""
+    nodes = [{"stake": 1}, {"stake": 0}, {"stake": 1}]
+    result = get_validators_for_transaction(nodes, 3)
+    assert list_of_dicts_to_set(result) == list_of_dicts_to_set(nodes)

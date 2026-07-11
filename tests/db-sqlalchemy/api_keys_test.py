@@ -138,3 +138,59 @@ class TestApiKey:
 
         result = session.query(ApiKey).filter_by(key_hash=key_hash).first()
         assert result.description == "Test API key"
+
+
+class TestDeactivateAmbiguousPrefix:
+    """Regression: admin_deactivate_api_key targets key_prefix, which is only
+    'glk_' + 4 hex chars (16 bits) and is NOT unique (only key_hash has a
+    UniqueConstraint). With a prefix collision, .first() deactivates an
+    arbitrary matching key -- an admin revoking a compromised key can silently
+    disable an innocent key while the compromised one stays active.
+    """
+
+    def _create_tier(self, session, name="free"):
+        tier = ApiTier(
+            name=name, rate_limit_minute=30, rate_limit_hour=500, rate_limit_day=5000
+        )
+        session.add(tier)
+        session.commit()
+        session.expire_all()
+        return session.query(ApiTier).filter_by(name=name).first()
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_prefix_is_not_silently_deactivated(self, session):
+        from backend.protocol_rpc import endpoints
+
+        tier = self._create_tier(session)
+        # Two distinct active keys colliding on the 8-char prefix.
+        k1 = ApiKey(
+            key_prefix="glk_dead",
+            key_hash=hashlib.sha256(b"raw-key-1").hexdigest(),
+            tier_id=tier.id,
+            is_active=True,
+        )
+        k2 = ApiKey(
+            key_prefix="glk_dead",
+            key_hash=hashlib.sha256(b"raw-key-2").hexdigest(),
+            tier_id=tier.id,
+            is_active=True,
+        )
+        session.add_all([k1, k2])
+        session.commit()
+
+        # Revoking by an ambiguous prefix must not silently pick one key and
+        # report success -- that leaves the other (possibly compromised) key
+        # active. Expected: a clear error so the admin can disambiguate.
+        with pytest.raises(Exception):
+            await endpoints.admin_deactivate_api_key(
+                session=session, key_prefix="glk_dead", rate_limiter=None
+            )
+
+        session.expire_all()
+        still_active = (
+            session.query(ApiKey)
+            .filter_by(key_prefix="glk_dead", is_active=True)
+            .count()
+        )
+        # No key should have been silently flipped by an arbitrary guess.
+        assert still_active == 2

@@ -74,3 +74,29 @@ def test_default_providers_valid():
 )
 def test_validate_provider(llm_provider):
     validate_provider(llm_provider)
+
+
+def test_get_default_provider_for_returns_isolated_copy():
+    """Regression: get_default_provider_for returned the shared cached
+    LLMProvider instance on an exact (provider, model) match. update_validator
+    then did `llm_provider.config = config` on that shared object, so every
+    later caller in the process silently received the caller-supplied config
+    instead of the real default. The exact-match path must return a copy, like
+    the fallback-template path already does."""
+    from backend.node.create_nodes.providers import (
+        get_default_provider_for,
+        get_default_providers,
+    )
+
+    sample = get_default_providers()[0]
+
+    a = get_default_provider_for(sample.provider, sample.model)
+    if a.config is None:
+        a.config = {}
+    a.config["__pollution_marker__"] = 12345
+
+    b = get_default_provider_for(sample.provider, sample.model)
+    assert (b.config or {}).get("__pollution_marker__") is None, (
+        "get_default_provider_for leaked a shared cached instance; mutating one "
+        "caller's config polluted the process-wide default"
+    )

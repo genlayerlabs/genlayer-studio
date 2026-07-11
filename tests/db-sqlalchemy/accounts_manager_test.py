@@ -281,3 +281,34 @@ def test_settle_tx_fee_accounting_once_uses_actual_final_round_for_refund(
     fee_accounting = tx.data[FEE_ACCOUNTING_KEY]
     assert fee_accounting["actual_final_round"] == 0
     assert fee_accounting["primary_fee_spent"] == 1100
+
+
+def test_credit_account_balance_normalizes_lowercase_address(
+    accounts_manager: AccountsManager, session: Session
+):
+    """Regression: credit_account_balance / debit_account_balance /
+    credit_tx_value_once interpolate the address verbatim into SQL, while
+    get_account (and thus get_account_balance) checksum-normalizes. Crediting a
+    lowercase address writes a row keyed by the lowercase string; every ORM
+    read hits the checksummed key and sees 0 -> funds are stranded and
+    unspendable. sim_fundAccount accepts lowercase (is_address) and passes it
+    straight through.
+    """
+    checksummed = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
+    lowercase = checksummed.lower()
+
+    accounts_manager.credit_account_balance(lowercase, 100)
+    session.commit()
+
+    # The credited balance must be visible under the canonical (checksummed)
+    # address, and there must be exactly one row for this account.
+    assert accounts_manager.get_account_balance(checksummed) == 100
+
+    from backend.database_handler.models import CurrentState
+
+    rows = (
+        session.query(CurrentState)
+        .filter(CurrentState.id.in_([checksummed, lowercase]))
+        .all()
+    )
+    assert len(rows) == 1, f"expected a single account row, got {[r.id for r in rows]}"

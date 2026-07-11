@@ -2758,14 +2758,30 @@ async def admin_deactivate_api_key(
 ) -> dict:
     from backend.database_handler.models import ApiKey
 
-    api_key = (
-        session.query(ApiKey).filter_by(key_prefix=key_prefix, is_active=True).first()
+    matching_keys = (
+        session.query(ApiKey).filter_by(key_prefix=key_prefix, is_active=True).all()
     )
-    if not api_key:
+    if not matching_keys:
         raise NotFoundError(
             message=f"Active API key with prefix {key_prefix} not found"
         )
+    if len(matching_keys) > 1:
+        # key_prefix is only 'glk_' + 4 hex chars (16 bits) and is not unique,
+        # so a birthday collision can leave several active keys sharing a
+        # prefix. Deactivating an arbitrary one (the old .first() behavior)
+        # could disable an innocent key while a compromised one stays active.
+        # Refuse to guess.
+        raise JSONRPCError(
+            code=-32602,
+            message=(
+                f"Ambiguous API key prefix {key_prefix}: "
+                f"{len(matching_keys)} active keys share it. "
+                "Disambiguate before deactivating."
+            ),
+            data={"key_prefix": key_prefix, "matches": len(matching_keys)},
+        )
 
+    api_key = matching_keys[0]
     api_key.is_active = False
     session.flush()
 
