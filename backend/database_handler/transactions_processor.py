@@ -15,6 +15,7 @@ import base64
 import time
 from backend.domain.types import TransactionType
 from web3 import Web3
+from loguru import logger
 from backend.consensus.types import ConsensusRound
 from backend.consensus.history import time_unit_consumption
 from backend.consensus.utils import determine_consensus_from_votes
@@ -233,7 +234,19 @@ class TransactionsProcessor:
         if not tx_hash:
             return
 
-        snapshot = self.snapshot_archive.load_snapshot(self.session, tx_hash)
+        try:
+            snapshot = self.snapshot_archive.load_snapshot(self.session, tx_hash)
+        except Exception as exc:
+            # A missing/unreachable/corrupt archive object (S3/GCS outage,
+            # absent credentials, sha256 mismatch, FileNotFoundError) must not
+            # turn every read of this transaction into a permanent 500. Degrade
+            # to a null snapshot, exactly as when no archive is configured.
+            logger.warning(
+                "Failed to hydrate archived contract snapshot for {}: {}",
+                tx_hash,
+                exc,
+            )
+            return
         if snapshot is not None:
             transaction_data["contract_snapshot"] = snapshot
 

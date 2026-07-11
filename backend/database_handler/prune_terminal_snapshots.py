@@ -140,6 +140,21 @@ def _run_pruner_worker(
             elapsed_seconds=batch_elapsed,
         )
 
+        if result.dry_run:
+            # Dry-run rolls back instead of archiving/pruning, so the same
+            # candidate window is re-selected every iteration and
+            # result.candidates never reaches 0. With --max-batches 0 the loop
+            # would spin forever, re-counting identical rows. A dry-run is a
+            # bounded counting pass: report this batch and stop.
+            logger.info(
+                "Worker %s dry-run counted a batch of %s candidates for "
+                "phase %s; stopping (dry-run does not drain candidates)",
+                worker_id,
+                result.candidates,
+                phase,
+            )
+            return
+
         if sleep_seconds > 0:
             time.sleep(sleep_seconds)
 

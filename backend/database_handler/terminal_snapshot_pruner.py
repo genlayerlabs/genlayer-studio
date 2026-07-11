@@ -814,12 +814,11 @@ class TerminalSnapshotPruner:
         ]
 
     def _fetch_archive_candidates(self, session: Session) -> list[SnapshotCandidate]:
-        candidate_scan_limit = self.config.batch_size * 5
         rows = (
             session.execute(
                 text(
                     """
-                    WITH candidate_rows AS MATERIALIZED (
+                    WITH selected_rows AS MATERIALIZED (
                         SELECT
                             hash,
                             status::text AS status,
@@ -828,24 +827,15 @@ class TerminalSnapshotPruner:
                         WHERE contract_snapshot IS NOT NULL
                           AND status IN ('FINALIZED', 'CANCELED')
                           AND created_at < :cutoff
-                        ORDER BY created_at ASC, hash ASC
-                        LIMIT :candidate_scan_limit
-                        FOR UPDATE SKIP LOCKED
-                    ),
-                    selected_rows AS MATERIALIZED (
-                        SELECT
-                            hash,
-                            status,
-                            created_at
-                        FROM candidate_rows
-                        WHERE NOT EXISTS (
+                          AND NOT EXISTS (
                               SELECT 1
                               FROM transaction_snapshot_archives archives
-                              WHERE archives.tx_hash = candidate_rows.hash
+                              WHERE archives.tx_hash = transactions.hash
                                 AND archives.archive_status IN ('archived', 'pruned')
                           )
                         ORDER BY created_at ASC, hash ASC
                         LIMIT :batch_size
+                        FOR UPDATE SKIP LOCKED
                     )
                     SELECT
                         selected_rows.hash,
@@ -861,7 +851,6 @@ class TerminalSnapshotPruner:
                 {
                     "cutoff": self._cutoff(),
                     "batch_size": self.config.batch_size,
-                    "candidate_scan_limit": candidate_scan_limit,
                 },
             )
             .mappings()
