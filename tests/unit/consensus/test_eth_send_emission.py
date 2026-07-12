@@ -102,3 +102,29 @@ class TestPendingTransactionEthSend:
             is_eth_send=True,
         )
         assert pt.is_deploy() is False
+
+
+def test_eth_send_round_trip_preserves_vote_equality():
+    """Failing repro: an EthSend PendingTransaction with non-empty calldata is
+    not equal to itself after a to_dict/from_dict round-trip, because to_dict
+    omits `calldata` for is_eth_send and from_dict unconditionally sets it to
+    b"". provide_result (genvm/base.py) still populates calldata from the
+    emission, and _set_vote (node/base.py) compares full dataclass equality of
+    pending_transactions. So a deserialized leader receipt (from consensus_data)
+    compared against a validator's freshly-executed receipt mismatches on
+    calldata alone -> a spurious Vote.DETERMINISTIC_VIOLATION even though both
+    executed identically."""
+    pt = PendingTransaction(
+        address="0x" + "11" * 20,
+        calldata=b"\xde\xad\xbe\xef",
+        code=None,
+        salt_nonce=0,
+        on="finalized",
+        value=1,
+        is_eth_send=True,
+    )
+    round_tripped = PendingTransaction.from_dict(pt.to_dict())
+    assert round_tripped == pt, (
+        "EthSend pending-tx must survive a serialization round-trip for vote "
+        f"equality; calldata {pt.calldata!r} became {round_tripped.calldata!r}"
+    )
