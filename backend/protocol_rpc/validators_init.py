@@ -92,6 +92,7 @@ async def initialize_validators(
         desired_hash = _desired_config_hash(validators_json)
     except (TypeError, KeyError) as e:
         # Bad config fields — fall through to the creation loop which gives a better error
+        logger.warning(f"Unable to hash validators config; validation will report: {e}")
         desired_hash = None
     current_hash = _current_config_hash(validators_manager.registry)
 

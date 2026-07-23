@@ -488,7 +488,7 @@ async def _await_first_cancel_others(*it):
 async def run_genvm(
     handler: IHost,
     *,
-    timeout: float | None = None,
+    timeout: float | None = None,  # noqa: ASYNC109 - drives a process timeout task
     manager_uri: str = "http://127.0.0.1:3999",
     ctx: Context,
     is_sync: bool,

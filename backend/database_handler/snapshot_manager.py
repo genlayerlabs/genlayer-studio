@@ -69,7 +69,6 @@ class SnapshotManager:
                 "appealed": tx.appealed,
                 "appeal_undetermined": tx.appeal_undetermined,
                 "triggered_by_hash": tx.triggered_by_hash,
-                "appealed": tx.appealed,
                 "timestamp_awaiting_finalization": tx.timestamp_awaiting_finalization,
                 "num_of_initial_validators": tx.num_of_initial_validators,
                 "last_vote_timestamp": tx.last_vote_timestamp,

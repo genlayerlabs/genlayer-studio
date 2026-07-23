@@ -469,20 +469,20 @@ async def check_provider_is_available(
 
     if len(res) != 1:
         genvm_manager.logger.error(
-            f"LLM provider check failed", provider=provider, result=res
+            "LLM provider check failed", provider=provider, result=res
         )
         return False
     res = res[0]
     if (text_response := res.get("response")) is None:
         genvm_manager.logger.error(
-            f"LLM provider check failed", provider=provider, result=res
+            "LLM provider check failed", provider=provider, result=res
         )
         return False
 
     what_returned = text_response.strip().lower()
     if what_returned != "ok":
         genvm_manager.logger.error(
-            f"LLM provider check failed", provider=provider, text_response=text_response
+            "LLM provider check failed", provider=provider, text_response=text_response
         )
         return False
     return True

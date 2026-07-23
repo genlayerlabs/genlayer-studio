@@ -732,7 +732,7 @@ def _leader_results_to_list(
 async def run_genvm_host(
     host_supplier: typing.Callable[[socket.socket], Host],
     *,
-    timeout: float,
+    timeout: float,  # noqa: ASYNC109 - retry budget spans multiple awaits
     manager_uri: str = "http://127.0.0.1:3999",
     logger: genvm_logger.Logger | None = None,
     is_sync: bool,
@@ -859,7 +859,7 @@ async def run_genvm_host(
                     raise
                 except Exception as e:
                     logger.error(
-                        f"GenVM execution attempt failed",
+                        "GenVM execution attempt failed",
                         error=e,
                         retry_count=retry_count,
                     )

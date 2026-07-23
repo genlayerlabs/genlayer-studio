@@ -39,6 +39,18 @@ jobs:
       - run: npm run lint
       - run: npm run build
 
+  backend-lint:
+    if: (github.actor != 'dependabot[bot]' && github.actor != 'renovate[bot]')
+    name: Backend lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install ruff==0.15.22
+      - run: ruff check
+
   backend-unit-tests:
     if: (github.actor != 'dependabot[bot]' && github.actor != 'renovate[bot]')
     runs-on: ubuntu-latest
@@ -51,7 +63,14 @@ jobs:
       - run: pip install -r backend/requirements.txt
       - run: pip install pytest-cov pytest-xdist
       - run: pytest tests/unit --cov=backend --cov-report=xml --cov-branch -n auto
-      - name: SonarCloud Scan
-        uses: sonarsource/sonarqube-scan-action@v7.0.0
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      # Backend coverage.xml previously had exactly one consumer (SonarCloud).
+      # Codecov measures the actual PR diff rather than a stale branch baseline.
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5.5.2
+        with:
+          verbose: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+          files: coverage.xml
+          flags: backend
