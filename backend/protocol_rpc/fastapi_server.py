@@ -61,17 +61,17 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app
 app = FastAPI(title="GenLayer Studio RPC API", version="1.0.0", lifespan=lifespan)
 
-# Add CORS middleware
+# Rate limiting is inner so CORS decorates short-circuit responses such as 429s.
+app.add_middleware(RateLimitMiddleware)
+
+# This public RPC uses header-based API keys and no cookie authentication.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Add rate limiting middleware (executes after CORS, before route handler)
-app.add_middleware(RateLimitMiddleware)
 
 # Include health check endpoints
 app.include_router(health_router)
