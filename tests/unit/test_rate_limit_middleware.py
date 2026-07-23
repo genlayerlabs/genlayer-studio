@@ -98,6 +98,20 @@ class TestMiddlewarePassthrough:
         call_next.assert_called_once()
 
 
+def test_rpc_app_cors_wraps_rate_limiting_without_credentials():
+    from fastapi.middleware.cors import CORSMiddleware
+
+    from backend.protocol_rpc.fastapi_server import app
+
+    cors_class, _, cors_options = app.user_middleware[0]
+    rate_limit_class, _, _ = app.user_middleware[1]
+
+    assert cors_class is CORSMiddleware
+    assert cors_options["allow_origins"] == ["*"]
+    assert cors_options["allow_credentials"] is False
+    assert rate_limit_class is RateLimitMiddleware
+
+
 class TestMiddlewareRateLimiting:
     @pytest.mark.asyncio
     async def test_allows_when_under_limit(self):

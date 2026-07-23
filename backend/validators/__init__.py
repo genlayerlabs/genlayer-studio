@@ -1,4 +1,4 @@
-__all__ = ("Manager", "with_lock", "select_random_different_validator")
+__all__ = ("Manager", "select_random_different_validator")
 
 import asyncio
 import typing

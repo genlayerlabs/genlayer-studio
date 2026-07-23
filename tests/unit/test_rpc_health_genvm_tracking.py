@@ -12,6 +12,21 @@ import pytest
 import backend.protocol_rpc.health as health_module
 
 
+def test_readiness_jitter_uses_default_process_rng():
+    with (
+        patch.object(health_module.random, "random", return_value=0.25) as random_fn,
+        patch.object(
+            health_module,
+            "_get_readiness_permit_jitter_seconds",
+            return_value=8.0,
+        ),
+    ):
+        jitter = health_module._generate_readiness_jitter_seconds()
+
+    assert jitter == 2.0
+    random_fn.assert_called_once_with()
+
+
 class TestGenVMExecutionFailureTracking:
     """Test GenVM execution failure tracking functions."""
 

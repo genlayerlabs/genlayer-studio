@@ -408,9 +408,7 @@ class TransactionsProcessor:
                         bytes(value, encoding="utf-8")
                     ).decode("utf-8", errors="ignore")
                     byte_content = re.sub(r"^[\x00-\x1f]+", "", decoded_str)
-                    if byte_content or len(byte_content) >= 0:
-                        return byte_content
-                    return decoded_str
+                    return byte_content
                 except (ValueError, UnicodeDecodeError):
                     return value  # Return original if decoding fails
 

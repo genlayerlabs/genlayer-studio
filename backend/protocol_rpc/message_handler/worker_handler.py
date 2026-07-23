@@ -11,7 +11,7 @@ import aiohttp
 from loguru import logger
 
 from backend.protocol_rpc.message_handler.base import MessageHandler
-from backend.protocol_rpc.message_handler.types import LogEvent
+from backend.protocol_rpc.message_handler.types import EventScope, LogEvent
 from backend.protocol_rpc.configuration import GlobalConfiguration
 
 
@@ -138,10 +138,10 @@ class WorkerMessageHandler(MessageHandler):
             self._log_message(log_event)
 
         # Forward to JSON-RPC server if it's an important event
-        if log_event.transaction_hash or log_event.scope.value in [
-            "TRANSACTION",
-            "CONSENSUS",
-        ]:
+        if log_event.transaction_hash or log_event.scope in (
+            EventScope.TRANSACTION,
+            EventScope.CONSENSUS,
+        ):
             self._socket_emit(log_event)
 
     async def close(self):

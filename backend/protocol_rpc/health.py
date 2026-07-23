@@ -160,10 +160,12 @@ def _get_readiness_permit_jitter_seconds() -> float:
         return 2.0
 
 
+def _generate_readiness_jitter_seconds() -> float:
+    return random.random() * _get_readiness_permit_jitter_seconds()
+
+
 # Per-process stable jitter in [0, jitter_s]
-_READINESS_JITTER_S: float = (
-    random.Random(os.getpid()).random() * _get_readiness_permit_jitter_seconds()
-)
+_READINESS_JITTER_S: float = _generate_readiness_jitter_seconds()
 
 
 def _evaluate_permit_readiness(
