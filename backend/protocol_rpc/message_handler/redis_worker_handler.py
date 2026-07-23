@@ -182,7 +182,8 @@ class RedisWorkerMessageHandler(MessageHandler):
             loop = asyncio.get_event_loop()
             if loop.is_running():
                 # Schedule the async send operation
-                asyncio.create_task(self._publish_to_redis(log_event))
+                task = asyncio.create_task(self._publish_to_redis(log_event))
+                self._track_background_task(task)
             else:
                 # If no loop is running, run it synchronously
                 asyncio.run(self._publish_to_redis(log_event))

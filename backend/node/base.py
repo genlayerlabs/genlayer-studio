@@ -472,10 +472,10 @@ class Manager:
             body = await resp.json()
             if resp.status != 200:
                 self.logger.error(
-                    f"Failed to stop LLM module", body=body, status=resp.status
+                    "Failed to stop LLM module", body=body, status=resp.status
                 )
             else:
-                self.logger.info(f"Stopped LLM module", body=body, status=resp.status)
+                self.logger.info("Stopped LLM module", body=body, status=resp.status)
 
     async def start_module(
         self,
@@ -490,7 +490,7 @@ class Manager:
             body = await resp.json()
             if resp.status != 200:
                 self.logger.error(
-                    f"Failed to start module",
+                    "Failed to start module",
                     module=module_type,
                     body=body,
                     status=resp.status,
@@ -518,9 +518,7 @@ class Manager:
         async with aiohttp.request("POST", f"{self.url}/llm/check", json=data) as resp:
             body = await resp.json()
             if resp.status != 200:
-                self.logger.error(
-                    f"Failed to check llms", body=body, status=resp.status
-                )
+                self.logger.error("Failed to check llms", body=body, status=resp.status)
                 # Return error response for each config when the check fails
                 return [
                     {
@@ -976,7 +974,7 @@ class Node:
         transaction_hash: str | None = None,
         transaction_datetime: datetime.datetime | None,
         state_status: str | None = None,
-        timeout: float = 10 * 60,
+        timeout: float = 10 * 60,  # noqa: ASYNC109 - forwarded GenVM deadline
         code: bytes | None = None,
         value: int = 0,
         origin_address: str | None = None,

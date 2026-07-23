@@ -214,7 +214,9 @@ async def lifespan(app: FastAPI):
     # CRITICAL: Kill any orphaned GenVM processes from previous crashes
     # These zombie processes can consume gigabytes of memory outside Docker limits
     logger.info("Cleaning up orphaned GenVM processes from previous crashes...")
-    _pkill_rc = os.system("pkill -9 -f 'genvm (llm|web)' 2>/dev/null || true")
+    _pkill_rc = os.system(  # noqa: ASYNC221 - one-shot startup orphan cleanup
+        "pkill -9 -f 'genvm (llm|web)' 2>/dev/null || true"
+    )
     logger.info("GenVM cleanup complete")
 
     # Database setup
@@ -479,7 +481,9 @@ async def lifespan(app: FastAPI):
 
         # Final safety check: Kill any remaining genvm processes
         logger.info("Final cleanup: killing any remaining GenVM processes...")
-        os.system("pkill -9 -f 'genvm (llm|web)' 2>/dev/null || true")
+        os.system(  # noqa: ASYNC221 - one-shot shutdown orphan cleanup
+            "pkill -9 -f 'genvm (llm|web)' 2>/dev/null || true"
+        )
         logger.info("GenVM cleanup complete")
 
         print("Consensus Worker Service stopped")

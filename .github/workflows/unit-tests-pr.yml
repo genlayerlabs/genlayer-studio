@@ -39,6 +39,18 @@ jobs:
       - run: npm run lint
       - run: npm run build
 
+  backend-lint:
+    if: (github.actor != 'dependabot[bot]' && github.actor != 'renovate[bot]')
+    name: Backend lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install ruff==0.15.22
+      - run: ruff check
+
   backend-unit-tests:
     if: (github.actor != 'dependabot[bot]' && github.actor != 'renovate[bot]')
     runs-on: ubuntu-latest

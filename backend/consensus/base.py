@@ -1134,6 +1134,7 @@ class ConsensusAlgorithm:
                     "Appeal failed, no validators found to process the appeal",
                     {
                         "transaction_hash": context.transaction.hash,
+                        "error": str(e),
                     },
                     transaction_hash=context.transaction.hash,
                 )
