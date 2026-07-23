@@ -1,7 +1,29 @@
 # Consensus worker Dockerfile - based on Ubuntu for compatibility
+FROM ubuntu:24.04 AS genvm-runner-pin
+
+SHELL ["/bin/bash", "-c"]
+
+# Collapse all contract/test inputs to the unique py-genlayer pin list. The
+# acquisition stage copies only this normalized output, so unrelated source
+# changes do not invalidate the large GenVM layer.
+RUN set -euo pipefail ; \
+    mkdir -p /studio/backend /studio/examples /studio/tests /genvm-pin ; \
+    touch -d '@0' /studio/backend /studio/examples /studio/tests /studio /genvm-pin
+RUN --mount=type=bind,source=backend,target=/studio/backend,ro \
+    --mount=type=bind,source=examples,target=/studio/examples,ro \
+    --mount=type=bind,source=tests,target=/studio/tests,ro \
+    set -euo pipefail ; \
+    { grep -rhoE 'py-genlayer:[a-z0-9]+' \
+        /studio/backend /studio/examples /studio/tests 2>/dev/null \
+        | sed 's/^py-genlayer://' | sort -u || true ; \
+    } > /genvm-pin/py-genlayer-pins ; \
+    touch -d '@0' /genvm-pin /genvm-pin/py-genlayer-pins
+
 FROM nixos/nix:2.30.2 AS genvm-source-build
 
 ARG TARGETARCH
+ARG GENVM_SOURCE_MODE
+ARG GENVM_TAG
 ARG GENVM_REF
 ARG GENVM_EXECUTOR_VERSION_NAME
 # Nix `cores` for the genvm build (0 = all). Cap on memory-constrained or
@@ -15,14 +37,28 @@ SHELL ["/nix/var/nix/profiles/default/bin/bash", "-x", "-c"]
 # follows TARGETARCH (amd64-linux / arm64-linux); runners are included by
 # genvm-manager's combined genvm package.
 RUN set -euo pipefail ; \
-    if [ -n "$GENVM_REF" ]; then \
+    if [[ -n "$GENVM_TAG" && -n "$GENVM_REF" ]]; then \
+        echo "ERROR: GENVM_TAG and GENVM_REF are mutually exclusive" ; exit 1 ; \
+    fi ; \
+    source_selected=0 ; \
+    if [[ "$GENVM_SOURCE_MODE" == "source" || ( -z "$GENVM_SOURCE_MODE" && "$GENVM_REF" =~ ^.+:[0-9a-fA-F]{7,40}$ ) ]]; then \
+        source_selected=1 ; \
+    fi ; \
+    if [[ "$source_selected" == "1" ]]; then \
+        if [[ -z "$GENVM_REF" ]]; then \
+            echo "ERROR: GENVM_SOURCE_MODE=source requires GENVM_REF" ; exit 1 ; \
+        fi ; \
+        SOURCE_REF="$GENVM_REF" ; \
+        if [[ "$SOURCE_REF" =~ ^.+:([0-9a-fA-F]{7,40})$ ]]; then \
+            SOURCE_REF="${BASH_REMATCH[1]}" ; \
+        fi ; \
         # filter-syscalls=false: nix's seccomp filter cannot load under
         # qemu/Rosetta emulation (cross-platform local builds); harmless on
         # native hosts since the image already runs with sandbox disabled.
         printf 'experimental-features = nix-command flakes\nfilter-syscalls = false\ncores = %s\n' "$GENVM_BUILD_CORES" >> /etc/nix/nix.conf ; \
         git clone --recurse-submodules https://github.com/genlayerlabs/genvm-manager /src/genvm ; \
         cd /src/genvm ; \
-        git checkout "$GENVM_REF" ; \
+        git checkout "$SOURCE_REF" ; \
         git submodule update --init --recursive ; \
         if [[ "$TARGETARCH" == "amd64" ]] || [[ -z "$TARGETARCH" ]]; then \
             GT="amd64-linux" ; \
@@ -53,6 +89,7 @@ ARG TARGETARCH
 
 ARG GENVM_TAG
 ARG GENVM_REF
+ARG GENVM_SOURCE_MODE
 ARG GENVM_EXECUTOR_VERSION_NAME
 ENV GENVM_TAG=$GENVM_TAG
 ENV GENVM_REF=$GENVM_REF
@@ -99,62 +136,87 @@ ENV HUGGINGFACE_HUB_CACHE /home/worker-user/.cache/huggingface
 ENV RUST_BACKTRACE=1
 
 
-# Download and extract GenVM binaries (sequential for Docker compatibility)
-ARG GENVM_ARTIFACT_URL="https://storage.googleapis.com/genvm-artifacts/temp/4d9a7b73/genvm-amd64-linux.tar.xz"
+# Acquire GenVM from an E2E prebuilt tree, a source build, or (by default) a
+# genvm-manager release.
 COPY --from=genvm-source-build /genvm-out/ /genvm/
 COPY .e2e-genvm-prebuilt/ /genvm-prebuilt/
-RUN cd /genvm \
-    && has_prebuilt=0 \
-    && if [[ -x "/genvm-prebuilt/bin/genvm-modules" ]]; then \
+COPY third_party/genvm/version /genvm-default-version
+COPY docker/scripts/download_genvm.sh /usr/local/bin/download-genvm
+COPY --from=genvm-runner-pin /genvm-pin/py-genlayer-pins /genvm-runner-pins
+RUN set -euo pipefail ; \
+    if [[ -n "$GENVM_TAG" && -n "$GENVM_REF" ]]; then \
+        echo "ERROR: GENVM_TAG and GENVM_REF are mutually exclusive" ; exit 1 ; \
+    fi ; \
+    case "$GENVM_SOURCE_MODE" in \
+        ""|prebuilt|release|source) ;; \
+        *) echo "ERROR: GENVM_SOURCE_MODE must be prebuilt, release, source, or empty (auto)" ; exit 1 ;; \
+    esac ; \
+    mode="$GENVM_SOURCE_MODE" ; \
+    if [[ -z "$mode" ]]; then \
+        if [[ -x /genvm-prebuilt/bin/genvm-modules ]]; then \
+            mode=prebuilt ; \
+        elif [[ "$GENVM_REF" =~ ^.+:[0-9a-fA-F]{7,40}$ ]]; then \
+            mode=source ; \
+        else \
+            mode=release ; \
+        fi ; \
+    fi ; \
+    if [[ "$mode" == "prebuilt" ]]; then \
+        if [[ ! -x /genvm-prebuilt/bin/genvm-modules ]]; then \
+            echo "ERROR: GENVM_SOURCE_MODE=prebuilt requires an executable /genvm-prebuilt/bin/genvm-modules; rebuild the E2E GenVM tree and include it in .e2e-genvm-prebuilt/" ; exit 1 ; \
+        fi ; \
         echo "Using prebuilt GenVM runtime from build context" ; \
+        find /genvm -mindepth 1 -maxdepth 1 -exec rm -rf {} + ; \
         cp -a /genvm-prebuilt/. /genvm/ ; \
         rm -f /genvm/.gitkeep ; \
-        has_prebuilt=1 ; \
-    fi \
-    && if [[ "$has_prebuilt" == "0" && -z "$GENVM_ARTIFACT_URL" && -z "$GENVM_REF" ]]; then \
-        echo "ERROR: either GENVM_ARTIFACT_URL or GENVM_REF must be set" ; exit 1 ; \
-    fi \
-    && echo "=== Starting GenVM $GENVM_TAG download ===" \
-    && if [[ "$has_prebuilt" == "0" && -z "$GENVM_REF" ]]; then \
-    echo "Downloading genvm-manager artifact..." \
-    && curl -L --fail --retry 3 --retry-delay 2 \
-        --connect-timeout 10 --max-time 600 \
-        --progress-bar \
-        -o genvm.tar.xz \
-        "$GENVM_ARTIFACT_URL" \
-    && echo "✓ Downloaded artifact" \
-    && echo "Extracting archives..." \
-    && tar -xf genvm.tar.xz \
-    && rm genvm.tar.xz ; \
-    fi \
-    && echo "Configuring GenVM manager threads..." \
-    && CONFIG_FILE="/genvm/config/genvm-manager.yaml" \
-    && if [[ -f "$CONFIG_FILE" ]]; then \
-        sed -i 's/^threads:.*/threads: 8/' "$CONFIG_FILE" \
-        && sed -i 's/^blocking_threads:.*/blocking_threads: 48/' "$CONFIG_FILE" \
-        && echo "Updated $CONFIG_FILE with threads=8 and blocking_threads=48" \
-        && cat "$CONFIG_FILE" ; \
-      else \
-        echo "WARNING: $CONFIG_FILE not found; skipping GenVM manager thread configuration." ; \
-      fi \
-    && echo "GenVM installed successfully:" \
-    && ls -la \
-    && chown -R worker-user:worker-group /genvm \
-    && chmod -R u+w /genvm \
-    # Source path: skip lief bin-patch — nix outputs are already
-    # $ORIGIN-rpath-patched by genvm's patch-rpath, and lief SIGABRTs on the
-    # zig/musl-linked amd64 executor ("Can't read got entries"). E2E prebuilt
-    # runtimes come from dev-env and may still point at a host Nix-store loader,
-    # so keep download disabled but let post-install patch them for this image.
-    && if [[ "$has_prebuilt" == "1" ]]; then \
-        su - worker-user -c "/genvm/bin/post-install.py --precompile false --default-download false" ; \
-    elif [[ -n "$GENVM_REF" ]]; then \
-        su - worker-user -c "/genvm/bin/post-install.py --precompile false --default-download false --bin-patch false" ; \
+    elif [[ "$mode" == "source" ]]; then \
+        if [[ -z "$GENVM_REF" ]]; then \
+            echo "ERROR: source mode requires GENVM_REF (a git ref/SHA or <branch>:<commit>)" ; exit 1 ; \
+        fi ; \
+        if [[ ! -x /genvm/bin/genvm-modules ]]; then \
+            echo "ERROR: the GenVM source stage did not produce /genvm/bin/genvm-modules" ; exit 1 ; \
+        fi ; \
+        printf '%s\n' "$GENVM_REF" > /genvm/version ; \
+        echo "Using GenVM built from source at $GENVM_REF" ; \
     else \
-        su - worker-user -c "/genvm/bin/post-install.py --precompile false" ; \
-    fi \
-    && find /genvm -name genvm.yaml -exec sed -i 's|cache_dir:.*|cache_dir: /genvm-cache/|' {} + \
-    && mkdir -p /genvm-cache && chown worker-user:worker-group /genvm-cache
+        if [[ -n "$GENVM_REF" ]]; then \
+            echo "ERROR: release mode does not accept GENVM_REF; use GENVM_SOURCE_MODE=source" ; exit 1 ; \
+        fi ; \
+        release_version="${GENVM_TAG:-$(< /genvm-default-version)}" ; \
+        release_arch="${TARGETARCH:-amd64}" ; \
+        /usr/local/bin/download-genvm linux "$release_arch" "$release_version" \
+            --out-dir /genvm --download-dir /tmp/genvm-download \
+            --runner-pins-file /genvm-runner-pins --precompile false ; \
+    fi ; \
+    echo "Configuring GenVM manager threads..." ; \
+    CONFIG_FILE=/genvm/config/genvm-manager.yaml ; \
+    if [[ -f "$CONFIG_FILE" ]]; then \
+        sed -i 's/^threads:.*/threads: 8/' "$CONFIG_FILE" ; \
+        sed -i 's/^blocking_threads:.*/blocking_threads: 48/' "$CONFIG_FILE" ; \
+        echo "Updated $CONFIG_FILE with threads=8 and blocking_threads=48" ; \
+        cat "$CONFIG_FILE" ; \
+    else \
+        echo "WARNING: $CONFIG_FILE not found; skipping GenVM manager thread configuration." ; \
+    fi ; \
+    chown -R worker-user:worker-group /genvm ; \
+    chmod -R u+w /genvm ; \
+    if [[ "$mode" != "release" ]]; then \
+        if [[ -x /genvm/bin/genvm-post-install ]]; then \
+            post_install=/genvm/bin/genvm-post-install ; \
+        elif [[ -f /genvm/bin/post-install.py ]]; then \
+            post_install=/genvm/bin/post-install.py ; \
+        else \
+            echo "ERROR: GenVM has neither bin/genvm-post-install nor bin/post-install.py" ; exit 1 ; \
+        fi ; \
+        post_install_args="--precompile false --default-download false" ; \
+        if [[ "$mode" == "source" ]]; then \
+            post_install_args="$post_install_args --bin-patch false" ; \
+        fi ; \
+        su - worker-user -c "$post_install $post_install_args" ; \
+    fi ; \
+    find /genvm -name genvm.yaml -exec sed -i 's|cache_dir:.*|cache_dir: /genvm-cache/|' {} + ; \
+    mkdir -p /genvm-cache ; \
+    chown worker-user:worker-group /genvm-cache
 
 # Set GenVM environment variables (GENVM_TAG is already set as ENV earlier)
 ENV GENVMROOT=/genvm

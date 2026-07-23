@@ -72,15 +72,15 @@ jobs:
           # the GenVM this branch's host protocol speaks; it is flipped to the
           # release tag at release cut. The e2e pipeline / release train can
           # override by injecting GENVM_TAG or GENVM_REF into the environment.
-          # Auto-detection for the file value: ^v[0-9] => release tag (tarball
-          # build), anything else => git ref (source build, pinned to a SHA so
-          # caches invalidate exactly when genvm moves).
+          # Exact vX.Y.Z[-suffix] values use release assets. Source pins must be
+          # explicit <branch>:<commit> values so builds cannot drift with a branch.
           if [[ -n "${GENVM_TAG:-}" && -n "${GENVM_REF:-}" ]]; then
             echo "::error::GENVM_TAG and GENVM_REF are both set; they are mutually exclusive"
             exit 1
           fi
           GENVM_TAG_VALUE="${GENVM_TAG:-}"
           GENVM_REF_VALUE="${GENVM_REF:-}"
+          GENVM_SOURCE_MODE_VALUE="${GENVM_SOURCE_MODE:-}"
           if [[ -z "$GENVM_TAG_VALUE" && -z "$GENVM_REF_VALUE" ]]; then
             if [[ ! -f third_party/genvm/version ]]; then
               echo "::error::third_party/genvm/version is missing and no GENVM_TAG/GENVM_REF env override is set"
@@ -95,21 +95,50 @@ jobs:
               echo "::error::third_party/genvm/version is empty"
               exit 1
             fi
-            if [[ "$BINDING" =~ ^v[0-9] ]]; then
+            if [[ "$BINDING" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
               GENVM_TAG_VALUE="$BINDING"
-            else
+            elif [[ "$BINDING" == *-dev ]]; then
+              echo "::error::Bare GenVM branch pin '$BINDING' is not supported; pin an exact vX.Y.Z release or '<branch>:<commit>'"
+              exit 1
+            elif [[ "$BINDING" =~ ^.+:[0-9a-fA-F]{7,40}$ ]]; then
               GENVM_REF_VALUE="$BINDING"
+              GENVM_SOURCE_MODE_VALUE="source"
+            else
+              echo "::error::Invalid GenVM pin '$BINDING'; expected vX.Y.Z[-suffix] or '<branch>:<commit>'"
+              exit 1
             fi
           fi
+          if [[ -n "$GENVM_TAG_VALUE" && ! "$GENVM_TAG_VALUE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::Invalid GENVM_TAG '$GENVM_TAG_VALUE'; expected vX.Y.Z[-suffix]"
+            exit 1
+          fi
           if [[ -n "$GENVM_REF_VALUE" ]]; then
-            GENVM_REF_VALUE="$(gh api "repos/genlayerlabs/genvm-manager/commits/$GENVM_REF_VALUE" --jq .sha)"
+            if [[ "$GENVM_REF_VALUE" == *-dev ]]; then
+              echo "::error::Bare GenVM branch pin '$GENVM_REF_VALUE' is not supported; pin an exact vX.Y.Z release or '<branch>:<commit>'"
+              exit 1
+            elif [[ "$GENVM_REF_VALUE" =~ ^(.+):([0-9a-fA-F]{7,40})$ ]]; then
+              GENVM_REF_BRANCH="${BASH_REMATCH[1]}"
+              GENVM_REF_COMMIT="$(gh api "repos/genlayerlabs/genvm-manager/commits/${BASH_REMATCH[2]}" --jq .sha)"
+              GENVM_REF_VALUE="$GENVM_REF_BRANCH:$GENVM_REF_COMMIT"
+            elif [[ "$GENVM_SOURCE_MODE_VALUE" == "source" ]]; then
+              GENVM_REF_VALUE="$(gh api "repos/genlayerlabs/genvm-manager/commits/$GENVM_REF_VALUE" --jq .sha)"
+            else
+              echo "::error::GENVM_REF must be '<branch>:<commit>' unless GENVM_SOURCE_MODE=source is explicit"
+              exit 1
+            fi
+            GENVM_SOURCE_MODE_VALUE="source"
           fi
           sed -i "s|^GENVM_TAG=.*|GENVM_TAG=\"$GENVM_TAG_VALUE\"|" .env
           sed -i "s|^GENVM_REF=.*|GENVM_REF=\"$GENVM_REF_VALUE\"|" .env
-          echo "GENVM_TAG=$GENVM_TAG_VALUE" >> "$GITHUB_ENV"
-          echo "GENVM_REF=$GENVM_REF_VALUE" >> "$GITHUB_ENV"
+          sed -i "s|^GENVM_SOURCE_MODE=.*|GENVM_SOURCE_MODE=\"$GENVM_SOURCE_MODE_VALUE\"|" .env
+          {
+            echo "GENVM_TAG=$GENVM_TAG_VALUE"
+            echo "GENVM_REF=$GENVM_REF_VALUE"
+            echo "GENVM_SOURCE_MODE=$GENVM_SOURCE_MODE_VALUE"
+          } >> "$GITHUB_ENV"
           grep "^GENVM_TAG=" .env
           grep "^GENVM_REF=" .env
+          grep "^GENVM_SOURCE_MODE=" .env
 
       - name: Changing URL for rpc server to localhost
         run: sed -i "s/'jsonrpc'/'localhost'/g" .env
@@ -136,8 +165,9 @@ jobs:
             GENVM_REF_VALUE="$(sed -n 's/^GENVM_REF=["'\'']\{0,1\}\([^"'\'']*\)["'\'']\{0,1\}.*/\1/p' .env | head -n1)"
           fi
           if [[ -n "$GENVM_REF_VALUE" ]]; then
-            echo "tag=ref-$GENVM_REF_VALUE" >> "$GITHUB_OUTPUT"
-            echo "bake_cache=,scope=genvm-$GENVM_REF_VALUE" >> "$GITHUB_OUTPUT"
+            GENVM_CACHE_REF="${GENVM_REF_VALUE##*:}"
+            echo "tag=ref-$GENVM_CACHE_REF" >> "$GITHUB_OUTPUT"
+            echo "bake_cache=,scope=genvm-$GENVM_CACHE_REF" >> "$GITHUB_OUTPUT"
           else
             GENVM_TAG_VALUE="${GENVM_TAG:-}"
             if [[ -z "$GENVM_TAG_VALUE" && -f .env ]]; then
