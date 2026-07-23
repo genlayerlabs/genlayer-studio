@@ -258,7 +258,7 @@ def test_s3_archive_writer_compresses_snapshot_with_checksum_and_metadata():
     assert call["StorageClass"] == "GLACIER_IR"
     assert call["ServerSideEncryption"] == "aws:kms"
     assert call["SSEKMSKeyId"] == "alias/studio-archive"
-    assert call["ContentEncoding"] == "gzip"
+    assert "ContentEncoding" not in call
     assert gzip.decompress(call["Body"]) == b'{"x":1}'
     expected_digest = hashlib.sha256(call["Body"]).digest()
     assert call["ChecksumSHA256"] == base64.b64encode(expected_digest).decode("ascii")
@@ -550,7 +550,7 @@ def test_gcs_archive_writer_uploads_compressed_snapshot_with_metadata():
     assert result.backend == "gcs"
     assert result.bucket == "archive-bucket"
     assert result.uri == f"gs://archive-bucket/{result.key}"
-    assert blob.content_encoding == "gzip"
+    assert blob.content_encoding is None
     assert blob.storage_class == "NEARLINE"
     assert blob.metadata["tx-hash"] == "0xABCDEF"
     assert blob.metadata["snapshot-sha256"] == hashlib.sha256(b'{"x":1}').hexdigest()
