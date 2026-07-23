@@ -443,7 +443,10 @@ class GCSSnapshotArchiveWriter:
         key = self.key_for_hash(candidate.tx_hash)
         bucket = self.client.bucket(self.bucket)
         blob = bucket.blob(key)
-        blob.content_encoding = "gzip"
+        # Deliberately not setting content_encoding: the body is already gzipped and
+        # the key ends in .json.gz. Declaring it makes GCS decompressively transcode
+        # on read, which returns a byte count that disagrees with the listed size and
+        # silently ignores Range requests, breaking external readers.
         blob.metadata = metadata
         if self.storage_class:
             blob.storage_class = self.storage_class
@@ -570,11 +573,12 @@ class S3SnapshotArchiveWriter:
         key = self.key_for_hash(candidate.tx_hash)
         compressed_digest = bytes.fromhex(compressed_sha256)
 
+        # ContentEncoding is likewise omitted; readers decompress the stored bytes
+        # themselves, and the header only invites clients to do it for them.
         put_kwargs: dict[str, Any] = {
             "Bucket": self.bucket,
             "Key": key,
             "Body": body,
-            "ContentEncoding": "gzip",
             "ContentType": "application/json",
             "ChecksumSHA256": base64.b64encode(compressed_digest).decode("ascii"),
             "Metadata": metadata,
