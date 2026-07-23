@@ -51,3 +51,14 @@ jobs:
       - run: pip install -r backend/requirements.txt
       - run: pip install pytest-cov pytest-xdist
       - run: pytest tests/unit --cov=backend --cov-report=xml --cov-branch -n auto
+
+      # Backend coverage.xml previously had exactly one consumer (SonarCloud).
+      # Codecov measures the actual PR diff rather than a stale branch baseline.
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5.5.2
+        with:
+          verbose: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+          files: coverage.xml
+          flags: backend
