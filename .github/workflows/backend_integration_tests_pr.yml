@@ -180,7 +180,7 @@ jobs:
           fi
           if [[ -n "$GENVM_REF_VALUE" ]]; then
             GENVM_CACHE_REF="${GENVM_REF_VALUE##*:}"
-            echo "tag=ref-$GENVM_CACHE_REF" >> "$GITHUB_OUTPUT"
+            echo "binding=ref-$GENVM_CACHE_REF" >> "$GITHUB_OUTPUT"
             echo "bake_cache=,scope=genvm-$GENVM_CACHE_REF" >> "$GITHUB_OUTPUT"
           else
             GENVM_TAG_VALUE="${GENVM_TAG:-}"
@@ -191,9 +191,15 @@ jobs:
               echo "::warning::GENVM_TAG not set (this job runs prebuilt images) — using shared 'untagged' precompile cache key that will not invalidate across GenVM upgrades"
               GENVM_TAG_VALUE="untagged"
             fi
-            echo "tag=$GENVM_TAG_VALUE" >> "$GITHUB_OUTPUT"
+            echo "binding=$GENVM_TAG_VALUE" >> "$GITHUB_OUTPUT"
             echo "bake_cache=" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Restore GenVM precompile cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.GENVM_CACHE_DIR }}
+          key: genvm-precompile-${{ runner.os }}-${{ runner.arch }}-${{ steps.genvm.outputs.binding }}
 
       - name: Prepare GenVM cache directory
         run: |
@@ -220,6 +226,10 @@ jobs:
             jsonrpc.tags=genlayer-studio-jsonrpc:latest
             consensus-worker.tags=genlayer-studio-consensus-worker:latest
           load: true
+
+      - name: Precompile GenVM cache
+        timeout-minutes: 30
+        run: docker/scripts/precompile_genvm.sh
 
       # Start services without rebuilding images; CI override provides fast healthcheck timings.
       # --wait blocks until all healthchecks pass (jsonrpc /ready + consensus-worker /health).
@@ -413,7 +423,7 @@ jobs:
           fi
           if [[ -n "$GENVM_REF_VALUE" ]]; then
             GENVM_CACHE_REF="${GENVM_REF_VALUE##*:}"
-            echo "tag=ref-$GENVM_CACHE_REF" >> "$GITHUB_OUTPUT"
+            echo "binding=ref-$GENVM_CACHE_REF" >> "$GITHUB_OUTPUT"
             echo "bake_cache=,scope=genvm-$GENVM_CACHE_REF" >> "$GITHUB_OUTPUT"
           else
             GENVM_TAG_VALUE="${GENVM_TAG:-}"
@@ -424,9 +434,15 @@ jobs:
               echo "::warning::GENVM_TAG not set (this job runs prebuilt images) — using shared 'untagged' precompile cache key that will not invalidate across GenVM upgrades"
               GENVM_TAG_VALUE="untagged"
             fi
-            echo "tag=$GENVM_TAG_VALUE" >> "$GITHUB_OUTPUT"
+            echo "binding=$GENVM_TAG_VALUE" >> "$GITHUB_OUTPUT"
             echo "bake_cache=" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Restore GenVM precompile cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.GENVM_CACHE_DIR }}
+          key: genvm-precompile-${{ runner.os }}-${{ runner.arch }}-${{ steps.genvm.outputs.binding }}
 
       - name: Prepare GenVM cache directory
         run: |
@@ -452,6 +468,10 @@ jobs:
             jsonrpc.tags=genlayer-studio-jsonrpc:latest
             consensus-worker.tags=genlayer-studio-consensus-worker:latest
           load: true
+
+      - name: Precompile GenVM cache
+        timeout-minutes: 30
+        run: docker/scripts/precompile_genvm.sh
 
       # Start services without rebuilding images; CI override provides fast healthcheck timings.
       # --wait blocks until all healthchecks pass (jsonrpc /ready + consensus-worker /health).
