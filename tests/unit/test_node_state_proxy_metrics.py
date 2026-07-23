@@ -15,6 +15,7 @@ from backend.node.genvm.origin.base_host import RunHostAndProgramRes
 from backend.node.genvm.origin.public_abi import ResultCode
 from backend.node.types import Address, ExecutionMode, ExecutionResultStatus
 from backend.protocol_rpc.fees import (
+    GENVM_UNMETERED_DATA_FEE_BUCKET,
     StudioFeePolicy,
     create_fee_accounting,
     required_fee_deposit,
@@ -319,8 +320,9 @@ async def test_run_genvm_receives_fee_context_from_transaction_accounting():
     fee_context = run_genvm_host.await_args.kwargs["fee_context"]
     assert fee_context.bucket_totals == [
         fees_distribution["executionBudgetPerRound"],
-        fees_distribution["executionBudgetPerRound"],
         0,
+        GENVM_UNMETERED_DATA_FEE_BUCKET,
+        GENVM_UNMETERED_DATA_FEE_BUCKET,
     ]
     assert fee_context.gas_data["intrinsicGas"] == "21000"
 

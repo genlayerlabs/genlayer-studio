@@ -1,13 +1,12 @@
-# v0.1.0
-# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
+# v0.3.0
+# { "Depends": "py-genlayer:9b8kjyda2ycxyq4ea6g4yfpnydxhd52gqba5rb8dw7krkh5mn9p0" }
 
 import genlayer as gl
-from genlayer import *
 
 
 class Registry(gl.contract.Contract):
     # Declare persistent storage fields
-    contract_addresses: DynArray[str]
+    contract_addresses: gl.storage.DynArray[str]
     intelligent_oracle_code: str
 
     def __init__(self, intelligent_oracle_code: str):

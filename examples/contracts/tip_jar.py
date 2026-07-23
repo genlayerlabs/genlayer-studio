@@ -1,8 +1,8 @@
-# v0.2.16
-# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
+# v0.3.0
+# { "Depends": "py-genlayer:9b8kjyda2ycxyq4ea6g4yfpnydxhd52gqba5rb8dw7krkh5mn9p0" }
 
 import genlayer as gl
-from genlayer import *
+from genlayer.types import *
 
 
 class TipJar(gl.contract.Contract):
@@ -11,12 +11,12 @@ class TipJar(gl.contract.Contract):
 
     def __init__(self):
         self.owner = gl.message.sender_address
-        self.total_tips = u256(0)
+        self.total_tips = 0
 
     @gl.public.write.payable
     def tip(self) -> None:
         v = gl.message.value
-        if v == u256(0):
+        if v == 0:
             raise gl.vm.UserError("send some value")
         self.total_tips = self.total_tips + v
 

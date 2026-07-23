@@ -1,8 +1,8 @@
-# v0.2.17
-# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
+# v0.3.0
+# { "Depends": "py-genlayer:9b8kjyda2ycxyq4ea6g4yfpnydxhd52gqba5rb8dw7krkh5mn9p0" }
 
 import genlayer as gl
-from genlayer import *
+from genlayer.types import *
 
 
 @gl.evm.contract_interface
@@ -21,6 +21,6 @@ class Faucet(gl.contract.Contract):
     @gl.public.write.payable
     def send(self, recipient: str) -> None:
         v = gl.message.value
-        if v == u256(0):
+        if v == 0:
             raise gl.vm.UserError("send some value")
         _Recipient(Address(recipient)).emit_transfer(value=v)

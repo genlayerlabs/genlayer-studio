@@ -1,8 +1,8 @@
-# v0.2.5
-# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
+# v0.3.0
+# { "Depends": "py-genlayer:9b8kjyda2ycxyq4ea6g4yfpnydxhd52gqba5rb8dw7krkh5mn9p0" }
 
 import genlayer as gl
-from genlayer import *
+from genlayer.types import *
 
 
 class PayableEscrow(gl.contract.Contract):
@@ -11,12 +11,12 @@ class PayableEscrow(gl.contract.Contract):
 
     def __init__(self):
         self.depositor = Address(b"\x00" * 20)
-        self.deposited = u256(0)
+        self.deposited = 0
 
     @gl.public.write.payable
     def deposit(self) -> None:
         v = gl.message.value
-        if v == u256(0):
+        if v == 0:
             raise gl.vm.UserError("zero value")
         self.depositor = gl.message.sender_address
         self.deposited = self.deposited + v
@@ -26,9 +26,9 @@ class PayableEscrow(gl.contract.Contract):
         if gl.message.sender_address != self.depositor:
             raise gl.vm.UserError("not depositor")
         amount = self.deposited
-        if amount == u256(0):
+        if amount == 0:
             raise gl.vm.UserError("nothing to withdraw")
-        self.deposited = u256(0)
+        self.deposited = 0
         gl.contract.get_at(Address(to)).emit_transfer(value=amount)
 
     @gl.public.view

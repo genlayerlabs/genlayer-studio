@@ -1,4 +1,4 @@
-# { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
+# { "Depends": "py-genlayer:9b8kjyda2ycxyq4ea6g4yfpnydxhd52gqba5rb8dw7krkh5mn9p0" }
 import genlayer as gl
 
 
@@ -14,8 +14,7 @@ class GenVMSmoke(gl.contract.Contract):
 
         def ask_llm() -> str:
             return gl.nondet.exec_prompt(
-                "Respond with exactly the two characters OK and nothing else.",
-                response_format="text",
+                "Respond with exactly the two characters OK and nothing else."
             ).strip()
 
         self.prompt_result = gl.eq_principle.strict_eq(ask_llm).strip()

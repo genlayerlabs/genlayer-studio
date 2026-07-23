@@ -1,7 +1,10 @@
 # This file is auto-generated. Do not edit!
 
-from enum import IntEnum
+# fmt: off
+# ruff: noqa
+
 import typing
+from enum import IntEnum
 
 
 class Methods(IntEnum):
@@ -17,12 +20,25 @@ class Methods(IntEnum):
 
 class Errors(IntEnum):
     OK = 0
-    ABSENT = 1
+    EVM_REVERTED = 1
     FORBIDDEN = 2
-    OUT_OF_STORAGE_GAS = 3
+
+class VmErrorDetail:
+    __slots__ = ('value',)
+    def __init__(self, value: str):
+        self.value = value
+    def __str__(self) -> str:
+        return self.value
+    @staticmethod
+    def internal() -> 'VmErrorDetail':
+        return VmErrorDetail('internal')
+    @staticmethod
+    def external() -> 'VmErrorDetail':
+        return VmErrorDetail('external')
+
 
 
 CURRENT_MAJOR: typing.Final[int] = 0
 
 
-CURRENT_MAJOR_STR: typing.Final[str] = "v0.0.0"
+CURRENT_MAJOR_STR: typing.Final[str] = 'v0.0.0'

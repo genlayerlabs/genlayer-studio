@@ -1,31 +1,40 @@
-"""
-This module is a part of GenVM source code. When updating
-
-#. Open PR to https://github.com/genlayerlabs/genvm/blob/main/tests/runner/origin/base_host.py
-#. Keep interface integration-agnostic: no usage of environment variables, no assumptions
-"""
-
+import abc
+import asyncio
 import enum
 import socket
-import typing
-import asyncio
-import abc
 import time
+import typing
+from dataclasses import dataclass
 
 import aiohttp
 
-from dataclasses import dataclass
-
-
+from . import (
+    calldata as gvm_calldata,
+)
+from . import (
+    fees,
+    host_fns,
+    public_abi,
+)
 from .calldata import Address
-from . import calldata as gvm_calldata
-from . import fees
-from . import host_fns
-from . import public_abi
+from .logger import Logger
 
 ACCOUNT_ADDR_SIZE = 20
 SLOT_ID_SIZE = 32
 
+# Mirrors the executor's `DebugMode` enum (crates/common/src/debug_mode.rs).
+DebugMode = typing.Literal[
+    "disabled",
+    "safe",
+    "safe-unbounded",
+    "unsafe",
+    "unsafe-tracing",
+]
+
+# Default host-provided `node` fee constants (see fees.expr_prelude in
+# install/config/genvm.yaml). Values are strings (gas_data is Map<str, str>)
+# and are kept minimal/deterministic for tests. `validatorsPerRound` is
+# intentionally omitted so the prelude default table is used.
 DEFAULT_GAS_DATA: dict[str, str] = {
     "storageUnitPrice": "1",
     "receiptGasPerByte": "1",
@@ -35,10 +44,12 @@ DEFAULT_GAS_DATA: dict[str, str] = {
     "fixedProposeReceiptGas": "0",
     "fixedMessageRevealGas": "0",
     "genPerTimeUnit": "0",
+    # 0 = no per-phase timeunit floor, so default-allocation tests are unaffected.
+    "minTimeUnitsPerPhase": "0",
+    # 0 = no per-round execution-budget floor for balance-funded messages.
+    "messageBudgetFloor": "0",
 }
 DEFAULT_INITIAL_TIME_UNITS_ALLOCATION = 10 * 60
-
-from .logger import Logger
 
 
 class TimeoutAction(enum.StrEnum):
@@ -121,6 +132,7 @@ class Message(typing.TypedDict):
     contract_address: Address
     sender_address: Address
     origin_address: Address
+    signer_address: Address
     chain_id: int
     value: typing.NotRequired[int]
     is_init: bool
@@ -142,11 +154,9 @@ class EthSendInner(typing.TypedDict):
     address: Address
     calldata: bytes
     value: int
-    feeParams: typing.NotRequired[bytes]
-    fee_params: typing.NotRequired[fees.ExternalMessageParams]
-    declaredBudget: typing.NotRequired[int]
-    callKey: typing.NotRequired[bytes]
-    allocationSubtree: typing.NotRequired[list[dict]]
+    message_fee: int
+    receipt_fee: int
+    fee_params: fees.ExternalMessageParams
 
 
 class PostMessageInner(typing.TypedDict):
@@ -155,12 +165,13 @@ class PostMessageInner(typing.TypedDict):
     calldata: gvm_calldata.Decoded
     value: int
     on: typing.Literal["finalized", "accepted"]
-    feeParams: typing.NotRequired[bytes]
-    fee_params: typing.NotRequired[fees.InternalMessageParams]
-    declaredBudget: typing.NotRequired[int]
-    callKey: typing.NotRequired[bytes]
-    allocationSubtree: typing.NotRequired[list[dict]]
-    subtree: typing.NotRequired[bytes]
+    message_fee: int
+    receipt_fee: int
+    fee_params: fees.InternalMessageParams
+    # ABI-encoded allocation subtree carried in the receipt under commitment modes.
+    subtree: bytes
+    # Chain `useBalance`: fee funded from the emitting contract's balance.
+    use_balance: bool
 
 
 class DeployContractInner(typing.TypedDict):
@@ -170,18 +181,20 @@ class DeployContractInner(typing.TypedDict):
     value: int
     on: typing.Literal["finalized", "accepted"]
     salt_nonce: int
-    feeParams: typing.NotRequired[bytes]
-    fee_params: typing.NotRequired[fees.InternalMessageParams]
-    declaredBudget: typing.NotRequired[int]
-    callKey: typing.NotRequired[bytes]
-    allocationSubtree: typing.NotRequired[list[dict]]
-    subtree: typing.NotRequired[bytes]
+    message_fee: int
+    receipt_fee: int
+    fee_params: fees.InternalMessageParams
+    # ABI-encoded allocation subtree carried in the receipt under commitment modes.
+    subtree: bytes
+    # Chain `useBalance`: fee funded from the emitting contract's balance.
+    use_balance: bool
 
 
 class EmitEventInner(typing.TypedDict):
     type: typing.Literal["EmitEvent"]
     topics: list[bytes]
     blob: dict[str, gvm_calldata.Decoded]
+    storage_fee: int
 
 
 type ResultEmission = typing.Union[
@@ -370,8 +383,6 @@ async def host_loop(
                 )
                 return None
             case host_fns.Methods.CONSUME_FUEL:
-                # GenVM main sends fuel as a 32-byte little-endian U256
-                # (rc3 used 8 bytes); see executor/src/host/mod.rs consume_fuel.
                 gas = await recv_int(32)
                 await handler.consume_gas(gas)
             case host_fns.Methods.ETH_CALL:
@@ -402,15 +413,7 @@ async def host_loop(
                 except HostException as e:
                     await send_all(bytes([e.error_code]))
                 else:
-                    res = min(res, 2**53 - 1)
                     await send_all(bytes([host_fns.Errors.OK]))
-                    # GenVM main reads a 32-byte little-endian U256 here (rc3
-                    # read 8 bytes). Sending only 8 left the executor blocked
-                    # on the remaining 24 bytes while this loop waited for the
-                    # next method — a read-read deadlock that stalled every
-                    # nondet (exec_prompt/web) execution in PROPOSING until
-                    # LEADER_TIMEOUT. See executor/src/host/mod.rs
-                    # remaining_fuel_as_gen and wasi/genlayer_sdk.rs call sites.
                     await send_all(res.to_bytes(32, byteorder="little", signed=False))
             case host_fns.Methods.NOTIFY_NONDET_DISAGREEMENT:
                 call_no = await recv_int()
@@ -490,20 +493,34 @@ async def run_genvm(
     ctx: Context,
     is_sync: bool,
     capture_output: bool = True,
+    debug_mode: DebugMode | None = None,
     message: Message,
     host_data: str = "",
     gas_data: dict[str, str] | None = None,
     host: str,
     extra_args: list[str] = [],
+    # default config fee buckets use bucket_no 0 and 1
     bucket_totals: list[int] | None = None,
     code: bytes | None = None,
     calldata: bytes,
     leader_nondet_results: list[bytes] | None = None,
     message_fee_allocation: list[fees.MessageAllocationNode] | None = None,
+    reroute_to: str = "",
     request_extra: dict[str, gvm_calldata.Encodable] = {},
+    shutdown_early: asyncio.Event | None = None,
 ) -> RunHostAndProgramRes:
     logger = ctx.logger
-    effective_bucket_totals = bucket_totals or [10_000_000, 10_000_000, 10_000_000]
+
+    # `node` fee constants are an ExecutionData field (no longer in host_data).
+    effective_debug_mode = debug_mode or (
+        "safe-unbounded" if capture_output else "disabled"
+    )
+    effective_bucket_totals = bucket_totals or [
+        10_000_000,
+        10_000_000,
+        10_000_000,
+        10_000_000,
+    ]
     effective_gas_data = DEFAULT_GAS_DATA if gas_data is None else gas_data
     effective_message_fee_allocation = message_fee_allocation or []
 
@@ -532,7 +549,7 @@ async def run_genvm(
                     "major": 0,  # FIXME
                     "message": message,
                     "is_sync": is_sync,
-                    "capture_output": capture_output,
+                    "debug_mode": effective_debug_mode,
                     "host_data": host_data,
                     "max_execution_minutes": max_exec_mins,  # this parameter is needed to prevent zombie genvms
                     "timestamp": timestamp,
@@ -545,6 +562,9 @@ async def run_genvm(
                     "gas_data": effective_gas_data,
                     "message_fee_allocation": effective_message_fee_allocation,
                     "initial_time_units_allocation": DEFAULT_INITIAL_TIME_UNITS_ALLOCATION,
+                    # Debug-only executor-dir override; honored by the manager only
+                    # under debug_mode >= safe (tests run with safe/unsafe).
+                    "reroute_to": reroute_to,
                     **request_extra,
                 }
             ),
@@ -555,7 +575,7 @@ async def run_genvm(
             logger.trace("post /genvm/run", body=data)
             if resp.status != 200:
                 logger.error(
-                    f"genvm manager /genvm/run failed", status=resp.status, body=data
+                    "genvm manager /genvm/run failed", status=resp.status, body=data
                 )
                 if _is_retryable_manager_run_error(resp.status, data):
                     raise GenVMManagerRetryableError(resp.status, data)
@@ -647,10 +667,24 @@ async def run_genvm(
     timeout_fired = asyncio.Event()
 
     async def wrap_timeout(genvm_id: str):
+        reason = "unknown"
         if timeout is None:
-            return
-        await asyncio.sleep(timeout)
-        logger.debug("timeout reached", genvm_id=genvm_id)
+            if shutdown_early is None:
+                return  # nothing to do
+            else:
+                await shutdown_early.wait()
+                reason = "shutdown_early event set"
+        else:
+            if shutdown_early is None:
+                await asyncio.sleep(timeout)
+                reason = "timeout reached"
+            else:
+                try:
+                    await asyncio.wait_for(shutdown_early.wait(), timeout=timeout)
+                    reason = "shutdown_early event set"
+                except asyncio.TimeoutError:
+                    reason = "timeout reached"
+        logger.debug("timeout reached", genvm_id=genvm_id, reason=reason)
         timeout_fired.set()
         await _send_timeout(
             manager_uri,
@@ -877,7 +911,7 @@ async def run_genvm(
 
         if timeout_fired.is_set() and result_kind != public_abi.ResultCode.RETURN:
             result_kind = public_abi.ResultCode.VM_ERROR
-            result_data = str(public_abi.VmError.TIMEOUT)
+            result_data = str(public_abi.VmError.timeout())
 
         vm_error_description: str | None = None
         if result_kind == public_abi.ResultCode.VM_ERROR and isinstance(

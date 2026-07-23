@@ -1,22 +1,22 @@
-# v0.3-dev
+# v0.3.0
 # {
 #   "Seq": [
-#     { "Depends": "py-lib-genlayer-embeddings:1md4i1njqn0h0psgjdl97mz10rpp1268ychpn6l2dmr81fbvxknb" },
-#     { "Depends": "py-genlayer:1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh" }
+#     { "Depends": "py-lib-genlayer-embeddings:kr2rb2dcp01mw9khpg3tg2jasx4f82mcsy3eg08rjj1zdcm9q350" },
+#     { "Depends": "py-genlayer:9b8kjyda2ycxyq4ea6g4yfpnydxhd52gqba5rb8dw7krkh5mn9p0" }
 #   ]
 # }
 
 import numpy as np
 import genlayer as gl
-from genlayer import *
-from genlayer.storage import allow
+from genlayer.types import *
+from genlayer.storage import TreeMap
 import genlayer_embeddings as gle
 
 from dataclasses import dataclass
 import typing
 
 
-@allow
+@gl.storage.allow
 @dataclass
 class StoreValue:
     log_id: u256
@@ -52,7 +52,7 @@ class LogIndexer(gl.contract.Contract):
                 continue
             if log_id not in self.log_vector_ids:
                 continue
-            if self.log_vector_ids[log_id] != u32(result.id):
+            if self.log_vector_ids[log_id] != result.id:
                 continue
             return {
                 "vector": list(str(x) for x in result.key),
@@ -64,7 +64,7 @@ class LogIndexer(gl.contract.Contract):
 
     @gl.public.write
     def add_log(self, log: str, log_id: int) -> None:
-        key = u256(log_id)
+        key = log_id
         if key in self.log_vector_ids:
             self.vector_store.get_by_id(self.log_vector_ids[key]).value = StoreValue(
                 text=log, log_id=key
@@ -73,11 +73,11 @@ class LogIndexer(gl.contract.Contract):
 
         emb = self.get_embedding(log)
         vector_id = self.vector_store.insert(emb, StoreValue(text=log, log_id=key))
-        self.log_vector_ids[key] = u32(vector_id)
+        self.log_vector_ids[key] = vector_id
 
     @gl.public.write
     def update_log(self, log_id: int, log: str) -> None:
-        key = u256(log_id)
+        key = log_id
         if key in self.log_vector_ids:
             self.vector_store.get_by_id(self.log_vector_ids[key]).value = StoreValue(
                 text=log, log_id=key
@@ -86,10 +86,10 @@ class LogIndexer(gl.contract.Contract):
 
         emb = self.get_embedding(log)
         vector_id = self.vector_store.insert(emb, StoreValue(text=log, log_id=key))
-        self.log_vector_ids[key] = u32(vector_id)
+        self.log_vector_ids[key] = vector_id
 
     @gl.public.write
     def remove_log(self, id: int) -> None:
-        key = u256(id)
+        key = id
         if key in self.log_vector_ids:
             self.removed_log_ids[key] = True
