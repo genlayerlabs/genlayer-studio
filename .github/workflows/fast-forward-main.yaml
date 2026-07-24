@@ -29,7 +29,7 @@ jobs:
         id: ci-bot-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.CI_BOT_APP_ID }}
+          client-id: ${{ vars.CI_BOT_CLIENT_ID }}
           private-key: ${{ secrets.CI_BOT_SECRET }}
           permission-contents: write
 
