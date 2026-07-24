@@ -83,7 +83,10 @@ def test_validators_timeout_appeal_does_not_wipe_accepted_state(engine):
 
         row = session.query(CurrentState).filter_by(id=CONTRACT).one()
         row.data = {
-            "state": {"accepted": dict(REAL_STATE), "finalized": {CODE_SLOT: "Y29kZQ=="}}
+            "state": {
+                "accepted": dict(REAL_STATE),
+                "finalized": {CODE_SLOT: "Y29kZQ=="},
+            }
         }
         session.commit()
 
@@ -139,9 +142,10 @@ def test_validators_timeout_appeal_does_not_wipe_accepted_state(engine):
 
         session.expire_all()
         accepted = (
-            session.query(CurrentState).filter_by(id=CONTRACT).one().data["state"][
-                "accepted"
-            ]
+            session.query(CurrentState)
+            .filter_by(id=CONTRACT)
+            .one()
+            .data["state"]["accepted"]
         )
         assert accepted != {}, (
             "re-acceptance from the stripped leader receipt wiped the contract's "

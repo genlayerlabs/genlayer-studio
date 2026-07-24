@@ -183,7 +183,7 @@ class PendingTransaction:
 
     def to_dict(self):
         if self.is_eth_send:
-            return {
+            serialized = {
                 "address": self.address,
                 "is_eth_send": True,
                 "on": self.on,
@@ -194,6 +194,11 @@ class PendingTransaction:
                 "allocation_subtree": self.allocation_subtree,
                 "gas_used": self.gas_used,
             }
+            if self.calldata:
+                serialized["calldata"] = str(
+                    base64.b64encode(self.calldata), encoding="ascii"
+                )
+            return serialized
         elif self.code is None:
             return {
                 "address": self.address,
@@ -225,7 +230,7 @@ class PendingTransaction:
         if input.get("is_eth_send"):
             return cls(
                 address=input["address"],
-                calldata=b"",
+                calldata=base64.b64decode(input.get("calldata", "")),
                 code=None,
                 salt_nonce=0,
                 value=_int_from_serialized(input.get("value"), 0),

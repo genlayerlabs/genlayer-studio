@@ -46,6 +46,7 @@ from backend.node.types import (
     Vote,
     ExecutionResultStatus,
     PendingTransaction,
+    _compute_contract_state_hash,
 )
 from backend.protocol_rpc.message_handler.base import MessageHandler
 from backend.protocol_rpc.message_handler.types import (
@@ -89,6 +90,7 @@ from backend.consensus.decisions import (
     has_appeal_capacity,
 )
 from backend.consensus.effect_executor import EffectExecutor
+from backend.consensus.effects import SetContractSnapshotEffect
 from backend.node.genvm import get_code_slot
 from backend.node.genvm.error_codes import GenVMInternalError, GenVMErrorCode
 from backend.node.base import Manager as GenVMManager
@@ -1953,6 +1955,22 @@ class PendingState(TransactionState):
                         all_validators, context.transaction.consensus_data, False
                     )
                 )
+                if not context.involved_validators:
+                    context.msg_handler.send_message(
+                        LogEvent(
+                            "consensus_event",
+                            EventType.WARNING,
+                            EventScope.CONSENSUS,
+                            "Original appeal validators not found, selecting new validators",
+                            {"transaction_hash": context.transaction.hash},
+                            transaction_hash=context.transaction.hash,
+                        )
+                    )
+                    context.transaction.consensus_data = None
+                    context.involved_validators = get_validators_for_transaction(
+                        all_validators,
+                        context.transaction.num_of_initial_validators,
+                    )
             else:
                 context.involved_validators = get_validators_for_transaction(
                     all_validators, context.transaction.num_of_initial_validators
@@ -2319,6 +2337,9 @@ class CommittingState(TransactionState):
         assigned_addresses: set[str] = set()
         if context.leader.get("address"):
             assigned_addresses.add(context.leader["address"])
+        for receipt in context.consensus_data.leader_receipt or []:
+            if receipt.node_config and receipt.node_config.get("address"):
+                assigned_addresses.add(receipt.node_config["address"])
         assigned_addresses.update(v["address"] for v in context.remaining_validators)
         replacement_pool: list[dict] = [
             n.validator.to_dict()
@@ -2482,6 +2503,7 @@ class CommittingState(TransactionState):
         validation_by_leader = (
             context.consensus_data.leader_receipt
             and len(context.consensus_data.leader_receipt) == 1
+            and bool(context.leader.get("address"))
         )
 
         # Build list of validator dicts to run
@@ -2798,10 +2820,36 @@ class AcceptedState(TransactionState):
         _apply_external_message_freeze_check(context, leader_receipt)
         _sync_reveal_message_fee_accounting(context, leader_receipt)
         accepted_contract_state = leader_receipt.contract_state
+        if not accepted_contract_state:
+            accepted_contract_state = next(
+                (
+                    receipt.contract_state
+                    for receipt in context.validation_results
+                    if receipt is not None
+                    and receipt.vote == Vote.AGREE
+                    and receipt.contract_state
+                ),
+                None,
+            )
+        if not accepted_contract_state and context.contract_snapshot is not None:
+            accepted_contract_state = context.contract_snapshot.states.get("accepted")
         execution_success = (
             leader_receipt.execution_result == ExecutionResultStatus.SUCCESS
         )
         is_deploy = context.transaction.type == TransactionType.DEPLOY_CONTRACT
+
+        contract_snapshot_dict = None
+        snapshot_to_persist = (
+            context.transaction.contract_snapshot or context.contract_snapshot
+        )
+        if snapshot_to_persist is not None:
+            enriched_snapshot_dict = snapshot_to_persist.to_dict()
+            if execution_success and accepted_contract_state:
+                enriched_snapshot_dict["finalization_state"] = deepcopy(
+                    accepted_contract_state
+                )
+            if not context.transaction.contract_snapshot:
+                contract_snapshot_dict = enriched_snapshot_dict
 
         pre_effects, post_effects, consensus_round, return_value = decide_accepted(
             tx_hash=context.transaction.hash,
@@ -2818,11 +2866,7 @@ class AcceptedState(TransactionState):
                 context.consensus_data.to_dict()
             ),
             has_contract_snapshot=bool(context.transaction.contract_snapshot),
-            contract_snapshot_dict=(
-                context.contract_snapshot.to_dict()
-                if not context.transaction.contract_snapshot
-                else None
-            ),
+            contract_snapshot_dict=contract_snapshot_dict,
             execution_result_success=execution_success,
             tx_type_deploy=is_deploy,
             accepted_contract_state=accepted_contract_state,
@@ -2835,6 +2879,18 @@ class AcceptedState(TransactionState):
             to_address=context.transaction.to_address,
             leader_node_config=leader_receipt.node_config,
         )
+        if (
+            context.transaction.contract_snapshot
+            and not context.transaction.appealed
+            and execution_success
+            and accepted_contract_state
+        ):
+            pre_effects.append(
+                SetContractSnapshotEffect(
+                    tx_hash=context.transaction.hash,
+                    snapshot_dict=enriched_snapshot_dict,
+                )
+            )
 
         # Execute pre-effects (includes contract registration/update via executor)
         executor = EffectExecutor(context)
@@ -2981,7 +3037,35 @@ class FinalizingState(TransactionState):
     """
 
     async def handle(self, context):
-        leader_receipt = context.transaction.consensus_data.leader_receipt[0]
+        consensus_data = context.transaction.consensus_data
+        leader_receipt = (
+            consensus_data.leader_receipt[0]
+            if consensus_data is not None and consensus_data.leader_receipt
+            else None
+        )
+
+        finalization_state = None
+        saved_snapshot = context.transaction.contract_snapshot
+        if saved_snapshot is not None:
+            finalization_state = getattr(saved_snapshot, "finalization_state", None)
+        if not finalization_state and leader_receipt is not None:
+            finalization_state = leader_receipt.contract_state or None
+
+        live_snapshot = None
+        if (
+            finalization_state is None
+            and leader_receipt is not None
+            and leader_receipt.contract_state_hash
+        ):
+            live_snapshot = context.contract_snapshot_factory(
+                context.transaction.to_address
+            )
+            live_accepted = live_snapshot.states.get("accepted")
+            if (
+                _compute_contract_state_hash(live_accepted)
+                == leader_receipt.contract_state_hash
+            ):
+                finalization_state = live_accepted
 
         pre_effects, post_effects, should_finalize_contract = decide_finalizing(
             tx_hash=context.transaction.hash,
@@ -2989,9 +3073,11 @@ class FinalizingState(TransactionState):
                 context.transaction.status == TransactionStatus.ACCEPTED
             ),
             execution_result_success=(
-                leader_receipt.execution_result == ExecutionResultStatus.SUCCESS
+                leader_receipt is not None
+                and leader_receipt.execution_result == ExecutionResultStatus.SUCCESS
+                and finalization_state is not None
             ),
-            leader_node_config=leader_receipt.node_config,
+            leader_node_config=leader_receipt.node_config if leader_receipt else {},
         )
 
         executor = EffectExecutor(context)
@@ -2999,13 +3085,15 @@ class FinalizingState(TransactionState):
 
         # Impure: contract finalization + triggered transactions (needs DB reads)
         if should_finalize_contract:
-            snapshot = context.contract_snapshot_factory(context.transaction.to_address)
+            snapshot = live_snapshot or context.contract_snapshot_factory(
+                context.transaction.to_address
+            )
             if snapshot is None:
                 raise RuntimeError(
                     "Missing contract snapshot while finalizing a transaction"
                 )
 
-            accepted_state = snapshot.states.get("accepted")
+            accepted_state = finalization_state
             if not accepted_state:
                 raise RuntimeError(
                     "Missing accepted contract state prior to finalization"

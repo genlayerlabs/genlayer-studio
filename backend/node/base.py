@@ -148,7 +148,10 @@ def _repr_result_with_capped_data(
                 return json.dumps(parsed)
         return as_str
     except Exception:
-        return f"{result!r}"
+        # A custom __repr__ may itself fail (for example when an ExecutionError
+        # contains bytes in raw_error). Logging an execution result must never
+        # abort the execution path, so bypass the custom repr as a last resort.
+        return object.__repr__(result)
 
 
 class _SnapshotView(genvmbase.StateProxy):

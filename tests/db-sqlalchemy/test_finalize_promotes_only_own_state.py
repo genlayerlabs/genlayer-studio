@@ -18,7 +18,6 @@ never will be). No fix here -- failing reproduction only.
 import asyncio
 import base64
 
-from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 
 from backend.consensus.base import FinalizingState
@@ -127,9 +126,10 @@ def test_finalization_does_not_promote_younger_txs_accepted_state(engine):
 
         session.expire_all()
         finalized = (
-            session.query(CurrentState).filter_by(id=CONTRACT).one().data["state"][
-                "finalized"
-            ]
+            session.query(CurrentState)
+            .filter_by(id=CONTRACT)
+            .one()
+            .data["state"]["finalized"]
         )
         assert SLOT_B not in finalized, (
             "finalizing T1 promoted a younger, still-appealable transaction's "

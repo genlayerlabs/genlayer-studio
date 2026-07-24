@@ -94,7 +94,9 @@ def test_claim_next_appeal_preserves_contract_snapshot(engine):
         )
         tp.update_transaction_status(tx_hash, TransactionStatus.ACCEPTED)
         row = session.query(CurrentState).filter_by(id=CONTRACT).one()
-        row.data = {"state": {"accepted": dict(POST_STATE), "finalized": dict(PRE_STATE)}}
+        row.data = {
+            "state": {"accepted": dict(POST_STATE), "finalized": dict(PRE_STATE)}
+        }
         tp.set_transaction_appeal(tx_hash, True)
         session.commit()
 

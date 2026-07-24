@@ -38,7 +38,9 @@ class _MessageHandler:
         return None
 
 
-def _make_receipt(address: str, vote: Vote | None, mode=ExecutionMode.VALIDATOR) -> Receipt:
+def _make_receipt(
+    address: str, vote: Vote | None, mode=ExecutionMode.VALIDATOR
+) -> Receipt:
     return Receipt(
         result=bytes([ResultCode.RETURN]) + b"ok",
         calldata=b"",
@@ -54,7 +56,7 @@ def _make_receipt(address: str, vote: Vote | None, mode=ExecutionMode.VALIDATOR)
 
 def _snapshot_node(address: str) -> SimpleNamespace:
     validator = MagicMock()
-    validator.to_dict.return_value = {"address": address}
+    validator.to_dict.return_value = {"address": address, "stake": 1}
     return SimpleNamespace(validator=validator)
 
 
@@ -206,9 +208,9 @@ async def test_appeal_replacement_pool_excludes_appealed_leader(monkeypatch):
 
     voter_addresses = [r.node_config["address"] for r in context.validation_results]
     # EXPECTED: the appealed leader must never vote in its own appeal.
-    assert "old-leader" not in voter_addresses, (
-        f"appealed leader was drafted as replacement juror: {voter_addresses}"
-    )
+    assert (
+        "old-leader" not in voter_addresses
+    ), f"appealed leader was drafted as replacement juror: {voter_addresses}"
 
 
 # ────────────────────────────────────────────────────────────────────

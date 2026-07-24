@@ -6,6 +6,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Callable, Optional, Any
+from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 from sqlalchemy import text, bindparam
 
@@ -32,6 +33,21 @@ from backend.services.usage_metrics_service import UsageMetricsService
 # NO_PROVIDER_FOR_PROMPT for its own node address. These must not trip the
 # stop-the-worker circuit breaker (see _transaction_context).
 _TRANSIENT_LEADER_FATAL_CAUSES = frozenset({"NO_PROVIDER_FOR_PROMPT"})
+
+_CONTRACT_LOCK_SQL = text(
+    """
+    SELECT pg_try_advisory_lock(
+        hashtext(CAST(:lock_key AS text))
+    )
+    """
+)
+_CONTRACT_UNLOCK_SQL = text(
+    """
+    SELECT pg_advisory_unlock(
+        hashtext(CAST(:lock_key AS text))
+    )
+    """
+)
 
 
 class ConsensusWorker:
@@ -291,7 +307,8 @@ class ConsensusWorker:
                       transactions.leader_only, transactions.execution_mode, transactions.sim_config,
                       transactions.status, transactions.consensus_data,
                       transactions.input_data, transactions.created_at, transactions.timestamp_awaiting_finalization,
-                      transactions.appeal_failed, transactions.blocked_at, transactions.triggered_by_hash;
+                      transactions.appeal_failed, transactions.blocked_at,
+                      transactions.triggered_by_hash, transactions.contract_snapshot;
         """
         )
 
@@ -337,6 +354,7 @@ class ConsensusWorker:
                 "appeal_failed": result.appeal_failed,
                 "blocked_at": result.blocked_at,
                 "triggered_by": result.triggered_by_hash,
+                "contract_snapshot": result.contract_snapshot,
             }
 
         return None
@@ -402,7 +420,7 @@ class ConsensusWorker:
                       transactions.appeal_failed, transactions.timestamp_appeal,
                       transactions.appeal_undetermined, transactions.appeal_leader_timeout,
                       transactions.appeal_validators_timeout, transactions.blocked_at,
-                      transactions.triggered_by_hash;
+                      transactions.triggered_by_hash, transactions.contract_snapshot;
         """
         )
 
@@ -446,6 +464,7 @@ class ConsensusWorker:
                 "appeal_validators_timeout": result.appeal_validators_timeout,
                 "blocked_at": result.blocked_at,
                 "triggered_by": result.triggered_by_hash,
+                "contract_snapshot": result.contract_snapshot,
             }
 
         return None
@@ -732,6 +751,70 @@ class ConsensusWorker:
                 )
             raise
 
+    async def _acquire_contract_processing_lock(
+        self,
+        session: Session,
+        lock_key: str,
+    ) -> Connection | None:
+        """Hold a PostgreSQL session lock for the complete processing attempt.
+
+        Claim-time transaction locks close the claim CTE's TOCTOU window, but
+        they are released as soon as the claim is committed. ``blocked_at`` is
+        a recoverable lease rather than a heartbeat, so a sufficiently long
+        attempt can otherwise overlap a retry and compute from stale contract
+        state.
+
+        A dedicated connection is required because processing commits multiple
+        database transactions. PostgreSQL session advisory locks survive those
+        commits and are explicitly released before the connection returns to
+        the pool.
+        """
+        bind = session.get_bind()
+        if getattr(getattr(bind, "dialect", None), "name", None) != "postgresql":
+            return None
+
+        connection = bind.connect().execution_options(isolation_level="AUTOCOMMIT")
+        try:
+            while True:
+                acquired = connection.execute(
+                    _CONTRACT_LOCK_SQL, {"lock_key": lock_key}
+                ).scalar_one()
+                if acquired:
+                    return connection
+                await asyncio.sleep(0.05)
+        except BaseException:
+            connection.close()
+            raise
+
+    def _release_contract_processing_lock(
+        self,
+        connection: Connection | None,
+        lock_key: str,
+    ) -> None:
+        if connection is None:
+            return
+
+        try:
+            released = connection.execute(
+                _CONTRACT_UNLOCK_SQL, {"lock_key": lock_key}
+            ).scalar_one()
+            if not released:
+                # Never return a connection with a potentially leaked
+                # session-level lock to the pool.
+                connection.invalidate()
+                logger.error(
+                    f"[Worker {self.worker_id}] Contract processing lock "
+                    f"was not held during release for {lock_key}"
+                )
+        except Exception:
+            connection.invalidate()
+            logger.exception(
+                f"[Worker {self.worker_id}] Failed to release contract "
+                f"processing lock for {lock_key}"
+            )
+        finally:
+            connection.close()
+
     @asynccontextmanager
     async def _transaction_context(
         self,
@@ -760,7 +843,13 @@ class ConsensusWorker:
             Control to the processing logic
         """
         transaction_reset = False
+        lock_key = str(tx_data.get("to_address") or tx_hash)
+        lock_connection = None
         try:
+            lock_connection = await self._acquire_contract_processing_lock(
+                session, lock_key
+            )
+
             # Track current transaction for health monitoring
             self.current_transactions[tx_hash] = {
                 "hash": tx_hash,
@@ -864,6 +953,8 @@ class ConsensusWorker:
             session.rollback()
             await self._handle_generic_error_retry(tx_hash, e)
         finally:
+            self._release_contract_processing_lock(lock_connection, lock_key)
+
             # Clear current transaction tracking
             self.current_transactions.pop(tx_hash, None)
             # Release the transaction if not already reset

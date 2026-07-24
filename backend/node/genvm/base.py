@@ -98,7 +98,7 @@ class ExecutionError:
             data["error_code"] = self.error_code
         if self.raw_error:
             data["raw_error"] = self.raw_error
-        return json.dumps(data)
+        return json.dumps(data, default=repr)
 
 
 @dataclass

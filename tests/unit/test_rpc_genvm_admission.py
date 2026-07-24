@@ -384,11 +384,17 @@ async def test_gen_call_singleflight_returns_stale_read_after_state_change(monke
     # Mutable "contract state" observed by an execution when it takes its
     # snapshot (at execution start, before the release barrier).
     current_state = {"value": 0x11}
+    state_version = {"value": "v1"}
 
     monkeypatch.setattr(endpoints, "_GEN_CALL_SINGLEFLIGHT_ENABLED", True)
     monkeypatch.setattr(endpoints, "_gen_call_singleflight_tasks", {})
     monkeypatch.setattr(endpoints, "_gen_call_singleflight_lock", asyncio.Lock())
     monkeypatch.setattr(endpoints, "_genvm_admission_semaphore", semaphore)
+    monkeypatch.setattr(
+        endpoints,
+        "_gen_call_state_version",
+        lambda session, params: state_version["value"],
+    )
 
     async def fake_execute_call_with_snapshot(*args, **kwargs):
         nonlocal execute_calls
@@ -425,6 +431,7 @@ async def test_gen_call_singleflight_returns_stale_read_after_state_change(monke
 
     # A write lands and the contract state advances after R1 snapshotted.
     current_state["value"] = 0x22
+    state_version["value"] = "v2"
 
     second = asyncio.create_task(
         endpoints.gen_call(
