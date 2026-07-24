@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: fast-forward-main-${{ github.repository }}
@@ -25,9 +25,18 @@ jobs:
     if: github.ref_type == 'branch'
     runs-on: ubuntu-latest
     steps:
+      - name: Generate CI bot token
+        id: ci-bot-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.CI_BOT_APP_ID }}
+          private-key: ${{ secrets.CI_BOT_SECRET }}
+          permission-contents: write
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ steps.ci-bot-token.outputs.token }}
 
       - name: Fast-forward main to active dev branch
         run: |
@@ -39,19 +48,23 @@ jobs:
             exit 1
           fi
 
-          if [[ "${GITHUB_REF_NAME}" != "${active_branch}" ]]; then
+          if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" && "${GITHUB_REF_NAME}" != "${active_branch}" ]]; then
             echo "Push was to ${GITHUB_REF_NAME}; active dev branch is ${active_branch}. Nothing to do."
             exit 0
           fi
 
+          git fetch origin "refs/heads/${active_branch}:refs/remotes/origin/${active_branch}"
+          source_ref="refs/remotes/origin/${active_branch}"
+          source_sha="$(git rev-parse "${source_ref}")"
+
           if git ls-remote --exit-code --heads origin main >/dev/null 2>&1; then
             git fetch origin main
-            if ! git merge-base --is-ancestor origin/main HEAD; then
+            if ! git merge-base --is-ancestor origin/main "${source_ref}"; then
               echo "::error::main has diverged from ${active_branch}; refusing non-fast-forward update"
               exit 1
             fi
           else
-            echo "main does not exist yet; creating it at ${GITHUB_SHA}."
+            echo "main does not exist yet; creating it at ${source_sha}."
           fi
 
-          git push origin "HEAD:refs/heads/main"
+          git push origin "${source_sha}:refs/heads/main"
