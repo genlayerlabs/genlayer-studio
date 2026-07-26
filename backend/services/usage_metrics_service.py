@@ -297,7 +297,9 @@ class UsageMetricsService:
         if consensus_data is not None and consensus_data.leader_receipt:
             first_receipt = consensus_data.leader_receipt[0]
             if first_receipt is not None:
-                execution_result = getattr(first_receipt, "execution_result", None)
+                execution_result = self._receipt_field(
+                    first_receipt, "execution_result"
+                )
                 if execution_result is not None:
                     # Handle both enum and string values
                     if hasattr(execution_result, "value"):
