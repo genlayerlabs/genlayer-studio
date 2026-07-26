@@ -6,6 +6,7 @@ import { Wallet, Droplets } from 'lucide-vue-next';
 import { PlusIcon } from '@heroicons/vue/16/solid';
 import { notify } from '@kyvg/vue3-notification';
 import { useEventTracking, useWallet, useRpcClient } from '@/hooks';
+import { parseGenAmountToWei } from '@/utils/tokenAmount';
 import { computed, ref, watch, onMounted } from 'vue';
 
 const store = useAccountsStore();
@@ -72,21 +73,20 @@ const handleCreateNewAccount = async () => {
 
 const handleFundAccount = async () => {
   if (!store.selectedAccount?.address) return;
-  const amount = parseFloat(faucetAmount.value);
-  if (isNaN(amount) || amount <= 0) {
+  const weiAmount = parseGenAmountToWei(faucetAmount.value);
+  if (weiAmount === null || weiAmount <= 0n) {
     notify({ title: 'Enter a valid amount', type: 'error' });
     return;
   }
 
   isFunding.value = true;
   try {
-    const weiAmount = BigInt(Math.floor(amount * 1e18));
     await rpcClient.fundAccount(
       store.selectedAccount.address,
-      Number(weiAmount),
+      weiAmount.toString(),
     );
     notify({
-      title: `Funded ${amount} GEN`,
+      title: `Funded ${faucetAmount.value.trim()} GEN`,
       type: 'success',
     });
     showFaucet.value = false;
