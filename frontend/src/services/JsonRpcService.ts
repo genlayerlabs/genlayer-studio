@@ -93,7 +93,7 @@ export class JsonRpcService implements IJsonRpcService {
     ) as Promise<string>;
   }
 
-  async fundAccount(address: string, amount: number): Promise<any> {
+  async fundAccount(address: string, amount: string): Promise<any> {
     return this.callRpcMethod<any>(
       'sim_fundAccount',
       [address, amount],
