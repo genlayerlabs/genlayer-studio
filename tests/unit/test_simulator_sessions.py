@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from backend.protocol_rpc import endpoints
+from backend.protocol_rpc.exceptions import JSONRPCError
 from backend.errors.errors import InvalidAddressError
 from backend.domain.types import LLMProvider, TransactionType
 from backend.database_handler.models import TransactionStatus
@@ -43,6 +44,9 @@ def test_fund_account_uses_request_scoped_session(monkeypatch):
     transactions_processor_instance.insert_transaction.assert_called_once_with(
         None, "0x" + "1" * 40, None, 25, 0, 12, False, 0, None, "0xabc"
     )
+    accounts_manager_instance.credit_tx_value_once.assert_called_once_with(
+        "0xabc", "0x" + "1" * 40, 25
+    )
 
 
 def test_fund_account_raises_for_invalid_address(monkeypatch):
@@ -59,6 +63,40 @@ def test_fund_account_raises_for_invalid_address(monkeypatch):
 
     with pytest.raises(InvalidAddressError):
         endpoints.fund_account(session, "0x" + "2" * 40, 10)
+
+
+@pytest.mark.parametrize("amount", [0, -1])
+def test_fund_account_rejects_non_positive_amount_without_side_effects(
+    monkeypatch, amount
+):
+    session = object()
+    account_address = "0x" + "5" * 40
+    accounts_manager_instance = MagicMock()
+    accounts_manager_instance.is_valid_address.return_value = True
+
+    transactions_processor_instance = MagicMock()
+    processor_sessions = []
+
+    def fake_transactions_processor(session):
+        processor_sessions.append(session)
+        return transactions_processor_instance
+
+    monkeypatch.setattr(
+        endpoints, "AccountsManager", lambda _session: accounts_manager_instance
+    )
+    monkeypatch.setattr(endpoints, "TransactionsProcessor", fake_transactions_processor)
+
+    with pytest.raises(JSONRPCError) as exc_info:
+        endpoints.fund_account(session, account_address, amount)
+
+    assert exc_info.value.code == -32602
+    assert exc_info.value.message == "amount must be greater than 0"
+    assert exc_info.value.data == {}
+    accounts_manager_instance.is_valid_address.assert_called_once_with(account_address)
+    assert processor_sessions == []
+    transactions_processor_instance.get_transaction_count.assert_not_called()
+    transactions_processor_instance.insert_transaction.assert_not_called()
+    accounts_manager_instance.credit_tx_value_once.assert_not_called()
 
 
 def test_fund_account_instantiates_managers_per_session(monkeypatch):
