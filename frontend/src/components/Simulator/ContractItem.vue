@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useNetworkStore } from '@/stores/network';
 import { useContractsStore } from '@/stores';
 import { type ContractFile } from '@/types';
 import {
@@ -8,7 +9,7 @@ import {
   TrashIcon,
   ArrowDownOnSquareIcon,
 } from '@heroicons/vue/16/solid';
-import { ref, onMounted, nextTick } from 'vue';
+import { ref, onMounted, nextTick, computed } from 'vue';
 import { notify } from '@kyvg/vue3-notification';
 
 const store = useContractsStore();
@@ -41,8 +42,19 @@ const handleEditFile = () => {
   nextTick(() => {
     editInput.value?.focus();
     editInput.value?.setSelectionRange(0, dotPosition);
-  });
+  }); 
 };
+const networkStore = useNetworkStore();
+
+const isLocalNetwork = computed(() => {
+  return networkStore.network?.id === 'studionet' || networkStore.network?.type === 'local';
+});
+
+const explorerUrl = computed(() => {
+  const address = props.contract?.address;
+  if (!address) return '';
+  return `https://explorer-asimov.genlayer.com/contract/${address}`;
+});
 
 onMounted(() => {
   if (props.isNewFile) {
@@ -142,7 +154,15 @@ const handleDownloadFile = (e: Event) => {
         <div data-testid="contract-file" class="truncate font-semibold">
           {{ contract.name }}
         </div>
-
+<a
+  v-if="props.contract?.address && !isLocalNetwork"
+  :href="explorerUrl"
+  target="_blank"
+  rel="noopener noreferrer"
+  class="ml-2 text-[10px] text-blue-500 hover:text-blue-700 underline flex items-center"
+>
+  View Explorer
+</a>
         <div class="hidden flex-row gap-1 group-hover:flex">
           <button @click.stop="handleEditFile" v-tooltip="'Edit Name'">
             <PencilSquareIcon
