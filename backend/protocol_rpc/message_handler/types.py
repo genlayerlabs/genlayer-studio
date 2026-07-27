@@ -19,14 +19,6 @@ class EventScope(Enum):
     TRANSACTION = "Transaction"
 
 
-def show_validator_private_keys_in_logs() -> bool:
-    return os.getenv("SHOW_VALIDATOR_PRIVATE_KEYS_IN_LOGS", "").lower() in {
-        "1",
-        "true",
-        "yes",
-    }
-
-
 def _is_private_key_field(key: Any) -> bool:
     if not isinstance(key, str):
         return False
@@ -37,9 +29,6 @@ def _is_private_key_field(key: Any) -> bool:
 
 def sanitize_log_data(value: Any) -> Any:
     """Return a copy of log data with private-key fields removed."""
-    if show_validator_private_keys_in_logs():
-        return value
-
     if isinstance(value, dict):
         return {
             key: sanitize_log_data(item)
