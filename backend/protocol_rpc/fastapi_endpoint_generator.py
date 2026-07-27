@@ -315,7 +315,7 @@ class FastAPIEndpointRegistry:
             if db and hasattr(db, "rollback"):
                 try:
                     db.rollback()
-                except:
+                except Exception:
                     pass  # Ignore rollback errors
 
             raise
