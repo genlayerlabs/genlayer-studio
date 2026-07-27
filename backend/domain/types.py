@@ -6,9 +6,30 @@ from dataclasses import dataclass, field
 import datetime
 from enum import Enum, IntEnum
 import os
+from typing import NotRequired, TypedDict
 from backend.database_handler.models import TransactionStatus
 from backend.database_handler.types import ConsensusData
 from backend.database_handler.contract_snapshot import ContractSnapshot
+
+
+class LLMProviderConfig(TypedDict, total=False):
+    temperature: float
+    max_tokens: int
+    use_max_completion_tokens: bool
+
+
+class PluginConfig(TypedDict, total=False):
+    api_key_env_var: str
+    api_url: str
+    mock_response: dict
+
+
+class ProviderParams(TypedDict):
+    provider: str
+    model: str
+    config: LLMProviderConfig
+    plugin: str
+    plugin_config: PluginConfig
 
 
 @dataclass
@@ -16,9 +37,9 @@ class SimValidatorConfig:
     stake: int
     provider: str
     model: str
-    config: dict
+    config: LLMProviderConfig
     plugin: str
-    plugin_config: dict
+    plugin_config: PluginConfig
 
     @classmethod
     def from_dict(cls, d: dict) -> "SimValidatorConfig":
@@ -80,9 +101,9 @@ class SimConfig:
 class LLMProvider:
     provider: str
     model: str
-    config: dict
+    config: LLMProviderConfig
     plugin: str
-    plugin_config: dict
+    plugin_config: PluginConfig
     id: int | None = None
 
     def __hash__(self):

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from backend.node.types import NodeConfig
 from backend.consensus.effects import (
     AddTimestampEffect,
     StatusUpdateEffect,
@@ -320,7 +321,7 @@ def decide_accepted(
     contract_address: str | None,
     code_slot_b64: str | None,
     to_address: str,
-    leader_node_config: dict,
+    leader_node_config: NodeConfig,
 ) -> tuple[list[Effect], list[Effect], ConsensusRound, ConsensusRound | None]:
     """Decide effects for AcceptedState.
 
@@ -478,7 +479,7 @@ def decide_finalizing(
     tx_hash: str,
     tx_status_accepted: bool,
     execution_result_success: bool,
-    leader_node_config: dict,
+    leader_node_config: NodeConfig,
 ) -> tuple[list[Effect], list[Effect], bool]:
     """Decide effects for FinalizingState.
 
