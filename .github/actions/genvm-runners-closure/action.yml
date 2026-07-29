@@ -1,0 +1,65 @@
+name: Prebuild GenVM runners closure
+description: >
+  Builds genvm-manager's `runners-all` on the runner, where the Nix sandbox
+  works, and exports its store closure into the Docker build context so the
+  in-image source build can import it instead of rebuilding it.
+
+  The runner tree is assembled from fixed-output derivations that compile C to
+  wasm (`genvm-cpython-objs`, `genvm-ffi`, bz2/xz/zlib, numpy, PIL). Their
+  identity is their output hash, and the `nixos/nix` image cannot enable the
+  sandbox, so building them there picks up host state and misses the pinned
+  hashes. Everything else in the build is input-addressed and does not care.
+
+inputs:
+  ref:
+    description: GenVM source binding, `<branch>:<commit>` or a bare commit.
+    required: true
+  destination:
+    description: Directory in the build context to write the closure into.
+    required: false
+    default: .genvm-nix-closure
+
+runs:
+  using: composite
+  steps:
+    - name: Install Nix
+      uses: cachix/install-nix-action@v31
+      with:
+        extra_nix_config: |
+          experimental-features = nix-command flakes
+          sandbox = true
+          # Without this Nix quietly builds unsandboxed when it cannot set the
+          # sandbox up, which is the exact output this action must never export.
+          sandbox-fallback = false
+
+    - name: Build and export runners-all
+      shell: bash
+      env:
+        GENVM_CLOSURE_REF: ${{ inputs.ref }}
+        GENVM_CLOSURE_DEST: ${{ inputs.destination }}
+      run: |
+        set -euo pipefail
+        # `<branch>:<commit>` and a bare commit both resolve to the commit.
+        commit="${GENVM_CLOSURE_REF##*:}"
+        if [[ -z "$commit" ]]; then
+          echo "::error::empty GenVM ref passed to genvm-runners-closure"
+          exit 1
+        fi
+        # `sandbox-fallback = false` already fails the build when the sandbox
+        # cannot be set up. This only names the earlier mistake -- nix.conf not
+        # applied at all -- so the failure below reads as a cause, not a puzzle.
+        sandbox=$(nix config show sandbox)
+        if [[ "$sandbox" != "true" ]]; then
+          echo "::error::Nix sandbox is '$sandbox', expected 'true'; nix.conf did not apply, and runner derivations built without a sandbox miss their pinned hashes"
+        fi
+        src=$(mktemp -d)
+        git clone --recurse-submodules https://github.com/genlayerlabs/genvm-manager "$src"
+        git -C "$src" checkout "$commit"
+        git -C "$src" submodule update --init --recursive
+        out=$(cd "$src" && nix build --no-link --print-out-paths ".?submodules=1#runners-all")
+        mkdir -p "$GENVM_CLOSURE_DEST"
+        # shellcheck disable=SC2046 # store paths never contain whitespace
+        nix-store --export $(nix-store -qR "$out") \
+          | gzip > "$GENVM_CLOSURE_DEST/runners-all.nar.gz"
+        rm -rf "$src"
+        echo "Exported $out ($(du -h "$GENVM_CLOSURE_DEST/runners-all.nar.gz" | cut -f1))"

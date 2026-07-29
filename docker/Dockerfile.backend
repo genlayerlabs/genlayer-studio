@@ -32,6 +32,11 @@ ARG GENVM_BUILD_CORES=0
 # nixos/nix ships bash only inside the default nix profile (no /bin/bash).
 SHELL ["/nix/var/nix/profiles/default/bin/bash", "-x", "-c"]
 
+# CI exports genvm-manager's `runners-all` closure here from a sandboxed Nix on
+# the runner (.github/actions/genvm-runners-closure). Empty in a plain local
+# build, which then builds the runners here instead -- see the import below.
+COPY .genvm-nix-closure/ /genvm-nix-closure/
+
 # Source builds bind Studio to a genvm-manager branch/SHA. The flake target
 # follows TARGETARCH (amd64-linux / arm64-linux); runners are included by
 # genvm-manager's combined genvm package.
@@ -57,6 +62,13 @@ RUN set -euo pipefail ; \
         cd /src/genvm ; \
         git checkout "$SOURCE_REF" ; \
         git submodule update --init --recursive ; \
+        # The runner tree is built from fixed-output derivations that compile C
+        # to wasm; without a sandbox they pick up host state and miss their
+        # pinned hashes. Import the closure CI built under a real sandbox
+        # (.github/actions/genvm-runners-closure) so they are not rebuilt here.
+        if [[ -f /genvm-nix-closure/runners-all.nar.gz ]]; then \
+            gzip -dc /genvm-nix-closure/runners-all.nar.gz | nix-store --import > /dev/null ; \
+        fi ; \
         if [[ "$TARGETARCH" == "amd64" ]] || [[ -z "$TARGETARCH" ]]; then \
             GT="amd64-linux" ; \
         elif [[ "$TARGETARCH" == "arm64" ]]; then \
