@@ -40,6 +40,20 @@ Have ideas for new features or use cases? We're eager to hear them! But first:
    $ docker compose up
    ```
 
+   When building GenVM from source, install Nix locally and configure
+   `sandbox = true` in `nix.conf`. After exporting `GENVM_SOURCE_MODE=source`
+   and `GENVM_REF` (or using a `<branch>:<commit>` ref for automatic source
+   mode), prepare the runner closure before `docker compose build` or
+   `docker compose up`:
+
+   ```sh
+   $ ./scripts/prepare-genvm-source-build.sh
+   ```
+
+   The runner tree contains fixed-output derivations that need a real Nix
+   sandbox to retain their pinned hashes. The Docker build imports this
+   prepared closure because its `nixos/nix` stage cannot provide that sandbox.
+
 - **1.4. Running Tests**:
 
    ```sh

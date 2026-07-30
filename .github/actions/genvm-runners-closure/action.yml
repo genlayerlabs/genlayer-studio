@@ -38,28 +38,5 @@ runs:
         GENVM_CLOSURE_REF: ${{ inputs.ref }}
         GENVM_CLOSURE_DEST: ${{ inputs.destination }}
       run: |
-        set -euo pipefail
-        # `<branch>:<commit>` and a bare commit both resolve to the commit.
-        commit="${GENVM_CLOSURE_REF##*:}"
-        if [[ -z "$commit" ]]; then
-          echo "::error::empty GenVM ref passed to genvm-runners-closure"
-          exit 1
-        fi
-        # `sandbox-fallback = false` already fails the build when the sandbox
-        # cannot be set up. This only names the earlier mistake -- nix.conf not
-        # applied at all -- so the failure below reads as a cause, not a puzzle.
-        sandbox=$(nix config show sandbox)
-        if [[ "$sandbox" != "true" ]]; then
-          echo "::error::Nix sandbox is '$sandbox', expected 'true'; nix.conf did not apply, and runner derivations built without a sandbox miss their pinned hashes"
-        fi
-        src=$(mktemp -d)
-        git clone --recurse-submodules https://github.com/genlayerlabs/genvm-manager "$src"
-        git -C "$src" checkout "$commit"
-        git -C "$src" submodule update --init --recursive
-        out=$(cd "$src" && nix build --no-link --print-out-paths ".?submodules=1#runners-all")
-        mkdir -p "$GENVM_CLOSURE_DEST"
-        # shellcheck disable=SC2046 # store paths never contain whitespace
-        nix-store --export $(nix-store -qR "$out") \
-          | gzip > "$GENVM_CLOSURE_DEST/runners-all.nar.gz"
-        rm -rf "$src"
-        echo "Exported $out ($(du -h "$GENVM_CLOSURE_DEST/runners-all.nar.gz" | cut -f1))"
+        ./scripts/genvm-runners-closure.sh \
+          "$GENVM_CLOSURE_REF" "$GENVM_CLOSURE_DEST"
