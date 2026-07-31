@@ -25,8 +25,8 @@ ARG GENVM_SOURCE_MODE
 ARG GENVM_TAG
 ARG GENVM_REF
 ARG GENVM_EXECUTOR_VERSION_NAME
-# Nix `cores` for the genvm build (0 = all). Cap on memory-constrained or
-# emulated builders where a full-parallel rust build can OOM.
+# Nix `cores` for the GenVM build (0 = all). Cap on memory-constrained or
+# emulated builders where a full-parallel Rust build can OOM.
 ARG GENVM_BUILD_CORES=0
 
 # nixos/nix ships bash only inside the default nix profile (no /bin/bash).
@@ -51,9 +51,7 @@ RUN set -euo pipefail ; \
         if [[ "$SOURCE_REF" =~ ^.+:([0-9a-fA-F]{7,40})$ ]]; then \
             SOURCE_REF="${BASH_REMATCH[1]}" ; \
         fi ; \
-        # filter-syscalls=false: nix's seccomp filter cannot load under
-        # qemu/Rosetta emulation (cross-platform local builds); harmless on
-        # native hosts since the image already runs with sandbox disabled.
+        # nix's seccomp filter cannot load under qemu/Rosetta emulation.
         printf 'experimental-features = nix-command flakes\nfilter-syscalls = false\ncores = %s\n' "$GENVM_BUILD_CORES" >> /etc/nix/nix.conf ; \
         git clone --recurse-submodules https://github.com/genlayerlabs/genvm-manager /src/genvm ; \
         cd /src/genvm ; \
@@ -69,11 +67,9 @@ RUN set -euo pipefail ; \
         nix build -o /out-genvm ".?submodules=1#genvm-$GT" ; \
         mkdir -p /genvm-out ; \
         cp -rL --no-preserve=ownership /out-genvm/. /genvm-out/ ; \
-        # Keep nix-store modes (exec bits!) but make everything owner-writable
-        # so post-install can create venvs/cache dirs inside /genvm later.
+        # Preserve executable modes while allowing post-install finalization.
         chmod -R u+w /genvm-out ; \
-        # Drop sources + nix store build artifacts so this layer (and the
-        # buildx/gha cache entry for it) stays close to the size of /genvm-out.
+        # Keep source and Nix build artifacts out of the exported runtime layer.
         rm -f /out-genvm ; \
         rm -rf /src/genvm ; \
         nix-collect-garbage -d || true ; \
@@ -81,11 +77,12 @@ RUN set -euo pipefail ; \
         mkdir -p /genvm-out ; \
     fi
 
-FROM ubuntu:24.04 AS base
+# jsonrpc and consensus-worker intentionally share this exact parent. In E2E,
+# Compose builds both targets in one BuildKit graph, so GenVM is acquired once.
+# Their ECR manifests then reference the same large content-addressed layers.
+FROM ubuntu:24.04 AS genvm-runtime
 
-ARG TARGETPLATFORM
 ARG TARGETARCH
-
 ARG GENVM_TAG
 ARG GENVM_REF
 ARG GENVM_SOURCE_MODE
@@ -96,20 +93,21 @@ ENV GENVM_REF=$GENVM_REF
 ENV GENVM_EXECUTOR_VERSION_NAME=$GENVM_EXECUTOR_VERSION_NAME
 
 ARG path=/app
+ARG STUDIO_UID=999
+ARG STUDIO_GID=999
 WORKDIR $path
 
 SHELL ["/bin/bash", "-x", "-c"]
-# Retry apt-get update — Ubuntu mirrors occasionally serve out-of-sync
-# Packages.gz files mid-rotation, which causes "File has unexpected size"
-# errors that persist for a few minutes. Retrying smooths over these.
+# Ubuntu mirrors occasionally rotate indexes mid-request. Retry the index fetch
+# before treating a transient mirror mismatch as a failed image build.
 RUN for i in 1 2 3 4 5; do \
         apt-get update -y && break; \
         echo "apt-get update failed (attempt $i/5), retrying in 15s..."; \
         sleep 15; \
     done \
     && DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install -y --no-install-recommends \
-        curl unzip xz-utils ca-certificates python3.12 python3.12-venv python3-dev gcc libssl3 \
-        musl musl-dev \
+        curl unzip xz-utils ca-certificates python3.12 python3.12-venv python3.12-dev \
+        gcc libssl3 musl musl-dev \
     && mkdir -p "$HOME/.config/pip/" \
     && printf "[global]\nbreak-system-packages = true\n" >> "$HOME/.config/pip/pip.conf" \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2 \
@@ -118,24 +116,22 @@ RUN for i in 1 2 3 4 5; do \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-ADD backend/requirements.txt backend/requirements.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --cache-dir=/root/.cache/pip -r backend/requirements.txt
+# Both old images used the first system UID/GID allocated on the same Ubuntu
+# base (999). Make that contract explicit so existing cache-volume ownership is
+# preserved while both final targets can consume the same GenVM layer.
+RUN groupadd --system --gid "$STUDIO_GID" studio-group \
+    && useradd --system --uid "$STUDIO_UID" --gid studio-group \
+        --home-dir /home/studio-user --create-home --shell /bin/bash studio-user \
+    && mkdir -p /home/studio-user/.cache/huggingface /genvm /genvm-cache \
+    && chown -R studio-user:studio-group /home/studio-user /genvm /genvm-cache
 
-RUN groupadd -r backend-group \
-    && useradd -r -g backend-group backend-user \
-    && mkdir -p /home/backend-user/.cache/huggingface \
-    && chown -R backend-user:backend-group /home/backend-user \
-    && chown -R backend-user:backend-group $path \
-    && mkdir -p /genvm
-
-ENV PYTHONPATH "${PYTHONPATH}:/${path}"
-ENV HUGGINGFACE_HUB_CACHE /home/backend-user/.cache/huggingface
-
+ENV PYTHONPATH=$path
+ENV HUGGINGFACE_HUB_CACHE=/home/studio-user/.cache/huggingface
 ENV RUST_BACKTRACE=1
 
 # Acquire GenVM from an E2E prebuilt tree, a source build, or (by default) a
-# genvm-manager release. Keep downloads in this layer so archives are discarded.
+# genvm-manager release. This is the only acquisition/finalization path used by
+# either backend service.
 COPY --from=genvm-source-build /genvm-out/ /genvm/
 COPY .e2e-genvm-prebuilt/ /genvm-prebuilt/
 COPY third_party/genvm/version /genvm-default-version
@@ -186,7 +182,7 @@ RUN set -euo pipefail ; \
             --out-dir /genvm --download-dir /tmp/genvm-download \
             --runner-pins-file /genvm-runner-pins --precompile false ; \
     fi ; \
-    chown -R backend-user:backend-group /genvm ; \
+    chown -R studio-user:studio-group /genvm ; \
     chmod -R u+w /genvm ; \
     if [[ "$mode" != "release" ]]; then \
         if [[ -x /genvm/bin/genvm-post-install ]]; then \
@@ -200,34 +196,95 @@ RUN set -euo pipefail ; \
         if [[ "$mode" == "source" ]]; then \
             post_install_args="$post_install_args --bin-patch false" ; \
         fi ; \
-        su - backend-user -c "$post_install $post_install_args" ; \
+        su - studio-user -c "$post_install $post_install_args" ; \
     fi ; \
     find /genvm -name genvm.yaml -exec sed -i 's|cache_dir:.*|cache_dir: /genvm-cache/|' {} + ; \
-    mkdir -p /genvm-cache ; \
-    chown backend-user:backend-group /genvm-cache
+    chown studio-user:studio-group /genvm-cache
 
-# Set GenVM environment variables (GENVM_TAG is already set as ENV earlier)
 ENV GENVMROOT=/genvm
 ENV PATH="/genvm/bin:${PATH}"
 
+FROM genvm-runtime AS service-base
+
+ARG path=/app
+WORKDIR $path
+
+ADD backend/requirements.txt backend/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --cache-dir=/root/.cache/pip -r backend/requirements.txt
+
 COPY backend $path/backend
+RUN chown -R studio-user:studio-group $path
+
+FROM service-base AS consensus-worker
+
+# The worker is the only service that needs the high-throughput manager tuning.
+RUN set -euo pipefail ; \
+    config_file=/genvm/config/genvm-manager.yaml ; \
+    if [[ -f "$config_file" ]]; then \
+        sed -i 's/^threads:.*/threads: 8/' "$config_file" ; \
+        sed -i 's/^blocking_threads:.*/blocking_threads: 48/' "$config_file" ; \
+        cat "$config_file" ; \
+    else \
+        echo "WARNING: $config_file not found; skipping GenVM manager thread configuration." ; \
+    fi ; \
+    groupmod --new-name worker-group studio-group ; \
+    usermod --login worker-user --home /home/worker-user --move-home studio-user
+
+COPY docker/entrypoint-consensus-worker.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh \
+    && chown 999:999 /entrypoint.sh
+
+ENV HUGGINGFACE_HUB_CACHE=/home/worker-user/.cache/huggingface
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=120s \
+    CMD curl -f http://localhost:${WORKER_PORT:-4001}/health || exit 1
+
+USER worker-user
+WORKDIR /app
+ENTRYPOINT ["/entrypoint.sh"]
+
+# Backwards-compatible alias for explicit CONSENSUS_BUILD_TARGET=base overrides.
+FROM consensus-worker AS base
+
+FROM service-base AS debug
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --cache-dir=/root/.cache/pip debugpy
+
+RUN groupmod --new-name backend-group studio-group \
+    && usermod --login backend-user --home /home/backend-user --move-home studio-user
+
 COPY asgi.py $path/asgi.py
 COPY uvicorn_config.py $path/uvicorn_config.py
 COPY docker/entrypoint-backend.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN chmod +x /entrypoint.sh \
+    && chown 999:999 "$path/asgi.py" "$path/uvicorn_config.py" /entrypoint.sh
 
-HEALTHCHECK --interval=1s --timeout=1s --retries=30 --start-period=120s CMD python3 backend/healthcheck.py --port ${RPCPORT:-4000}
+ENV HUGGINGFACE_HUB_CACHE=/home/backend-user/.cache/huggingface
 
-###########START NEW IMAGE : DEBUGGER ###################
-FROM base AS debug
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --cache-dir=/root/.cache/pip debugpy
 USER backend-user
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["python3", "-m", "debugpy", "--listen", "0.0.0.0:${RPCDEBUGPORT}", "-m", "uvicorn", "asgi:application", "--host", "0.0.0.0", "--port", "${RPCPORT:-4000}", "--reload", "--reload-dir", "/app/backend"]
 
-###########START NEW IMAGE: PRODUCTION ###################
-FROM base AS prod
+# Keep the JSON-RPC production target last so a direct build without --target
+# retains Dockerfile.backend's historical default image.
+FROM service-base AS prod
+
+RUN groupmod --new-name backend-group studio-group \
+    && usermod --login backend-user --home /home/backend-user --move-home studio-user
+
+COPY asgi.py $path/asgi.py
+COPY uvicorn_config.py $path/uvicorn_config.py
+COPY docker/entrypoint-backend.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh \
+    && chown 999:999 "$path/asgi.py" "$path/uvicorn_config.py" /entrypoint.sh
+
+ENV HUGGINGFACE_HUB_CACHE=/home/backend-user/.cache/huggingface
+
+HEALTHCHECK --interval=1s --timeout=1s --retries=30 --start-period=120s \
+    CMD python3 backend/healthcheck.py --port ${RPCPORT:-4000}
+
 USER backend-user
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["python3", "-m", "backend.protocol_rpc.run_server"]

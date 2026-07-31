@@ -299,8 +299,8 @@ services:
   consensus-worker:
     build:
       context: ./
-      dockerfile: ./docker/Dockerfile.consensus-worker
-      target: ${CONSENSUS_BUILD_TARGET:-base}
+      dockerfile: ./docker/Dockerfile.backend
+      target: ${CONSENSUS_BUILD_TARGET:-consensus-worker}
       args:
         GENVM_TAG: ${GENVM_TAG:-}
         GENVM_REF: ${GENVM_REF:-}
