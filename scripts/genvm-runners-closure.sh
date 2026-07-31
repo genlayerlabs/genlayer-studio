@@ -15,11 +15,11 @@ if [[ -z "$GENVM_CLOSURE_DEST" ]]; then
 fi
 
 # `<branch>:<commit>` and a bare commit both resolve to the commit.
-commit="${GENVM_CLOSURE_REF##*:}"
-if [[ -z "$commit" ]]; then
-    echo "ERROR: empty GenVM ref passed to genvm-runners-closure" >&2
+if [[ ! "$GENVM_CLOSURE_REF" =~ ^([^:]+:)?[0-9a-fA-F]{7,40}$ ]]; then
+    echo "ERROR: GenVM ref must be '<branch>:<commit>' or a bare commit SHA, got '$GENVM_CLOSURE_REF'" >&2
     exit 1
 fi
+commit="${GENVM_CLOSURE_REF##*:}"
 
 # A caller may disable sandbox fallback separately. Checking the effective
 # config here also catches nix.conf not being applied at all.
@@ -34,7 +34,12 @@ fi
 out=$(nix build --no-link --print-out-paths \
     "git+https://github.com/genlayerlabs/genvm-manager?rev=$commit&submodules=1#runners-all")
 mkdir -p "$GENVM_CLOSURE_DEST"
+dest="$GENVM_CLOSURE_DEST/runners-all-$commit.nar.gz"
+tmp="$dest.tmp"
 # shellcheck disable=SC2046 # store paths never contain whitespace
 nix-store --export $(nix-store -qR "$out") \
-    | gzip > "$GENVM_CLOSURE_DEST/runners-all.nar.gz"
-echo "Exported $out ($(du -h "$GENVM_CLOSURE_DEST/runners-all.nar.gz" | cut -f1))"
+    | gzip > "$tmp"
+# Export via a temp file + rename so a Ctrl+C mid-write can't leave a
+# truncated .nar.gz that a later build silently imports as if it were valid.
+mv "$tmp" "$dest"
+echo "Exported $out ($(du -h "$dest" | cut -f1))"
