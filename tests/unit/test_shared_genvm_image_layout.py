@@ -1,0 +1,85 @@
+import re
+from pathlib import Path
+
+import yaml
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile.backend"
+
+
+def _stages(dockerfile: str) -> dict[str, str]:
+    stages: dict[str, str] = {}
+    for parent, name in re.findall(
+        r"^FROM\s+(\S+)\s+AS\s+(\S+)\s*$", dockerfile, re.MULTILINE | re.IGNORECASE
+    ):
+        stages[name] = parent
+    return stages
+
+
+def _stage_body(dockerfile: str, stage: str) -> str:
+    marker = re.search(
+        rf"^FROM\s+\S+\s+AS\s+{re.escape(stage)}\s*$",
+        dockerfile,
+        re.MULTILINE | re.IGNORECASE,
+    )
+    assert marker is not None
+    body = dockerfile[marker.end() :]
+    return re.split(r"^FROM\s+", body, maxsplit=1, flags=re.MULTILINE)[0]
+
+
+def test_backend_services_share_one_genvm_parent():
+    dockerfile = DOCKERFILE.read_text()
+    stages = _stages(dockerfile)
+
+    assert stages["service-base"] == "genvm-runtime"
+    assert stages["prod"] == "service-base"
+    assert stages["debug"] == "service-base"
+    assert stages["consensus-worker"] == "service-base"
+    assert stages["base"] == "consensus-worker"
+
+    # Acquisition belongs to the shared parent, never to a service target.
+    assert dockerfile.count("download-genvm linux") == 1
+    assert dockerfile.count("COPY .e2e-genvm-prebuilt/ /genvm-prebuilt/") == 1
+    assert dockerfile.count("nix build -o /out-genvm") == 1
+    assert not (REPO_ROOT / "docker" / "Dockerfile.consensus-worker").exists()
+    assert list(stages)[-1] == "prod"
+    assert "USER backend-user" in dockerfile
+    assert "USER worker-user" in dockerfile
+
+
+def test_debug_target_installs_debugpy_with_the_pip_cache():
+    dockerfile = DOCKERFILE.read_text()
+    debug_stage = _stage_body(dockerfile, "debug")
+
+    assert "--mount=type=cache,target=/root/.cache/pip" in debug_stage
+    assert "pip install --cache-dir=/root/.cache/pip debugpy" in debug_stage
+    assert dockerfile.count("pip install --cache-dir=/root/.cache/pip debugpy") == 1
+
+
+def test_compose_builds_both_services_from_the_shared_dockerfile():
+    compose = yaml.safe_load((REPO_ROOT / "docker-compose.yml").read_text())
+    jsonrpc = compose["services"]["jsonrpc"]["build"]
+    worker = compose["services"]["consensus-worker"]["build"]
+
+    assert Path(jsonrpc["dockerfile"]).name == "Dockerfile.backend"
+    assert Path(worker["dockerfile"]).name == "Dockerfile.backend"
+    assert jsonrpc["target"] == "prod"
+    assert worker["target"].endswith(":-consensus-worker}")
+
+
+def test_legacy_consensus_base_target_is_a_zero_cost_alias():
+    dockerfile = DOCKERFILE.read_text()
+
+    assert _stage_body(dockerfile, "base").strip() == ""
+
+
+def test_release_builds_select_the_shared_service_targets():
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "docker-build-and-push-all.yml"
+    ).read_text()
+
+    assert workflow.count("dockerfile: docker/Dockerfile.backend") == 2
+    assert "target: prod" in workflow
+    assert "target: consensus-worker" in workflow
+    assert "Dockerfile.consensus-worker" not in workflow
