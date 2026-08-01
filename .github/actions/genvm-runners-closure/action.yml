@@ -1,0 +1,42 @@
+name: Prebuild GenVM runners closure
+description: >
+  Builds genvm-manager's `runners-all` on the runner, where the Nix sandbox
+  works, and exports its store closure into the Docker build context so the
+  in-image source build can import it instead of rebuilding it.
+
+  The runner tree is assembled from fixed-output derivations that compile C to
+  wasm (`genvm-cpython-objs`, `genvm-ffi`, bz2/xz/zlib, numpy, PIL). Their
+  identity is their output hash, and the `nixos/nix` image cannot enable the
+  sandbox, so building them there picks up host state and misses the pinned
+  hashes. Everything else in the build is input-addressed and does not care.
+
+inputs:
+  ref:
+    description: GenVM source binding, `<branch>:<commit>` or a bare commit.
+    required: true
+  destination:
+    description: Directory in the build context to write the closure into.
+    required: false
+    default: .genvm-nix-closure
+
+runs:
+  using: composite
+  steps:
+    - name: Install Nix
+      uses: cachix/install-nix-action@b4b293eae0b79aac8a161bb32925a5508c9cca93 # v31
+      with:
+        extra_nix_config: |
+          experimental-features = nix-command flakes
+          sandbox = true
+          # Without this Nix quietly builds unsandboxed when it cannot set the
+          # sandbox up, which is the exact output this action must never export.
+          sandbox-fallback = false
+
+    - name: Build and export runners-all
+      shell: bash
+      env:
+        GENVM_CLOSURE_REF: ${{ inputs.ref }}
+        GENVM_CLOSURE_DEST: ${{ inputs.destination }}
+      run: |
+        ./scripts/genvm-runners-closure.sh \
+          "$GENVM_CLOSURE_REF" "$GENVM_CLOSURE_DEST"
