@@ -371,6 +371,12 @@ class _SnapshotView(genvmbase.StateProxy):
         bal = getattr(snap, "balance", 0)
         return int(bal) if bal is not None else 0
 
+    def genvm_executor_selector_for(self, addr: Address) -> str | None:
+        # A nested call target picks up its own executor pin; loading its
+        # snapshot here is the same lookup its storage reads already trigger.
+        selector = getattr(self._get_snapshot(addr), "genvm_executor_selector", None)
+        return selector or None
+
 
 import aiohttp
 
@@ -1075,6 +1081,7 @@ class Node:
                     message_fee_allocation=message_fee_allocation,
                 ),
                 logger=logger,
+                genvm_executor_selector=self.contract_snapshot.genvm_executor_selector,
             )
         except FeeValidationError as e:
             result = genvmbase.ExecutionResult(

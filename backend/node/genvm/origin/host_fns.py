@@ -15,7 +15,8 @@ class Methods(IntEnum):
     REMAINING_FUEL_AS_GEN = 4
     NOTIFY_NONDET_DISAGREEMENT = 5
     CONSUME_RESULT = 6
-    NOTIFY_FINISHED = 7
+    RESOLVE_CALLCONTRACT_EXECUTOR = 7
+    RUN_NESTED = 8
 
 
 class Errors(IntEnum):
@@ -23,22 +24,26 @@ class Errors(IntEnum):
     EVM_REVERTED = 1
     FORBIDDEN = 2
 
+
 class VmErrorDetail:
-    __slots__ = ('value',)
+    __slots__ = ("value",)
+
     def __init__(self, value: str):
         self.value = value
+
     def __str__(self) -> str:
         return self.value
-    @staticmethod
-    def internal() -> 'VmErrorDetail':
-        return VmErrorDetail('internal')
-    @staticmethod
-    def external() -> 'VmErrorDetail':
-        return VmErrorDetail('external')
 
+    @staticmethod
+    def internal() -> "VmErrorDetail":
+        return VmErrorDetail("internal")
+
+    @staticmethod
+    def external() -> "VmErrorDetail":
+        return VmErrorDetail("external")
 
 
 CURRENT_MAJOR: typing.Final[int] = 0
 
 
-CURRENT_MAJOR_STR: typing.Final[str] = 'v0.0.0'
+CURRENT_MAJOR_STR: typing.Final[str] = "v0.0.0"

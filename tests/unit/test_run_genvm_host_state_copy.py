@@ -24,10 +24,31 @@ class _DummyStateProxy(StateProxy):
         return 0
 
 
+class _FakeManagerClient:
+    """Stands in for base_host.ManagerClient's async-context lifecycle so
+    run_genvm_host does not open a real manager websocket when run_genvm itself
+    is mocked."""
+
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+
 class _FakeHost:
     def __init__(self, _sock_listener, **kwargs):
         self.sock = None
         self._kwargs = kwargs
+
+    def bind_context(self, _ctx):
+        pass
+
+    async def close_connections(self):
+        pass
 
     def provide_result(self, _res, state, _ctx=None):
         return ExecutionResult(
@@ -59,6 +80,9 @@ async def test_run_genvm_host_skips_state_copy_on_first_attempt():
         new_callable=AsyncMock,
         return_value=object(),
     ) as run_mock, patch(
+        "backend.node.genvm.base.base_host.ManagerClient",
+        _FakeManagerClient,
+    ), patch(
         "backend.node.genvm.base._copy_state_proxy",
         new_callable=AsyncMock,
         side_effect=lambda s: s,
@@ -91,6 +115,9 @@ async def test_run_genvm_host_copies_state_on_retry():
         "backend.node.genvm.base.base_host.run_genvm",
         new_callable=AsyncMock,
         side_effect=[RuntimeError("boom"), object()],
+    ), patch(
+        "backend.node.genvm.base.base_host.ManagerClient",
+        _FakeManagerClient,
     ), patch(
         "backend.node.genvm.base._copy_state_proxy",
         new_callable=AsyncMock,

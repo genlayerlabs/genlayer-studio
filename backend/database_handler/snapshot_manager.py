@@ -33,6 +33,7 @@ class SnapshotManager:
             state.id: {
                 "data": state.data,
                 "balance": state.balance,
+                "genvm_executor_selector": state.genvm_executor_selector,
                 "updated_at": (
                     state.updated_at.isoformat() if state.updated_at else None
                 ),
@@ -110,7 +111,10 @@ class SnapshotManager:
         # Restore current states
         for state_id, state_info in state_data.items():
             new_state = CurrentState(
-                id=state_id, data=state_info["data"], balance=state_info["balance"]
+                id=state_id,
+                data=state_info["data"],
+                balance=state_info["balance"],
+                genvm_executor_selector=state_info.get("genvm_executor_selector"),
             )
             if state_info["updated_at"]:
                 new_state.updated_at = datetime.fromisoformat(state_info["updated_at"])

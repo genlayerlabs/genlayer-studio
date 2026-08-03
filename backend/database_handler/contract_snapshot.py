@@ -17,6 +17,9 @@ class ContractSnapshot:
     contract_address: str
     balance: int
     states: Dict[str, Dict[str, str]]
+    # Executor version or `re:` selector this contract is pinned to, forwarded
+    # to the GenVM manager as `reroute_to`.
+    genvm_executor_selector: Optional[str] = None
 
     def __init__(self, contract_address: str | None, session: Session):
         if contract_address is not None:
@@ -25,6 +28,7 @@ class ContractSnapshot:
             contract_account = self._load_contract_account(session)
             self.contract_data = contract_account.data
             self.balance = contract_account.balance
+            self.genvm_executor_selector = contract_account.genvm_executor_selector
 
             if ("accepted" in self.contract_data["state"]) and (
                 isinstance(self.contract_data["state"]["accepted"], dict)
@@ -43,6 +47,7 @@ class ContractSnapshot:
             "balance": (
                 int(b) if (b := getattr(self, "balance", None)) is not None else None
             ),
+            "genvm_executor_selector": self.genvm_executor_selector,
         }
 
     @classmethod
@@ -53,6 +58,9 @@ class ContractSnapshot:
             instance.states = input.get("states", {"accepted": {}, "finalized": {}})
             raw_balance = input.get("balance")
             instance.balance = int(raw_balance) if raw_balance is not None else None
+            instance.genvm_executor_selector = input.get(
+                "genvm_executor_selector", None
+            )
             return instance
         else:
             return None

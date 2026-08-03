@@ -202,6 +202,18 @@ class TestDecideAcceptedDeploy:
         pre, _, _, _ = decide_accepted(**self._deploy_kwargs())
         assert _find_effect(pre, UpdateContractStateEffect) is None
 
+    def test_registers_contract_without_reroute_by_default(self):
+        pre, _, _, _ = decide_accepted(**self._deploy_kwargs())
+        e = _find_effect(pre, RegisterContractEffect)
+        assert e.contract_data["genvm_executor_selector"] is None
+
+    def test_registers_contract_with_reroute_to(self):
+        pre, _, _, _ = decide_accepted(
+            **self._deploy_kwargs(genvm_executor_selector="v0.2.17")
+        )
+        e = _find_effect(pre, RegisterContractEffect)
+        assert e.contract_data["genvm_executor_selector"] == "v0.2.17"
+
 
 class TestDecideAcceptedRunContract:
     """Normal acceptance path for run-contract (non-deploy) transactions."""

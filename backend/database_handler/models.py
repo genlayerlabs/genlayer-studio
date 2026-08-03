@@ -76,6 +76,12 @@ class CurrentState(Base):
     id: Mapped[str] = mapped_column(String(255), primary_key=True)
     data: Mapped[dict] = mapped_column(JSONB)
     balance: Mapped[int] = mapped_column(IntNumeric(), default=0, nullable=False)
+    # Executor version or `re:` selector this contract is pinned to, forwarded
+    # to the GenVM manager as `reroute_to`. NULL means "no override, resolve
+    # from the manifest".
+    genvm_executor_selector: Mapped[Optional[str]] = mapped_column(
+        String(255), default=None, nullable=True
+    )
     updated_at: Mapped[Optional[datetime.datetime]] = mapped_column(
         DateTime(True),
         init=False,

@@ -176,8 +176,10 @@ if [[ -z "$EXECUTOR_BINARY" || ! -s "$EXECUTOR_BINARY" ]]; then
     error_exit "No GenVM executor binary was found after extracting $ASSET_NAME."
 fi
 
-# Studio embeds the py-genlayer hash in its intelligent contracts. Assert the
-# unique pin is present so an asset/pin mismatch fails during acquisition.
+# Studio embeds py-genlayer hashes in its intelligent contracts. Assert every
+# pin is present so an asset/pin mismatch fails during acquisition. Contracts
+# targeting an older executor line pin an older runner, which ships inside that
+# executor's legacy-runners/ tree rather than the shared runners/ tree.
 RUNNER_PINS=""
 if [[ -n "$RUNNER_PINS_FILE" ]]; then
     if [[ -f "$RUNNER_PINS_FILE" ]]; then
@@ -189,26 +191,40 @@ elif [[ -n "$REPO_ROOT" ]]; then
         | sed 's/^py-genlayer://' | sort -u || true)
 fi
 
+runner_tar_for_pin() {
+    local pin=$1 candidate
+    candidate="$INSTALL_DIR/runners/py-genlayer/${pin:0:2}/${pin:2}.tar"
+    if [[ -f "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    for candidate in "$INSTALL_DIR"/executor/*/legacy-runners/py-genlayer/"${pin:0:2}"/"${pin:2}".tar; do
+        if [[ -f "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 if [[ -n "$RUNNER_PINS_FILE" || -n "$REPO_ROOT" ]]; then
     RUNNER_PIN_COUNT=$(grep -c . <<<"$RUNNER_PINS" || true)
-    if [[ "$RUNNER_PIN_COUNT" -eq 1 ]]; then
-        RUNNER_PIN=$RUNNER_PINS
-        RUNNER_TAR="$INSTALL_DIR/runners/py-genlayer/${RUNNER_PIN:0:2}/${RUNNER_PIN:2}.tar"
-        if [[ ! -f "$RUNNER_TAR" ]]; then
-            if [[ ! -d "$INSTALL_DIR/runners" ]]; then
-                error_exit "No runners/ directory after extracting $BUNDLE_DESC at $VERSION; check the published release assets."
-            fi
-            error_exit "Pinned py-genlayer runner is missing: expected $RUNNER_TAR (pin: py-genlayer:$RUNNER_PIN)."
-        fi
-        echo "Runner pin OK: py-genlayer:$RUNNER_PIN"
-    elif [[ "$RUNNER_PIN_COUNT" -eq 0 ]]; then
+    if [[ "$RUNNER_PIN_COUNT" -eq 0 ]]; then
         # Studio always carries at least one pin, so zero means the context
         # filtering or the grep itself broke -- exactly what this assertion
         # exists to catch. Failing loudly beats silently skipping the check.
         error_exit "No py-genlayer pin found in Studio sources; the runner assertion cannot run. This usually means the pin inputs were not present in the build context."
-    else
-        echo "WARNING: expected exactly one py-genlayer pin in Studio, found $RUNNER_PIN_COUNT; skipping runner assertion."
     fi
+    if [[ ! -d "$INSTALL_DIR/runners" ]]; then
+        error_exit "No runners/ directory after extracting $BUNDLE_DESC at $VERSION; check the published release assets."
+    fi
+    while read -r RUNNER_PIN; do
+        [[ -n "$RUNNER_PIN" ]] || continue
+        if ! RUNNER_TAR=$(runner_tar_for_pin "$RUNNER_PIN"); then
+            error_exit "Pinned py-genlayer runner is missing: py-genlayer:$RUNNER_PIN (looked in $INSTALL_DIR/runners and $INSTALL_DIR/executor/*/legacy-runners)."
+        fi
+        echo "Runner pin OK: py-genlayer:$RUNNER_PIN -> ${RUNNER_TAR#"$INSTALL_DIR"/}"
+    done <<<"$RUNNER_PINS"
 fi
 
 # The executable was renamed in newer bundles. Both variants accept the same
