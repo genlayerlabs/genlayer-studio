@@ -35,11 +35,20 @@ SHELL ["/nix/var/nix/profiles/default/bin/bash", "-x", "-c"]
 # CI or scripts/prepare-genvm-source-build.sh exports genvm-manager's
 # `runners-all` closure here from a sandboxed Nix.
 COPY .genvm-nix-closure/ /genvm-nix-closure/
+COPY docker/genvm-source-build.nix.conf /genvm-source-build.nix.conf
 
 # Source builds bind Studio to a genvm-manager branch/SHA. The flake target
 # follows TARGETARCH (amd64-linux / arm64-linux); runners are included by
 # genvm-manager's combined genvm package.
-RUN set -euo pipefail ; \
+#
+# The cache this build substitutes from is private, so the fetch needs a
+# credential. `/etc/nix/netrc` is nix's default netrc-file, so mounting there
+# means nothing has to point at it. The mount is torn down when the RUN ends and
+# never reaches a layer — which is why it is a secret and not an ARG or a COPY.
+# `required=false`: a build without the secret gets no credential, fetches
+# nothing from the cache, and builds from source instead of failing.
+RUN --mount=type=secret,id=nix_netrc,target=/etc/nix/netrc,required=false \
+    set -euo pipefail ; \
     if [[ -n "$GENVM_TAG" && -n "$GENVM_REF" ]]; then \
         echo "ERROR: GENVM_TAG and GENVM_REF are mutually exclusive" ; exit 1 ; \
     fi ; \
@@ -64,10 +73,8 @@ RUN set -euo pipefail ; \
             echo "ERROR: GenVM source builds require the sandboxed runners closure; run ./scripts/prepare-genvm-source-build.sh before building" ; exit 1 ; \
         fi ; \
         gzip -dc "$CLOSURE_FILE" | nix-store --import > /dev/null ; \
-        # filter-syscalls=false: nix's seccomp filter cannot load under
-        # qemu/Rosetta emulation (cross-platform local builds); harmless on
-        # native hosts since the image already runs with sandbox disabled.
-        printf 'experimental-features = nix-command flakes\nfilter-syscalls = false\ncores = %s\n' "$GENVM_BUILD_CORES" >> /etc/nix/nix.conf ; \
+        cat /genvm-source-build.nix.conf >> /etc/nix/nix.conf ; \
+        printf 'cores = %s\n' "$GENVM_BUILD_CORES" >> /etc/nix/nix.conf ; \
         git clone --recurse-submodules https://github.com/genlayerlabs/genvm-manager /src/genvm ; \
         cd /src/genvm ; \
         git checkout "$SOURCE_REF" ; \

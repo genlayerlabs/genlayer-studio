@@ -209,16 +209,24 @@ jobs:
       # Source builds need the GenVM runner fixed-output derivations built under
       # a real Nix sandbox, which the nixos/nix build stage cannot provide.
       - name: Prebuild GenVM runners closure
+        id: genvm_closure
         if: env.GENVM_SOURCE_MODE == 'source'
         uses: ./.github/actions/genvm-runners-closure
         with:
           ref: ${{ env.GENVM_REF }}
+          nix_cache_pull_token: ${{ secrets.NIX_CACHE_PULL_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       # Build only backend images with Buildx Bake and enable GHA cache
       - name: Build backend images with cache (buildx bake)
+        # The source build inside Dockerfile.backend substitutes from the same
+        # private cache, so it needs the same credential. docker-compose.yml
+        # reads this path into the `nix_netrc` build secret; unset (a release
+        # build, or a fork PR with no token) falls back to /dev/null.
+        env:
+          NIX_NETRC_FILE: ${{ steps.genvm_closure.outputs.netrc_path }}
         uses: docker/bake-action@v6
         with:
           # Bake defaults to the Git context, which ignores anything earlier
@@ -465,16 +473,24 @@ jobs:
       # Source builds need the GenVM runner fixed-output derivations built under
       # a real Nix sandbox, which the nixos/nix build stage cannot provide.
       - name: Prebuild GenVM runners closure
+        id: genvm_closure
         if: env.GENVM_SOURCE_MODE == 'source'
         uses: ./.github/actions/genvm-runners-closure
         with:
           ref: ${{ env.GENVM_REF }}
+          nix_cache_pull_token: ${{ secrets.NIX_CACHE_PULL_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       # Build only backend images with Buildx Bake and enable GHA cache
       - name: Build backend images with cache (buildx bake)
+        # The source build inside Dockerfile.backend substitutes from the same
+        # private cache, so it needs the same credential. docker-compose.yml
+        # reads this path into the `nix_netrc` build secret; unset (a release
+        # build, or a fork PR with no token) falls back to /dev/null.
+        env:
+          NIX_NETRC_FILE: ${{ steps.genvm_closure.outputs.netrc_path }}
         uses: docker/bake-action@5be5f02ff8819ecd3092ea6b2e6261c31774f2b4 # v6
         with:
           # Bake defaults to the Git context, which ignores anything earlier

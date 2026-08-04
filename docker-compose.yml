@@ -111,6 +111,8 @@ services:
       context: ./
       dockerfile: ./docker/Dockerfile.backend
       target: prod
+      secrets:
+        - nix_netrc
       args:
         GENVM_TAG: ${GENVM_TAG:-}
         GENVM_REF: ${GENVM_REF:-}
@@ -301,6 +303,8 @@ services:
       context: ./
       dockerfile: ./docker/Dockerfile.backend
       target: ${CONSENSUS_BUILD_TARGET:-consensus-worker}
+      secrets:
+        - nix_netrc
       args:
         GENVM_TAG: ${GENVM_TAG:-}
         GENVM_REF: ${GENVM_REF:-}
@@ -449,3 +453,11 @@ volumes:
   genvm_cache:
   postgres_data:
   redis_data:
+
+# Credential for the private nix cache, consumed only by the GenVM source build
+# in Dockerfile.backend. Defaults to /dev/null — an empty netrc — so a checkout
+# without a token still builds, just without cache hits. CI points it at the
+# netrc `nix-setup` wrote.
+secrets:
+  nix_netrc:
+    file: ${NIX_NETRC_FILE:-/dev/null}
