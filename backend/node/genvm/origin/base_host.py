@@ -1,5 +1,6 @@
 import abc
 import asyncio
+import base64
 import collections.abc
 import contextlib
 import json
@@ -519,19 +520,22 @@ class ConsumedResult:
             return cls.internal_error("no_result")
         empty = False
         try:
-            as_bytes = bytes(raw)
+            # The socket sends bytes, the deprecated http shim sends base64.
+            as_bytes = (
+                base64.b64decode(raw, validate=True)
+                if isinstance(raw, str)
+                else bytes(raw)
+            )
             empty = not as_bytes
             if not empty:
                 result_kind = public_abi.ResultCode(as_bytes[0])
                 decoded = gvm_calldata.decode(as_bytes[1:])
         except Exception as exc:
-            # `raw` wasn't even bytes-shaped, or its ResultCode byte/calldata
-            # failed to parse. Either way this is not a result the genvm
-            # reported, it's a protocol violation: raise instead of returning
-            # an `internal_error(...)` value so it can never be mistaken for a
-            # real (if unhappy) execution outcome.
+            # Unreadable bytes are a protocol violation rather than a result, so
+            # raise instead of returning an `internal_error(...)` value that a
+            # caller could mistake for a real (if unhappy) execution outcome.
             raise ConsumedResultDecodeError(
-                f"malformed consumed_result ({raw!r}): {exc}"
+                f"malformed consumed_result ({raw!r:.80}): {exc}"
             ) from exc
         if empty:
             # Distinct from `None`: the manager did send a `consumed_result`,

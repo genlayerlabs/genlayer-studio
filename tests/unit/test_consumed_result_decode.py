@@ -9,6 +9,8 @@ quietly turning into an `internal_error(...)` result the caller could mistake
 for a real (if unhappy) execution outcome.
 """
 
+import base64
+
 import pytest
 
 import backend.node.genvm.origin.calldata as gvm_calldata
@@ -61,9 +63,17 @@ def test_decode_invalid_result_code_raises_a_protocol_error():
         ConsumedResult.decode(raw)
 
 
+def test_decode_base64_string_round_trips():
+    # The socket reports bytes, the deprecated http shim reports base64.
+    raw = _encode_valid(public_abi.ResultCode.RETURN, {"execution_hash": b"\x01\x02"})
+    result = ConsumedResult.decode(base64.b64encode(raw).decode())
+    assert result.result_kind == public_abi.ResultCode.RETURN
+    assert result.execution_hash == b"\x01\x02"
+
+
 def test_decode_a_non_bytes_shaped_value_raises_a_protocol_error():
-    # `bytes(raw)` itself can fail (e.g. a string, or an int outside 0-255 in
-    # a list) before there is even a ResultCode byte to look at.
+    # Reading `raw` can fail (a string that is not base64, or an int outside
+    # 0-255 in a list) before there is even a ResultCode byte to look at.
     with pytest.raises(ConsumedResultDecodeError):
         ConsumedResult.decode("not bytes")
     with pytest.raises(ConsumedResultDecodeError):
