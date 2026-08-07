@@ -25,6 +25,14 @@ from loguru import logger
 from backend.node.base import Manager as GenVMManager
 from backend.services.usage_metrics_service import UsageMetricsService
 
+# Causes the GenVM module reports as fatal that Studio treats as transient.
+# GenVM's shared HTTP helper flags every transport-level failure fatal, so a
+# webdriver or LLM endpoint that is briefly unreachable surfaces here. That
+# means "an upstream call failed", not "this worker's state is broken" — the
+# transaction is still reset for another worker, but killing the worker turns
+# one restarting dependency into a fleet-wide restart loop.
+_TRANSIENT_LEADER_FATAL_CAUSES = frozenset({"SENDING_REQUEST", "READING_BODY"})
+
 
 class ConsensusWorker:
     """
@@ -802,11 +810,25 @@ class ConsensusWorker:
 
                     # For fatal leader errors, stop the worker to trigger K8s restart via health check
                     if e.is_fatal:
-                        logger.warning(
-                            f"[Worker {self.worker_id}] Fatal GenVM error in leader - stopping worker. "
-                            f"{tx_type.capitalize()} {tx_hash} will be reset for another worker."
+                        transient_causes = _TRANSIENT_LEADER_FATAL_CAUSES.intersection(
+                            e.causes or []
                         )
-                        self.running = False
+                        if transient_causes:
+                            # Upstream was unreachable, not a broken worker. The
+                            # transaction was already reset above; stay alive so a
+                            # restarting webdriver or LLM endpoint can't cascade
+                            # into every worker restarting at once.
+                            logger.warning(
+                                f"[Worker {self.worker_id}] Transient GenVM transport failure in leader "
+                                f"({', '.join(sorted(transient_causes))}) - keeping worker alive. "
+                                f"{tx_type.capitalize()} {tx_hash} was reset for another worker."
+                            )
+                        else:
+                            logger.warning(
+                                f"[Worker {self.worker_id}] Fatal GenVM error in leader - stopping worker. "
+                                f"{tx_type.capitalize()} {tx_hash} will be reset for another worker."
+                            )
+                            self.running = False
         except (ContractNotFoundError, _NoValidatorsError):
             # Re-raise for specific handling by caller
             raise
