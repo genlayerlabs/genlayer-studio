@@ -66,8 +66,8 @@ import asyncio
 
 # Limit concurrent GenVM executions on the jsonrpc path to prevent uvloop fd
 # conflicts and DB pool exhaustion while calls hold request-scoped sessions.
-# Workers use asyncio.Semaphore(8) in consensus/base.py; keep the RPC path
-# bounded too.
+# Workers use CONSENSUS_VALIDATOR_MAX_CONCURRENT (default 8) in
+# consensus/base.py; keep the RPC path bounded too.
 _GENVM_CONCURRENCY = int(os.environ.get("GENVM_MAX_CONCURRENT", "8"))
 _genvm_semaphore = asyncio.Semaphore(_GENVM_CONCURRENCY)
 _genvm_admission_semaphore = asyncio.Semaphore(_GENVM_CONCURRENCY)
