@@ -93,6 +93,13 @@ from backend.node.genvm import get_code_slot
 from backend.node.genvm.error_codes import GenVMInternalError, GenVMErrorCode
 from backend.node.base import Manager as GenVMManager
 
+# Cap on concurrently executing validators per transaction. Bounds GenVM
+# subprocess memory, fd, and DB-session usage; larger committees run through
+# this window. See issue #1721.
+VALIDATOR_MAX_CONCURRENT = max(
+    1, int(os.environ.get("CONSENSUS_VALIDATOR_MAX_CONCURRENT", "8"))
+)
+
 type NodeFactory = Callable[
     [
         dict,
@@ -2310,7 +2317,7 @@ class CommittingState(TransactionState):
         )
 
         # Execute the transaction with a semaphore to limit the number of concurrent validators
-        sem = asyncio.Semaphore(8)
+        sem = asyncio.Semaphore(VALIDATOR_MAX_CONCURRENT)
 
         # Build replacement pool: all validators minus those already assigned
         assigned_addresses: set[str] = set()
