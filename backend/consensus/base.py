@@ -1197,18 +1197,48 @@ class ConsensusAlgorithm:
                         await self.rollback_transactions(context)
 
                         # Get the previous state of the contract
+                        previous_contact_state = None
                         if context.transaction.contract_snapshot:
                             previous_contact_state = (
                                 context.transaction.contract_snapshot.states["accepted"]
                             )
-                        else:
+                        elif (
+                            context.transaction.type == TransactionType.DEPLOY_CONTRACT
+                        ):
+                            # Rolling back a deploy: clear the contract state
                             previous_contact_state = {}
+                        else:
+                            # Defense in depth: the in-memory transaction may have
+                            # been built without the stored contract_snapshot.
+                            # Re-fetch it instead of clobbering the contract state
+                            # with {} (which would wipe the code slot).
+                            refetched = (
+                                context.transactions_processor.get_transaction_by_hash(
+                                    context.transaction.hash
+                                )
+                            )
+                            refetched_snapshot = ContractSnapshot.from_dict(
+                                (refetched or {}).get("contract_snapshot")
+                            )
+                            if refetched_snapshot:
+                                previous_contact_state = refetched_snapshot.states[
+                                    "accepted"
+                                ]
+                            else:
+                                from loguru import logger
+
+                                logger.error(
+                                    f"Missing contract_snapshot for appealed "
+                                    f"transaction {context.transaction.hash}; "
+                                    f"skipping contract state restore"
+                                )
 
                         # Restore the contract state
-                        context.contract_processor.update_contract_state(
-                            context.transaction.to_address,
-                            accepted_state=previous_contact_state,
-                        )
+                        if previous_contact_state is not None:
+                            context.contract_processor.update_contract_state(
+                                context.transaction.to_address,
+                                accepted_state=previous_contact_state,
+                            )
 
                     # Always clear snapshot on successful appeal (including timeout appeals)
                     # so re-execution loads fresh state from DB
