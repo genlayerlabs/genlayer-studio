@@ -33,6 +33,82 @@ from backend.services.usage_metrics_service import UsageMetricsService
 # stop-the-worker circuit breaker (see _transaction_context).
 _TRANSIENT_LEADER_FATAL_CAUSES = frozenset({"NO_PROVIDER_FOR_PROMPT"})
 
+# ---------------------------------------------------------------------------
+# Claim column manifest
+#
+# Single source of truth for what a claim query RETURNs and what the rebuilt
+# transaction dict contains. Both the RETURNING clause and the row->dict
+# conversion are generated from these tuples, so the two can never drift
+# apart. Drift is exactly what caused the contract-state wipe fixed in
+# PR #1724: claim_next_appeal's hand-written RETURNING list omitted
+# contract_snapshot/consensus_history and Transaction.from_dict silently
+# defaulted them, so a successful validator appeal "restored" the contract
+# state to {}.
+#
+# Entries are (sql_column, dict_key). dict_key differs from the column name
+# only for triggered_by_hash, which Transaction.from_dict consumes as
+# "triggered_by".
+# ---------------------------------------------------------------------------
+_TX_CLAIM_BASE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("hash", "hash"),
+    ("from_address", "from_address"),
+    ("to_address", "to_address"),
+    ("data", "data"),
+    ("value", "value"),
+    ("type", "type"),
+    ("nonce", "nonce"),
+    ("gaslimit", "gaslimit"),
+    ("r", "r"),
+    ("s", "s"),
+    ("v", "v"),
+    ("leader_only", "leader_only"),
+    ("execution_mode", "execution_mode"),
+    ("sim_config", "sim_config"),
+    ("status", "status"),
+    ("consensus_data", "consensus_data"),
+    ("input_data", "input_data"),
+    ("created_at", "created_at"),
+    ("blocked_at", "blocked_at"),
+    ("triggered_by_hash", "triggered_by"),
+)
+
+# Stored per-transaction state. Heavy: contract_snapshot has been observed at
+# tens of MB, so only claims whose downstream consumes it include this group.
+# Appeals restore the contract's accepted state from it; the pending and
+# finalization paths rebuild snapshots via contract_snapshot_factory and
+# persist consensus_history through DB-side jsonb merges, so they omit it
+# deliberately (see _TX_CLAIM_OMISSIONS in the manifest tests).
+_TX_STATE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("contract_snapshot", "contract_snapshot"),
+    ("consensus_history", "consensus_history"),
+)
+
+_TX_APPEAL_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("appealed", "appealed"),
+    ("appeal_failed", "appeal_failed"),
+    ("timestamp_appeal", "timestamp_appeal"),
+    ("appeal_undetermined", "appeal_undetermined"),
+    ("appeal_leader_timeout", "appeal_leader_timeout"),
+    ("appeal_validators_timeout", "appeal_validators_timeout"),
+)
+
+_TX_FINALIZATION_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("timestamp_awaiting_finalization", "timestamp_awaiting_finalization"),
+    ("appeal_failed", "appeal_failed"),
+)
+
+
+def _tx_returning_clause(*column_groups: tuple[tuple[str, str], ...]) -> str:
+    """Render a RETURNING column list from manifest groups."""
+    columns = [col for group in column_groups for col, _ in group]
+    return ", ".join(f"transactions.{col}" for col in columns)
+
+
+def _tx_row_to_dict(row: Any, *column_groups: tuple[tuple[str, str], ...]) -> dict:
+    """Build the claimed-transaction dict from the same manifest groups that
+    generated the query's RETURNING clause."""
+    return {key: getattr(row, col) for group in column_groups for col, key in group}
+
 
 class ConsensusWorker:
     """
@@ -223,7 +299,7 @@ class ConsensusWorker:
         # They must be in ACCEPTED/UNDETERMINED/TIMEOUT states and appeal window must have passed
         start_time = time.perf_counter()
         query = text(
-            """
+            f"""
             WITH locked_finalizations AS (
                 SELECT t.*
                 FROM transactions t
@@ -285,13 +361,7 @@ class ConsensusWorker:
                 worker_id = :worker_id
             FROM single_finalization
             WHERE transactions.hash = single_finalization.hash
-            RETURNING transactions.hash, transactions.from_address, transactions.to_address,
-                      transactions.data, transactions.value, transactions.type, transactions.nonce,
-                      transactions.gaslimit, transactions.r, transactions.s, transactions.v,
-                      transactions.leader_only, transactions.execution_mode, transactions.sim_config,
-                      transactions.status, transactions.consensus_data,
-                      transactions.input_data, transactions.created_at, transactions.timestamp_awaiting_finalization,
-                      transactions.appeal_failed, transactions.blocked_at, transactions.triggered_by_hash;
+            RETURNING {_tx_returning_clause(_TX_CLAIM_BASE_COLUMNS, _TX_FINALIZATION_COLUMNS)};
         """
         )
 
@@ -313,31 +383,9 @@ class ConsensusWorker:
                 f"[Worker {self.worker_id}] Claimed next finalization result {result.hash}"
             )
             session.commit()
-            # Convert result to dict
-            return {
-                "hash": result.hash,
-                "from_address": result.from_address,
-                "to_address": result.to_address,
-                "data": result.data,
-                "value": result.value,
-                "type": result.type,
-                "nonce": result.nonce,
-                "gaslimit": result.gaslimit,
-                "r": result.r,
-                "s": result.s,
-                "v": result.v,
-                "leader_only": result.leader_only,
-                "execution_mode": result.execution_mode,
-                "sim_config": result.sim_config,
-                "status": result.status,
-                "consensus_data": result.consensus_data,
-                "input_data": result.input_data,
-                "created_at": result.created_at,
-                "timestamp_awaiting_finalization": result.timestamp_awaiting_finalization,
-                "appeal_failed": result.appeal_failed,
-                "blocked_at": result.blocked_at,
-                "triggered_by": result.triggered_by_hash,
-            }
+            return _tx_row_to_dict(
+                result, _TX_CLAIM_BASE_COLUMNS, _TX_FINALIZATION_COLUMNS
+            )
 
         return None
 
@@ -352,7 +400,7 @@ class ConsensusWorker:
         # Query to atomically claim an appealed transaction
         start_time = time.perf_counter()
         query = text(
-            """
+            f"""
             WITH locked_appeals AS (
                 SELECT t.hash, t.to_address, t.created_at
                 FROM transactions t
@@ -393,17 +441,7 @@ class ConsensusWorker:
                 worker_id = :worker_id
             FROM single_appeal
             WHERE transactions.hash = single_appeal.hash
-            RETURNING transactions.hash, transactions.from_address, transactions.to_address,
-                      transactions.data, transactions.value, transactions.type, transactions.nonce,
-                      transactions.gaslimit, transactions.r, transactions.s, transactions.v,
-                      transactions.leader_only, transactions.execution_mode, transactions.sim_config,
-                      transactions.status, transactions.consensus_data,
-                      transactions.contract_snapshot, transactions.consensus_history,
-                      transactions.input_data, transactions.created_at, transactions.appealed,
-                      transactions.appeal_failed, transactions.timestamp_appeal,
-                      transactions.appeal_undetermined, transactions.appeal_leader_timeout,
-                      transactions.appeal_validators_timeout, transactions.blocked_at,
-                      transactions.triggered_by_hash;
+            RETURNING {_tx_returning_clause(_TX_CLAIM_BASE_COLUMNS, _TX_STATE_COLUMNS, _TX_APPEAL_COLUMNS)};
         """
         )
 
@@ -419,37 +457,9 @@ class ConsensusWorker:
 
         if result:
             session.commit()
-            # Convert result to dict
-            return {
-                "hash": result.hash,
-                "from_address": result.from_address,
-                "to_address": result.to_address,
-                "data": result.data,
-                "value": result.value,
-                "type": result.type,
-                "nonce": result.nonce,
-                "gaslimit": result.gaslimit,
-                "r": result.r,
-                "s": result.s,
-                "v": result.v,
-                "leader_only": result.leader_only,
-                "execution_mode": result.execution_mode,
-                "sim_config": result.sim_config,
-                "status": result.status,
-                "consensus_data": result.consensus_data,
-                "contract_snapshot": result.contract_snapshot,
-                "consensus_history": result.consensus_history,
-                "input_data": result.input_data,
-                "created_at": result.created_at,
-                "appealed": result.appealed,
-                "appeal_failed": result.appeal_failed,
-                "timestamp_appeal": result.timestamp_appeal,
-                "appeal_undetermined": result.appeal_undetermined,
-                "appeal_leader_timeout": result.appeal_leader_timeout,
-                "appeal_validators_timeout": result.appeal_validators_timeout,
-                "blocked_at": result.blocked_at,
-                "triggered_by": result.triggered_by_hash,
-            }
+            return _tx_row_to_dict(
+                result, _TX_CLAIM_BASE_COLUMNS, _TX_STATE_COLUMNS, _TX_APPEAL_COLUMNS
+            )
 
         return None
 
@@ -465,7 +475,7 @@ class ConsensusWorker:
         # Ensures only one transaction per contract is processed at a time
         start_time = time.perf_counter()
         query = text(
-            """
+            f"""
             WITH candidate_transactions AS (
                 SELECT t.hash, t.to_address, t.type, t.created_at, t.recovery_count
                 FROM transactions t
@@ -545,13 +555,7 @@ class ConsensusWorker:
                 worker_id = :worker_id
             FROM single_transaction
             WHERE transactions.hash = single_transaction.hash
-            RETURNING transactions.hash, transactions.from_address, transactions.to_address,
-                      transactions.data, transactions.value, transactions.type, transactions.nonce,
-                      transactions.gaslimit, transactions.r, transactions.s, transactions.v,
-                      transactions.leader_only, transactions.execution_mode, transactions.sim_config,
-                      transactions.status, transactions.consensus_data,
-                      transactions.input_data, transactions.created_at, transactions.blocked_at,
-                      transactions.triggered_by_hash;
+            RETURNING {_tx_returning_clause(_TX_CLAIM_BASE_COLUMNS)};
         """
         )
 
@@ -570,29 +574,7 @@ class ConsensusWorker:
         if result:
             logger.debug(f"[Worker {self.worker_id}] Claimed transaction {result.hash}")
             session.commit()
-            # Convert result to dict
-            return {
-                "hash": result.hash,
-                "from_address": result.from_address,
-                "to_address": result.to_address,
-                "data": result.data,
-                "value": result.value,
-                "type": result.type,
-                "nonce": result.nonce,
-                "gaslimit": result.gaslimit,
-                "r": result.r,
-                "s": result.s,
-                "v": result.v,
-                "leader_only": result.leader_only,
-                "execution_mode": result.execution_mode,
-                "sim_config": result.sim_config,
-                "status": result.status,
-                "consensus_data": result.consensus_data,
-                "input_data": result.input_data,
-                "created_at": result.created_at,
-                "blocked_at": result.blocked_at,
-                "triggered_by": result.triggered_by_hash,
-            }
+            return _tx_row_to_dict(result, _TX_CLAIM_BASE_COLUMNS)
 
         return None
 

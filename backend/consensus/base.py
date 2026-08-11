@@ -1197,16 +1197,16 @@ class ConsensusAlgorithm:
                         await self.rollback_transactions(context)
 
                         # Get the previous state of the contract
-                        previous_contact_state = None
+                        previous_contract_state = None
                         if context.transaction.contract_snapshot:
-                            previous_contact_state = (
+                            previous_contract_state = (
                                 context.transaction.contract_snapshot.states["accepted"]
                             )
                         elif (
                             context.transaction.type == TransactionType.DEPLOY_CONTRACT
                         ):
                             # Rolling back a deploy: clear the contract state
-                            previous_contact_state = {}
+                            previous_contract_state = {}
                         else:
                             # Defense in depth: the in-memory transaction may have
                             # been built without the stored contract_snapshot.
@@ -1221,7 +1221,7 @@ class ConsensusAlgorithm:
                                 (refetched or {}).get("contract_snapshot")
                             )
                             if refetched_snapshot:
-                                previous_contact_state = refetched_snapshot.states[
+                                previous_contract_state = refetched_snapshot.states[
                                     "accepted"
                                 ]
                             else:
@@ -1232,12 +1232,30 @@ class ConsensusAlgorithm:
                                     f"transaction {context.transaction.hash}; "
                                     f"skipping contract state restore"
                                 )
+                                # Surface to monitoring: the appeal succeeded but
+                                # the contract kept the appealed transaction's
+                                # state — recoverable, but needs operator eyes.
+                                context.msg_handler.send_message(
+                                    LogEvent(
+                                        "consensus_event",
+                                        EventType.ERROR,
+                                        EventScope.CONSENSUS,
+                                        "Missing contract_snapshot on successful "
+                                        "validator appeal; contract state restore "
+                                        "skipped",
+                                        {
+                                            "transaction_hash": context.transaction.hash,
+                                            "contract_address": context.transaction.to_address,
+                                        },
+                                        transaction_hash=context.transaction.hash,
+                                    )
+                                )
 
                         # Restore the contract state
-                        if previous_contact_state is not None:
+                        if previous_contract_state is not None:
                             context.contract_processor.update_contract_state(
                                 context.transaction.to_address,
-                                accepted_state=previous_contact_state,
+                                accepted_state=previous_contract_state,
                             )
 
                     # Always clear snapshot on successful appeal (including timeout appeals)
@@ -1899,6 +1917,18 @@ class PendingState(TransactionState):
     """
 
     async def handle(self, context):
+        # Refresh transaction from DB FIRST. The claim-path dict that built
+        # context.transaction omits columns whose Transaction.from_dict
+        # defaults are silently wrong for re-processed appeals (e.g.
+        # appeal_undetermined/appeal_leader_timeout default to False) — the
+        # same drift class as the PR #1724 state wipe. Nothing in this state
+        # may read claim-built appeal fields before this refresh.
+        context.transaction = Transaction.from_dict(
+            context.transactions_processor.get_transaction_by_hash(
+                context.transaction.hash
+            )
+        )
+
         # Pre-effects: timestamp + reset rotation count
         pre_effects = decide_pending_pre(
             tx_hash=context.transaction.hash,
@@ -1906,13 +1936,6 @@ class PendingState(TransactionState):
             appeal_undetermined=context.transaction.appeal_undetermined,
         )
         await EffectExecutor(context).execute(pre_effects)
-
-        # Refresh transaction from DB
-        context.transaction = Transaction.from_dict(
-            context.transactions_processor.get_transaction_by_hash(
-                context.transaction.hash
-            )
-        )
 
         # Log executing message (unless appeal)
         if (
