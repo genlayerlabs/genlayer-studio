@@ -12,6 +12,10 @@ from backend.protocol_rpc.exceptions import (
     NotFoundError,
     QueueDepthExceeded,
 )
+from backend.protocol_rpc.contract_storage_quota import (
+    enforce_contract_storage_quota,
+    live_state_column_size,
+)
 from sqlalchemy import Table, text
 from sqlalchemy.orm import Session
 import backend.validators as validators
@@ -1774,7 +1778,9 @@ def send_raw_transaction(
                     to_address, f"Invalid address to_address: {to_address}"
                 )
 
-            if accounts_manager.get_account(to_address) is None:
+            # Size-only lookup: do not hydrate current_state.data (can be
+            # tens of MB) just to test existence.
+            if live_state_column_size(session, to_address) is None:
                 raise NotFoundError(
                     message="Contract not found",
                     data={"address": to_address},
@@ -1801,6 +1807,8 @@ def send_raw_transaction(
                 to_address=to_address,
                 from_address=from_address,
             )
+            if genlayer_transaction.type == TransactionType.RUN_CONTRACT:
+                enforce_contract_storage_quota(session, to_address)
 
         # Debit sender BEFORE insert. Mint on demand if insufficient (Studio sandbox).
         # Skip for SEND (execute_transfer handles it) and duplicates.
