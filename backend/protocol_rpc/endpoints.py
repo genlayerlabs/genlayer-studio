@@ -20,7 +20,7 @@ import backend.validators as validators
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.database_handler.llm_providers import LLMProviderRegistry
 from backend.rollup.consensus_service import ConsensusService
-from backend.database_handler.models import Base, TransactionStatus
+from backend.database_handler.models import Base, CurrentState, TransactionStatus
 from backend.domain.types import LLMProvider, Validator, TransactionType, SimConfig
 from backend.node.create_nodes.providers import (
     get_default_provider_for,
@@ -157,13 +157,49 @@ async def _admit_genvm_call(method: str, to_address: str | None):
         _genvm_admission_semaphore.release()
 
 
-def _gen_call_singleflight_key(params: dict) -> str | None:
+def _gen_call_state_version(session: Session, params: dict) -> str | None:
+    """Return the contract-state version observed when a read is submitted."""
+    if not isinstance(params, dict):
+        return None
+    address = params.get("to")
+    if not address:
+        return None
+    try:
+        address = eth_utils.to_checksum_address(address)
+    except (TypeError, ValueError):
+        pass
+    try:
+        updated_at = (
+            session.query(CurrentState.updated_at)
+            .filter(CurrentState.id == address)
+            .scalar()
+        )
+    except Exception:
+        return None
+    if updated_at is None:
+        return None
+    if hasattr(updated_at, "isoformat"):
+        serialized = updated_at.isoformat()
+        return serialized if isinstance(serialized, str) else None
+    if isinstance(updated_at, (str, int, float)):
+        return str(updated_at)
+    return None
+
+
+def _gen_call_singleflight_key(
+    params: dict, state_version: str | None = None
+) -> str | None:
     if not _GEN_CALL_SINGLEFLIGHT_ENABLED:
         return None
     if not isinstance(params, dict) or params.get("type") != "read":
         return None
 
-    payload = json.dumps(params, sort_keys=True, separators=(",", ":"), default=str)
+    payload = json.dumps(
+        {"params": params, "state_version": state_version},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -1299,7 +1335,9 @@ async def gen_call(
     genvm_manager: GenVMManager,
     params: dict,
 ) -> str:
-    singleflight_key = _gen_call_singleflight_key(params)
+    singleflight_key = _gen_call_singleflight_key(
+        params, _gen_call_state_version(session, params)
+    )
     if singleflight_key is None:
         return await _execute_gen_call_with_admission(
             session,
@@ -2411,6 +2449,23 @@ def get_transaction_receipt(
 
     to_addr = transaction.get("to_address")
     from_addr = transaction.get("from_address")
+    block_number = transaction.get("block_number")
+    if block_number is None:
+        block_number = transaction.get("timestamp_awaiting_finalization", 0)
+
+    transaction_data = transaction.get("data")
+    contract_address = transaction.get("contract_address")
+    if contract_address is None and isinstance(transaction_data, dict):
+        contract_address = transaction_data.get("contract_address")
+
+    execution_result = transaction.get("txExecutionResultName")
+    if execution_result is not None:
+        succeeded = execution_result in {"SUCCESS", "FINISHED_WITH_RETURN"}
+    else:
+        succeeded = transaction.get("status") in {
+            TransactionStatus.ACCEPTED.value,
+            TransactionStatus.FINALIZED.value,
+        }
 
     logs = [
         {
@@ -2430,7 +2485,7 @@ def get_transaction_receipt(
                 ),
             ],
             "data": "0x",
-            "blockNumber": 0,
+            "blockNumber": hex(block_number or 0),
             "transactionHash": transaction_hash,
             "transactionIndex": 0,
             "blockHash": transaction_hash,
@@ -2443,21 +2498,17 @@ def get_transaction_receipt(
         "transactionHash": transaction_hash,
         "transactionIndex": hex(0),
         "blockHash": transaction_hash,
-        "blockNumber": hex(transaction.get("block_number", 0)),
+        "blockNumber": hex(block_number or 0),
         "from": from_addr,
         "to": to_addr,
         "cumulativeGasUsed": hex(transaction.get("gas_used", 8000000)),
         "gasUsed": hex(transaction.get("gas_used", 8000000)),
         "effectiveGasPrice": "0x0",
         "type": "0x0",
-        "contractAddress": (
-            transaction.get("contract_address")
-            if transaction.get("contract_address")
-            else None
-        ),
+        "contractAddress": contract_address,
         "logs": logs,
         "logsBloom": "0x" + "00" * 256,
-        "status": hex(1 if transaction.get("status", True) else 0),
+        "status": hex(1 if succeeded else 0),
     }
 
     return receipt
@@ -2476,11 +2527,18 @@ def get_block_by_hash(
     if not transaction:
         return None
 
+    block_number = transaction.get("block_number")
+    if block_number is None:
+        block_number = transaction.get("timestamp_awaiting_finalization", 0)
+    timestamp = transaction.get("timestamp")
+    if timestamp is None:
+        timestamp = transaction.get("timestamp_awaiting_finalization", 0)
+
     block_details = {
         "hash": block_hash,
         "parentHash": "0x" + "00" * 32,
-        "number": hex(transaction.get("block_number", 0)),
-        "timestamp": hex(transaction.get("timestamp", 0)),
+        "number": hex(block_number or 0),
+        "timestamp": hex(timestamp or 0),
         "nonce": "0x" + "00" * 8,
         "transactionsRoot": "0x" + "00" * 32,
         "stateRoot": "0x" + "00" * 32,
@@ -2758,14 +2816,30 @@ async def admin_deactivate_api_key(
 ) -> dict:
     from backend.database_handler.models import ApiKey
 
-    api_key = (
-        session.query(ApiKey).filter_by(key_prefix=key_prefix, is_active=True).first()
+    matching_keys = (
+        session.query(ApiKey).filter_by(key_prefix=key_prefix, is_active=True).all()
     )
-    if not api_key:
+    if not matching_keys:
         raise NotFoundError(
             message=f"Active API key with prefix {key_prefix} not found"
         )
+    if len(matching_keys) > 1:
+        # key_prefix is only 'glk_' + 4 hex chars (16 bits) and is not unique,
+        # so a birthday collision can leave several active keys sharing a
+        # prefix. Deactivating an arbitrary one (the old .first() behavior)
+        # could disable an innocent key while a compromised one stays active.
+        # Refuse to guess.
+        raise JSONRPCError(
+            code=-32602,
+            message=(
+                f"Ambiguous API key prefix {key_prefix}: "
+                f"{len(matching_keys)} active keys share it. "
+                "Disambiguate before deactivating."
+            ),
+            data={"key_prefix": key_prefix, "matches": len(matching_keys)},
+        )
 
+    api_key = matching_keys[0]
     api_key.is_active = False
     session.flush()
 

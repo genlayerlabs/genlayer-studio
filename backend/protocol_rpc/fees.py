@@ -816,6 +816,11 @@ def genvm_message_fee_allocation(
 
     if not accounting.get("message_allocations"):
         if int(accounting.get("message_fee_budget", 0) or 0) > 0:
+            # An internally emitted mode-1 child receives any declared-budget
+            # slack as its own message bucket, even when it has no predeclared
+            # allocation subtree. It is valid for that child to emit nothing.
+            if accounting.get("source") == "internal_message":
+                return []
             raise Mode1MessageFeesRequireGenVMPerEmissionSupport(
                 "Mode1MessageFeesRequireGenVMPerEmissionSupport: fee-bearing "
                 "GenVM messages require a message allocation tree"
@@ -985,7 +990,7 @@ def calculate_min_appeal_bond(
         )
         total = _calculate_fee_for_round(
             VALIDATORS_PER_ROUND[target_round],
-            rotations,
+            max(1, rotations),
             int(fees["leaderTimeunitsAllocation"]),
             int(fees["validatorTimeunitsAllocation"]),
         )
@@ -1980,6 +1985,15 @@ def _settle_appeal_bonds(
         else:
             status = "forfeited"
             payout = 0
+        if bond.get("topUpAndSubmit"):
+            # The same payment was already added to primary_fee_budget. Its
+            # principal is therefore refunded/spent through that bucket and
+            # must not be paid a second time as an appeal bond. A successful
+            # appeal still earns the 50% reward.
+            if status == "successful":
+                payout = amount // 2
+            else:
+                payout = 0
         payout_total += payout
         entry = {
             "bondIndex": index,

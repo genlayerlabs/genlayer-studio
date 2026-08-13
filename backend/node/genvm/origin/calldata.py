@@ -213,7 +213,10 @@ def encode[
             append_uleb128(lb)
             mem.extend(b)
         elif isinstance(b, memoryview):
-            mem.extend(b.tolist())
+            lb = len(b)
+            lb = (lb << 3) | TYPE_BYTES
+            append_uleb128(lb)
+            mem.extend(b)
         elif isinstance(b, str):
             b = b.encode("utf-8")
             lb = len(b)

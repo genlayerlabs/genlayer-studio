@@ -5197,6 +5197,51 @@ def test_create_child_fee_accounting_seeds_mode1_bucket_without_child_allocation
     assert child_accounting["user_value"] == 7
 
 
+def test_seeded_mode1_child_with_budget_slack_is_still_executable():
+    """Regression (commit ab62acc): a mode-1 child whose declared budget
+    exceeds its exact primary fee gets ``message_fee_budget = slack > 0`` with
+    an empty ``message_allocations``. When that child is executed, consensus
+    calls ``genvm_message_fee_allocation(child_accounting)`` — which raises
+    ``Mode1MessageFeesRequireGenVMPerEmissionSupport`` whenever the message-fee
+    budget is positive but there is no allocation tree. So a child that a
+    contract legitimately over-funds (e.g. to leave room for its own emissions)
+    can *never* run: it deterministically fails before GenVM starts.
+
+    Before ab62acc the slack stayed out of ``message_fee_budget`` (it was 0),
+    so ``genvm_message_fee_allocation`` returned ``[]`` and the child executed.
+    Budget slack is explicitly permitted at submission (``budget >= min``), so
+    seeding a child with slack and then rejecting it at execution is
+    inconsistent. A child that carries a message-fee bucket but emits no
+    sub-messages of its own must still be executable.
+    """
+    _child_fees, child_accounting = create_child_fee_accounting(
+        message={
+            "messageType": 1,
+            "recipient": "0x3333333333333333333333333333333333333333",
+            "value": 7,
+            "onAcceptance": True,
+            "feeParams": _encode_internal_fee_params(),
+            "declaredBudget": 70,  # exceeds the 55 primary fee -> 15 slack
+            "callKey": "0x" + "0" * 64,
+        },
+        parent_fees_distribution=_fees_distribution(
+            max_price_gen_per_time_unit=999,
+            storage_fee_max_gas_price=888,
+            receipt_fee_max_gas_price=777,
+        ),
+        sender="0x1111111111111111111111111111111111111111",
+    )
+
+    # Sanity: this is the seeded shape (slack in the message-fee bucket).
+    assert child_accounting["message_fee_budget"] == 15
+    assert child_accounting["message_allocations"] == []
+
+    # The over-funded child must still be executable: producing its GenVM
+    # message-fee allocation must not raise. Currently raises
+    # Mode1MessageFeesRequireGenVMPerEmissionSupport.
+    assert genvm_message_fee_allocation(child_accounting) == []
+
+
 def test_create_child_fee_accounting_validates_primary_before_inherited_caps():
     policy = StudioFeePolicy(
         gen_per_time_unit=2,
@@ -6470,3 +6515,81 @@ def test_transaction_payload_fees_null_when_fee_accounting_disabled():
     assert parsed["fees"] is None
     assert parsed["txExecutionResult"] == 0
     assert parsed["txExecutionResultName"] == "NOT_VOTED"
+
+
+def test_leader_appeal_min_bond_is_nonzero_for_default_distribution():
+    """Regression: calculate_min_appeal_bond returns 0 for LEADER_TIMEOUT /
+    UNDETERMINED appeals under the Studio default distribution (rotations=[0]).
+
+    The LEADER_TIMEOUT/UNDETERMINED branch passes the raw rotations entry as
+    the per-round slot multiplier of _calculate_fee_for_round, but every other
+    call site passes `rotations + 1` (a 0 entry means "1 leader slot"). Since
+    that multiplier scales BOTH the leader and validator fee, a 0 entry zeroes
+    the whole replacement-round cost -> a minimum appeal bond of 0. A zero
+    minimum lets a third party appeal an UNDETERMINED / LEADER_TIMEOUT tx with a
+    zero bond, forcing extra consensus rounds paid from the sender's fee pot
+    with nothing at stake (bond forfeiture on a failed appeal is meaningless at
+    amount 0).
+    """
+    dist = _fees_distribution()  # default: rotations=[0], appealRounds=0
+
+    for status in ("UNDETERMINED", "LEADER_TIMEOUT"):
+        bond = calculate_min_appeal_bond(dist, current_round=0, status=status)
+        assert bond > 0, f"min appeal bond for {status} must be > 0, got {bond}"
+
+
+def test_zero_amount_leader_appeal_bond_is_rejected():
+    """A zero-amount appeal bond must be rejected for UNDETERMINED /
+    LEADER_TIMEOUT, not accepted as a free appeal. Currently accepted because
+    calculate_min_appeal_bond returns 0 (see companion test)."""
+    dist = _fees_distribution()
+    accounting = create_fee_accounting(
+        fees_distribution=dist,
+        num_of_validators=5,
+        submitted_value=100000,
+        user_value=0,
+    )
+    with pytest.raises(InvalidAppealBond):
+        record_appeal_bond(
+            accounting,
+            amount=0,
+            appealer="0xa",
+            current_round=0,
+            status="UNDETERMINED",
+        )
+
+
+def test_cancel_after_top_up_and_submit_does_not_double_pay_bond():
+    """Regression: a topUpAndSubmit appeal bond is added to primary_fee_budget
+    AND recorded as an appeal bond, so on cancel the money is paid out twice --
+    once via the primary-budget refund and once via the appeal-bond payout.
+
+    Collected = submitted_value (1100) + bond (1400) = 2500.
+    Current cancel refunds 2500 (primary budget includes the bond) and also
+    pays the 1400 bond back => 3900 out for 2500 in. Fees must conserve:
+    refund + bond payout <= collected.
+    """
+    collected_submitted = 1100
+    bond = 1400
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(),
+        num_of_validators=5,
+        submitted_value=collected_submitted,
+        user_value=0,
+    )
+    recorded = record_appeal_bond(
+        accounting,
+        amount=bond,
+        appealer="0xa",
+        current_round=0,
+        status="ACCEPTED",
+        top_up_and_submit=True,
+    )
+    canceled, refund = cancel_fee_accounting(recorded)
+    payout = int(canceled.get("appeal_bonds_payout_total", 0) or 0)
+
+    total_collected = collected_submitted + bond
+    assert int(refund) + payout <= total_collected, (
+        f"fees not conserved on cancel: refund {refund} + bond payout {payout} "
+        f"= {int(refund) + payout} > collected {total_collected}"
+    )

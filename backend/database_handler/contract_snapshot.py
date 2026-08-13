@@ -25,6 +25,7 @@ class ContractSnapshot:
             contract_account = self._load_contract_account(session)
             self.contract_data = contract_account.data
             self.balance = contract_account.balance
+            self.finalization_state = None
 
             if ("accepted" in self.contract_data["state"]) and (
                 isinstance(self.contract_data["state"]["accepted"], dict)
@@ -43,6 +44,7 @@ class ContractSnapshot:
             "balance": (
                 int(b) if (b := getattr(self, "balance", None)) is not None else None
             ),
+            "finalization_state": getattr(self, "finalization_state", None),
         }
 
     @classmethod
@@ -53,6 +55,7 @@ class ContractSnapshot:
             instance.states = input.get("states", {"accepted": {}, "finalized": {}})
             raw_balance = input.get("balance")
             instance.balance = int(raw_balance) if raw_balance is not None else None
+            instance.finalization_state = input.get("finalization_state")
             return instance
         else:
             return None

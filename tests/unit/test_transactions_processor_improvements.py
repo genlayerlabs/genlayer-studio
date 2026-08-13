@@ -302,3 +302,38 @@ class TestSetTransactionAppealProcessingTime:
         self.mock_session.commit.assert_not_called()
         mock_print.assert_called_once()
         assert "not found or has no timestamp_appeal" in str(mock_print.call_args)
+
+
+class TestArchiveHydrationRobustness:
+    """Regression: _hydrate_archived_contract_snapshot has no error handling.
+
+    When snapshot read-through is enabled and a pruned (FINALIZED/CANCELED)
+    transaction has an archive row, reads call
+    SnapshotArchiveReader.load_snapshot, which downloads and integrity-checks
+    the object. Any failure there -- a missing file, an S3/GCS outage or absent
+    credentials on that container, or a sha256 mismatch -- propagates uncaught
+    through get_transaction_by_hash / get_studio_transaction_by_hash, turning
+    every read of that transaction into a permanent 500 instead of degrading to
+    contract_snapshot=None (the exact behavior when no archive is configured).
+    """
+
+    class _FailingArchive:
+        def __init__(self):
+            self.calls = 0
+
+        def load_snapshot(self, session, tx_hash):
+            self.calls += 1
+            raise RuntimeError("archive object unreachable (S3 outage)")
+
+    def test_hydration_degrades_to_null_when_archive_read_fails(self):
+        archive = self._FailingArchive()
+        processor = TransactionsProcessor(Mock(), snapshot_archive=archive)
+
+        transaction_data = {"hash": "0xabc", "contract_snapshot": None}
+
+        # An archive backend failure must not turn a normal read into a 500;
+        # it should degrade to a null snapshot. Currently raises RuntimeError.
+        processor._hydrate_archived_contract_snapshot(transaction_data)
+
+        assert archive.calls == 1
+        assert transaction_data["contract_snapshot"] is None

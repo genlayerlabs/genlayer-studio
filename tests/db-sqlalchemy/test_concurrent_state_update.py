@@ -1,9 +1,10 @@
 """
-Regression test for the lost update bug in ContractProcessor.update_contract_state().
+Regression tests for concurrent contract-state updates.
 
-The bug: update_contract_state() does a read-modify-write on the full JSONB blob.
-When two sessions call it concurrently for the same contract, the second commit
-silently overwrites the first's changes because it re-reads stale state.
+Contract execution produces a complete replacement for ``accepted_state``.
+Workers must therefore serialize the entire read/execute/write attempt for a
+contract; locking only the final database write is too late to distinguish an
+intentional deletion from a stale snapshot.
 
 This is the root cause of 336+ lost submissions in Rally production (March 2026).
 See: Rally2/docs/genvm-state-mismatch-bug.md
@@ -14,14 +15,18 @@ Production scenario:
     with TX-B's submission → TX-A's submission is silently erased
 """
 
+import asyncio
 import threading
+from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock
 
-import pytest
 from sqlalchemy import Engine
 from sqlalchemy.orm import sessionmaker
 
+from backend.consensus.worker import ConsensusWorker
 from backend.database_handler.contract_processor import ContractProcessor
-from backend.database_handler.models import CurrentState
+from backend.database_handler.models import CurrentState, Transactions
+from backend.database_handler.transactions_processor import TransactionsProcessor
 
 
 CONTRACT_ADDRESS = "0xrace_test_contract"
@@ -52,73 +57,114 @@ def _read_state(engine: Engine) -> dict:
         return row.data["state"]
 
 
+def _make_lock_worker(Session_, worker_id: str) -> ConsensusWorker:
+    """Build the worker fields used by processing/claim lock tests."""
+    worker = ConsensusWorker.__new__(ConsensusWorker)
+    worker.worker_id = worker_id
+    worker.get_session = Session_
+    worker.current_transactions = {}
+    worker.release_transaction = MagicMock()
+    return worker
+
+
 # ---------------------------------------------------------------------------
-# Test 1: Two concurrent accepted_state updates — must both survive
+# Test 1: Worker processing locks serialize read + accepted-state replacement
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason="update_contract_state does full-field replacement by design. "
-    "Same-field concurrent writes are prevented upstream by advisory locks "
-    "in worker.py claim CTEs (pg_try_advisory_xact_lock). "
-    "This test documents the limitation — will pass if state merging is added.",
-    strict=True,
-)
 def test_concurrent_accepted_updates_preserve_both(engine: Engine):
     """
-    Two workers both write accepted_state for the same contract concurrently.
-    Worker A adds submission_A, Worker B adds submission_B.
+    A second worker attempting the same contract must wait before reading
+    state, even when it was already claimed (for example after claim expiry).
 
-    This scenario is prevented in production by advisory locks at the worker
-    claim level. The update_contract_state API does full replacement, so if
-    two callers pass different complete dicts, the second always wins.
+    Without the processing-lifetime advisory lock, both workers read the
+    original state and one complete accepted-state replacement is lost.
     """
     _setup_contract(engine)
 
-    barrier = threading.Barrier(2, timeout=5)
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    worker_a = _make_lock_worker(Session_, "state-writer-a")
+    worker_b = _make_lock_worker(Session_, "state-writer-b")
+    # These synthetic transaction hashes do not have transaction rows to
+    # release; the test is scoped to the processing lock and state write.
+
+    a_has_read = threading.Event()
+    b_is_attempting = threading.Event()
+    b_has_read = threading.Event()
     errors = []
 
-    def worker_a():
+    def run_writer(worker, submission: str, tx_hash: str):
         try:
-            Session_ = sessionmaker(bind=engine)
-            with Session_() as s:
-                cp = ContractProcessor(s)
-                # Read current state (sees original)
-                contract = s.query(CurrentState).filter_by(id=CONTRACT_ADDRESS).one()
-                _ = contract.data  # force load
-                barrier.wait()  # synchronize with worker B
-                # Write accepted_state with submission_A
-                cp.update_contract_state(
-                    CONTRACT_ADDRESS,
-                    accepted_state={"slot_a": "original_a", "submission_A": "scored"},
-                )
-        except Exception as e:
-            errors.append(("A", e))
 
-    def worker_b():
-        try:
-            Session_ = sessionmaker(bind=engine)
-            with Session_() as s:
-                cp = ContractProcessor(s)
-                # Read current state (sees original — same as worker A)
-                contract = s.query(CurrentState).filter_by(id=CONTRACT_ADDRESS).one()
-                _ = contract.data  # force load
-                barrier.wait()  # synchronize with worker A
-                # Write accepted_state with submission_B
-                cp.update_contract_state(
-                    CONTRACT_ADDRESS,
-                    accepted_state={"slot_a": "original_a", "submission_B": "scored"},
-                )
-        except Exception as e:
-            errors.append(("B", e))
+            async def process():
+                if submission == "submission_B":
+                    if not a_has_read.wait(timeout=5):
+                        errors.append(
+                            ("B", RuntimeError("worker A did not read state"))
+                        )
+                        return
+                    b_is_attempting.set()
 
-    t_a = threading.Thread(target=worker_a)
-    t_b = threading.Thread(target=worker_b)
+                with Session_() as session:
+                    async with worker._transaction_context(
+                        tx_hash,
+                        {"to_address": CONTRACT_ADDRESS},
+                        session,
+                    ):
+                        contract = (
+                            session.query(CurrentState)
+                            .filter_by(id=CONTRACT_ADDRESS)
+                            .one()
+                        )
+                        accepted = dict(contract.data["state"]["accepted"])
+
+                        if submission == "submission_A":
+                            a_has_read.set()
+                            if not b_is_attempting.wait(timeout=5):
+                                errors.append(
+                                    ("A", RuntimeError("worker B did not attempt lock"))
+                                )
+                                return
+                            # If the processing lock is removed, B enters and
+                            # reads the same stale state before A writes.
+                            if b_has_read.wait(timeout=0.5):
+                                errors.append(
+                                    (
+                                        "lock",
+                                        RuntimeError(
+                                            "worker B read state while worker A "
+                                            "still held the contract lock"
+                                        ),
+                                    )
+                                )
+                                return
+                        else:
+                            b_has_read.set()
+
+                        accepted[submission] = "scored"
+                        ContractProcessor(session).update_contract_state(
+                            CONTRACT_ADDRESS,
+                            accepted_state=accepted,
+                        )
+
+            asyncio.run(process())
+        except Exception as e:
+            errors.append((submission, e))
+
+    t_a = threading.Thread(
+        target=run_writer,
+        args=(worker_a, "submission_A", "0xstate-writer-a"),
+    )
+    t_b = threading.Thread(
+        target=run_writer,
+        args=(worker_b, "submission_B", "0xstate-writer-b"),
+    )
     t_a.start()
     t_b.start()
     t_a.join(timeout=10)
     t_b.join(timeout=10)
 
+    assert not t_a.is_alive() and not t_b.is_alive(), "worker threads did not finish"
     assert not errors, f"Worker errors: {errors}"
 
     state = _read_state(engine)
@@ -133,7 +179,65 @@ def test_concurrent_accepted_updates_preserve_both(engine: Engine):
 
 
 # ---------------------------------------------------------------------------
-# Test 2: accepted + finalized concurrent updates — must both survive
+# Test 2: Claim lease expiry cannot bypass the processing lock
+# ---------------------------------------------------------------------------
+
+
+def test_processing_lock_prevents_reclaim_after_lease_expiry(engine: Engine):
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    transaction_hash = "0x" + "ab" * 32
+
+    with Session_() as session:
+        TransactionsProcessor(session).insert_transaction(
+            from_address="0x" + "11" * 20,
+            to_address=CONTRACT_ADDRESS,
+            data={},
+            value=0,
+            type=2,
+            nonce=0,
+            leader_only=True,
+            config_rotation_rounds=0,
+            transaction_hash=transaction_hash,
+        )
+        transaction = session.query(Transactions).filter_by(hash=transaction_hash).one()
+        transaction.worker_id = "expired-worker"
+        transaction.blocked_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        session.commit()
+
+    lock_owner = _make_lock_worker(Session_, "lock-owner")
+    claimer = _make_lock_worker(Session_, "new-worker")
+    claimer.transaction_timeout_minutes = 20
+    claimer.consensus_algorithm = MagicMock(
+        finality_window_time=10,
+        finality_window_appeal_failed_reduction=0,
+    )
+    claimer._log_query_result = MagicMock()
+
+    with Session_() as owner_session:
+        lock_connection = asyncio.run(
+            lock_owner._acquire_contract_processing_lock(
+                owner_session, CONTRACT_ADDRESS
+            )
+        )
+        try:
+            with Session_() as claim_session:
+                assert (
+                    asyncio.run(claimer.claim_next_transaction(claim_session)) is None
+                )
+        finally:
+            lock_owner._release_contract_processing_lock(
+                lock_connection, CONTRACT_ADDRESS
+            )
+
+    with Session_() as claim_session:
+        claimed = asyncio.run(claimer.claim_next_transaction(claim_session))
+
+    assert claimed is not None
+    assert claimed["hash"] == transaction_hash
+
+
+# ---------------------------------------------------------------------------
+# Test 3: accepted + finalized concurrent updates — must both survive
 # ---------------------------------------------------------------------------
 
 
@@ -202,7 +306,7 @@ def test_concurrent_accepted_and_finalized_preserve_both(engine: Engine):
 
 
 # ---------------------------------------------------------------------------
-# Test 3: Sequential updates — sanity check (should always pass)
+# Test 4: Sequential updates — sanity check (should always pass)
 # ---------------------------------------------------------------------------
 
 
