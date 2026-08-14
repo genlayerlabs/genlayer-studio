@@ -28,10 +28,10 @@ class MemoryRedis:
         return self.store[quota_key]
 
 
-def test_snapshot_cost_is_two_slots():
+def test_snapshot_cost_matches_complete_live_state_row():
     assert snapshot_cost_bytes(None) == 0
     assert snapshot_cost_bytes(0) == 0
-    assert snapshot_cost_bytes(10) == 20
+    assert snapshot_cost_bytes(10) == 10
 
 
 def test_first_write_of_day_always_allowed_even_if_over_limit():
