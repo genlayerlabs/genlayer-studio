@@ -1801,6 +1801,7 @@ def send_raw_transaction(
         # Skip duplicates (resubmission of an already-known hash is benign)
         # and SEND txs (faucet/transfer; not subject to per-contract pile-up
         # because to_address is a user account, not a contract).
+        storage_reservation = None
         if is_duplicate is None and genlayer_transaction.type != TransactionType.SEND:
             _enforce_pending_queue_caps(
                 transactions_processor=transactions_processor,
@@ -1808,39 +1809,46 @@ def send_raw_transaction(
                 from_address=from_address,
             )
             if genlayer_transaction.type == TransactionType.RUN_CONTRACT:
-                enforce_contract_storage_quota(session, to_address)
+                storage_reservation = enforce_contract_storage_quota(
+                    session, to_address, transaction_hash
+                )
 
-        # Debit sender BEFORE insert. Mint on demand if insufficient (Studio sandbox).
-        # Skip for SEND (execute_transfer handles it) and duplicates.
-        if (
-            value > 0
-            and from_address
-            and genlayer_transaction.type != TransactionType.SEND
-            and is_duplicate is None
-        ):
-            sender_balance = accounts_manager.get_account_balance(from_address)
-            if sender_balance < value:
-                shortfall = value - sender_balance
-                accounts_manager.credit_account_balance(from_address, shortfall)
-            accounts_manager.debit_account_balance(from_address, value)
+        try:
+            # Debit sender BEFORE insert. Mint on demand if insufficient (Studio sandbox).
+            # Skip for SEND (execute_transfer handles it) and duplicates.
+            if (
+                value > 0
+                and from_address
+                and genlayer_transaction.type != TransactionType.SEND
+                and is_duplicate is None
+            ):
+                sender_balance = accounts_manager.get_account_balance(from_address)
+                if sender_balance < value:
+                    shortfall = value - sender_balance
+                    accounts_manager.credit_account_balance(from_address, shortfall)
+                accounts_manager.debit_account_balance(from_address, value)
 
-        # Insert transaction into the database
-        transactions_processor.insert_transaction(
-            genlayer_transaction.from_address,
-            to_address,
-            transaction_data,
-            value,
-            genlayer_transaction.type.value,
-            nonce,
-            leader_only,
-            genlayer_transaction.max_rotations,
-            None,
-            transaction_hash,
-            genlayer_transaction.num_of_initial_validators,
-            sim_config,
-            None,  # triggered_on
-            execution_mode,
-        )
+            # Insert transaction into the database
+            transactions_processor.insert_transaction(
+                genlayer_transaction.from_address,
+                to_address,
+                transaction_data,
+                value,
+                genlayer_transaction.type.value,
+                nonce,
+                leader_only,
+                genlayer_transaction.max_rotations,
+                None,
+                transaction_hash,
+                genlayer_transaction.num_of_initial_validators,
+                sim_config,
+                None,  # triggered_on
+                execution_mode,
+            )
+        except Exception:
+            if storage_reservation is not None:
+                storage_reservation.release()
+            raise
 
         # Post-insert verification: ensure the transaction is visible immediately
         try:

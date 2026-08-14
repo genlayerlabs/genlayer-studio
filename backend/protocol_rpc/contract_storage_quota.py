@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -36,6 +37,57 @@ _STORAGE_HELP = (
 
 _redis_client: Any = None
 _redis_init_attempted = False
+
+_CONSUME_SCRIPT = """
+local used = tonumber(redis.call('GET', KEYS[1]) or '0')
+if redis.call('EXISTS', KEYS[2]) == 1 then
+    return {1, used, 0}
+end
+local cost = tonumber(ARGV[1])
+local limit = tonumber(ARGV[2])
+if used > 0 and used + cost > limit then
+    return {0, used, 0}
+end
+local new_used = redis.call('INCRBY', KEYS[1], cost)
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
+redis.call('SET', KEYS[2], cost, 'EX', tonumber(ARGV[3]))
+return {1, new_used, 1}
+"""
+
+_RELEASE_SCRIPT = """
+local cost = tonumber(redis.call('GET', KEYS[2]) or '0')
+if cost == 0 then
+    return 0
+end
+redis.call('DEL', KEYS[2])
+local used = tonumber(redis.call('GET', KEYS[1]) or '0')
+local new_used = used - cost
+if new_used <= 0 then
+    redis.call('DEL', KEYS[1])
+    return 0
+end
+redis.call('DECRBY', KEYS[1], cost)
+return new_used
+"""
+
+
+@dataclass(frozen=True)
+class StorageQuotaReservation:
+    redis_client: Any
+    quota_key: str
+    reservation_key: str
+    owned: bool
+
+    def release(self) -> None:
+        """Refund this request's reservation after admission fails."""
+        if not self.owned:
+            return
+        try:
+            self.redis_client.eval(
+                _RELEASE_SCRIPT, 2, self.quota_key, self.reservation_key
+            )
+        except Exception:
+            logger.exception("Failed to refund contract storage quota reservation")
 
 
 def reset_storage_quota_client_for_tests() -> None:
@@ -68,6 +120,10 @@ def snapshot_cost_bytes(live_state_column_size: int | None) -> int:
 def redis_key(address: str, day: str | None = None) -> str:
     day_token = day or datetime.now(timezone.utc).strftime("%Y%m%d")
     return f"studio:contract-storage:{address}:{day_token}"
+
+
+def reservation_key(address: str, transaction_hash: str, day: str | None = None) -> str:
+    return f"{redis_key(address, day)}:tx:{transaction_hash}"
 
 
 def _get_redis():
@@ -109,22 +165,31 @@ def try_consume_daily_bytes(
     address: str,
     cost: int,
     limit: int,
-) -> tuple[bool, int]:
-    """Atomically-enough consume `cost` against `limit`. Returns (ok, used).
+    transaction_hash: str,
+) -> tuple[bool, int, StorageQuotaReservation | None]:
+    """Atomically reserve `cost` against `limit`.
 
-    First write of the UTC day always succeeds. Concurrent submits can
-    overshoot by a few; that is accepted.
+    First write of the UTC day always succeeds. The transaction marker makes
+    concurrent submissions of the same hash idempotent.
     """
-    key = redis_key(address)
-    used = int(redis_client.get(key) or 0)
-    if used > 0 and used + cost > limit:
-        return False, used
-    new_used = int(redis_client.incrby(key, cost))
-    redis_client.expire(key, _REDIS_KEY_TTL_SECONDS)
-    return True, new_used
+    quota_key = redis_key(address)
+    tx_key = reservation_key(address, transaction_hash)
+    ok, used, owned = redis_client.eval(
+        _CONSUME_SCRIPT,
+        2,
+        quota_key,
+        tx_key,
+        cost,
+        limit,
+        _REDIS_KEY_TTL_SECONDS,
+    )
+    reservation = StorageQuotaReservation(redis_client, quota_key, tx_key, bool(owned))
+    return bool(ok), int(used), reservation if ok else None
 
 
-def enforce_contract_storage_quota(session, to_address: str | None) -> None:
+def enforce_contract_storage_quota(
+    session, to_address: str | None, transaction_hash: str
+) -> StorageQuotaReservation | None:
     """Raise StorageQuotaExceeded when the contract is over its daily budget."""
     limit = daily_byte_limit()
     if limit is None or to_address is None:
@@ -145,7 +210,9 @@ def enforce_contract_storage_quota(session, to_address: str | None) -> None:
         return
 
     try:
-        ok, used = try_consume_daily_bytes(redis_client, to_address, cost, limit)
+        ok, used, reservation = try_consume_daily_bytes(
+            redis_client, to_address, cost, limit, transaction_hash
+        )
     except Exception:
         logger.exception(
             "Contract storage quota Redis error; failing open for %s", to_address
@@ -153,7 +220,7 @@ def enforce_contract_storage_quota(session, to_address: str | None) -> None:
         return
 
     if ok:
-        return
+        return reservation
 
     raise StorageQuotaExceeded(
         message=(

@@ -50,7 +50,7 @@ def test_quota_disabled_when_env_unset(engine: Engine, monkeypatch):
     Session_ = sessionmaker(bind=engine, expire_on_commit=False)
     with Session_() as session:
         _seed_state(session, CONTRACT, {"blob": "x" * 5000})
-        enforce_contract_storage_quota(session, CONTRACT)
+        enforce_contract_storage_quota(session, CONTRACT, "disabled-tx")
 
 
 def test_quota_rejects_after_first_write(engine: Engine, monkeypatch):
@@ -61,15 +61,20 @@ def test_quota_rejects_after_first_write(engine: Engine, monkeypatch):
         def __init__(self):
             self.store = {}
 
-        def get(self, key):
-            return self.store.get(key)
-
-        def incrby(self, key, amount):
-            self.store[key] = int(self.store.get(key) or 0) + int(amount)
-            return self.store[key]
-
-        def expire(self, key, ttl):
-            return True
+        def eval(self, script, numkeys, quota_key, reservation_key, *args):
+            if args:
+                cost, limit, _ttl = map(int, args)
+                used = self.store.get(quota_key, 0)
+                if reservation_key in self.store:
+                    return [1, used, 0]
+                if used > 0 and used + cost > limit:
+                    return [0, used, 0]
+                self.store[quota_key] = used + cost
+                self.store[reservation_key] = cost
+                return [1, used + cost, 1]
+            cost = self.store.pop(reservation_key, 0)
+            self.store[quota_key] = max(0, self.store.get(quota_key, 0) - cost)
+            return self.store[quota_key]
 
     redis = MemoryRedis()
     monkeypatch.setattr(
@@ -78,9 +83,9 @@ def test_quota_rejects_after_first_write(engine: Engine, monkeypatch):
     )
     with Session_() as session:
         _seed_state(session, CONTRACT, {"blob": "x" * 5000})
-        enforce_contract_storage_quota(session, CONTRACT)
+        enforce_contract_storage_quota(session, CONTRACT, "tx-1")
         with pytest.raises(StorageQuotaExceeded) as exc_info:
-            enforce_contract_storage_quota(session, CONTRACT)
+            enforce_contract_storage_quota(session, CONTRACT, "tx-2")
         assert exc_info.value.code == -32031
         assert exc_info.value.data["scope"] == "contract_storage"
         assert exc_info.value.data["address"] == CONTRACT
