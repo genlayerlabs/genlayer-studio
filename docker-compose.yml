@@ -143,6 +143,7 @@ services:
       # deployments to keep one heavy user from filling the queue.
       - MAX_PENDING_PER_CONTRACT_DEFAULT=${MAX_PENDING_PER_CONTRACT_DEFAULT:-}
       - MAX_PENDING_PER_SENDER_DEFAULT=${MAX_PENDING_PER_SENDER_DEFAULT:-}
+      - MAX_CONTRACT_SNAPSHOT_BYTES_PER_DAY=${MAX_CONTRACT_SNAPSHOT_BYTES_PER_DAY:-}
     ports:
       - "${RPCHOSTPORT:-4000}:${RPCPORT:-4000}"
     expose:

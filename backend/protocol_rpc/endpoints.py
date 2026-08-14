@@ -13,6 +13,10 @@ from backend.protocol_rpc.exceptions import (
     NotFoundError,
     QueueDepthExceeded,
 )
+from backend.protocol_rpc.contract_storage_quota import (
+    enforce_contract_storage_quota,
+    live_state_column_size,
+)
 from sqlalchemy import Table, text
 from sqlalchemy.orm import Session
 import backend.validators as validators
@@ -252,7 +256,7 @@ _MAX_PENDING_PER_SENDER = _parse_optional_positive_int("MAX_PENDING_PER_SENDER_D
 _QUEUE_DEPTH_HELP = (
     "The public Studio is a shared sandbox with per-contract and "
     "per-sender PENDING transaction caps. For production-volume "
-    "workloads, run a self-hosted instance or use Rally."
+    "workloads, run a self-hosted instance."
 )
 
 
@@ -2292,7 +2296,9 @@ def send_raw_transaction(
                     to_address, f"Invalid address to_address: {to_address}"
                 )
 
-            if accounts_manager.get_account(to_address) is None:
+            # Size-only lookup: do not hydrate current_state.data (can be
+            # tens of MB) just to test existence.
+            if live_state_column_size(session, to_address) is None:
                 raise NotFoundError(
                     message="Contract not found",
                     data={"address": to_address},
@@ -2315,40 +2321,50 @@ def send_raw_transaction(
         # Skip duplicates (resubmission of an already-known hash is benign)
         # and SEND txs (faucet/transfer; not subject to per-contract pile-up
         # because to_address is a user account, not a contract).
+        storage_reservation = None
         if is_duplicate is None and genlayer_transaction.type != TransactionType.SEND:
             _enforce_pending_queue_caps(
                 transactions_processor=transactions_processor,
                 to_address=to_address,
                 from_address=from_address,
             )
+            if genlayer_transaction.type == TransactionType.RUN_CONTRACT:
+                storage_reservation = enforce_contract_storage_quota(
+                    session, to_address, transaction_hash
+                )
 
-        # Debit sender BEFORE insert. Mint on demand if insufficient (Studio sandbox).
-        # Skip for SEND (execute_transfer handles it) and duplicates.
-        if (
-            total_spend > 0
-            and from_address
-            and genlayer_transaction.type != TransactionType.SEND
-            and is_duplicate is None
-        ):
-            _sandbox_debit_sender(accounts_manager, from_address, total_spend)
+        try:
+            # Debit sender BEFORE insert. Mint on demand if insufficient (Studio sandbox).
+            # Skip for SEND (execute_transfer handles it) and duplicates.
+            if (
+                total_spend > 0
+                and from_address
+                and genlayer_transaction.type != TransactionType.SEND
+                and is_duplicate is None
+            ):
+                _sandbox_debit_sender(accounts_manager, from_address, total_spend)
 
-        # Insert transaction into the database
-        transactions_processor.insert_transaction(
-            genlayer_transaction.from_address,
-            to_address,
-            transaction_data,
-            value,
-            genlayer_transaction.type.value,
-            nonce,
-            leader_only,
-            genlayer_transaction.max_rotations,
-            None,
-            transaction_hash,
-            genlayer_transaction.num_of_initial_validators,
-            sim_config,
-            None,  # triggered_on
-            execution_mode,
-        )
+            # Insert transaction into the database
+            transactions_processor.insert_transaction(
+                genlayer_transaction.from_address,
+                to_address,
+                transaction_data,
+                value,
+                genlayer_transaction.type.value,
+                nonce,
+                leader_only,
+                genlayer_transaction.max_rotations,
+                None,
+                transaction_hash,
+                genlayer_transaction.num_of_initial_validators,
+                sim_config,
+                None,  # triggered_on
+                execution_mode,
+            )
+        except Exception:
+            if storage_reservation is not None:
+                storage_reservation.release()
+            raise
 
         # Post-insert verification: ensure the transaction is visible immediately
         try:
