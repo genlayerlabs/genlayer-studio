@@ -6,35 +6,13 @@ Note: Tests that import worker_service need to run in Docker (require fastapi).
 Those are in test_worker_health_degradation.py
 """
 
-from unittest.mock import patch
+import functools
+from unittest.mock import AsyncMock, patch
 import pytest
 
 import backend.node.genvm.base as base_host
 from backend.node.genvm.origin import base_host as origin_base_host
-
-
-class MockAsyncContextManager:
-    """Helper for mocking async context managers."""
-
-    def __init__(self, response):
-        self.response = response
-
-    async def __aenter__(self):
-        return self.response
-
-    async def __aexit__(self, *args):
-        pass
-
-
-class MockResponse:
-    """Helper for mocking aiohttp responses."""
-
-    def __init__(self, status, body):
-        self.status = status
-        self.body = body
-
-    async def json(self):
-        return self.body
+from backend.node.genvm.origin import manager_api
 
 
 class NoopLogger:
@@ -79,32 +57,128 @@ class NoopHandler:
     pass
 
 
-def _consumed_return_result():
-    return list(
-        bytes([origin_base_host.public_abi.ResultCode.RETURN])
-        + origin_base_host.gvm_calldata.encode(
-            {
-                "execution_hash": b"",
-                "data": b"ok",
-                "fingerprint": None,
-                "storage_changes": [],
-                "emissions": [],
-                "nondet_results": [],
-                "data_fees_remaining": [],
-            }
-        )
-    )
-
-
 async def _fake_host_loop(_handler, _cancellation, *, ctx):
     return None
 
 
-async def _fake_prob_died_wait(*awaitables):
-    for awaitable in awaitables:
-        close = getattr(awaitable, "close", None)
-        if close is not None:
-            close()
+class _RunRejectingManagerClient:
+    """A manager client whose RUN is rejected with a given socket error, so
+    run_genvm exercises its not-started classification without a real manager."""
+
+    def __init__(self, error: origin_base_host.ManagerSocketError):
+        self._error = error
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+    async def run(self, _payload):
+        raise self._error
+
+
+class _ArtifactFailingManagerClient:
+    """Reports a finished run, then fails to hand back one of its artifacts."""
+
+    class _State:
+        boot_id = 1
+        genvm_id = 42
+
+    def __init__(self):
+        self.ack_called = False
+        self.cancel_called = False
+
+    async def run(self, _payload):
+        return self._State()
+
+    async def wait_terminal(self, _state):
+        return {
+            "finished": {
+                "artifact_sizes": {"stdout": 5},
+                "consumed_result": None,
+            }
+        }
+
+    async def get_artifact(self, _boot_id, _genvm_id, _field):
+        raise RuntimeError("artifact transfer failed")
+
+    async def ack(self, _boot_id, _genvm_id):
+        self.ack_called = True
+
+    async def cancel(self, _boot_id, _genvm_id):
+        self.cancel_called = True
+
+
+class _FailedToStartManagerClient:
+    """Accepts the RUN, then reports a failed_to_start terminal so run_genvm
+    exercises the terminal-based not-started classification."""
+
+    class _State:
+        boot_id = 1
+        genvm_id = 1
+
+    def __init__(self, error: str):
+        self._error = error
+
+    async def run(self, _payload):
+        return self._State()
+
+    async def wait_terminal(self, _state):
+        return {"failed_to_start": {"error": self._error}}
+
+    async def ack(self, _boot_id, _genvm_id):
+        pass
+
+
+class _FakeManagerClientCM:
+    """Async-context stand-in so run_genvm_host does not open a real websocket
+    when base_host.run_genvm is mocked."""
+
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+
+class _DummyStateProxy(base_host.StateProxy):
+    def __init__(self):
+        self.snapshot_factory = lambda _addr: None
+
+    def storage_read(self, account, slot, index, le, /) -> bytes:
+        return b"\x00" * le
+
+    def get_balance(self, addr) -> int:
+        return 0
+
+
+class _ReturningHost:
+    def __init__(self, _sock_listener, **_kwargs):
+        self.sock = None
+
+    def bind_context(self, _ctx):
+        pass
+
+    async def close_connections(self):
+        pass
+
+    def provide_result(self, _res, state, _ctx=None):
+        return base_host.ExecutionResult(
+            result=base_host.ExecutionReturn(ret=b"\x00"),
+            eq_outputs={},
+            pending_transactions=[],
+            stdout="",
+            stderr="",
+            genvm_log=[],
+            state=state,
+            processing_time=0,
+            nondet_disagree=None,
+            execution_stats={},
+        )
 
 
 class TestRetryBehavior:
@@ -210,112 +284,299 @@ class TestRetryBehavior:
             "modules are required but not all are running",
         ],
     )
-    async def test_modules_not_running_500_is_retried_and_can_succeed(
-        self, monkeypatch, manager_error
-    ):
-        """Transient manager module restart 500 retries /genvm/run."""
+    async def test_transient_run_refusal_is_retryable(self, monkeypatch, manager_error):
+        """A modules-not-running RUN rejection surfaces as a retryable
+        ManagerRunNotStarted, classified inside base_host (no caller string
+        matching)."""
         ctx = RecordingCtx()
-        post_bodies = [
-            {"error": manager_error},
-            {"id": "genvm-1"},
-        ]
-        post_attempts = 0
-
-        def fake_request(method, url, **_kwargs):
-            nonlocal post_attempts
-            if method == "POST" and url.endswith("/genvm/run"):
-                body = post_bodies[post_attempts]
-                status = 500 if post_attempts == 0 else 200
-                post_attempts += 1
-                return MockAsyncContextManager(MockResponse(status, body))
-            if method == "DELETE":
-                return MockAsyncContextManager(MockResponse(200, {}))
-            if method == "GET" and url.endswith("/genvm/genvm-1"):
-                return MockAsyncContextManager(
-                    MockResponse(
-                        200,
-                        {
-                            "status": {
-                                "consumed_result": _consumed_return_result(),
-                                "stdout": "",
-                                "stderr": "",
-                                "genvm_log": [],
-                            }
-                        },
-                    )
-                )
-            raise AssertionError(f"unexpected request: {method} {url}")
-
         monkeypatch.setattr(origin_base_host, "host_loop", _fake_host_loop)
-        monkeypatch.setattr(
-            origin_base_host, "_await_first_cancel_others", _fake_prob_died_wait
-        )
-        monkeypatch.setattr(origin_base_host.aiohttp, "request", fake_request)
-
-        result = await origin_base_host.run_genvm(
-            NoopHandler(),
-            ctx=ctx,
-            is_sync=False,
-            message={},
-            host="unix://test",
-            calldata=b"",
+        client = _RunRejectingManagerClient(
+            origin_base_host.ManagerSocketError(
+                manager_api.Errors.INTERNAL, manager_error
+            )
         )
 
-        assert post_attempts == 2
-        assert result.result_data == b"ok"
-        assert ctx.successes == 1
-        assert ctx.failures == 0
-        assert ctx.stats["manager_run_attempt_0_error"]["will_retry"] is True
-        assert (
-            ctx.stats["manager_run_attempt_0_error"]["error_type"]
-            == "GenVMManagerRetryableError"
-        )
-        assert (
-            ctx.stats["manager_run_attempt_0_error"]["retry_reason"]
-            == "manager_modules_not_running"
-        )
-        assert ctx.stats["manager_run_attempt_success"]["attempt"] == 1
-
-    @pytest.mark.asyncio
-    async def test_other_500_is_not_retried(self, monkeypatch):
-        """Non-transient manager 500s still fail fast."""
-        ctx = RecordingCtx()
-        post_attempts = 0
-
-        def fake_request(method, url, **_kwargs):
-            nonlocal post_attempts
-            if method == "POST" and url.endswith("/genvm/run"):
-                post_attempts += 1
-                return MockAsyncContextManager(
-                    MockResponse(
-                        500,
-                        {
-                            "error": "unknown variant `foo`, expected one of `bar`, `baz`"
-                        },
-                    )
-                )
-            raise AssertionError(f"unexpected request: {method} {url}")
-
-        monkeypatch.setattr(origin_base_host, "host_loop", _fake_host_loop)
-        monkeypatch.setattr(
-            origin_base_host, "_await_first_cancel_others", _fake_prob_died_wait
-        )
-        monkeypatch.setattr(origin_base_host.aiohttp, "request", fake_request)
-
-        with pytest.raises(Exception, match="genvm execution failed"):
+        with pytest.raises(origin_base_host.ManagerRunNotStarted) as exc_info:
             await origin_base_host.run_genvm(
                 NoopHandler(),
+                manager_client=client,
                 ctx=ctx,
                 is_sync=False,
-                message={},
+                message={"is_init": True},
                 host="unix://test",
                 calldata=b"",
+                bucket_totals=[10_000_000, 10_000_000, 10_000_000, 10_000_000],
             )
 
-        assert post_attempts == 1
-        assert ctx.successes == 0
-        assert ctx.failures == 0
-        assert ctx.stats["manager_run_attempt_0_error"]["outcome"] == "fatal_error"
+        assert exc_info.value.retryable is True
+        assert exc_info.value.reason == "manager_modules_not_running"
+        assert ctx.failures == 1
+        assert ctx.stats["manager_run_attempt_0_error"]["retryable"] is True
+        assert (
+            ctx.stats["manager_run_attempt_0_error"]["reason"]
+            == "manager_modules_not_running"
+        )
+
+    @pytest.mark.asyncio
+    async def test_unknown_run_refusal_is_not_retryable(self, monkeypatch):
+        """An unrecognised RUN rejection is a permanent ManagerRunNotStarted."""
+        ctx = RecordingCtx()
+        monkeypatch.setattr(origin_base_host, "host_loop", _fake_host_loop)
+        client = _RunRejectingManagerClient(
+            origin_base_host.ManagerSocketError(
+                manager_api.Errors.INTERNAL,
+                "unknown variant `foo`, expected one of `bar`, `baz`",
+            )
+        )
+
+        with pytest.raises(origin_base_host.ManagerRunNotStarted) as exc_info:
+            await origin_base_host.run_genvm(
+                NoopHandler(),
+                manager_client=client,
+                ctx=ctx,
+                is_sync=False,
+                message={"is_init": True},
+                host="unix://test",
+                calldata=b"",
+                bucket_totals=[10_000_000, 10_000_000, 10_000_000, 10_000_000],
+            )
+
+        assert exc_info.value.retryable is False
+        assert exc_info.value.reason == "manager_refused"
+        assert ctx.stats["manager_run_attempt_0_error"]["retryable"] is False
+
+    @pytest.mark.asyncio
+    async def test_run_genvm_raises_terminal_result_unavailable_on_artifact_failure(
+        self, monkeypatch
+    ):
+        """A finished run whose artifact retrieval fails must surface as
+        `TerminalResultUnavailable`, not a plain exception -- the run already
+        executed, so the caller must not mistake this for an attempt that
+        never happened and retry it."""
+        monkeypatch.setattr(origin_base_host, "host_loop", _fake_host_loop)
+        client = _ArtifactFailingManagerClient()
+        ctx = RecordingCtx()
+
+        with pytest.raises(origin_base_host.TerminalResultUnavailable) as exc_info:
+            await origin_base_host.run_genvm(
+                NoopHandler(),
+                manager_client=client,
+                ctx=ctx,
+                is_sync=False,
+                message={"is_init": True},
+                host="unix://test",
+                calldata=b"",
+                bucket_totals=[10_000_000, 10_000_000, 10_000_000, 10_000_000],
+            )
+
+        assert exc_info.value.genvm_id == 42
+        # Releasing the manager's retention of the finished run must still
+        # happen -- only its result is unavailable, not the run itself.
+        assert client.ack_called
+        assert not client.cancel_called
+
+    @pytest.mark.asyncio
+    async def test_run_genvm_host_retries_retryable_not_started(self):
+        """run_genvm_host retries a retryable ManagerRunNotStarted and succeeds,
+        with no transport knowledge of its own."""
+        state = _DummyStateProxy()
+        host_supplier = functools.partial(
+            _ReturningHost,
+            state_proxy=state,
+            calldata_bytes=b"",
+            leader_results=None,
+        )
+        transient = origin_base_host.ManagerRunNotStarted(
+            "modules are required but not running",
+            retryable=True,
+            reason="manager_modules_not_running",
+        )
+
+        with patch(
+            "backend.node.genvm.base.base_host.run_genvm",
+            new_callable=AsyncMock,
+            side_effect=[transient, object()],
+        ) as run_mock, patch(
+            "backend.node.genvm.base.base_host.ManagerClient",
+            _FakeManagerClientCM,
+        ), patch(
+            "backend.node.genvm.base.asyncio.sleep",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            result = await base_host.run_genvm_host(
+                host_supplier,
+                timeout=15,
+                is_sync=False,
+                message={"is_init": True},
+                capture_output=False,
+            )
+
+        assert run_mock.await_count == 2
+        assert isinstance(result.result, base_host.ExecutionReturn)
+
+    @pytest.mark.asyncio
+    async def test_run_genvm_host_fails_fast_on_permanent_not_started(self):
+        """A non-retryable ManagerRunNotStarted is raised immediately, not
+        retried until the deadline."""
+        state = _DummyStateProxy()
+        host_supplier = functools.partial(
+            _ReturningHost,
+            state_proxy=state,
+            calldata_bytes=b"",
+            leader_results=None,
+        )
+        permanent = origin_base_host.ManagerRunNotStarted(
+            "unknown variant `foo`",
+            retryable=False,
+            reason="manager_refused",
+        )
+
+        with patch(
+            "backend.node.genvm.base.base_host.run_genvm",
+            new_callable=AsyncMock,
+            side_effect=[permanent, object()],
+        ) as run_mock, patch(
+            "backend.node.genvm.base.base_host.ManagerClient",
+            _FakeManagerClientCM,
+        ), patch(
+            "backend.node.genvm.base.asyncio.sleep",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            with pytest.raises(origin_base_host.ManagerRunNotStarted) as exc_info:
+                await base_host.run_genvm_host(
+                    host_supplier,
+                    timeout=15,
+                    is_sync=False,
+                    message={"is_init": True},
+                    capture_output=False,
+                )
+
+        assert exc_info.value.retryable is False
+        assert run_mock.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_run_genvm_host_does_not_start_a_second_run_after_terminal_result_unavailable(
+        self,
+    ):
+        """`TerminalResultUnavailable` must propagate immediately, never fall
+        into the generic retry branch that would start a brand new run for a
+        genvm that already executed and finished."""
+        state = _DummyStateProxy()
+        host_supplier = functools.partial(
+            _ReturningHost,
+            state_proxy=state,
+            calldata_bytes=b"",
+            leader_results=None,
+        )
+        failure = origin_base_host.TerminalResultUnavailable(
+            "failed to retrieve/decode result for finished run: boom",
+            genvm_id=42,
+        )
+
+        with patch(
+            "backend.node.genvm.base.base_host.run_genvm",
+            new_callable=AsyncMock,
+            side_effect=[failure, object()],
+        ) as run_mock, patch(
+            "backend.node.genvm.base.base_host.ManagerClient",
+            _FakeManagerClientCM,
+        ), patch(
+            "backend.node.genvm.base.asyncio.sleep",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            with pytest.raises(origin_base_host.TerminalResultUnavailable):
+                await base_host.run_genvm_host(
+                    host_supplier,
+                    timeout=15,
+                    is_sync=False,
+                    message={"is_init": True},
+                    capture_output=False,
+                )
+
+        # Only the one, already-consumed attempt -- no second call to
+        # `run_genvm` that would start a new genvm execution.
+        assert run_mock.await_count == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error,expected_retryable,expected_reason",
+        [
+            (
+                "modules are required but not running",
+                True,
+                "manager_modules_not_running",
+            ),
+            ("absent runner for py-genlayer", False, "manager_refused"),
+        ],
+    )
+    async def test_failed_to_start_terminal_is_classified(
+        self, monkeypatch, error, expected_retryable, expected_reason
+    ):
+        """A failed_to_start terminal surfaces as ManagerRunNotStarted (not an
+        INTERNAL_ERROR result) and counts as a manager failure."""
+        ctx = RecordingCtx()
+        monkeypatch.setattr(origin_base_host, "host_loop", _fake_host_loop)
+
+        with pytest.raises(origin_base_host.ManagerRunNotStarted) as exc_info:
+            await origin_base_host.run_genvm(
+                NoopHandler(),
+                manager_client=_FailedToStartManagerClient(error),
+                ctx=ctx,
+                is_sync=False,
+                message={"is_init": True},
+                host="unix://test",
+                calldata=b"",
+                bucket_totals=[10_000_000, 10_000_000, 10_000_000, 10_000_000],
+            )
+
+        assert exc_info.value.retryable is expected_retryable
+        assert exc_info.value.reason == expected_reason
+        # The RUN was accepted (success), then failed to start (failure).
+        assert ctx.failures == 1
+        assert ctx.stats["manager_run_start_failed"]["retryable"] is expected_retryable
+
+    @pytest.mark.asyncio
+    async def test_run_genvm_host_retryable_exhausts_timeout_budget(self):
+        """A persistently retryable ManagerRunNotStarted stops at the deadline
+        (timeout result) instead of looping forever or raising."""
+        state = _DummyStateProxy()
+        host_supplier = functools.partial(
+            _ReturningHost,
+            state_proxy=state,
+            calldata_bytes=b"",
+            leader_results=None,
+        )
+        transient = origin_base_host.ManagerRunNotStarted(
+            "modules are required but not running",
+            retryable=True,
+            reason="manager_modules_not_running",
+        )
+
+        # A short real deadline (no sleep mock): the first backoff is clamped to
+        # the remaining budget, so the next top-of-loop check exits via timeout.
+        with patch(
+            "backend.node.genvm.base.base_host.run_genvm",
+            new_callable=AsyncMock,
+            side_effect=transient,
+        ) as run_mock, patch(
+            "backend.node.genvm.base.base_host.ManagerClient",
+            _FakeManagerClientCM,
+        ):
+            result = await base_host.run_genvm_host(
+                host_supplier,
+                timeout=0.3,
+                is_sync=False,
+                message={"is_init": True},
+                capture_output=False,
+            )
+
+        assert result is not None
+        assert run_mock.await_count >= 1
+        # It exhausted the budget rather than propagating the exception.
+        assert isinstance(result.result, base_host.ExecutionError)
 
 
 class TestRetryConfiguration:

@@ -54,16 +54,15 @@ async def test_consume_fuel_reads_32_byte_little_endian_u256():
     try:
         gas = (1 << 100) + 7
         client.sendall(
-            bytes([host_fns.Methods.CONSUME_FUEL])
-            + gas.to_bytes(32, "little")
-            + bytes([host_fns.Methods.NOTIFY_FINISHED])
+            bytes([host_fns.Methods.CONSUME_FUEL]) + gas.to_bytes(32, "little")
         )
+        # CONSUME_FUEL sends no reply; EOF ends the loop after it is consumed.
+        client.shutdown(socket.SHUT_WR)
 
         handler = FuelHandler(server, remaining_fuel=12345)
         await base_host.host_loop(handler, asyncio.Event(), ctx=RecordingCtx())
 
         assert handler.consumed_gas == [gas]
-        assert await _recv_exact(client, 1) == b"\x00"
     finally:
         client.close()
         server.close()
@@ -76,22 +75,14 @@ async def test_remaining_fuel_as_gen_replies_with_32_byte_little_endian_u256():
     client.setblocking(False)
     try:
         remaining_fuel = 12345
-        client.sendall(
-            bytes(
-                [
-                    host_fns.Methods.REMAINING_FUEL_AS_GEN,
-                    host_fns.Methods.NOTIFY_FINISHED,
-                ]
-            )
-        )
+        client.sendall(bytes([host_fns.Methods.REMAINING_FUEL_AS_GEN]))
+        client.shutdown(socket.SHUT_WR)
 
         handler = FuelHandler(server, remaining_fuel=remaining_fuel)
         await base_host.host_loop(handler, asyncio.Event(), ctx=RecordingCtx())
 
-        assert await _recv_exact(client, 34) == (
-            bytes([host_fns.Errors.OK])
-            + remaining_fuel.to_bytes(32, "little")
-            + b"\x00"
+        assert await _recv_exact(client, 33) == (
+            bytes([host_fns.Errors.OK]) + remaining_fuel.to_bytes(32, "little")
         )
     finally:
         client.close()

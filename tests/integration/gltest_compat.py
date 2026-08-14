@@ -29,7 +29,20 @@ def _is_genlayer_contract_base(base: ast.expr) -> bool:
 def search_path_by_class_name(contracts_dir: Path, contract_name: str) -> Path:
     """Search for a file by class name in the contracts directory."""
     matching_files = []
-    exclude_dirs = {".venv", "venv", "env", "build", "dist", "__pycache__", ".git"}
+    # `node_modules` holds third-party files this parser has no business
+    # reading: the documented `--contracts-dir .` walks the whole repo, and a
+    # single stray Python 2 script in there fails the run. CI never hits it
+    # because it does not install frontend deps.
+    exclude_dirs = {
+        ".venv",
+        "venv",
+        "env",
+        "build",
+        "dist",
+        "__pycache__",
+        ".git",
+        "node_modules",
+    }
 
     for file_path in contracts_dir.rglob("*"):
         if any(exclude_dir in file_path.parts for exclude_dir in exclude_dirs):

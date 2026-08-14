@@ -321,6 +321,7 @@ def decide_accepted(
     code_slot_b64: str | None,
     to_address: str,
     leader_node_config: dict,
+    genvm_executor_selector: str | None = None,
 ) -> tuple[list[Effect], list[Effect], ConsensusRound, ConsensusRound | None]:
     """Decide effects for AcceptedState.
 
@@ -419,6 +420,7 @@ def decide_accepted(
                             },
                         },
                     },
+                    "genvm_executor_selector": genvm_executor_selector,
                 }
                 pre_effects.append(RegisterContractEffect(contract_data=new_contract))
                 pre_effects.append(

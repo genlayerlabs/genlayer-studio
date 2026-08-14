@@ -326,6 +326,15 @@ def node_factory(
     )
 
 
+def transaction_genvm_executor_selector(transaction: Transaction) -> str | None:
+    """Studio-only GenVM executor override carried by the transaction."""
+    return (
+        transaction.sim_config.genvm_executor_selector
+        if transaction.sim_config
+        else None
+    )
+
+
 def contract_snapshot_factory(
     contract_address: str,
     session: Session,
@@ -359,6 +368,9 @@ def contract_snapshot_factory(
         ret.contract_code = transaction.data["contract_code"]
         ret.balance = transaction.value or 0
         ret.states = {"accepted": {}, "finalized": {}}
+        # The contract row is still empty at deploy time, so the executor
+        # override can only come from the deploy transaction itself.
+        ret.genvm_executor_selector = transaction_genvm_executor_selector(transaction)
         return ret
 
     # Return a ContractSnapshot instance for an existing contract
@@ -2891,6 +2903,11 @@ class AcceptedState(TransactionState):
             ),
             to_address=context.transaction.to_address,
             leader_node_config=leader_receipt.node_config,
+            genvm_executor_selector=(
+                transaction_genvm_executor_selector(context.transaction)
+                if is_deploy
+                else None
+            ),
         )
 
         # Execute pre-effects (includes contract registration/update via executor)

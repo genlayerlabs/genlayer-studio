@@ -7,7 +7,7 @@ import eth_utils
 import logging
 from contextlib import asynccontextmanager
 from functools import partial, wraps
-from typing import Any
+from typing import Any, Final, get_args
 from backend.protocol_rpc.exceptions import (
     JSONRPCError,
     NotFoundError,
@@ -66,7 +66,9 @@ from backend.database_handler.transactions_processor import (
 
 logger = logging.getLogger(__name__)
 TRANSACTION_NOT_FOUND_MESSAGE = "Transaction not found"
-from backend.node.base import Node, get_simulator_chain_id
+from backend.node.base import Node, _genvm_debug_mode, get_simulator_chain_id
+from backend.node.genvm.base import is_valid_executor_selector
+from backend.node.genvm.origin import base_host
 from backend.node.types import ExecutionMode, ExecutionResultStatus
 from backend.consensus.base import ConsensusAlgorithm
 from backend.protocol_rpc.call_interceptor import handle_consensus_data_call
@@ -1820,6 +1822,96 @@ def _fee_metadata(decoded_rollup_transaction: DecodedRollupTransaction) -> dict:
     return metadata
 
 
+# `DebugMode` is ordered least- to most-permissive, and the manager gates
+# `reroute_to` on `debug_mode >= Safe` (implementation/src/manager/run.rs).
+# Comparing positions states that rule directly instead of enumerating the
+# levels above it, which is how `safe-unbounded` -- the level studio's own run
+# path resolves to -- gets left out of a hand-written list.
+_DEBUG_MODE_ORDER: Final = get_args(base_host.DebugMode)
+_MIN_REROUTE_TO_DEBUG_MODE: Final = _DEBUG_MODE_ORDER.index("safe")
+
+
+def _genvm_executor_selector_is_present(sim_config: dict | None) -> bool:
+    """A missing key, `None`, or `""` all mean "unset" and are ignored.
+
+    Anything else -- including a non-string falsy value like `0`, `False`,
+    `[]`, or `{}` -- counts as present, so it reaches the type/grammar checks
+    below instead of silently being treated the same as "unset".
+    """
+    if not sim_config:
+        return False
+    value = sim_config.get("genvm_executor_selector")
+    if value is None:
+        return False
+    if isinstance(value, str) and not value:
+        return False
+    return True
+
+
+def _validate_genvm_executor_selector(sim_config: dict | None) -> None:
+    """`sim_config.genvm_executor_selector` pins the contract to a GenVM
+    executor version or `re:` selector.
+
+    The manager honors it only under `debug_mode >= safe` and ignores it
+    silently otherwise, so reject the transaction instead of running it on
+    an executor the caller did not ask for.
+    """
+    if not _genvm_executor_selector_is_present(sim_config):
+        return
+    genvm_executor_selector = sim_config["genvm_executor_selector"]
+    debug_mode = _genvm_debug_mode()
+    if (
+        debug_mode not in _DEBUG_MODE_ORDER
+        or _DEBUG_MODE_ORDER.index(debug_mode) < _MIN_REROUTE_TO_DEBUG_MODE
+    ):
+        raise JSONRPCError(
+            code=-32602,
+            message=(
+                "sim_config.genvm_executor_selector requires genvm debug mode "
+                "(GENVM_DEBUG_MODE)"
+            ),
+            data={"genvm_executor_selector": genvm_executor_selector},
+        )
+    # The pin is persisted on the contract and only read back much later, by
+    # `resolve_callcontract_executor` in the middle of a run. Validating it here
+    # turns an unusable pin into a rejected transaction instead of a contract
+    # that fails every call it takes part in.
+    # `fullmatch`, not `match`: `$` also matches in front of a final newline, so
+    # an anchored `match` would let `"v0.2.17\n"` through as a directory name.
+    if not isinstance(genvm_executor_selector, str) or not is_valid_executor_selector(
+        genvm_executor_selector
+    ):
+        raise JSONRPCError(
+            code=-32602,
+            message=(
+                "sim_config.genvm_executor_selector is not a valid executor "
+                "version or selector"
+            ),
+            data={"genvm_executor_selector": genvm_executor_selector},
+        )
+
+
+def _reject_genvm_executor_selector_unless_deploy(
+    sim_config: dict | None, *, is_deploy: bool
+) -> None:
+    """`sim_config.genvm_executor_selector` pins the *deployment's* executor;
+    the manager ignores it for every other transaction type. Silently
+    accepting it elsewhere would look like the pin took effect when it never
+    reached the manager at all, so reject it instead of dropping it on the
+    floor.
+    """
+    if is_deploy or not _genvm_executor_selector_is_present(sim_config):
+        return
+    raise JSONRPCError(
+        code=-32602,
+        message=(
+            "sim_config.genvm_executor_selector is only valid for contract "
+            "deployment transactions"
+        ),
+        data={"genvm_executor_selector": sim_config["genvm_executor_selector"]},
+    )
+
+
 def _validate_fee_envelope(
     decoded_rollup_transaction: DecodedRollupTransaction,
 ) -> None:
@@ -2078,6 +2170,8 @@ def send_raw_transaction(
     sim_config: dict | None = None,
 ) -> str:
     """Persist a raw transaction using a request-scoped session."""
+    _validate_genvm_executor_selector(sim_config)
+
     accounts_manager = AccountsManager(session)
     transactions_processor = TransactionsProcessor(session)
 
@@ -2111,6 +2205,7 @@ def send_raw_transaction(
         raise InvalidTransactionError("Transaction signature verification failed")
 
     if isinstance(decoded_rollup_transaction.data, DecodedsubmitAppealDataArgs):
+        _reject_genvm_executor_selector_unless_deploy(sim_config, is_deploy=False)
         return _handle_appeal_or_top_up_and_submit(
             accounts_manager=accounts_manager,
             transactions_processor=transactions_processor,
@@ -2118,6 +2213,7 @@ def send_raw_transaction(
             decoded_rollup_transaction=decoded_rollup_transaction,
         )
     elif isinstance(decoded_rollup_transaction.data, DecodedTopUpFeesDataArgs):
+        _reject_genvm_executor_selector_unless_deploy(sim_config, is_deploy=False)
         return _handle_top_up_fees(
             accounts_manager=accounts_manager,
             transactions_processor=transactions_processor,
@@ -2134,6 +2230,10 @@ def send_raw_transaction(
         total_spend = getattr(decoded_rollup_transaction, "total_spend", value)
         genlayer_transaction = transactions_parser.get_genlayer_transaction(
             decoded_rollup_transaction
+        )
+        _reject_genvm_executor_selector_unless_deploy(
+            sim_config,
+            is_deploy=genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT,
         )
 
         transaction_data = {}
