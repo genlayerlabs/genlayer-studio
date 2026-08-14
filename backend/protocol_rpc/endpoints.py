@@ -234,7 +234,7 @@ _MAX_PENDING_PER_SENDER = _parse_optional_positive_int("MAX_PENDING_PER_SENDER_D
 _QUEUE_DEPTH_HELP = (
     "The public Studio is a shared sandbox with per-contract and "
     "per-sender PENDING transaction caps. For production-volume "
-    "workloads, run a self-hosted instance or use Rally."
+    "workloads, run a self-hosted instance."
 )
 
 

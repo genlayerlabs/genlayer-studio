@@ -31,7 +31,7 @@ _REDIS_KEY_TTL_SECONDS = 48 * 3600
 _STORAGE_HELP = (
     "The public Studio is a shared sandbox with a per-contract daily "
     "snapshot storage budget. For production-volume workloads, run a "
-    "self-hosted instance or use Rally."
+    "self-hosted instance."
 )
 
 _redis_client: Any = None
