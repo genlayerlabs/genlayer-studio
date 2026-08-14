@@ -52,6 +52,72 @@ def test_eth_get_transaction_by_hash_requests_no_contract_snapshot():
     )
 
 
+def test_eth_get_transaction_by_hash_redacts_private_keys_by_default(monkeypatch):
+    monkeypatch.delenv("SHOW_VALIDATOR_PRIVATE_KEYS_IN_RPC", raising=False)
+    transactions_processor = MagicMock()
+    stored_transaction = {
+        "hash": "0xabc",
+        "consensus_data": {
+            "leader_receipt": [
+                {
+                    "node_config": {
+                        "address": "0xvalidator",
+                        "private_key": "0xsecret",
+                    }
+                }
+            ],
+            "validators": [
+                {
+                    "node_config": {
+                        "address": "0xvalidator2",
+                        "privateKey": "0xsecret2",
+                    }
+                }
+            ],
+        },
+    }
+    transactions_processor.get_transaction_by_hash.return_value = stored_transaction
+
+    result = endpoints.get_transaction_by_hash(
+        transactions_processor=transactions_processor,
+        transaction_hash="0xabc",
+    )
+
+    leader_config = result["consensus_data"]["leader_receipt"][0]["node_config"]
+    validator_config = result["consensus_data"]["validators"][0]["node_config"]
+    assert leader_config == {"address": "0xvalidator"}
+    assert validator_config == {"address": "0xvalidator2"}
+    assert (
+        stored_transaction["consensus_data"]["leader_receipt"][0]["node_config"][
+            "private_key"
+        ]
+        == "0xsecret"
+    )
+
+
+def test_eth_get_transaction_by_hash_can_show_private_keys_for_local_debug(
+    monkeypatch,
+):
+    monkeypatch.setenv("SHOW_VALIDATOR_PRIVATE_KEYS_IN_RPC", "true")
+    transactions_processor = MagicMock()
+    stored_transaction = {
+        "hash": "0xabc",
+        "consensus_data": {
+            "leader_receipt": [
+                {"node_config": {"address": "0xvalidator", "private_key": "0xsecret"}}
+            ]
+        },
+    }
+    transactions_processor.get_transaction_by_hash.return_value = stored_transaction
+
+    result = endpoints.get_transaction_by_hash(
+        transactions_processor=transactions_processor,
+        transaction_hash="0xabc",
+    )
+
+    assert result == stored_transaction
+
+
 def test_eth_transaction_receipt_requests_no_contract_snapshot():
     transactions_processor = MagicMock()
     transactions_processor.get_transaction_by_hash.return_value = {
