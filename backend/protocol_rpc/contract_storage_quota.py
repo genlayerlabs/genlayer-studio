@@ -26,8 +26,6 @@ from backend.protocol_rpc.exceptions import StorageQuotaExceeded
 
 logger = logging.getLogger(__name__)
 
-# Snapshot stores accepted + finalized slots; live current_state is one slot.
-_SNAPSHOT_SLOT_FACTOR = 2
 _REDIS_KEY_TTL_SECONDS = 48 * 3600
 _STORAGE_HELP = (
     "The public Studio is a shared sandbox with a per-contract daily "
@@ -112,9 +110,15 @@ def daily_byte_limit() -> int | None:
 
 
 def snapshot_cost_bytes(live_state_column_size: int | None) -> int:
+    """Estimate the next snapshot from the already-complete live state row.
+
+    ``current_state.data`` contains both accepted and finalized slots, matching
+    the shape copied into ``transactions.contract_snapshot``.  Multiplying it
+    again would double-count the snapshot cost.
+    """
     if not live_state_column_size:
         return 0
-    return live_state_column_size * _SNAPSHOT_SLOT_FACTOR
+    return live_state_column_size
 
 
 def redis_key(address: str, day: str | None = None) -> str:

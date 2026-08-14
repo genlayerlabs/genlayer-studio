@@ -42,7 +42,7 @@ def test_live_state_column_size_does_not_require_python_hydrate(engine: Engine):
         size = live_state_column_size(session, CONTRACT)
         assert size is not None
         assert size > 0
-        assert snapshot_cost_bytes(size) == size * 2
+        assert snapshot_cost_bytes(size) == size
 
 
 def test_quota_disabled_when_env_unset(engine: Engine, monkeypatch):
