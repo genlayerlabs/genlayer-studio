@@ -710,3 +710,18 @@ class TestRotationCount:
             {"h": tx_hash},
         ).one()
         assert row[0] == 0
+
+    def test_reset_transaction_rotation_count_commits(self, tp, session):
+        tx_hash = _make_tx(tp)
+        tp.increase_transaction_rotation_count(tx_hash)
+        tp.reset_transaction_rotation_count(tx_hash)
+
+        other = session.get_bind().connect()
+        try:
+            row = other.execute(
+                text("SELECT rotation_count FROM transactions WHERE hash = :h"),
+                {"h": tx_hash},
+            ).one()
+        finally:
+            other.close()
+        assert row[0] == 0

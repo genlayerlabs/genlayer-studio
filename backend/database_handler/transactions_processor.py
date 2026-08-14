@@ -1410,6 +1410,7 @@ class TransactionsProcessor:
             text("UPDATE transactions SET rotation_count = 0 WHERE hash = :hash"),
             {"hash": transaction_hash},
         )
+        self.session.commit()
 
     def set_transaction_appeal_leader_timeout(
         self, transaction_hash: str, appeal_leader_timeout: bool

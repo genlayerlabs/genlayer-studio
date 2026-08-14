@@ -252,6 +252,14 @@ class Manager:
                     "Validators manager snapshot not initialized. "
                     "Ensure restart() was called successfully."
                 )
+            # Wipe+recreate can leave the cache empty after the last delete's
+            # LLM restart while new validators are already committed. Create
+            # events sit behind those restarts; re-read before freezing a
+            # 0-node copy for exec.
+            if not self._cached_snapshot.nodes:
+                fresh = await self._get_snap_from_registry()
+                if fresh.nodes:
+                    await self._change_providers_from_snapshot_locked(fresh)
             snap = deepcopy(self._cached_snapshot)
         yield snap
 
