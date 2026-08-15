@@ -68,7 +68,7 @@ def test_get_validators_for_transaction_3():
     assert validators == [{"stake": 3}, {"stake": 2}, {"stake": 1}]
 
 
-def test_get_validators_for_transaction_independent_rng_per_call():
+def test_get_validators_for_transaction_independent_rng_per_call() -> None:
     """
     Regression test for #1733: mutable default argument caused a single RNG instance
     to be shared across all calls, making the selection sequence predictable.
