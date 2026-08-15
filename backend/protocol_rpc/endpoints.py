@@ -121,6 +121,40 @@ _gen_call_singleflight_tasks: dict[str, asyncio.Task[str]] = {}
 _gen_call_singleflight_lock = asyncio.Lock()
 
 
+def _show_validator_private_keys_in_rpc() -> bool:
+    return os.getenv("SHOW_VALIDATOR_PRIVATE_KEYS_IN_RPC", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _is_private_key_field(key: Any) -> bool:
+    if not isinstance(key, str):
+        return False
+    normalized = key.replace("_", "").replace("-", "").lower()
+    return normalized == "privatekey" or normalized.endswith("privatekey")
+
+
+def _sanitize_rpc_private_keys(value: Any) -> Any:
+    """Return RPC data with private-key fields removed unless explicitly enabled."""
+    if _show_validator_private_keys_in_rpc():
+        return value
+
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_rpc_private_keys(item)
+            for key, item in value.items()
+            if not _is_private_key_field(key)
+        }
+    if isinstance(value, list):
+        return [_sanitize_rpc_private_keys(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_rpc_private_keys(item) for item in value)
+    return value
+
+
 def _check_rate_limit(address: str) -> None:
     """Reject if address exceeds rate limit. Prunes old entries."""
     now = time.monotonic()
@@ -1660,7 +1694,7 @@ def get_transaction_by_hash(
             message=f"Transaction {transaction_hash} not found",
             data={"hash": transaction_hash},
         )
-    return transaction
+    return _sanitize_rpc_private_keys(transaction)
 
 
 def get_studio_transaction_by_hash(
@@ -1677,7 +1711,7 @@ def get_studio_transaction_by_hash(
             message=f"Transaction {transaction_hash} not found",
             data={"hash": transaction_hash},
         )
-    return transaction
+    return _sanitize_rpc_private_keys(transaction)
 
 
 def get_transaction_status(
@@ -2411,8 +2445,10 @@ def get_transactions_for_address(
     if not accounts_manager.is_valid_address(address):
         raise InvalidAddressError(address)
 
-    return transactions_processor.get_transactions_for_address(
-        address, TransactionAddressFilter(filter)
+    return _sanitize_rpc_private_keys(
+        transactions_processor.get_transactions_for_address(
+            address, TransactionAddressFilter(filter)
+        )
     )
 
 
@@ -2497,7 +2533,7 @@ def get_block_by_number(
             "uncles": [],
         }
 
-    return block_details
+    return _sanitize_rpc_private_keys(block_details)
 
 
 def get_gas_price() -> str:
@@ -2617,7 +2653,7 @@ def get_block_by_hash(
     else:
         block_details["transactions"].append(block_hash)
 
-    return block_details
+    return _sanitize_rpc_private_keys(block_details)
 
 
 def get_contract(consensus_service: ConsensusService, contract_name: str) -> dict:
@@ -2754,7 +2790,7 @@ def update_transaction_status(
             code=-32602, message=f"Transaction not found: {transaction_hash}", data={}
         )
 
-    return updated_transaction
+    return _sanitize_rpc_private_keys(updated_transaction)
 
 
 def dev_get_pool_status(sqlalchemy_db) -> dict:
