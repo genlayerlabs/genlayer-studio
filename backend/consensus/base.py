@@ -714,13 +714,16 @@ class ConsensusAlgorithm:
         is_triggered = transaction.triggered_by_hash is not None
 
         if not is_triggered and transaction.from_address is not None:
-            # Get the balance of the sender account
-            from_balance = accounts_manager.get_account_balance(
-                transaction.from_address
+            # Atomic conditional debit: subtracts value only if balance >= value.
+            # Using debit_account_balance (SQL UPDATE WHERE balance >= amount) instead
+            # of the non-atomic read→check→write pattern prevents a race condition
+            # where two concurrent finalization sessions both read the same stale
+            # balance and one overwrites the other's debit. (#1734)
+            debited = accounts_manager.debit_account_balance(
+                transaction.from_address, transaction.value
             )
-
-            # Check if the sender has enough balance
-            if from_balance < transaction.value:
+            if not debited:
+                # Insufficient balance — same UNDETERMINED path as before.
                 # UNDETERMINED is finalization-eligible: claim_next_finalization
                 # filters on timestamp_awaiting_finalization IS NOT NULL.
                 # Without this stamp the row strands forever (16 such rows
@@ -734,25 +737,21 @@ class ConsensusAlgorithm:
                     TransactionStatus.UNDETERMINED,
                     msg_handler,
                 )
-
                 return
 
-            # Update the balance of the sender account
-            accounts_manager.update_account_balance(
-                transaction.from_address, from_balance - transaction.value
-            )
-
         if transaction.to_address is not None:
-            # Get the balance of the recipient account
-            to_balance = accounts_manager.get_account_balance(transaction.to_address)
-
-            # Update the balance of the recipient account
-            accounts_manager.update_account_balance(
-                transaction.to_address, to_balance + transaction.value
+            # Atomic credit: SQL UPDATE balance + amount avoids the lost-update
+            # race where two sessions both read balance=X and each writes X+delta,
+            # with the second overwriting the first. (#1734)
+            accounts_manager.credit_account_balance(
+                transaction.to_address, transaction.value
             )
 
         # Mark the tx as credited so a later retry (or duplicate sync path)
         # hits the idempotency guard above and no-ops.
+        # credit_tx_value_once would be ideal here but execute_transfer owns the
+        # value_credited flag directly; set it inline to keep the existing
+        # idempotency contract.
         if transaction.value and transaction.value > 0:
             accounts_manager.session.execute(
                 text(
