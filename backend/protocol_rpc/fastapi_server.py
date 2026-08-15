@@ -1,6 +1,7 @@
 # backend/protocol_rpc/fastapi_server.py
 
 import os
+import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -25,6 +26,7 @@ from backend.protocol_rpc.rate_limit_middleware import RateLimitMiddleware
 from backend.protocol_rpc.rpc_endpoint_manager import JSONRPCResponse
 from backend.protocol_rpc.websocket import GLOBAL_CHANNEL, websocket_handler
 
+logger = logging.getLogger(__name__)
 
 SENTRY_DSN = os.getenv("SENTRY_DSN", None)
 if SENTRY_DSN:
@@ -64,10 +66,18 @@ app = FastAPI(title="GenLayer Studio RPC API", version="1.0.0", lifespan=lifespa
 # Rate limiting is inner so CORS decorates short-circuit responses such as 429s.
 app.add_middleware(RateLimitMiddleware)
 
+# Security Fix: Require an explicit CORS allowlist from the environment.
+# Fail closed (prevent startup) if the configuration is missing to avoid permissive wildcard access.
+allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "")
+if not allowed_origins_env:
+    raise RuntimeError("ALLOWED_ORIGINS environment variable must be explicitly set to configure CORS.")
+
+allowed_origins = [origin.strip() for origin in allowed_origins_env.split(",") if origin.strip()]
+
 # This public RPC uses header-based API keys and no cookie authentication.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -100,11 +110,14 @@ async def jsonrpc_endpoint(
     except ClientDisconnect:
         return Response(status_code=204)
     except Exception as exc:
-        # Ensure JSON-RPC compliant error response instead of framework HTML pages
+        # Security Fix: Log the actual exception securely on the server side
+        # and return a stable, generic error message to the client to prevent internal state leakage.
+        logger.error(f"[JSON-RPC] Request processing failed: {exc}", exc_info=True)
+        
         error = {
             "code": -32603,
             "message": "Internal error",
-            "data": {"detail": str(exc)},
+            "data": {"detail": "An unexpected server error occurred."},
         }
         return JSONResponse(content={"jsonrpc": "2.0", "error": error, "id": None})
 
