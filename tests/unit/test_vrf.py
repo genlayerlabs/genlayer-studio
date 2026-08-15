@@ -70,7 +70,7 @@ def test_get_validators_for_transaction_3():
     assert validators == [{"stake": 3}, {"stake": 2}, {"stake": 1}]
 
 
-def test_get_validators_for_transaction_zero_stake_raises():
+def test_get_validators_for_transaction_zero_stake_raises() -> None:
     """
     Regression test for #1732: ZeroDivisionError when all validators have stake=0.
     get_validators_for_transaction must raise NoValidatorsAvailableError instead of
