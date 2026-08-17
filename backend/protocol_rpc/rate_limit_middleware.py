@@ -12,7 +12,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from backend.protocol_rpc.exceptions import RateLimitExceeded
-from backend.protocol_rpc.rate_limiter import RateLimiterService
+from backend.protocol_rpc.rate_limit_methods import is_cheap_read_payload
+from backend.protocol_rpc.rate_limiter import RateLimiterService, RateLimitUsage
 
 logger = logging.getLogger(__name__)
 
@@ -63,13 +64,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         api_key = request.headers.get("X-API-Key")
         client_ip = self._client_ip(request)
+        is_cheap_read = await self._is_cheap_read(request)
 
+        usage: Optional[RateLimitUsage] = None
         try:
-            await rate_limiter.check_rate_limit(api_key, client_ip)
+            usage = await rate_limiter.check_rate_limit(
+                api_key, client_ip, is_cheap_read=is_cheap_read
+            )
         except RateLimitExceeded as exc:
-            retry_after = "60"
-            if exc.data and isinstance(exc.data, dict):
-                retry_after = str(exc.data.get("retry_after_seconds", 60))
             return JSONResponse(
                 status_code=429,
                 content={
@@ -77,7 +79,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     "error": exc.to_dict(),
                     "id": None,
                 },
-                headers={"Retry-After": retry_after},
+                headers=self._denial_headers(exc),
             )
         except Exception:
             logger.warning(
@@ -85,7 +87,47 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 exc_info=True,
             )
 
-        return await call_next(request)
+        response = await call_next(request)
+        if usage is not None:
+            response.headers.update(usage.as_headers())
+        return response
+
+    async def _is_cheap_read(self, request: Request) -> bool:
+        """Classify the request body, charging the stricter bucket on any doubt.
+
+        Reading the body here is safe because Starlette's BaseHTTPMiddleware
+        wraps the request in a _CachedRequest, which replays the buffered body
+        downstream. Calling request.stream() instead would starve the route
+        handler.
+        """
+        try:
+            raw_body = await request.body()
+        except Exception:
+            logger.warning(
+                "Could not read request body to classify rate limit bucket",
+                exc_info=True,
+            )
+            return False
+        return is_cheap_read_payload(raw_body)
+
+    @staticmethod
+    def _denial_headers(exc: RateLimitExceeded) -> dict:
+        data = exc.data if isinstance(exc.data, dict) else {}
+        retry_after = data.get("retry_after_seconds", 60)
+        headers = {"Retry-After": str(retry_after)}
+        # An invalid API key is raised before any window is evaluated, so there
+        # is no usage to report — only the windowed denials carry limits.
+        if "limit" in data:
+            headers.update(
+                {
+                    "X-RateLimit-Bucket": str(data.get("bucket", "standard")),
+                    "X-RateLimit-Window": str(data.get("window", "")),
+                    "X-RateLimit-Limit": str(data["limit"]),
+                    "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Reset": str(retry_after),
+                }
+            )
+        return headers
 
     def _client_ip(self, request: Request) -> str:
         peer_host = request.client.host if request.client else "unknown"
