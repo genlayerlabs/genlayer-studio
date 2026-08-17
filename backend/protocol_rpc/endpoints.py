@@ -20,7 +20,10 @@ from sqlalchemy import Table, text
 from sqlalchemy.orm import Session
 import backend.validators as validators
 
-from backend.database_handler.contract_snapshot import ContractSnapshot
+from backend.database_handler.contract_snapshot import (
+    ContractSnapshot,
+    fetch_deployed_code_b64,
+)
 from backend.database_handler.llm_providers import LLMProviderRegistry
 from backend.rollup.consensus_service import ConsensusService
 from backend.database_handler.models import Base, TransactionStatus
@@ -1146,13 +1149,12 @@ async def get_contract_schema_for_code(
 
 def get_contract_code(session: Session, contract_address: str) -> str:
     try:
-        contract_snapshot = ContractSnapshot(contract_address, session)
+        code_b64 = fetch_deployed_code_b64(session, contract_address)
     except ContractNotFoundError:
         raise NotFoundError(
             message=f"Contract {contract_address} not found",
             data={"contract_address": contract_address},
         )
-    code_b64 = contract_snapshot.extract_deployed_code_b64()
     if not code_b64:
         raise InvalidAddressError(
             contract_address,
