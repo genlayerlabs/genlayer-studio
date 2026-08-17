@@ -71,6 +71,17 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Browsers hide non-simple response headers from JS unless they are listed
+    # here, so without this the rate limit headers are readable by curl but not
+    # by genlayer-js in the browser — the client that most needs to self-pace.
+    expose_headers=[
+        "Retry-After",
+        "X-RateLimit-Bucket",
+        "X-RateLimit-Window",
+        "X-RateLimit-Limit",
+        "X-RateLimit-Remaining",
+        "X-RateLimit-Reset",
+    ],
 )
 
 # Include health check endpoints
