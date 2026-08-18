@@ -17,6 +17,27 @@ from backend.protocol_rpc.rate_limiter import RateLimiterService, RateLimitUsage
 
 logger = logging.getLogger(__name__)
 
+# Keys may be supplied either as an X-API-Key header or as a single path
+# segment (`/api/glk_...`). The path form exists because the EVM toolchain —
+# MetaMask's "Add network", `foundry.toml`, `--rpc-url`, most viem/ethers
+# setups — accepts one URL string and offers no way to attach a header. Every
+# major RPC provider puts the key in the URL for that reason. Header-only
+# forced at least one integrator to plan a reverse proxy whose entire job was
+# turning a URL into a header.
+API_PATH = "/api"
+API_KEY_PREFIX = "glk_"
+
+
+def _rpc_path_segment(path: str) -> Optional[str]:
+    """Return the single path segment under /api/, or None if not that shape."""
+    if not path.startswith(API_PATH + "/"):
+        return None
+    segment = path[len(API_PATH) + 1 :]
+    if not segment or "/" in segment:
+        return None
+    return segment
+
+
 DEFAULT_TRUSTED_PROXY_CIDRS = (
     "127.0.0.0/8",
     "10.0.0.0/8",  # NOSONAR - RFC1918 private proxy range.
@@ -52,8 +73,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self._trusted_proxy_networks = _load_trusted_proxy_networks()
 
     async def dispatch(self, request: Request, call_next) -> Response:
-        # Only rate-limit the JSON-RPC endpoint
-        if request.url.path != "/api" or request.method != "POST":
+        # Only rate-limit the JSON-RPC endpoint. This gate must cover every
+        # path the /api/{api_key} route can match, not just key-shaped ones —
+        # anything the route serves but this misses would be an unlimited,
+        # unauthenticated RPC endpoint.
+        if not self._is_rpc_path(request.url.path) or request.method != "POST":
             return await call_next(request)
 
         rate_limiter: Optional[RateLimiterService] = getattr(
@@ -62,7 +86,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if rate_limiter is None or not rate_limiter.enabled:
             return await call_next(request)
 
-        api_key = request.headers.get("X-API-Key")
+        api_key = self._api_key(request)
         client_ip = self._client_ip(request)
         is_cheap_read = await self._is_cheap_read(request)
 
@@ -91,6 +115,29 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if usage is not None:
             response.headers.update(usage.as_headers())
         return response
+
+    @staticmethod
+    def _is_rpc_path(path: str) -> bool:
+        return path == API_PATH or _rpc_path_segment(path) is not None
+
+    @staticmethod
+    def _api_key(request: Request) -> Optional[str]:
+        """Resolve the API key from the path, falling back to the header.
+
+        The path wins when both are present: it is what the caller typed into
+        their tool, whereas a header may have been injected by an intermediary
+        they cannot see.
+
+        Only `glk_`-prefixed segments count as keys. A segment of some other
+        shape is treated as no key at all rather than as a bad one, so it falls
+        through to anonymous limits instead of erroring — while a mistyped real
+        key still fails loudly as invalid, which is the confusing case worth
+        being loud about.
+        """
+        segment = _rpc_path_segment(request.url.path)
+        if segment and segment.startswith(API_KEY_PREFIX):
+            return segment
+        return request.headers.get("X-API-Key")
 
     async def _is_cheap_read(self, request: Request) -> bool:
         """Classify the request body, charging the stricter bucket on any doubt.

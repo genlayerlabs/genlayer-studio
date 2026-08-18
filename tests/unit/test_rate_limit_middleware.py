@@ -570,3 +570,105 @@ class TestRateLimitHeaders:
         assert response.status_code == 429
         assert response.headers["Retry-After"] == "60"
         assert "X-RateLimit-Limit" not in response.headers
+
+
+class TestPathBasedApiKey:
+    """Keys may ride in the URL, because MetaMask et al. cannot send headers."""
+
+    @pytest.mark.asyncio
+    async def test_key_read_from_path(self):
+        limiter = AsyncMock()
+        limiter.enabled = True
+        limiter.check_rate_limit = AsyncMock(return_value=None)
+        key = "glk_" + "a" * 64
+        request = _make_request(path=f"/api/{key}")
+        request.app.state.rate_limiter = limiter
+
+        middleware = RateLimitMiddleware(app=MagicMock())
+        await middleware.dispatch(request, _make_call_next())
+
+        assert limiter.check_rate_limit.call_args[0][0] == key
+
+    @pytest.mark.asyncio
+    async def test_path_key_wins_over_header(self):
+        limiter = AsyncMock()
+        limiter.enabled = True
+        limiter.check_rate_limit = AsyncMock(return_value=None)
+        path_key = "glk_" + "a" * 64
+        request = _make_request(path=f"/api/{path_key}", api_key="glk_" + "b" * 64)
+        request.app.state.rate_limiter = limiter
+
+        middleware = RateLimitMiddleware(app=MagicMock())
+        await middleware.dispatch(request, _make_call_next())
+
+        assert limiter.check_rate_limit.call_args[0][0] == path_key
+
+    @pytest.mark.asyncio
+    async def test_header_still_works_without_path_key(self):
+        limiter = AsyncMock()
+        limiter.enabled = True
+        limiter.check_rate_limit = AsyncMock(return_value=None)
+        request = _make_request(api_key="glk_headerkey")
+        request.app.state.rate_limiter = limiter
+
+        middleware = RateLimitMiddleware(app=MagicMock())
+        await middleware.dispatch(request, _make_call_next())
+
+        assert limiter.check_rate_limit.call_args[0][0] == "glk_headerkey"
+
+    @pytest.mark.asyncio
+    async def test_non_key_segment_falls_through_to_anonymous(self):
+        """A non-key path is not a bad key — it should not error, just be anon."""
+        limiter = AsyncMock()
+        limiter.enabled = True
+        limiter.check_rate_limit = AsyncMock(return_value=None)
+        request = _make_request(path="/api/explorer")
+        request.app.state.rate_limiter = limiter
+
+        middleware = RateLimitMiddleware(app=MagicMock())
+        await middleware.dispatch(request, _make_call_next())
+
+        assert limiter.check_rate_limit.call_args[0][0] is None
+
+    @pytest.mark.asyncio
+    async def test_mistyped_key_is_still_treated_as_a_key(self):
+        """So it fails loudly as invalid instead of silently dropping to anon."""
+        limiter = AsyncMock()
+        limiter.enabled = True
+        limiter.check_rate_limit = AsyncMock(return_value=None)
+        request = _make_request(path="/api/glk_tooshort")
+        request.app.state.rate_limiter = limiter
+
+        middleware = RateLimitMiddleware(app=MagicMock())
+        await middleware.dispatch(request, _make_call_next())
+
+        assert limiter.check_rate_limit.call_args[0][0] == "glk_tooshort"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", ["/api", "/api/glk_abc", "/api/anything"])
+    async def test_every_path_the_route_matches_is_rate_limited(self, path):
+        """Any path the route serves but the gate misses would be unlimited."""
+        limiter = AsyncMock()
+        limiter.enabled = True
+        limiter.check_rate_limit = AsyncMock(return_value=None)
+        request = _make_request(path=path)
+        request.app.state.rate_limiter = limiter
+
+        middleware = RateLimitMiddleware(app=MagicMock())
+        await middleware.dispatch(request, _make_call_next())
+
+        limiter.check_rate_limit.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", ["/api/explorer/stats", "/health", "/api/a/b"])
+    async def test_deeper_paths_are_not_treated_as_rpc(self, path):
+        limiter = AsyncMock()
+        limiter.enabled = True
+        limiter.check_rate_limit = AsyncMock(return_value=None)
+        request = _make_request(path=path)
+        request.app.state.rate_limiter = limiter
+
+        middleware = RateLimitMiddleware(app=MagicMock())
+        await middleware.dispatch(request, _make_call_next())
+
+        limiter.check_rate_limit.assert_not_called()

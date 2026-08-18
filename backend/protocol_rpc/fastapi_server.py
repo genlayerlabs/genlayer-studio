@@ -13,6 +13,10 @@ from starlette.requests import ClientDisconnect
 # Load environment variables early so SENTRY_DSN is available for initialization
 load_dotenv()
 
+from backend.protocol_rpc.api_key_redaction import (
+    install_log_redaction,
+    scrub_sentry_event,
+)
 from backend.protocol_rpc.app_lifespan import RPCAppSettings, rpc_app_lifespan
 from backend.protocol_rpc.dependencies import (
     get_rpc_router_optional,
@@ -26,12 +30,19 @@ from backend.protocol_rpc.rpc_endpoint_manager import JSONRPCResponse
 from backend.protocol_rpc.websocket import GLOBAL_CHANNEL, websocket_handler
 
 
+install_log_redaction()
+
 SENTRY_DSN = os.getenv("SENTRY_DSN", None)
 if SENTRY_DSN:
     import sentry_sdk
 
     sentry_sdk.init(
         dsn=SENTRY_DSN,
+        # API keys can arrive as a path segment, and with send_default_pii and
+        # full trace sampling below, request URLs reach Sentry on *every*
+        # transaction. Scrub keys out before anything leaves the process.
+        before_send=scrub_sentry_event,
+        before_send_transaction=scrub_sentry_event,
         # Add data like request headers and IP for users,
         # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
         send_default_pii=True,
@@ -92,9 +103,22 @@ app.include_router(explorer_router)
 
 
 # JSON-RPC endpoint (supports single and batch requests)
+#
+# `/api/{api_key}` is the same endpoint with the key in the URL, matching how
+# every major RPC provider does it (Alchemy `/v2/<key>`, Infura `/v3/<key>`).
+# The EVM toolchain takes a single URL string and has nowhere to put a custom
+# header — MetaMask's "Add network" being the clearest case — so the header
+# form alone makes Studio unusable from those tools without a proxy in front.
+#
+# The key is consumed by RateLimitMiddleware before the request reaches here;
+# the path parameter exists only so the route matches. Anything that changes
+# which paths this route accepts must change `_is_rpc_path` in that middleware
+# to match, or the new paths become unlimited and unauthenticated.
 @app.post("/api")
+@app.post("/api/{api_key}")
 async def jsonrpc_endpoint(
     request: Request,
+    api_key: str | None = None,
     rpc_router: FastAPIRPCRouter | None = Depends(get_rpc_router_optional),
 ):
     """Main JSON-RPC endpoint with JSON-RPC 2.0 batch support."""
