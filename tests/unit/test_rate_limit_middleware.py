@@ -672,3 +672,38 @@ class TestPathBasedApiKey:
         await middleware.dispatch(request, _make_call_next())
 
         limiter.check_rate_limit.assert_not_called()
+
+
+class TestV123MethodClassification:
+    """Methods that exist only on v0.123 and later."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "method", ["sim_getFeeConfig", "gen_getTransactionStatusDetails"]
+    )
+    async def test_new_cheap_reads(self, method):
+        limiter = AsyncMock()
+        limiter.enabled = True
+        limiter.check_rate_limit = AsyncMock(return_value=None)
+        request = _make_request(body=_rpc_body(method))
+        request.app.state.rate_limiter = limiter
+
+        middleware = RateLimitMiddleware(app=MagicMock())
+        await middleware.dispatch(request, _make_call_next())
+
+        assert limiter.check_rate_limit.call_args.kwargs["is_cheap_read"] is True
+
+    @pytest.mark.asyncio
+    async def test_fee_estimation_is_not_cheap(self):
+        """It runs the contract through sim_call — unlike eth_estimateGas,
+        which is a constant. Near-identical names, wildly different cost."""
+        limiter = AsyncMock()
+        limiter.enabled = True
+        limiter.check_rate_limit = AsyncMock(return_value=None)
+        request = _make_request(body=_rpc_body("sim_estimateTransactionFees"))
+        request.app.state.rate_limiter = limiter
+
+        middleware = RateLimitMiddleware(app=MagicMock())
+        await middleware.dispatch(request, _make_call_next())
+
+        assert limiter.check_rate_limit.call_args.kwargs["is_cheap_read"] is False

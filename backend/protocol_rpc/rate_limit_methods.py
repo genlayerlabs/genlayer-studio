@@ -50,6 +50,7 @@ CHEAP_READ_METHODS = frozenset(
         "eth_estimateGas",  # returns a constant
         "sim_getFinalityWindowTime",
         "sim_getConsensusContract",
+        "sim_getFeeConfig",
         # Indexed database reads
         "eth_getBalance",
         "eth_getTransactionCount",
@@ -60,6 +61,7 @@ CHEAP_READ_METHODS = frozenset(
         "gen_getContractCode",
         "gen_getContractNonce",
         "gen_getTransactionStatus",
+        "gen_getTransactionStatusDetails",
         "gen_getStudioTransactionByHash",
         "sim_getTransactionsForAddress",
     }
@@ -70,6 +72,12 @@ CHEAP_READ_METHODS = frozenset(
 #   gen_getContractSchema               -> builds a Node + GenVMManager
 #   gen_getContractSchemaForCode        -> builds a Node + GenVMManager
 #   sim_lintContract                    -> runs the GenVM linter
+#   sim_estimateTransactionFees         -> executes the contract via sim_call to
+#                                          measure fees. Note the contrast with
+#                                          eth_estimateGas, which is allowlisted
+#                                          because it returns a constant. The
+#                                          names are near-identical; the cost is
+#                                          not.
 #   eth_getLogs                         -> unbounded range scan
 #   eth_sendRawTransaction, sim_*, admin_*, dev_*  -> writes / privileged
 
