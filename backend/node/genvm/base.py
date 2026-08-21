@@ -46,6 +46,10 @@ from dataclasses import dataclass
 from .origin.public_abi import *
 from .origin import base_host
 from .origin import host_fns
+
+# The wire result code lives in `host_fns`; `public_abi` only carries the
+# subset the SDK exposes, so import it last to win over the star import.
+from .origin.host_fns import ResultCode
 from .origin import logger as genvm_logger
 from .error_codes import (
     extract_error_code,
@@ -135,7 +139,7 @@ class StateProxy(metaclass=abc.ABCMeta):
     def genvm_executor_selector_for(self, addr: Address) -> str | None:
         """Executor selector this contract is pinned to, or None if unpinned.
 
-        Backs the nested cross-major `resolve_callcontract_executor` hook: the
+        Backs the nested cross-major `resolve_call_contract_executor` hook: the
         genvm asks which executor a call target runs on, and a pinned contract
         answers with its stored `genvm_executor_selector`. Proxies without a
         contract store (e.g. deploy-time `_StateProxyNone`) inherit this None
@@ -194,7 +198,7 @@ def is_valid_executor_selector(value: str) -> bool:
 
     Both submit-time validation
     (`protocol_rpc.endpoints._validate_genvm_executor_selector`) and
-    nested-call resolution (`Host.resolve_callcontract_executor`) must use
+    nested-call resolution (`Host.resolve_call_contract_executor`) must use
     this same grammar so a value that is accepted (or backfilled) on one
     boundary never gets rejected at the other.
     """
@@ -417,6 +421,15 @@ def _emission_int(emission: dict, name: str) -> int:
     return int(_emission_value(emission, name) or 0)
 
 
+def _emission_on(emission: dict) -> typing.Literal["accepted", "finalized"]:
+    """GenVM calls the pre-finalization lifecycle `decided`; Studio calls it `accepted`.
+
+    Both executor lines normalize to `decided` at the host boundary, so `accepted`
+    never arrives on the wire — this maps one way, GenVM → Studio.
+    """
+    return "finalized" if emission["on"] == "finalized" else "accepted"
+
+
 def _emission_hex(emission: dict, name: str) -> str:
     value = _emission_value(emission, name)
     if value is None:
@@ -589,13 +602,13 @@ class Host(genvmhost.IHost):
         # are ephemeral VM-side effects: discard them instead of tripping the
         # storage_write readonly assertion.
         if not getattr(state, "readonly", False):
-            apply_storage_changes(res.result_storage_changes, state)
+            apply_storage_changes(res.result_storage_deltas, state)
 
         # Extract pending_transactions from result_emissions
         pending_transactions = []
         for emission in res.result_emissions:
             match emission["type"]:
-                case "PostMessage":
+                case "InternalMessage":
                     pending_transactions.append(
                         PendingTransaction(
                             emission["address"].as_hex,
@@ -603,14 +616,14 @@ class Host(genvmhost.IHost):
                             code=None,
                             salt_nonce=0,
                             value=emission["value"],
-                            on=emission["on"],
+                            on=_emission_on(emission),
                             fee_params=_emission_internal_fee_params(emission),
                             declared_budget=_emission_int(emission, "declaredBudget"),
                             call_key=_emission_hex(emission, "callKey"),
                             allocation_subtree=_emission_allocation_subtree(emission),
                         )
                     )
-                case "DeployContract":
+                case "InternalDeployMessage":
                     pending_transactions.append(
                         PendingTransaction(
                             address="0x",
@@ -618,14 +631,14 @@ class Host(genvmhost.IHost):
                             code=emission["code"],
                             salt_nonce=emission["salt_nonce"],
                             value=emission["value"],
-                            on=emission["on"],
+                            on=_emission_on(emission),
                             fee_params=_emission_internal_fee_params(emission),
                             declared_budget=_emission_int(emission, "declaredBudget"),
                             call_key=_emission_hex(emission, "callKey"),
                             allocation_subtree=_emission_allocation_subtree(emission),
                         )
                     )
-                case "EthSend":
+                case "ExternalMessage":
                     pending_transactions.append(
                         PendingTransaction(
                             address=emission["address"].as_hex,
@@ -780,17 +793,17 @@ class Host(genvmhost.IHost):
         self.sock = None
 
     async def storage_read(
-        self, type: StorageType, account: bytes, slot: bytes, index: int, le: int, /
+        self, type: StorageView, address: bytes, slot: bytes, offset: int, le: int, /
     ) -> bytes:
-        assert type != StorageType.LATEST_FINAL
+        assert type != StorageView.LATEST_FINALIZED
         return await asyncio.to_thread(
-            self._state_proxy.storage_read, Address(account), slot, index, le
+            self._state_proxy.storage_read, Address(address), slot, offset, le
         )
 
-    async def resolve_callcontract_executor(
+    async def resolve_call_contract_executor(
         self,
         contract_address: Address,
-        state_mode: StorageType,
+        state_mode: StorageView,
         advisory_major: int,
         /,
     ) -> bytes | None:
@@ -818,20 +831,20 @@ class Host(genvmhost.IHost):
             )
         return gvm_calldata.encode({"kind": "version", "version": reroute})
 
-    async def consume_gas(self, gas: int, /) -> None:
+    async def consume_time_fee_gen_wei(self, time_fee_gen_wei: int, /) -> None:
         pass
 
-    async def eth_call(self, account: bytes, calldata: bytes, /) -> bytes:
+    async def external_call(self, address: bytes, calldata: bytes, /) -> bytes:
         # FIXME(core-team): #748
         assert False
 
-    async def get_balance(self, account: bytes, /) -> int:
-        return await asyncio.to_thread(self._state_proxy.get_balance, Address(account))
+    async def get_balance_gen_wei(self, address: bytes, /) -> int:
+        return await asyncio.to_thread(self._state_proxy.get_balance, Address(address))
 
     async def notify_nondet_disagreement(self, call_no: int, /) -> None:
         self._nondet_disagreement = call_no
 
-    async def remaining_fuel_as_gen(self, /) -> int:
+    async def get_remaining_time_fee_gen_wei(self, /) -> int:
         return 2**60
 
 

@@ -68,7 +68,7 @@ from backend.protocol_rpc.fees import (
 from backend.rollup.consensus_service import ConsensusService
 
 import backend.validators as validators
-from backend.node.genvm.origin.public_abi import ResultCode
+from backend.node.genvm.origin.host_fns import ResultCode
 from backend.consensus.types import ConsensusResult, ConsensusRound
 from backend.consensus.utils import determine_consensus_from_votes
 from backend.consensus.decisions import (

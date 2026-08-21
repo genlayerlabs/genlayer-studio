@@ -2,7 +2,7 @@ from unittest.mock import MagicMock
 
 from backend.node.genvm.base import Context, Host
 from backend.node.genvm.origin.base_host import RunHostAndProgramRes
-from backend.node.genvm.origin.public_abi import ResultCode
+from backend.node.genvm.origin.host_fns import ResultCode
 
 
 def _result_with_storage_change():
@@ -15,7 +15,7 @@ def _result_with_storage_change():
         result_kind=ResultCode.RETURN,
         result_data=b"ok",
         result_fingerprint=None,
-        result_storage_changes=[(b"\x11" * 32 + (0).to_bytes(4, "big"), b"\xaa")],
+        result_storage_deltas=[(b"\x11" * 32 + (0).to_bytes(4, "big"), b"\xaa")],
         result_emissions=[],
         result_nondet_results=[],
         data_fees_remaining=[],

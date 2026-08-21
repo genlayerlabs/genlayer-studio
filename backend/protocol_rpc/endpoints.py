@@ -1913,7 +1913,7 @@ def _validate_genvm_executor_selector(sim_config: dict | None) -> None:
             data={"genvm_executor_selector": genvm_executor_selector},
         )
     # The pin is persisted on the contract and only read back much later, by
-    # `resolve_callcontract_executor` in the middle of a run. Validating it here
+    # `resolve_call_contract_executor` in the middle of a run. Validating it here
     # turns an unusable pin into a rejected transaction instead of a contract
     # that fails every call it takes part in.
     # `fullmatch`, not `match`: `$` also matches in front of a final newline, so

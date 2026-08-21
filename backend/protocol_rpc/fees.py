@@ -2260,9 +2260,10 @@ def _genvm_message_allocation_node(
 
 
 def _genvm_message_on(node: dict[str, Any]) -> str:
+    # `decided` is GenVM's name for the lifecycle Studio calls `accepted`.
     if int(node["messageType"]) == MESSAGE_TYPE_EXTERNAL:
         return "finalized"
-    return "accepted" if bool(node["onAcceptance"]) else "finalized"
+    return "decided" if bool(node["onAcceptance"]) else "finalized"
 
 
 def _genvm_recipient(
@@ -2327,7 +2328,7 @@ def _genvm_unmetered_message_fee_allocation() -> list[dict[str, Any]]:
             "recipient": None,
             "call_key": None,
             "budget": budget,
-            "on": "accepted",
+            "on": "decided",
             "fee_params": internal_fee_params,
             "children": [],
         },

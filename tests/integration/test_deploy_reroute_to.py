@@ -67,7 +67,7 @@ pytestmark = pytest.mark.xdist_group(name="mock_validators")
 
 # Current SDK, current executor.
 CONTRACT_A = """# v0.3.0
-# { "Depends": "py-genlayer:9b8kjyda2ycxyq4ea6g4yfpnydxhd52gqba5rb8dw7krkh5mn9p0" }
+# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
 
 import genlayer as gl
 from genlayer.types import *
@@ -106,7 +106,7 @@ class RerouteModernPeer(gl.contract.Contract):
         # Synchronous cross-contract call from the current executor into a
         # contract pinned to the legacy one. The manager runs the callee in a
         # nested executor of its own, which it only knows to do because the
-        # host answers `resolve_callcontract_executor` for a callee that
+        # host answers `resolve_call_contract_executor` for a callee that
         # carries a `reroute_to`.
         return gl.contract.get_at(Address(self.peer)).view().get_storage()
 """
@@ -340,7 +340,7 @@ def test_call_from_current_to_legacy_executor(peers):
         "v0.2 -> v0.3 synchronous call to an *unpinned* callee. The limit is "
         "ours, not the legacy executor's: v0.2.17 does issue "
         "RESOLVE_CALLCONTRACT_EXECUTOR (confirmed in the host call counts), but "
-        "`Host.resolve_callcontract_executor` answers only for a callee that "
+        "`Host.resolve_call_contract_executor` answers only for a callee that "
         "carries a `reroute_to` and returns None for anything else. So the "
         "answer here is 'stay in-process', the v0.2.17 executor loads A's v0.3 "
         "code itself, and rejects it with `invalid_contract "
@@ -365,7 +365,7 @@ def pinned_peers() -> tuple[str, str]:
     """The same pair, except A is pinned to the current executor explicitly.
 
     The pin changes nothing about how A runs — it is already on that line. It
-    changes what the *host* can say about A: `resolve_callcontract_executor`
+    changes what the *host* can say about A: `resolve_call_contract_executor`
     answers from the callee's stored `reroute_to`, so an unpinned A leaves it
     with nothing to answer and the caller keeps the callee in-process.
     """

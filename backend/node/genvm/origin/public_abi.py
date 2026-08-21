@@ -11,13 +11,12 @@ class ResultCode(IntEnum):
     RETURN = 0
     USER_ERROR = 1
     VM_ERROR = 2
-    INTERNAL_ERROR = 3
 
 
-class StorageType(IntEnum):
+class StorageView(IntEnum):
     DEFAULT = 0
-    LATEST_FINAL = 1
-    LATEST_NON_FINAL = 2
+    LATEST_FINALIZED = 1
+    LATEST_DECIDED = 2
 
 
 class EntryKind(IntEnum):
@@ -28,17 +27,6 @@ class EntryKind(IntEnum):
 
 class Permissions(IntEnum):
     CAN_USE_BALANCE_FOR_MESSAGE_FEES = 1
-
-
-class _MemoryLimiterConsts(typing.NamedTuple):
-    TABLE_ENTRY: int = 64
-    FILE_MAPPING: int = 256
-    FD_ALLOCATION: int = 96
-    RUNNER_LOAD_COST: int = 4096
-    VM_SPAWN_COST: int = 134217728
-
-
-memory_limiter_consts: typing.Final = _MemoryLimiterConsts()
 
 
 class _RootOffsets(typing.NamedTuple):
@@ -54,24 +42,45 @@ class _RootOffsets(typing.NamedTuple):
 root_offsets: typing.Final = _RootOffsets()
 
 
-class _TopLimits(typing.NamedTuple):
-    NONDET_BLOCKS: int = 4096
-    LOCKED_SLOTS: int = 256
-    UPGRADERS: int = 32
-    VM_RECURSION: int = 512
-    WEB_REQUEST_MIN_SPACE: int = 65536
-    WEB_RENDER_MIN_SPACE: int = 134217728
-    MAX_FDS: int = 1024
-    WASM_CALL_DEPTH: int = 1024
-    WASM_STACK_VALUE_SLOTS: int = 65535
-
-
-top_limits: typing.Final = _TopLimits()
-
-
 class SpecialMethod(StrEnum):
     GET_SCHEMA = "#get-schema"
     ERRORED_MESSAGE = "#error"
+
+
+class _VmErrorLeaderFaultNondetOutput:
+    @staticmethod
+    def absent() -> "VmError":
+        return VmError("leader_fault nondet_output absent")
+
+    @staticmethod
+    def malformed() -> "VmError":
+        return VmError("leader_fault nondet_output malformed")
+
+    @staticmethod
+    def uses_this_error() -> "_VmErrorLeaderFaultNondetOutputUsesThisError":
+        return _VmErrorLeaderFaultNondetOutputUsesThisError()
+
+    @staticmethod
+    def extra() -> "_VmErrorLeaderFaultNondetOutputExtra":
+        return _VmErrorLeaderFaultNondetOutputExtra()
+
+
+class _VmErrorLeaderFaultNondetOutputUsesThisError:
+    @staticmethod
+    def val_str(v: str) -> "VmError":
+        return VmError(f"leader_fault nondet_output uses_this_error {v}")
+
+
+class _VmErrorLeaderFaultNondetOutputExtra:
+    @staticmethod
+    def val_str(v: str) -> "VmError":
+        return VmError(f"leader_fault nondet_output extra {v}")
+
+
+class _VmErrorLeaderFault:
+    @staticmethod
+    def nondet_output() -> "_VmErrorLeaderFaultNondetOutput":
+        return _VmErrorLeaderFaultNondetOutput()
 
 
 class _VmErrorWasmTrap:
@@ -154,28 +163,66 @@ class _VmErrorOutOfMemory:
         return VmError("out_of memory wasm_table")
 
 
+class _VmErrorOutOfReceiptMessage:
+    @staticmethod
+    def val() -> "VmError":
+        return VmError("out_of receipt message")
+
+    @staticmethod
+    def internal() -> "VmError":
+        return VmError("out_of receipt message # internal")
+
+
 class _VmErrorOutOfReceipt:
     @staticmethod
     def nondet_output() -> "VmError":
         return VmError("out_of receipt nondet_output")
 
     @staticmethod
-    def message() -> "VmError":
-        return VmError("out_of receipt message")
-
-    @staticmethod
     def event() -> "VmError":
         return VmError("out_of receipt event")
+
+    @staticmethod
+    def message() -> "_VmErrorOutOfReceiptMessage":
+        return _VmErrorOutOfReceiptMessage()
+
+
+class _VmErrorOutOfMessageFeeTotal:
+    @staticmethod
+    def val() -> "VmError":
+        return VmError("out_of message_fee total")
+
+    @staticmethod
+    def internal() -> "VmError":
+        return VmError("out_of message_fee total # internal")
+
+    @staticmethod
+    def external() -> "VmError":
+        return VmError("out_of message_fee total # external")
+
+
+class _VmErrorOutOfMessageFeeAllocationBudget:
+    @staticmethod
+    def val() -> "VmError":
+        return VmError("out_of message_fee allocation_budget")
+
+    @staticmethod
+    def internal() -> "VmError":
+        return VmError("out_of message_fee allocation_budget # internal")
+
+    @staticmethod
+    def external() -> "VmError":
+        return VmError("out_of message_fee allocation_budget # external")
 
 
 class _VmErrorOutOfMessageFee:
     @staticmethod
-    def total() -> "VmError":
-        return VmError("out_of message_fee total")
+    def total() -> "_VmErrorOutOfMessageFeeTotal":
+        return _VmErrorOutOfMessageFeeTotal()
 
     @staticmethod
-    def node() -> "VmError":
-        return VmError("out_of message_fee node")
+    def allocation_budget() -> "_VmErrorOutOfMessageFeeAllocationBudget":
+        return _VmErrorOutOfMessageFeeAllocationBudget()
 
 
 class _VmErrorOutOf:
@@ -184,8 +231,8 @@ class _VmErrorOutOf:
         return VmError("out_of storage")
 
     @staticmethod
-    def vm_recursion() -> "VmError":
-        return VmError("out_of vm_recursion")
+    def subvm_recursion() -> "VmError":
+        return VmError("out_of subvm_recursion")
 
     @staticmethod
     def nondet_blocks() -> "VmError":
@@ -216,11 +263,21 @@ class _VmErrorOutOf:
         return _VmErrorOutOfMessageFee()
 
 
-class _VmErrorFee:
+class _VmErrorFeeNoMatchingAllocation:
     @staticmethod
-    def no_matching_node() -> "VmError":
-        return VmError("fee no_matching_node")
+    def val() -> "VmError":
+        return VmError("fee no_matching_allocation")
 
+    @staticmethod
+    def internal() -> "VmError":
+        return VmError("fee no_matching_allocation # internal")
+
+    @staticmethod
+    def external() -> "VmError":
+        return VmError("fee no_matching_allocation # external")
+
+
+class _VmErrorFee:
     @staticmethod
     def below_minimum() -> "VmError":
         return VmError("fee below_minimum")
@@ -229,11 +286,25 @@ class _VmErrorFee:
     def too_many_rounds() -> "VmError":
         return VmError("fee too_many_rounds")
 
+    @staticmethod
+    def no_matching_allocation() -> "_VmErrorFeeNoMatchingAllocation":
+        return _VmErrorFeeNoMatchingAllocation()
+
 
 class _VmErrorEvm:
     @staticmethod
     def reverted() -> "VmError":
         return VmError("evm reverted")
+
+
+class _VmErrorInvalidContractRunner:
+    @staticmethod
+    def absent() -> "VmError":
+        return VmError("invalid_contract runner absent")
+
+    @staticmethod
+    def malformed() -> "VmError":
+        return VmError("invalid_contract runner malformed")
 
 
 class _VmErrorInvalidContractWasm:
@@ -256,20 +327,16 @@ class _VmErrorInvalidContract:
         return VmError("invalid_contract")
 
     @staticmethod
-    def absent_runner_comment() -> "VmError":
-        return VmError("invalid_contract absent_runner_comment")
-
-    @staticmethod
     def not_utf8_text() -> "VmError":
         return VmError("invalid_contract not_utf8_text")
 
     @staticmethod
-    def malformed_runner() -> "VmError":
-        return VmError("invalid_contract malformed_runner")
-
-    @staticmethod
     def major_mismatch() -> "VmError":
         return VmError("invalid_contract major_mismatch")
+
+    @staticmethod
+    def runner() -> "_VmErrorInvalidContractRunner":
+        return _VmErrorInvalidContractRunner()
 
     @staticmethod
     def wasm() -> "_VmErrorInvalidContractWasm":
@@ -296,12 +363,16 @@ class VmError:
         return VmError("timeout")
 
     @staticmethod
-    def absent_leader_nondet_output() -> "VmError":
-        return VmError("absent_leader_nondet_output")
+    def malformed_entry() -> "VmError":
+        return VmError("malformed_entry")
 
     @staticmethod
-    def host_forbidden() -> "VmError":
-        return VmError("host_forbidden")
+    def forbidden() -> "VmError":
+        return VmError("forbidden")
+
+    @staticmethod
+    def leader_fault() -> "_VmErrorLeaderFault":
+        return _VmErrorLeaderFault()
 
     @staticmethod
     def exit_code() -> "_VmErrorExitCode":

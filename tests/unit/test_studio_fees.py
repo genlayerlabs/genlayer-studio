@@ -1647,7 +1647,7 @@ def test_genvm_message_fee_allocation_maps_studio_nodes():
         "recipient": "0x2222222222222222222222222222222222222222",
         "call_key": bytes.fromhex("12" * 32),
         "budget": 60,
-        "on": "accepted",
+        "on": "decided",
         "fee_params": {
             "Internal": {
                 "leader_timeunits_allocation": 6,
@@ -1711,7 +1711,7 @@ def test_genvm_message_fee_allocation_nests_descendants_under_roots():
             "recipient": descendant["recipient"],
             "call_key": bytes.fromhex("34" * 32),
             "budget": 60,
-            "on": "accepted",
+            "on": "decided",
             "fee_params": {
                 "Internal": {
                     "leader_timeunits_allocation": 7,
@@ -1779,7 +1779,7 @@ def test_genvm_message_fee_allocation_keeps_legacy_gasless_messages_unmetered():
     assert [node["on"] for node in allocations] == [
         "finalized",
         "finalized",
-        "accepted",
+        "decided",
     ]
     assert all(node["recipient"] is None for node in allocations)
     assert all(node["call_key"] is None for node in allocations)

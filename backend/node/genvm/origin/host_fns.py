@@ -9,38 +9,28 @@ from enum import IntEnum
 
 class Methods(IntEnum):
     STORAGE_READ = 0
-    CONSUME_FUEL = 1
-    ETH_CALL = 2
-    GET_BALANCE = 3
-    REMAINING_FUEL_AS_GEN = 4
+    CONSUME_TIME_FEE_GEN_WEI = 1
+    EXTERNAL_CALL = 2
+    GET_BALANCE_GEN_WEI = 3
+    GET_REMAINING_TIME_FEE_GEN_WEI = 4
     NOTIFY_NONDET_DISAGREEMENT = 5
     CONSUME_RESULT = 6
-    RESOLVE_CALLCONTRACT_EXECUTOR = 7
+    RESOLVE_CALL_CONTRACT_EXECUTOR = 7
     RUN_NESTED = 8
+
+
+class ResultCode(IntEnum):
+    RETURN = 0
+    USER_ERROR = 1
+    VM_ERROR = 2
+    INTERNAL_ERROR = 3
+    FATAL_VM_ERROR = 4
 
 
 class Errors(IntEnum):
     OK = 0
     EVM_REVERTED = 1
     FORBIDDEN = 2
-
-
-class VmErrorDetail:
-    __slots__ = ("value",)
-
-    def __init__(self, value: str):
-        self.value = value
-
-    def __str__(self) -> str:
-        return self.value
-
-    @staticmethod
-    def internal() -> "VmErrorDetail":
-        return VmErrorDetail("internal")
-
-    @staticmethod
-    def external() -> "VmErrorDetail":
-        return VmErrorDetail("external")
 
 
 CURRENT_MAJOR: typing.Final[int] = 0
