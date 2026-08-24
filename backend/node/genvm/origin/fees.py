@@ -1,4 +1,5 @@
-"""Message-fee allocation tree types.
+"""
+Message-fee allocation tree types.
 
 Mirrors the executor's `genvm_common::domain::fees` module: the fee parameters
 and the nested `MessageAllocationNode` tree that is passed alongside an
@@ -44,7 +45,7 @@ class MessageAllocationNode(typing.TypedDict):
     call_key: bytes | None
     budget: int
     # Lifecycle the node matches against (only meaningful for internal messages).
-    on: typing.Literal["finalized", "accepted"]
+    on: typing.Literal["finalized", "decided"]
     fee_params: MessageAllocationNodeParams
     # Nested allocation subtree; the chain receives this flattened to
     # parent-pointer form.
@@ -66,11 +67,11 @@ DEFAULT_EXTERNAL_MESSAGE_ALLOC: MessageAllocationNode = {
     "children": [],
 }
 
-DEFAULT_INTERNAL_ACC_MESSAGE_ALLOC: MessageAllocationNode = {
+DEFAULT_INTERNAL_DEC_MESSAGE_ALLOC: MessageAllocationNode = {
     "budget": 2**200,
     "recipient": None,
     "call_key": None,
-    "on": "accepted",
+    "on": "decided",
     "fee_params": {
         "Internal": {
             "execution_budget_per_round": 2**10,

@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 import backend.node.genvm.origin.calldata as gvm_calldata
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.node.genvm.base import Host, is_valid_executor_selector
-from backend.node.genvm.origin.public_abi import StorageType
+from backend.node.genvm.origin.public_abi import StorageView
 from backend.node.types import Address
 
 from conftest import _alembic_config
@@ -32,7 +32,7 @@ LEGACY_EXECUTOR_SELECTOR = r"re:^v0\.2\."
 
 class _SingleContractStateProxy:
     """Minimal `StateProxy` stand-in: answers `genvm_executor_selector_for`
-    for one address, the way `Host.resolve_callcontract_executor` reads it
+    for one address, the way `Host.resolve_call_contract_executor` reads it
     mid-run."""
 
     def __init__(self, address: str, genvm_executor_selector: str | None):
@@ -122,7 +122,7 @@ def test_migration_backfills_legacy_selector_for_pre_existing_contracts(
         # The backfilled value must be usable end-to-end for a cross-version
         # call, not merely present in the column: it has to pass the same
         # selector grammar submit-time validation enforces, load back through
-        # `ContractSnapshot`, and let `resolve_callcontract_executor` answer a
+        # `ContractSnapshot`, and let `resolve_call_contract_executor` answer a
         # caller on another line with a routable selector instead of raising.
         assert is_valid_executor_selector(LEGACY_EXECUTOR_SELECTOR)
 
@@ -135,8 +135,8 @@ def test_migration_backfills_legacy_selector_for_pre_existing_contracts(
             contract_address, snapshot.genvm_executor_selector
         )
         resolved = asyncio.run(
-            host.resolve_callcontract_executor(
-                Address(contract_address), StorageType.DEFAULT, 6
+            host.resolve_call_contract_executor(
+                Address(contract_address), StorageView.DEFAULT, 6
             )
         )
         assert gvm_calldata.decode(resolved) == {

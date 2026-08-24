@@ -191,13 +191,17 @@ elif [[ -n "$REPO_ROOT" ]]; then
         | sed 's/^py-genlayer://' | sort -u || true)
 fi
 
-runner_tar_for_pin() {
-    local pin=$1 candidate
-    candidate="$INSTALL_DIR/runners/py-genlayer/${pin:0:2}/${pin:2}.tar"
-    if [[ -f "$candidate" ]]; then
-        printf '%s\n' "$candidate"
-        return 0
-    fi
+runner_archive_for_pin() {
+    local pin=$1 candidate ext
+    # The shared tree moved from .tar to .zip in the v0.3.0-rc7 line; the
+    # legacy-runners tree of an older executor still ships .tar.
+    for ext in zip tar; do
+        candidate="$INSTALL_DIR/runners/py-genlayer/${pin:0:2}/${pin:2}.$ext"
+        if [[ -f "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
     for candidate in "$INSTALL_DIR"/executor/*/legacy-runners/py-genlayer/"${pin:0:2}"/"${pin:2}".tar; do
         if [[ -f "$candidate" ]]; then
             printf '%s\n' "$candidate"
@@ -220,10 +224,10 @@ if [[ -n "$RUNNER_PINS_FILE" || -n "$REPO_ROOT" ]]; then
     fi
     while read -r RUNNER_PIN; do
         [[ -n "$RUNNER_PIN" ]] || continue
-        if ! RUNNER_TAR=$(runner_tar_for_pin "$RUNNER_PIN"); then
+        if ! RUNNER_ARCHIVE=$(runner_archive_for_pin "$RUNNER_PIN"); then
             error_exit "Pinned py-genlayer runner is missing: py-genlayer:$RUNNER_PIN (looked in $INSTALL_DIR/runners and $INSTALL_DIR/executor/*/legacy-runners)."
         fi
-        echo "Runner pin OK: py-genlayer:$RUNNER_PIN -> ${RUNNER_TAR#"$INSTALL_DIR"/}"
+        echo "Runner pin OK: py-genlayer:$RUNNER_PIN -> ${RUNNER_ARCHIVE#"$INSTALL_DIR"/}"
     done <<<"$RUNNER_PINS"
 fi
 

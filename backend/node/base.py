@@ -27,6 +27,7 @@ from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.node.types import Receipt, ExecutionMode, Vote, ExecutionResultStatus
 from backend.protocol_rpc.message_handler.base import IMessageHandler
 from .genvm.origin import logger as genvm_logger
+from .genvm.origin import host_fns
 from .genvm.origin import public_abi
 
 from .types import Address
@@ -734,7 +735,7 @@ class Node:
         result_code = receipt.result[0]
 
         # 1. Timeout: VM-level timeout or GenVM internal error
-        if result_code == public_abi.ResultCode.VM_ERROR:
+        if result_code == host_fns.ResultCode.VM_ERROR:
             error_message = receipt.result[1:]
             if error_message == b"timeout" or error_message.startswith(
                 b"GenVM internal error"
@@ -1045,7 +1046,7 @@ class Node:
         }
         if transaction_datetime is not None:
             assert transaction_datetime.tzinfo is not None
-            message["datetime"] = transaction_datetime.isoformat()
+            message["transaction_timestamp"] = transaction_datetime.isoformat()
         perms = "rcn"  # read/call/spawn nondet
         if not readonly:
             perms += "ws"  # write/send
@@ -1087,7 +1088,7 @@ class Node:
             result = genvmbase.ExecutionResult(
                 result=genvmbase.ExecutionError(
                     message=str(e),
-                    kind=public_abi.ResultCode.USER_ERROR,
+                    kind=host_fns.ResultCode.USER_ERROR,
                     error_code=e.__class__.__name__,
                     raw_error={
                         "fatal": False,

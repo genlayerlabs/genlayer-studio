@@ -1,4 +1,4 @@
-"""Nested cross-major call routing: `Host.resolve_callcontract_executor`.
+"""Nested cross-major call routing: `Host.resolve_call_contract_executor`.
 
 A call target that is pinned to an executor version (its snapshot carries a
 `reroute_to`) answers the genvm's resolve query with that version, so the callee
@@ -10,7 +10,7 @@ import pytest
 import backend.node.genvm.origin.calldata as gvm_calldata
 from backend.node.genvm.base import Host
 from backend.node.genvm.origin import base_host, host_fns
-from backend.node.genvm.origin.public_abi import StorageType
+from backend.node.genvm.origin.public_abi import StorageView
 from backend.node.types import Address
 
 
@@ -43,7 +43,7 @@ async def test_resolve_names_the_pinned_line_itself():
     # Not a major: every line released so far is semver major 0, so a major
     # would resolve to the newest line whichever one the pin meant.
     host = _host({ADDR_PINNED.as_hex.lower(): "v0.2.17"})
-    res = await host.resolve_callcontract_executor(ADDR_PINNED, StorageType.DEFAULT, 6)
+    res = await host.resolve_call_contract_executor(ADDR_PINNED, StorageView.DEFAULT, 6)
     assert res is not None
     assert gvm_calldata.decode(res) == {"kind": "version", "version": "v0.2.17"}
 
@@ -51,8 +51,8 @@ async def test_resolve_names_the_pinned_line_itself():
 @pytest.mark.asyncio
 async def test_resolve_returns_none_for_unpinned_target():
     host = _host({ADDR_PINNED.as_hex.lower(): "v0.2.17"})
-    res = await host.resolve_callcontract_executor(
-        ADDR_UNPINNED, StorageType.DEFAULT, 6
+    res = await host.resolve_call_contract_executor(
+        ADDR_UNPINNED, StorageView.DEFAULT, 6
     )
     assert res is None
 
@@ -66,14 +66,14 @@ async def test_resolve_reports_an_unusable_stored_pin_as_a_host_error():
     # transaction's time budget is gone.
     host = _host({ADDR_PINNED.as_hex.lower(): "banana"})
     with pytest.raises(base_host.HostException) as exc:
-        await host.resolve_callcontract_executor(ADDR_PINNED, StorageType.DEFAULT, 6)
+        await host.resolve_call_contract_executor(ADDR_PINNED, StorageView.DEFAULT, 6)
     assert exc.value.error_code != host_fns.Errors.OK
 
 
 @pytest.mark.asyncio
 async def test_resolve_treats_empty_pin_as_unpinned():
     host = _host({ADDR_PINNED.as_hex.lower(): ""})
-    res = await host.resolve_callcontract_executor(ADDR_PINNED, StorageType.DEFAULT, 6)
+    res = await host.resolve_call_contract_executor(ADDR_PINNED, StorageView.DEFAULT, 6)
     assert res is None
 
 
@@ -82,7 +82,7 @@ async def test_resolve_accepts_a_regex_selector():
     # Same grammar the migration backfill writes for pre-existing v0.2
     # contracts: a `re:`-prefixed pattern, not an exact version.
     host = _host({ADDR_PINNED.as_hex.lower(): r"re:^v0\.2\."})
-    res = await host.resolve_callcontract_executor(ADDR_PINNED, StorageType.DEFAULT, 6)
+    res = await host.resolve_call_contract_executor(ADDR_PINNED, StorageView.DEFAULT, 6)
     assert res is not None
     assert gvm_calldata.decode(res) == {"kind": "version", "version": r"re:^v0\.2\."}
 
@@ -91,5 +91,5 @@ async def test_resolve_accepts_a_regex_selector():
 async def test_resolve_rejects_a_stored_pin_with_an_invalid_regex():
     host = _host({ADDR_PINNED.as_hex.lower(): "re:("})
     with pytest.raises(base_host.HostException) as exc:
-        await host.resolve_callcontract_executor(ADDR_PINNED, StorageType.DEFAULT, 6)
+        await host.resolve_call_contract_executor(ADDR_PINNED, StorageView.DEFAULT, 6)
     assert exc.value.error_code != host_fns.Errors.OK

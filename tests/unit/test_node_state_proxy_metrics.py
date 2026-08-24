@@ -12,7 +12,7 @@ from backend.node.genvm.base import Context, ExecutionResult, ExecutionReturn
 from backend.node.genvm.base import Host as GenVMHost
 import backend.node.genvm.origin.calldata as gvm_calldata
 from backend.node.genvm.origin.base_host import RunHostAndProgramRes
-from backend.node.genvm.origin.public_abi import ResultCode
+from backend.node.genvm.origin.host_fns import ResultCode
 from backend.node.types import Address, ExecutionMode, ExecutionResultStatus
 from backend.protocol_rpc.fees import (
     GENVM_UNMETERED_DATA_FEE_BUCKET,
@@ -138,14 +138,14 @@ def test_host_provide_result_preserves_fee_metadata_from_genvm_emissions():
         result_kind=ResultCode.RETURN,
         result_data=b"ok",
         result_fingerprint=None,
-        result_storage_changes=[],
+        result_storage_deltas=[],
         result_emissions=[
             {
-                "type": "PostMessage",
+                "type": "InternalMessage",
                 "address": Address("0x" + "22" * 20),
                 "calldata": ["post", 1],
                 "value": 7,
-                "on": "accepted",
+                "on": "decided",
                 "fee_params": {
                     "leader_timeunits_allocation": 6,
                     "validator_timeunits_allocation": 10,
@@ -160,7 +160,7 @@ def test_host_provide_result_preserves_fee_metadata_from_genvm_emissions():
                 "subtree": genvm_subtree,
             },
             {
-                "type": "DeployContract",
+                "type": "InternalDeployMessage",
                 "calldata": {"init": True},
                 "code": b"class Child: pass",
                 "salt_nonce": 9,
@@ -172,7 +172,7 @@ def test_host_provide_result_preserves_fee_metadata_from_genvm_emissions():
                 "allocation_subtree": allocation_subtree,
             },
             {
-                "type": "EthSend",
+                "type": "ExternalMessage",
                 "address": Address("0x" + "44" * 20),
                 "calldata": b"\xab\xcd",
                 "value": 5,

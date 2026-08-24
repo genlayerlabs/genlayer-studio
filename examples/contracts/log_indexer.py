@@ -1,8 +1,8 @@
 # v0.3.0
 # {
 #   "Seq": [
-#     { "Depends": "py-lib-genlayer-embeddings:kr2rb2dcp01mw9khpg3tg2jasx4f82mcsy3eg08rjj1zdcm9q350" },
-#     { "Depends": "py-genlayer:9b8kjyda2ycxyq4ea6g4yfpnydxhd52gqba5rb8dw7krkh5mn9p0" }
+#     { "Depends": "py-lib-genlayer-embeddings:hqpree1t3470fnac2aeee1y5c2205k22bgk1p98sg8m3s1ndmxbg" },
+#     { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
 #   ]
 # }
 

@@ -151,7 +151,7 @@ class _NoopManagerClient:
 async def test_run_genvm_host_opts_into_cross_contract_resolution(monkeypatch):
     """Opting out is a silent downgrade, not a missing feature.
 
-    Without this flag the manager answers `resolve_callcontract_executor`
+    Without this flag the manager answers `resolve_call_contract_executor`
     itself with "stay in-process", so a pinned callee's code runs on the
     caller's executor and the pin quietly stops meaning anything.
     """

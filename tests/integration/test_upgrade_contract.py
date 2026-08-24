@@ -162,7 +162,7 @@ def write_contract_method(
 # =============================================================================
 
 CONTRACT_V1 = """# v0.3.0
-# { "Depends": "py-genlayer:9b8kjyda2ycxyq4ea6g4yfpnydxhd52gqba5rb8dw7krkh5mn9p0" }
+# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
 
 import genlayer as gl
 from genlayer.types import *
@@ -197,7 +197,7 @@ class UpgradeTest(gl.contract.Contract):
 """
 
 CONTRACT_V2 = """# v0.3.0
-# { "Depends": "py-genlayer:9b8kjyda2ycxyq4ea6g4yfpnydxhd52gqba5rb8dw7krkh5mn9p0" }
+# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
 
 import genlayer as gl
 from genlayer.types import *
@@ -236,7 +236,7 @@ class UpgradeTest(gl.contract.Contract):
 """
 
 CONTRACT_V3_WITH_NEW_STATE = """# v0.3.0
-# { "Depends": "py-genlayer:9b8kjyda2ycxyq4ea6g4yfpnydxhd52gqba5rb8dw7krkh5mn9p0" }
+# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
 
 import genlayer as gl
 from genlayer.types import *
@@ -277,7 +277,7 @@ class UpgradeTest(gl.contract.Contract):
 """
 
 INVALID_CONTRACT = """# v0.3.0
-# { "Depends": "py-genlayer:9b8kjyda2ycxyq4ea6g4yfpnydxhd52gqba5rb8dw7krkh5mn9p0" }
+# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
 
 import genlayer as gl
 from genlayer.types import *
@@ -288,7 +288,7 @@ class BrokenContract(gl.contract.Contract):
 """
 
 SIMPLE_CONTRACT = """# v0.3.0
-# { "Depends": "py-genlayer:9b8kjyda2ycxyq4ea6g4yfpnydxhd52gqba5rb8dw7krkh5mn9p0" }
+# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
 
 import genlayer as gl
 from genlayer.types import *
