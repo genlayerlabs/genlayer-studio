@@ -990,7 +990,7 @@ class Node:
         self.timing_callback("GENVM_PREPARATION_START")
 
         leader_res: None | dict[int, bytes]
-        if self.leader_receipt is None or not self.leader_receipt.eq_outputs:
+        if self.leader_receipt is None or self.leader_receipt.eq_outputs is None:
             leader_res = None
         else:
             leader_res = {

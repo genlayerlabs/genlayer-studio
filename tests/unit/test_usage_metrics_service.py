@@ -5,6 +5,7 @@ import pytest
 
 from backend.node.genvm import base as genvm_base
 from backend.node.genvm.origin import host_fns
+from backend.node.genvm.origin.leader_public_data import LeaderPublicData
 from backend.services.usage_metrics_service import UsageMetricsService
 
 
@@ -169,7 +170,7 @@ def test_provide_result_preserves_llm_token_metrics():
         result_data={"ok": True},
         result_storage_deltas=[],
         result_emissions=[],
-        result_nondet_results=[],
+        result_leader_public_data=LeaderPublicData([]).encode(),
         stdout="",
         stderr="",
         genvm_log=[],
