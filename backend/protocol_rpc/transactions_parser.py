@@ -196,8 +196,9 @@ FEE_AWARE_TOP_UP_AND_SUBMIT_APPEAL_ABI = {
     "name": "topUpAndSubmitAppeal",
 }
 
-# Keep accepting transactions produced by the currently released SDKs while
-# the toolchain migrates to exact DecisionId authority.
+# Decode transactions produced by older SDKs so the RPC boundary can return
+# the canonical CanNotAppeal error. Admission still requires the exact
+# DecisionId, matching v0.6 Consensus.
 FEE_AWARE_LEGACY_TOP_UP_AND_SUBMIT_APPEAL_ABI = {
     **FEE_AWARE_TOP_UP_FEES_ABI,
     "name": "topUpAndSubmitAppeal",

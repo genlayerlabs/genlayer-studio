@@ -2178,10 +2178,11 @@ def _handle_appeal_or_top_up_and_submit(
     # monotonic ordinal from its alternating normal/appeal round history.
     # Round 0 -> decision 1; rounds 1/2 -> decision 2; rounds 3/4 -> 3.
     current_decision_id = 1 + ((current_round + 1) // 2)
-    if (
-        expected_decision_id is not None
-        and int(expected_decision_id) != current_decision_id
-    ):
+    # v0.6 binds every appeal to one exact materialized decision.  Older SDKs
+    # emitted selectors without this argument; Studio may still decode those
+    # transactions to surface a canonical error, but must never admit the
+    # unbound appeal when deployed Consensus would reject it.
+    if expected_decision_id is None or int(expected_decision_id) != current_decision_id:
         raise InvalidTransactionError("CanNotAppeal")
 
     fee_accounting = (tx.get("data") or {}).get(FEE_ACCOUNTING_KEY)

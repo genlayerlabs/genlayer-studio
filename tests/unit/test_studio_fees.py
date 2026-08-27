@@ -8746,7 +8746,7 @@ def _decoded_appeal(
     tx_id,
     *,
     amount,
-    expected_decision_id=None,
+    expected_decision_id=1,
     fees_distribution=None,
     top_up_and_submit=False,
 ):
@@ -9102,6 +9102,34 @@ def test_submit_appeal_endpoint_rejects_stale_decision_id_before_charging():
             ),
         )
 
+    assert transactions.updated_fee_accounting is None
+    assert transactions.appeal_updates == []
+
+
+def test_submit_appeal_endpoint_rejects_missing_decision_id_before_charging():
+    accounting = _env_fee_accounting()
+    tx = _fee_accounted_tx(status="ACCEPTED", accounting=accounting)
+    transactions = _FakeTransactionsProcessor(tx)
+    charge = _env_appeal_charge(accounting)
+
+    class _MsgHandler:
+        def send_message(self, log_event, log_to_terminal=True):
+            pass
+
+    accounts = _FakeAccountsManager(balance=5000)
+    with pytest.raises(InvalidTransactionError, match="CanNotAppeal"):
+        _handle_appeal_or_top_up_and_submit(
+            accounts_manager=accounts,
+            transactions_processor=transactions,
+            msg_handler=_MsgHandler(),
+            decoded_rollup_transaction=_decoded_appeal(
+                tx["hash"],
+                amount=charge["bond"] + charge["funding"],
+                expected_decision_id=None,
+            ),
+        )
+
+    assert accounts.debits == []
     assert transactions.updated_fee_accounting is None
     assert transactions.appeal_updates == []
 
