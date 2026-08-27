@@ -5143,8 +5143,15 @@ def test_leader_timeout_bond_matches_fee_simulator_configured_round_vector():
         current_round=0,
         status="LEADER_TIMEOUT",
     )
+    bond_with_two_rotations_left = calculate_min_appeal_bond(
+        _fees_distribution(),
+        current_round=0,
+        status="LEADER_TIMEOUT",
+        leader_timeout_rotations_left=2,
+    )
 
     assert bond == 100 + 5 * 200
+    assert bond_with_two_rotations_left == 3 * (100 + 5 * 200)
 
 
 def test_leader_appeal_bonds_count_the_mandatory_attempt():
