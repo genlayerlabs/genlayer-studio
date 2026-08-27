@@ -147,6 +147,7 @@ consensus/nodes/nodes.json
 # npm
 node_modules/
 package-lock.json
+!hardhat/package-lock.json
 /package.json
 
 # Nginx TLS certificates and keys
