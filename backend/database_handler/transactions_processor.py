@@ -7,7 +7,7 @@ import random
 from sqlalchemy.orm import Session, defer, selectinload
 from sqlalchemy import or_, desc, and_, JSON, type_coerce, text
 
-from backend.node.types import Vote, Receipt, ExecutionResultStatus
+from backend.node.types import Receipt, ExecutionResultStatus
 from .models import Transactions, TransactionStatus
 from eth_utils import to_bytes, keccak, is_address, to_checksum_address
 import json
@@ -15,10 +15,23 @@ import base64
 import time
 from backend.domain.types import TransactionType
 from web3 import Web3
-from backend.consensus.types import ConsensusRound
-from backend.consensus.history import time_unit_consumption
+from backend.consensus.types import (
+    ConsensusResult,
+    ConsensusRound,
+    consensus_result_type_code,
+    consensus_vote_type_code,
+)
+from backend.consensus.history import (
+    completed_consensus_round_index,
+    completed_consensus_rounds,
+    time_unit_consumption,
+)
 from backend.consensus.utils import determine_consensus_from_votes
-from backend.protocol_rpc.fees import FEE_ACCOUNTING_KEY, normalize_fees_distribution
+from backend.protocol_rpc.fees import (
+    FEE_ACCOUNTING_KEY,
+    normalize_fees_distribution,
+    runtime_rotations_for_round,
+)
 from backend.database_handler.terminal_snapshot_pruner import (
     SnapshotArchiveReader,
     snapshot_archive_read_through_enabled,
@@ -27,7 +40,7 @@ from backend.rollup.web3_pool import Web3ConnectionPool
 
 MAX_JSON_SAFE_INTEGER = (2**53) - 1
 
-# Canonical v0.6 ITransactions.TransactionStatus ordinals (0-14). Studio-only
+# Canonical v0.6 ITransactions.TransactionStatus ordinals (0-13). Studio-only
 # states map to their on-chain equivalents (ACTIVATED -> Proposing: activation
 # transitions the on-chain tx into Proposing).
 TRANSACTION_STATUS_CODES = {
@@ -43,10 +56,9 @@ TRANSACTION_STATUS_CODES = {
     "CANCELED": 8,
     "APPEAL_REVEALING": 9,
     "APPEAL_COMMITTING": 10,
-    "READY_TO_FINALIZE": 11,
-    "VALIDATORS_TIMEOUT": 12,
-    "LEADER_TIMEOUT": 13,
-    "LEADER_REVEALING": 14,
+    "VALIDATORS_TIMEOUT": 11,
+    "LEADER_TIMEOUT": 12,
+    "LEADER_REVEALING": 13,
 }
 
 
@@ -56,38 +68,54 @@ class TransactionAddressFilter(Enum):
     FROM = "from"
 
 
-def get_validator_vote_hash(validator_address: str, vote_type: int, nonce: int) -> str:
+def get_validator_vote_hash(
+    validator_address: str,
+    vote_type: int,
+    nonce: int,
+    other_execution_fields_hash: bytes = bytes(32),
+) -> str:
     """
     Generate a hash for validator vote data using Solidity keccak.
 
     Args:
         validator_address: Address of the validator
-        vote_type: Numeric vote type (1=AGREE, 2=DISAGREE, etc.)
+        vote_type: Canonical v0.6 ``ITransactions.VoteType`` ordinal.
         nonce: Transaction nonce
 
     Returns:
         str: Hex-encoded hash with 0x prefix
     """
     vote_hash_bytes = Web3.solidity_keccak(
-        ["address", "uint8", "uint256"], [validator_address, vote_type, nonce]
+        ["address", "uint8", "bytes32", "uint256"],
+        [validator_address, vote_type, other_execution_fields_hash, nonce],
     )
     return Web3.to_hex(vote_hash_bytes)
 
 
-def get_tx_execution_hash(leader_address: str, vote_type: int) -> str:
+def get_tx_execution_hash(
+    leader_address: str,
+    vote_type: int,
+    nonce: int,
+    messages_and_other_fields_hash: bytes = bytes(32),
+) -> str:
     """
     Generate a hash for transaction execution data using Solidity keccak.
 
     Args:
         leader_address: Address of the consensus leader
-        vote_type: Numeric vote type
+        vote_type: Canonical v0.6 ``ITransactions.VoteType`` ordinal.
+        nonce: Studio's deterministic compatibility salt for this transaction.
+        messages_and_other_fields_hash: Canonical bytes32 preimage field when
+            available. Studio currently has no Solidity reveal payload, so the
+            compatibility view uses the zero sentinel consistently for leader
+            and validator hashes.
 
     Returns:
         str: Hex-encoded hash with 0x prefix
     """
     tx_execution_hash_bytes = Web3.solidity_keccak(
         ["address", "uint8", "bytes32", "uint256"],
-        [leader_address, vote_type, b"", 4444],
+        [leader_address, vote_type, messages_and_other_fields_hash, nonce],
     )
     return Web3.to_hex(tx_execution_hash_bytes)
 
@@ -250,12 +278,114 @@ class TransactionsProcessor:
         receipt = TransactionsProcessor._leader_receipt(consensus_data)
         if not isinstance(receipt, dict):
             return 0, "NOT_VOTED"
+        genvm_result = receipt.get("genvm_result")
+        if isinstance(genvm_result, dict) and str(
+            genvm_result.get("error_code") or ""
+        ) in {
+            "CONSENSUS_LEADER_EXEC_TIMEOUT",
+            "CONSENSUS_VALIDATOR_EXEC_TIMEOUT",
+        }:
+            return 3, "TIMEOUT"
         value = str(receipt.get("execution_result") or "").upper()
         if value == "SUCCESS":
             return 1, "FINISHED_WITH_RETURN"
         if value in {"ERROR", "FAILURE", "FINISHEDWITHERROR", "FINISHED_WITH_ERROR"}:
             return 2, "FINISHED_WITH_ERROR"
         return 0, "NOT_VOTED"
+
+    @staticmethod
+    def _result_type_code(result: ConsensusResult) -> int:
+        """Map Studio's decision enum to v0.6 ITransactions.ResultType."""
+
+        return consensus_result_type_code(result)
+
+    @staticmethod
+    def _rpc_raw_round(
+        transaction_data: dict,
+        completed_rounds: list[dict],
+    ) -> int:
+        """Return the raw round currently materialized by v0.6 Consensus."""
+
+        completed_raw = (
+            completed_consensus_round_index(transaction_data.get("consensus_history"))
+            if completed_rounds
+            else 0
+        )
+        status = str(transaction_data.get("status") or "").upper()
+        executing = status in {
+            "PENDING",
+            "ACTIVATED",
+            "PROPOSING",
+            "COMMITTING",
+            "REVEALING",
+            "LEADER_REVEALING",
+        }
+        if not executing:
+            return completed_raw
+
+        if transaction_data.get("appeal_undetermined") or transaction_data.get(
+            "appeal_leader_timeout"
+        ):
+            return completed_raw + 2
+        if transaction_data.get("appealed") or transaction_data.get(
+            "appeal_validators_timeout"
+        ):
+            return completed_raw + (1 if completed_raw % 2 == 0 else 2)
+
+        if completed_rounds:
+            last_outcome = str(completed_rounds[-1].get("consensus_round") or "")
+            if last_outcome in {
+                ConsensusRound.VALIDATOR_APPEAL_SUCCESSFUL.value,
+                ConsensusRound.VALIDATOR_TIMEOUT_APPEAL_SUCCESSFUL.value,
+            }:
+                return completed_raw + 1
+        return completed_raw
+
+    @staticmethod
+    def _appeal_bond_for_round(accounting: dict | None, raw_round: int) -> int:
+        """Project Studio appeal custody onto Consensus RoundData.appealBond."""
+
+        if not isinstance(accounting, dict):
+            return 0
+        entries = accounting.get("appeal_bonds")
+        if not isinstance(entries, list):
+            return 0
+        for entry in reversed(entries):
+            if not isinstance(entry, dict):
+                continue
+            source_round = int(entry.get("sourceRound", entry.get("round", 0)) or 0)
+            status = str(entry.get("status") or "").upper()
+            default_appeal_round = (
+                source_round + (1 if source_round % 2 == 0 else 2)
+                if status in {"ACCEPTED", "VALIDATORS_TIMEOUT"}
+                else source_round + 2
+            )
+            appeal_round = int(
+                entry.get("appealRound", default_appeal_round) or default_appeal_round
+            )
+            if status == "LEADER_TIMEOUT":
+                bond_rounds = {appeal_round - 1}
+            elif status == "UNDETERMINED":
+                bond_rounds = {appeal_round - 1, appeal_round}
+            else:
+                bond_rounds = {appeal_round}
+            if raw_round in bond_rounds:
+                return int(entry.get("amount", entry.get("minimumRequired", 0)) or 0)
+        return 0
+
+    @staticmethod
+    def _last_history_outcome(transaction_data: dict) -> str:
+        rounds = completed_consensus_rounds(transaction_data.get("consensus_history"))
+        return str(rounds[-1].get("consensus_round") or "") if rounds else ""
+
+    @staticmethod
+    def _is_timeout_outcome(outcome: str) -> bool:
+        return outcome in {
+            ConsensusRound.LEADER_TIMEOUT.value,
+            ConsensusRound.VALIDATORS_TIMEOUT.value,
+            ConsensusRound.LEADER_TIMEOUT_APPEAL_FAILED.value,
+            ConsensusRound.VALIDATORS_TIMEOUT_APPEAL_FAILED.value,
+        }
 
     @staticmethod
     def _leader_receipt(consensus_data: dict | None) -> dict | None:
@@ -545,28 +675,30 @@ class TransactionsProcessor:
     def _process_round_data(self, transaction_data: dict) -> dict:
         """Process round data and prepare transaction data."""
 
-        if (
-            transaction_data["consensus_history"] is not None
-            and "consensus_results" in transaction_data["consensus_history"]
-        ):
-            transaction_data["num_of_rounds"] = str(
-                len(transaction_data["consensus_history"]["consensus_results"])
-            )
-        else:
-            transaction_data["num_of_rounds"] = "0"
+        completed_rounds = completed_consensus_rounds(
+            transaction_data.get("consensus_history")
+        )
+        # Despite its historical name, ConsensusData.numOfRounds exposes the
+        # current raw round index, not a cardinality (round 0 -> 0, round 3 -> 3).
+        raw_round = self._rpc_raw_round(transaction_data, completed_rounds)
+        transaction_data["num_of_rounds"] = str(raw_round)
 
         validator_votes_name = []
         validator_votes = []
         validator_votes_hash = []
         round_validators = []
-        if (
-            transaction_data["consensus_history"] is not None
-            and "consensus_results" in transaction_data["consensus_history"]
-        ):
-            round_number = str(
-                len(transaction_data["consensus_history"]["consensus_results"]) - 1
-            )
-            last_round = transaction_data["consensus_history"]["consensus_results"][-1]
+        round_number = str(raw_round)
+        last_round_outcome = ""
+        completed_raw = (
+            completed_consensus_round_index(transaction_data["consensus_history"])
+            if completed_rounds
+            else 0
+        )
+        if completed_rounds and raw_round == completed_raw:
+            # Ignore trailing in-round UI events such as Leader Rotation. They
+            # do not create a Solidity round and cannot be the lastRound view.
+            last_round = completed_rounds[-1]
+            last_round_outcome = str(last_round.get("consensus_round") or "")
             leader = self._select_receipt(last_round.get("leader_result"), index=1)
             if (
                 leader is not None
@@ -575,7 +707,9 @@ class TransactionsProcessor:
                 and leader["node_config"].get("address") is not None
             ):
                 validator_votes_name.append(leader["vote"].upper())
-                vote_number = int(Vote.from_string(leader["vote"]))
+                vote_number = consensus_vote_type_code(
+                    leader["vote"], leader.get("execution_result")
+                )
                 validator_votes.append(vote_number)
                 leader_address = leader["node_config"]["address"]
                 validator_votes_hash.append(
@@ -585,9 +719,11 @@ class TransactionsProcessor:
                 )
                 round_validators.append(leader_address)
 
-            for validator in last_round["validator_results"]:
+            for validator in last_round.get("validator_results") or []:
                 validator_votes_name.append(validator["vote"].upper())
-                vote_number = int(Vote.from_string(validator["vote"]))
+                vote_number = consensus_vote_type_code(
+                    validator["vote"], validator.get("execution_result")
+                )
                 validator_votes.append(vote_number)
                 validator_address = validator["node_config"]["address"]
                 validator_votes_hash.append(
@@ -596,22 +732,23 @@ class TransactionsProcessor:
                     )
                 )
                 round_validators.append(validator_address)
-        else:
-            round_number = "0"
-
         # Handle upgrade transactions specially - they bypass consensus
         # and have upgrade_result instead of votes
-        if (
+        if self._is_timeout_outcome(last_round_outcome):
+            last_round_result = self._result_type_code(ConsensusResult.TIMEOUT)
+        elif (
             transaction_data.get("type") == TransactionType.UPGRADE_CONTRACT
             and transaction_data.get("consensus_data") is not None
             and "upgrade_result" in transaction_data["consensus_data"]
         ):
-            from backend.consensus.types import ConsensusResult
-
             if transaction_data["consensus_data"]["upgrade_result"] == "success":
-                last_round_result = int(ConsensusResult.MAJORITY_AGREE)
+                last_round_result = self._result_type_code(
+                    ConsensusResult.MAJORITY_AGREE
+                )
             else:
-                last_round_result = int(ConsensusResult.MAJORITY_DISAGREE)
+                last_round_result = self._result_type_code(
+                    ConsensusResult.MAJORITY_DISAGREE
+                )
         elif (
             # Handle LEADER_ONLY mode specially - no validators, so no votes to count
             # If the transaction is ACCEPTED or FINALIZED, the leader execution was successful
@@ -619,14 +756,29 @@ class TransactionsProcessor:
             and transaction_data.get("status")
             in [TransactionStatus.ACCEPTED.value, TransactionStatus.FINALIZED.value]
         ):
-            from backend.consensus.types import ConsensusResult
-
-            last_round_result = int(ConsensusResult.MAJORITY_AGREE)
+            last_round_result = self._result_type_code(ConsensusResult.MAJORITY_AGREE)
         else:
-            last_round_result = int(
+            last_round_result = self._result_type_code(
                 determine_consensus_from_votes(
                     [vote.lower() for vote in validator_votes_name]
                 )
+            )
+
+        fee_accounting = (transaction_data.get("data") or {}).get(FEE_ACCOUNTING_KEY)
+        fees_distribution = (
+            fee_accounting.get("fees_distribution")
+            if isinstance(fee_accounting, dict)
+            else None
+        )
+        if isinstance(fees_distribution, dict):
+            rotation_limit = runtime_rotations_for_round(
+                fees_distribution,
+                transaction_data.get("config_rotation_rounds"),
+                int(round_number),
+            )
+        else:
+            rotation_limit = max(
+                0, int(transaction_data.get("config_rotation_rounds") or 0)
             )
 
         transaction_data["last_round"] = {
@@ -634,10 +786,12 @@ class TransactionsProcessor:
             "leader_index": "0",
             "votes_committed": str(len(validator_votes_name)),
             "votes_revealed": str(len(validator_votes_name)),
-            "appeal_bond": "0",
+            "appeal_bond": str(self._appeal_bond_for_round(fee_accounting, raw_round)),
             "rotations_left": str(
-                (transaction_data.get("config_rotation_rounds") or 0)
-                - (transaction_data.get("rotation_count") or 0)
+                max(
+                    0,
+                    rotation_limit - int(transaction_data.get("rotation_count") or 0),
+                )
             ),
             "result": last_round_result,
             "round_validators": round_validators,
@@ -668,11 +822,11 @@ class TransactionsProcessor:
             "processing_block": "0",
             "proposal_block": "0",
         }
-        if (
-            transaction_data["consensus_history"] is not None
-            and "consensus_results" in transaction_data["consensus_history"]
-        ):
-            first_round = transaction_data["consensus_history"]["consensus_results"][0]
+        history_rounds = completed_consensus_rounds(
+            transaction_data.get("consensus_history")
+        )
+        if history_rounds:
+            first_round = history_rounds[0]
             leader = self._select_receipt(first_round.get("leader_result"), index=0)
             if (
                 leader is not None
@@ -732,7 +886,7 @@ class TransactionsProcessor:
             and "leader_receipt" in transaction_data["consensus_data"]
         ):
             leader_receipt = self._select_receipt(
-                transaction_data["consensus_data"]["leader_receipt"], index=1
+                transaction_data["consensus_data"]["leader_receipt"], index=0
             )
 
         if (
@@ -741,9 +895,17 @@ class TransactionsProcessor:
             and leader_receipt["node_config"].get("address") is not None
             and leader_receipt.get("vote") is not None
         ):
+            vote_type = self._execution_result_fields(
+                {"leader_receipt": leader_receipt}
+            )[0]
+            if vote_type == 0:
+                vote_type = consensus_vote_type_code(
+                    leader_receipt["vote"], leader_receipt.get("execution_result")
+                )
             transaction_data["tx_execution_hash"] = get_tx_execution_hash(
                 leader_receipt["node_config"]["address"],
-                int(Vote.from_string(leader_receipt["vote"])),
+                vote_type,
+                int(transaction_data.get("nonce") or 0),
             )
         else:
             transaction_data["tx_execution_hash"] = ""
@@ -837,7 +999,15 @@ class TransactionsProcessor:
         status_to_queue_type = {
             TransactionStatus.PENDING.value: "1",
             TransactionStatus.ACTIVATED.value: "1",
+            TransactionStatus.PROPOSING.value: "1",
+            TransactionStatus.COMMITTING.value: "1",
+            TransactionStatus.REVEALING.value: "1",
+            "LEADER_REVEALING": "1",
+            "APPEAL_COMMITTING": "1",
+            "APPEAL_REVEALING": "1",
             TransactionStatus.ACCEPTED.value: "2",
+            TransactionStatus.LEADER_TIMEOUT.value: "2",
+            TransactionStatus.VALIDATORS_TIMEOUT.value: "2",
             TransactionStatus.UNDETERMINED.value: "3",
         }
         transaction_data["queue_type"] = status_to_queue_type.get(
@@ -848,6 +1018,12 @@ class TransactionsProcessor:
         return transaction_data
 
     def _process_result(self, transaction_data: dict) -> dict:
+        if self._is_timeout_outcome(self._last_history_outcome(transaction_data)):
+            consensus_result = ConsensusResult.TIMEOUT
+            transaction_data["result"] = self._result_type_code(consensus_result)
+            transaction_data["result_name"] = consensus_result.value
+            return transaction_data
+
         # Handle upgrade transactions specially - they bypass consensus
         # and have upgrade_result instead of votes
         if (
@@ -855,13 +1031,11 @@ class TransactionsProcessor:
             and transaction_data.get("consensus_data") is not None
             and "upgrade_result" in transaction_data["consensus_data"]
         ):
-            from backend.consensus.types import ConsensusResult
-
             if transaction_data["consensus_data"]["upgrade_result"] == "success":
                 consensus_result = ConsensusResult.MAJORITY_AGREE
             else:
                 consensus_result = ConsensusResult.MAJORITY_DISAGREE
-            transaction_data["result"] = int(consensus_result)
+            transaction_data["result"] = self._result_type_code(consensus_result)
             transaction_data["result_name"] = consensus_result.value
             return transaction_data
 
@@ -873,10 +1047,8 @@ class TransactionsProcessor:
             TransactionStatus.ACCEPTED.value,
             TransactionStatus.FINALIZED.value,
         ]:
-            from backend.consensus.types import ConsensusResult
-
             consensus_result = ConsensusResult.MAJORITY_AGREE
-            transaction_data["result"] = int(consensus_result)
+            transaction_data["result"] = self._result_type_code(consensus_result)
             transaction_data["result_name"] = consensus_result.value
             return transaction_data
 
@@ -887,7 +1059,7 @@ class TransactionsProcessor:
         else:
             votes_temp = []
         consensus_result = determine_consensus_from_votes(votes_temp)
-        transaction_data["result"] = int(consensus_result)
+        transaction_data["result"] = self._result_type_code(consensus_result)
         transaction_data["result_name"] = consensus_result.value
         return transaction_data
 

@@ -68,6 +68,7 @@ from backend.protocol_rpc.fees import (
     message_novelty_mask,
     prepare_reveal_message_generation,
     record_external_message_execution_fees,
+    runtime_rotations_for_round,
     stamp_receipt_execution_policy,
     unwind_reveal_message_fees,
     validate_receipt_admission_caps,
@@ -76,7 +77,12 @@ from backend.rollup.consensus_service import ConsensusService
 
 import backend.validators as validators
 from backend.node.genvm.origin.host_fns import ResultCode
-from backend.consensus.types import ConsensusResult, ConsensusRound
+from backend.consensus.types import (
+    ConsensusResult,
+    ConsensusRound,
+    consensus_vote_type_code,
+)
+from backend.consensus.history import logical_fee_round_entries
 from backend.consensus.utils import determine_consensus_from_votes
 from backend.consensus.decisions import (
     decide_undetermined,
@@ -499,6 +505,7 @@ class TransactionContext:
         self.validator_nodes: list = []
         self.validation_results: list = []
         self.rotation_count: int = 0
+        self.active_fee_round: int | None = None
         self.consensus_service = consensus_service
         self.leader: dict = {}
         # Shared for the lifetime of this transaction context (leader + validators).
@@ -1289,6 +1296,17 @@ class ConsensusAlgorithm:
                     context.transactions_processor.set_transaction_contract_snapshot(
                         context.transaction.hash, None
                     )
+
+                    # The successful review is followed by one terminal normal
+                    # recomputation, not another validator-appeal pass.
+                    context.transactions_processor.set_transaction_appeal(
+                        context.transaction.hash, False
+                    )
+                    context.transaction.appealed = False
+                    context.transactions_processor.set_transaction_appeal_validators_timeout(
+                        context.transaction.hash, False
+                    )
+                    context.transaction.appeal_validators_timeout = False
 
                     await ConsensusAlgorithm.dispatch_transaction_status_update(
                         context.transactions_processor,
@@ -2118,6 +2136,7 @@ class PendingState(TransactionState):
                 context.transaction.hash
             )
         )
+        context.active_fee_round = _active_execution_fee_round(context.transaction)
 
         # Pre-effects: timestamp + reset rotation count
         pre_effects = decide_pending_pre(
@@ -2966,15 +2985,18 @@ class RevealingState(TransactionState):
         # Determine consensus result
         consensus_result = determine_consensus_from_votes(list(context.votes.values()))
 
-        # Build vote reveal entries (IDLE→TIMEOUT for on-chain events)
+        # Build vote reveal entries with canonical v0.6 VoteType ordinals.
         vote_reveal_entries = []
         for validation_result in context.validation_results:
-            chain_vote = (
-                Vote.TIMEOUT
-                if validation_result.vote == Vote.IDLE
-                else validation_result.vote
+            vote_reveal_entries.append(
+                (
+                    validation_result.node_config,
+                    consensus_vote_type_code(
+                        validation_result.vote,
+                        validation_result.execution_result,
+                    ),
+                )
             )
-            vote_reveal_entries.append((validation_result.node_config, int(chain_vote)))
 
         # Leader receipt split
         if (
@@ -3010,7 +3032,10 @@ class RevealingState(TransactionState):
             appeal_validators_timeout=context.transaction.appeal_validators_timeout,
             appeal_undetermined=context.transaction.appeal_undetermined,
             rotation_count=context.rotation_count,
-            config_rotation_rounds=context.transaction.config_rotation_rounds,
+            config_rotation_rounds=_runtime_rotation_limit(
+                context.transaction,
+                context.active_fee_round,
+            ),
             vote_reveal_entries=vote_reveal_entries,
             consensus_data_dict=context.consensus_data.to_dict(
                 strip_contract_state=True
@@ -3937,7 +3962,42 @@ def _child_config_rotation_rounds(parent_rotations: int, data: dict[str, Any]) -
         return max(0, int(parent_rotations))
     if not rotations:
         return 0
-    return min(max(0, int(parent_rotations)), *(max(0, int(v)) for v in rotations))
+    return min(max(0, int(parent_rotations)), max(max(0, int(v)) for v in rotations))
+
+
+def _active_execution_fee_round(transaction: Transaction) -> int:
+    """Resolve the raw round once, before appeal flags mutate during retries."""
+
+    entries = logical_fee_round_entries(transaction.consensus_history)
+    last_round = entries[-1][0] if entries else 0
+    if transaction.appeal_undetermined or transaction.appeal_leader_timeout:
+        return last_round + 2
+    if entries and last_round % 2 == 1:
+        # Successful validator review is followed by one terminal normal round.
+        return last_round + 1
+    return last_round
+
+
+def _runtime_rotation_limit(
+    transaction: Transaction,
+    raw_round: int | None = None,
+) -> int:
+    """Mirror Consensus' per-normal-round funded rotation allowance."""
+
+    if transaction.appealed or transaction.appeal_validators_timeout:
+        return 0
+    if raw_round is None:
+        raw_round = _active_execution_fee_round(transaction)
+
+    accounting = (transaction.data or {}).get(FEE_ACCOUNTING_KEY) or {}
+    fees_distribution = accounting.get("fees_distribution")
+    if not isinstance(fees_distribution, dict):
+        return max(0, int(transaction.config_rotation_rounds or 0))
+    return runtime_rotations_for_round(
+        fees_distribution,
+        transaction.config_rotation_rounds,
+        raw_round,
+    )
 
 
 def _emit_messages(

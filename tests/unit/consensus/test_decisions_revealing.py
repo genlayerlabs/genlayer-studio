@@ -145,11 +145,11 @@ class TestRevealingAlwaysEmitted:
 
         # First two: is_last=False, result=IDLE
         assert vote_reveals[0].extra_args[2] is False
-        assert vote_reveals[0].extra_args[3] == int(ConsensusResult.IDLE)
+        assert vote_reveals[0].extra_args[3] == 0
 
         # Last: is_last=True, result=consensus_result
         assert vote_reveals[2].extra_args[2] is True
-        assert vote_reveals[2].extra_args[3] == int(ConsensusResult.MAJORITY_AGREE)
+        assert vote_reveals[2].extra_args[3] == 1
 
     def test_timestamp_last_vote(self):
         _, effects = decide_revealing(**_base_kwargs())

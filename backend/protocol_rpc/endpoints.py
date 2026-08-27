@@ -65,8 +65,8 @@ from backend.protocol_rpc.fees import (
     validate_transaction_fee_deposit,
 )
 from backend.consensus.history import (
-    actual_leader_rotations_by_round,
     completed_consensus_round_index,
+    has_terminal_validator_appeal,
     logical_fee_round_entries,
 )
 from backend.errors.errors import InvalidAddressError, InvalidTransactionError
@@ -1930,11 +1930,10 @@ def _funded_max_rotations(
 ) -> int:
     """Mirror Consensus' submission-time rotation-capacity clamp.
 
-    Consensus seeds every normal round from one transaction-level
-    ``initialRotations`` value, then clamps that value to the smallest funded
-    entry in ``feesDistribution.rotations``. Studio must persist the same
-    effective value or it can execute attempts that the submitted fee
-    schedule never reserved.
+    ``initialRotations`` remains the transaction-wide ceiling. Consensus
+    clamps it to the largest funded entry so later normal rounds retain their
+    paid capacity; each round is separately bounded by its own schedule entry
+    at runtime.
     """
 
     data = decoded_rollup_transaction.data
@@ -1950,7 +1949,7 @@ def _funded_max_rotations(
     rotations = normalize_fees_distribution(data.args.fees_distribution)["rotations"]
     if not rotations:
         return int(requested_max_rotations)
-    return min(int(requested_max_rotations), *(int(value) for value in rotations))
+    return min(int(requested_max_rotations), max(int(value) for value in rotations))
 
 
 # `DebugMode` is ordered least- to most-permissive, and the manager gates
@@ -2152,6 +2151,8 @@ def _handle_appeal_or_top_up_and_submit(
         TransactionStatus.VALIDATORS_TIMEOUT.value,
     } or bool(tx.get("appealed")):
         raise InvalidTransactionError("CanNotAppeal")
+    if has_terminal_validator_appeal(tx.get("consensus_history")):
+        raise InvalidTransactionError("CanNotAppeal")
     appeal_window_started = tx.get("timestamp_awaiting_finalization")
     if appeal_window_started is not None:
         finality_window = int(os.environ.get("VITE_FINALITY_WINDOW", "1800"))
@@ -2207,22 +2208,6 @@ def _handle_appeal_or_top_up_and_submit(
             live_validators = tx.get("leader_timeout_validators")
             if isinstance(live_validators, list):
                 leader_timeout_live_seats = len(live_validators)
-            # Consensus prices the live `rotationsLeft` stored on the timed-out
-            # round. Studio's equivalent is the submission-clamped transaction
-            # capacity minus rotations already consumed in this logical round;
-            # the per-round fee schedule may be larger and is not the runtime
-            # counter.
-            configured = max(0, int(tx.get("config_rotation_rounds") or 0))
-            used = actual_leader_rotations_by_round(consensus_history).get(
-                current_round,
-                0,
-            )
-            replacement_rotations = max(0, configured - used)
-        elif status == TransactionStatus.UNDETERMINED.value:
-            replacement_rotations = max(
-                0,
-                int(tx.get("config_rotation_rounds") or 0),
-            )
         try:
             updated = record_appeal_bond(
                 fee_accounting,

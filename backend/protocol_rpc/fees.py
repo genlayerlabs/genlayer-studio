@@ -1985,7 +1985,12 @@ def record_appeal_bond(
             "fundingBreakdown": charge["fundingBreakdown"],
             "requiredCharge": total_required,
             "surplusRefund": surplus,
+            # Keep the legacy source-round field, and also persist the raw
+            # round that Consensus creates at admission. The RPC compatibility
+            # view needs the latter to expose RoundData.appealBond correctly.
             "round": current_round if round is None else round,
+            "sourceRound": current_round,
+            "appealRound": int(charge["appealRound"]),
             "status": status,
             "minimumRequired": bond,
             "topUpAndSubmit": bool(top_up_and_submit),
@@ -2038,11 +2043,7 @@ def calculate_appeal_charge(
         appeal_round = current_round + 2
         jury_count = 0
         if replacement_rotations is None:
-            replacement_rotations = (
-                _appeal_rotation_allowance(fees, current_round)
-                if status_value == "LEADER_TIMEOUT"
-                else int(fees["rotations"][0] if fees["rotations"] else 0)
-            )
+            replacement_rotations = _appeal_rotation_allowance(fees, current_round)
         replacement_rotations = max(0, int(replacement_rotations))
 
     pre_funded = appeal_round + (appeal_round & 1) <= int(fees["appealRounds"]) * 2
@@ -2174,10 +2175,31 @@ def _appeal_rotation_allowance(
     rotations = fees["rotations"]
     if not isinstance(rotations, list) or not rotations:
         return 0
-    current_normal_index = max(0, int(current_round)) // 2
-    if current_normal_index < len(rotations):
-        return int(rotations[current_normal_index])
-    return int(rotations[-1])
+    next_normal_index = max(0, int(current_round)) // 2 + 1
+    if next_normal_index < len(rotations):
+        return int(rotations[next_normal_index])
+    return 0
+
+
+def runtime_rotations_for_round(
+    fees_distribution: dict[str, Any],
+    transaction_rotation_cap: int | None,
+    raw_round: int,
+) -> int:
+    """Return the exact funded runtime allowance for one raw normal round."""
+
+    raw_round = max(0, int(raw_round))
+    if raw_round % 2 != 0:
+        return 0
+    fees = normalize_fees_distribution(fees_distribution)
+    normal_ordinal = raw_round // 2
+    rotations = fees["rotations"]
+    funded = (
+        int(rotations[normal_ordinal])
+        if isinstance(rotations, list) and normal_ordinal < len(rotations)
+        else 0
+    )
+    return min(max(0, int(transaction_rotation_cap or 0)), max(0, funded))
 
 
 def fill_message_fee_payload_from_allocation(

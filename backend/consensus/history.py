@@ -34,6 +34,10 @@ VALIDATOR_APPEAL_CONSENSUS_ROUNDS = {
     ConsensusRound.VALIDATOR_TIMEOUT_APPEAL_SUCCESSFUL.value,
     ConsensusRound.VALIDATORS_TIMEOUT_APPEAL_FAILED.value,
 }
+TERMINAL_VALIDATOR_APPEAL_ROUNDS = {
+    ConsensusRound.VALIDATOR_APPEAL_SUCCESSFUL.value,
+    ConsensusRound.VALIDATOR_TIMEOUT_APPEAL_SUCCESSFUL.value,
+}
 
 
 def is_completed_consensus_round(entry: dict[str, Any]) -> bool:
@@ -58,6 +62,17 @@ def completed_consensus_rounds(
 def completed_consensus_round_index(consensus_history: dict[str, Any] | None) -> int:
     entries = logical_fee_round_entries(consensus_history)
     return entries[-1][0] if entries else 0
+
+
+def has_terminal_validator_appeal(
+    consensus_history: dict[str, Any] | None,
+) -> bool:
+    """Whether a successful validator review made the next normal round final."""
+
+    return any(
+        str(entry.get("consensus_round") or "") in TERMINAL_VALIDATOR_APPEAL_ROUNDS
+        for entry in completed_consensus_rounds(consensus_history)
+    )
 
 
 def _next_logical_fee_round(previous_round: int | None, outcome: str) -> int:

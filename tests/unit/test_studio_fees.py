@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import rlp
 from eth_abi import encode
+from web3 import Web3
 
 from backend.consensus.base import (
     _apply_external_message_freeze_check,
@@ -13,11 +14,15 @@ from backend.consensus.base import (
     _child_config_rotation_rounds,
     _emit_messages,
     _get_messages_data,
+    _runtime_rotation_limit,
 )
 from backend.domain.types import TransactionType
 from backend.errors.errors import InvalidTransactionError
 from backend.database_handler.accounts_manager import _infer_final_round
-from backend.database_handler.transactions_processor import TransactionsProcessor
+from backend.database_handler.transactions_processor import (
+    TransactionsProcessor,
+    get_tx_execution_hash,
+)
 from backend.protocol_rpc.exceptions import JSONRPCError, NotFoundError
 from backend.protocol_rpc.endpoints import (
     _current_fee_round,
@@ -1158,7 +1163,7 @@ def test_endpoint_fee_envelope_accepts_exact_fee_deposit():
     _validate_fee_envelope(decoded)
 
 
-def test_submission_clamps_runtime_rotations_to_smallest_funded_round():
+def test_submission_preserves_largest_funded_round_as_global_rotation_cap():
     fees_distribution = _env_fees_distribution(
         appeals=2,
         rotations=[3, 1, 2],
@@ -1182,7 +1187,7 @@ def test_submission_clamps_runtime_rotations_to_smallest_funded_round():
         value=0,
     )
 
-    assert _funded_max_rotations(decoded, 4) == 1
+    assert _funded_max_rotations(decoded, 4) == 3
 
 
 def test_internal_child_clamps_parent_rotations_to_its_own_fee_schedule():
@@ -1193,8 +1198,41 @@ def test_internal_child_clamps_parent_rotations_to_its_own_fee_schedule():
         )
     }
 
-    assert _child_config_rotation_rounds(3, data) == 0
+    assert _child_config_rotation_rounds(3, data) == 2
     assert _child_config_rotation_rounds(1, {"calldata": b"legacy"}) == 1
+
+
+def test_runtime_rotations_follow_each_normal_round_schedule_entry():
+    accounting = _env_fee_accounting(
+        _env_fees_distribution(appeals=2, rotations=[3, 1, 2])
+    )
+    transaction = SimpleNamespace(
+        appealed=False,
+        appeal_validators_timeout=False,
+        appeal_undetermined=True,
+        appeal_leader_timeout=False,
+        consensus_history={"consensus_results": [{"consensus_round": "Undetermined"}]},
+        data={FEE_ACCOUNTING_KEY: accounting},
+        config_rotation_rounds=3,
+    )
+
+    # The appeal replays raw round 2, which uses rotations[1], not the global
+    # cap and not the smallest entry across the transaction.
+    assert _runtime_rotation_limit(transaction) == 1
+
+    # The raw round remains pinned across retries even after the state machine
+    # clears the appeal flag before selecting a replacement leader.
+    transaction.appeal_undetermined = False
+    assert _runtime_rotation_limit(transaction, raw_round=2) == 1
+
+    transaction.consensus_history = {
+        "consensus_results": [
+            {"consensus_round": "Accepted"},
+            {"consensus_round": "Validator Appeal Successful"},
+        ]
+    }
+    # The terminal recomputation is raw round 2 as well.
+    assert _runtime_rotation_limit(transaction) == 1
 
 
 def test_internal_child_uses_protocol_round_zero_committee_not_parent_size():
@@ -7209,6 +7247,16 @@ def test_leader_timeout_bond_matches_fee_simulator_configured_round_vector():
     assert bond_with_two_rotations_left == 3 * (100 + 5 * 200)
 
 
+def test_leader_timeout_bond_uses_the_next_normal_round_schedule():
+    fees_distribution = _fees_distribution(appeals=1, rotations=[0, 2])
+
+    assert calculate_min_appeal_bond(
+        fees_distribution,
+        current_round=0,
+        status="LEADER_TIMEOUT",
+    ) == 3 * (100 + 5 * 200)
+
+
 def test_leader_timeout_live_seats_gate_eligibility_not_configured_pricing():
     fees_distribution = _fees_distribution()
 
@@ -8859,11 +8907,11 @@ def test_submit_appeal_endpoint_records_separate_bond_and_typed_funding():
     ]
 
 
-def test_leader_timeout_appeal_uses_live_transaction_rotations_not_fee_schedule():
-    fees = _env_fees_distribution(rotations=[3])
+def test_leader_timeout_appeal_uses_next_normal_fee_schedule():
+    fees = _env_fees_distribution(appeals=1, rotations=[3, 2])
     accounting = _env_fee_accounting(fees)
     tx = _fee_accounted_tx(status="LEADER_TIMEOUT", accounting=accounting)
-    tx["config_rotation_rounds"] = 1
+    tx["config_rotation_rounds"] = 3
     tx["leader_timeout_validators"] = [
         "0x1111111111111111111111111111111111111111",
         "0x2222222222222222222222222222222222222222",
@@ -8875,7 +8923,7 @@ def test_leader_timeout_appeal_uses_live_transaction_rotations_not_fee_schedule(
         fees,
         current_round=0,
         status="LEADER_TIMEOUT",
-        replacement_rotations=1,
+        replacement_rotations=2,
         leader_timeout_live_seats=5,
         policy=StudioFeePolicy.from_env(),
     )
@@ -8897,10 +8945,35 @@ def test_leader_timeout_appeal_uses_live_transaction_rotations_not_fee_schedule(
 
     recorded = transactions.updated_fee_accounting["appeal_bonds"][0]
     assert recorded["minimumRequired"] == charge["bond"]
+    assert recorded["minimumRequired"] == 3 * (100 + 5 * 200)
+    assert recorded["sourceRound"] == 0
+    assert recorded["appealRound"] == 2
     assert recorded["fundingBreakdown"] == charge["fundingBreakdown"]
-    assert recorded["fundingBreakdown"]["executionBacking"] == (
-        3 * int(fees["executionBudgetPerRound"])
-    )
+    assert recorded["fundingBreakdown"]["executionBacking"] == 0
+
+
+def test_submit_appeal_rejects_terminal_validator_recomputation():
+    tx = _fee_accounted_tx(status="ACCEPTED")
+    tx["consensus_history"] = {
+        "consensus_results": [
+            {"consensus_round": "Accepted"},
+            {"consensus_round": "Validator Appeal Successful"},
+            {"consensus_round": "Accepted"},
+        ]
+    }
+    transactions = _FakeTransactionsProcessor(tx)
+
+    class _MsgHandler:
+        def send_message(self, log_event, log_to_terminal=True):
+            pass
+
+    with pytest.raises(InvalidTransactionError, match="CanNotAppeal"):
+        _handle_appeal_or_top_up_and_submit(
+            accounts_manager=_FakeAccountsManager(balance=0),
+            transactions_processor=transactions,
+            msg_handler=_MsgHandler(),
+            decoded_rollup_transaction=_decoded_appeal(tx["hash"], amount=10**30),
+        )
 
 
 def test_submit_appeal_prices_against_frozen_activation_pool():
@@ -9164,6 +9237,18 @@ def test_current_fee_round_ignores_rotation_events_and_expands_leader_appeal():
     assert _infer_final_round(consensus_history) == 2
 
 
+def test_current_fee_round_skips_even_gaps_between_failed_validator_appeals():
+    consensus_history = {
+        "consensus_results": [
+            {"consensus_round": "Accepted"},
+            {"consensus_round": "Validator Appeal Failed"},
+            {"consensus_round": "Validator Appeal Failed"},
+        ]
+    }
+
+    assert _current_fee_round(consensus_history) == 3
+
+
 def _processor_transaction(*, accounting=None, execution_result=None):
     consensus_data = None
     if execution_result is not None:
@@ -9234,6 +9319,53 @@ def test_transaction_status_details_rpc_shape_includes_canonical_status_code():
     }
 
 
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [
+        ("VALIDATORS_TIMEOUT", 11),
+        ("LEADER_TIMEOUT", 12),
+        ("LEADER_REVEALING", 13),
+    ],
+)
+def test_transaction_status_details_rpc_uses_consensus_v06_timeout_ordinals(
+    status, code
+):
+    class _Processor:
+        def get_transaction_status(self, transaction_hash):
+            return TransactionsProcessor._status_payload(status)
+
+    assert get_transaction_status_details(_Processor(), "0x1234") == {
+        "status": status,
+        "statusCode": code,
+    }
+
+
+@pytest.mark.parametrize(
+    ("status", "queue_type"),
+    [
+        ("PENDING", "1"),
+        ("PROPOSING", "1"),
+        ("COMMITTING", "1"),
+        ("REVEALING", "1"),
+        ("APPEAL_COMMITTING", "1"),
+        ("APPEAL_REVEALING", "1"),
+        ("LEADER_REVEALING", "1"),
+        ("ACCEPTED", "2"),
+        ("LEADER_TIMEOUT", "2"),
+        ("VALIDATORS_TIMEOUT", "2"),
+        ("UNDETERMINED", "3"),
+        ("FINALIZED", "0"),
+        ("CANCELED", "0"),
+    ],
+)
+def test_transaction_queue_type_matches_consensus_v06_status_family(status, queue_type):
+    processor = TransactionsProcessor.__new__(TransactionsProcessor)
+
+    result = processor._process_queue({"status": status})
+
+    assert result["queue_type"] == queue_type
+
+
 def test_transaction_status_details_rpc_raises_not_found():
     class _Processor:
         def get_transaction_status(self, transaction_hash):
@@ -9257,6 +9389,298 @@ def test_transaction_payload_maps_execution_result_name():
     assert parsed["txExecutionResultName"] == "FINISHED_WITH_RETURN"
     assert failed["txExecutionResult"] == 2
     assert failed["txExecutionResultName"] == "FINISHED_WITH_ERROR"
+
+
+def test_transaction_payload_maps_execution_timeout_to_vote_type_timeout():
+    assert TransactionsProcessor._execution_result_fields(
+        {
+            "leader_receipt": [
+                {
+                    "execution_result": "ERROR",
+                    "genvm_result": {"error_code": "CONSENSUS_LEADER_EXEC_TIMEOUT"},
+                }
+            ]
+        }
+    ) == (3, "TIMEOUT")
+
+
+@pytest.mark.parametrize(
+    ("result", "code"),
+    [
+        ("MAJORITY_AGREE", 1),
+        ("MAJORITY_DISAGREE", 2),
+        ("TIMEOUT", 3),
+        ("DETERMINISTIC_VIOLATION", 4),
+        ("NO_MAJORITY", 5),
+    ],
+)
+def test_transaction_round_result_uses_consensus_v06_result_type(result, code):
+    from backend.consensus.types import ConsensusResult
+
+    assert TransactionsProcessor._result_type_code(ConsensusResult(result)) == code
+
+
+def test_transaction_round_payload_uses_raw_round_index_and_ignores_rotation_events():
+    processor = TransactionsProcessor.__new__(TransactionsProcessor)
+    leader = {
+        "vote": "agree",
+        "execution_result": "SUCCESS",
+        "node_config": {"address": "0x1111111111111111111111111111111111111111"},
+    }
+    transaction = {
+        "consensus_history": {
+            "consensus_results": [
+                {
+                    "consensus_round": "Accepted",
+                    "leader_result": [leader, leader],
+                    "validator_results": [],
+                },
+                {
+                    "consensus_round": "Leader Rotation",
+                    "leader_result": [],
+                    "validator_results": [],
+                },
+            ]
+        },
+        "data": {},
+        "nonce": 7,
+        "config_rotation_rounds": 0,
+        "rotation_count": 0,
+        "type": TransactionType.RUN_CONTRACT,
+        "status": "ACCEPTED",
+        "execution_mode": "NORMAL",
+    }
+
+    result = processor._process_round_data(transaction)
+
+    # ConsensusData.numOfRounds is the current raw index despite its name.
+    assert result["num_of_rounds"] == "0"
+    assert result["last_round"]["round"] == "0"
+    assert result["last_round"]["validator_votes"] == [1]
+
+
+def test_transaction_round_payload_handles_empty_history_and_raw_appeal_gaps():
+    processor = TransactionsProcessor.__new__(TransactionsProcessor)
+    base = {
+        "data": {},
+        "nonce": 7,
+        "config_rotation_rounds": 0,
+        "rotation_count": 0,
+        "type": TransactionType.RUN_CONTRACT,
+        "status": "PENDING",
+        "execution_mode": "NORMAL",
+    }
+
+    empty = processor._process_round_data(
+        {**base, "consensus_history": {"consensus_results": []}}
+    )
+    assert empty["num_of_rounds"] == "0"
+    assert empty["last_round"]["round"] == "0"
+
+    rounds = [
+        {
+            "consensus_round": outcome,
+            "leader_result": [],
+            "validator_results": [],
+        }
+        for outcome in [
+            "Accepted",
+            "Validator Appeal Failed",
+            "Validator Appeal Failed",
+        ]
+    ]
+    appealed = processor._process_round_data(
+        {**base, "consensus_history": {"consensus_results": rounds}}
+    )
+    assert appealed["num_of_rounds"] == "3"
+    assert appealed["last_round"]["round"] == "3"
+
+
+@pytest.mark.parametrize(
+    (
+        "status",
+        "active_flags",
+        "history_outcomes",
+        "bond_status",
+        "appeal_round",
+        "expected_round",
+        "expected_bond",
+    ),
+    [
+        ("REVEALING", {"appealed": True}, ["Accepted"], "ACCEPTED", 1, 1, 1400),
+        (
+            "PROPOSING",
+            {"appeal_undetermined": True},
+            ["Undetermined"],
+            "UNDETERMINED",
+            2,
+            2,
+            2300,
+        ),
+        (
+            "PROPOSING",
+            {"appeal_leader_timeout": True},
+            ["Leader Timeout"],
+            "LEADER_TIMEOUT",
+            2,
+            2,
+            0,
+        ),
+        (
+            "PROPOSING",
+            {},
+            ["Accepted", "Validator Appeal Successful"],
+            "ACCEPTED",
+            1,
+            2,
+            0,
+        ),
+    ],
+)
+def test_transaction_round_payload_projects_active_v06_round_and_bond(
+    status,
+    active_flags,
+    history_outcomes,
+    bond_status,
+    appeal_round,
+    expected_round,
+    expected_bond,
+):
+    processor = TransactionsProcessor.__new__(TransactionsProcessor)
+    rounds = [
+        {
+            "consensus_round": outcome,
+            "leader_result": [],
+            "validator_results": [],
+        }
+        for outcome in history_outcomes
+    ]
+    transaction = {
+        "consensus_history": {"consensus_results": rounds},
+        "data": {
+            FEE_ACCOUNTING_KEY: {
+                "appeal_bonds": [
+                    {
+                        "sourceRound": 0,
+                        "appealRound": appeal_round,
+                        "status": bond_status,
+                        "amount": 1400 if bond_status == "ACCEPTED" else 2300,
+                    }
+                ]
+            }
+        },
+        "nonce": 7,
+        "config_rotation_rounds": 0,
+        "rotation_count": 0,
+        "type": TransactionType.RUN_CONTRACT,
+        "status": status,
+        "execution_mode": "NORMAL",
+        **active_flags,
+    }
+
+    result = processor._process_round_data(transaction)
+
+    assert result["num_of_rounds"] == str(expected_round)
+    assert result["last_round"]["round"] == str(expected_round)
+    assert result["last_round"]["appeal_bond"] == str(expected_bond)
+    assert result["last_round"]["validator_votes"] == []
+
+
+def test_execution_hash_uses_the_transaction_nonce_in_the_v06_preimage():
+    leader = "0x1111111111111111111111111111111111111111"
+
+    expected = Web3.to_hex(
+        Web3.solidity_keccak(
+            ["address", "uint8", "bytes32", "uint256"],
+            [leader, 1, bytes(32), 7],
+        )
+    )
+
+    assert get_tx_execution_hash(leader, 1, 7) == expected
+    assert get_tx_execution_hash(leader, 1, 7) != get_tx_execution_hash(leader, 1, 8)
+
+
+@pytest.mark.parametrize(
+    ("vote", "execution_result", "code"),
+    [
+        ("agree", "SUCCESS", 1),
+        ("agree", "ERROR", 2),
+        ("timeout", None, 3),
+        ("idle", None, 3),
+        ("disagree", None, 4),
+        ("deterministic_violation", None, 5),
+    ],
+)
+def test_studio_votes_map_to_consensus_v06_vote_type(vote, execution_result, code):
+    from backend.consensus.types import consensus_vote_type_code
+
+    assert consensus_vote_type_code(vote, execution_result) == code
+
+
+@pytest.mark.parametrize(
+    ("votes", "code"),
+    [
+        ({"a": "agree", "b": "agree", "c": "disagree"}, 1),
+        ({"a": "disagree", "b": "disagree", "c": "agree"}, 2),
+        ({"a": "timeout", "b": "idle", "c": "agree"}, 3),
+        (
+            {
+                "a": "deterministic_violation",
+                "b": "deterministic_violation",
+                "c": "agree",
+            },
+            4,
+        ),
+        ({"a": "agree", "b": "disagree"}, 5),
+    ],
+)
+def test_transaction_top_level_result_uses_consensus_v06_result_type(votes, code):
+    processor = TransactionsProcessor.__new__(TransactionsProcessor)
+    transaction = {
+        "type": TransactionType.RUN_CONTRACT,
+        "status": "ACCEPTED",
+        "execution_mode": "NORMAL",
+        "consensus_data": {"votes": votes},
+    }
+
+    assert processor._process_result(transaction)["result"] == code
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "Leader Timeout",
+        "Validators Timeout",
+        "Leader Timeout Appeal Failed",
+        "Validators Timeout Appeal Failed",
+    ],
+)
+def test_timeout_history_sets_top_level_and_round_result_without_validator_votes(
+    outcome,
+):
+    processor = TransactionsProcessor.__new__(TransactionsProcessor)
+    transaction = {
+        "consensus_history": {
+            "consensus_results": [
+                {
+                    "consensus_round": outcome,
+                    "leader_result": [],
+                    "validator_results": [],
+                }
+            ]
+        },
+        "consensus_data": {"votes": {}},
+        "data": {},
+        "nonce": 7,
+        "config_rotation_rounds": 0,
+        "rotation_count": 0,
+        "type": TransactionType.RUN_CONTRACT,
+        "status": "FINALIZED",
+        "execution_mode": "NORMAL",
+    }
+
+    assert processor._process_result(dict(transaction))["result"] == 3
+    assert processor._process_round_data(dict(transaction))["last_round"]["result"] == 3
 
 
 def test_transaction_payload_includes_canonical_fee_object_with_decimal_strings():

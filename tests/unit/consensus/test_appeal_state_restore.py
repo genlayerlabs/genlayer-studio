@@ -135,6 +135,7 @@ class TestValidatorAppealStateRestore:
         contract_processor.update_contract_state.assert_called_once_with(
             CONTRACT_ADDRESS, accepted_state=stored_accepted
         )
+        transactions_processor.set_transaction_appeal.assert_called_with(TX_HASH, False)
 
     @pytest.mark.asyncio
     async def test_missing_snapshot_non_deploy_unfetchable_skips_restore(

@@ -32,7 +32,11 @@ from backend.consensus.effects import (
     SetTimestampLastVoteEffect,
     Effect,
 )
-from backend.consensus.types import ConsensusResult, ConsensusRound
+from backend.consensus.types import (
+    ConsensusResult,
+    ConsensusRound,
+    consensus_result_type_code,
+)
 
 # ── UndeterminedState ──────────────────────────────────────────────
 
@@ -604,7 +608,7 @@ def decide_revealing(
                     node_config["address"],
                     chain_vote_int,
                     is_last,
-                    int(consensus_result) if is_last else int(ConsensusResult.IDLE),
+                    consensus_result_type_code(consensus_result) if is_last else 0,
                 ),
             )
         )
