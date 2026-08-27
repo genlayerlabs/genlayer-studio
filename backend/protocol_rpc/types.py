@@ -30,6 +30,7 @@ class EndpointResult:
 @dataclass
 class DecodedsubmitAppealDataArgs:
     tx_id: str
+    expected_decision_id: int | None = None
     fees_distribution: dict | None = None
     top_up_and_submit: bool = False
 

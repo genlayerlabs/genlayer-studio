@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import copy
 import os
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import Any, Callable
 
 import rlp
@@ -14,7 +14,6 @@ from backend.consensus.history import (
     completed_consensus_rounds,
 )
 from backend.consensus.types import ConsensusRound
-
 
 VALIDATORS_PER_ROUND = (
     5,
@@ -81,7 +80,10 @@ DEFAULT_LEADER_TIMEUNITS_ALLOCATION = 100
 DEFAULT_VALIDATOR_TIMEUNITS_ALLOCATION = 200
 DEFAULT_PRICE_CAP_HEADROOM_BPS = 12_000
 DEFAULT_PARENT_MESSAGE_RECEIPT_HEADROOM = 10_000
+DEFAULT_TIME_UNIT_OVERLAY_BPS = 1_500
 GENVM_UNMETERED_DATA_FEE_BUCKET = (1 << 256) - 1
+SUCCESSFUL_APPEAL_REWARD_NUMERATOR = 5
+SUCCESSFUL_APPEAL_REWARD_DENOMINATOR = 2
 
 
 class FeeValidationError(ValueError):
@@ -152,6 +154,10 @@ class InvalidAppealBond(FeeValidationError):
     pass
 
 
+class TopUpCannotExtendSchedule(FeeValidationError):
+    pass
+
+
 class MessageDeclaredBudgetInsufficient(FeeValidationError):
     pass
 
@@ -209,6 +215,7 @@ class StudioFeePolicy:
     extra_exec_gas: int = 210_000
     max_allocation_tree_depth: int = 5
     max_messages_per_tx: int = 0
+    time_unit_overlay_bps: int = 0
 
     @classmethod
     def from_env(cls) -> "StudioFeePolicy":
@@ -242,6 +249,10 @@ class StudioFeePolicy:
                 "GENLAYER_STUDIO_MAX_ALLOCATION_TREE_DEPTH", 5
             ),
             max_messages_per_tx=_env_int("GENLAYER_STUDIO_MAX_MESSAGES_PER_TX", 0),
+            time_unit_overlay_bps=_env_int(
+                "GENLAYER_STUDIO_TIME_UNIT_OVERLAY_BPS",
+                DEFAULT_TIME_UNIT_OVERLAY_BPS,
+            ),
         )
 
     def estimate_propose_receipt_bytes(self, eq_outputs_length: int) -> int:
@@ -335,7 +346,15 @@ class StudioFeePolicy:
 
     @classmethod
     def from_snapshot(cls, snapshot: dict[str, Any]) -> "StudioFeePolicy":
-        return cls(**{field.name: int(snapshot[field.name]) for field in fields(cls)})
+        # Snapshots created before the overlay field was introduced remain
+        # valid and preserve the economics under which they were funded.
+        defaults = cls()
+        return cls(
+            **{
+                field.name: int(snapshot.get(field.name, getattr(defaults, field.name)))
+                for field in fields(cls)
+            }
+        )
 
 
 def _accounting_policy(
@@ -441,9 +460,6 @@ def calculate_time_unit_fees_through_round(
         raise InvalidAppealRounds("InvalidAppealRounds")
 
     capped_final_round = min(max(0, int(final_round)), int(fees["appealRounds"]) * 2)
-    if validator_index + capped_final_round >= len(VALIDATORS_PER_ROUND):
-        raise InvalidNumOfValidators("InvalidNumOfValidators")
-
     leader_timeunits = int(fees["leaderTimeunitsAllocation"])
     validator_timeunits = int(fees["validatorTimeunitsAllocation"])
     actual_rotations = actual_leader_rotations_by_round(consensus_history)
@@ -468,7 +484,7 @@ def calculate_time_unit_fees_through_round(
         else:
             rotations_this_round = 1
         total += _calculate_fee_for_round(
-            VALIDATORS_PER_ROUND[validator_index + offset],
+            _validators_per_round_safe(offset),
             rotations_this_round,
             leader_timeunits,
             validator_timeunits,
@@ -488,16 +504,37 @@ def calculate_round_fees(
     num_of_validators: int,
     round: int = 0,
     policy: StudioFeePolicy | None = None,
+    *,
+    enforce_gen_price_cap: bool = True,
 ) -> int:
     fees = normalize_fees_distribution(fees_distribution)
     policy = policy or StudioFeePolicy()
 
     if round == 0:
-        total = _calculate_initial_round_total(fees, num_of_validators)
+        time_unit_work = _calculate_initial_round_total(fees, num_of_validators)
+        appeal_profit_reserve = _calculate_appeal_profit_reserve(fees)
     else:
-        total = _calculate_appeal_round_total(fees, round)
+        time_unit_work = _calculate_appeal_round_total(fees, round)
+        appeal_profit_reserve = 0
 
-    total = _apply_time_unit_price(total, int(fees["maxPriceGenPerTimeUnit"]), policy)
+    max_price = int(fees["maxPriceGenPerTimeUnit"])
+    priced_work = _apply_time_unit_price(
+        time_unit_work,
+        max_price,
+        policy,
+        enforce_cap=enforce_gen_price_cap,
+    )
+    priced_profit_reserve = _apply_time_unit_price(
+        appeal_profit_reserve,
+        max_price,
+        policy,
+        enforce_cap=enforce_gen_price_cap,
+    )
+    total = (
+        priced_work
+        + _time_unit_overlay(priced_work, policy.time_unit_overlay_bps)
+        + priced_profit_reserve
+    )
     _enforce_gas_price_cap(
         policy.storage_unit_price, int(fees["storageFeeMaxGasPrice"])
     )
@@ -584,6 +621,7 @@ def studio_fee_config(policy: StudioFeePolicy | None = None) -> dict[str, Any]:
             ),
             "maxAllocationTreeDepth": str(policy.max_allocation_tree_depth),
             "maxMessagesPerTx": str(policy.max_messages_per_tx),
+            "timeUnitOverlayBps": str(policy.time_unit_overlay_bps),
         },
         "capabilities": {
             "messageFees": {
@@ -869,13 +907,31 @@ def apply_fee_top_up(
         raise InsufficientFees("InsufficientFees")
 
     primary_amount = amount - incoming_message_fees
+    updated = copy.deepcopy(accounting)
+    current = normalize_fees_distribution(updated.get("fees_distribution") or {})
+    merged = merge_fees_distribution(current, incoming)
     if perform_fee_checks:
-        required_primary = calculate_round_fees(incoming, num_of_validators, 0, policy)
-        if required_primary > primary_amount:
+        quote_before = (
+            calculate_round_fees(
+                current,
+                num_of_validators,
+                0,
+                policy,
+                enforce_gen_price_cap=False,
+            )
+            if current["rotations"]
+            else 0
+        )
+        quote_after = calculate_round_fees(
+            merged,
+            num_of_validators,
+            0,
+            policy,
+            enforce_gen_price_cap=False,
+        )
+        if quote_after - quote_before > primary_amount:
             raise InsufficientFees("InsufficientFeesForRound")
 
-    updated = copy.deepcopy(accounting)
-    merged = merge_fees_distribution(updated.get("fees_distribution") or {}, incoming)
     if (
         int(merged["executionBudgetPerRound"]) > 0
         and int(merged["executionBudgetPerRound"])
@@ -917,50 +973,184 @@ def record_appeal_bond(
     round: int | None = None,
     fees_distribution: dict[str, Any] | None = None,
     top_up_and_submit: bool = False,
+    terminal_committee_upper_bound: int | None = None,
+    replacement_rotations: int | None = None,
+    time_unit_overlay_bps: int | None = None,
     policy: StudioFeePolicy | None = None,
 ) -> dict[str, Any]:
     updated = copy.deepcopy(accounting)
     policy = _accounting_policy(updated, policy)
+    if time_unit_overlay_bps is not None:
+        # Consensus prices the developer/DAO overlay at appeal admission;
+        # unlike the transaction's GEN multiplier, this split is not locked at
+        # initial activation.
+        policy = replace(
+            policy,
+            time_unit_overlay_bps=int(time_unit_overlay_bps),
+        )
     amount = int(amount)
 
-    min_required = 0
-    if status is not None:
-        min_required = calculate_min_appeal_bond(
-            updated.get("fees_distribution") or {},
-            current_round=current_round,
-            status=status,
-            policy=policy,
-        )
-        if amount < min_required:
-            raise InvalidAppealBond("InvalidAppealBond")
+    if status is None:
+        raise InvalidAppealBond("InvalidAppealBond")
+    charge = calculate_appeal_charge(
+        updated.get("fees_distribution") or {},
+        current_round=current_round,
+        status=status,
+        terminal_committee_upper_bound=terminal_committee_upper_bound,
+        replacement_rotations=replacement_rotations,
+        policy=policy,
+    )
+    bond = int(charge["bond"])
+    funding = int(charge["funding"])
+    total_required = bond + funding
+    if bond <= 0 or amount < total_required:
+        raise InvalidAppealBond("InvalidAppealBond")
 
-    if top_up_and_submit:
-        updated["primary_fee_budget"] = (
-            int(updated.get("primary_fee_budget", 0)) + amount
-        )
-        updated["paid_fee_value"] = int(updated.get("paid_fee_value", 0)) + amount
+    if bool(charge["extendsSchedule"]):
         merged = normalize_fees_distribution(updated.get("fees_distribution") or {})
         merged["appealRounds"] = int(merged["appealRounds"]) + 1
+        rotations = list(merged["rotations"])
+        while len(rotations) < int(merged["appealRounds"]) + 1:
+            rotations.append(int(charge["replacementRotations"]))
+        merged["rotations"] = rotations
         updated["fees_distribution"] = merged
         updated["execution_budget_total"] = int(
             merged["executionBudgetPerRound"]
         ) * get_leader_rounds(merged)
 
-    updated["appeal_bonds_total"] = int(updated.get("appeal_bonds_total", 0)) + amount
+    # Bond principal stays in its own custody. Only the typed funding leg is
+    # spendable fee budget; this prevents topUpAndSubmitAppeal from counting
+    # the same payment as both bond and primary fees.
+    updated["primary_fee_budget"] = int(updated.get("primary_fee_budget", 0)) + funding
+    updated["paid_fee_value"] = int(updated.get("paid_fee_value", 0)) + funding
+    updated["appeal_funding_total"] = (
+        int(updated.get("appeal_funding_total", 0)) + funding
+    )
+    updated["appeal_bonds_total"] = int(updated.get("appeal_bonds_total", 0)) + bond
+    surplus = amount - total_required
+    updated["appeal_charge_surplus_refunded"] = (
+        int(updated.get("appeal_charge_surplus_refunded", 0)) + surplus
+    )
     updated.setdefault("appeal_bonds", []).append(
         {
             "appealer": appealer,
-            "amount": amount,
+            "amount": bond,
+            "submittedAmount": amount,
+            "funding": funding,
+            "fundingBreakdown": charge["fundingBreakdown"],
+            "requiredCharge": total_required,
+            "surplusRefund": surplus,
             "round": current_round if round is None else round,
             "status": status,
-            "minimumRequired": min_required,
+            "minimumRequired": bond,
             "topUpAndSubmit": bool(top_up_and_submit),
-            "feesDistributionIgnored": fees_distribution is not None
-            and top_up_and_submit,
+            "feesDistributionIgnored": fees_distribution is not None,
+            "extendsSchedule": bool(charge["extendsSchedule"]),
         }
     )
     _refresh_message_fee_accounting_report_if_present(updated, policy)
     return updated
+
+
+def calculate_appeal_charge(
+    fees_distribution: dict[str, Any],
+    *,
+    current_round: int,
+    status: str,
+    terminal_committee_upper_bound: int | None = None,
+    replacement_rotations: int | None = None,
+    policy: StudioFeePolicy | None = None,
+) -> dict[str, Any]:
+    """Quote the same bond + typed funding split used by Consensus admission."""
+    policy = policy or StudioFeePolicy()
+    fees = normalize_fees_distribution(fees_distribution)
+    current_round = max(0, int(current_round))
+    status_value = str(status).upper()
+    bond = calculate_min_appeal_bond(
+        fees,
+        current_round=current_round,
+        status=status_value,
+        leader_timeout_rotations_left=(
+            replacement_rotations if status_value == "LEADER_TIMEOUT" else None
+        ),
+        policy=policy,
+    )
+
+    validator_appeal = status_value in {"VALIDATORS_TIMEOUT", "ACCEPTED"}
+    leader_appeal = status_value in {"LEADER_TIMEOUT", "UNDETERMINED"}
+    if not validator_appeal and not leader_appeal:
+        raise InvalidAppealBond("InvalidAppealBond")
+
+    if validator_appeal:
+        appeal_round = (
+            current_round + 1 if current_round % 2 == 0 else current_round + 2
+        )
+        jury_count = _validators_per_round_safe(current_round + 1)
+        replacement_rotations = 0
+    else:
+        appeal_round = current_round + 2
+        jury_count = 0
+        if replacement_rotations is None:
+            replacement_rotations = (
+                _appeal_rotation_allowance(fees, current_round)
+                if status_value == "LEADER_TIMEOUT"
+                else int(fees["rotations"][0] if fees["rotations"] else 0)
+            )
+        replacement_rotations = max(0, int(replacement_rotations))
+
+    pre_funded = appeal_round + (appeal_round & 1) <= int(fees["appealRounds"]) * 2
+    taxable_work = 0
+    if leader_appeal:
+        if not pre_funded:
+            taxable_work = bond
+    else:
+        scheduled_replacement = _validators_per_round_safe(appeal_round + 1)
+        replacement_count = max(
+            0,
+            int(
+                terminal_committee_upper_bound
+                if terminal_committee_upper_bound is not None
+                else scheduled_replacement
+            ),
+        )
+        if pre_funded:
+            time_units = max(0, replacement_count - scheduled_replacement) * int(
+                fees["validatorTimeunitsAllocation"]
+            )
+        else:
+            time_units = (
+                jury_count * int(fees["validatorTimeunitsAllocation"])
+                + replacement_count * int(fees["validatorTimeunitsAllocation"])
+                + int(fees["leaderTimeunitsAllocation"])
+            )
+        taxable_work = (
+            time_units * policy.gen_per_time_unit
+            if policy.gen_per_time_unit > 0
+            else time_units
+        )
+
+    appellant_profit = 0 if pre_funded else successful_appeal_profit(bond)
+    execution_slots = 0
+    if not pre_funded:
+        execution_slots = replacement_rotations + 2 if leader_appeal else 2
+    execution_backing = execution_slots * int(fees["executionBudgetPerRound"])
+    overlay = _time_unit_overlay(taxable_work, policy.time_unit_overlay_bps)
+    funding = taxable_work + overlay + appellant_profit + execution_backing
+    return {
+        "bond": bond,
+        "funding": funding,
+        "appealRound": appeal_round,
+        "juryCount": jury_count,
+        "replacementRotations": replacement_rotations,
+        "extendsSchedule": not pre_funded,
+        "fundingBreakdown": {
+            "bondPrincipal": bond,
+            "taxableWork": taxable_work,
+            "overlay": overlay,
+            "appellantProfit": appellant_profit,
+            "executionBacking": execution_backing,
+        },
+    }
 
 
 def calculate_min_appeal_bond(
@@ -968,24 +1158,39 @@ def calculate_min_appeal_bond(
     *,
     current_round: int,
     status: str,
+    leader_timeout_rotations_left: int | None = None,
     policy: StudioFeePolicy | None = None,
 ) -> int:
     policy = policy or StudioFeePolicy()
     fees = normalize_fees_distribution(fees_distribution)
     current_round = max(0, int(current_round))
     status_value = str(status).upper()
-    if status_value in {"LEADER_TIMEOUT", "UNDETERMINED"}:
+    if status_value == "LEADER_TIMEOUT":
+        rotations_left = (
+            _appeal_rotation_allowance(fees, current_round)
+            if leader_timeout_rotations_left is None
+            else max(0, int(leader_timeout_rotations_left))
+        )
+        total = _calculate_fee_for_round(
+            _validators_per_round_safe(current_round),
+            rotations_left + 1,
+            int(fees["leaderTimeunitsAllocation"]),
+            int(fees["validatorTimeunitsAllocation"]),
+        )
+        return (
+            total * policy.gen_per_time_unit if policy.gen_per_time_unit > 0 else total
+        )
+
+    if status_value == "UNDETERMINED":
         target_round = current_round + 2
-        if target_round >= len(VALIDATORS_PER_ROUND):
-            raise InvalidNumOfValidators("InvalidNumOfValidators")
         rotations = (
             int(fees["rotations"][target_round - 1])
             if target_round - 1 < len(fees["rotations"])
             else 0
         )
         total = _calculate_fee_for_round(
-            VALIDATORS_PER_ROUND[target_round],
-            rotations,
+            _validators_per_round_safe(target_round),
+            rotations + 1,
             int(fees["leaderTimeunitsAllocation"]),
             int(fees["validatorTimeunitsAllocation"]),
         )
@@ -995,9 +1200,7 @@ def calculate_min_appeal_bond(
 
     if status_value in {"VALIDATORS_TIMEOUT", "ACCEPTED"}:
         target_round = current_round + 1
-        if target_round >= len(VALIDATORS_PER_ROUND):
-            raise InvalidNumOfValidators("InvalidNumOfValidators")
-        total = VALIDATORS_PER_ROUND[target_round] * int(
+        total = _validators_per_round_safe(target_round) * int(
             fees["validatorTimeunitsAllocation"]
         )
         return (
@@ -1005,6 +1208,19 @@ def calculate_min_appeal_bond(
         )
 
     return 0
+
+
+def _appeal_rotation_allowance(
+    fees: dict[str, int | list[int]],
+    current_round: int,
+) -> int:
+    rotations = fees["rotations"]
+    if not isinstance(rotations, list) or not rotations:
+        return 0
+    current_normal_index = max(0, int(current_round)) // 2
+    if current_normal_index < len(rotations):
+        return int(rotations[current_normal_index])
+    return int(rotations[-1])
 
 
 def fill_message_fee_payload_from_allocation(
@@ -1488,7 +1704,27 @@ def settle_fee_accounting(
     execution_spent = min(
         int(updated.get("execution_fee_consumed", 0)), execution_budget
     )
-    primary_spent = min(primary_budget, time_unit_budget + execution_spent)
+    bond_settlements, bond_payout = _settle_appeal_bonds(
+        updated,
+        consensus_history=consensus_history,
+        cancel=False,
+    )
+    appeal_profit_spent = sum(
+        max(0, int(item.get("payout", 0)) - int(item.get("amount", 0)))
+        for item in bond_settlements
+        if item.get("status") == "successful"
+    )
+    time_unit_overlay_spent = _time_unit_overlay(
+        time_unit_budget,
+        policy.time_unit_overlay_bps,
+    )
+    primary_spent = min(
+        primary_budget,
+        time_unit_budget
+        + time_unit_overlay_spent
+        + appeal_profit_spent
+        + execution_spent,
+    )
     primary_refund = max(
         0, primary_budget - primary_spent - int(updated.get("primary_fee_refunded", 0))
     )
@@ -1500,15 +1736,11 @@ def settle_fee_accounting(
         - int(updated.get("message_fee_refunded", 0)),
     )
     refund = primary_refund + message_refund
-    bond_settlements, bond_payout = _settle_appeal_bonds(
-        updated,
-        consensus_history=consensus_history,
-        cancel=False,
-    )
-
     updated["status"] = "settled"
     updated["settlement_reason"] = reason
     updated["primary_fee_spent"] = primary_spent
+    updated["time_unit_overlay_spent"] = time_unit_overlay_spent
+    updated["appeal_profit_spent"] = appeal_profit_spent
     updated["primary_fee_refunded"] = (
         int(updated.get("primary_fee_refunded", 0)) + primary_refund
     )
@@ -1597,6 +1829,12 @@ def merge_fees_distribution(
             "validatorTimeunitsAllocation"
         ]
         merged["appealRounds"] = incoming_fees["appealRounds"]
+        merged["rotations"] = list(incoming_fees["rotations"])
+    elif incoming_fees["rotations"] or int(incoming_fees["appealRounds"]) != 0:
+        # Consensus treats an established schedule as immutable. Appeals are
+        # the only operation allowed to append one appeal slot plus its paired
+        # rotation entry; ordinary top-ups are pure funding.
+        raise TopUpCannotExtendSchedule("TopUpCannotExtendSchedule")
 
     merged["executionBudgetPerRound"] = int(merged["executionBudgetPerRound"]) + int(
         incoming_fees["executionBudgetPerRound"]
@@ -1604,7 +1842,6 @@ def merge_fees_distribution(
     merged["totalMessageFees"] = int(merged["totalMessageFees"]) + int(
         incoming_fees["totalMessageFees"]
     )
-    merged["rotations"] = list(merged["rotations"]) + list(incoming_fees["rotations"])
     for cap in (
         "maxPriceGenPerTimeUnit",
         "storageFeeMaxGasPrice",
@@ -1830,30 +2067,79 @@ def _calculate_appeal_round_total(
     fees: dict[str, int | list[int]],
     round: int,
 ) -> int:
-    if round >= len(VALIDATORS_PER_ROUND):
-        raise InvalidNumOfValidators("InvalidNumOfValidators")
-
     rotations = (
         int(fees["rotations"][round - 1]) if round - 1 < len(fees["rotations"]) else 0
     )
     return _calculate_fee_for_round(
-        VALIDATORS_PER_ROUND[round],
-        rotations,
+        _validators_per_round_safe(round),
+        rotations + 1,
         int(fees["leaderTimeunitsAllocation"]),
         int(fees["validatorTimeunitsAllocation"]),
     )
+
+
+def _calculate_appeal_profit_reserve(
+    fees: dict[str, int | list[int]],
+) -> int:
+    rotations = fees["rotations"]
+    if not isinstance(rotations, list):
+        raise InvalidAppealRounds("InvalidAppealRounds")
+
+    reserve = 0
+    for appeal_ordinal in range(int(fees["appealRounds"])):
+        rotations_index = appeal_ordinal + 1
+        funded_rotations = (
+            int(rotations[rotations_index]) if rotations_index < len(rotations) else 0
+        )
+        next_normal_bond = _calculate_fee_for_round(
+            _validators_per_round_safe((appeal_ordinal + 1) * 2),
+            funded_rotations + 1,
+            int(fees["leaderTimeunitsAllocation"]),
+            int(fees["validatorTimeunitsAllocation"]),
+        )
+        reserve += successful_appeal_profit(next_normal_bond)
+    return reserve
 
 
 def _apply_time_unit_price(
     total: int,
     max_price: int,
     policy: StudioFeePolicy,
+    *,
+    enforce_cap: bool = True,
 ) -> int:
-    if policy.gen_per_time_unit <= 0:
-        return total
-    if max_price > 0 and policy.gen_per_time_unit > max_price:
+    if enforce_cap and max_price > 0 and policy.gen_per_time_unit > max_price:
         raise MaxPriceExceeded("MaxPriceExceeded")
-    return total * policy.gen_per_time_unit
+    # Consensus reserves at the caller's ceiling. The live price is checked
+    # against that ceiling and locked separately for settlement.
+    return total * max_price if max_price > 0 else total
+
+
+def _time_unit_overlay(time_unit_work: int, split_bps: int) -> int:
+    split_bps = int(split_bps)
+    if time_unit_work <= 0 or split_bps <= 0:
+        return 0
+    if split_bps >= 10_000:
+        raise FeeValidationError("InvalidTimeUnitOverlayBps")
+    return time_unit_work * split_bps // (10_000 - split_bps)
+
+
+def successful_appeal_reward(appeal_bond: int) -> int:
+    appeal_bond = int(appeal_bond)
+    return (
+        appeal_bond
+        * SUCCESSFUL_APPEAL_REWARD_NUMERATOR
+        // SUCCESSFUL_APPEAL_REWARD_DENOMINATOR
+    )
+
+
+def successful_appeal_profit(appeal_bond: int) -> int:
+    return successful_appeal_reward(appeal_bond) - int(appeal_bond)
+
+
+def _validators_per_round_safe(round: int) -> int:
+    index = min(max(0, int(round)), len(VALIDATORS_PER_ROUND) - 1)
+    return VALIDATORS_PER_ROUND[index]
 
 
 def _enforce_gas_price_cap(actual_price: int, max_price: int) -> None:
@@ -1891,10 +2177,11 @@ def _calculate_fees(
     rotations_index = 1
     rotations_this_round = 1
     appeal_rounds = int(fees_distribution["appealRounds"])
-    if validator_index + (appeal_rounds * 2) >= len(VALIDATORS_PER_ROUND):
-        raise InvalidNumOfValidators("InvalidNumOfValidators")
     for offset in range(1, (appeal_rounds * 2) + 1):
-        round_validators = VALIDATORS_PER_ROUND[validator_index + offset]
+        # Consensus uses the configured round ladder by absolute round after
+        # the caller-selected initial committee. Rounds beyond the published
+        # ladder saturate at its final size.
+        round_validators = _validators_per_round_safe(offset)
         if offset % 2 == 0 and rotations_index < len(rotations):
             rotations_this_round = int(rotations[rotations_index]) + 1
             rotations_index += 1
@@ -1976,7 +2263,7 @@ def _settle_appeal_bonds(
             payout = amount
         elif outcome in APPEAL_SUCCESS_ROUNDS:
             status = "successful"
-            payout = amount * 3 // 2
+            payout = successful_appeal_reward(amount)
         else:
             status = "forfeited"
             payout = 0
@@ -2140,6 +2427,8 @@ def _new_fee_accounting(
         "external_message_events": [],
         "appeal_bonds": [],
         "appeal_bonds_total": 0,
+        "appeal_funding_total": 0,
+        "appeal_charge_surplus_refunded": 0,
         "total_refunded": 0,
         "refunds": [],
         "top_ups": [

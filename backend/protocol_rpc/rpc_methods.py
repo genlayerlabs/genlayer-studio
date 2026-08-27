@@ -27,7 +27,6 @@ from backend.protocol_rpc.dependencies import (
 from backend.protocol_rpc.rpc_decorators import rpc
 from backend.protocol_rpc.rpc_endpoint_manager import LogPolicy
 
-
 # ---------------------------------------------------------------------------
 # Simulator endpoints
 # ---------------------------------------------------------------------------
@@ -296,6 +295,19 @@ def get_finality_window_time(
 @rpc.method("sim_getFeeConfig", log_policy=LogPolicy.debug())
 def get_fee_config() -> dict:
     return impl.get_studio_fee_config()
+
+
+@rpc.method("sim_calculateRoundFees", log_policy=LogPolicy.debug())
+def sim_calculate_round_fees(
+    fees_distribution: dict,
+    num_of_validators: int = 5,
+    round: int = 0,
+) -> str:
+    return impl.sim_calculate_round_fees(
+        fees_distribution,
+        num_of_validators,
+        round,
+    )
 
 
 @rpc.method("sim_getConsensusContract", log_policy=LogPolicy.debug())

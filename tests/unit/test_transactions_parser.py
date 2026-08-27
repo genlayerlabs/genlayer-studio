@@ -359,11 +359,19 @@ def _fee_aware_call_data(parser, function_name: str, params: tuple) -> bytes:
     return selector + parser.web3.codec.encode([input_type], [params])
 
 
-def _contract_call_data(parser, function_name: str, params: list) -> bytes:
+def _contract_call_data(
+    parser,
+    function_name: str,
+    params: list,
+    *,
+    input_count: int | None = None,
+) -> bytes:
     abi_entry = next(
         entry
         for entry in parser._get_contract_abi()
-        if entry["type"] == "function" and entry["name"] == function_name
+        if entry["type"] == "function"
+        and entry["name"] == function_name
+        and (input_count is None or len(entry["inputs"]) == input_count)
     )
     input_types = [
         parser._canonical_abi_type(abi_input) for abi_input in abi_entry["inputs"]
@@ -512,7 +520,12 @@ def test_decode_signed_transaction_fee_top_up_calls(
         nonce=8,
         to=bytes.fromhex("0000000000000000000000000000000000000000"),
         value=1400,
-        data=_contract_call_data(parser, function_name, [tx_id, fees_distribution]),
+        data=_contract_call_data(
+            parser,
+            function_name,
+            [tx_id, fees_distribution],
+            input_count=2,
+        ),
     )
 
     decoded = parser.decode_signed_transaction(raw)
@@ -579,3 +592,67 @@ def test_decode_signed_transaction_submit_appeal_uses_value_as_bond(monkeypatch)
     assert decoded.data.tx_id == tx_id
     assert decoded.data.fees_distribution is None
     assert decoded.data.top_up_and_submit is False
+
+
+def test_decode_latest_submit_appeal_preserves_expected_decision_id(monkeypatch):
+    monkeypatch.setattr(
+        "backend.protocol_rpc.transactions_parser.Account.recover_transaction",
+        lambda raw: "0x3333333333333333333333333333333333333333",
+    )
+    consensus_service = Mock()
+    consensus_service.web3 = Web3()
+    consensus_service.load_contract = Mock(return_value={"abi": []})
+    parser = TransactionParser(consensus_service)
+    tx_id = b"\x56" * 32
+
+    raw = _build_eip1559_raw(
+        nonce=10,
+        to=bytes.fromhex("0000000000000000000000000000000000000000"),
+        value=1400,
+        data=_contract_call_data(
+            parser,
+            "submitAppeal",
+            [tx_id, 7],
+            input_count=2,
+        ),
+    )
+
+    decoded = parser.decode_signed_transaction(raw)
+
+    assert decoded is not None
+    assert decoded.data.tx_id == tx_id
+    assert decoded.data.expected_decision_id == 7
+    assert decoded.data.top_up_and_submit is False
+
+
+def test_decode_latest_top_up_and_submit_appeal_preserves_decision_id(monkeypatch):
+    monkeypatch.setattr(
+        "backend.protocol_rpc.transactions_parser.Account.recover_transaction",
+        lambda raw: "0x3333333333333333333333333333333333333333",
+    )
+    consensus_service = Mock()
+    consensus_service.web3 = Web3()
+    consensus_service.load_contract = Mock(return_value={"abi": []})
+    parser = TransactionParser(consensus_service)
+    tx_id = b"\x78" * 32
+    fees_distribution = (11, 22, 2, 333, 44, 55, [3, 4, 5], 66, 77, 88)
+
+    raw = _build_eip1559_raw(
+        nonce=11,
+        to=bytes.fromhex("0000000000000000000000000000000000000000"),
+        value=2800,
+        data=_contract_call_data(
+            parser,
+            "topUpAndSubmitAppeal",
+            [tx_id, 9, fees_distribution],
+            input_count=3,
+        ),
+    )
+
+    decoded = parser.decode_signed_transaction(raw)
+
+    assert decoded is not None
+    assert decoded.fee_value == 2800
+    assert decoded.data.expected_decision_id == 9
+    assert decoded.data.top_up_and_submit is True
+    assert decoded.data.fees_distribution["rotations"] == [3, 4, 5]

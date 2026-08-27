@@ -490,6 +490,7 @@ def register_endpoints_for_fastapi(
         "sim_getFinalityWindowTime",
     )
     register(endpoints.get_studio_fee_config, "sim_getFeeConfig")
+    register(endpoints.sim_calculate_round_fees, "sim_calculateRoundFees")
     register(
         partial(endpoints.get_contract, accounts_manager), "sim_getConsensusContract"
     )

@@ -166,7 +166,39 @@ FEE_AWARE_TOP_UP_FEES_ABI = {
     "type": "function",
 }
 
+FEE_AWARE_SUBMIT_APPEAL_ABI = {
+    "inputs": [
+        {"internalType": "bytes32", "name": "_txId", "type": "bytes32"},
+        {
+            "internalType": "uint256",
+            "name": "_expectedDecisionId",
+            "type": "uint256",
+        },
+    ],
+    "name": "submitAppeal",
+    "outputs": [],
+    "stateMutability": "payable",
+    "type": "function",
+}
+
+FEE_AWARE_LEGACY_SUBMIT_APPEAL_ABI = {
+    **FEE_AWARE_SUBMIT_APPEAL_ABI,
+    "inputs": [FEE_AWARE_SUBMIT_APPEAL_ABI["inputs"][0]],
+}
+
 FEE_AWARE_TOP_UP_AND_SUBMIT_APPEAL_ABI = {
+    **FEE_AWARE_TOP_UP_FEES_ABI,
+    "inputs": [
+        FEE_AWARE_TOP_UP_FEES_ABI["inputs"][0],
+        FEE_AWARE_SUBMIT_APPEAL_ABI["inputs"][1],
+        FEE_AWARE_TOP_UP_FEES_ABI["inputs"][1],
+    ],
+    "name": "topUpAndSubmitAppeal",
+}
+
+# Keep accepting transactions produced by the currently released SDKs while
+# the toolchain migrates to exact DecisionId authority.
+FEE_AWARE_LEGACY_TOP_UP_AND_SUBMIT_APPEAL_ABI = {
     **FEE_AWARE_TOP_UP_FEES_ABI,
     "name": "topUpAndSubmitAppeal",
 }
@@ -408,6 +440,9 @@ class TransactionParser:
                                 params = decoded_data["params"]
                                 decoded_data = DecodedsubmitAppealDataArgs(
                                     tx_id=params["_txId"],
+                                    expected_decision_id=params.get(
+                                        "_expectedDecisionId"
+                                    ),
                                 )
                             elif decoded_data["function"] == "topUpFees":
                                 params = decoded_data["params"]
@@ -423,6 +458,9 @@ class TransactionParser:
                                 params = decoded_data["params"]
                                 decoded_data = DecodedsubmitAppealDataArgs(
                                     tx_id=params["_txId"],
+                                    expected_decision_id=params.get(
+                                        "_expectedDecisionId"
+                                    ),
                                     fees_distribution=self._fees_distribution_to_dict(
                                         params["_feesDistribution"]
                                     ),
@@ -681,8 +719,11 @@ class TransactionParser:
             [
                 FEE_AWARE_ADD_TRANSACTION_ABI,
                 FEE_AWARE_DEPLOY_SALTED_ABI,
+                FEE_AWARE_SUBMIT_APPEAL_ABI,
+                FEE_AWARE_LEGACY_SUBMIT_APPEAL_ABI,
                 FEE_AWARE_TOP_UP_FEES_ABI,
                 FEE_AWARE_TOP_UP_AND_SUBMIT_APPEAL_ABI,
+                FEE_AWARE_LEGACY_TOP_UP_AND_SUBMIT_APPEAL_ABI,
             ]
         )
         return contract_abi

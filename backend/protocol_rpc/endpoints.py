@@ -52,6 +52,7 @@ from backend.protocol_rpc.fees import (
     FeeValidationError,
     StudioFeePolicy,
     apply_fee_top_up,
+    calculate_round_fees,
     create_fee_accounting,
     get_leader_rounds,
     normalize_fees_distribution,
@@ -61,7 +62,11 @@ from backend.protocol_rpc.fees import (
     studio_fee_config,
     validate_transaction_fee_deposit,
 )
-from backend.consensus.history import completed_consensus_round_index
+from backend.consensus.history import (
+    actual_leader_rotations_by_round,
+    completed_consensus_round_index,
+    completed_consensus_rounds,
+)
 from backend.errors.errors import InvalidAddressError, InvalidTransactionError
 from backend.database_handler.errors import ContractNotFoundError
 
@@ -69,7 +74,6 @@ from backend.database_handler.transactions_processor import (
     TransactionAddressFilter,
     TransactionsProcessor,
 )
-
 
 logger = logging.getLogger(__name__)
 TRANSACTION_NOT_FOUND_MESSAGE = "Transaction not found"
@@ -362,6 +366,24 @@ def _enforce_pending_queue_caps(
 
 def get_studio_fee_config() -> dict[str, Any]:
     return studio_fee_config(StudioFeePolicy.from_env())
+
+
+def sim_calculate_round_fees(
+    fees_distribution: dict[str, Any],
+    num_of_validators: int = 5,
+    round: int = 0,
+) -> str:
+    """Expose Studio's canonical fee quote for cross-stack conformance tests."""
+    try:
+        quote = calculate_round_fees(
+            fees_distribution,
+            int(num_of_validators),
+            int(round),
+            StudioFeePolicy.from_env(),
+        )
+    except FeeValidationError as exc:
+        raise InvalidTransactionError(str(exc)) from exc
+    return str(quote)
 
 
 ####### ADMIN ACCESS CONTROL #######
@@ -2053,15 +2075,79 @@ def _handle_appeal_or_top_up_and_submit(
 
     fee_accounting = (tx.get("data") or {}).get(FEE_ACCOUNTING_KEY)
     if fee_accounting is not None:
+        status = str(tx.get("status") or "")
+        if status not in {
+            TransactionStatus.ACCEPTED.value,
+            TransactionStatus.UNDETERMINED.value,
+            TransactionStatus.LEADER_TIMEOUT.value,
+            TransactionStatus.VALIDATORS_TIMEOUT.value,
+        } or bool(tx.get("appealed")):
+            raise InvalidTransactionError("CanNotAppeal")
+        consensus_history = tx.get("consensus_history")
+        expected_decision_id = decoded_rollup_transaction.data.expected_decision_id
+        current_round = _current_fee_round(consensus_history)
+        # Studio has no on-chain DecisionRecord, so derive the equivalent
+        # monotonic ordinal from its alternating normal/appeal round history.
+        # Round 0 -> decision 1; rounds 1/2 -> decision 2; rounds 3/4 -> 3.
+        current_decision_id = 1 + ((current_round + 1) // 2)
+        if (
+            expected_decision_id is not None
+            and int(expected_decision_id) != current_decision_id
+        ):
+            raise InvalidTransactionError("CanNotAppeal")
+        session = getattr(accounts_manager, "session", None)
+        validator_count = (
+            ValidatorsRegistry(session).count_validators()
+            if session is not None
+            else int(
+                fee_accounting.get("num_of_initial_validators")
+                or tx.get("num_of_initial_validators")
+                or 5
+            )
+        )
+        normal_leader_count = sum(
+            1
+            for index, _entry in enumerate(
+                completed_consensus_rounds(consensus_history)
+            )
+            if index % 2 == 0
+        )
+        replacement_rotations = None
+        if status == TransactionStatus.LEADER_TIMEOUT.value:
+            rotations = normalize_fees_distribution(
+                fee_accounting.get("fees_distribution") or {}
+            )["rotations"]
+            rotation_index = current_round // 2
+            configured = (
+                int(rotations[rotation_index])
+                if rotation_index < len(rotations)
+                else int(rotations[-1] if rotations else 0)
+            )
+            used = actual_leader_rotations_by_round(consensus_history).get(
+                current_round,
+                0,
+            )
+            replacement_rotations = max(0, configured - used)
+        elif status == TransactionStatus.UNDETERMINED.value:
+            replacement_rotations = max(
+                0,
+                int(tx.get("config_rotation_rounds") or 0),
+            )
         try:
             updated = record_appeal_bond(
                 fee_accounting,
                 amount=decoded_rollup_transaction.total_spend,
                 appealer=decoded_rollup_transaction.from_address,
-                current_round=_current_fee_round(tx.get("consensus_history")),
-                status=str(tx.get("status") or ""),
+                current_round=current_round,
+                status=status,
                 fees_distribution=decoded_rollup_transaction.data.fees_distribution,
                 top_up_and_submit=decoded_rollup_transaction.data.top_up_and_submit,
+                terminal_committee_upper_bound=max(
+                    0,
+                    validator_count - normal_leader_count,
+                ),
+                replacement_rotations=replacement_rotations,
+                time_unit_overlay_bps=StudioFeePolicy.from_env().time_unit_overlay_bps,
             )
         except FeeValidationError as exc:
             raise InvalidTransactionError(str(exc)) from exc
@@ -2070,6 +2156,12 @@ def _handle_appeal_or_top_up_and_submit(
             decoded_rollup_transaction.from_address,
             decoded_rollup_transaction.total_spend,
         )
+        surplus_refund = int(updated["appeal_bonds"][-1]["surplusRefund"])
+        if surplus_refund > 0:
+            accounts_manager.credit_account_balance(
+                decoded_rollup_transaction.from_address,
+                surplus_refund,
+            )
         transactions_processor.update_transaction_fee_accounting(tx_id, updated)
 
     transactions_processor.set_transaction_appeal(tx_id, True)
