@@ -10,7 +10,11 @@ from backend.database_handler.accounts_manager import AccountsManager
 from backend.database_handler.errors import AccountNotFoundError
 from backend.database_handler.models import Transactions
 from backend.database_handler.transactions_processor import TransactionsProcessor
-from backend.protocol_rpc.fees import FEE_ACCOUNTING_KEY, create_fee_accounting
+from backend.protocol_rpc.fees import (
+    FEE_ACCOUNTING_KEY,
+    create_fee_accounting,
+    required_fee_deposit,
+)
 
 
 @pytest.fixture
@@ -256,10 +260,12 @@ def test_settle_tx_fee_accounting_once_uses_actual_final_round_for_refund(
 ):
     sender = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
     tx_hash = "0x" + "ef" * 32
+    fees_distribution = _fees_distribution(appeals=2, rotations=[0, 0, 0])
+    submitted_value = required_fee_deposit(fees_distribution, 5)
     accounting = create_fee_accounting(
-        fees_distribution=_fees_distribution(appeals=2, rotations=[0, 0, 0]),
+        fees_distribution=fees_distribution,
         num_of_validators=5,
-        submitted_value=12300,
+        submitted_value=submitted_value,
         user_value=0,
         sender=sender,
     )
@@ -275,8 +281,8 @@ def test_settle_tx_fee_accounting_once_uses_actual_final_round_for_refund(
     session.flush()
     session.expire_all()
 
-    assert refund == 11200
-    assert accounts_manager.get_account_balance(sender) == 11200
+    assert refund == submitted_value - 1100
+    assert accounts_manager.get_account_balance(sender) == submitted_value - 1100
     tx = session.query(Transactions).filter_by(hash=tx_hash).one()
     fee_accounting = tx.data[FEE_ACCOUNTING_KEY]
     assert fee_accounting["actual_final_round"] == 0
