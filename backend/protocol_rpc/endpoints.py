@@ -53,9 +53,11 @@ from backend.protocol_rpc.fees import (
     StudioFeePolicy,
     apply_fee_top_up,
     calculate_round_fees,
+    decode_internal_message_fee_params,
     create_fee_accounting,
     get_leader_rounds,
     normalize_fees_distribution,
+    min_message_primary_fees,
     record_appeal_bond,
     record_execution_fee_consumption,
     required_fee_deposit,
@@ -65,7 +67,7 @@ from backend.protocol_rpc.fees import (
 from backend.consensus.history import (
     actual_leader_rotations_by_round,
     completed_consensus_round_index,
-    completed_consensus_rounds,
+    logical_fee_round_entries,
 )
 from backend.errors.errors import InvalidAddressError, InvalidTransactionError
 from backend.database_handler.errors import ContractNotFoundError
@@ -384,6 +386,44 @@ def sim_calculate_round_fees(
     except FeeValidationError as exc:
         raise InvalidTransactionError(str(exc)) from exc
     return str(quote)
+
+
+def sim_min_message_primary_fees(fee_params: str) -> str:
+    """Quote the child primary-fee floor from canonical v0.6 ABI bytes."""
+    try:
+        decoded = decode_internal_message_fee_params(fee_params)
+        quote = min_message_primary_fees(decoded, StudioFeePolicy.from_env())
+    except FeeValidationError as exc:
+        raise InvalidTransactionError(str(exc)) from exc
+    return str(quote)
+
+
+def sim_estimate_propose_receipt_gas(eq_outputs_length: int = 0) -> dict[str, str]:
+    """Expose the deterministic v0.6 proposed-receipt metering formula."""
+    policy = StudioFeePolicy.from_env()
+    receipt_bytes = policy.estimate_propose_receipt_bytes(int(eq_outputs_length))
+    gas = policy.estimate_propose_receipt_gas(receipt_bytes)
+    return {
+        "receiptBytes": str(receipt_bytes),
+        "gas": str(gas),
+        "fee": str(gas * policy.receipt_gas_price),
+    }
+
+
+def sim_estimate_message_reveal_gas(
+    message_bytes: int,
+    message_count: int,
+) -> dict[str, str]:
+    """Expose the deterministic v0.6 revealed-message write formula."""
+    policy = StudioFeePolicy.from_env()
+    gas = policy.estimate_consensus_message_reveal_gas(
+        int(message_bytes),
+        int(message_count),
+    )
+    return {
+        "gas": str(gas),
+        "fee": str(gas * policy.receipt_gas_price),
+    }
 
 
 ####### ADMIN ACCESS CONTROL #######
@@ -1884,6 +1924,35 @@ def _fee_metadata(decoded_rollup_transaction: DecodedRollupTransaction) -> dict:
     return metadata
 
 
+def _funded_max_rotations(
+    decoded_rollup_transaction: DecodedRollupTransaction,
+    requested_max_rotations: int,
+) -> int:
+    """Mirror Consensus' submission-time rotation-capacity clamp.
+
+    Consensus seeds every normal round from one transaction-level
+    ``initialRotations`` value, then clamps that value to the smallest funded
+    entry in ``feesDistribution.rotations``. Studio must persist the same
+    effective value or it can execute attempts that the submitted fee
+    schedule never reserved.
+    """
+
+    data = decoded_rollup_transaction.data
+    if (
+        data is None
+        or isinstance(data, (DecodedsubmitAppealDataArgs, DecodedTopUpFeesDataArgs))
+        or not hasattr(data, "args")
+        or data.args is None
+        or data.args.fees_distribution is None
+    ):
+        return int(requested_max_rotations)
+
+    rotations = normalize_fees_distribution(data.args.fees_distribution)["rotations"]
+    if not rotations:
+        return int(requested_max_rotations)
+    return min(int(requested_max_rotations), *(int(value) for value in rotations))
+
+
 # `DebugMode` is ordered least- to most-permissive, and the manager gates
 # `reroute_to` on `debug_mode >= Safe` (implementation/src/manager/run.rs).
 # Comparing positions states that rule directly instead of enumerating the
@@ -2030,6 +2099,8 @@ def _handle_top_up_fees(
     if status in {
         TransactionStatus.ACCEPTED.value,
         TransactionStatus.UNDETERMINED.value,
+        TransactionStatus.LEADER_TIMEOUT.value,
+        TransactionStatus.VALIDATORS_TIMEOUT.value,
         TransactionStatus.FINALIZED.value,
         TransactionStatus.CANCELED.value,
     }:
@@ -2073,56 +2144,75 @@ def _handle_appeal_or_top_up_and_submit(
     if tx is None:
         raise NotFoundError(message=TRANSACTION_NOT_FOUND_MESSAGE, data={"hash": tx_id})
 
+    status = str(tx.get("status") or "")
+    if status not in {
+        TransactionStatus.ACCEPTED.value,
+        TransactionStatus.UNDETERMINED.value,
+        TransactionStatus.LEADER_TIMEOUT.value,
+        TransactionStatus.VALIDATORS_TIMEOUT.value,
+    } or bool(tx.get("appealed")):
+        raise InvalidTransactionError("CanNotAppeal")
+    appeal_window_started = tx.get("timestamp_awaiting_finalization")
+    if appeal_window_started is not None:
+        finality_window = int(os.environ.get("VITE_FINALITY_WINDOW", "1800"))
+        failed_reduction = float(
+            os.environ.get("VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION", "0")
+        )
+        failed_reduction = min(1.0, max(0.0, failed_reduction))
+        appeal_deadline = (
+            float(appeal_window_started)
+            + float(tx.get("appeal_processing_time") or 0)
+            + finality_window
+            * ((1.0 - failed_reduction) ** int(tx.get("appeal_failed") or 0))
+        )
+        # Consensus rejects at `block.timestamp >= appealDeadline`; do the
+        # same at the RPC admission boundary instead of relying on the
+        # asynchronous finalization worker to win the race first.
+        if time.time() >= appeal_deadline:
+            raise InvalidTransactionError("CanNotAppeal")
+    consensus_history = tx.get("consensus_history")
+    expected_decision_id = decoded_rollup_transaction.data.expected_decision_id
+    current_round = _current_fee_round(consensus_history)
+    # Studio has no on-chain DecisionRecord, so derive the equivalent
+    # monotonic ordinal from its alternating normal/appeal round history.
+    # Round 0 -> decision 1; rounds 1/2 -> decision 2; rounds 3/4 -> 3.
+    current_decision_id = 1 + ((current_round + 1) // 2)
+    if (
+        expected_decision_id is not None
+        and int(expected_decision_id) != current_decision_id
+    ):
+        raise InvalidTransactionError("CanNotAppeal")
+
     fee_accounting = (tx.get("data") or {}).get(FEE_ACCOUNTING_KEY)
     if fee_accounting is not None:
-        status = str(tx.get("status") or "")
-        if status not in {
-            TransactionStatus.ACCEPTED.value,
-            TransactionStatus.UNDETERMINED.value,
-            TransactionStatus.LEADER_TIMEOUT.value,
-            TransactionStatus.VALIDATORS_TIMEOUT.value,
-        } or bool(tx.get("appealed")):
-            raise InvalidTransactionError("CanNotAppeal")
-        consensus_history = tx.get("consensus_history")
-        expected_decision_id = decoded_rollup_transaction.data.expected_decision_id
-        current_round = _current_fee_round(consensus_history)
-        # Studio has no on-chain DecisionRecord, so derive the equivalent
-        # monotonic ordinal from its alternating normal/appeal round history.
-        # Round 0 -> decision 1; rounds 1/2 -> decision 2; rounds 3/4 -> 3.
-        current_decision_id = 1 + ((current_round + 1) // 2)
-        if (
-            expected_decision_id is not None
-            and int(expected_decision_id) != current_decision_id
-        ):
-            raise InvalidTransactionError("CanNotAppeal")
         session = getattr(accounts_manager, "session", None)
+        frozen_pool_count = fee_accounting.get("selection_pool_count")
         validator_count = (
-            ValidatorsRegistry(session).count_validators()
-            if session is not None
-            else int(
-                fee_accounting.get("num_of_initial_validators")
-                or tx.get("num_of_initial_validators")
-                or 5
+            int(frozen_pool_count)
+            if frozen_pool_count is not None
+            else (
+                ValidatorsRegistry(session).count_validators()
+                if session is not None
+                else int(
+                    fee_accounting.get("num_of_initial_validators")
+                    or tx.get("num_of_initial_validators")
+                    or 5
+                )
             )
         )
-        normal_leader_count = sum(
-            1
-            for index, _entry in enumerate(
-                completed_consensus_rounds(consensus_history)
-            )
-            if index % 2 == 0
-        )
+        normal_leader_count = _normal_leader_count(consensus_history)
         replacement_rotations = None
+        leader_timeout_live_seats = None
         if status == TransactionStatus.LEADER_TIMEOUT.value:
-            rotations = normalize_fees_distribution(
-                fee_accounting.get("fees_distribution") or {}
-            )["rotations"]
-            rotation_index = current_round // 2
-            configured = (
-                int(rotations[rotation_index])
-                if rotation_index < len(rotations)
-                else int(rotations[-1] if rotations else 0)
-            )
+            live_validators = tx.get("leader_timeout_validators")
+            if isinstance(live_validators, list):
+                leader_timeout_live_seats = len(live_validators)
+            # Consensus prices the live `rotationsLeft` stored on the timed-out
+            # round. Studio's equivalent is the submission-clamped transaction
+            # capacity minus rotations already consumed in this logical round;
+            # the per-round fee schedule may be larger and is not the runtime
+            # counter.
+            configured = max(0, int(tx.get("config_rotation_rounds") or 0))
             used = actual_leader_rotations_by_round(consensus_history).get(
                 current_round,
                 0,
@@ -2147,6 +2237,7 @@ def _handle_appeal_or_top_up_and_submit(
                     validator_count - normal_leader_count,
                 ),
                 replacement_rotations=replacement_rotations,
+                leader_timeout_live_seats=leader_timeout_live_seats,
                 time_unit_overlay_bps=StudioFeePolicy.from_env().time_unit_overlay_bps,
             )
         except FeeValidationError as exc:
@@ -2186,6 +2277,18 @@ def _tx_id_to_hex(tx_id: str | bytes) -> str:
 
 def _current_fee_round(consensus_history: dict | None) -> int:
     return completed_consensus_round_index(consensus_history)
+
+
+def _normal_leader_count(consensus_history: dict | None) -> int:
+    # Consensus excludes every prior *normal-round* leader from the terminal
+    # replacement committee. Studio compacts a leader appeal's hidden appeal
+    # round and replay into one history entry, so raw list parity is not a safe
+    # way to identify normal rounds after the first leader appeal.
+    return sum(
+        1
+        for logical_round, _entry in logical_fee_round_entries(consensus_history)
+        if logical_round % 2 == 0
+    )
 
 
 def _simulation_fee_accounting(
@@ -2264,7 +2367,11 @@ def _effective_simulation_fee_accounting_for_genvm(
     )
     fees = normalize_fees_distribution(accounting.get("fees_distribution") or {})
     execution_budget_per_round = int(fees["executionBudgetPerRound"])
-    floor = policy.message_fee_params_budget_floor()
+    # Consensus admits against the proposal-only receipt floor, while GenVM
+    # reserves proposal/reveal/nondeterministic-output start costs before user
+    # code. Estimation must temporarily satisfy the latter or it cannot run far
+    # enough to recommend a realistic budget.
+    floor = policy.genvm_start_budget_floor()
     if execution_budget_per_round <= 0 or execution_budget_per_round >= floor:
         return accounting
 
@@ -2362,6 +2469,10 @@ def send_raw_transaction(
         total_spend = getattr(decoded_rollup_transaction, "total_spend", value)
         genlayer_transaction = transactions_parser.get_genlayer_transaction(
             decoded_rollup_transaction
+        )
+        genlayer_transaction.max_rotations = _funded_max_rotations(
+            decoded_rollup_transaction,
+            genlayer_transaction.max_rotations,
         )
         _reject_genvm_executor_selector_unless_deploy(
             sim_config,

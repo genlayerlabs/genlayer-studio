@@ -16,6 +16,25 @@ NON_ROUND_CONSENSUS_EVENTS = {
     ConsensusRound.LEADER_ROTATION_APPEAL.value,
 }
 
+# Studio records the verdict and execution of an appeal as one history item.
+# Consensus, however, advances the fee round according to the appeal shape:
+# validator appeals occupy the next odd round (skipping an even gap when
+# chained), while leader/leader-timeout appeals create an appeal bookkeeping
+# round and execute again in the following even round.  Fee accounting must
+# preserve those on-chain round numbers even though the UI history is compact.
+LEADER_APPEAL_CONSENSUS_ROUNDS = {
+    ConsensusRound.LEADER_APPEAL_SUCCESSFUL.value,
+    ConsensusRound.LEADER_APPEAL_FAILED.value,
+    ConsensusRound.LEADER_TIMEOUT_APPEAL_SUCCESSFUL.value,
+    ConsensusRound.LEADER_TIMEOUT_APPEAL_FAILED.value,
+}
+VALIDATOR_APPEAL_CONSENSUS_ROUNDS = {
+    ConsensusRound.VALIDATOR_APPEAL_SUCCESSFUL.value,
+    ConsensusRound.VALIDATOR_APPEAL_FAILED.value,
+    ConsensusRound.VALIDATOR_TIMEOUT_APPEAL_SUCCESSFUL.value,
+    ConsensusRound.VALIDATORS_TIMEOUT_APPEAL_FAILED.value,
+}
+
 
 def is_completed_consensus_round(entry: dict[str, Any]) -> bool:
     return str(entry.get("consensus_round") or "") not in NON_ROUND_CONSENSUS_EVENTS
@@ -37,7 +56,32 @@ def completed_consensus_rounds(
 
 
 def completed_consensus_round_index(consensus_history: dict[str, Any] | None) -> int:
-    return max(0, len(completed_consensus_rounds(consensus_history)) - 1)
+    entries = logical_fee_round_entries(consensus_history)
+    return entries[-1][0] if entries else 0
+
+
+def _next_logical_fee_round(previous_round: int | None, outcome: str) -> int:
+    if previous_round is None:
+        return 0
+    if outcome in LEADER_APPEAL_CONSENSUS_ROUNDS:
+        return previous_round + 2
+    if outcome in VALIDATOR_APPEAL_CONSENSUS_ROUNDS:
+        return previous_round + (1 if previous_round % 2 == 0 else 2)
+    return previous_round + 1
+
+
+def logical_fee_round_entries(
+    consensus_history: dict[str, Any] | None,
+) -> list[tuple[int, dict[str, Any]]]:
+    """Return compact Studio history entries keyed by on-chain fee round."""
+    logical_entries: list[tuple[int, dict[str, Any]]] = []
+    previous_round: int | None = None
+    for entry in completed_consensus_rounds(consensus_history):
+        outcome = str(entry.get("consensus_round") or "")
+        logical_round = _next_logical_fee_round(previous_round, outcome)
+        logical_entries.append((logical_round, entry))
+        previous_round = logical_round
+    return logical_entries
 
 
 def actual_leader_rotations_by_round(
@@ -51,7 +95,7 @@ def actual_leader_rotations_by_round(
 
     rotations: dict[int, int] = {}
     pending_rotations = 0
-    round_index = 0
+    previous_round: int | None = None
     for entry in results:
         if not isinstance(entry, dict):
             continue
@@ -59,9 +103,10 @@ def actual_leader_rotations_by_round(
         if event in NON_ROUND_CONSENSUS_EVENTS:
             pending_rotations += 1
             continue
+        round_index = _next_logical_fee_round(previous_round, event)
         rotations[round_index] = pending_rotations
         pending_rotations = 0
-        round_index += 1
+        previous_round = round_index
     return rotations
 
 
@@ -159,6 +204,7 @@ def _empty_pending_time_units() -> dict[str, int | str | bool]:
 def _record_round(
     per_round: list[dict[str, int | str]],
     *,
+    round_index: int | None = None,
     consensus_round: str,
     leader_timeunits: int,
     validator_timeunits: int,
@@ -166,7 +212,7 @@ def _record_round(
 ) -> tuple[int, int]:
     per_round.append(
         _round_entry(
-            round_index=len(per_round),
+            round_index=len(per_round) if round_index is None else round_index,
             consensus_round=consensus_round,
             leader_timeunits=leader_timeunits,
             validator_timeunits=validator_timeunits,
@@ -210,6 +256,7 @@ def _consume_history_time_units(
     pending = _empty_pending_time_units()
     leader_timeunits_used = 0
     validator_timeunits_used = 0
+    previous_round: int | None = None
 
     for entry in results:
         if not isinstance(entry, dict):
@@ -234,8 +281,10 @@ def _consume_history_time_units(
             max_validator_timeunits, int(pending["max_validator_timeunits"])
         )
         pending = _empty_pending_time_units()
+        logical_round = _next_logical_fee_round(previous_round, consensus_round)
         leader_used, validator_used = _record_round(
             per_round,
+            round_index=logical_round,
             consensus_round=consensus_round,
             leader_timeunits=leader_timeunits,
             validator_timeunits=validator_timeunits,
@@ -243,6 +292,7 @@ def _consume_history_time_units(
         )
         leader_timeunits_used += leader_used
         validator_timeunits_used += validator_used
+        previous_round = logical_round
 
     return per_round, leader_timeunits_used, validator_timeunits_used, pending
 
@@ -289,8 +339,10 @@ def time_unit_consumption(
         validator_timeunits_used += validator_used
 
     if pending["has_rotation"]:
+        trailing_round = int(per_round[-1]["round"]) + 1 if per_round else 0
         leader_used, validator_used = _record_round(
             per_round,
+            round_index=trailing_round,
             consensus_round=str(pending["consensus_round"]),
             leader_timeunits=int(pending["leader_timeunits"]),
             validator_timeunits=int(pending["validator_timeunits"]),

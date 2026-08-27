@@ -8,10 +8,14 @@ from typing import Any, Callable
 
 import rlp
 from eth_abi import decode, encode
+from eth_hash.auto import keccak
 
 from backend.consensus.history import (
+    LEADER_APPEAL_CONSENSUS_ROUNDS,
+    NON_ROUND_CONSENSUS_EVENTS,
+    VALIDATOR_APPEAL_CONSENSUS_ROUNDS,
     actual_leader_rotations_by_round,
-    completed_consensus_rounds,
+    logical_fee_round_entries,
 )
 from backend.consensus.types import ConsensusRound
 
@@ -39,12 +43,18 @@ VALIDATORS_PER_ROUND = (
 MIN_RECEIPT_BYTES = 512
 PROPOSE_RECEIPT_SLOTS = 7
 MESSAGE_REVEAL_LENGTH_SLOTS = 32
+MAX_ALLOCATED_MESSAGES_CAP = 20
 NONDET_OUTPUT_LENGTH_BYTES = 32
 NODE_ROOT_SENTINEL = (1 << 256) - 1
-CALL_KEY_WILDCARD = "0x" + ("0" * 64)
+MAX_CONTRIBUTION_SEGMENTS = 64
+EMPTY_CALL_KEY = "0x" + ("0" * 64)
+# Consensus reserves keccak256("") as the allocation wildcard. bytes32(0)
+# remains the call key for an empty method name and must not match every call.
+CALL_KEY_WILDCARD = "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"
 MESSAGE_TYPE_EXTERNAL = 0
 MESSAGE_TYPE_INTERNAL = 1
 FEE_ACCOUNTING_KEY = "fee_accounting"
+FEE_POLICY_SNAPSHOT_KEY = "fee_policy_snapshot"
 
 APPEAL_SUCCESS_ROUNDS = {
     ConsensusRound.VALIDATOR_APPEAL_SUCCESSFUL.value,
@@ -62,25 +72,34 @@ ROUND_LEADER_MULTIPLIERS = {
     ConsensusRound.LEADER_TIMEOUT.value: (1, 2),
 }
 
-INTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE = "(uint256,uint256,uint256,uint256,uint256[])"
+INTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE = (
+    "(uint256,uint256,uint256,uint256,uint256[],uint256,uint256,uint256)"
+)
 EXTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE = "(uint256,uint256)"
 MESSAGE_ALLOCATION_NODE_ABI_TYPE = (
     "(uint8,bool,uint256,address,bytes32,uint256,bytes)[]"
 )
 SUBMITTED_MESSAGE_ABI_TYPE = (
-    "(uint8,address,uint256,bytes,bool,uint256,bytes,uint256,bytes,bytes32)[]"
+    "(uint8,address,uint256,bytes,bool,uint256,bytes,uint256,bytes,bytes32,bool)[]"
 )
 
 WEI_PER_GEN = 10**18
-DEFAULT_GEN_PER_TIME_UNIT = WEI_PER_GEN // 1_000
-DEFAULT_STORAGE_UNIT_PRICE = 1
-DEFAULT_RECEIPT_GAS_PRICE = 1
-DEFAULT_TRANSACTION_EXECUTION_BUDGET_PER_ROUND = 500_000
+# Keep the standalone Studio policy identical to the v0.6 deployment defaults.
+# The multiplier is deliberately the neutral value 1 while the storage and
+# receipt gas prices use the deployment's 0.25 gwei fallback price.
+DEFAULT_GEN_PER_TIME_UNIT = 1
+DEFAULT_STORAGE_UNIT_PRICE = 250_000_000
+DEFAULT_RECEIPT_GAS_PRICE = 250_000_000
+DEFAULT_TRANSACTION_EXECUTION_BUDGET_PER_ROUND = 100_000_000
 DEFAULT_LEADER_TIMEUNITS_ALLOCATION = 100
 DEFAULT_VALIDATOR_TIMEUNITS_ALLOCATION = 200
 DEFAULT_PRICE_CAP_HEADROOM_BPS = 12_000
 DEFAULT_PARENT_MESSAGE_RECEIPT_HEADROOM = 10_000
 DEFAULT_TIME_UNIT_OVERLAY_BPS = 1_500
+DEFAULT_MIN_PROPOSE_TIMEUNITS = 30
+DEFAULT_MAX_PROPOSE_TIMEUNITS = 600
+DEFAULT_MIN_COMMIT_TIMEUNITS = 30
+DEFAULT_MAX_COMMIT_TIMEUNITS = 600
 GENVM_UNMETERED_DATA_FEE_BUCKET = (1 << 256) - 1
 SUCCESSFUL_APPEAL_REWARD_NUMERATOR = 5
 SUCCESSFUL_APPEAL_REWARD_DENOMINATOR = 2
@@ -107,6 +126,14 @@ class BudgetTooLow(FeeValidationError):
 
 
 class MaxPriceExceeded(FeeValidationError):
+    pass
+
+
+class FeeValueMustBeNonZero(FeeValidationError):
+    pass
+
+
+class PhaseTimeoutOutOfBounds(FeeValidationError):
     pass
 
 
@@ -200,6 +227,18 @@ class TooManyMessages(FeeValidationError):
     pass
 
 
+class EqOutputsTooLarge(FeeValidationError):
+    pass
+
+
+class SubmittedMessagesTooLarge(FeeValidationError):
+    pass
+
+
+class MessageEffectDescriptorMismatch(FeeValidationError):
+    pass
+
+
 @dataclass(frozen=True)
 class StudioFeePolicy:
     gen_per_time_unit: int = 0
@@ -214,8 +253,43 @@ class StudioFeePolicy:
     receipt_wrapper_bytes: int = 1_024
     extra_exec_gas: int = 210_000
     max_allocation_tree_depth: int = 5
+    max_allocated_messages: int = MAX_ALLOCATED_MESSAGES_CAP
     max_messages_per_tx: int = 0
+    min_external_gas_limit: int = 0
+    max_eq_outputs_bytes: int = 0
+    max_submitted_messages_bytes: int = 0
     time_unit_overlay_bps: int = 0
+    enforce_v06_submission_config: bool = False
+    # Pure/test policies retain the permissive contract-initializer bounds.
+    # from_env() below uses the v0.6 deployment defaults (30..600).
+    min_propose_timeunits: int = 1
+    max_propose_timeunits: int = (1 << 128) - 1
+    min_commit_timeunits: int = 1
+    max_commit_timeunits: int = (1 << 128) - 1
+
+    def __post_init__(self) -> None:
+        if not 0 <= int(self.max_allocated_messages) <= MAX_ALLOCATED_MESSAGES_CAP:
+            raise ValueError(
+                "invalid max allocated messages: "
+                f"{self.max_allocated_messages} (protocol cap "
+                f"{MAX_ALLOCATED_MESSAGES_CAP})"
+            )
+        for minimum, maximum, label in (
+            (
+                self.min_propose_timeunits,
+                self.max_propose_timeunits,
+                "propose",
+            ),
+            (
+                self.min_commit_timeunits,
+                self.max_commit_timeunits,
+                "commit",
+            ),
+        ):
+            if int(minimum) <= 0 or int(maximum) < int(minimum):
+                raise ValueError(
+                    f"invalid {label} timeunit bounds: {minimum}..{maximum}"
+                )
 
     @classmethod
     def from_env(cls) -> "StudioFeePolicy":
@@ -248,10 +322,38 @@ class StudioFeePolicy:
             max_allocation_tree_depth=_env_int(
                 "GENLAYER_STUDIO_MAX_ALLOCATION_TREE_DEPTH", 5
             ),
+            max_allocated_messages=_env_int(
+                "GENLAYER_STUDIO_MAX_ALLOCATED_MESSAGES",
+                MAX_ALLOCATED_MESSAGES_CAP,
+            ),
             max_messages_per_tx=_env_int("GENLAYER_STUDIO_MAX_MESSAGES_PER_TX", 0),
+            min_external_gas_limit=_env_int(
+                "GENLAYER_STUDIO_MIN_EXTERNAL_GAS_LIMIT", 0
+            ),
+            max_eq_outputs_bytes=_env_int("GENLAYER_STUDIO_MAX_EQ_OUTPUTS_BYTES", 0),
+            max_submitted_messages_bytes=_env_int(
+                "GENLAYER_STUDIO_MAX_SUBMITTED_MESSAGES_BYTES", 0
+            ),
             time_unit_overlay_bps=_env_int(
                 "GENLAYER_STUDIO_TIME_UNIT_OVERLAY_BPS",
                 DEFAULT_TIME_UNIT_OVERLAY_BPS,
+            ),
+            enforce_v06_submission_config=True,
+            min_propose_timeunits=_env_int(
+                "GENLAYER_STUDIO_MIN_PROPOSE_TIMEUNITS",
+                DEFAULT_MIN_PROPOSE_TIMEUNITS,
+            ),
+            max_propose_timeunits=_env_int(
+                "GENLAYER_STUDIO_MAX_PROPOSE_TIMEUNITS",
+                DEFAULT_MAX_PROPOSE_TIMEUNITS,
+            ),
+            min_commit_timeunits=_env_int(
+                "GENLAYER_STUDIO_MIN_COMMIT_TIMEUNITS",
+                DEFAULT_MIN_COMMIT_TIMEUNITS,
+            ),
+            max_commit_timeunits=_env_int(
+                "GENLAYER_STUDIO_MAX_COMMIT_TIMEUNITS",
+                DEFAULT_MAX_COMMIT_TIMEUNITS,
             ),
         )
 
@@ -288,10 +390,12 @@ class StudioFeePolicy:
         message_bytes: int,
         message_count: int,
     ) -> int:
-        return self.estimate_receipt_gas(
-            measured_exec_gas=0,
-            calldata_length=message_bytes,
-            slots_changed=message_count,
+        return (
+            self.fixed_message_reveal_gas
+            + self.intrinsic_gas
+            + self.bootloader_overhead
+            + (max(0, int(message_bytes)) * self.calldata_gas_per_byte)
+            + (max(0, int(message_count)) * self.gas_per_changed_slot)
         )
 
     def estimate_receipt_gas(
@@ -320,7 +424,19 @@ class StudioFeePolicy:
     def minimum_execution_budget_per_round(self) -> int:
         if self.receipt_gas_price <= 0:
             return 0
-        message_receipt_start_gas = (
+        # FeeManager.messageFeeParamsBudgetFloor() prices only a minimum-size
+        # proposed receipt. Message reveal and nondeterministic-output charges
+        # remain ordinary per-round consumption, not admission requirements.
+        return (
+            self.estimate_propose_receipt_gas(MIN_RECEIPT_BYTES)
+            * self.receipt_gas_price
+        )
+
+    def genvm_start_budget_floor(self) -> int:
+        """Budget GenVM must reserve before contract code begins executing."""
+        if self.receipt_gas_price <= 0:
+            return 0
+        start_gas = (
             self.fixed_propose_receipt_gas
             + self.intrinsic_gas
             + self.bootloader_overhead
@@ -329,10 +445,9 @@ class StudioFeePolicy:
             + self.intrinsic_gas
             + self.bootloader_overhead
             + (MESSAGE_REVEAL_LENGTH_SLOTS * self.gas_per_changed_slot)
+            + self.estimate_nondet_output_start_gas()
         )
-        return (
-            message_receipt_start_gas + self.estimate_nondet_output_start_gas()
-        ) * self.receipt_gas_price
+        return start_gas * self.receipt_gas_price
 
     def fee_accounting_enabled(self) -> bool:
         return (
@@ -370,6 +485,61 @@ def _accounting_policy(
         except (KeyError, TypeError, ValueError):
             pass
     return StudioFeePolicy()
+
+
+def _live_policy_for_accounting(
+    accounting: dict[str, Any] | None,
+    override: StudioFeePolicy | None = None,
+) -> StudioFeePolicy:
+    """Return the governance policy that applies to work performed now.
+
+    Before activation, the submission snapshot is also the best available
+    representation of the live configuration (and keeps pure callers/tests
+    independent of process environment). Once prices are locked, Consensus
+    continues reading every non-price metering parameter and admission cap
+    live from FeeManager/Messages.
+    """
+    if override is not None:
+        return override
+    if accounting and accounting.get("activation_prices_locked"):
+        return StudioFeePolicy.from_env()
+    return _accounting_policy(accounting)
+
+
+def execution_policy_for_accounting(
+    accounting: dict[str, Any] | None,
+    live_policy: StudioFeePolicy | None = None,
+) -> StudioFeePolicy:
+    """Combine live metering configuration with activation-locked prices."""
+    live_policy = _live_policy_for_accounting(accounting, live_policy)
+    if not accounting or not accounting.get("activation_prices_locked"):
+        return live_policy
+
+    locked_policy = _accounting_policy(accounting)
+    return replace(
+        live_policy,
+        gen_per_time_unit=int(locked_policy.gen_per_time_unit),
+        storage_unit_price=int(locked_policy.storage_unit_price),
+        receipt_gas_price=int(locked_policy.receipt_gas_price),
+    )
+
+
+def stamp_receipt_execution_policy(
+    receipt: Any,
+    accounting: dict[str, Any] | None,
+    live_policy: StudioFeePolicy | None = None,
+) -> StudioFeePolicy:
+    """Persist the exact proposal-time metering inputs on a Studio receipt."""
+    policy = execution_policy_for_accounting(accounting, live_policy)
+    genvm_result = _receipt_genvm_result(receipt)
+    if genvm_result is None:
+        genvm_result = {}
+        if isinstance(receipt, dict):
+            receipt["genvm_result"] = genvm_result
+        else:
+            setattr(receipt, "genvm_result", genvm_result)
+    genvm_result[FEE_POLICY_SNAPSHOT_KEY] = policy.to_snapshot()
+    return policy
 
 
 def _env_int(name: str, default: int) -> int:
@@ -460,8 +630,19 @@ def calculate_time_unit_fees_through_round(
         raise InvalidAppealRounds("InvalidAppealRounds")
 
     capped_final_round = min(max(0, int(final_round)), int(fees["appealRounds"]) * 2)
-    leader_timeunits = int(fees["leaderTimeunitsAllocation"])
-    validator_timeunits = int(fees["validatorTimeunitsAllocation"])
+    max_price = int(fees["maxPriceGenPerTimeUnit"])
+    if policy.gen_per_time_unit > 0:
+        if max_price > 0 and policy.gen_per_time_unit > max_price:
+            raise MaxPriceExceeded("MaxPriceExceeded")
+        leader_timeunits = (
+            int(fees["leaderTimeunitsAllocation"]) * policy.gen_per_time_unit
+        )
+        validator_timeunits = (
+            int(fees["validatorTimeunitsAllocation"]) * policy.gen_per_time_unit
+        )
+    else:
+        leader_timeunits = int(fees["leaderTimeunitsAllocation"])
+        validator_timeunits = int(fees["validatorTimeunitsAllocation"])
     actual_rotations = actual_leader_rotations_by_round(consensus_history)
     round_outcomes = _round_outcomes(consensus_history)
     total = _calculate_fee_for_round(
@@ -491,12 +672,612 @@ def calculate_time_unit_fees_through_round(
             leader_multiplier=_round_leader_multiplier(round_outcomes.get(offset)),
         )
 
-    max_price = int(fees["maxPriceGenPerTimeUnit"])
-    if policy.gen_per_time_unit > 0:
-        if max_price > 0 and policy.gen_per_time_unit > max_price:
-            raise MaxPriceExceeded("MaxPriceExceeded")
-        total *= policy.gen_per_time_unit
     return total
+
+
+def _calculate_settled_time_unit_fees(
+    fees_distribution: dict[str, Any],
+    num_of_validators: int,
+    final_round: int,
+    policy: StudioFeePolicy,
+    consensus_history: dict[str, Any] | None,
+    execution_mode: str = "NORMAL",
+) -> tuple[int, list[dict[str, Any]]]:
+    """Aggregate the fee-funded round payouts made by FeesProcessor.
+
+    Submission quotes reserve every configured seat and leader attempt. At
+    settlement Consensus pays by round type instead: a bare leader timeout
+    pays only half a leader allocation, appeal rounds never pay a leader, and
+    a successful appeal retroactively skips the appealed round. Prior leader
+    rotations pay the non-leader committee plus half of the rotated leader.
+    """
+    fees = normalize_fees_distribution(fees_distribution)
+    _validator_index(num_of_validators)
+    logical_entries = logical_fee_round_entries(consensus_history)
+    entries = {round_index: entry for round_index, entry in logical_entries}
+    if not entries:
+        return (
+            calculate_time_unit_fees_through_round(
+                fees,
+                num_of_validators,
+                final_round,
+                policy,
+                consensus_history=consensus_history,
+            ),
+            [],
+        )
+
+    capped_final_round = min(
+        max(0, int(final_round)),
+        int(fees["appealRounds"]) * 2,
+        max(entries),
+    )
+    outcomes = {
+        round_index: str(entry.get("consensus_round") or "")
+        for round_index, entry in entries.items()
+    }
+    previous_completed_round: dict[int, int] = {
+        logical_entries[index][0]: logical_entries[index - 1][0]
+        for index in range(1, len(logical_entries))
+    }
+    skipped_rounds = set()
+    for round_index, outcome in outcomes.items():
+        if outcome not in APPEAL_SUCCESS_ROUNDS:
+            continue
+        predecessor = previous_completed_round.get(round_index)
+        if predecessor is None:
+            continue
+        # A chained validator appeal is separated by an empty logical round.
+        # Consensus leaves the preceding appeal round's fee type intact; only
+        # a directly appealed execution round is retroactively skipped.
+        if outcomes.get(predecessor) in (
+            VALIDATOR_APPEAL_CONSENSUS_ROUNDS | LEADER_APPEAL_CONSENSUS_ROUNDS
+        ):
+            continue
+        # A successful leader replay does not erase a raw deterministic-
+        # violation predecessor: those validators correctly established the
+        # separate fault and retain their fee treatment on-chain.
+        if (
+            outcome == ConsensusRound.LEADER_APPEAL_SUCCESSFUL.value
+            and _fee_alignment_result(entries.get(predecessor))
+            == "deterministic_violation"
+        ):
+            continue
+        skipped_rounds.add(predecessor)
+    validator_appeal_outcomes = {
+        ConsensusRound.VALIDATOR_APPEAL_SUCCESSFUL.value,
+        ConsensusRound.VALIDATOR_APPEAL_FAILED.value,
+        ConsensusRound.VALIDATOR_TIMEOUT_APPEAL_SUCCESSFUL.value,
+        ConsensusRound.VALIDATORS_TIMEOUT_APPEAL_FAILED.value,
+    }
+    leader_appeal_outcomes = APPEAL_SUCCESS_ROUNDS.union(APPEAL_FAILED_ROUNDS) - (
+        validator_appeal_outcomes
+    )
+    rotations_by_round = actual_leader_rotations_by_round(consensus_history)
+    attempts_by_round = _consensus_attempt_entries_by_round(consensus_history)
+    outcomes = _round_outcomes(consensus_history)
+    if policy.gen_per_time_unit > 0:
+        leader_timeunits = (
+            int(fees["leaderTimeunitsAllocation"]) * policy.gen_per_time_unit
+        )
+        validator_timeunits = (
+            int(fees["validatorTimeunitsAllocation"]) * policy.gen_per_time_unit
+        )
+    else:
+        leader_timeunits = int(fees["leaderTimeunitsAllocation"])
+        validator_timeunits = int(fees["validatorTimeunitsAllocation"])
+    base_total = 0
+    by_round: list[dict[str, Any]] = []
+    leader_only = str(execution_mode).upper() == "LEADER_ONLY"
+
+    for round_index in range(capped_final_round + 1):
+        outcome = outcomes.get(round_index, "")
+        is_leader_appeal_replay = outcome in LEADER_APPEAL_CONSENSUS_ROUNDS
+        is_leader_appeal_placeholder = (
+            round_index + 1 in outcomes
+            and outcomes[round_index + 1] in LEADER_APPEAL_CONSENSUS_ROUNDS
+        )
+        validators = (
+            int(num_of_validators)
+            if round_index == 0
+            else _validators_per_round_safe(round_index)
+        )
+        rotations = max(0, int(rotations_by_round.get(round_index, 0)))
+        attempts = attempts_by_round.get(round_index, [])
+        prior_attempts = attempts[:rotations]
+        current_attempt = attempts[-1] if attempts else None
+        prior_rotation_fee = 0
+        if prior_attempts and all(
+            _entry_validator_receipts(attempt) for attempt in prior_attempts
+        ):
+            for attempt in prior_attempts:
+                aligned = _aligned_validator_count(attempt, exclude_leader=True)
+                rotated_leader_fee = (
+                    0
+                    if _fee_alignment_result(attempt) == "deterministic_violation"
+                    else leader_timeunits // 2
+                )
+                prior_rotation_fee += aligned * validator_timeunits + rotated_leader_fee
+        else:
+            prior_rotation_fee = rotations * _calculate_fee_for_round(
+                max(0, validators - 1),
+                1,
+                leader_timeunits,
+                validator_timeunits,
+                leader_multiplier=(1, 2),
+            )
+
+        if round_index not in entries and not is_leader_appeal_placeholder:
+            round_fee = 0
+            rule = "empty_round"
+        elif is_leader_appeal_placeholder:
+            round_fee = 0
+            rule = "leader_appeal"
+        elif round_index in skipped_rounds:
+            round_fee = 0
+            rule = "successful_appeal_skip"
+        elif is_leader_appeal_replay:
+            replay_result = (
+                _fee_alignment_result(current_attempt)
+                if current_attempt is not None
+                else "unknown"
+            )
+            aligned = (
+                _aligned_validator_count(current_attempt)
+                if current_attempt is not None
+                and _entry_validator_receipts(current_attempt)
+                else validators
+            )
+            if outcome == ConsensusRound.LEADER_TIMEOUT_APPEAL_FAILED.value:
+                # The replay timed out again. Its leader is paid from the
+                # forfeited appeal bond, not from the sender's time-unit pool.
+                round_fee = prior_rotation_fee
+                rule = "post_timeout_appeal_repeated_timeout"
+            else:
+                leader_fee = (
+                    0
+                    if replay_result == "deterministic_violation"
+                    else leader_timeunits
+                )
+                if (
+                    outcome == ConsensusRound.LEADER_TIMEOUT_APPEAL_SUCCESSFUL.value
+                    and replay_result != "deterministic_violation"
+                ):
+                    leader_fee += leader_timeunits // 2
+                    rule = "post_timeout_appeal_150_percent"
+                elif replay_result == "deterministic_violation":
+                    rule = "deterministic_violation_leader_withheld"
+                else:
+                    rule = "leader_appeal_replay"
+                round_fee = (
+                    prior_rotation_fee + aligned * validator_timeunits + leader_fee
+                )
+        elif outcome == ConsensusRound.LEADER_TIMEOUT.value:
+            previous = outcomes.get(round_index - 1, "")
+            # After a successful leader-timeout appeal, a repeated timeout's
+            # leader is paid from the prior appeal bond rather than fee money.
+            current_fee = (
+                0
+                if previous == ConsensusRound.LEADER_TIMEOUT_APPEAL_SUCCESSFUL.value
+                else leader_timeunits // 2
+            )
+            round_fee = prior_rotation_fee + current_fee
+            rule = "leader_timeout"
+        elif outcome in VALIDATOR_APPEAL_CONSENSUS_ROUNDS:
+            if (
+                outcome in APPEAL_SUCCESS_ROUNDS
+                and current_attempt is not None
+                and _entry_validator_receipts(current_attempt)
+            ):
+                appeal_result = _fee_alignment_result(current_attempt)
+                aligned = _aligned_validator_count(
+                    current_attempt,
+                    forced_result=appeal_result,
+                )
+                vindicated = 0
+                previous_attempts = _previous_non_appeal_attempts(
+                    round_index,
+                    attempts_by_round,
+                    outcomes,
+                )
+                # Consensus pays vindication only when the successful appeal
+                # establishes one of the four concrete result buckets. A
+                # NoMajority appeal committee is itself paid equally, but it
+                # does not prove any side of the overturned round correct.
+                if (
+                    appeal_result
+                    in {
+                        "agree",
+                        "disagree",
+                        "timeout",
+                        "deterministic_violation",
+                    }
+                    and previous_attempts
+                    and _entry_validator_receipts(previous_attempts[-1])
+                ):
+                    vindicated = _aligned_validator_count(
+                        previous_attempts[-1],
+                        forced_result=appeal_result,
+                    )
+                round_fee = (aligned + vindicated) * validator_timeunits
+                rule = "validator_appeal_success_with_vindication"
+            else:
+                # An unsuccessful validator appeal redistributes the complete
+                # fee pool for the seats that actually revealed (plus the
+                # forfeited bond) among aligned voters. Consensus records
+                # validators on reveal, so unrecorded committee seats remain
+                # refundable rather than being charged from the sender pool.
+                receipts = (
+                    _entry_validator_receipts(current_attempt)
+                    if current_attempt is not None
+                    else []
+                )
+                revealed = len(receipts) if receipts else validators
+                aligned = (
+                    _aligned_validator_count(current_attempt)
+                    if receipts
+                    else validators
+                )
+                round_fee = revealed * validator_timeunits if aligned > 0 else 0
+                rule = "validator_appeal_failed_redistribution"
+        elif outcome in leader_appeal_outcomes:
+            round_fee = 0
+            rule = "leader_appeal"
+        else:
+            current_result = (
+                _fee_alignment_result(current_attempt)
+                if current_attempt is not None
+                else "unknown"
+            )
+            leader_fee = (
+                0 if current_result == "deterministic_violation" else leader_timeunits
+            )
+            if (
+                outcomes.get(round_index - 1, "")
+                == ConsensusRound.LEADER_TIMEOUT_APPEAL_SUCCESSFUL.value
+            ):
+                if current_result != "deterministic_violation":
+                    leader_fee += leader_timeunits // 2
+                rule = "post_timeout_appeal_150_percent"
+            elif current_result == "deterministic_violation":
+                rule = "deterministic_violation_leader_withheld"
+            else:
+                rule = "normal"
+            aligned = (
+                _aligned_validator_count(current_attempt)
+                if current_attempt is not None
+                and _entry_validator_receipts(current_attempt)
+                else (0 if leader_only else validators)
+            )
+            round_fee = prior_rotation_fee + aligned * validator_timeunits + leader_fee
+
+        base_total += round_fee
+        by_round.append(
+            {
+                "round": round_index,
+                "outcome": outcome,
+                "rule": rule,
+                "rotations": rotations,
+                "timeUnitAmount": round_fee,
+            }
+        )
+
+    return base_total, by_round
+
+
+def _consensus_attempt_entries_by_round(
+    consensus_history: dict[str, Any] | None,
+) -> dict[int, list[dict[str, Any]]]:
+    if not isinstance(consensus_history, dict):
+        return {}
+    results = consensus_history.get("consensus_results")
+    if not isinstance(results, list):
+        return {}
+
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    pending: list[dict[str, Any]] = []
+    previous_round: int | None = None
+    for entry in results:
+        if not isinstance(entry, dict):
+            continue
+        outcome = str(entry.get("consensus_round") or "")
+        if outcome in NON_ROUND_CONSENSUS_EVENTS:
+            pending.append(entry)
+            continue
+        if previous_round is None:
+            round_index = 0
+        elif outcome in LEADER_APPEAL_CONSENSUS_ROUNDS:
+            round_index = previous_round + 2
+        elif outcome in VALIDATOR_APPEAL_CONSENSUS_ROUNDS:
+            round_index = previous_round + (1 if previous_round % 2 == 0 else 2)
+        else:
+            round_index = previous_round + 1
+        grouped[round_index] = [*pending, entry]
+        pending = []
+        previous_round = round_index
+    return grouped
+
+
+def _previous_non_appeal_attempts(
+    round_index: int,
+    attempts_by_round: dict[int, list[dict[str, Any]]],
+    outcomes: dict[int, str],
+) -> list[dict[str, Any]]:
+    """Mirror FeesProcessor._findPreviousOriginalRound for vindication."""
+    appeal_outcomes = VALIDATOR_APPEAL_CONSENSUS_ROUNDS | LEADER_APPEAL_CONSENSUS_ROUNDS
+    for candidate in sorted(
+        (index for index in attempts_by_round if index < int(round_index)),
+        reverse=True,
+    ):
+        if outcomes.get(candidate) in appeal_outcomes:
+            continue
+        attempts = attempts_by_round.get(candidate) or []
+        if attempts:
+            return attempts
+    return []
+
+
+def _entry_validator_receipts(entry: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(entry, dict):
+        return []
+    receipts: list[dict[str, Any]] = []
+    for key in ("leader_result", "validator_results"):
+        value = entry.get(key)
+        candidates = value if isinstance(value, list) else [value]
+        for receipt in candidates:
+            if not isinstance(receipt, dict):
+                continue
+            mode = receipt.get("mode")
+            if hasattr(mode, "value"):
+                mode = mode.value
+            if str(mode or "").lower() == "validator":
+                receipts.append(receipt)
+    return receipts
+
+
+def _receipt_validator_address(receipt: dict[str, Any]) -> str:
+    node_config = receipt.get("node_config") or receipt.get("nodeConfig") or {}
+    if not isinstance(node_config, dict):
+        return ""
+    return str(node_config.get("address") or "").lower()
+
+
+def _entry_leader_address(entry: dict[str, Any] | None) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    value = entry.get("leader_result")
+    candidates = value if isinstance(value, list) else [value]
+    for receipt in candidates:
+        if not isinstance(receipt, dict):
+            continue
+        mode = receipt.get("mode")
+        if hasattr(mode, "value"):
+            mode = mode.value
+        if str(mode or "").lower() == "leader":
+            return _receipt_validator_address(receipt)
+    return ""
+
+
+def _fee_alignment_result(entry: dict[str, Any] | None) -> str:
+    votes = [
+        str(receipt.get("vote") or "").lower()
+        for receipt in _entry_validator_receipts(entry)
+    ]
+    total = len(votes)
+    if total == 0:
+        return "unknown"
+    majority = total / 2
+    if votes.count("agree") > majority:
+        return "agree"
+    if votes.count("disagree") > majority:
+        return "disagree"
+    # RevealingState classifies Studio's local IDLE sentinel as the on-chain
+    # Timeout ballot before emitting/recording it. Fee alignment must derive
+    # the result from that classified ballot too, not from Studio's separate
+    # state-transition convention where IDLE contributes to disagreement.
+    if votes.count("timeout") + votes.count("idle") > majority:
+        return "timeout"
+    if votes.count("deterministic_violation") > majority:
+        return "deterministic_violation"
+    return "no_majority"
+
+
+def _aligned_validator_count(
+    entry: dict[str, Any] | None,
+    *,
+    exclude_leader: bool = False,
+    forced_result: str | None = None,
+) -> int:
+    receipts = _entry_validator_receipts(entry)
+    if exclude_leader:
+        leader = _entry_leader_address(entry)
+        removed = False
+        filtered: list[dict[str, Any]] = []
+        for receipt in receipts:
+            if not removed and leader and _receipt_validator_address(receipt) == leader:
+                removed = True
+                continue
+            filtered.append(receipt)
+        receipts = filtered
+
+    result = forced_result or _fee_alignment_result(entry)
+    if result == "no_majority":
+        return len(receipts)
+    if result == "unknown":
+        return len(receipts)
+
+    aligned = 0
+    for receipt in receipts:
+        vote = str(receipt.get("vote") or "").lower()
+        # Studio emits an IDLE reveal to Consensus as Timeout. Its local state
+        # transition tally treats IDLE as disagreement, but strict fee
+        # alignment uses the classified on-chain ballot.
+        if vote == result or (result == "timeout" and vote == "idle"):
+            aligned += 1
+    return aligned
+
+
+def _settlement_storage_recipient_count(
+    consensus_history: dict[str, Any] | None,
+    settlement_rounds: list[dict[str, Any]],
+    fees_distribution: dict[str, Any],
+    policy: StudioFeePolicy,
+    execution_mode: str,
+) -> int:
+    """Count the unique fee-ledger recipients that share persistent storage.
+
+    Consensus distributes storage over FeesProcessor's tracked validator set,
+    not the configured committee size. Rebuild the same tracking side effects:
+    paid recipients and nonzero penalties are tracked, as is a withheld DV
+    leader, while skipped/placeholder rounds and zero-value entries add nobody.
+    """
+    attempts_by_round = _consensus_attempt_entries_by_round(consensus_history)
+    outcomes = _round_outcomes(consensus_history)
+    settlement_by_round = {
+        int(item.get("round", 0)): item for item in settlement_rounds
+    }
+    non_material_rules = {
+        "empty_round",
+        "successful_appeal_skip",
+        "leader_appeal",
+    }
+    normal_rules = {
+        "normal",
+        "deterministic_violation_leader_withheld",
+        "leader_appeal_replay",
+        "post_timeout_appeal_150_percent",
+    }
+    leader_timeout_rules = {
+        "leader_timeout",
+        "post_timeout_appeal_repeated_timeout",
+    }
+    fees = normalize_fees_distribution(fees_distribution)
+    price = int(policy.gen_per_time_unit)
+    validator_value = int(fees["validatorTimeunitsAllocation"]) * (
+        price if price > 0 else 1
+    )
+    leader_value = int(fees["leaderTimeunitsAllocation"]) * (price if price > 0 else 1)
+    leader_only = str(execution_mode).upper() == "LEADER_ONLY"
+    recipients: set[str] = set()
+
+    def add_leader(attempt: dict[str, Any], *, payable_value: int) -> None:
+        leader = _entry_leader_address(attempt)
+        if leader and (
+            payable_value > 0
+            or _fee_alignment_result(attempt) == "deterministic_violation"
+        ):
+            recipients.add(leader)
+
+    def validator_addresses(
+        attempt: dict[str, Any],
+        *,
+        aligned_only: bool = False,
+        exclude_leader: bool = False,
+        forced_result: str | None = None,
+    ) -> list[str]:
+        receipts = _entry_validator_receipts(attempt)
+        if exclude_leader:
+            leader = _entry_leader_address(attempt)
+            removed = False
+            filtered: list[dict[str, Any]] = []
+            for receipt in receipts:
+                if (
+                    not removed
+                    and leader
+                    and _receipt_validator_address(receipt) == leader
+                ):
+                    removed = True
+                    continue
+                filtered.append(receipt)
+            receipts = filtered
+        result = forced_result or _fee_alignment_result(attempt)
+        addresses: list[str] = []
+        for receipt in receipts:
+            vote = str(receipt.get("vote") or "").lower()
+            aligned = (
+                result in {"no_majority", "unknown"}
+                or vote == result
+                or (result == "timeout" and vote == "idle")
+            )
+            if aligned_only and not aligned:
+                continue
+            address = _receipt_validator_address(receipt)
+            if address:
+                addresses.append(address)
+        return addresses
+
+    for round_index, attempts in attempts_by_round.items():
+        settlement = settlement_by_round.get(round_index) or {}
+        rule = str(settlement.get("rule") or "")
+        if rule in non_material_rules:
+            continue
+
+        current_attempt = attempts[-1] if attempts else None
+        rotation_attempts = attempts[:-1] if attempts else []
+        if int(settlement.get("rotations", 0) or 0) > 0:
+            for attempt in rotation_attempts:
+                add_leader(attempt, payable_value=leader_value // 2)
+                if validator_value > 0:
+                    recipients.update(validator_addresses(attempt, exclude_leader=True))
+
+        if current_attempt is None:
+            continue
+        if rule in normal_rules:
+            add_leader(current_attempt, payable_value=leader_value)
+            if validator_value > 0 and not leader_only:
+                recipients.update(validator_addresses(current_attempt))
+        elif rule in leader_timeout_rules:
+            payable_value = (
+                1
+                if rule == "post_timeout_appeal_repeated_timeout"
+                else leader_value // 2
+            )
+            add_leader(current_attempt, payable_value=payable_value)
+        elif rule == "validator_appeal_success_with_vindication":
+            if validator_value > 0:
+                recipients.update(validator_addresses(current_attempt))
+        elif rule == "validator_appeal_failed_redistribution":
+            # With a nonzero validator allocation every revealer is either
+            # paid or penalized. If it is zero, only aligned recipients of the
+            # forfeited bond enter the distribution index.
+            recipients.update(
+                validator_addresses(
+                    current_attempt,
+                    aligned_only=validator_value == 0,
+                )
+            )
+
+    # A successful validator appeal also tracks each vindicated voter from the
+    # skipped original round, even when that address is not on the appeal jury.
+    for item in settlement_rounds:
+        if item.get("rule") != "validator_appeal_success_with_vindication":
+            continue
+        round_index = int(item.get("round", 0))
+        appeal_attempts = attempts_by_round.get(round_index) or []
+        original_attempts = _previous_non_appeal_attempts(
+            round_index,
+            attempts_by_round,
+            outcomes,
+        )
+        if not appeal_attempts or not original_attempts:
+            continue
+        result = _fee_alignment_result(appeal_attempts[-1])
+        if validator_value <= 0 or result not in {
+            "agree",
+            "disagree",
+            "timeout",
+            "deterministic_violation",
+        }:
+            continue
+        recipients.update(
+            validator_addresses(
+                original_attempts[-1],
+                aligned_only=True,
+                forced_result=result,
+            )
+        )
+
+    return len(recipients)
 
 
 def calculate_round_fees(
@@ -505,14 +1286,17 @@ def calculate_round_fees(
     round: int = 0,
     policy: StudioFeePolicy | None = None,
     *,
-    enforce_gen_price_cap: bool = True,
+    enforce_gen_price_cap: bool = False,
 ) -> int:
     fees = normalize_fees_distribution(fees_distribution)
     policy = policy or StudioFeePolicy()
 
     if round == 0:
         time_unit_work = _calculate_initial_round_total(fees, num_of_validators)
-        appeal_profit_reserve = _calculate_appeal_profit_reserve(fees)
+        appeal_profit_reserve = _calculate_appeal_profit_reserve(
+            fees,
+            gen_per_time_unit=int(fees["maxPriceGenPerTimeUnit"]),
+        )
     else:
         time_unit_work = _calculate_appeal_round_total(fees, round)
         appeal_profit_reserve = 0
@@ -524,16 +1308,10 @@ def calculate_round_fees(
         policy,
         enforce_cap=enforce_gen_price_cap,
     )
-    priced_profit_reserve = _apply_time_unit_price(
-        appeal_profit_reserve,
-        max_price,
-        policy,
-        enforce_cap=enforce_gen_price_cap,
-    )
     total = (
         priced_work
         + _time_unit_overlay(priced_work, policy.time_unit_overlay_bps)
-        + priced_profit_reserve
+        + appeal_profit_reserve
     )
     _enforce_gas_price_cap(
         policy.storage_unit_price, int(fees["storageFeeMaxGasPrice"])
@@ -561,34 +1339,37 @@ def default_transaction_fees_for_policy(
     policy: StudioFeePolicy | None = None,
 ) -> tuple[dict[str, int | list[int]], int]:
     policy = policy or StudioFeePolicy()
+    enabled = policy.fee_accounting_enabled()
     execution_budget_per_round = (
         max(
             DEFAULT_TRANSACTION_EXECUTION_BUDGET_PER_ROUND,
             policy.message_fee_params_budget_floor(),
         )
-        if policy.storage_unit_price > 0 or policy.receipt_gas_price > 0
+        if enabled
         else 0
     )
     distribution = _serializable_fees_distribution(
         {
             "leaderTimeunitsAllocation": (
-                DEFAULT_LEADER_TIMEUNITS_ALLOCATION
-                if policy.gen_per_time_unit > 0
-                else 0
+                DEFAULT_LEADER_TIMEUNITS_ALLOCATION if enabled else 0
             ),
             "validatorTimeunitsAllocation": (
-                DEFAULT_VALIDATOR_TIMEUNITS_ALLOCATION
-                if policy.gen_per_time_unit > 0
-                else 0
+                DEFAULT_VALIDATOR_TIMEUNITS_ALLOCATION if enabled else 0
             ),
             "appealRounds": 0,
             "executionBudgetPerRound": execution_budget_per_round,
             "executionConsumed": 0,
             "totalMessageFees": 0,
             "rotations": [0],
-            "maxPriceGenPerTimeUnit": _with_cap_headroom(policy.gen_per_time_unit),
-            "storageFeeMaxGasPrice": _with_cap_headroom(policy.storage_unit_price),
-            "receiptFeeMaxGasPrice": _with_cap_headroom(policy.receipt_gas_price),
+            "maxPriceGenPerTimeUnit": (
+                max(1, _with_cap_headroom(policy.gen_per_time_unit)) if enabled else 0
+            ),
+            "storageFeeMaxGasPrice": (
+                max(1, _with_cap_headroom(policy.storage_unit_price)) if enabled else 0
+            ),
+            "receiptFeeMaxGasPrice": (
+                max(1, _with_cap_headroom(policy.receipt_gas_price)) if enabled else 0
+            ),
         }
     )
     fee_value = (
@@ -619,9 +1400,18 @@ def studio_fee_config(policy: StudioFeePolicy | None = None) -> dict[str, Any]:
             "messageFeeParamsBudgetFloor": str(
                 policy.message_fee_params_budget_floor()
             ),
+            "genvmStartBudgetFloor": str(policy.genvm_start_budget_floor()),
             "maxAllocationTreeDepth": str(policy.max_allocation_tree_depth),
+            "maxAllocatedMessages": str(policy.max_allocated_messages),
             "maxMessagesPerTx": str(policy.max_messages_per_tx),
+            "minExternalGasLimit": str(policy.min_external_gas_limit),
+            "maxEqOutputsBytes": str(policy.max_eq_outputs_bytes),
+            "maxSubmittedMessagesBytes": str(policy.max_submitted_messages_bytes),
             "timeUnitOverlayBps": str(policy.time_unit_overlay_bps),
+            "minProposeTimeunits": str(policy.min_propose_timeunits),
+            "maxProposeTimeunits": str(policy.max_propose_timeunits),
+            "minCommitTimeunits": str(policy.min_commit_timeunits),
+            "maxCommitTimeunits": str(policy.max_commit_timeunits),
         },
         "capabilities": {
             "messageFees": {
@@ -653,6 +1443,50 @@ def studio_fee_config(policy: StudioFeePolicy | None = None) -> dict[str, Any]:
     }
 
 
+def _require_nonzero_fee_config(fees_distribution: dict[str, Any]) -> None:
+    # ConsensusHelpers.requireNonZeroFeeConfig assigns these stable field
+    # indices to the six mandatory fields on every fee-aware user submission.
+    required_fields = (
+        (1, "leaderTimeunitsAllocation"),
+        (2, "validatorTimeunitsAllocation"),
+        (3, "executionBudgetPerRound"),
+        (4, "maxPriceGenPerTimeUnit"),
+        (5, "storageFeeMaxGasPrice"),
+        (6, "receiptFeeMaxGasPrice"),
+    )
+    for field_index, field_name in required_fields:
+        if int(fees_distribution[field_name]) <= 0:
+            raise FeeValueMustBeNonZero(f"FeeValueMustBeNonZero({field_index})")
+
+
+def _validate_phase_timeout_bounds(
+    leader_timeunits: int,
+    validator_timeunits: int,
+    policy: StudioFeePolicy,
+    *,
+    allow_zero: bool = False,
+) -> None:
+    checks = (
+        (
+            int(leader_timeunits),
+            int(policy.min_propose_timeunits),
+            int(policy.max_propose_timeunits),
+        ),
+        (
+            int(validator_timeunits),
+            int(policy.min_commit_timeunits),
+            int(policy.max_commit_timeunits),
+        ),
+    )
+    for value, minimum, maximum in checks:
+        if allow_zero and value == 0:
+            continue
+        if value < minimum or value > maximum:
+            raise PhaseTimeoutOutOfBounds(
+                f"PhaseTimeoutOutOfBounds({value},{minimum},{maximum})"
+            )
+
+
 def validate_transaction_fee_deposit(
     *,
     fees_distribution: dict[str, Any],
@@ -665,6 +1499,13 @@ def validate_transaction_fee_deposit(
 ) -> int:
     policy = policy or StudioFeePolicy()
     fees = normalize_fees_distribution(fees_distribution)
+    if policy.fee_accounting_enabled() and policy.enforce_v06_submission_config:
+        _require_nonzero_fee_config(fees)
+        _validate_phase_timeout_bounds(
+            int(fees["leaderTimeunitsAllocation"]),
+            int(fees["validatorTimeunitsAllocation"]),
+            policy,
+        )
     execution_budget_per_round = int(fees["executionBudgetPerRound"])
     if (
         not allow_low_execution_budget
@@ -725,6 +1566,56 @@ def create_fee_accounting(
     )
 
 
+def activate_fee_accounting(
+    accounting: dict[str, Any],
+    policy: StudioFeePolicy | None = None,
+    *,
+    selection_pool_count: int | None = None,
+) -> tuple[dict[str, Any], bool]:
+    """Lock v0.6 execution prices on first activation.
+
+    Submission reserves time-unit work at the user's GEN ceiling. Consensus
+    checks the live GEN price only once the pending transaction activates; an
+    over-cap transaction is canceled with its escrow untouched. Storage and
+    receipt prices are also locked at activation, but do not cause a second
+    cap check after the submission-time quote.
+    """
+    updated = copy.deepcopy(accounting)
+    if updated.get("activation_prices_locked"):
+        return updated, False
+
+    if selection_pool_count is not None:
+        # Consensus appeal reservations use the activation epoch's frozen
+        # selection-pool authority, never the live staking population.
+        updated["selection_pool_count"] = max(0, int(selection_pool_count))
+
+    live_policy = policy or StudioFeePolicy.from_env()
+    fees = normalize_fees_distribution(updated.get("fees_distribution") or {})
+    max_gen_price = int(fees["maxPriceGenPerTimeUnit"])
+    if max_gen_price > 0 and live_policy.gen_per_time_unit > max_gen_price:
+        updated["activation_price_cap_exceeded"] = {
+            "actual": int(live_policy.gen_per_time_unit),
+            "maximum": max_gen_price,
+        }
+        return updated, True
+
+    submission_policy = _accounting_policy(updated)
+    locked_policy = replace(
+        submission_policy,
+        gen_per_time_unit=int(live_policy.gen_per_time_unit),
+        storage_unit_price=int(live_policy.storage_unit_price),
+        receipt_gas_price=int(live_policy.receipt_gas_price),
+    )
+    updated["policy_snapshot"] = locked_policy.to_snapshot()
+    updated["activation_prices_locked"] = True
+    updated["locked_prices"] = {
+        "genPerTimeUnit": int(live_policy.gen_per_time_unit),
+        "storageUnitPrice": int(live_policy.storage_unit_price),
+        "receiptGasPrice": int(live_policy.receipt_gas_price),
+    }
+    return updated, False
+
+
 def create_child_fee_accounting(
     *,
     message: dict[str, Any],
@@ -739,24 +1630,37 @@ def create_child_fee_accounting(
         raise MessageDeclaredBudgetInsufficient("MessageDeclaredBudgetInsufficient")
 
     fee_params = decode_internal_message_fee_params(message.get("feeParams", b""))
-    capless_child_fees = _fees_distribution_from_internal_params(
+    _validate_internal_message_price_caps(fee_params)
+    _validate_phase_timeout_bounds(
+        int(fee_params["leaderTimeunitsAllocation"]),
+        int(fee_params["validatorTimeunitsAllocation"]),
+        policy,
+        allow_zero=True,
+    )
+    funding_child_fees = _fees_distribution_from_internal_params(
         fee_params,
         total_message_fees=0,
         parent_fees_distribution=normalize_fees_distribution({}),
     )
-    try:
-        child_primary = validate_transaction_fee_deposit(
-            fees_distribution=capless_child_fees,
-            message_allocations=[],
-            num_of_validators=VALIDATORS_PER_ROUND[0],
-            submitted_value=declared_budget,
-            user_value=0,
-            policy=policy,
-        )
-    except InsufficientFees as exc:
-        raise MessageDeclaredBudgetInsufficient(
-            "MessageDeclaredBudgetInsufficient"
-        ) from exc
+    # Consensus prices child funding at the child's declared GEN ceiling. The
+    # live GEN price is checked only when the child activates, while storage
+    # and receipt ceilings guard the child's later work and therefore do not
+    # participate in this floor calculation.
+    funding_child_fees["storageFeeMaxGasPrice"] = 0
+    funding_child_fees["receiptFeeMaxGasPrice"] = 0
+    execution_budget_per_round = int(funding_child_fees["executionBudgetPerRound"])
+    if (
+        execution_budget_per_round > 0
+        and execution_budget_per_round < policy.message_fee_params_budget_floor()
+    ):
+        raise BudgetTooLow("BudgetTooLow")
+    child_primary = calculate_round_fees(
+        funding_child_fees,
+        VALIDATORS_PER_ROUND[0],
+        0,
+        policy,
+        enforce_gen_price_cap=False,
+    )
     if declared_budget < child_primary:
         raise MessageDeclaredBudgetInsufficient("MessageDeclaredBudgetInsufficient")
 
@@ -804,7 +1708,7 @@ def genvm_fee_context(
     if not accounting:
         return None, None
 
-    policy = _accounting_policy(accounting, policy)
+    policy = execution_policy_for_accounting(accounting, policy)
     fees = normalize_fees_distribution(accounting.get("fees_distribution") or {})
     bucket_total = int(fees["executionBudgetPerRound"])
 
@@ -899,9 +1803,24 @@ def apply_fee_top_up(
     perform_fee_checks: bool = True,
     policy: StudioFeePolicy | None = None,
 ) -> dict[str, Any]:
-    policy = _accounting_policy(accounting, policy)
+    # Top-up validation uses the FeeManager configuration at the time of the
+    # top-up. Activation locks execution prices, not governance parameters or
+    # the gas-based minimum-budget floor.
+    policy = _live_policy_for_accounting(accounting, policy)
     amount = int(amount)
+    if amount <= 0:
+        raise InsufficientFees("InsufficientFees")
     incoming = normalize_fees_distribution(fees_distribution)
+    cap_owner = accounting.get("sender")
+    if sender and cap_owner and str(sender).lower() != str(cap_owner).lower():
+        # Any account may fund an in-flight transaction, but Consensus pins
+        # price-cap authority to the first depositor.
+        for cap in (
+            "maxPriceGenPerTimeUnit",
+            "storageFeeMaxGasPrice",
+            "receiptFeeMaxGasPrice",
+        ):
+            incoming[cap] = 0
     incoming_message_fees = int(incoming["totalMessageFees"])
     if incoming_message_fees > amount:
         raise InsufficientFees("InsufficientFees")
@@ -950,6 +1869,22 @@ def apply_fee_top_up(
     updated["execution_budget_total"] = int(merged["executionBudgetPerRound"]) * (
         get_leader_rounds(merged)
     )
+    current_overlay_reserve = int(updated.get("time_unit_overlay_budget", 0) or 0)
+    updated["time_unit_overlay_budget"] = _carve_time_unit_overlay_reserve(
+        current_reserve=current_overlay_reserve,
+        cumulative_primary=int(updated["primary_fee_budget"]),
+        execution_budget=int(updated["execution_budget_total"]),
+        incoming_primary=primary_amount,
+        split_bps=policy.time_unit_overlay_bps,
+    )
+    overlay_reserve_delta = (
+        int(updated["time_unit_overlay_budget"]) - current_overlay_reserve
+    )
+    _record_fee_contribution(
+        updated,
+        sender,
+        primary_amount - overlay_reserve_delta + incoming_message_fees,
+    )
     updated.setdefault("top_ups", []).append(
         {
             "sender": sender,
@@ -975,6 +1910,7 @@ def record_appeal_bond(
     top_up_and_submit: bool = False,
     terminal_committee_upper_bound: int | None = None,
     replacement_rotations: int | None = None,
+    leader_timeout_live_seats: int | None = None,
     time_unit_overlay_bps: int | None = None,
     policy: StudioFeePolicy | None = None,
 ) -> dict[str, Any]:
@@ -998,6 +1934,7 @@ def record_appeal_bond(
         status=status,
         terminal_committee_upper_bound=terminal_committee_upper_bound,
         replacement_rotations=replacement_rotations,
+        leader_timeout_live_seats=leader_timeout_live_seats,
         policy=policy,
     )
     bond = int(charge["bond"])
@@ -1025,6 +1962,14 @@ def record_appeal_bond(
     updated["paid_fee_value"] = int(updated.get("paid_fee_value", 0)) + funding
     updated["appeal_funding_total"] = (
         int(updated.get("appeal_funding_total", 0)) + funding
+    )
+    updated["time_unit_overlay_budget"] = int(
+        updated.get("time_unit_overlay_budget", 0) or 0
+    ) + int(charge["fundingBreakdown"]["overlay"])
+    _record_fee_contribution(
+        updated,
+        appealer,
+        funding - int(charge["fundingBreakdown"]["overlay"]),
     )
     updated["appeal_bonds_total"] = int(updated.get("appeal_bonds_total", 0)) + bond
     surplus = amount - total_required
@@ -1059,6 +2004,7 @@ def calculate_appeal_charge(
     status: str,
     terminal_committee_upper_bound: int | None = None,
     replacement_rotations: int | None = None,
+    leader_timeout_live_seats: int | None = None,
     policy: StudioFeePolicy | None = None,
 ) -> dict[str, Any]:
     """Quote the same bond + typed funding split used by Consensus admission."""
@@ -1073,6 +2019,7 @@ def calculate_appeal_charge(
         leader_timeout_rotations_left=(
             replacement_rotations if status_value == "LEADER_TIMEOUT" else None
         ),
+        leader_timeout_live_seats=leader_timeout_live_seats,
         policy=policy,
     )
 
@@ -1159,6 +2106,7 @@ def calculate_min_appeal_bond(
     current_round: int,
     status: str,
     leader_timeout_rotations_left: int | None = None,
+    leader_timeout_live_seats: int | None = None,
     policy: StudioFeePolicy | None = None,
 ) -> int:
     policy = policy or StudioFeePolicy()
@@ -1166,6 +2114,14 @@ def calculate_min_appeal_bond(
     current_round = max(0, int(current_round))
     status_value = str(status).upper()
     if status_value == "LEADER_TIMEOUT":
+        if (
+            leader_timeout_live_seats is not None
+            and int(leader_timeout_live_seats) <= 1
+        ):
+            # The live committee only gates whether a replacement leader can
+            # be induced. When it can, pricing still uses the configured round
+            # size below, even though the timed-out leader was removed.
+            return 0
         rotations_left = (
             _appeal_rotation_allowance(fees, current_round)
             if leader_timeout_rotations_left is None
@@ -1183,9 +2139,10 @@ def calculate_min_appeal_bond(
 
     if status_value == "UNDETERMINED":
         target_round = current_round + 2
+        target_normal_index = target_round // 2
         rotations = (
-            int(fees["rotations"][target_round - 1])
-            if target_round - 1 < len(fees["rotations"])
+            int(fees["rotations"][target_normal_index])
+            if target_normal_index < len(fees["rotations"])
             else 0
         )
         total = _calculate_fee_for_round(
@@ -1227,6 +2184,10 @@ def fill_message_fee_payload_from_allocation(
     accounting: dict[str, Any],
     message: dict[str, Any],
 ) -> dict[str, Any]:
+    if bool(message.get("useBalance", False)):
+        # Contract-funded messages carry their own canonical fee payload and
+        # bypass the sender's allocation tree in Consensus.
+        return copy.deepcopy(message)
     allocations = accounting.get("message_allocations") or []
     if not allocations:
         return copy.deepcopy(message)
@@ -1278,23 +2239,32 @@ def consume_message_fees(
     reported_total: int | None = None,
     policy: StudioFeePolicy | None = None,
     reimburse_external: bool = True,
+    external_executor: str | None = None,
 ) -> dict[str, Any]:
-    policy = _accounting_policy(accounting, policy)
-    if policy.max_messages_per_tx > 0 and len(messages) > policy.max_messages_per_tx:
+    live_policy = _live_policy_for_accounting(accounting, policy)
+    execution_policy = execution_policy_for_accounting(accounting, live_policy)
+    if len(messages) > _message_count_cap(live_policy):
         raise TooManyMessages("TooManyMessages")
 
     updated = copy.deepcopy(accounting)
     recalculated_total = 0
-    external_reimbursement_total = 0
+    external_consumption_total = 0
+    initial_external_reimbursed = int(
+        updated.get("external_message_fee_reimbursed", 0) or 0
+    )
+    initial_external_remainder = int(
+        updated.get("external_message_fee_remainder", 0) or 0
+    )
 
     for message in messages:
         message_type = _message_type_value(message)
         if message_type == MESSAGE_TYPE_EXTERNAL:
-            external_reimbursement_total += _consume_external_message_fee(
+            external_consumption_total += _consume_external_message_fee(
                 updated,
                 message,
-                policy,
+                execution_policy,
                 reimburse_external,
+                external_executor,
             )
             continue
 
@@ -1302,7 +2272,7 @@ def consume_message_fees(
             recalculated_total += _consume_internal_message_fee(
                 updated,
                 message,
-                policy,
+                live_policy,
             )
 
     if reported_total is not None and int(reported_total) < recalculated_total:
@@ -1311,23 +2281,39 @@ def consume_message_fees(
     attempted = (
         int(updated.get("message_fee_consumed", 0))
         + recalculated_total
-        + external_reimbursement_total
+        + external_consumption_total
     )
     message_budget = int(updated.get("message_fee_budget", 0))
     if attempted > message_budget:
         raise MessageBudgetExceeded("MessageBudgetExceeded")
 
     updated["message_fee_consumed"] = attempted
-    updated.setdefault("message_consumption_events", []).append(
-        {
-            "consumed": recalculated_total + external_reimbursement_total,
-            "internalConsumed": recalculated_total,
-            "externalReimbursed": external_reimbursement_total,
-            "remaining": message_budget - attempted,
-        }
+    consumption_event = {
+        "consumed": recalculated_total + external_consumption_total,
+        "internalConsumed": recalculated_total,
+        "externalReimbursed": int(
+            updated.get("external_message_fee_reimbursed", 0) or 0
+        )
+        - initial_external_reimbursed,
+        "remaining": message_budget - attempted,
+    }
+    external_remainder_settled = (
+        int(updated.get("external_message_fee_remainder", 0) or 0)
+        - initial_external_remainder
     )
-    _refresh_message_fee_accounting_report_if_present(updated, policy)
+    if external_remainder_settled > 0:
+        consumption_event["externalRemainderSettled"] = external_remainder_settled
+    updated.setdefault("message_consumption_events", []).append(consumption_event)
+    _refresh_message_fee_accounting_report_if_present(updated, execution_policy)
     return updated
+
+
+def _message_count_cap(policy: StudioFeePolicy) -> int:
+    cap = max(0, int(policy.max_allocated_messages))
+    fee_cap = int(policy.max_messages_per_tx)
+    if fee_cap > 0:
+        cap = min(cap, fee_cap)
+    return cap
 
 
 def _message_type_value(message: dict[str, Any]) -> int:
@@ -1339,6 +2325,7 @@ def _consume_external_message_fee(
     message: dict[str, Any],
     policy: StudioFeePolicy,
     reimburse_external: bool,
+    external_executor: str | None,
 ) -> int:
     if int(message.get("declaredBudget", 0) or 0) != 0:
         raise MessageDeclaredBudgetInsufficient("MessageDeclaredBudgetInsufficient")
@@ -1347,6 +2334,7 @@ def _consume_external_message_fee(
         message,
         policy,
         reimburse=reimburse_external,
+        executor=external_executor,
     )
 
 
@@ -1357,11 +2345,17 @@ def _consume_internal_message_fee(
 ) -> int:
     declared_budget = int(message.get("declaredBudget", 0) or 0)
     fee_params = decode_internal_message_fee_params(message.get("feeParams", b""))
+    _validate_internal_message_price_caps(fee_params)
     _validate_internal_execution_budget_floor(fee_params, policy)
 
     min_required = min_message_primary_fees(fee_params, policy)
     if declared_budget < min_required:
         raise MessageDeclaredBudgetInsufficient("MessageDeclaredBudgetInsufficient")
+
+    if bool(message.get("useBalance", False)):
+        # Consensus reserves this budget from the emitting contract (ghost),
+        # outside the sender-funded message bucket and allocation tree.
+        return 0
 
     _consume_against_allocation(accounting, message, declared_budget)
     return declared_budget
@@ -1386,11 +2380,13 @@ def record_reveal_message_fees(
     reported_total: int | None = None,
     policy: StudioFeePolicy | None = None,
 ) -> dict[str, Any]:
+    live_policy = _live_policy_for_accounting(accounting, policy)
+    _enforce_submitted_messages_cap(messages, live_policy)
     updated = consume_message_fees(
         accounting,
         messages,
         reported_total=reported_total,
-        policy=policy,
+        policy=live_policy,
         reimburse_external=False,
     )
     updated["message_fees_recorded_at_reveal"] = True
@@ -1402,9 +2398,11 @@ def record_external_message_execution_fees(
     messages: list[dict[str, Any]],
     *,
     policy: StudioFeePolicy | None = None,
+    executor: str | None = None,
 ) -> dict[str, Any]:
     updated = copy.deepcopy(accounting)
     policy = _accounting_policy(updated, policy)
+    consumed_total = 0
     reimbursement_total = 0
     remainder_total = 0
     updated_any = False
@@ -1430,9 +2428,7 @@ def record_external_message_execution_fees(
         remainder = reservation - reimbursement
 
         attempted = (
-            int(updated.get("message_fee_consumed", 0))
-            + reimbursement_total
-            + reimbursement
+            int(updated.get("message_fee_consumed", 0)) + consumed_total + reservation
         )
         message_budget = int(updated.get("message_fee_budget", 0))
         if attempted > message_budget:
@@ -1442,13 +2438,18 @@ def record_external_message_execution_fees(
         event["reimbursement"] = reimbursement
         event["remainder"] = remainder
         event["executionRecorded"] = True
+        _record_external_message_fee_payouts(updated, event, executor)
+        consumed_total += reservation
         reimbursement_total += reimbursement
         remainder_total += remainder
         updated_any = True
 
     if updated_any:
         updated["message_fee_consumed"] = (
-            int(updated.get("message_fee_consumed", 0)) + reimbursement_total
+            int(updated.get("message_fee_consumed", 0)) + consumed_total
+        )
+        updated["external_message_fee_settled"] = (
+            int(updated.get("external_message_fee_settled", 0)) + consumed_total
         )
         updated["external_message_fee_reimbursed"] = (
             int(updated.get("external_message_fee_reimbursed", 0)) + reimbursement_total
@@ -1458,9 +2459,10 @@ def record_external_message_execution_fees(
         )
         updated.setdefault("message_consumption_events", []).append(
             {
-                "consumed": reimbursement_total,
+                "consumed": consumed_total,
                 "internalConsumed": 0,
                 "externalReimbursed": reimbursement_total,
+                "externalRemainderSettled": remainder_total,
                 "remaining": max(
                     0,
                     int(updated.get("message_fee_budget", 0))
@@ -1541,6 +2543,8 @@ def unwind_reveal_message_fees(
             != MESSAGE_TYPE_INTERNAL
         ):
             continue
+        if bool(message.get("useBalance", False)):
+            continue
         if acceptance_dispatched and bool(message.get("onAcceptance", False)):
             continue
 
@@ -1591,7 +2595,8 @@ def record_execution_fee_consumption(
     policy: StudioFeePolicy | None = None,
 ) -> dict[str, Any]:
     updated = copy.deepcopy(accounting)
-    policy = _accounting_policy(updated, policy)
+    fallback_policy = execution_policy_for_accounting(updated, policy)
+    policy = _receipt_execution_policy(receipt, fallback_policy)
     message_payloads = _receipt_message_fee_payloads(updated, receipt)
     reported_message_fees_total = _receipt_reported_message_fees_total(receipt)
     if (
@@ -1661,6 +2666,27 @@ def record_execution_fee_consumption(
     return updated
 
 
+def validate_receipt_admission_caps(
+    receipt: Any,
+    policy: StudioFeePolicy | None = None,
+) -> None:
+    policy = policy or StudioFeePolicy.from_env()
+    eq_outputs_length = _receipt_eq_blocks_outputs_length(receipt)
+    if (
+        policy.max_eq_outputs_bytes > 0
+        and eq_outputs_length > policy.max_eq_outputs_bytes
+    ):
+        raise EqOutputsTooLarge(
+            f"EqOutputsTooLarge({eq_outputs_length},{policy.max_eq_outputs_bytes})"
+        )
+
+    message_payloads = _receipt_message_fee_payloads({}, receipt)
+    if message_payloads and _receipt_execution_allows_messages(receipt):
+        if len(message_payloads) > _message_count_cap(policy):
+            raise TooManyMessages("TooManyMessages")
+        _enforce_submitted_messages_cap(message_payloads, policy)
+
+
 def settle_fee_accounting(
     accounting: dict[str, Any],
     *,
@@ -1669,61 +2695,130 @@ def settle_fee_accounting(
     actual_final_round: int | None = None,
     num_of_validators: int | None = None,
     consensus_history: dict[str, Any] | None = None,
+    execution_mode: str = "NORMAL",
     policy: StudioFeePolicy | None = None,
 ) -> tuple[dict[str, Any], int]:
-    policy = _accounting_policy(accounting, policy)
-    updated = record_execution_fee_consumption(accounting, receipt, policy)
+    policy_override = policy
+    locked_policy = _accounting_policy(
+        accounting,
+        policy_override if not accounting.get("activation_prices_locked") else None,
+    )
+    live_policy = _live_policy_for_accounting(accounting, policy_override)
+    execution_policy = execution_policy_for_accounting(accounting, live_policy)
+    updated = record_execution_fee_consumption(accounting, receipt, live_policy)
     if updated.get("status") in {"settled", "canceled"}:
         return updated, 0
+    updated = _record_historical_execution_fee_consumption(
+        updated,
+        receipt=receipt,
+        consensus_history=consensus_history,
+        policy=execution_policy,
+    )
 
     primary_budget = int(updated.get("primary_fee_budget", 0))
     execution_budget = int(updated.get("execution_budget_total", 0))
     primary_required = int(updated.get("primary_fee_required", 0))
     fees_distribution = updated.get("fees_distribution") or {}
+    settlement_rounds: list[dict[str, Any]] = []
     if actual_final_round is not None:
         validators = int(
             num_of_validators or updated.get("num_of_initial_validators") or 0
         )
-        time_unit_budget = calculate_time_unit_fees_through_round(
+        time_unit_budget, settlement_rounds = _calculate_settled_time_unit_fees(
             fees_distribution,
             validators,
             actual_final_round,
-            policy,
-            consensus_history=consensus_history,
+            locked_policy,
+            consensus_history,
+            execution_mode,
         )
-        execution_budget = int(
-            normalize_fees_distribution(fees_distribution)["executionBudgetPerRound"]
-        ) * get_leader_rounds_through_round(
-            fees_distribution,
-            actual_final_round,
-            consensus_history=consensus_history,
-        )
+        # Consensus settles storage + receipt/write consumption against the
+        # complete unified reserve quoted at submission:
+        #
+        #   executionBudgetPerRound * all configured leader slots
+        #
+        # Unused future slots are a refund breakdown only; they do not shrink
+        # the cap available to real cumulative execution. In particular, an
+        # early round-0 finish may consume more than one per-round slice (for
+        # example through persistent storage) while remaining fully backed by
+        # the transaction's multi-round reserve.
         updated["actual_final_round"] = int(actual_final_round)
+        if settlement_rounds:
+            updated["settlement_rounds"] = settlement_rounds
     else:
         time_unit_budget = max(0, primary_required - execution_budget)
-    execution_spent = min(
-        int(updated.get("execution_fee_consumed", 0)), execution_budget
+    execution_consumed = int(updated.get("execution_fee_consumed", 0))
+    execution_spent = min(execution_consumed, execution_budget)
+    storage_fee = _bucket_value(
+        list(updated.get("execution_fee_consumed_buckets") or []),
+        1,
     )
+    storage_recipients = _settlement_storage_recipient_count(
+        consensus_history,
+        settlement_rounds if actual_final_round is not None else [],
+        fees_distribution,
+        locked_policy,
+        execution_mode,
+    )
+    if storage_recipients == 0 and time_unit_budget > 0 and not settlement_rounds:
+        # Legacy/synthetic histories without receipt identities retain the
+        # configured initial committee as the best available denominator.
+        storage_recipients = int(
+            num_of_validators or updated.get("num_of_initial_validators") or 0
+        )
+    capped_storage_fee = min(storage_fee, execution_budget)
+    storage_dust = (
+        capped_storage_fee % storage_recipients
+        if storage_recipients > 0
+        else capped_storage_fee
+    )
+    execution_spent = max(0, execution_spent - storage_dust)
     bond_settlements, bond_payout = _settle_appeal_bonds(
         updated,
         consensus_history=consensus_history,
         cancel=False,
     )
-    appeal_profit_spent = sum(
+    appeal_profit_requested = sum(
         max(0, int(item.get("payout", 0)) - int(item.get("amount", 0)))
         for item in bond_settlements
         if item.get("status") == "successful"
     )
-    time_unit_overlay_spent = _time_unit_overlay(
-        time_unit_budget,
-        policy.time_unit_overlay_bps,
+    appeal_bond_sender_refund = sum(
+        int(item.get("senderRefund", 0) or 0) for item in bond_settlements
     )
+    current_overlay_bps = (
+        int(policy_override.time_unit_overlay_bps)
+        if policy_override is not None
+        else int(StudioFeePolicy.from_env().time_unit_overlay_bps)
+    )
+    time_unit_overlay_requested = _time_unit_overlay(
+        time_unit_budget,
+        current_overlay_bps,
+    )
+    overlay_budget = int(updated.get("time_unit_overlay_budget", primary_budget) or 0)
+    time_unit_overlay_spent = min(time_unit_overlay_requested, overlay_budget)
+    non_profit_spend = time_unit_budget + time_unit_overlay_spent + execution_spent
+    appeal_profit_spent = (
+        appeal_profit_requested
+        if non_profit_spend + appeal_profit_requested <= primary_budget
+        else 0
+    )
+    if appeal_profit_requested > 0 and appeal_profit_spent == 0:
+        # Consensus never partially promises a successful-appeal profit. If
+        # legacy/malformed accounting cannot fund the complete profit leg, all
+        # successful payouts are clamped to principal and that fee money stays
+        # in the sender residual.
+        for item in bond_settlements:
+            if item.get("status") != "successful":
+                continue
+            amount = int(item.get("amount", 0) or 0)
+            payout = int(item.get("payout", 0) or 0)
+            bond_payout -= max(0, payout - amount)
+            item["payout"] = amount
+            item["profitFunded"] = False
     primary_spent = min(
         primary_budget,
-        time_unit_budget
-        + time_unit_overlay_spent
-        + appeal_profit_spent
-        + execution_spent,
+        non_profit_spend + appeal_profit_spent,
     )
     primary_refund = max(
         0, primary_budget - primary_spent - int(updated.get("primary_fee_refunded", 0))
@@ -1735,33 +2830,154 @@ def settle_fee_accounting(
         - int(updated.get("message_fee_consumed", 0))
         - int(updated.get("message_fee_refunded", 0)),
     )
-    refund = primary_refund + message_refund
+    refund = primary_refund + message_refund + appeal_bond_sender_refund
     updated["status"] = "settled"
     updated["settlement_reason"] = reason
     updated["primary_fee_spent"] = primary_spent
     updated["time_unit_overlay_spent"] = time_unit_overlay_spent
+    updated["time_unit_overlay_requested"] = time_unit_overlay_requested
+    updated["time_unit_overlay_settlement_bps"] = current_overlay_bps
+    updated["appeal_profit_requested"] = appeal_profit_requested
     updated["appeal_profit_spent"] = appeal_profit_spent
+    updated["storage_fee_recipient_count"] = storage_recipients
+    updated["storage_fee_dust_refunded"] = storage_dust
     updated["primary_fee_refunded"] = (
         int(updated.get("primary_fee_refunded", 0)) + primary_refund
     )
     updated["message_fee_refunded"] = (
         int(updated.get("message_fee_refunded", 0)) + message_refund
     )
+    updated["appeal_bond_sender_refunded"] = (
+        int(updated.get("appeal_bond_sender_refunded", 0)) + appeal_bond_sender_refund
+    )
     updated["total_refunded"] = int(updated.get("total_refunded", 0)) + refund
     updated["appeal_bonds_payout_total"] = (
         int(updated.get("appeal_bonds_payout_total", 0)) + bond_payout
     )
     updated["appeal_bond_settlements"] = bond_settlements
+    updated["fee_refund_settlements"] = _allocate_fee_refund(updated, refund)
     updated.setdefault("refunds", []).append(
         {
             "reason": reason,
             "primary": primary_refund,
             "message": message_refund,
+            "appealBond": appeal_bond_sender_refund,
             "amount": refund,
         }
     )
-    _refresh_message_fee_accounting_report_if_present(updated, policy)
+    _refresh_message_fee_accounting_report_if_present(updated, execution_policy)
     return updated, refund
+
+
+def _record_historical_execution_fee_consumption(
+    accounting: dict[str, Any],
+    *,
+    receipt: Any | None,
+    consensus_history: dict[str, Any] | None,
+    policy: StudioFeePolicy,
+) -> dict[str, Any]:
+    attempts = _historical_leader_proposal_receipts(consensus_history)
+    if not attempts:
+        return accounting
+
+    updated = copy.deepcopy(accounting)
+    receipt_total = 0
+    attempt_report: list[dict[str, Any]] = []
+    for (
+        round_index,
+        attempt_index,
+        attempt_receipt,
+        deterministic_violation,
+    ) in attempts:
+        timed_out = _receipt_is_leader_timeout(attempt_receipt)
+        attempt_policy = _receipt_execution_policy(attempt_receipt, policy)
+        report = (
+            None
+            if timed_out or deterministic_violation
+            else _receipt_fee_report(attempt_receipt, attempt_policy)
+        )
+        charged = _receipt_report_chargeable_fee(report) if report is not None else 0
+        receipt_total += charged
+        attempt_report.append(
+            {
+                "round": round_index,
+                "attempt": attempt_index,
+                "leaderTimeout": timed_out,
+                "deterministicViolation": deterministic_violation,
+                "receiptFee": charged,
+                "receiptGasPrice": int(attempt_policy.receipt_gas_price),
+            }
+        )
+
+    final_consumed = _receipt_data_fees_consumed(receipt)
+    storage_fee = (
+        _chargeable_storage_fee(receipt, final_consumed)
+        if final_consumed is not None
+        else _bucket_value(
+            list(updated.get("execution_fee_consumed_buckets") or []),
+            1,
+        )
+    )
+    updated["execution_fee_consumed"] = receipt_total + storage_fee
+    updated["execution_fee_consumed_buckets"] = [receipt_total, storage_fee]
+    updated["historical_execution_attempts"] = attempt_report
+    updated["execution_fee_report"] = {
+        **(updated.get("execution_fee_report") or {}),
+        "historicalReceiptFees": {
+            "attempts": attempt_report,
+            "receiptFeeTotal": receipt_total,
+            "finalStorageFee": storage_fee,
+            "totalExecution": receipt_total + storage_fee,
+        },
+    }
+    return updated
+
+
+def _historical_leader_proposal_receipts(
+    consensus_history: dict[str, Any] | None,
+) -> list[tuple[int, int, dict[str, Any], bool]]:
+    grouped = _consensus_attempt_entries_by_round(consensus_history)
+    proposals: list[tuple[int, int, dict[str, Any], bool]] = []
+    for round_index in sorted(grouped):
+        for attempt_index, entry in enumerate(grouped[round_index]):
+            deterministic_violation = (
+                _fee_alignment_result(entry) == "deterministic_violation"
+            )
+            value = entry.get("leader_result")
+            candidates = value if isinstance(value, list) else [value]
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                mode = candidate.get("mode")
+                if hasattr(mode, "value"):
+                    mode = mode.value
+                if str(mode or "").lower() == "leader":
+                    proposals.append(
+                        (
+                            round_index,
+                            attempt_index,
+                            candidate,
+                            deterministic_violation,
+                        )
+                    )
+                    break
+    return proposals
+
+
+def _receipt_is_leader_timeout(receipt: Any) -> bool:
+    genvm_result = _receipt_genvm_result(receipt)
+    if isinstance(genvm_result, dict) and genvm_result.get("error_code") == (
+        "CONSENSUS_LEADER_EXEC_TIMEOUT"
+    ):
+        return True
+
+    result = _receipt_value(receipt, "result")
+    if isinstance(result, str):
+        try:
+            result = base64.b64decode(result)
+        except (ValueError, TypeError):
+            result = b""
+    return isinstance(result, (bytes, bytearray)) and bytes(result).endswith(b"timeout")
 
 
 def cancel_fee_accounting(
@@ -1804,11 +3020,13 @@ def cancel_fee_accounting(
         int(updated.get("appeal_bonds_payout_total", 0)) + bond_payout
     )
     updated["appeal_bond_settlements"] = bond_settlements
+    updated["fee_refund_settlements"] = _allocate_fee_refund(updated, refund)
     updated.setdefault("refunds", []).append(
         {
             "reason": reason,
             "primary": primary_refund,
             "message": message_refund,
+            "appealBond": 0,
             "amount": refund,
         }
     )
@@ -1902,7 +3120,7 @@ def _validate_message_allocation_node(
     _validate_allocation_parent(index, node, message_allocations)
 
     if int(node["messageType"]) == MESSAGE_TYPE_EXTERNAL:
-        _validate_external_allocation(node, external_keys)
+        _validate_external_allocation(node, external_keys, policy)
         return int(node["budget"])
 
     if int(node["messageType"]) != MESSAGE_TYPE_INTERNAL:
@@ -1934,6 +3152,12 @@ def _validate_internal_allocation_budget(
     policy: StudioFeePolicy,
 ) -> int:
     internal_fee_params = decode_internal_message_fee_params(node["feeParams"])
+    _validate_phase_timeout_bounds(
+        int(internal_fee_params["leaderTimeunitsAllocation"]),
+        int(internal_fee_params["validatorTimeunitsAllocation"]),
+        policy,
+        allow_zero=True,
+    )
     min_required = _internal_allocation_min_required(node, internal_fee_params, policy)
     if int(node["budget"]) < min_required:
         raise AllocationLifecycleBudgetInsufficient(
@@ -1942,6 +3166,21 @@ def _validate_internal_allocation_budget(
 
     _validate_internal_execution_budget_floor(internal_fee_params, policy)
     return min_required
+
+
+def _validate_internal_message_price_caps(
+    internal_fee_params: dict[str, Any],
+) -> None:
+    # Consensus rejects a leader reveal whose child declares any zero price
+    # cap. Validate the identical canonical bytes at submission/allocation
+    # time too, so Studio cannot accept a message shape that v0.6 rejects.
+    for field_index, field in (
+        (4, "maxPriceGenPerTimeUnit"),
+        (5, "storageFeeMaxGasPrice"),
+        (6, "receiptFeeMaxGasPrice"),
+    ):
+        if int(internal_fee_params[field]) <= 0:
+            raise FeeValueMustBeNonZero(f"FeeValueMustBeNonZero({field_index})")
 
 
 def _internal_allocation_min_required(
@@ -2009,6 +3248,9 @@ def decode_internal_message_fee_params(fee_params: bytes | str) -> dict[str, Any
         "appealRounds": int(decoded[2]),
         "executionBudgetPerRound": int(decoded[3]),
         "rotations": [int(rotation) for rotation in decoded[4]],
+        "maxPriceGenPerTimeUnit": int(decoded[5]),
+        "storageFeeMaxGasPrice": int(decoded[6]),
+        "receiptFeeMaxGasPrice": int(decoded[7]),
     }
 
 
@@ -2043,13 +3285,16 @@ def min_message_primary_fees(
             "executionConsumed": 0,
             "totalMessageFees": 0,
             "rotations": internal_fee_params["rotations"],
-            "maxPriceGenPerTimeUnit": 0,
+            "maxPriceGenPerTimeUnit": int(
+                internal_fee_params["maxPriceGenPerTimeUnit"]
+            ),
             "storageFeeMaxGasPrice": 0,
             "receiptFeeMaxGasPrice": 0,
         },
         VALIDATORS_PER_ROUND[0],
         0,
         policy,
+        enforce_gen_price_cap=False,
     )
 
 
@@ -2067,8 +3312,13 @@ def _calculate_appeal_round_total(
     fees: dict[str, int | list[int]],
     round: int,
 ) -> int:
+    # Fee schedules index rotations by normal-round ordinal, whereas callers
+    # use raw consensus rounds (0, 2, 4, ... for normal rounds).
+    rotations_index = round // 2
     rotations = (
-        int(fees["rotations"][round - 1]) if round - 1 < len(fees["rotations"]) else 0
+        int(fees["rotations"][rotations_index])
+        if rotations_index < len(fees["rotations"])
+        else 0
     )
     return _calculate_fee_for_round(
         _validators_per_round_safe(round),
@@ -2080,6 +3330,8 @@ def _calculate_appeal_round_total(
 
 def _calculate_appeal_profit_reserve(
     fees: dict[str, int | list[int]],
+    *,
+    gen_per_time_unit: int = 0,
 ) -> int:
     rotations = fees["rotations"]
     if not isinstance(rotations, list):
@@ -2097,6 +3349,8 @@ def _calculate_appeal_profit_reserve(
             int(fees["leaderTimeunitsAllocation"]),
             int(fees["validatorTimeunitsAllocation"]),
         )
+        if gen_per_time_unit > 0:
+            next_normal_bond *= gen_per_time_unit
         reserve += successful_appeal_profit(next_normal_bond)
     return reserve
 
@@ -2122,6 +3376,32 @@ def _time_unit_overlay(time_unit_work: int, split_bps: int) -> int:
     if split_bps >= 10_000:
         raise FeeValidationError("InvalidTimeUnitOverlayBps")
     return time_unit_work * split_bps // (10_000 - split_bps)
+
+
+def _carve_time_unit_overlay_reserve(
+    *,
+    current_reserve: int,
+    cumulative_primary: int,
+    execution_budget: int,
+    incoming_primary: int,
+    split_bps: int,
+) -> int:
+    """Mirror FeeManagerHelpers.carveOverlayReserve for one funding call."""
+    current_reserve = max(0, int(current_reserve))
+    incoming_primary = max(0, int(incoming_primary))
+    split_bps = int(split_bps)
+    if split_bps <= 0:
+        return current_reserve
+    if split_bps >= 10_000:
+        raise FeeValidationError("InvalidTimeUnitOverlayBps")
+
+    taxable_time_unit = max(
+        0,
+        int(cumulative_primary) - int(execution_budget),
+    )
+    target_reserve = taxable_time_unit * split_bps // 10_000
+    reserve_delta = max(0, target_reserve - current_reserve)
+    return current_reserve + min(reserve_delta, incoming_primary)
 
 
 def successful_appeal_reward(appeal_bond: int) -> int:
@@ -2229,8 +3509,8 @@ def _leader_slots_for_round(
 
 def _round_outcomes(consensus_history: dict[str, Any] | None) -> dict[int, str]:
     return {
-        index: str(entry.get("consensus_round") or "")
-        for index, entry in enumerate(completed_consensus_rounds(consensus_history))
+        round_index: str(entry.get("consensus_round") or "")
+        for round_index, entry in logical_fee_round_entries(consensus_history)
     }
 
 
@@ -2249,6 +3529,12 @@ def _settle_appeal_bonds(
         return copy.deepcopy(existing), 0
 
     outcomes = _round_outcomes(consensus_history)
+    entries = dict(logical_fee_round_entries(consensus_history))
+    fees = normalize_fees_distribution(accounting.get("fees_distribution") or {})
+    validator_timeunits = int(fees["validatorTimeunitsAllocation"])
+    locked_policy = _accounting_policy(accounting)
+    if locked_policy.gen_per_time_unit > 0:
+        validator_timeunits *= int(locked_policy.gen_per_time_unit)
     settlements: list[dict[str, Any]] = []
     payout_total = 0
     for index, bond in enumerate(accounting.get("appeal_bonds") or []):
@@ -2281,6 +3567,41 @@ def _settle_appeal_bonds(
             entry["outcome"] = outcome
         if status == "forfeited":
             entry["bond_forfeited"] = amount
+            if outcome == ConsensusRound.LEADER_TIMEOUT_APPEAL_FAILED.value:
+                leader_share = amount // 2
+                entry["distribution"] = "leader-timeout-split"
+                entry["leaderPayout"] = leader_share
+                entry["senderRefund"] = amount - leader_share
+            elif outcome in {
+                ConsensusRound.VALIDATOR_APPEAL_FAILED.value,
+                ConsensusRound.VALIDATORS_TIMEOUT_APPEAL_FAILED.value,
+            }:
+                outcome_entry = entries.get(int(outcome_index or 0))
+                receipts = _entry_validator_receipts(outcome_entry)
+                revealed = (
+                    len(receipts)
+                    if receipts
+                    else _validators_per_round_safe(int(outcome_index or 0))
+                )
+                aligned = (
+                    _aligned_validator_count(outcome_entry) if receipts else revealed
+                )
+                pool = revealed * validator_timeunits + amount
+                dust = pool if aligned <= 0 else pool % aligned
+                sender_refund = min(amount, dust)
+                entry["distribution"] = "appeal-validators"
+                entry["bondDistributed"] = amount - sender_refund
+                if sender_refund:
+                    entry["senderRefund"] = sender_refund
+            elif outcome == ConsensusRound.LEADER_APPEAL_FAILED.value:
+                outcome_entry = entries.get(int(outcome_index or 0))
+                receipts = _entry_validator_receipts(outcome_entry)
+                aligned = _aligned_validator_count(outcome_entry) if receipts else 0
+                sender_refund = amount if aligned <= 0 else amount % aligned
+                entry["distribution"] = "replay-validators"
+                entry["bondDistributed"] = amount - sender_refund
+                if sender_refund:
+                    entry["senderRefund"] = sender_refund
         settlements.append(entry)
     return settlements, payout_total
 
@@ -2312,15 +3633,20 @@ def _normalize_message_allocation(node: dict[str, Any]) -> dict[str, Any]:
 def _validate_external_allocation(
     node: dict[str, Any],
     external_keys: set[tuple[str, str]],
+    policy: StudioFeePolicy,
 ) -> None:
     if int(node["parentIndex"]) != NODE_ROOT_SENTINEL:
         raise AllocationTreeMalformed("AllocationTreeMalformed")
+    if bool(node["onAcceptance"]):
+        raise ExternalAllocationInvalid("ExternalOnAcceptanceNotSupported")
 
     external_fee_params = decode_external_message_fee_params(node["feeParams"])
     gas_limit = int(external_fee_params["gasLimit"])
     max_gas_price = int(external_fee_params["maxGasPrice"])
     if gas_limit == 0 or max_gas_price == 0:
         raise ExternalAllocationInvalid("ExternalAllocationInvalid")
+    if gas_limit < int(policy.min_external_gas_limit):
+        raise ExternalAllocationInvalid("ExternalGasLimitBelowMinimum")
 
     per_call = gas_limit * max_gas_price
     budget = int(node["budget"])
@@ -2380,6 +3706,85 @@ def _fee_params_bytes(fee_params: bytes | str) -> bytes:
     return bytes(fee_params)
 
 
+def _record_fee_contribution(
+    accounting: dict[str, Any],
+    depositor: str | None,
+    amount: int,
+) -> None:
+    amount = max(0, int(amount))
+    if amount == 0:
+        return
+    if not depositor:
+        accounting["untracked_contributions"] = (
+            int(accounting.get("untracked_contributions", 0) or 0) + amount
+        )
+        return
+
+    contributions = accounting.setdefault("contributions", [])
+    if (
+        contributions
+        and str(contributions[-1].get("depositor", "")).lower()
+        == str(depositor).lower()
+    ):
+        contributions[-1]["amount"] = int(contributions[-1].get("amount", 0)) + amount
+        return
+    if len(contributions) >= MAX_CONTRIBUTION_SEGMENTS:
+        accounting["untracked_contributions"] = (
+            int(accounting.get("untracked_contributions", 0) or 0) + amount
+        )
+        return
+    contributions.append({"depositor": depositor, "amount": amount})
+
+
+def _allocate_fee_refund(
+    accounting: dict[str, Any],
+    refundable: int,
+) -> list[dict[str, Any]]:
+    refundable = max(0, int(refundable))
+    if refundable == 0:
+        return []
+
+    contributions = [
+        {
+            "depositor": item.get("depositor"),
+            "amount": max(0, int(item.get("amount", 0) or 0)),
+        }
+        for item in accounting.get("contributions") or []
+        if isinstance(item, dict) and item.get("depositor")
+    ]
+    tracked_total = sum(item["amount"] for item in contributions)
+    tracked_refundable = min(refundable, tracked_total)
+    consumed = tracked_total - tracked_refundable
+    settlements: list[dict[str, Any]] = []
+    cumulative = 0
+    for item in contributions:
+        end = cumulative + item["amount"]
+        amount = 0
+        if cumulative >= consumed:
+            amount = item["amount"]
+        elif end > consumed:
+            amount = end - consumed
+        if amount > 0:
+            settlements.append(
+                {"recipient": item["depositor"], "amount": amount, "source": "fifo"}
+            )
+        cumulative = end
+
+    remainder = refundable - sum(item["amount"] for item in settlements)
+    fallback = accounting.get("sender")
+    if remainder > 0 and fallback:
+        for settlement in settlements:
+            if str(settlement["recipient"]).lower() == str(fallback).lower():
+                settlement["amount"] += remainder
+                settlement["source"] = "fifo+remainder"
+                break
+        else:
+            settlements.append(
+                {"recipient": fallback, "amount": remainder, "source": "remainder"}
+            )
+    return settlements
+
+
 def _new_fee_accounting(
     *,
     fees_distribution: dict[str, Any],
@@ -2393,11 +3798,24 @@ def _new_fee_accounting(
     policy: StudioFeePolicy,
 ) -> dict[str, Any]:
     fees = _serializable_fees_distribution(fees_distribution)
+    # FeeManager owns this counter. A caller may include the field in the ABI
+    # struct, but addFeesDistribution deliberately never copies it into
+    # storage; only receipt/storage charging advances it later.
+    fees["executionConsumed"] = 0
     total_message_fees = int(fees["totalMessageFees"])
     execution_budget_total = int(fees["executionBudgetPerRound"]) * get_leader_rounds(
         fees
     )
     primary_required = max(0, int(required_fee_value) - total_message_fees)
+    primary_budget = max(0, int(fee_value) - total_message_fees)
+    overlay_budget = _carve_time_unit_overlay_reserve(
+        current_reserve=0,
+        cumulative_primary=primary_budget,
+        execution_budget=execution_budget_total,
+        incoming_primary=primary_budget,
+        split_bps=policy.time_unit_overlay_bps,
+    )
+    tracked_contribution = primary_budget - overlay_budget + total_message_fees
     return {
         "version": 1,
         "source": source,
@@ -2409,10 +3827,11 @@ def _new_fee_accounting(
         "paid_fee_value": int(fee_value),
         "required_fee_value": int(required_fee_value),
         "primary_fee_required": primary_required,
-        "primary_fee_budget": max(0, int(fee_value) - total_message_fees),
+        "primary_fee_budget": primary_budget,
         "primary_fee_spent": 0,
         "primary_fee_refunded": 0,
         "execution_budget_total": execution_budget_total,
+        "time_unit_overlay_budget": overlay_budget,
         "execution_fee_consumed": 0,
         "execution_fee_consumed_buckets": [],
         "genvm_fee_consumed_buckets": [],
@@ -2424,9 +3843,13 @@ def _new_fee_accounting(
         "external_message_fee_reserved": 0,
         "external_message_fee_reimbursed": 0,
         "external_message_fee_remainder": 0,
+        "external_message_fee_settled": 0,
         "external_message_events": [],
+        "external_message_fee_payouts": [],
         "appeal_bonds": [],
         "appeal_bonds_total": 0,
+        "appeal_bonds_payout_total": 0,
+        "appeal_bond_sender_refunded": 0,
         "appeal_funding_total": 0,
         "appeal_charge_surplus_refunded": 0,
         "total_refunded": 0,
@@ -2440,6 +3863,12 @@ def _new_fee_accounting(
                 "feesDistribution": fees,
             }
         ],
+        "contributions": (
+            [{"depositor": sender, "amount": tracked_contribution}]
+            if sender and tracked_contribution > 0
+            else []
+        ),
+        "untracked_contributions": 0,
         "fees_distribution": fees,
         "message_allocations": [
             _serializable_message_allocation(allocation)
@@ -2483,15 +3912,9 @@ def _fees_distribution_from_internal_params(
         "executionConsumed": 0,
         "totalMessageFees": int(total_message_fees),
         "rotations": [int(rotation) for rotation in fee_params["rotations"]],
-        "maxPriceGenPerTimeUnit": int(
-            parent_fees_distribution.get("maxPriceGenPerTimeUnit", 0)
-        ),
-        "storageFeeMaxGasPrice": int(
-            parent_fees_distribution.get("storageFeeMaxGasPrice", 0)
-        ),
-        "receiptFeeMaxGasPrice": int(
-            parent_fees_distribution.get("receiptFeeMaxGasPrice", 0)
-        ),
+        "maxPriceGenPerTimeUnit": int(fee_params["maxPriceGenPerTimeUnit"]),
+        "storageFeeMaxGasPrice": int(fee_params["storageFeeMaxGasPrice"]),
+        "receiptFeeMaxGasPrice": int(fee_params["receiptFeeMaxGasPrice"]),
     }
 
 
@@ -2517,18 +3940,9 @@ def _genvm_message_fee_params(
             ),
             "execution_budget_per_round": int(decoded["executionBudgetPerRound"]),
             "rotations": [int(rotation) for rotation in decoded["rotations"]],
-            # Studio's chain-canonical per-node ABI carries only the first five
-            # internal fields. The three price caps live on fees_distribution,
-            # so add them only at the GenVM manager boundary.
-            "max_price_gen_per_time_unit": int(
-                fees_distribution.get("maxPriceGenPerTimeUnit", 0)
-            ),
-            "storage_fee_max_gas_price": int(
-                fees_distribution.get("storageFeeMaxGasPrice", 0)
-            ),
-            "receipt_fee_max_gas_price": int(
-                fees_distribution.get("receiptFeeMaxGasPrice", 0)
-            ),
+            "max_price_gen_per_time_unit": int(decoded["maxPriceGenPerTimeUnit"]),
+            "storage_fee_max_gas_price": int(decoded["storageFeeMaxGasPrice"]),
+            "receipt_fee_max_gas_price": int(decoded["receiptFeeMaxGasPrice"]),
         },
     }
 
@@ -2729,7 +4143,7 @@ def _is_matched_root_allocation(
     ):
         return False
     if _normalize_call_key(allocation["callKey"]) != _normalize_call_key(
-        message.get("callKey", CALL_KEY_WILDCARD)
+        message.get("callKey", EMPTY_CALL_KEY)
     ):
         return False
     if _fee_params_hex(allocation["feeParams"]) != _fee_params_hex(
@@ -2775,36 +4189,48 @@ def _reserve_external_execution(
     policy: StudioFeePolicy,
     *,
     reimburse: bool = True,
+    executor: str | None = None,
 ) -> int:
     if bool(message.get("onAcceptance", False)):
-        return 0
+        raise ExternalAllocationInvalid("ExternalOnAcceptanceNotSupported")
 
     allocations = accounting.get("message_allocations") or []
     if not allocations:
         return 0
 
-    resolved = _resolve_allocation(allocations, message)
-    if resolved is None:
+    candidates = list(_matching_root_allocations(allocations, message))
+    if not candidates:
         return 0
 
-    index, allocation = resolved
-    if int(allocation["messageType"]) != MESSAGE_TYPE_EXTERNAL:
-        return 0
+    selected: tuple[int, dict[str, Any], int, int, int] | None = None
+    for index, allocation in candidates:
+        external_fee_params = decode_external_message_fee_params(
+            allocation["feeParams"]
+        )
+        gas_limit = int(external_fee_params["gasLimit"])
+        max_gas_price = int(external_fee_params["maxGasPrice"])
+        locked_price = (
+            min(policy.receipt_gas_price, max_gas_price)
+            if policy.receipt_gas_price > 0
+            else 0
+        )
+        reservation = gas_limit * locked_price
+        key = str(index)
+        consumed = int(accounting.setdefault("allocation_consumed", {}).get(key, 0))
+        attempted = consumed + reservation
+        if attempted <= int(allocation["budget"]):
+            selected = (index, allocation, gas_limit, locked_price, reservation)
+            break
 
-    external_fee_params = decode_external_message_fee_params(allocation["feeParams"])
-    gas_limit = int(external_fee_params["gasLimit"])
-    max_gas_price = int(external_fee_params["maxGasPrice"])
-    locked_price = (
-        min(policy.receipt_gas_price, max_gas_price)
-        if policy.receipt_gas_price > 0
-        else 0
-    )
-    reservation = gas_limit * locked_price
+    # Consensus falls through exact -> wildcard when the exact allocation is
+    # exhausted. If records existed but neither has room, the reveal fails.
+    if selected is None:
+        raise MessageBudgetExceeded("MessageBudgetExceeded")
+
+    index, _allocation, gas_limit, locked_price, reservation = selected
     key = str(index)
     consumed = int(accounting.setdefault("allocation_consumed", {}).get(key, 0))
     attempted = consumed + reservation
-    if attempted > int(allocation["budget"]):
-        raise MessageBudgetExceeded("MessageBudgetExceeded")
     accounting["allocation_consumed"][key] = attempted
 
     gas_used = int(message.get("gasUsed", 0) or 0)
@@ -2820,21 +4246,53 @@ def _reserve_external_execution(
         accounting["external_message_fee_remainder"] = (
             int(accounting.get("external_message_fee_remainder", 0)) + remainder
         )
-    accounting.setdefault("external_message_events", []).append(
-        {
-            "recipient": str(message.get("recipient", "")).lower(),
-            "callKey": _normalize_call_key(message.get("callKey", CALL_KEY_WILDCARD)),
-            "allocationIndex": index,
-            "gasLimit": gas_limit,
-            "lockedGasPrice": locked_price,
-            "reservation": reservation,
-            "gasUsed": gas_used if reimburse else 0,
-            "reimbursement": reimbursement if reimburse else 0,
-            "remainder": remainder if reimburse else 0,
-            "executionRecorded": bool(reimburse),
-        }
-    )
-    return reimbursement if reimburse else 0
+    event = {
+        "recipient": str(message.get("recipient", "")).lower(),
+        "callKey": _normalize_call_key(message.get("callKey", EMPTY_CALL_KEY)),
+        "allocationIndex": index,
+        "gasLimit": gas_limit,
+        "lockedGasPrice": locked_price,
+        "reservation": reservation,
+        "gasUsed": gas_used if reimburse else 0,
+        "reimbursement": reimbursement if reimburse else 0,
+        "remainder": remainder if reimburse else 0,
+        "executionRecorded": bool(reimburse),
+    }
+    accounting.setdefault("external_message_events", []).append(event)
+    if reimburse:
+        accounting["external_message_fee_settled"] = (
+            int(accounting.get("external_message_fee_settled", 0)) + reservation
+        )
+        _record_external_message_fee_payouts(accounting, event, executor)
+    return reservation if reimburse else 0
+
+
+def _record_external_message_fee_payouts(
+    accounting: dict[str, Any],
+    event: dict[str, Any],
+    executor: str | None,
+) -> None:
+    reimbursement = int(event.get("reimbursement", 0) or 0)
+    remainder = int(event.get("remainder", 0) or 0)
+    depositor = accounting.get("sender")
+    executor_recipient = executor or depositor
+    payouts = accounting.setdefault("external_message_fee_payouts", [])
+    if reimbursement > 0 and executor_recipient:
+        payouts.append(
+            {
+                "recipient": executor_recipient,
+                "amount": reimbursement,
+                "source": "external-executor-reimbursement",
+            }
+        )
+    if remainder > 0 and depositor:
+        payouts.append(
+            {
+                "recipient": depositor,
+                "amount": remainder,
+                "source": "external-execution-remainder",
+            }
+        )
 
 
 def _find_unrefunded_external_message_event(
@@ -2842,7 +4300,7 @@ def _find_unrefunded_external_message_event(
     message: dict[str, Any],
 ) -> int | None:
     recipient = str(message.get("recipient", "")).lower()
-    call_key = _normalize_call_key(message.get("callKey", CALL_KEY_WILDCARD))
+    call_key = _normalize_call_key(message.get("callKey", EMPTY_CALL_KEY))
     for index, event in enumerate(accounting.get("external_message_events") or []):
         if (
             event.get("failureRefunded")
@@ -2852,7 +4310,7 @@ def _find_unrefunded_external_message_event(
             continue
         if str(event.get("recipient", "")).lower() != recipient:
             continue
-        if _normalize_call_key(event.get("callKey", CALL_KEY_WILDCARD)) != call_key:
+        if _normalize_call_key(event.get("callKey", EMPTY_CALL_KEY)) != call_key:
             continue
         return index
     return None
@@ -2863,13 +4321,13 @@ def _find_unexecuted_external_message_event(
     message: dict[str, Any],
 ) -> int | None:
     recipient = str(message.get("recipient", "")).lower()
-    call_key = _normalize_call_key(message.get("callKey", CALL_KEY_WILDCARD))
+    call_key = _normalize_call_key(message.get("callKey", EMPTY_CALL_KEY))
     for index, event in enumerate(accounting.get("external_message_events") or []):
         if event.get("executionRecorded") or event.get("unreserved"):
             continue
         if str(event.get("recipient", "")).lower() != recipient:
             continue
-        if _normalize_call_key(event.get("callKey", CALL_KEY_WILDCARD)) != call_key:
+        if _normalize_call_key(event.get("callKey", EMPTY_CALL_KEY)) != call_key:
             continue
         return index
     return None
@@ -2879,7 +4337,11 @@ def _unreserve_external_message_fee(
     accounting: dict[str, Any],
     message: dict[str, Any],
 ) -> tuple[int, int, int]:
-    event_index = _find_unrefunded_external_message_event(accounting, message)
+    # Reveal unwind applies only to a reservation that has not executed yet.
+    # Once execution is recorded Consensus consumes the whole reservation and
+    # routes its reimbursement/remainder payouts; rolling that event back here
+    # would leave those terminal payouts inconsistent with the fee ledger.
+    event_index = _find_unexecuted_external_message_event(accounting, message)
     if event_index is None:
         return 0, 0, 0
 
@@ -2891,10 +4353,14 @@ def _unreserve_external_message_fee(
 
     allocation_consumed = accounting.setdefault("allocation_consumed", {})
     consumed = int(allocation_consumed.get(allocation_index, 0) or 0)
-    allocation_consumed[allocation_index] = max(0, consumed - reservation)
+    remaining = max(0, consumed - reservation)
+    if remaining > 0:
+        allocation_consumed[allocation_index] = remaining
+    else:
+        allocation_consumed.pop(allocation_index, None)
     accounting["message_fee_consumed"] = max(
         0,
-        int(accounting.get("message_fee_consumed", 0)) - reimbursement,
+        int(accounting.get("message_fee_consumed", 0)) - reservation,
     )
     accounting["external_message_fee_reserved"] = max(
         0,
@@ -2907,6 +4373,10 @@ def _unreserve_external_message_fee(
     accounting["external_message_fee_remainder"] = max(
         0,
         int(accounting.get("external_message_fee_remainder", 0)) - remainder,
+    )
+    accounting["external_message_fee_settled"] = max(
+        0,
+        int(accounting.get("external_message_fee_settled", 0)) - reservation,
     )
     event["unreserved"] = True
     return reservation, reimbursement, remainder
@@ -2924,18 +4394,32 @@ def _decrement_allocation_consumed(
     allocation_consumed = accounting.setdefault("allocation_consumed", {})
     key = str(index)
     consumed = int(allocation_consumed.get(key, 0) or 0)
-    allocation_consumed[key] = max(0, consumed - int(amount))
+    remaining = max(0, consumed - int(amount))
+    if remaining > 0:
+        allocation_consumed[key] = remaining
+    else:
+        allocation_consumed.pop(key, None)
 
 
 def _resolve_allocation(
     allocations: list[dict[str, Any]],
     message: dict[str, Any],
 ) -> tuple[int, dict[str, Any]] | None:
+    return next(_matching_root_allocations(allocations, message), None)
+
+
+def _matching_root_allocations(
+    allocations: list[dict[str, Any]],
+    message: dict[str, Any],
+):
     message_type = int(message.get("messageType", MESSAGE_TYPE_INTERNAL))
     recipient = str(message.get("recipient", "")).lower()
-    call_key = _normalize_call_key(message.get("callKey", CALL_KEY_WILDCARD))
+    call_key = _normalize_call_key(message.get("callKey", EMPTY_CALL_KEY))
 
-    for wanted_call_key in (call_key, CALL_KEY_WILDCARD):
+    wanted_call_keys = [call_key]
+    if call_key != CALL_KEY_WILDCARD:
+        wanted_call_keys.append(CALL_KEY_WILDCARD)
+    for wanted_call_key in wanted_call_keys:
         for index, raw_allocation in enumerate(allocations):
             allocation = _serializable_message_allocation(raw_allocation)
             if int(allocation["parentIndex"]) != NODE_ROOT_SENTINEL:
@@ -2945,8 +4429,7 @@ def _resolve_allocation(
             if str(allocation["recipient"]).lower() != recipient:
                 continue
             if _normalize_call_key(allocation["callKey"]) == wanted_call_key:
-                return index, allocation
-    return None
+                yield index, allocation
 
 
 def _receipt_message_fee_payloads(
@@ -2961,7 +4444,9 @@ def _receipt_message_fee_payloads(
     payloads: list[dict[str, Any]] = []
     for raw in _receipt_pending_transactions(receipt):
         message = _receipt_pending_transaction_fee_payload(raw)
-        if accounting.get("message_allocations"):
+        if accounting.get("message_allocations") and not bool(
+            message.get("useBalance", False)
+        ):
             message = fill_message_fee_payload_from_allocation(accounting, message)
         payloads.append(message)
     return payloads
@@ -3022,7 +4507,7 @@ def _receipt_pending_transaction_fee_payload(raw: Any) -> dict[str, Any]:
         message,
         "call_key",
         "callKey",
-        CALL_KEY_WILDCARD,
+        EMPTY_CALL_KEY,
     )
     if message_type == MESSAGE_TYPE_EXTERNAL:
         call_key = derive_external_message_call_key(call_key, data)
@@ -3058,6 +4543,7 @@ def _receipt_pending_transaction_fee_payload(raw: Any) -> dict[str, Any]:
             [],
         ),
         "callKey": call_key,
+        "useBalance": bool(_message_field(message, "use_balance", "useBalance", False)),
         "gasUsed": int(_message_field(message, "gas_used", "gasUsed", 0) or 0),
     }
 
@@ -3199,7 +4685,8 @@ def _message_fee_accounting_report(accounting: dict[str, Any]) -> dict[str, int]
     external_reserved = int(accounting.get("external_message_fee_reserved", 0) or 0)
     external_reimbursed = int(accounting.get("external_message_fee_reimbursed", 0) or 0)
     external_remainder = int(accounting.get("external_message_fee_remainder", 0) or 0)
-    declared_consumed = max(0, total_consumed - external_reimbursed)
+    external_settled = int(accounting.get("external_message_fee_settled", 0) or 0)
+    declared_consumed = max(0, total_consumed - external_settled)
     declared_refunded = int(accounting.get("message_fee_refunded", 0) or 0)
     genvm_metered_consumed = int(accounting.get("genvm_message_fee_consumed", 0) or 0)
     report = {
@@ -3214,6 +4701,7 @@ def _message_fee_accounting_report(accounting: dict[str, Any]) -> dict[str, int]
         report["externalReserved"] = external_reserved
         report["externalReimbursed"] = external_reimbursed
         report["externalRemainder"] = external_remainder
+        report["externalSettled"] = external_settled
         report["totalConsumed"] = total_consumed
     if accounting.get("reported_message_fees_total") is not None:
         report["reportedTotal"] = int(accounting["reported_message_fees_total"])
@@ -3255,6 +4743,7 @@ def recommended_fee_preset(
         execution_floor += (
             policy.receipt_gas_price * DEFAULT_PARENT_MESSAGE_RECEIPT_HEADROOM
         )
+    execution_floor = max(execution_floor, policy.genvm_start_budget_floor())
 
     observed_execution = _observed_chargeable_execution_fee(accounting, report)
     recommended_execution = int(fees["executionBudgetPerRound"])
@@ -3371,6 +4860,24 @@ def _receipt_data_fees_consumed(receipt: Any | None) -> list[int] | None:
     return [max(0, int(total) - int(rest)) for total, rest in zip(totals, remaining)]
 
 
+def _receipt_execution_policy(
+    receipt: Any | None,
+    fallback: StudioFeePolicy,
+) -> StudioFeePolicy:
+    genvm_result = _receipt_genvm_result(receipt)
+    snapshot = (
+        genvm_result.get(FEE_POLICY_SNAPSHOT_KEY)
+        if isinstance(genvm_result, dict)
+        else None
+    )
+    if isinstance(snapshot, dict):
+        try:
+            return StudioFeePolicy.from_snapshot(snapshot)
+        except (KeyError, TypeError, ValueError):
+            pass
+    return fallback
+
+
 def _receipt_reported_message_fees_total(receipt: Any | None) -> int | None:
     if receipt is None:
         return None
@@ -3396,6 +4903,7 @@ def _receipt_fee_report(
         return None
 
     eq_outputs_length = _receipt_eq_blocks_outputs_length(receipt)
+    validate_receipt_admission_caps(receipt, policy)
     receipt_bytes = policy.estimate_propose_receipt_bytes(eq_outputs_length)
     proposal_gas = policy.estimate_propose_receipt_gas(receipt_bytes)
     proposal_fee = proposal_gas * policy.receipt_gas_price
@@ -3411,12 +4919,21 @@ def _receipt_fee_report(
         "totalStudioMeteredFee": proposal_fee,
     }
 
-    submitted_messages, message_reports = _receipt_submitted_messages_and_reports(
-        receipt,
-        message_payloads,
+    submitted_messages, message_reports = (
+        _receipt_submitted_messages_and_reports(receipt, message_payloads)
+        if _receipt_execution_allows_messages(receipt)
+        else ([], [])
     )
     if submitted_messages:
         message_bytes = len(encode([SUBMITTED_MESSAGE_ABI_TYPE], [submitted_messages]))
+        if (
+            policy.max_submitted_messages_bytes > 0
+            and message_bytes > policy.max_submitted_messages_bytes
+        ):
+            raise SubmittedMessagesTooLarge(
+                "SubmittedMessagesTooLarge"
+                f"({message_bytes},{policy.max_submitted_messages_bytes})"
+            )
         message_gas = policy.estimate_message_reveal_gas(
             message_bytes,
             len(submitted_messages),
@@ -3447,9 +4964,9 @@ def _receipt_fee_report(
 def _receipt_eq_blocks_outputs_length(receipt: Any) -> int:
     genvm_result = _receipt_genvm_result(receipt)
     if isinstance(genvm_result, dict):
-        explicit = genvm_result.get("eq_blocks_outputs_length") or genvm_result.get(
-            "eqBlocksOutputsLength"
-        )
+        explicit = genvm_result.get("eq_blocks_outputs_length")
+        if explicit is None:
+            explicit = genvm_result.get("eqBlocksOutputsLength")
         if explicit is not None:
             return max(0, int(explicit))
 
@@ -3463,6 +4980,25 @@ def _receipt_eq_blocks_outputs_length(receipt: Any) -> int:
 def _receipt_submitted_messages(receipt: Any) -> list[tuple[Any, ...]]:
     submitted, _ = _receipt_submitted_messages_and_reports(receipt)
     return submitted
+
+
+def _enforce_submitted_messages_cap(
+    messages: list[dict[str, Any]],
+    policy: StudioFeePolicy,
+) -> int:
+    if not messages:
+        return 0
+    submitted, _ = _receipt_submitted_messages_and_reports({}, messages)
+    message_bytes = len(encode([SUBMITTED_MESSAGE_ABI_TYPE], [submitted]))
+    if (
+        policy.max_submitted_messages_bytes > 0
+        and message_bytes > policy.max_submitted_messages_bytes
+    ):
+        raise SubmittedMessagesTooLarge(
+            "SubmittedMessagesTooLarge"
+            f"({message_bytes},{policy.max_submitted_messages_bytes})"
+        )
+    return message_bytes
 
 
 def _receipt_submitted_messages_and_reports(
@@ -3518,7 +5054,7 @@ def _receipt_submitted_messages_and_reports(
             message,
             "call_key",
             "callKey",
-            CALL_KEY_WILDCARD,
+            EMPTY_CALL_KEY,
         )
         if message_type == MESSAGE_TYPE_EXTERNAL:
             call_key_value = derive_external_message_call_key(call_key_value, data)
@@ -3535,6 +5071,7 @@ def _receipt_submitted_messages_and_reports(
                 declared_budget,
                 allocation_subtree,
                 call_key,
+                bool(_message_field(message, "use_balance", "useBalance", False)),
             )
         )
         reports.append(
@@ -3562,9 +5099,180 @@ def _receipt_submitted_messages_and_reports(
                 "allocationSubtree": "0x" + allocation_subtree.hex(),
                 "allocationSubtreeBytes": len(allocation_subtree),
                 "callKey": "0x" + call_key.hex(),
+                "useBalance": bool(
+                    _message_field(message, "use_balance", "useBalance", False)
+                ),
             }
         )
     return submitted, reports
+
+
+def _message_effect_identities(
+    tx_id: str,
+    messages: list[dict[str, Any]],
+) -> list[tuple[str, str]]:
+    """Mirror Messages._logicalOccurrence and _effectDescriptor.
+
+    The application key deliberately excludes fee/value/lifecycle fields. Any
+    drift in those fields is caught by the full SubmittedMessage descriptor for
+    the same stable occurrence, exactly as in Consensus.
+    """
+
+    submitted, _ = _receipt_submitted_messages_and_reports({}, messages)
+    tx_id_bytes = _bytes32_field(tx_id)
+    tuple_type = SUBMITTED_MESSAGE_ABI_TYPE.removesuffix("[]")
+    occurrence_counts: dict[bytes, int] = {}
+    identities: list[tuple[str, str]] = []
+    zero_address = "0x" + ("0" * 40)
+
+    for submitted_message in submitted:
+        message_type = int(submitted_message[0])
+        recipient = str(submitted_message[1]).lower()
+        data_hash = keccak(bytes(submitted_message[3]))
+        deploy_salt = (
+            int(submitted_message[5])
+            if message_type == MESSAGE_TYPE_INTERNAL and recipient == zero_address
+            else 0
+        )
+        application_key = keccak(
+            encode(
+                ["uint8", "address", "bytes32", "uint256"],
+                [message_type, recipient, data_hash, deploy_salt],
+            )
+        )
+        ordinal = occurrence_counts.get(application_key, 0)
+        occurrence_counts[application_key] = ordinal + 1
+        occurrence = keccak(
+            encode(
+                ["bytes32", "bytes32", "uint256"],
+                [tx_id_bytes, application_key, ordinal],
+            )
+        )
+        descriptor = keccak(encode([tuple_type], [submitted_message]))
+        identities.append(("0x" + occurrence.hex(), "0x" + descriptor.hex()))
+
+    return identities
+
+
+def message_novelty_mask(
+    accounting: dict[str, Any],
+    tx_id: str,
+    messages: list[dict[str, Any]],
+) -> list[bool]:
+    identities = _message_effect_identities(tx_id, messages)
+    descriptors = accounting.get("message_effect_descriptors") or {}
+    delivered = accounting.get("message_effect_delivered") or {}
+    novelty = []
+    for occurrence, descriptor in identities:
+        expected = descriptors.get(occurrence)
+        if expected is not None and expected != descriptor:
+            raise MessageEffectDescriptorMismatch(
+                "MessageEffectDescriptorMismatch"
+                f"({tx_id},{occurrence},{expected},{descriptor})"
+            )
+        novelty.append(not bool(delivered.get(occurrence, False)))
+    return novelty
+
+
+def prepare_reveal_message_generation(
+    accounting: dict[str, Any],
+    tx_id: str,
+    messages: list[dict[str, Any]],
+    *,
+    policy: StudioFeePolicy | None = None,
+) -> dict[str, Any]:
+    """Retire the prior reveal and charge only fresh logical occurrences."""
+
+    updated = copy.deepcopy(accounting)
+    prior_generation = updated.get("active_message_generation")
+    if isinstance(prior_generation, dict):
+        updated = unwind_reveal_message_fees(
+            updated,
+            list(prior_generation.get("messages") or []),
+            acceptance_dispatched=bool(
+                prior_generation.get("acceptanceDispatched", False)
+            ),
+        )
+
+    identities = _message_effect_identities(tx_id, messages)
+    novelty = message_novelty_mask(updated, tx_id, messages)
+    descriptors = updated.setdefault("message_effect_descriptors", {})
+    for occurrence, descriptor in identities:
+        descriptors.setdefault(occurrence, descriptor)
+
+    novel_messages = [
+        message for message, is_novel in zip(messages, novelty) if is_novel
+    ]
+    updated = record_reveal_message_fees(
+        updated,
+        novel_messages,
+        policy=policy,
+    )
+    updated["active_message_generation"] = {
+        "messages": _message_accounting_json_safe(messages),
+        "occurrences": [occurrence for occurrence, _ in identities],
+        "novelty": novelty,
+        "acceptanceDispatched": False,
+    }
+    return updated
+
+
+def _message_accounting_json_safe(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return "0x" + value.hex()
+    if isinstance(value, bytearray):
+        return "0x" + bytes(value).hex()
+    if isinstance(value, list):
+        return [_message_accounting_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_message_accounting_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _message_accounting_json_safe(item) for key, item in value.items()}
+    return value
+
+
+def discard_active_message_generation(
+    accounting: dict[str, Any],
+) -> dict[str, Any]:
+    updated = copy.deepcopy(accounting)
+    prior_generation = updated.pop("active_message_generation", None)
+    if not isinstance(prior_generation, dict):
+        return updated
+    updated = unwind_reveal_message_fees(
+        updated,
+        list(prior_generation.get("messages") or []),
+        acceptance_dispatched=bool(prior_generation.get("acceptanceDispatched", False)),
+    )
+    updated.pop("active_message_generation", None)
+    updated["message_fees_recorded_at_reveal"] = True
+    return updated
+
+
+def mark_message_effects_delivered(
+    accounting: dict[str, Any],
+    tx_id: str,
+    messages: list[dict[str, Any]],
+    on: str,
+) -> dict[str, Any]:
+    updated = copy.deepcopy(accounting)
+    identities = _message_effect_identities(tx_id, messages)
+    # Reuse descriptor validation before installing an irreversible tombstone.
+    message_novelty_mask(updated, tx_id, messages)
+    delivered = updated.setdefault("message_effect_delivered", {})
+    delivered_any = False
+    for message, (occurrence, descriptor) in zip(messages, identities):
+        if bool(message.get("onAcceptance", False)) != (on == "accepted"):
+            continue
+        updated.setdefault("message_effect_descriptors", {}).setdefault(
+            occurrence, descriptor
+        )
+        delivered[occurrence] = True
+        delivered_any = True
+
+    generation = updated.get("active_message_generation")
+    if delivered_any and on == "accepted" and isinstance(generation, dict):
+        generation["acceptanceDispatched"] = True
+    return updated
 
 
 def _message_fee_mode(
@@ -3621,8 +5329,9 @@ def _pending_transaction_dict(pending_transaction: Any) -> dict[str, Any]:
         ),
         "fee_params": getattr(pending_transaction, "fee_params", b""),
         "declared_budget": getattr(pending_transaction, "declared_budget", 0),
-        "call_key": getattr(pending_transaction, "call_key", CALL_KEY_WILDCARD),
+        "call_key": getattr(pending_transaction, "call_key", EMPTY_CALL_KEY),
         "allocation_subtree": getattr(pending_transaction, "allocation_subtree", []),
+        "use_balance": getattr(pending_transaction, "use_balance", False),
     }
 
 
@@ -3809,12 +5518,14 @@ def _normalize_call_key(call_key: bytes | str) -> str:
 def derive_external_message_call_key(
     call_key: bytes | str | None, calldata: Any
 ) -> str:
-    normalized = _normalize_call_key(call_key or CALL_KEY_WILDCARD)
-    if normalized != CALL_KEY_WILDCARD:
+    normalized = _normalize_call_key(call_key or EMPTY_CALL_KEY)
+    if normalized == CALL_KEY_WILDCARD:
+        return normalized
+    if normalized != EMPTY_CALL_KEY:
         return normalized
 
     raw_calldata = _bytes_field(calldata)
     if len(raw_calldata) < 4:
-        return CALL_KEY_WILDCARD
+        return EMPTY_CALL_KEY
 
     return "0x" + raw_calldata[:4].hex().ljust(64, "0")

@@ -55,15 +55,22 @@ from backend.protocol_rpc.message_handler.types import (
 )
 from backend.protocol_rpc.fees import (
     FEE_ACCOUNTING_KEY,
+    VALIDATORS_PER_ROUND,
     FeeValidationError,
     StudioFeePolicy,
+    activate_fee_accounting,
     consume_message_fees,
     create_child_fee_accounting,
     derive_external_message_call_key,
+    discard_active_message_generation,
     fill_message_fee_payload_from_allocation,
+    mark_message_effects_delivered,
+    message_novelty_mask,
+    prepare_reveal_message_generation,
     record_external_message_execution_fees,
-    record_reveal_message_fees,
+    stamp_receipt_execution_policy,
     unwind_reveal_message_fees,
+    validate_receipt_admission_caps,
 )
 from backend.rollup.consensus_service import ConsensusService
 
@@ -1579,6 +1586,33 @@ def _external_message_value_for_phase(
     )
 
 
+def _use_balance_obligation_total(
+    pending_transactions: Iterable[PendingTransaction],
+) -> tuple[int, int]:
+    fee_budget = 0
+    value = 0
+    for pending_transaction in pending_transactions:
+        if pending_transaction.is_eth_send or not pending_transaction.use_balance:
+            continue
+        fee_budget += max(0, int(pending_transaction.declared_budget or 0))
+        value += max(0, int(pending_transaction.value or 0))
+    return fee_budget, value
+
+
+def _use_balance_obligation_for_phase(
+    pending_transactions: Iterable[PendingTransaction],
+    on: Literal["accepted", "finalized"],
+) -> int:
+    return sum(
+        max(0, int(pending_transaction.declared_budget or 0))
+        + max(0, int(pending_transaction.value or 0))
+        for pending_transaction in pending_transactions
+        if not pending_transaction.is_eth_send
+        and pending_transaction.use_balance
+        and pending_transaction.on == on
+    )
+
+
 def _apply_external_message_freeze_check(
     context: TransactionContext,
     leader_receipt: Receipt,
@@ -1586,7 +1620,15 @@ def _apply_external_message_freeze_check(
     if leader_receipt.execution_result != ExecutionResultStatus.SUCCESS:
         return
 
-    declared_value = _external_message_value_total(leader_receipt.pending_transactions)
+    pending_transactions = _novel_pending_transactions(
+        context,
+        leader_receipt.pending_transactions,
+    )
+    external_value = _external_message_value_total(pending_transactions)
+    use_balance_fee, use_balance_value = _use_balance_obligation_total(
+        pending_transactions
+    )
+    declared_value = external_value + use_balance_fee + use_balance_value
     if declared_value <= 0:
         return
 
@@ -1598,9 +1640,13 @@ def _apply_external_message_freeze_check(
     if declared_value <= available:
         return
 
+    error_name = (
+        "ExternalMessageFreezeExceeded"
+        if use_balance_fee + use_balance_value == 0
+        else "ContractMessageFreezeExceeded"
+    )
     error_message = (
-        "ExternalMessageFreezeExceeded: "
-        f"declaredValue={declared_value}, availableLimit={available}"
+        f"{error_name}: declaredValue={declared_value}, availableLimit={available}"
     )
     leader_receipt.execution_result = ExecutionResultStatus.ERROR
     leader_receipt.result = bytes([ResultCode.VM_ERROR]) + error_message.encode("utf-8")
@@ -1609,13 +1655,26 @@ def _apply_external_message_freeze_check(
     leader_receipt.pending_transactions = []
     leader_receipt.genvm_result = {
         **(leader_receipt.genvm_result or {}),
-        "error_code": "EXTERNAL_MESSAGE_FREEZE_EXCEEDED",
+        "error_code": (
+            "EXTERNAL_MESSAGE_FREEZE_EXCEEDED"
+            if use_balance_fee + use_balance_value == 0
+            else "CONTRACT_MESSAGE_FREEZE_EXCEEDED"
+        ),
         "error_description": error_message,
         "external_message_freeze": {
             "declaredValue": declared_value,
             "availableLimit": available,
             "balance": balance,
             "reservedExternal": other_reserved,
+            **(
+                {
+                    "externalValue": external_value,
+                    "useBalanceFee": use_balance_fee,
+                    "useBalanceValue": use_balance_value,
+                }
+                if use_balance_fee + use_balance_value > 0
+                else {}
+            ),
         },
     }
 
@@ -1642,8 +1701,10 @@ def _remaining_external_freeze_after_phase(
     if on == "finalized":
         return pending_freeze
 
-    return pending_freeze + _external_message_value_for_phase(
-        pending_transactions, "finalized"
+    return (
+        pending_freeze
+        + _external_message_value_for_phase(pending_transactions, "finalized")
+        + _use_balance_obligation_for_phase(pending_transactions, "finalized")
     )
 
 
@@ -1684,6 +1745,10 @@ def _external_message_pending_freeze_total(context: TransactionContext) -> int:
             ):
                 continue
             total += _external_message_value_for_phase_from_raw(
+                _receipt_pending_transactions(receipt),
+                "finalized",
+            )
+            total += _use_balance_obligation_for_phase_from_raw(
                 _receipt_pending_transactions(receipt),
                 "finalized",
             )
@@ -1767,6 +1832,57 @@ def _pending_transaction_external_value(
     return int(pending_transaction.get("value", 0) or 0)
 
 
+def _use_balance_obligation_for_phase_from_raw(
+    pending_transactions: Iterable[Any],
+    on: Literal["accepted", "finalized"],
+) -> int:
+    total = 0
+    for pending_transaction in pending_transactions:
+        if isinstance(pending_transaction, PendingTransaction):
+            if (
+                pending_transaction.is_eth_send
+                or not pending_transaction.use_balance
+                or pending_transaction.on != on
+            ):
+                continue
+            total += max(0, int(pending_transaction.declared_budget or 0))
+            total += max(0, int(pending_transaction.value or 0))
+            continue
+
+        if not isinstance(pending_transaction, dict):
+            continue
+        message_type = pending_transaction.get(
+            "message_type", pending_transaction.get("messageType")
+        )
+        if message_type in {0, "0", "External", "external"}:
+            continue
+        if not bool(
+            pending_transaction.get(
+                "use_balance", pending_transaction.get("useBalance", False)
+            )
+        ):
+            continue
+        pending_on = pending_transaction.get("on")
+        if pending_on is None and "onAcceptance" in pending_transaction:
+            pending_on = (
+                "accepted" if pending_transaction.get("onAcceptance") else "finalized"
+            )
+        if pending_on != on:
+            continue
+        total += max(
+            0,
+            int(
+                pending_transaction.get(
+                    "declared_budget",
+                    pending_transaction.get("declaredBudget", 0),
+                )
+                or 0
+            ),
+        )
+        total += max(0, int(pending_transaction.get("value", 0) or 0))
+    return total
+
+
 def _pending_transaction_with_value(
     pending_transaction: PendingTransaction,
     value: int,
@@ -1804,7 +1920,14 @@ def _debit_internal_message_value_for_phase(
     pending_transactions: list[PendingTransaction],
     on: Literal["accepted", "finalized"],
 ) -> bool:
-    internal_value = _internal_message_value_for_phase(pending_transactions, on)
+    internal_value = sum(
+        int(pending_transaction.value or 0)
+        for pending_transaction in pending_transactions
+        if not pending_transaction.is_eth_send
+        and not pending_transaction.use_balance
+        and pending_transaction.on == on
+        and int(pending_transaction.value or 0) > 0
+    )
     if internal_value <= 0:
         return True
 
@@ -1829,6 +1952,40 @@ def _debit_internal_message_value_for_phase(
             internal_value,
             "internal",
             "Emitting internal children with value=0.",
+        )
+    return debited
+
+
+def _debit_use_balance_funding_for_phase(
+    context: TransactionContext,
+    pending_transactions: list[PendingTransaction],
+    on: Literal["accepted", "finalized"],
+) -> bool:
+    obligation = _use_balance_obligation_for_phase(pending_transactions, on)
+    if obligation <= 0:
+        return True
+
+    available = _internal_message_value_cap(context, pending_transactions, on)
+    if obligation > available:
+        _log_message_value_debit_failure(
+            context,
+            on,
+            obligation,
+            "useBalance internal",
+            "Emitting the child without contract-funded value or fees.",
+        )
+        return False
+
+    debited = context.accounts_manager.debit_account_balance(
+        context.transaction.to_address, obligation
+    )
+    if not debited:
+        _log_message_value_debit_failure(
+            context,
+            on,
+            obligation,
+            "useBalance internal",
+            "Emitting the child without contract-funded value or fees.",
         )
     return debited
 
@@ -1888,9 +2045,19 @@ def _adjust_unbacked_message_values(
     *,
     external_value_backed: bool,
     internal_value_backed: bool,
+    use_balance_funding_backed: bool,
 ) -> list[PendingTransaction]:
     adjusted_pending_transactions = []
     for pending_transaction in pending_transactions:
+        if (
+            pending_transaction.on == on
+            and pending_transaction.use_balance
+            and not use_balance_funding_backed
+        ):
+            unfunded = _pending_transaction_with_value(pending_transaction, 0)
+            unfunded.declared_budget = 0
+            adjusted_pending_transactions.append(unfunded)
+            continue
         value = int(pending_transaction.value or 0)
         if pending_transaction.on == on and value > 0:
             if pending_transaction.is_eth_send and not external_value_backed:
@@ -1915,11 +2082,14 @@ def _apply_message_value_withdrawals_for_phase(
     external_value_backed = _debit_external_message_value_for_phase(
         context, pending_list, on
     )
+    use_balance_funding_backed = _debit_use_balance_funding_for_phase(
+        context, pending_list, on
+    )
     internal_value_backed = _debit_internal_message_value_for_phase(
         context, pending_list, on
     )
 
-    if external_value_backed and internal_value_backed:
+    if external_value_backed and internal_value_backed and use_balance_funding_backed:
         return pending_list
 
     return _adjust_unbacked_message_values(
@@ -1927,6 +2097,7 @@ def _apply_message_value_withdrawals_for_phase(
         on,
         external_value_backed=external_value_backed,
         internal_value_backed=internal_value_backed,
+        use_balance_funding_backed=use_balance_funding_backed,
     )
 
 
@@ -1955,6 +2126,51 @@ class PendingState(TransactionState):
             appeal_undetermined=context.transaction.appeal_undetermined,
         )
         await EffectExecutor(context).execute(pre_effects)
+
+        # Consensus reserves the time-unit pool at the user's cap during
+        # submission, then locks live execution prices only when the queued
+        # transaction first activates. A live GEN price above the cap cancels
+        # with a full value/fee refund; storage and receipt prices simply lock.
+        fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
+        if fee_accounting:
+            activated_accounting, should_cancel = activate_fee_accounting(
+                fee_accounting,
+                StudioFeePolicy.from_env(),
+                selection_pool_count=(
+                    len(context.validators_snapshot.nodes)
+                    if context.validators_snapshot is not None
+                    else None
+                ),
+            )
+            context.transactions_processor.update_transaction_fee_accounting(
+                context.transaction.hash,
+                activated_accounting,
+            )
+            context.transaction.data = {
+                **(context.transaction.data or {}),
+                FEE_ACCOUNTING_KEY: activated_accounting,
+            }
+            if should_cancel:
+                value_sender = context.transaction.from_address
+                if value_sender:
+                    context.accounts_manager.refund_tx_value(
+                        context.transaction.hash,
+                        value_sender,
+                    )
+                fee_sender = activated_accounting.get("sender") or value_sender
+                if fee_sender:
+                    context.accounts_manager.cancel_tx_fee_accounting_once(
+                        context.transaction.hash,
+                        fee_sender,
+                        "activation_gen_price_cap_exceeded",
+                    )
+                await ConsensusAlgorithm.dispatch_transaction_status_update(
+                    context.transactions_processor,
+                    context.transaction.hash,
+                    TransactionStatus.CANCELED,
+                    context.msg_handler,
+                )
+                return None
 
         # Log executing message (unless appeal)
         if (
@@ -2185,7 +2401,11 @@ class ProposingState(TransactionState):
         leader_budget_seconds = _slot_budget_seconds(context.transaction, "leader")
         leader_deadline = asyncio.get_running_loop().time() + leader_budget_seconds
 
-        def _build_leader_timeout_receipt(leader_dict: dict) -> Receipt:
+        def _build_leader_timeout_receipt(
+            leader_dict: dict,
+            *,
+            detail: str | None = None,
+        ) -> Receipt:
             timeout_ms = int(leader_budget_seconds * 1000)
             return Receipt(
                 result=bytes([ResultCode.VM_ERROR]) + b"timeout",
@@ -2198,7 +2418,8 @@ class ProposingState(TransactionState):
                 vote=None,
                 genvm_result={
                     "stdout": "",
-                    "stderr": f"Leader execution exceeded {leader_budget_seconds:.3f}s",
+                    "stderr": detail
+                    or f"Leader execution exceeded {leader_budget_seconds:.3f}s",
                     "error_code": "CONSENSUS_LEADER_EXEC_TIMEOUT",
                     "raw_error": {
                         "causes": ["LEADER_EXEC_TIMEOUT"],
@@ -2295,6 +2516,28 @@ class ProposingState(TransactionState):
             context.consensus_data.leader_receipt[0].result[0] == ResultCode.VM_ERROR
             and context.consensus_data.leader_receipt[0].result[1:] == b"timeout"
         )
+        if not leader_receipt_timed_out:
+            try:
+                proposal_policy = stamp_receipt_execution_policy(
+                    context.consensus_data.leader_receipt[0],
+                    (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY),
+                    StudioFeePolicy.from_env(),
+                )
+                validate_receipt_admission_caps(
+                    context.consensus_data.leader_receipt[0],
+                    proposal_policy,
+                )
+            except FeeValidationError as exc:
+                # The on-chain proposal/reveal call reverts on these caps.
+                # Studio advances to the equivalent leader-timeout path
+                # instead of accepting a receipt Consensus would never store.
+                context.consensus_data.leader_receipt = [
+                    _build_leader_timeout_receipt(
+                        context.leader,
+                        detail=str(exc),
+                    )
+                ]
+                leader_receipt_timed_out = True
 
         # Post-execution decision
         next_state, post_effects = decide_post_proposal(
@@ -2576,6 +2819,7 @@ class CommittingState(TransactionState):
                 Vote.AGREE.value,
                 Vote.DISAGREE.value,
                 Vote.TIMEOUT.value,
+                Vote.DETERMINISTIC_VIOLATION.value,
                 Vote.IDLE.value,
             )
             outcomes = {
@@ -2914,14 +3158,19 @@ class AcceptedState(TransactionState):
         executor = EffectExecutor(context)
         await executor.execute(pre_effects)
 
-        # Impure: triggered transaction processing (needs DB reads for nonce/accounts)
-        # Cumulative: child emission happens on every acceptance round (including appeal re-acceptance)
+        # Impure: triggered transaction processing (needs DB reads for nonce/accounts).
+        # Consensus tombstones each tx-scoped logical message occurrence, so a
+        # successful appeal may re-reveal it but cannot charge or emit it twice.
         if execution_success:
+            novel_pending_transactions = _novel_pending_transactions(
+                context,
+                leader_receipt.pending_transactions,
+            )
             internal_messages_data, insert_transactions_data = _get_messages_data(
                 context,
                 _apply_message_value_withdrawals_for_phase(
                     context,
-                    leader_receipt.pending_transactions,
+                    novel_pending_transactions,
                     "accepted",
                 ),
                 "accepted",
@@ -2936,6 +3185,11 @@ class AcceptedState(TransactionState):
 
             _emit_messages(
                 context, insert_transactions_data, rollup_receipt, "accepted"
+            )
+            _mark_message_phase_delivered(
+                context,
+                leader_receipt.pending_transactions,
+                "accepted",
             )
 
         # Execute post-effects (status update + appeal cleanup)
@@ -3090,11 +3344,15 @@ class FinalizingState(TransactionState):
                 finalized_state=accepted_state,
             )
 
+            novel_pending_transactions = _novel_pending_transactions(
+                context,
+                leader_receipt.pending_transactions,
+            )
             internal_messages_data, insert_transactions_data = _get_messages_data(
                 context,
                 _apply_message_value_withdrawals_for_phase(
                     context,
-                    leader_receipt.pending_transactions,
+                    novel_pending_transactions,
                     "finalized",
                 ),
                 "finalized",
@@ -3109,6 +3367,11 @@ class FinalizingState(TransactionState):
 
             _emit_messages(
                 context, insert_transactions_data, rollup_receipt, "finalized"
+            )
+            _mark_message_phase_delivered(
+                context,
+                leader_receipt.pending_transactions,
+                "finalized",
             )
 
         await executor.execute(post_effects)
@@ -3134,7 +3397,9 @@ def _get_messages_data(
     insert_transactions_data = []
     internal_messages_data = []
     message_fee_payloads = []
-    parent_fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
+    parent_fee_accounting = (getattr(context.transaction, "data", None) or {}).get(
+        FEE_ACCOUNTING_KEY
+    )
     reveal_recorded = bool(
         parent_fee_accounting
         and parent_fee_accounting.get("message_fees_recorded_at_reveal")
@@ -3278,7 +3543,7 @@ def _parent_message_fee_payload(
     on: Literal["accepted", "finalized"],
 ) -> dict[str, Any]:
     payload = _pending_transaction_fee_payload(pending_transaction, on)
-    if pending_transaction.is_eth_send:
+    if pending_transaction.is_eth_send or pending_transaction.use_balance:
         return payload
 
     try:
@@ -3302,8 +3567,12 @@ def _attach_child_fee_accounting(
             message=message_payload,
             parent_fees_distribution=parent_fee_accounting.get("fees_distribution"),
             message_allocations=message_payload.get("allocationSubtree") or [],
-            sender=context.transaction.origin_address
-            or context.transaction.from_address,
+            sender=(
+                context.transaction.to_address
+                if pending_transaction.use_balance
+                else context.transaction.origin_address
+                or context.transaction.from_address
+            ),
             policy=StudioFeePolicy.from_env(),
         )
     except FeeValidationError as exc:
@@ -3358,6 +3627,7 @@ def _record_parent_message_fee_consumption(
         parent_fee_accounting,
         message_fee_payloads,
         reveal_recorded,
+        _message_execution_fee_recipient(context),
     )
     context.transaction.data = dict(context.transaction.data or {})
     context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
@@ -3366,20 +3636,65 @@ def _record_parent_message_fee_consumption(
     )
 
 
+def _message_execution_fee_recipient(context: TransactionContext) -> str | None:
+    """Best Studio analogue of Consensus' tx.origin execution recipient.
+
+    Acceptance processing happens inside the leader's reveal transaction on
+    chain. Studio does not expose a separate public external-message flush EOA,
+    so finalization uses the leader attached to the accepted receipt as the
+    observable executor instead of incorrectly reimbursing the transaction
+    sender.
+    """
+
+    receipt_sources = [
+        getattr(context, "consensus_data", None),
+        getattr(context.transaction, "consensus_data", None),
+    ]
+    for source in receipt_sources:
+        if source is None:
+            continue
+        leader_receipts = (
+            source.get("leader_receipt", [])
+            if isinstance(source, dict)
+            else getattr(source, "leader_receipt", [])
+        )
+        if isinstance(leader_receipts, dict):
+            leader_receipts = [leader_receipts]
+        if not leader_receipts:
+            continue
+        receipt = leader_receipts[0]
+        node_config = (
+            receipt.get("node_config", {})
+            if isinstance(receipt, dict)
+            else getattr(receipt, "node_config", {})
+        )
+        address = (
+            node_config.get("address")
+            if isinstance(node_config, dict)
+            else getattr(node_config, "address", None)
+        )
+        if address:
+            return str(address)
+    return None
+
+
 def _consume_parent_message_fee_payloads(
     parent_fee_accounting: dict[str, Any],
     message_fee_payloads: list[dict[str, Any]],
     reveal_recorded: bool,
+    executor: str | None = None,
 ) -> dict[str, Any]:
     try:
         if reveal_recorded:
             return record_external_message_execution_fees(
                 parent_fee_accounting,
                 message_fee_payloads,
+                executor=executor,
             )
         return consume_message_fees(
             parent_fee_accounting,
             message_fee_payloads,
+            external_executor=executor,
         )
     except FeeValidationError as exc:
         raise RuntimeError(str(exc)) from exc
@@ -3408,8 +3723,9 @@ def _sync_reveal_message_fee_accounting(
         return
 
     try:
-        updated_accounting = record_reveal_message_fees(
+        updated_accounting = prepare_reveal_message_generation(
             parent_fee_accounting,
+            context.transaction.hash,
             message_fee_payloads,
         )
     except FeeValidationError as exc:
@@ -3434,7 +3750,7 @@ def _reveal_message_fee_payloads(
             pending_transaction,
             pending_transaction.on,
         )
-        if not pending_transaction.is_eth_send:
+        if not pending_transaction.is_eth_send and not pending_transaction.use_balance:
             message_payload = fill_message_fee_payload_from_allocation(
                 parent_fee_accounting,
                 message_payload,
@@ -3443,11 +3759,84 @@ def _reveal_message_fee_payloads(
     return message_fee_payloads
 
 
+def _novel_pending_transactions(
+    context: TransactionContext,
+    pending_transactions: Iterable[Any],
+) -> list[PendingTransaction]:
+    pending_list = [
+        _coerce_pending_transaction(pending_transaction)
+        for pending_transaction in pending_transactions
+    ]
+    parent_fee_accounting = (getattr(context.transaction, "data", None) or {}).get(
+        FEE_ACCOUNTING_KEY
+    )
+    if not parent_fee_accounting or not pending_list:
+        return pending_list
+
+    payloads = _reveal_message_fee_payloads(parent_fee_accounting, pending_list)
+    try:
+        novelty = message_novelty_mask(
+            parent_fee_accounting,
+            context.transaction.hash,
+            payloads,
+        )
+    except FeeValidationError as exc:
+        raise RuntimeError(str(exc)) from exc
+    return [
+        pending_transaction
+        for pending_transaction, is_novel in zip(pending_list, novelty)
+        if is_novel
+    ]
+
+
+def _mark_message_phase_delivered(
+    context: TransactionContext,
+    pending_transactions: Iterable[Any],
+    on: Literal["accepted", "finalized"],
+) -> None:
+    parent_fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
+    if not parent_fee_accounting:
+        return
+    payloads = _reveal_message_fee_payloads(
+        parent_fee_accounting,
+        pending_transactions,
+    )
+    if not payloads:
+        return
+    try:
+        updated_accounting = mark_message_effects_delivered(
+            parent_fee_accounting,
+            context.transaction.hash,
+            payloads,
+            on,
+        )
+    except FeeValidationError as exc:
+        raise RuntimeError(str(exc)) from exc
+    context.transaction.data = dict(context.transaction.data or {})
+    context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
+    context.transactions_processor.update_transaction_fee_accounting(
+        context.transaction.hash,
+        updated_accounting,
+    )
+
+
 def _unwind_discarded_reveal_message_fee_accounting(
     context: TransactionContext,
 ) -> None:
     parent_fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
     if not parent_fee_accounting:
+        return
+
+    if isinstance(parent_fee_accounting.get("active_message_generation"), dict):
+        updated_accounting = discard_active_message_generation(
+            parent_fee_accounting,
+        )
+        context.transaction.data = dict(context.transaction.data or {})
+        context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
+        context.transactions_processor.update_transaction_fee_accounting(
+            context.transaction.hash,
+            updated_accounting,
+        )
         return
 
     prior_receipts = _leader_receipts_from_consensus_data(
@@ -3530,8 +3919,25 @@ def _pending_transaction_fee_payload(
         "declaredBudget": pending_transaction.declared_budget,
         "allocationSubtree": pending_transaction.allocation_subtree,
         "callKey": call_key,
+        "useBalance": pending_transaction.use_balance,
         "gasUsed": pending_transaction.gas_used,
     }
+
+
+def _child_config_rotation_rounds(parent_rotations: int, data: dict[str, Any]) -> int:
+    """Clamp a triggered child's runtime rotations to its funded schedule."""
+
+    fees = data.get("fees_distribution")
+    if not isinstance(fees, dict):
+        return max(0, int(parent_rotations))
+    rotations = fees.get("rotations")
+    if not isinstance(rotations, list):
+        rotations = fees.get("rotationsList")
+    if not isinstance(rotations, list):
+        return max(0, int(parent_rotations))
+    if not rotations:
+        return 0
+    return min(max(0, int(parent_rotations)), *(max(0, int(v)) for v in rotations))
 
 
 def _emit_messages(
@@ -3561,10 +3967,16 @@ def _emit_messages(
             type=insert_transaction_data[2],
             nonce=insert_transaction_data[3],
             leader_only=leader_only,  # Backward compat
-            num_of_initial_validators=context.transaction.num_of_initial_validators,
+            # Consensus creates every internal child at the protocol's
+            # round-0 committee size. The child's minimum fee floor is priced
+            # on the same basis, independent of the parent's current size.
+            num_of_initial_validators=VALIDATORS_PER_ROUND[0],
             triggered_by_hash=context.transaction.hash,
             transaction_hash=transaction_hash,
-            config_rotation_rounds=context.transaction.config_rotation_rounds,
+            config_rotation_rounds=_child_config_rotation_rounds(
+                context.transaction.config_rotation_rounds,
+                insert_transaction_data[1],
+            ),
             sim_config=(
                 context.transaction.sim_config.to_dict()
                 if context.transaction.sim_config

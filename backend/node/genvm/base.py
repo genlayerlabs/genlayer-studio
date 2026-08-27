@@ -70,7 +70,9 @@ GENVM_GASLESS_GAS_DATA: dict[str, str] = {
     "genPerTimeUnit": "0",
 }
 
-INTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE = "(uint256,uint256,uint256,uint256,uint256[])"
+INTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE = (
+    "(uint256,uint256,uint256,uint256,uint256[],uint256,uint256,uint256)"
+)
 INTERNAL_MESSAGE_FEE_PARAMS_WITH_CAPS_ABI_TYPE = (
     "(uint256,uint256,uint256,uint256,uint256[],uint256,uint256,uint256)"
 )
@@ -337,6 +339,9 @@ def _emission_internal_fee_params(emission: dict) -> bytes:
                     appeal_rounds,
                     int(value.get("execution_budget_per_round", 0)),
                     rotations,
+                    int(value.get("max_price_gen_per_time_unit", 0)),
+                    int(value.get("storage_fee_max_gas_price", 0)),
+                    int(value.get("receipt_fee_max_gas_price", 0)),
                 )
             ],
         )
@@ -412,6 +417,9 @@ def _canonical_internal_fee_params_from_genvm(fee_params: bytes) -> bytes:
                 int(decoded[2]),
                 int(decoded[3]),
                 [int(rotation) for rotation in decoded[4]],
+                int(decoded[5]),
+                int(decoded[6]),
+                int(decoded[7]),
             )
         ],
     )
@@ -621,6 +629,9 @@ class Host(genvmhost.IHost):
                             declared_budget=_emission_int(emission, "declaredBudget"),
                             call_key=_emission_hex(emission, "callKey"),
                             allocation_subtree=_emission_allocation_subtree(emission),
+                            use_balance=bool(
+                                _emission_value(emission, "useBalance") or False
+                            ),
                         )
                     )
                 case "InternalDeployMessage":
@@ -636,6 +647,9 @@ class Host(genvmhost.IHost):
                             declared_budget=_emission_int(emission, "declaredBudget"),
                             call_key=_emission_hex(emission, "callKey"),
                             allocation_subtree=_emission_allocation_subtree(emission),
+                            use_balance=bool(
+                                _emission_value(emission, "useBalance") or False
+                            ),
                         )
                     )
                 case "ExternalMessage":

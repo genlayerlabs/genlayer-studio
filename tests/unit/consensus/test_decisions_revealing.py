@@ -3,7 +3,6 @@
 Tests call pure functions directly — no mocks, no async, no context objects.
 """
 
-import pytest
 from backend.consensus.decisions import decide_revealing, merge_appeal_validators
 from backend.consensus.effects import (
     AddTimestampEffect,
@@ -19,7 +18,6 @@ from backend.consensus.effects import (
     SendMessageEffect,
 )
 from backend.consensus.types import ConsensusResult, ConsensusRound
-
 
 # ── Helpers ────────────────────────────────────────────────────────
 
@@ -369,11 +367,24 @@ class TestRevealingAppealSuccessful:
         assert next_state == ConsensusRound.VALIDATOR_APPEAL_SUCCESSFUL
 
 
-class TestRevealingInvalidResult:
-    def test_raises_for_invalid_consensus_result(self):
-        with pytest.raises(ValueError, match="Invalid consensus result"):
-            decide_revealing(
-                **_base_kwargs(
-                    consensus_result=ConsensusResult.DETERMINISTIC_VIOLATION,
-                )
+class TestRevealingDeterministicViolation:
+    def test_dv_max_rotations_is_undetermined(self):
+        next_state, _ = decide_revealing(
+            **_base_kwargs(
+                consensus_result=ConsensusResult.DETERMINISTIC_VIOLATION,
+                rotation_count=3,
+                config_rotation_rounds=3,
             )
+        )
+        assert next_state == "undetermined"
+
+    def test_dv_with_rotations_rotates_accused_leader(self):
+        next_state, effects = decide_revealing(
+            **_base_kwargs(
+                consensus_result=ConsensusResult.DETERMINISTIC_VIOLATION,
+                rotation_count=0,
+                config_rotation_rounds=3,
+            )
+        )
+        assert next_state == "rotate"
+        assert _find_effect(effects, IncreaseRotationCountEffect) is not None

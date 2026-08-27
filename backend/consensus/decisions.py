@@ -34,7 +34,6 @@ from backend.consensus.effects import (
 )
 from backend.consensus.types import ConsensusResult, ConsensusRound
 
-
 # ── UndeterminedState ──────────────────────────────────────────────
 
 
@@ -658,6 +657,7 @@ def decide_revealing(
         elif consensus_result in (
             ConsensusResult.MAJORITY_DISAGREE,
             ConsensusResult.NO_MAJORITY,
+            ConsensusResult.DETERMINISTIC_VIOLATION,
         ):
             if rotation_count >= config_rotation_rounds:
                 return "undetermined", effects

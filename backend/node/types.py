@@ -181,6 +181,7 @@ class PendingTransaction:
     call_key: str = "0x" + ("0" * 64)
     allocation_subtree: list[dict] = field(default_factory=list)
     gas_used: int = 0
+    use_balance: bool = False
 
     def is_deploy(self) -> bool:
         return self.code is not None
@@ -197,6 +198,7 @@ class PendingTransaction:
                 "call_key": self.call_key,
                 "allocation_subtree": self.allocation_subtree,
                 "gas_used": self.gas_used,
+                "use_balance": self.use_balance,
             }
         elif self.code is None:
             return {
@@ -209,6 +211,7 @@ class PendingTransaction:
                 "call_key": self.call_key,
                 "allocation_subtree": self.allocation_subtree,
                 "gas_used": self.gas_used,
+                "use_balance": self.use_balance,
             }
         else:
             return {
@@ -222,6 +225,7 @@ class PendingTransaction:
                 "call_key": self.call_key,
                 "allocation_subtree": self.allocation_subtree,
                 "gas_used": self.gas_used,
+                "use_balance": self.use_balance,
             }
 
     @classmethod
@@ -240,6 +244,7 @@ class PendingTransaction:
                 call_key=input.get("call_key", "0x" + ("0" * 64)),
                 allocation_subtree=input.get("allocation_subtree", []),
                 gas_used=_int_from_serialized(input.get("gas_used"), 0),
+                use_balance=bool(input.get("use_balance", False)),
             )
         elif "code" in input:
             return cls(
@@ -254,6 +259,7 @@ class PendingTransaction:
                 call_key=input.get("call_key", "0x" + ("0" * 64)),
                 allocation_subtree=input.get("allocation_subtree", []),
                 gas_used=_int_from_serialized(input.get("gas_used"), 0),
+                use_balance=bool(input.get("use_balance", False)),
             )
         else:
             return cls(
@@ -268,6 +274,7 @@ class PendingTransaction:
                 call_key=input.get("call_key", "0x" + ("0" * 64)),
                 allocation_subtree=input.get("allocation_subtree", []),
                 gas_used=_int_from_serialized(input.get("gas_used"), 0),
+                use_balance=bool(input.get("use_balance", False)),
             )
 
 

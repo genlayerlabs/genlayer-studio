@@ -905,9 +905,12 @@ contract FeeManager is
 		} else {
 			IFeeManager.FeesDistribution
 				memory feesDistribution = feesDistributionForTx[txId];
+			// `round` is the raw consensus round (0, 2, 4, ... for normal
+			// rounds), while `rotations` is indexed by normal-round ordinal.
+			uint256 rotationsIndex = round / 2;
 			totalFeesToPay = _calculateFeeForARound(
 				VALIDATORS_PER_ROUND[round],
-				feesDistribution.rotations[round - 1],
+				feesDistribution.rotations[rotationsIndex] + 1,
 				feesDistribution.leaderTimeout,
 				feesDistribution.validatorsTimeout
 			);

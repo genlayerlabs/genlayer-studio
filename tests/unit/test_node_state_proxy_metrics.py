@@ -29,11 +29,14 @@ def _encode_internal_fee_params(
     appeals=0,
     execution_budget_per_round=0,
     rotations=None,
+    max_price_gen_per_time_unit=1,
+    storage_fee_max_gas_price=2**200,
+    receipt_fee_max_gas_price=2**200,
 ):
     if rotations is None:
         rotations = [0] * (appeals + 1)
     return encode(
-        ["(uint256,uint256,uint256,uint256,uint256[])"],
+        ["(uint256,uint256,uint256,uint256,uint256[],uint256,uint256,uint256)"],
         [
             (
                 leader_timeunits,
@@ -41,6 +44,9 @@ def _encode_internal_fee_params(
                 appeals,
                 execution_budget_per_round,
                 rotations,
+                max_price_gen_per_time_unit,
+                storage_fee_max_gas_price,
+                receipt_fee_max_gas_price,
             )
         ],
     )
@@ -95,7 +101,6 @@ def test_host_provide_result_preserves_fee_metadata_from_genvm_emissions():
         state_proxy=state,
         leader_results=None,
     )
-    post_fee_params = _encode_internal_fee_params(leader_timeunits=6)
     post_fee_params_with_caps = encode(
         ["(uint256,uint256,uint256,uint256,uint256[],uint256,uint256,uint256)"],
         [(6, 10, 0, 0, [0], 11, 12, 13)],
@@ -110,7 +115,7 @@ def test_host_provide_result_preserves_fee_metadata_from_genvm_emissions():
             "recipient": "0x" + "22" * 20,
             "callKey": "0x" + "12" * 32,
             "budget": 60,
-            "feeParams": "0x" + post_fee_params.hex(),
+            "feeParams": "0x" + post_fee_params_with_caps.hex(),
         }
     ]
     genvm_subtree = encode(
@@ -158,6 +163,7 @@ def test_host_provide_result_preserves_fee_metadata_from_genvm_emissions():
                 "declaredBudget": 60,
                 "callKey": bytes.fromhex("12" * 32),
                 "subtree": genvm_subtree,
+                "useBalance": True,
             },
             {
                 "type": "InternalDeployMessage",
@@ -198,10 +204,11 @@ def test_host_provide_result_preserves_fee_metadata_from_genvm_emissions():
     assert post.calldata == gvm_calldata.encode(["post", 1])
     assert post.value == 7
     assert post.on == "accepted"
-    assert post.fee_params == post_fee_params
+    assert post.fee_params == post_fee_params_with_caps
     assert post.declared_budget == 60
     assert post.call_key == "0x" + "12" * 32
     assert post.allocation_subtree == allocation_subtree
+    assert post.use_balance is True
 
     assert deploy.address == "0x"
     assert deploy.calldata == gvm_calldata.encode({"init": True})
@@ -414,9 +421,9 @@ async def test_run_genvm_passes_mode2_message_fee_allocations_to_genvm():
             "validator_timeunits_allocation": 10,
             "execution_budget_per_round": 0,
             "rotations": [0],
-            "max_price_gen_per_time_unit": 0,
-            "storage_fee_max_gas_price": 0,
-            "receipt_fee_max_gas_price": 0,
+            "max_price_gen_per_time_unit": 1,
+            "storage_fee_max_gas_price": 2**200,
+            "receipt_fee_max_gas_price": 2**200,
         },
     }
     assert allocation["children"][0]["recipient"].as_hex.lower() == child_recipient

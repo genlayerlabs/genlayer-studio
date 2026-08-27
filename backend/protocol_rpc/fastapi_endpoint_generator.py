@@ -491,6 +491,15 @@ def register_endpoints_for_fastapi(
     )
     register(endpoints.get_studio_fee_config, "sim_getFeeConfig")
     register(endpoints.sim_calculate_round_fees, "sim_calculateRoundFees")
+    register(endpoints.sim_min_message_primary_fees, "sim_minMessagePrimaryFees")
+    register(
+        endpoints.sim_estimate_propose_receipt_gas,
+        "sim_estimateProposeReceiptGas",
+    )
+    register(
+        endpoints.sim_estimate_message_reveal_gas,
+        "sim_estimateMessageRevealGas",
+    )
     register(
         partial(endpoints.get_contract, accounts_manager), "sim_getConsensusContract"
     )

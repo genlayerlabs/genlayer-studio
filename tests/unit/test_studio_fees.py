@@ -10,6 +10,8 @@ from eth_abi import encode
 from backend.consensus.base import (
     _apply_external_message_freeze_check,
     _apply_message_value_withdrawals_for_phase,
+    _child_config_rotation_rounds,
+    _emit_messages,
     _get_messages_data,
 )
 from backend.domain.types import TransactionType
@@ -19,8 +21,10 @@ from backend.database_handler.transactions_processor import TransactionsProcesso
 from backend.protocol_rpc.exceptions import JSONRPCError, NotFoundError
 from backend.protocol_rpc.endpoints import (
     _current_fee_round,
+    _funded_max_rotations,
     _handle_appeal_or_top_up_and_submit,
     _handle_top_up_fees,
+    _normal_leader_count,
     get_transaction_status_details,
     get_transaction_status,
     _stage_simulated_call_value,
@@ -28,7 +32,10 @@ from backend.protocol_rpc.endpoints import (
     _validate_fee_envelope,
     _with_default_simulation_fees,
     sim_calculate_round_fees,
+    sim_estimate_message_reveal_gas,
+    sim_estimate_propose_receipt_gas,
     sim_estimate_transaction_fees,
+    sim_min_message_primary_fees,
 )
 from backend.protocol_rpc.fees import (
     AllocationDuplicateKey,
@@ -38,7 +45,9 @@ from backend.protocol_rpc.fees import (
     AllocationTreeMalformed,
     AllocationTreeTooDeep,
     BudgetTooLow,
+    EqOutputsTooLarge,
     ExternalAllocationInvalid,
+    FeeValueMustBeNonZero,
     InsufficientFees,
     InvalidAppealBond,
     InvalidAppealRounds,
@@ -48,18 +57,23 @@ from backend.protocol_rpc.fees import (
     MessageBudgetExceeded,
     MessageDeclaredBudgetInsufficient,
     MessageEmissionPhaseMismatch,
+    MessageEffectDescriptorMismatch,
     MessageFeeParamsMismatch,
     MessageAllocationsNotEqualBudget,
     MessageFeesReportMismatch,
     MessageNoMatchingAllocation,
     Mode1MessageFeesRequireGenVMPerEmissionSupport,
+    PhaseTimeoutOutOfBounds,
+    SubmittedMessagesTooLarge,
     CALL_KEY_WILDCARD,
+    EMPTY_CALL_KEY,
     MESSAGE_ALLOCATION_NODE_ABI_TYPE,
     MIN_RECEIPT_BYTES,
     MESSAGE_REVEAL_LENGTH_SLOTS,
     NODE_ROOT_SENTINEL,
     NONDET_OUTPUT_LENGTH_BYTES,
     FEE_ACCOUNTING_KEY,
+    FEE_POLICY_SNAPSHOT_KEY,
     PROPOSE_RECEIPT_SLOTS,
     SUBMITTED_MESSAGE_ABI_TYPE,
     DEFAULT_GEN_PER_TIME_UNIT,
@@ -73,6 +87,7 @@ from backend.protocol_rpc.fees import (
     TopUpCannotExtendSchedule,
     TooManyMessages,
     apply_fee_top_up,
+    activate_fee_accounting,
     calculate_appeal_charge,
     calculate_min_appeal_bond,
     calculate_round_fees,
@@ -84,6 +99,9 @@ from backend.protocol_rpc.fees import (
     default_transaction_fees_for_policy,
     derive_external_message_call_key,
     fill_message_fee_payload_from_allocation,
+    mark_message_effects_delivered,
+    message_novelty_mask,
+    prepare_reveal_message_generation,
     genvm_fee_context,
     genvm_message_fee_allocation,
     get_leader_rounds,
@@ -95,6 +113,7 @@ from backend.protocol_rpc.fees import (
     refund_failed_external_message_fee,
     required_fee_deposit,
     settle_fee_accounting,
+    stamp_receipt_execution_policy,
     studio_fee_config,
     successful_appeal_profit,
     successful_appeal_reward,
@@ -166,6 +185,23 @@ def _required_env_fee_deposit(fees_distribution, num_of_validators=5):
     )
 
 
+def _env_fees_distribution(**overrides):
+    policy = StudioFeePolicy.from_env()
+    defaults, _ = default_transaction_fees_for_policy(policy)
+    values = {
+        "leader_timeunits": int(defaults["leaderTimeunitsAllocation"]),
+        "validator_timeunits": int(defaults["validatorTimeunitsAllocation"]),
+        "appeals": int(defaults["appealRounds"]),
+        "rotations": [int(value) for value in defaults["rotations"]],
+        "execution_budget_per_round": int(defaults["executionBudgetPerRound"]),
+        "max_price_gen_per_time_unit": int(defaults["maxPriceGenPerTimeUnit"]),
+        "storage_fee_max_gas_price": int(defaults["storageFeeMaxGasPrice"]),
+        "receipt_fee_max_gas_price": int(defaults["receiptFeeMaxGasPrice"]),
+    }
+    values.update(overrides)
+    return _fees_distribution(**values)
+
+
 def _encode_internal_fee_params(
     *,
     leader_timeunits=5,
@@ -173,11 +209,14 @@ def _encode_internal_fee_params(
     appeals=0,
     execution_budget_per_round=0,
     rotations=None,
+    max_price_gen_per_time_unit=1,
+    storage_fee_max_gas_price=2**200,
+    receipt_fee_max_gas_price=2**200,
 ):
     if rotations is None:
         rotations = [0] * (appeals + 1)
     return encode(
-        ["(uint256,uint256,uint256,uint256,uint256[])"],
+        ["(uint256,uint256,uint256,uint256,uint256[],uint256,uint256,uint256)"],
         [
             (
                 leader_timeunits,
@@ -185,6 +224,9 @@ def _encode_internal_fee_params(
                 appeals,
                 execution_budget_per_round,
                 rotations,
+                max_price_gen_per_time_unit,
+                storage_fee_max_gas_price,
+                receipt_fee_max_gas_price,
             )
         ],
     )
@@ -196,6 +238,31 @@ def _encode_external_fee_params(*, gas_limit=21_000, max_gas_price=10):
 
 def _external_selector_call_key(selector: bytes) -> str:
     return "0x" + selector.hex().ljust(64, "0")
+
+
+def _history_receipt(
+    *,
+    mode: str,
+    address: str,
+    vote: str | None = None,
+    eq_outputs_length: int = 0,
+    data_fees_consumed: list[int] | None = None,
+    timeout: bool = False,
+) -> dict:
+    genvm_result = {"eq_blocks_outputs_length": eq_outputs_length}
+    if data_fees_consumed is not None:
+        genvm_result["data_fees_consumed"] = data_fees_consumed
+    if timeout:
+        genvm_result["error_code"] = "CONSENSUS_LEADER_EXEC_TIMEOUT"
+    return {
+        "mode": mode,
+        "vote": vote,
+        "node_config": {"address": address},
+        "result": base64.b64encode(b"\x00timeout" if timeout else b"\x00ok").decode(),
+        "execution_result": "ERROR" if timeout else "SUCCESS",
+        "genvm_result": genvm_result,
+        "pending_transactions": [],
+    }
 
 
 def _root_parent_index() -> int:
@@ -210,27 +277,36 @@ def test_derive_external_message_call_key_preserves_explicit_value():
 def test_derive_external_message_call_key_from_calldata_selector_when_omitted():
     selector = b"\x12\x34\x56\x78"
     assert derive_external_message_call_key(
-        CALL_KEY_WILDCARD,
+        EMPTY_CALL_KEY,
         selector + b"payload",
     ) == _external_selector_call_key(selector)
 
 
-def test_derive_external_message_call_key_keeps_wildcard_without_selector():
-    assert derive_external_message_call_key(CALL_KEY_WILDCARD, b"\x12\x34") == (
-        CALL_KEY_WILDCARD
+def test_derive_external_message_call_key_keeps_empty_key_without_selector():
+    assert (
+        derive_external_message_call_key(EMPTY_CALL_KEY, b"\x12\x34") == EMPTY_CALL_KEY
+    )
+
+
+def test_derive_external_message_call_key_preserves_consensus_wildcard():
+    assert (
+        derive_external_message_call_key(CALL_KEY_WILDCARD, b"\x12\x34\x56\x78")
+        == CALL_KEY_WILDCARD
     )
 
 
 def _allocation(
     *,
     message_type=1,
-    on_acceptance=True,
+    on_acceptance=None,
     parent_index=NODE_ROOT_SENTINEL,
     recipient="0x2222222222222222222222222222222222222222",
-    call_key="0x0000000000000000000000000000000000000000000000000000000000000000",
+    call_key=CALL_KEY_WILDCARD,
     budget=55,
     fee_params=None,
 ):
+    if on_acceptance is None:
+        on_acceptance = message_type == 1
     if fee_params is None:
         fee_params = (
             _encode_external_fee_params()
@@ -368,6 +444,30 @@ def test_calculate_round_fees_applies_gen_per_time_unit_multiplier():
     )
 
 
+def test_calculate_later_round_fees_uses_normal_round_rotation_ordinal():
+    fees_distribution = _fees_distribution(
+        appeals=2,
+        rotations=[0, 1, 2],
+        max_price_gen_per_time_unit=1,
+    )
+
+    # Raw consensus round 4 is normal-round ordinal 2. Its configured two
+    # rotations price three attempts at the round-4 committee size (23).
+    assert calculate_round_fees(fees_distribution, 23, round=4) == 3 * (100 + 23 * 200)
+
+
+def test_sim_min_message_primary_fees_decodes_canonical_v06_abi(monkeypatch):
+    monkeypatch.setenv("GENLAYER_STUDIO_GEN_PER_TIME_UNIT", "1")
+    monkeypatch.setenv("GENLAYER_STUDIO_TIME_UNIT_OVERLAY_BPS", "1500")
+    fee_params = _encode_internal_fee_params(
+        max_price_gen_per_time_unit=1,
+        storage_fee_max_gas_price=2,
+        receipt_fee_max_gas_price=3,
+    )
+
+    assert sim_min_message_primary_fees("0x" + fee_params.hex()) == "64"
+
+
 def test_calculate_round_fees_reserves_profit_and_grosses_up_only_work():
     fees_distribution = _fees_distribution(
         appeals=1,
@@ -387,13 +487,73 @@ def test_calculate_round_fees_reserves_profit_and_grosses_up_only_work():
     )
 
 
-def test_calculate_round_fees_rejects_price_caps():
-    with pytest.raises(MaxPriceExceeded):
+def test_calculate_round_fees_prices_odd_bond_before_profit_rounding():
+    fees_distribution = _fees_distribution(
+        leader_timeunits=101,
+        validator_timeunits=200,
+        appeals=1,
+        rotations=[0, 0],
+        max_price_gen_per_time_unit=2,
+    )
+    policy = StudioFeePolicy(gen_per_time_unit=2)
+    work = (1_101 + 1_501 + 2_301) * 2
+    priced_bond = 2_301 * 2
+    exact_profit = successful_appeal_profit(priced_bond)
+
+    assert exact_profit == 6_903
+    assert calculate_round_fees(fees_distribution, 5, policy=policy) == (
+        work + exact_profit
+    )
+
+
+def test_settlement_uses_current_overlay_split_capped_by_funded_reserve():
+    submission_policy = StudioFeePolicy(
+        gen_per_time_unit=1,
+        time_unit_overlay_bps=1_000,
+    )
+    fees_distribution = _fees_distribution(max_price_gen_per_time_unit=1)
+    deposit = required_fee_deposit(fees_distribution, 5, submission_policy)
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=deposit,
+        user_value=0,
+        policy=submission_policy,
+    )
+
+    assert deposit == 1_222
+    assert accounting["time_unit_overlay_budget"] == 122
+
+    lower_split, lower_refund = settle_fee_accounting(
+        accounting,
+        actual_final_round=0,
+        num_of_validators=5,
+        policy=StudioFeePolicy(gen_per_time_unit=1, time_unit_overlay_bps=500),
+    )
+    higher_split, higher_refund = settle_fee_accounting(
+        accounting,
+        actual_final_round=0,
+        num_of_validators=5,
+        policy=StudioFeePolicy(gen_per_time_unit=1, time_unit_overlay_bps=2_000),
+    )
+
+    assert lower_split["time_unit_overlay_requested"] == 57
+    assert lower_split["time_unit_overlay_spent"] == 57
+    assert lower_refund == 65
+    assert higher_split["time_unit_overlay_requested"] == 275
+    assert higher_split["time_unit_overlay_spent"] == 122
+    assert higher_refund == 0
+
+
+def test_calculate_round_fees_reserves_at_gen_cap_without_submission_rejection():
+    assert (
         calculate_round_fees(
             _fees_distribution(max_price_gen_per_time_unit=5),
             5,
             policy=StudioFeePolicy(gen_per_time_unit=10),
         )
+        == 5_500
+    )
 
     with pytest.raises(MaxPriceExceeded):
         calculate_round_fees(
@@ -433,6 +593,23 @@ def test_sim_calculate_round_fees_exposes_decimal_canonical_quote(monkeypatch):
     )
 
     assert sim_calculate_round_fees(fees_distribution, 5, 0) == "9214"
+
+
+def test_sim_receipt_metering_views_match_consensus_formulas(monkeypatch):
+    monkeypatch.setenv("GENLAYER_STUDIO_RECEIPT_GAS_PRICE", "2")
+
+    proposal = sim_estimate_propose_receipt_gas(0)
+    reveal = sim_estimate_message_reveal_gas(352, 1)
+
+    assert proposal == {
+        "receiptBytes": "1024",
+        "gas": "314384",
+        "fee": "628768",
+    }
+    assert reveal == {
+        "gas": "187632",
+        "fee": "375264",
+    }
 
 
 def test_time_unit_fees_through_round_refunds_unused_appeal_budget():
@@ -536,12 +713,16 @@ def test_studio_fee_policy_matches_consensus_deterministic_receipt_estimators():
         + (PROPOSE_RECEIPT_SLOTS * policy.gas_per_changed_slot)
     )
     expected_receipt_floor_gas = (
-        policy.intrinsic_gas
+        policy.fixed_propose_receipt_gas
+        + policy.intrinsic_gas
         + policy.bootloader_overhead
         + (MIN_RECEIPT_BYTES * policy.calldata_gas_per_byte)
         + (PROPOSE_RECEIPT_SLOTS * policy.gas_per_changed_slot)
     )
-    expected_genvm_bucket_floor_gas = (
+    expected_legacy_receipt_gas = expected_receipt_floor_gas - (
+        policy.fixed_propose_receipt_gas
+    )
+    expected_genvm_start_gas = (
         policy.fixed_propose_receipt_gas
         + policy.intrinsic_gas
         + policy.bootloader_overhead
@@ -571,7 +752,8 @@ def test_studio_fee_policy_matches_consensus_deterministic_receipt_estimators():
         + ((MESSAGE_REVEAL_LENGTH_SLOTS + 2) * policy.gas_per_changed_slot)
     )
     expected_consensus_message_reveal_gas = (
-        policy.intrinsic_gas
+        policy.fixed_message_reveal_gas
+        + policy.intrinsic_gas
         + policy.bootloader_overhead
         + (320 * policy.calldata_gas_per_byte)
         + (2 * policy.gas_per_changed_slot)
@@ -593,7 +775,7 @@ def test_studio_fee_policy_matches_consensus_deterministic_receipt_estimators():
             calldata_length=MIN_RECEIPT_BYTES,
             slots_changed=PROPOSE_RECEIPT_SLOTS,
         )
-        == expected_receipt_floor_gas
+        == expected_legacy_receipt_gas
     )
     assert policy.estimate_message_reveal_gas(320, 2) == expected_message_reveal_gas
     assert (
@@ -602,8 +784,11 @@ def test_studio_fee_policy_matches_consensus_deterministic_receipt_estimators():
     )
     assert policy.estimate_nondet_output_start_gas() == expected_nondet_output_start_gas
     assert (
-        policy.message_fee_params_budget_floor() == expected_genvm_bucket_floor_gas * 3
+        policy.estimate_propose_receipt_gas(MIN_RECEIPT_BYTES)
+        == expected_receipt_floor_gas
     )
+    assert policy.message_fee_params_budget_floor() == expected_receipt_floor_gas * 3
+    assert policy.genvm_start_budget_floor() == expected_genvm_start_gas * 3
 
 
 def test_studio_fee_config_exposes_default_nonzero_fee_policy():
@@ -620,18 +805,20 @@ def test_studio_fee_config_exposes_default_nonzero_fee_policy():
         DEFAULT_TRANSACTION_EXECUTION_BUDGET_PER_ROUND,
         policy.message_fee_params_budget_floor(),
     )
-    assert distribution["maxPriceGenPerTimeUnit"] == (
-        DEFAULT_GEN_PER_TIME_UNIT * DEFAULT_PRICE_CAP_HEADROOM_BPS // 10_000
-    )
-    assert distribution["storageFeeMaxGasPrice"] == 2
-    assert distribution["receiptFeeMaxGasPrice"] == 2
+    expected_gen_cap = (
+        DEFAULT_GEN_PER_TIME_UNIT * DEFAULT_PRICE_CAP_HEADROOM_BPS + 9_999
+    ) // 10_000
+    expected_storage_cap = (
+        DEFAULT_STORAGE_UNIT_PRICE * DEFAULT_PRICE_CAP_HEADROOM_BPS + 9_999
+    ) // 10_000
+    expected_receipt_cap = (
+        DEFAULT_RECEIPT_GAS_PRICE * DEFAULT_PRICE_CAP_HEADROOM_BPS + 9_999
+    ) // 10_000
+    assert distribution["maxPriceGenPerTimeUnit"] == expected_gen_cap
+    assert distribution["storageFeeMaxGasPrice"] == expected_storage_cap
+    assert distribution["receiptFeeMaxGasPrice"] == expected_receipt_cap
     assert (
-        fee_value
-        == (
-            1100
-            * (DEFAULT_GEN_PER_TIME_UNIT * DEFAULT_PRICE_CAP_HEADROOM_BPS // 10_000)
-        )
-        + distribution["executionBudgetPerRound"]
+        fee_value == (1100 * expected_gen_cap) + distribution["executionBudgetPerRound"]
     )
 
     config = studio_fee_config(policy)
@@ -649,7 +836,7 @@ def test_studio_fee_config_exposes_default_nonzero_fee_policy():
     }
     assert config["capabilities"]["messageFees"]["mode2"]["genvmExecution"] is True
     assert config["defaultFees"]["distribution"]["maxPriceGenPerTimeUnit"] == str(
-        DEFAULT_GEN_PER_TIME_UNIT * DEFAULT_PRICE_CAP_HEADROOM_BPS // 10_000
+        expected_gen_cap
     )
     assert config["defaultFees"]["feeValue"] == str(fee_value)
 
@@ -706,8 +893,216 @@ def test_validate_transaction_fee_deposit_rejects_execution_budget_below_floor()
         )
 
 
+@pytest.mark.parametrize(
+    ("field", "field_index"),
+    [
+        ("leaderTimeunitsAllocation", 1),
+        ("validatorTimeunitsAllocation", 2),
+        ("executionBudgetPerRound", 3),
+        ("maxPriceGenPerTimeUnit", 4),
+        ("storageFeeMaxGasPrice", 5),
+        ("receiptFeeMaxGasPrice", 6),
+    ],
+)
+def test_v06_submission_requires_all_six_nonzero_fee_fields(field, field_index):
+    fees_distribution = _fees_distribution(
+        execution_budget_per_round=1,
+        max_price_gen_per_time_unit=1,
+        storage_fee_max_gas_price=1,
+        receipt_fee_max_gas_price=1,
+    )
+    fees_distribution[field] = 0
+    policy = StudioFeePolicy(
+        gen_per_time_unit=1,
+        enforce_v06_submission_config=True,
+    )
+
+    with pytest.raises(
+        FeeValueMustBeNonZero,
+        match=rf"FeeValueMustBeNonZero\({field_index}\)",
+    ):
+        validate_transaction_fee_deposit(
+            fees_distribution=fees_distribution,
+            num_of_validators=5,
+            submitted_value=10_000_000,
+            user_value=0,
+            policy=policy,
+        )
+
+
+def test_v06_submission_enforces_deployed_phase_timeout_bounds():
+    fees_distribution = _fees_distribution(
+        leader_timeunits=29,
+        validator_timeunits=30,
+        execution_budget_per_round=1,
+        max_price_gen_per_time_unit=1,
+        storage_fee_max_gas_price=1,
+        receipt_fee_max_gas_price=1,
+    )
+    policy = StudioFeePolicy(
+        gen_per_time_unit=1,
+        enforce_v06_submission_config=True,
+        min_propose_timeunits=30,
+        max_propose_timeunits=600,
+        min_commit_timeunits=30,
+        max_commit_timeunits=600,
+    )
+
+    with pytest.raises(PhaseTimeoutOutOfBounds, match="29,30,600"):
+        validate_transaction_fee_deposit(
+            fees_distribution=fees_distribution,
+            num_of_validators=5,
+            submitted_value=10_000_000,
+            user_value=0,
+            policy=policy,
+        )
+
+
+def test_activation_checks_live_gen_cap_and_locks_all_live_prices():
+    submission_policy = StudioFeePolicy(
+        gen_per_time_unit=2,
+        storage_unit_price=3,
+        receipt_gas_price=4,
+    )
+    fees_distribution = _fees_distribution(
+        execution_budget_per_round=1,
+        max_price_gen_per_time_unit=5,
+        storage_fee_max_gas_price=10,
+        receipt_fee_max_gas_price=10,
+    )
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(
+            fees_distribution,
+            5,
+            submission_policy,
+        ),
+        user_value=0,
+        policy=submission_policy,
+        allow_low_execution_budget=True,
+    )
+
+    canceled, should_cancel = activate_fee_accounting(
+        accounting,
+        StudioFeePolicy(gen_per_time_unit=6),
+    )
+    assert should_cancel is True
+    assert canceled["activation_price_cap_exceeded"] == {
+        "actual": 6,
+        "maximum": 5,
+    }
+
+    activated, should_cancel = activate_fee_accounting(
+        accounting,
+        StudioFeePolicy(
+            gen_per_time_unit=4,
+            storage_unit_price=7,
+            receipt_gas_price=8,
+        ),
+        selection_pool_count=11,
+    )
+    assert should_cancel is False
+    assert activated["activation_prices_locked"] is True
+    assert activated["locked_prices"] == {
+        "genPerTimeUnit": 4,
+        "storageUnitPrice": 7,
+        "receiptGasPrice": 8,
+    }
+    assert activated["policy_snapshot"]["gen_per_time_unit"] == 4
+    assert activated["policy_snapshot"]["storage_unit_price"] == 7
+    assert activated["policy_snapshot"]["receipt_gas_price"] == 8
+    assert activated["selection_pool_count"] == 11
+
+    relocked, should_cancel = activate_fee_accounting(
+        activated,
+        StudioFeePolicy(gen_per_time_unit=100),
+    )
+    assert should_cancel is False
+    assert relocked["locked_prices"] == activated["locked_prices"]
+
+
+def test_runtime_execution_policy_locks_only_activation_prices():
+    submission_policy = StudioFeePolicy(
+        gen_per_time_unit=2,
+        storage_unit_price=3,
+        receipt_gas_price=4,
+        calldata_gas_per_byte=5,
+        fixed_propose_receipt_gas=6,
+    )
+    fees_distribution = _fees_distribution(
+        execution_budget_per_round=1,
+        max_price_gen_per_time_unit=10,
+        storage_fee_max_gas_price=10,
+        receipt_fee_max_gas_price=10,
+    )
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(
+            fees_distribution,
+            5,
+            submission_policy,
+        ),
+        user_value=0,
+        policy=submission_policy,
+        allow_low_execution_budget=True,
+    )
+    activated, should_cancel = activate_fee_accounting(
+        accounting,
+        StudioFeePolicy(
+            gen_per_time_unit=7,
+            storage_unit_price=8,
+            receipt_gas_price=9,
+        ),
+    )
+    assert should_cancel is False
+
+    _, gas_data = genvm_fee_context(
+        activated,
+        StudioFeePolicy(
+            gen_per_time_unit=70,
+            storage_unit_price=80,
+            receipt_gas_price=90,
+            calldata_gas_per_byte=11,
+            fixed_propose_receipt_gas=13,
+        ),
+    )
+
+    assert gas_data["genPerTimeUnit"] == "7"
+    assert gas_data["storageUnitPrice"] == "8"
+    assert gas_data["receiptGasPerByte"] == str(9 * 11)
+    assert gas_data["fixedProposeReceiptGas"] == str(9 * 13)
+
+
+def test_activated_reveal_reads_live_message_count_cap(monkeypatch):
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(total_message_fees=120),
+        num_of_validators=5,
+        submitted_value=1220,
+        user_value=0,
+    )
+    activated, should_cancel = activate_fee_accounting(
+        accounting,
+        StudioFeePolicy(),
+    )
+    assert should_cancel is False
+    monkeypatch.setenv("GENLAYER_STUDIO_MAX_MESSAGES_PER_TX", "1")
+    message = {
+        "messageType": 1,
+        "recipient": "0x2222222222222222222222222222222222222222",
+        "onAcceptance": True,
+        "feeParams": _encode_internal_fee_params(),
+        "declaredBudget": 55,
+        "callKey": "0x" + "12" * 32,
+    }
+
+    with pytest.raises(TooManyMessages):
+        record_reveal_message_fees(activated, [message, message])
+
+
 def test_endpoint_fee_envelope_rejects_insufficient_fee_deposit():
-    fees_distribution = _fees_distribution(total_message_fees=55)
+    fees_distribution = _env_fees_distribution(total_message_fees=55)
     fee_value = _required_env_fee_deposit(fees_distribution) - 1
     decoded = DecodedRollupTransaction(
         from_address="0x1111111111111111111111111111111111111111",
@@ -736,7 +1131,7 @@ def test_endpoint_fee_envelope_rejects_insufficient_fee_deposit():
 
 
 def test_endpoint_fee_envelope_accepts_exact_fee_deposit():
-    fees_distribution = _fees_distribution(total_message_fees=55)
+    fees_distribution = _env_fees_distribution(total_message_fees=55)
     fee_value = _required_env_fee_deposit(fees_distribution)
     decoded = DecodedRollupTransaction(
         from_address="0x1111111111111111111111111111111111111111",
@@ -763,9 +1158,90 @@ def test_endpoint_fee_envelope_accepts_exact_fee_deposit():
     _validate_fee_envelope(decoded)
 
 
+def test_submission_clamps_runtime_rotations_to_smallest_funded_round():
+    fees_distribution = _env_fees_distribution(
+        appeals=2,
+        rotations=[3, 1, 2],
+    )
+    decoded = DecodedRollupTransaction(
+        from_address="0x1111111111111111111111111111111111111111",
+        to_address="0x0000000000000000000000000000000000000000",
+        data=DecodedRollupTransactionData(
+            function_name="addTransaction",
+            args=DecodedRollupTransactionDataArgs(
+                sender="0x1111111111111111111111111111111111111111",
+                recipient="0x2222222222222222222222222222222222222222",
+                num_of_initial_validators=5,
+                max_rotations=4,
+                data="0x",
+                fees_distribution=fees_distribution,
+            ),
+        ),
+        type="2",
+        nonce=0,
+        value=0,
+    )
+
+    assert _funded_max_rotations(decoded, 4) == 1
+
+
+def test_internal_child_clamps_parent_rotations_to_its_own_fee_schedule():
+    data = {
+        "fees_distribution": _fees_distribution(
+            appeals=2,
+            rotations=[2, 0, 1],
+        )
+    }
+
+    assert _child_config_rotation_rounds(3, data) == 0
+    assert _child_config_rotation_rounds(1, {"calldata": b"legacy"}) == 1
+
+
+def test_internal_child_uses_protocol_round_zero_committee_not_parent_size():
+    calls = []
+
+    class _Processor:
+        def insert_transaction(self, *args, **kwargs):
+            calls.append((args, kwargs))
+
+    context = SimpleNamespace(
+        transaction=SimpleNamespace(
+            to_address="0x1111111111111111111111111111111111111111",
+            execution_mode="NORMAL",
+            num_of_initial_validators=7,
+            hash="0x" + "12" * 32,
+            config_rotation_rounds=3,
+            sim_config=None,
+            origin_address=None,
+        ),
+        transactions_processor=_Processor(),
+    )
+    child_data = {
+        "fees_distribution": _fees_distribution(rotations=[0]),
+    }
+
+    _emit_messages(
+        context,
+        [
+            (
+                "0x2222222222222222222222222222222222222222",
+                child_data,
+                TransactionType.RUN_CONTRACT.value,
+                0,
+                0,
+            )
+        ],
+        {"tx_ids_hex": ["0x" + "34" * 32]},
+        "accepted",
+    )
+
+    assert calls[0][1]["num_of_initial_validators"] == 5
+    assert calls[0][1]["config_rotation_rounds"] == 0
+
+
 def test_simulation_fee_accounting_accepts_sdk_style_fee_options():
     policy = StudioFeePolicy.from_env()
-    fees_distribution = _fees_distribution(
+    fees_distribution = _env_fees_distribution(
         execution_budget_per_round=policy.message_fee_params_budget_floor()
     )
     fee_value = _required_env_fee_deposit(fees_distribution)
@@ -789,15 +1265,23 @@ def test_simulation_fee_accounting_accepts_sdk_style_fee_options():
 
 
 def test_simulation_fee_accounting_accepts_sdk_style_message_allocations():
-    fee_params = _encode_internal_fee_params()
     policy = StudioFeePolicy.from_env()
+    fee_params = _encode_internal_fee_params(
+        leader_timeunits=30,
+        validator_timeunits=30,
+        max_price_gen_per_time_unit=policy.gen_per_time_unit,
+    )
     budget = calculate_round_fees(
-        _fees_distribution(leader_timeunits=5, validator_timeunits=10),
+        _fees_distribution(
+            leader_timeunits=30,
+            validator_timeunits=30,
+            max_price_gen_per_time_unit=policy.gen_per_time_unit,
+        ),
         5,
         policy=policy,
     )
     allocation = _allocation(budget=budget, fee_params=fee_params)
-    fees_distribution = _fees_distribution(total_message_fees=budget)
+    fees_distribution = _env_fees_distribution(total_message_fees=budget)
 
     accounting = _simulation_fee_accounting(
         {
@@ -819,7 +1303,7 @@ def test_simulation_fee_accounting_accepts_sdk_style_message_allocations():
             "onAcceptance": True,
             "parentIndex": NODE_ROOT_SENTINEL,
             "recipient": "0x2222222222222222222222222222222222222222",
-            "callKey": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            "callKey": CALL_KEY_WILDCARD,
             "budget": budget,
             "feeParams": "0x" + fee_params.hex(),
         }
@@ -827,7 +1311,7 @@ def test_simulation_fee_accounting_accepts_sdk_style_message_allocations():
 
 
 def test_simulation_fee_accounting_defaults_to_required_deposit():
-    fees_distribution = _fees_distribution(total_message_fees=55)
+    fees_distribution = _env_fees_distribution(total_message_fees=55)
     required_fee_value = _required_env_fee_deposit(fees_distribution)
     accounting = _simulation_fee_accounting(
         {
@@ -848,12 +1332,13 @@ def test_simulation_fee_accounting_defaults_to_required_deposit():
 
 
 def test_simulation_fee_accounting_rejects_insufficient_sdk_fee_value():
+    fees_distribution = _env_fees_distribution(total_message_fees=55)
     with pytest.raises(JSONRPCError, match="InsufficientFees"):
         _simulation_fee_accounting(
             {
                 "fees": {
-                    "distribution": _fees_distribution(total_message_fees=55),
-                    "feeValue": 1154,
+                    "distribution": fees_distribution,
+                    "feeValue": _required_env_fee_deposit(fees_distribution) - 1,
                 },
                 "numOfInitialValidators": 5,
             },
@@ -974,15 +1459,17 @@ async def test_sim_estimate_transaction_fees_returns_mode2_recommended_preset(
     policy = StudioFeePolicy.from_env()
     execution_budget = policy.message_fee_params_budget_floor()
     fee_params = _encode_internal_fee_params(
-        leader_timeunits=5,
-        validator_timeunits=10,
+        leader_timeunits=30,
+        validator_timeunits=30,
         execution_budget_per_round=execution_budget,
+        max_price_gen_per_time_unit=policy.gen_per_time_unit,
     )
     message_budget = calculate_round_fees(
         _fees_distribution(
-            leader_timeunits=5,
-            validator_timeunits=10,
+            leader_timeunits=30,
+            validator_timeunits=30,
             execution_budget_per_round=execution_budget,
+            max_price_gen_per_time_unit=policy.gen_per_time_unit,
         ),
         5,
         policy=policy,
@@ -993,7 +1480,7 @@ async def test_sim_estimate_transaction_fees_returns_mode2_recommended_preset(
         budget=message_budget,
         fee_params="0x" + fee_params.hex(),
     )
-    fees_distribution = _fees_distribution(
+    fees_distribution = _env_fees_distribution(
         execution_budget_per_round=execution_budget,
         total_message_fees=message_budget,
     )
@@ -1090,13 +1577,15 @@ async def test_sim_estimate_transaction_fees_returns_mode1_observed_message_pres
 ):
     policy = StudioFeePolicy.from_env()
     fee_params = _encode_internal_fee_params(
-        leader_timeunits=6,
-        validator_timeunits=10,
+        leader_timeunits=30,
+        validator_timeunits=30,
+        max_price_gen_per_time_unit=policy.gen_per_time_unit,
     )
     message_budget = calculate_round_fees(
         _fees_distribution(
-            leader_timeunits=6,
-            validator_timeunits=10,
+            leader_timeunits=30,
+            validator_timeunits=30,
+            max_price_gen_per_time_unit=policy.gen_per_time_unit,
         ),
         5,
         policy=policy,
@@ -1105,7 +1594,7 @@ async def test_sim_estimate_transaction_fees_returns_mode1_observed_message_pres
         message_budget * DEFAULT_PRICE_CAP_HEADROOM_BPS + 9_999
     ) // 10_000
     recipient = "0x2222222222222222222222222222222222222222"
-    fees_distribution = _fees_distribution(
+    fees_distribution = _env_fees_distribution(
         execution_budget_per_round=policy.message_fee_params_budget_floor(),
         total_message_fees=message_budget,
     )
@@ -1176,11 +1665,14 @@ async def test_sim_estimate_transaction_fees_returns_mode1_observed_message_pres
     assert message["messageType"] == "Internal"
     assert message["feeParams"] == "0x" + fee_params.hex()
     assert message["feeParamsDecoded"] == {
-        "leaderTimeunitsAllocation": 6,
-        "validatorTimeunitsAllocation": 10,
+        "leaderTimeunitsAllocation": 30,
+        "validatorTimeunitsAllocation": 30,
         "appealRounds": 0,
         "executionBudgetPerRound": 0,
         "rotations": [0],
+        "maxPriceGenPerTimeUnit": policy.gen_per_time_unit,
+        "storageFeeMaxGasPrice": str(2**200),
+        "receiptFeeMaxGasPrice": str(2**200),
     }
     assert int(message["declaredBudget"]) == message_budget
     assert message["allocationSubtree"] == "0x"
@@ -1216,7 +1708,7 @@ async def test_sim_estimate_transaction_fees_returns_external_message_fee_report
         budget=message_budget,
         fee_params="0x" + fee_params.hex(),
     )
-    fees_distribution = _fees_distribution(total_message_fees=message_budget)
+    fees_distribution = _env_fees_distribution(total_message_fees=message_budget)
     params = {
         "scenarioName": "external-transfer",
         "type": "write",
@@ -1275,8 +1767,12 @@ async def test_sim_estimate_transaction_fees_returns_external_message_fee_report
     report = result["feeReport"]
     preset = result["recommendedPreset"]
     message = report["messageReveal"]["messages"][0]
-    expected_reservation = gas_limit * policy.receipt_gas_price
-    expected_reimbursement = 11 * policy.receipt_gas_price
+    # External fee params cap the reimbursable gas price independently of the
+    # live policy; the v0.6 default is intentionally far above this fixture's
+    # explicit maxGasPrice.
+    effective_gas_price = min(policy.receipt_gas_price, max_gas_price)
+    expected_reservation = gas_limit * effective_gas_price
+    expected_reimbursement = 11 * effective_gas_price
 
     assert result["scenario"] == "external-transfer"
     assert (
@@ -1421,7 +1917,7 @@ def test_message_allocations_reject_duplicate_root_internal_keys():
 def test_message_allocations_reject_duplicate_normalized_root_internal_keys():
     allocations = [
         _allocation(budget=55, call_key="0x0"),
-        _allocation(budget=55, call_key=CALL_KEY_WILDCARD),
+        _allocation(budget=55, call_key=EMPTY_CALL_KEY),
     ]
 
     with pytest.raises(AllocationDuplicateKey):
@@ -1453,9 +1949,43 @@ def test_message_allocations_reject_depth_above_default_cap():
         validate_message_allocations(allocations, total_message_fees=330)
 
 
+def test_internal_allocation_defers_zero_price_cap_rejection_until_reveal():
+    fee_params = _encode_internal_fee_params(
+        max_price_gen_per_time_unit=0,
+        storage_fee_max_gas_price=0,
+        receipt_fee_max_gas_price=0,
+    )
+    allocation = _allocation(budget=55, fee_params=fee_params)
+
+    validate_message_allocations([allocation], total_message_fees=55)
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(total_message_fees=55),
+        message_allocations=[allocation],
+        num_of_validators=5,
+        submitted_value=1_155,
+        user_value=0,
+    )
+
+    with pytest.raises(FeeValueMustBeNonZero, match=r"FeeValueMustBeNonZero\(4\)"):
+        consume_message_fees(
+            accounting,
+            [
+                {
+                    "messageType": 1,
+                    "recipient": allocation["recipient"],
+                    "onAcceptance": True,
+                    "feeParams": fee_params,
+                    "declaredBudget": 55,
+                    "callKey": allocation["callKey"],
+                }
+            ],
+        )
+
+
 def test_message_allocations_accept_valid_external_allocation():
     allocation = _allocation(
         message_type=0,
+        on_acceptance=False,
         budget=210_000,
         fee_params=_encode_external_fee_params(gas_limit=21_000, max_gas_price=10),
     )
@@ -1466,6 +1996,7 @@ def test_message_allocations_accept_valid_external_allocation():
 def test_message_allocations_reject_invalid_external_allocation():
     allocation = _allocation(
         message_type=0,
+        on_acceptance=False,
         budget=210_001,
         fee_params=_encode_external_fee_params(gas_limit=21_000, max_gas_price=10),
     )
@@ -1551,7 +2082,7 @@ def test_message_allocations_reject_external_allocation_invariants():
                 ),
                 _allocation(
                     message_type=0,
-                    call_key=CALL_KEY_WILDCARD,
+                    call_key=EMPTY_CALL_KEY,
                     budget=210_000,
                     fee_params=_encode_external_fee_params(),
                 ),
@@ -1588,6 +2119,36 @@ def test_message_allocations_reject_external_allocation_invariants():
                 ),
             ],
             total_message_fees=210_000,
+        )
+
+
+def test_message_allocations_reject_external_on_acceptance():
+    allocation = _allocation(
+        message_type=0,
+        on_acceptance=True,
+        budget=210_000,
+        fee_params=_encode_external_fee_params(gas_limit=21_000, max_gas_price=10),
+    )
+
+    with pytest.raises(
+        ExternalAllocationInvalid, match="ExternalOnAcceptanceNotSupported"
+    ):
+        validate_message_allocations([allocation], total_message_fees=210_000)
+
+
+def test_message_allocations_enforce_external_gas_limit_floor():
+    allocation = _allocation(
+        message_type=0,
+        on_acceptance=False,
+        budget=209_990,
+        fee_params=_encode_external_fee_params(gas_limit=20_999, max_gas_price=10),
+    )
+
+    with pytest.raises(ExternalAllocationInvalid, match="ExternalGasLimitBelowMinimum"):
+        validate_message_allocations(
+            [allocation],
+            total_message_fees=209_990,
+            policy=StudioFeePolicy(min_external_gas_limit=21_000),
         )
 
 
@@ -1728,9 +2289,9 @@ def test_genvm_message_fee_allocation_maps_studio_nodes():
                 "validator_timeunits_allocation": 10,
                 "execution_budget_per_round": 0,
                 "rotations": [0],
-                "max_price_gen_per_time_unit": 11,
-                "storage_fee_max_gas_price": 12,
-                "receipt_fee_max_gas_price": 13,
+                "max_price_gen_per_time_unit": 1,
+                "storage_fee_max_gas_price": 2**200,
+                "receipt_fee_max_gas_price": 2**200,
             },
         },
         "children": [],
@@ -1792,9 +2353,9 @@ def test_genvm_message_fee_allocation_nests_descendants_under_roots():
                     "validator_timeunits_allocation": 10,
                     "execution_budget_per_round": 0,
                     "rotations": [0],
-                    "max_price_gen_per_time_unit": 0,
-                    "storage_fee_max_gas_price": 0,
-                    "receipt_fee_max_gas_price": 0,
+                    "max_price_gen_per_time_unit": 1,
+                    "storage_fee_max_gas_price": 2**200,
+                    "receipt_fee_max_gas_price": 2**200,
                 },
             },
             "children": [],
@@ -2073,6 +2634,23 @@ def test_execution_fee_report_uses_locked_receipt_price_by_default():
     )
 
 
+def test_execution_fee_report_enforces_consensus_eq_outputs_byte_cap():
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(execution_budget_per_round=1_000_000),
+        num_of_validators=5,
+        submitted_value=1_001_100,
+        user_value=0,
+    )
+    receipt = {"genvm_result": {"eq_blocks_outputs_length": 9}}
+
+    with pytest.raises(EqOutputsTooLarge, match=r"EqOutputsTooLarge\(9,8\)"):
+        record_execution_fee_consumption(
+            accounting,
+            receipt,
+            StudioFeePolicy(max_eq_outputs_bytes=8),
+        )
+
+
 def test_execution_fee_consumption_reports_execution_budget_overrun():
     accounting = create_fee_accounting(
         fees_distribution=_fees_distribution(execution_budget_per_round=100),
@@ -2310,7 +2888,7 @@ def test_simulation_fee_consumption_fills_mode2_payload_from_allocation():
                     True,
                     NODE_ROOT_SENTINEL,
                     recipient,
-                    bytes(32),
+                    bytes.fromhex(CALL_KEY_WILDCARD[2:]),
                     75,
                     fee_params,
                 )
@@ -2660,7 +3238,7 @@ def test_simulation_fee_consumption_records_external_allocation_reservation():
     )
     message = recorded["execution_fee_report"]["messageReveal"]["messages"][0]
 
-    assert recorded["message_fee_consumed"] == 77
+    assert recorded["message_fee_consumed"] == 700
     assert recorded["allocation_consumed"] == {"0": 700}
     assert recorded["external_message_fee_reserved"] == 700
     assert recorded["external_message_fee_reimbursed"] == 77
@@ -2684,13 +3262,26 @@ def test_simulation_fee_consumption_records_external_allocation_reservation():
         "declaredConsumed": 0,
         "genvmMeteredConsumed": 0,
         "declaredRefunded": 0,
-        "remaining": 923,
+        "remaining": 300,
         "meteringDelta": 0,
         "externalReserved": 700,
         "externalReimbursed": 77,
         "externalRemainder": 623,
-        "totalConsumed": 77,
+        "externalSettled": 700,
+        "totalConsumed": 700,
     }
+    assert recorded["external_message_fee_payouts"] == [
+        {
+            "recipient": "0x1111111111111111111111111111111111111111",
+            "amount": 77,
+            "source": "external-executor-reimbursement",
+        },
+        {
+            "recipient": "0x1111111111111111111111111111111111111111",
+            "amount": 623,
+            "source": "external-execution-remainder",
+        },
+    ]
     preset = recorded["recommended_fee_preset"]
     assert preset["messageBudgetMode"] == "allocation-preserved"
     assert preset["distribution"]["totalMessageFees"] == 1_000
@@ -2713,7 +3304,7 @@ def test_simulation_fee_consumption_records_external_allocation_reservation():
         },
     )
 
-    assert refunded["message_fee_consumed"] == 77
+    assert refunded["message_fee_consumed"] == 700
     assert refunded["allocation_consumed"] == {"0": 700}
     assert refunded["external_message_fee_reimbursed"] == 77
     assert refunded["external_message_events"][0]["failureRefunded"] is True
@@ -2810,6 +3401,7 @@ def test_execution_fee_consumption_reports_deterministic_receipt_fee_components(
                         55,
                         expected_subtree,
                         bytes.fromhex("34" * 32),
+                        False,
                     )
                 ]
             ],
@@ -2861,12 +3453,16 @@ def test_execution_fee_consumption_reports_deterministic_receipt_fee_components(
                 "appealRounds": 0,
                 "executionBudgetPerRound": 0,
                 "rotations": [0],
+                "maxPriceGenPerTimeUnit": 1,
+                "storageFeeMaxGasPrice": 2**200,
+                "receiptFeeMaxGasPrice": 2**200,
             },
             "feeParamsBytes": len(fee_params),
             "declaredBudget": 55,
             "allocationSubtree": "0x" + expected_subtree.hex(),
             "allocationSubtreeBytes": len(expected_subtree),
             "callKey": "0x" + "34" * 32,
+            "useBalance": False,
         }
     ]
     assert message_reveal["fee"] == (
@@ -3281,7 +3877,16 @@ def test_recommended_fee_preset_adds_message_execution_headroom_over_floor():
     )
 
     preset = recorded["recommended_fee_preset"]
-    assert preset["distribution"]["executionBudgetPerRound"] == floor + 10_000
+    observed_with_padding = (
+        recorded["execution_fee_report"]["totalEstimatedFee"]
+        * DEFAULT_PRICE_CAP_HEADROOM_BPS
+        + 9_999
+    ) // 10_000
+    assert preset["distribution"]["executionBudgetPerRound"] == max(
+        floor + 10_000,
+        observed_with_padding,
+        policy.genvm_start_budget_floor(),
+    )
     assert preset["distribution"]["totalMessageFees"] == 55
 
 
@@ -3342,6 +3947,7 @@ def test_execution_fee_report_handles_mode1_internal_messages_without_allocation
             60,
             b"",
             bytes.fromhex("12" * 32),
+            False,
         ),
         (
             1,
@@ -3354,6 +3960,7 @@ def test_execution_fee_report_handles_mode1_internal_messages_without_allocation
             70,
             b"",
             bytes.fromhex("34" * 32),
+            False,
         ),
     ]
 
@@ -3381,12 +3988,16 @@ def test_execution_fee_report_handles_mode1_internal_messages_without_allocation
                 "appealRounds": 0,
                 "executionBudgetPerRound": 0,
                 "rotations": [0],
+                "maxPriceGenPerTimeUnit": 1,
+                "storageFeeMaxGasPrice": 2**200,
+                "receiptFeeMaxGasPrice": 2**200,
             },
             "feeParamsBytes": len(fee_params_a),
             "declaredBudget": 60,
             "allocationSubtree": "0x",
             "allocationSubtreeBytes": 0,
             "callKey": "0x" + "12" * 32,
+            "useBalance": False,
         },
         {
             "messageFeeMode": "mode1",
@@ -3403,12 +4014,16 @@ def test_execution_fee_report_handles_mode1_internal_messages_without_allocation
                 "appealRounds": 0,
                 "executionBudgetPerRound": 0,
                 "rotations": [0],
+                "maxPriceGenPerTimeUnit": 1,
+                "storageFeeMaxGasPrice": 2**200,
+                "receiptFeeMaxGasPrice": 2**200,
             },
             "feeParamsBytes": len(fee_params_b),
             "declaredBudget": 70,
             "allocationSubtree": "0x",
             "allocationSubtreeBytes": 0,
             "callKey": "0x" + "34" * 32,
+            "useBalance": False,
         },
     ]
     assert recorded["message_fee_consumed"] == 130
@@ -3620,6 +4235,7 @@ def test_execution_fee_report_handles_external_message_reveal_encoding():
             0,
             b"",
             bytes.fromhex("78" * 32),
+            False,
         )
     ]
 
@@ -3642,6 +4258,7 @@ def test_execution_fee_report_handles_external_message_reveal_encoding():
             "allocationSubtree": "0x",
             "allocationSubtreeBytes": 0,
             "callKey": "0x" + "78" * 32,
+            "useBalance": False,
         }
     ]
 
@@ -3674,7 +4291,7 @@ def test_execution_fee_report_derives_external_call_key_from_calldata_selector()
     assert message["callKey"] == _external_selector_call_key(bytes.fromhex("aabbccdd"))
 
 
-def test_settle_fee_accounting_caps_execution_spend_to_actual_round_budget():
+def test_settle_fee_accounting_uses_full_unified_budget_after_early_finish():
     fees_distribution = _fees_distribution(
         appeals=2,
         rotations=[0, 0, 0],
@@ -3698,8 +4315,13 @@ def test_settle_fee_accounting_caps_execution_spend_to_actual_round_budget():
 
     assert settled["execution_fee_consumed"] == 300
     assert settled["actual_final_round"] == 0
-    assert settled["primary_fee_spent"] == 1200
-    assert refund == 22100
+    # Consensus caps cumulative execution against the complete configured
+    # unified reserve (5 leader slots * 100), even though the transaction
+    # finalized in round 0. Future-slot capacity remains spendable backing;
+    # only its unused residual is reported/refunded.
+    assert accounting["execution_budget_total"] == 500
+    assert settled["primary_fee_spent"] == 1400
+    assert refund == 21900
 
 
 def test_settle_fee_accounting_uses_actual_round_for_primary_refund():
@@ -3723,7 +4345,7 @@ def test_settle_fee_accounting_uses_actual_round_for_primary_refund():
     assert refund == 21700
 
 
-def test_settle_fee_accounting_charges_half_leader_allocation_for_timeout_round():
+def test_leader_timeout_settlement_matches_fee_simulator_50_paid_1050_refunded():
     accounting = create_fee_accounting(
         fees_distribution=_fees_distribution(),
         num_of_validators=5,
@@ -3744,8 +4366,1086 @@ def test_settle_fee_accounting_charges_half_leader_allocation_for_timeout_round(
         consensus_history=consensus_history,
     )
 
-    assert settled["primary_fee_spent"] == 1050
-    assert refund == 50
+    assert settled["primary_fee_spent"] == 50
+    assert refund == 1050
+    assert settled["settlement_rounds"] == [
+        {
+            "round": 0,
+            "outcome": "Leader Timeout",
+            "rule": "leader_timeout",
+            "rotations": 0,
+            "timeUnitAmount": 50,
+        }
+    ]
+
+
+def test_leader_timeout_half_is_rounded_after_locked_gen_price_scaling():
+    policy = StudioFeePolicy(gen_per_time_unit=2)
+    fees_distribution = _fees_distribution(
+        leader_timeunits=101,
+        validator_timeunits=200,
+        max_price_gen_per_time_unit=2,
+    )
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5, policy),
+        user_value=0,
+        policy=policy,
+    )
+
+    settled, refund = settle_fee_accounting(
+        accounting,
+        actual_final_round=0,
+        num_of_validators=5,
+        consensus_history={
+            "consensus_results": [{"consensus_round": "Leader Timeout"}]
+        },
+        policy=policy,
+    )
+
+    # Consensus first prices the 101-TU allocation to 202 wei, then pays
+    # floor(202 / 2) = 101. Rounding 101 / 2 before pricing would pay 100.
+    assert settled["primary_fee_spent"] == 101
+    assert settled["settlement_rounds"][0]["timeUnitAmount"] == 101
+    assert refund == required_fee_deposit(fees_distribution, 5, policy) - 101
+
+
+def test_normal_settlement_refunds_non_aligned_validator_allocations():
+    leader = "0x1111111111111111111111111111111111111111"
+    validator_addresses = [
+        leader,
+        "0x2222222222222222222222222222222222222222",
+        "0x3333333333333333333333333333333333333333",
+        "0x4444444444444444444444444444444444444444",
+        "0x5555555555555555555555555555555555555555",
+    ]
+    votes = ["agree", "agree", "agree", "disagree", "disagree"]
+    proposal = _history_receipt(mode="leader", address=leader)
+    validation = [
+        _history_receipt(mode="validator", address=address, vote=vote)
+        for address, vote in zip(validator_addresses, votes)
+    ]
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(),
+        num_of_validators=5,
+        submitted_value=1100,
+        user_value=0,
+        sender=leader,
+    )
+
+    settled, refund = settle_fee_accounting(
+        accounting,
+        actual_final_round=0,
+        num_of_validators=5,
+        consensus_history={
+            "consensus_results": [
+                {
+                    "consensus_round": "Accepted",
+                    "leader_result": [proposal, validation[0]],
+                    "validator_results": validation[1:],
+                }
+            ]
+        },
+    )
+
+    assert settled["primary_fee_spent"] == 700
+    assert settled["settlement_rounds"][0]["timeUnitAmount"] == 700
+    assert refund == 400
+
+
+def test_leader_only_settlement_does_not_charge_unexecuted_validator_seats():
+    leader = "0x1111111111111111111111111111111111111111"
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(),
+        num_of_validators=5,
+        submitted_value=1100,
+        user_value=0,
+        sender=leader,
+    )
+
+    settled, refund = settle_fee_accounting(
+        accounting,
+        actual_final_round=0,
+        num_of_validators=5,
+        execution_mode="LEADER_ONLY",
+        consensus_history={
+            "consensus_results": [
+                {
+                    "consensus_round": "Accepted",
+                    "leader_result": [_history_receipt(mode="leader", address=leader)],
+                    "validator_results": [],
+                }
+            ]
+        },
+    )
+
+    assert settled["primary_fee_spent"] == 100
+    assert settled["settlement_rounds"][0]["timeUnitAmount"] == 100
+    assert refund == 1000
+
+
+def test_settlement_refunds_storage_division_dust_like_consensus():
+    leader = "0x1111111111111111111111111111111111111111"
+    validator_addresses = [
+        leader,
+        "0x2222222222222222222222222222222222222222",
+        "0x3333333333333333333333333333333333333333",
+    ]
+    fees_distribution = _fees_distribution(execution_budget_per_round=100)
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5),
+        user_value=0,
+        sender=leader,
+    )
+    history = {
+        "consensus_results": [
+            {
+                "consensus_round": "Accepted",
+                "leader_result": [
+                    _history_receipt(mode="leader", address=leader),
+                    _history_receipt(mode="validator", address=leader, vote="agree"),
+                ],
+                "validator_results": [
+                    _history_receipt(mode="validator", address=address, vote="agree")
+                    for address in validator_addresses[1:]
+                ],
+            }
+        ]
+    }
+
+    settled, refund = settle_fee_accounting(
+        accounting,
+        receipt={"genvm_result": {"data_fees_consumed": [0, 5]}},
+        actual_final_round=0,
+        num_of_validators=5,
+        consensus_history=history,
+    )
+
+    # Consensus pays floor(5 / 3) to each tracked validator and returns the
+    # two-wei remainder. Time-unit spend is 100 + 3 * 200 = 700.
+    assert settled["storage_fee_recipient_count"] == 3
+    assert settled["storage_fee_dust_refunded"] == 2
+    assert settled["primary_fee_spent"] == 703
+    assert refund == required_fee_deposit(fees_distribution, 5) - 703
+
+
+def test_settlement_refunds_all_storage_when_zero_value_round_tracks_nobody():
+    leader = "0x1111111111111111111111111111111111111111"
+    fees_distribution = _fees_distribution(
+        leader_timeunits=0,
+        validator_timeunits=0,
+        execution_budget_per_round=100,
+    )
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5),
+        user_value=0,
+        sender=leader,
+    )
+    history = {
+        "consensus_results": [
+            {
+                "consensus_round": "Accepted",
+                "leader_result": [
+                    _history_receipt(mode="leader", address=leader),
+                    _history_receipt(mode="validator", address=leader, vote="agree"),
+                ],
+                "validator_results": [
+                    _history_receipt(
+                        mode="validator",
+                        address="0x2222222222222222222222222222222222222222",
+                        vote="agree",
+                    )
+                ],
+            }
+        ]
+    }
+
+    settled, refund = settle_fee_accounting(
+        accounting,
+        receipt={"genvm_result": {"data_fees_consumed": [0, 5]}},
+        actual_final_round=0,
+        num_of_validators=5,
+        consensus_history=history,
+    )
+
+    # FeesProcessor does not index zero-value rewards or zero penalties, so
+    # storage has no recipient denominator and the complete bucket is dust.
+    assert settled["storage_fee_recipient_count"] == 0
+    assert settled["storage_fee_dust_refunded"] == 5
+    assert settled["primary_fee_spent"] == 0
+    assert refund == 100
+
+
+def test_leader_appeal_history_expands_placeholder_and_replay_round_fees():
+    fees_distribution = _fees_distribution(appeals=1, rotations=[0, 0])
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5),
+        user_value=0,
+    )
+    accounting = record_appeal_bond(
+        accounting,
+        amount=2_300,
+        appealer="0x9999999999999999999999999999999999999999",
+        current_round=0,
+        status="UNDETERMINED",
+    )
+    original_leader = "0x1111111111111111111111111111111111111111"
+    replay_leader = "0x2222222222222222222222222222222222222222"
+    replay_validators = [
+        _history_receipt(
+            mode="validator",
+            address=f"0x{index:040x}",
+            vote="agree",
+        )
+        for index in range(20, 31)
+    ]
+    history = {
+        "consensus_results": [
+            {
+                "consensus_round": "Undetermined",
+                "leader_result": [
+                    _history_receipt(mode="leader", address=original_leader)
+                ],
+                "validator_results": [],
+            },
+            {
+                "consensus_round": "Leader Appeal Successful",
+                "leader_result": [
+                    _history_receipt(mode="leader", address=replay_leader)
+                ],
+                "validator_results": replay_validators,
+            },
+        ]
+    }
+
+    settled, refund = settle_fee_accounting(
+        accounting,
+        actual_final_round=_infer_final_round(history),
+        num_of_validators=5,
+        consensus_history=history,
+    )
+
+    assert _infer_final_round(history) == 2
+    assert settled["primary_fee_spent"] == 5_750
+    assert refund == 2_600
+    assert [item["rule"] for item in settled["settlement_rounds"]] == [
+        "successful_appeal_skip",
+        "leader_appeal",
+        "leader_appeal_replay",
+    ]
+    assert settled["settlement_rounds"][2]["timeUnitAmount"] == 2_300
+
+
+def test_chained_validator_appeal_preserves_empty_even_fee_round():
+    history = {
+        "consensus_results": [
+            {"consensus_round": "Accepted"},
+            {"consensus_round": "Validator Appeal Failed"},
+            {"consensus_round": "Validator Appeal Successful"},
+        ]
+    }
+    fees_distribution = _fees_distribution(appeals=2, rotations=[0, 0, 0])
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5),
+        user_value=0,
+    )
+
+    settled, _ = settle_fee_accounting(
+        accounting,
+        actual_final_round=_infer_final_round(history),
+        num_of_validators=5,
+        consensus_history=history,
+    )
+
+    assert _infer_final_round(history) == 3
+    assert settled["settlement_rounds"][2]["rule"] == "empty_round"
+    assert settled["settlement_rounds"][2]["timeUnitAmount"] == 0
+
+
+def test_chained_successful_validator_appeal_vindicates_last_non_appeal_round():
+    fees_distribution = _fees_distribution(appeals=2, rotations=[0, 0, 0])
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5),
+        user_value=0,
+    )
+    original_validators = [
+        _history_receipt(
+            mode="validator",
+            address=f"0x{index:040x}",
+            vote=vote,
+        )
+        for index, vote in enumerate(
+            ["agree", "agree", "agree", "disagree", "disagree"],
+            start=1,
+        )
+    ]
+    failed_appeal_validators = [
+        _history_receipt(
+            mode="validator",
+            address=f"0x{index:040x}",
+            vote=vote,
+        )
+        for index, vote in enumerate(["agree", "agree", "disagree"], start=11)
+    ]
+    successful_appeal_validators = [
+        _history_receipt(
+            mode="validator",
+            address=f"0x{index:040x}",
+            vote=vote,
+        )
+        for index, vote in enumerate(
+            ["disagree", "disagree", "disagree", "disagree", "agree", "agree", "agree"],
+            start=21,
+        )
+    ]
+    history = {
+        "consensus_results": [
+            {
+                "consensus_round": "Accepted",
+                "leader_result": [
+                    _history_receipt(
+                        mode="leader",
+                        address="0x1111111111111111111111111111111111111111",
+                    ),
+                    original_validators[0],
+                ],
+                "validator_results": original_validators[1:],
+            },
+            {
+                "consensus_round": "Validator Appeal Failed",
+                "validator_results": failed_appeal_validators,
+            },
+            {
+                "consensus_round": "Validator Appeal Successful",
+                "validator_results": successful_appeal_validators,
+            },
+        ]
+    }
+
+    settled, _ = settle_fee_accounting(
+        accounting,
+        actual_final_round=3,
+        num_of_validators=5,
+        consensus_history=history,
+    )
+
+    # Solidity leaves the first failed-appeal jury payable (3 * 200), keeps
+    # the empty logical gap, and scans past both to vindicate the two Disagree
+    # voters from the last non-appeal round (4 jury + 2 vindicated) * 200.
+    assert settled["settlement_rounds"][1]["rule"] == (
+        "validator_appeal_failed_redistribution"
+    )
+    assert settled["settlement_rounds"][1]["timeUnitAmount"] == 600
+    assert settled["settlement_rounds"][2]["rule"] == "empty_round"
+    assert settled["settlement_rounds"][3]["timeUnitAmount"] == 1_200
+
+
+def test_successful_validator_appeal_with_no_majority_does_not_vindicate_original_round():
+    fees_distribution = _fees_distribution(appeals=1, rotations=[0, 0])
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5),
+        user_value=0,
+    )
+    original_validators = [
+        _history_receipt(
+            mode="validator",
+            address=f"0x{index:040x}",
+            vote=vote,
+        )
+        for index, vote in enumerate(
+            ["agree", "agree", "agree", "disagree", "disagree"],
+            start=1,
+        )
+    ]
+    appeal_validators = [
+        _history_receipt(
+            mode="validator",
+            address=f"0x{index:040x}",
+            vote=vote,
+        )
+        for index, vote in enumerate(
+            ["agree", "agree", "agree", "disagree", "disagree", "timeout", "timeout"],
+            start=11,
+        )
+    ]
+    history = {
+        "consensus_results": [
+            {
+                "consensus_round": "Accepted",
+                "leader_result": [
+                    _history_receipt(
+                        mode="leader",
+                        address="0x1111111111111111111111111111111111111111",
+                    ),
+                    original_validators[0],
+                ],
+                "validator_results": original_validators[1:],
+            },
+            {
+                "consensus_round": "Validator Appeal Successful",
+                "validator_results": appeal_validators,
+            },
+        ]
+    }
+
+    settled, _ = settle_fee_accounting(
+        accounting,
+        actual_final_round=1,
+        num_of_validators=5,
+        consensus_history=history,
+    )
+
+    # Consensus pays every NoMajority appeal revealer, but vindicates nobody
+    # from the overturned round because the appeal established no clear side.
+    assert settled["settlement_rounds"][0]["timeUnitAmount"] == 0
+    assert settled["settlement_rounds"][1]["timeUnitAmount"] == 1_400
+
+
+def test_failed_validator_appeal_charges_only_revealers_and_refunds_distribution_dust():
+    fees_distribution = _fees_distribution(appeals=1, rotations=[0, 0])
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5),
+        user_value=0,
+    )
+    accounting = record_appeal_bond(
+        accounting,
+        amount=1_400,
+        appealer="0x9999999999999999999999999999999999999999",
+        current_round=0,
+        status="ACCEPTED",
+    )
+    original_validators = [
+        _history_receipt(
+            mode="validator",
+            address=f"0x{index:040x}",
+            vote="agree",
+        )
+        for index in range(1, 6)
+    ]
+    appeal_validators = [
+        _history_receipt(
+            mode="validator",
+            address=f"0x{index:040x}",
+            vote=vote,
+        )
+        for index, vote in enumerate(
+            ["agree", "agree", "agree", "disagree"],
+            start=11,
+        )
+    ]
+    history = {
+        "consensus_results": [
+            {
+                "consensus_round": "Accepted",
+                "leader_result": [
+                    _history_receipt(
+                        mode="leader",
+                        address="0x1111111111111111111111111111111111111111",
+                    ),
+                    original_validators[0],
+                ],
+                "validator_results": original_validators[1:],
+            },
+            {
+                "consensus_round": "Validator Appeal Failed",
+                "validator_results": appeal_validators,
+            },
+        ]
+    }
+
+    settled, refund = settle_fee_accounting(
+        accounting,
+        actual_final_round=1,
+        num_of_validators=5,
+        consensus_history=history,
+    )
+
+    # Four of seven scheduled appeal seats revealed, so only 4 * 200 of the
+    # sender pool is consumed. (800 + 1400) / 3 leaves one wei of bond dust.
+    assert settled["settlement_rounds"][1]["timeUnitAmount"] == 800
+    assert settled["appeal_bond_sender_refunded"] == 1
+    assert settled["appeal_bond_settlements"][0]["bondDistributed"] == 1_399
+    assert settled["appeal_bond_settlements"][0]["senderRefund"] == 1
+    assert settled["refunds"][0]["appealBond"] == 1
+    assert refund >= 1
+
+
+def test_failed_validator_appeal_dust_uses_priced_validator_allocation():
+    policy = StudioFeePolicy(gen_per_time_unit=2)
+    fees_distribution = _fees_distribution(
+        appeals=1,
+        rotations=[0, 0],
+        max_price_gen_per_time_unit=2,
+    )
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5, policy),
+        user_value=0,
+        policy=policy,
+    )
+    accounting = record_appeal_bond(
+        accounting,
+        amount=2_800,
+        appealer="0x9999999999999999999999999999999999999999",
+        current_round=0,
+        status="ACCEPTED",
+        policy=policy,
+    )
+    appeal_validators = [
+        _history_receipt(
+            mode="validator",
+            address=f"0x{index:040x}",
+            vote=vote,
+        )
+        for index, vote in enumerate(
+            ["agree", "agree", "agree", "disagree"],
+            start=11,
+        )
+    ]
+    history = {
+        "consensus_results": [
+            {"consensus_round": "Accepted"},
+            {
+                "consensus_round": "Validator Appeal Failed",
+                "validator_results": appeal_validators,
+            },
+        ]
+    }
+
+    settled, _ = settle_fee_accounting(
+        accounting,
+        actual_final_round=1,
+        num_of_validators=5,
+        consensus_history=history,
+        policy=policy,
+    )
+
+    # (4 revealers * (200 TU * 2 wei/TU) + 2,800 bond) % 3 aligned = 2.
+    assert settled["settlement_rounds"][1]["timeUnitAmount"] == 1_600
+    assert settled["appeal_bond_sender_refunded"] == 2
+    assert settled["appeal_bond_settlements"][0]["bondDistributed"] == 2_798
+
+
+def test_failed_leader_appeal_dv_replay_withholds_leader_and_refunds_bond_dust():
+    fees_distribution = _fees_distribution(appeals=1, rotations=[0, 0])
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5),
+        user_value=0,
+    )
+    accounting = record_appeal_bond(
+        accounting,
+        amount=2_300,
+        appealer="0x9999999999999999999999999999999999999999",
+        current_round=0,
+        status="UNDETERMINED",
+    )
+    original_validators = [
+        _history_receipt(
+            mode="validator",
+            address=f"0x{index:040x}",
+            vote=vote,
+        )
+        for index, vote in enumerate(
+            ["agree", "agree", "disagree", "disagree", "timeout"],
+            start=1,
+        )
+    ]
+    replay_validators = [
+        _history_receipt(
+            mode="validator",
+            address=f"0x{index:040x}",
+            vote=("deterministic_violation" if index < 26 else "agree"),
+        )
+        for index in range(20, 31)
+    ]
+    history = {
+        "consensus_results": [
+            {
+                "consensus_round": "Undetermined",
+                "leader_result": [
+                    _history_receipt(
+                        mode="leader",
+                        address="0x1111111111111111111111111111111111111111",
+                    ),
+                    original_validators[0],
+                ],
+                "validator_results": original_validators[1:],
+            },
+            {
+                "consensus_round": "Leader Appeal Failed",
+                "leader_result": [
+                    _history_receipt(
+                        mode="leader",
+                        address="0x2222222222222222222222222222222222222222",
+                    ),
+                    replay_validators[0],
+                ],
+                "validator_results": replay_validators[1:],
+            },
+        ]
+    }
+
+    settled, _ = settle_fee_accounting(
+        accounting,
+        actual_final_round=_infer_final_round(history),
+        num_of_validators=5,
+        consensus_history=history,
+    )
+
+    assert settled["settlement_rounds"][2]["rule"] == (
+        "deterministic_violation_leader_withheld"
+    )
+    assert settled["settlement_rounds"][2]["timeUnitAmount"] == 1_200
+    assert settled["appeal_bond_sender_refunded"] == 2
+    assert settled["appeal_bond_settlements"][0]["bondDistributed"] == 2_298
+
+
+def test_failed_leader_timeout_appeal_refunds_sender_half_of_bond():
+    fees_distribution = _fees_distribution(appeals=1, rotations=[0, 0])
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5),
+        user_value=0,
+    )
+    accounting = record_appeal_bond(
+        accounting,
+        amount=1_100,
+        appealer="0x9999999999999999999999999999999999999999",
+        current_round=0,
+        status="LEADER_TIMEOUT",
+        leader_timeout_live_seats=5,
+    )
+    history = {
+        "consensus_results": [
+            {"consensus_round": "Leader Timeout"},
+            {
+                "consensus_round": "Leader Timeout Appeal Failed",
+                "leader_result": [
+                    _history_receipt(
+                        mode="leader",
+                        address="0x2222222222222222222222222222222222222222",
+                        timeout=True,
+                    )
+                ],
+                "validator_results": [],
+            },
+        ]
+    }
+
+    settled, refund = settle_fee_accounting(
+        accounting,
+        actual_final_round=_infer_final_round(history),
+        num_of_validators=5,
+        consensus_history=history,
+    )
+
+    assert settled["primary_fee_spent"] == 50
+    assert settled["appeal_bond_sender_refunded"] == 550
+    assert refund == 8_850
+    assert settled["refunds"][0]["appealBond"] == 550
+    assert settled["appeal_bond_settlements"][0] == {
+        "bondIndex": 0,
+        "appealer": "0x9999999999999999999999999999999999999999",
+        "amount": 1_100,
+        "round": 0,
+        "status": "forfeited",
+        "payout": 0,
+        "outcomeRound": 2,
+        "outcome": "Leader Timeout Appeal Failed",
+        "bond_forfeited": 1_100,
+        "distribution": "leader-timeout-split",
+        "leaderPayout": 550,
+        "senderRefund": 550,
+    }
+
+
+def test_fee_alignment_classifies_idle_ballots_as_onchain_timeouts():
+    leader = "0x1111111111111111111111111111111111111111"
+    addresses = [
+        leader,
+        "0x2222222222222222222222222222222222222222",
+        "0x3333333333333333333333333333333333333333",
+        "0x4444444444444444444444444444444444444444",
+        "0x5555555555555555555555555555555555555555",
+    ]
+    votes = ["idle", "idle", "idle", "disagree", "disagree"]
+    proposal = _history_receipt(mode="leader", address=leader)
+    validation = [
+        _history_receipt(mode="validator", address=address, vote=vote)
+        for address, vote in zip(addresses, votes)
+    ]
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(),
+        num_of_validators=5,
+        submitted_value=1_100,
+        user_value=0,
+        sender=leader,
+    )
+
+    settled, refund = settle_fee_accounting(
+        accounting,
+        actual_final_round=0,
+        num_of_validators=5,
+        consensus_history={
+            "consensus_results": [
+                {
+                    "consensus_round": "Accepted",
+                    "leader_result": [proposal, validation[0]],
+                    "validator_results": validation[1:],
+                }
+            ]
+        },
+    )
+
+    assert settled["primary_fee_spent"] == 700
+    assert refund == 400
+
+
+def test_deterministic_violation_withholds_leader_time_and_receipt_fees():
+    policy = StudioFeePolicy(receipt_gas_price=1)
+    fees_distribution = _fees_distribution(execution_budget_per_round=1_000_000)
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5, policy),
+        user_value=0,
+        policy=policy,
+    )
+    leader = _history_receipt(
+        mode="leader",
+        address="0x1111111111111111111111111111111111111111",
+        eq_outputs_length=64,
+    )
+    validators = [
+        _history_receipt(
+            mode="validator",
+            address=f"0x{index:040x}",
+            vote=vote,
+        )
+        for index, vote in enumerate(
+            [
+                "deterministic_violation",
+                "deterministic_violation",
+                "deterministic_violation",
+                "agree",
+                "agree",
+            ],
+            start=2,
+        )
+    ]
+    history = {
+        "consensus_results": [
+            {
+                "consensus_round": "Undetermined",
+                "leader_result": [leader, validators[0]],
+                "validator_results": validators[1:],
+            }
+        ]
+    }
+
+    settled, _ = settle_fee_accounting(
+        accounting,
+        receipt=leader,
+        actual_final_round=0,
+        num_of_validators=5,
+        consensus_history=history,
+        policy=policy,
+    )
+
+    assert settled["settlement_rounds"][0]["rule"] == (
+        "deterministic_violation_leader_withheld"
+    )
+    assert settled["settlement_rounds"][0]["timeUnitAmount"] == 600
+    assert settled["execution_fee_consumed"] == 0
+    assert settled["historical_execution_attempts"] == [
+        {
+            "round": 0,
+            "attempt": 0,
+            "leaderTimeout": False,
+            "deterministicViolation": True,
+            "receiptFee": 0,
+            "receiptGasPrice": 1,
+        }
+    ]
+
+
+def test_settlement_accumulates_receipt_fees_for_every_leader_attempt():
+    policy = StudioFeePolicy(receipt_gas_price=1)
+    fees_distribution = _fees_distribution(
+        rotations=[1],
+        execution_budget_per_round=1_000_000,
+    )
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5, policy),
+        user_value=0,
+        policy=policy,
+    )
+    addresses = [f"0x{index:040x}" for index in range(1, 7)]
+
+    def attempt(leader_index: int, eq_outputs_length: int) -> tuple[dict, list[dict]]:
+        proposal = _history_receipt(
+            mode="leader",
+            address=addresses[leader_index],
+            eq_outputs_length=eq_outputs_length,
+        )
+        validators = [
+            _history_receipt(
+                mode="validator",
+                address=address,
+                vote="agree",
+            )
+            for address in addresses[leader_index : leader_index + 5]
+        ]
+        return proposal, validators
+
+    first_proposal, first_validators = attempt(0, 0)
+    final_proposal, final_validators = attempt(1, 64)
+    final_proposal["genvm_result"]["data_fees_consumed"] = [0, 37]
+    history = {
+        "consensus_results": [
+            {
+                "consensus_round": "Leader Rotation",
+                "leader_result": [first_proposal, first_validators[0]],
+                "validator_results": first_validators[1:],
+            },
+            {
+                "consensus_round": "Accepted",
+                "leader_result": [final_proposal, final_validators[0]],
+                "validator_results": final_validators[1:],
+            },
+        ]
+    }
+
+    settled, _ = settle_fee_accounting(
+        accounting,
+        receipt=final_proposal,
+        actual_final_round=0,
+        num_of_validators=5,
+        consensus_history=history,
+        policy=policy,
+    )
+
+    expected_receipts = sum(
+        policy.estimate_propose_receipt_gas(
+            policy.estimate_propose_receipt_bytes(eq_outputs_length)
+        )
+        for eq_outputs_length in (0, 64)
+    )
+    assert settled["execution_fee_consumed_buckets"] == [expected_receipts, 37]
+    assert settled["execution_fee_consumed"] == expected_receipts + 37
+    assert len(settled["historical_execution_attempts"]) == 2
+
+
+def test_settlement_preserves_each_attempts_live_metering_snapshot():
+    submission_policy = StudioFeePolicy(receipt_gas_price=2)
+    fees_distribution = _fees_distribution(
+        rotations=[1],
+        execution_budget_per_round=1_000,
+    )
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(
+            fees_distribution,
+            5,
+            submission_policy,
+        ),
+        user_value=0,
+        policy=submission_policy,
+        allow_low_execution_budget=True,
+    )
+    activated, should_cancel = activate_fee_accounting(
+        accounting,
+        StudioFeePolicy(receipt_gas_price=2),
+    )
+    assert should_cancel is False
+
+    first = _history_receipt(
+        mode="leader",
+        address="0x1111111111111111111111111111111111111111",
+    )
+    final = _history_receipt(
+        mode="leader",
+        address="0x2222222222222222222222222222222222222222",
+    )
+    first_policy = stamp_receipt_execution_policy(
+        first,
+        activated,
+        StudioFeePolicy(
+            receipt_gas_price=90,
+            intrinsic_gas=0,
+            bootloader_overhead=0,
+            gas_per_changed_slot=0,
+            calldata_gas_per_byte=0,
+            fixed_propose_receipt_gas=11,
+            receipt_wrapper_bytes=0,
+        ),
+    )
+    final_policy = stamp_receipt_execution_policy(
+        final,
+        activated,
+        StudioFeePolicy(
+            receipt_gas_price=99,
+            intrinsic_gas=0,
+            bootloader_overhead=0,
+            gas_per_changed_slot=0,
+            calldata_gas_per_byte=0,
+            fixed_propose_receipt_gas=17,
+            receipt_wrapper_bytes=0,
+        ),
+    )
+    assert first_policy.receipt_gas_price == 2
+    assert final_policy.receipt_gas_price == 2
+    assert (
+        first["genvm_result"][FEE_POLICY_SNAPSHOT_KEY]["fixed_propose_receipt_gas"]
+        == 11
+    )
+
+    settled, _ = settle_fee_accounting(
+        activated,
+        receipt=final,
+        actual_final_round=0,
+        num_of_validators=5,
+        consensus_history={
+            "consensus_results": [
+                {
+                    "consensus_round": "Leader Rotation",
+                    "leader_result": [first],
+                    "validator_results": [],
+                },
+                {
+                    "consensus_round": "Accepted",
+                    "leader_result": [final],
+                    "validator_results": [],
+                },
+            ]
+        },
+        policy=StudioFeePolicy(
+            receipt_gas_price=500,
+            fixed_propose_receipt_gas=999,
+        ),
+    )
+
+    assert [
+        attempt["receiptFee"] for attempt in settled["historical_execution_attempts"]
+    ] == [22, 34]
+    assert settled["execution_fee_consumed"] == 56
+
+
+def test_historical_error_attempt_does_not_charge_message_reveal():
+    policy = StudioFeePolicy(
+        receipt_gas_price=1,
+        intrinsic_gas=0,
+        bootloader_overhead=0,
+        gas_per_changed_slot=0,
+        calldata_gas_per_byte=1,
+        fixed_propose_receipt_gas=10,
+        fixed_message_reveal_gas=1_000,
+        receipt_wrapper_bytes=0,
+    )
+    fees_distribution = _fees_distribution(execution_budget_per_round=10_000)
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5, policy),
+        user_value=0,
+        policy=policy,
+    )
+    failed = _history_receipt(
+        mode="leader",
+        address="0x1111111111111111111111111111111111111111",
+    )
+    failed["execution_result"] = "FinishedWithError"
+    failed["pending_transactions"] = [
+        {
+            "messageType": "Internal",
+            "recipient": "0x2222222222222222222222222222222222222222",
+            "data": "0x1234",
+            "onAcceptance": True,
+            "value": 0,
+            "declaredBudget": 0,
+            "callKey": CALL_KEY_WILDCARD,
+        }
+    ]
+
+    settled, _ = settle_fee_accounting(
+        accounting,
+        receipt=failed,
+        actual_final_round=0,
+        num_of_validators=5,
+        consensus_history={
+            "consensus_results": [
+                {
+                    "consensus_round": "Undetermined",
+                    "leader_result": [failed],
+                    "validator_results": [],
+                }
+            ]
+        },
+        policy=policy,
+    )
+
+    assert settled["historical_execution_attempts"][0]["receiptFee"] == 10
+    assert settled["execution_fee_consumed"] == 10
+
+
+def test_leader_timeout_attempt_consumes_no_receipt_fee():
+    policy = StudioFeePolicy(receipt_gas_price=1)
+    fees_distribution = _fees_distribution(execution_budget_per_round=1_000_000)
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5, policy),
+        user_value=0,
+        policy=policy,
+    )
+    timeout_receipt = _history_receipt(
+        mode="leader",
+        address="0x1111111111111111111111111111111111111111",
+        timeout=True,
+    )
+
+    settled, _ = settle_fee_accounting(
+        accounting,
+        receipt=timeout_receipt,
+        actual_final_round=0,
+        num_of_validators=5,
+        consensus_history={
+            "consensus_results": [
+                {
+                    "consensus_round": "Leader Timeout",
+                    "leader_result": [timeout_receipt],
+                    "validator_results": [],
+                }
+            ]
+        },
+        policy=policy,
+    )
+
+    assert settled["execution_fee_consumed"] == 0
+    assert settled["historical_execution_attempts"][0]["leaderTimeout"] is True
+    assert settled["historical_execution_attempts"][0]["receiptFee"] == 0
 
 
 def test_cancel_fee_accounting_refunds_unspent_buckets_and_is_idempotent():
@@ -3769,6 +5469,7 @@ def test_cancel_fee_accounting_refunds_unspent_buckets_and_is_idempotent():
         "reason": "canceled",
         "primary": 1100,
         "message": 55,
+        "appealBond": 0,
         "amount": 1155,
     }
     assert second_refund == 0
@@ -3928,9 +5629,38 @@ def test_mode1_message_fees_reject_declared_budget_below_child_minimum():
         )
 
 
+def test_use_balance_message_validates_floor_without_consuming_sender_bucket():
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(total_message_fees=0),
+        num_of_validators=5,
+        submitted_value=1_100,
+        user_value=0,
+    )
+
+    updated = consume_message_fees(
+        accounting,
+        [
+            {
+                "messageType": 1,
+                "recipient": "0x2222222222222222222222222222222222222222",
+                "onAcceptance": True,
+                "feeParams": _encode_internal_fee_params(),
+                "declaredBudget": 55,
+                "callKey": EMPTY_CALL_KEY,
+                "useBalance": True,
+            }
+        ],
+    )
+
+    assert updated["message_fee_budget"] == 0
+    assert updated["message_fee_consumed"] == 0
+    assert updated["allocation_consumed"] == {}
+    assert updated["message_consumption_events"][-1]["internalConsumed"] == 0
+
+
 def test_mode2_message_fees_use_exact_then_wildcard_allocation_match():
     exact_call_key = "0x" + "12" * 32
-    wildcard_call_key = "0x" + "0" * 32
+    wildcard_call_key = CALL_KEY_WILDCARD
     exact_fee_params = _encode_internal_fee_params(leader_timeunits=6)
     wildcard_fee_params = _encode_internal_fee_params(leader_timeunits=7)
     recipient = "0x2222222222222222222222222222222222222222"
@@ -4172,7 +5902,7 @@ def test_mode2_external_message_fees_use_legacy_fallback_without_matching_alloca
     }
 
 
-def test_mode2_external_message_fees_ignore_on_acceptance_execution_reservation():
+def test_mode2_external_message_fees_reject_on_acceptance_execution_reservation():
     allocation = _allocation(
         message_type=0,
         on_acceptance=False,
@@ -4187,62 +5917,23 @@ def test_mode2_external_message_fees_ignore_on_acceptance_execution_reservation(
         user_value=0,
     )
 
-    updated = consume_message_fees(
-        accounting,
-        [
-            {
-                "messageType": 0,
-                "recipient": allocation["recipient"],
-                "onAcceptance": True,
-                "declaredBudget": 0,
-                "callKey": allocation["callKey"],
-                "gasUsed": 1_000,
-            }
-        ],
-        policy=StudioFeePolicy(receipt_gas_price=7),
-    )
-
-    assert updated["message_fee_consumed"] == 0
-    assert updated["allocation_consumed"] == {}
-    assert updated["external_message_fee_reserved"] == 0
-    assert updated["external_message_events"] == []
-
-
-def test_external_message_execution_reservation_ignores_allocation_phase_pin():
-    allocation = _allocation(
-        message_type=0,
-        on_acceptance=True,
-        budget=1_000,
-        fee_params=_encode_external_fee_params(gas_limit=100, max_gas_price=10),
-    )
-    accounting = create_fee_accounting(
-        fees_distribution=_fees_distribution(total_message_fees=1_000),
-        message_allocations=[allocation],
-        num_of_validators=5,
-        submitted_value=2_100,
-        user_value=0,
-    )
-
-    updated = consume_message_fees(
-        accounting,
-        [
-            {
-                "messageType": 0,
-                "recipient": allocation["recipient"],
-                "onAcceptance": False,
-                "declaredBudget": 0,
-                "callKey": allocation["callKey"],
-                "gasUsed": 60,
-            }
-        ],
-        policy=StudioFeePolicy(receipt_gas_price=7),
-    )
-
-    assert updated["allocation_consumed"] == {"0": 700}
-    assert updated["external_message_fee_reserved"] == 700
-    assert updated["external_message_fee_reimbursed"] == 420
-    assert updated["external_message_fee_remainder"] == 280
-    assert updated["message_fee_consumed"] == 420
+    with pytest.raises(
+        ExternalAllocationInvalid, match="ExternalOnAcceptanceNotSupported"
+    ):
+        consume_message_fees(
+            accounting,
+            [
+                {
+                    "messageType": 0,
+                    "recipient": allocation["recipient"],
+                    "onAcceptance": True,
+                    "declaredBudget": 0,
+                    "callKey": allocation["callKey"],
+                    "gasUsed": 1_000,
+                }
+            ],
+            policy=StudioFeePolicy(receipt_gas_price=7),
+        )
 
 
 def test_consume_external_message_fees_use_exact_then_wildcard_allocation_match():
@@ -4261,7 +5952,7 @@ def test_consume_external_message_fees_use_exact_then_wildcard_allocation_match(
             message_type=0,
             on_acceptance=False,
             recipient=recipient,
-            call_key="0x" + "0" * 32,
+            call_key=CALL_KEY_WILDCARD,
             budget=2_000,
             fee_params=_encode_external_fee_params(gas_limit=200, max_gas_price=10),
         ),
@@ -4300,7 +5991,74 @@ def test_consume_external_message_fees_use_exact_then_wildcard_allocation_match(
     assert updated["allocation_consumed"] == {"0": 700, "1": 1_400}
     assert updated["external_message_fee_reserved"] == 2_100
     assert updated["external_message_fee_reimbursed"] == 210
-    assert updated["message_fee_consumed"] == 210
+    assert updated["message_fee_consumed"] == 2_100
+
+
+def test_external_message_reservation_spills_from_exhausted_exact_to_wildcard():
+    recipient = "0x2222222222222222222222222222222222222222"
+    exact_call_key = "0x" + "12" * 32
+    message = {
+        "messageType": 0,
+        "recipient": recipient,
+        "onAcceptance": False,
+        "declaredBudget": 0,
+        "callKey": exact_call_key,
+        "gasUsed": 10,
+    }
+    allocations = [
+        _allocation(
+            message_type=0,
+            on_acceptance=False,
+            recipient=recipient,
+            call_key=exact_call_key,
+            budget=1_000,
+            fee_params=_encode_external_fee_params(gas_limit=100, max_gas_price=10),
+        ),
+        _allocation(
+            message_type=0,
+            on_acceptance=False,
+            recipient=recipient,
+            call_key=CALL_KEY_WILDCARD,
+            budget=1_000,
+            fee_params=_encode_external_fee_params(gas_limit=100, max_gas_price=10),
+        ),
+    ]
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(total_message_fees=2_000),
+        message_allocations=allocations,
+        num_of_validators=5,
+        submitted_value=3_100,
+        user_value=0,
+    )
+
+    revealed = record_reveal_message_fees(
+        accounting,
+        [message, message],
+        policy=StudioFeePolicy(receipt_gas_price=10),
+    )
+
+    assert revealed["allocation_consumed"] == {"0": 1_000, "1": 1_000}
+    assert [
+        event["allocationIndex"] for event in revealed["external_message_events"]
+    ] == [
+        0,
+        1,
+    ]
+
+    unwound = unwind_reveal_message_fees(
+        revealed,
+        [message, message],
+    )
+
+    assert unwound["allocation_consumed"] == {}
+    assert unwound["external_message_fee_reserved"] == 0
+    assert [
+        event["allocationIndex"] for event in unwound["external_message_events"]
+    ] == [
+        0,
+        1,
+    ]
+    assert all(event["unreserved"] for event in unwound["external_message_events"])
 
 
 def test_consume_message_fees_rejects_internal_message_without_internal_allocation():
@@ -4312,6 +6070,7 @@ def test_consume_message_fees_rejects_internal_message_without_internal_allocati
         message_allocations=[
             _allocation(
                 message_type=0,
+                on_acceptance=False,
                 recipient=recipient,
                 call_key=call_key,
                 budget=210_000,
@@ -4373,11 +6132,11 @@ def test_consume_external_message_fees_reserves_and_reimburses_executor_gas():
     assert updated["external_message_fee_reserved"] == 147_000
     assert updated["external_message_fee_reimbursed"] == 7_000
     assert updated["external_message_fee_remainder"] == 140_000
-    assert updated["message_fee_consumed"] == 7_000
+    assert updated["message_fee_consumed"] == 147_000
 
     settled, refund = settle_fee_accounting(updated)
-    assert refund == 203_000
-    assert settled["message_fee_refunded"] == 203_000
+    assert refund == 63_000
+    assert settled["message_fee_refunded"] == 63_000
 
 
 def test_consume_external_message_fees_caps_reimbursement_at_reserved_gas_limit():
@@ -4504,13 +6263,70 @@ def test_reveal_external_message_reserves_then_execution_reimburses_once():
         policy=StudioFeePolicy(receipt_gas_price=7),
     )
 
-    assert executed["message_fee_consumed"] == 420
+    assert executed["message_fee_consumed"] == 700
     assert executed["external_message_fee_reserved"] == 700
     assert executed["external_message_fee_reimbursed"] == 420
     assert executed["external_message_fee_remainder"] == 280
     assert executed["external_message_events"][0]["executionRecorded"] is True
     assert executed["external_message_events"][0]["gasUsed"] == 60
     assert executed_again == executed
+
+
+def test_external_execution_routes_reimbursement_and_remainder_like_consensus():
+    depositor = "0x1111111111111111111111111111111111111111"
+    executor = "0x9999999999999999999999999999999999999999"
+    allocation = _allocation(
+        message_type=0,
+        on_acceptance=False,
+        budget=1_000,
+        fee_params=_encode_external_fee_params(gas_limit=100, max_gas_price=10),
+    )
+    message = {
+        "messageType": 0,
+        "recipient": allocation["recipient"],
+        "onAcceptance": False,
+        "declaredBudget": 0,
+        "callKey": allocation["callKey"],
+        "gasUsed": 60,
+    }
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(total_message_fees=1_000),
+        message_allocations=[allocation],
+        num_of_validators=5,
+        submitted_value=2_100,
+        user_value=0,
+        sender=depositor,
+    )
+    revealed = record_reveal_message_fees(
+        accounting,
+        [message],
+        policy=StudioFeePolicy(receipt_gas_price=7),
+    )
+
+    executed = record_external_message_execution_fees(
+        revealed,
+        [message],
+        policy=StudioFeePolicy(receipt_gas_price=7),
+        executor=executor,
+    )
+    settled, refund = settle_fee_accounting(executed)
+
+    assert executed["message_fee_consumed"] == 700
+    assert executed["external_message_fee_settled"] == 700
+    assert executed["external_message_fee_payouts"] == [
+        {
+            "recipient": executor,
+            "amount": 420,
+            "source": "external-executor-reimbursement",
+        },
+        {
+            "recipient": depositor,
+            "amount": 280,
+            "source": "external-execution-remainder",
+        },
+    ]
+    assert refund == 300
+    assert settled["message_fee_refunded"] == 300
 
 
 def test_refund_failed_external_message_fee_preserves_spent_executor_gas():
@@ -4545,7 +6361,7 @@ def test_refund_failed_external_message_fee_preserves_spent_executor_gas():
     refunded_again = refund_failed_external_message_fee(refunded, message)
 
     assert refunded["allocation_consumed"] == {"0": 147_000}
-    assert refunded["message_fee_consumed"] == 7_000
+    assert refunded["message_fee_consumed"] == 147_000
     assert refunded["external_message_fee_reserved"] == 147_000
     assert refunded["external_message_fee_reimbursed"] == 7_000
     assert refunded["external_message_fee_remainder"] == 140_000
@@ -4564,8 +6380,8 @@ def test_refund_failed_external_message_fee_preserves_spent_executor_gas():
     assert refunded_again == refunded
 
     settled, refund = settle_fee_accounting(refunded)
-    assert refund == 203_000
-    assert settled["message_fee_refunded"] == 203_000
+    assert refund == 63_000
+    assert settled["message_fee_refunded"] == 63_000
 
 
 def test_refund_failed_external_message_fee_marks_exact_or_wildcard_match_only():
@@ -4592,7 +6408,7 @@ def test_refund_failed_external_message_fee_marks_exact_or_wildcard_match_only()
             message_type=0,
             on_acceptance=False,
             recipient=recipient,
-            call_key="0x" + "0" * 32,
+            call_key=CALL_KEY_WILDCARD,
             budget=2_000,
             fee_params=_encode_external_fee_params(gas_limit=200, max_gas_price=10),
         ),
@@ -4623,7 +6439,7 @@ def test_refund_failed_external_message_fee_marks_exact_or_wildcard_match_only()
     refunded = refund_failed_external_message_fee(consumed, wildcard_message)
 
     assert refunded["allocation_consumed"] == {"0": 700, "1": 1_400}
-    assert refunded["message_fee_consumed"] == 210
+    assert refunded["message_fee_consumed"] == 2_100
     assert refunded["external_message_fee_reserved"] == 2_100
     assert refunded["external_message_fee_reimbursed"] == 210
     assert refunded["external_message_fee_remainder"] == 1_890
@@ -4703,7 +6519,7 @@ def test_unwind_reveal_message_fees_rolls_back_empty_rereveal_before_acceptance(
         submitted_value=2_155,
         user_value=0,
     )
-    consumed = consume_message_fees(
+    consumed = record_reveal_message_fees(
         accounting,
         [internal_message, external_message],
         reported_total=55,
@@ -4718,7 +6534,7 @@ def test_unwind_reveal_message_fees_rolls_back_empty_rereveal_before_acceptance(
     assert consumed["message_fee_consumed"] == 55
     assert consumed["allocation_consumed"] == {"0": 55, "1": 700}
     assert unwound["message_fee_consumed"] == 0
-    assert unwound["allocation_consumed"] == {"0": 0, "1": 0}
+    assert unwound["allocation_consumed"] == {}
     assert unwound["external_message_fee_reserved"] == 0
     assert unwound["external_message_fee_reimbursed"] == 0
     assert unwound["external_message_fee_remainder"] == 0
@@ -4730,7 +6546,7 @@ def test_unwind_reveal_message_fees_rolls_back_empty_rereveal_before_acceptance(
             "internalRefunded": 55,
             "externalUnreserved": 700,
             "externalReimbursementRolledBack": 0,
-            "externalRemainderRolledBack": 700,
+            "externalRemainderRolledBack": 0,
             "remaining": 1_055,
         }
     ]
@@ -4877,6 +6693,195 @@ def test_consume_message_fees_respects_max_messages_per_tx_policy():
         )
 
 
+def test_consume_message_fees_enforces_protocol_hard_cap_by_default():
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(total_message_fees=0),
+        num_of_validators=5,
+        submitted_value=1_100,
+        user_value=0,
+    )
+    messages = [
+        {
+            "messageType": 0,
+            "recipient": f"0x{index:040x}",
+            "onAcceptance": False,
+            "declaredBudget": 0,
+        }
+        for index in range(1, 22)
+    ]
+
+    assert len(messages[:20]) == 20
+    consume_message_fees(accounting, messages[:20])
+    with pytest.raises(TooManyMessages):
+        consume_message_fees(accounting, messages)
+
+
+def test_identical_accepted_message_rereveal_keeps_single_lifetime_charge():
+    tx_id = "0x" + ("ab" * 32)
+    message = {
+        "messageType": 1,
+        "recipient": "0x2222222222222222222222222222222222222222",
+        "value": 0,
+        "data": b"same-call",
+        "onAcceptance": True,
+        "saltNonce": 0,
+        "feeParams": _encode_internal_fee_params(),
+        "declaredBudget": 55,
+        "callKey": "0x" + ("12" * 32),
+        "useBalance": False,
+    }
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(total_message_fees=55),
+        num_of_validators=5,
+        submitted_value=1_155,
+        user_value=0,
+    )
+
+    first = prepare_reveal_message_generation(accounting, tx_id, [message])
+    delivered = mark_message_effects_delivered(first, tx_id, [message], "accepted")
+    second = prepare_reveal_message_generation(delivered, tx_id, [message])
+
+    assert first["message_fee_consumed"] == 55
+    assert delivered["active_message_generation"]["acceptanceDispatched"] is True
+    assert second["message_fee_consumed"] == 55
+    assert second["active_message_generation"]["novelty"] == [False]
+    assert second["message_consumption_events"][-1]["consumed"] == 0
+    # The generation ledger is persisted in transaction JSON, so bytes must be
+    # encoded rather than leaking a non-serializable Python value into jsonb.
+    json.dumps(second["active_message_generation"])
+
+
+def test_message_occurrence_descriptor_rejects_value_or_fee_drift():
+    tx_id = "0x" + ("bc" * 32)
+    message = {
+        "messageType": 1,
+        "recipient": "0x2222222222222222222222222222222222222222",
+        "value": 0,
+        "data": b"same-call",
+        "onAcceptance": True,
+        "saltNonce": 0,
+        "feeParams": _encode_internal_fee_params(),
+        "declaredBudget": 55,
+        "callKey": "0x" + ("12" * 32),
+        "useBalance": False,
+    }
+    accounting = mark_message_effects_delivered({}, tx_id, [message], "accepted")
+    drifted = {**message, "value": 1}
+
+    with pytest.raises(MessageEffectDescriptorMismatch):
+        message_novelty_mask(accounting, tx_id, [drifted])
+
+
+def test_message_occurrence_ordinals_are_permutation_stable_for_duplicates():
+    tx_id = "0x" + ("cd" * 32)
+
+    def message(recipient: str):
+        return {
+            "messageType": 0,
+            "recipient": recipient,
+            "value": 0,
+            "data": b"selector",
+            "onAcceptance": True,
+            "saltNonce": 0,
+            "feeParams": b"",
+            "declaredBudget": 0,
+            "callKey": "0x" + ("12" * 32),
+            "useBalance": False,
+        }
+
+    a = message("0x2222222222222222222222222222222222222222")
+    b = message("0x3333333333333333333333333333333333333333")
+    accounting = mark_message_effects_delivered({}, tx_id, [a, b, a], "accepted")
+
+    assert message_novelty_mask(accounting, tx_id, [b, a, a, a]) == [
+        False,
+        False,
+        False,
+        True,
+    ]
+
+
+def test_receipt_admission_applies_message_count_cap_to_fee_free_messages():
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(execution_budget_per_round=1_000_000),
+        num_of_validators=5,
+        submitted_value=1_001_100,
+        user_value=0,
+    )
+    messages = [
+        {
+            "is_eth_send": True,
+            "address": f"0x{index:040x}",
+            "calldata": b"",
+            "on": "finalized",
+            "value": 0,
+        }
+        for index in (1, 2)
+    ]
+
+    with pytest.raises(TooManyMessages):
+        record_execution_fee_consumption(
+            accounting,
+            {"pending_transactions": messages},
+            StudioFeePolicy(max_messages_per_tx=1),
+        )
+
+
+def test_receipt_admission_enforces_protocol_hard_cap_for_fee_free_messages():
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(execution_budget_per_round=1_000_000),
+        num_of_validators=5,
+        submitted_value=1_001_100,
+        user_value=0,
+    )
+    messages = [
+        {
+            "is_eth_send": True,
+            "address": f"0x{index:040x}",
+            "calldata": b"",
+            "on": "finalized",
+            "value": 0,
+        }
+        for index in range(1, 22)
+    ]
+
+    record_execution_fee_consumption(
+        accounting,
+        {"pending_transactions": messages[:20]},
+        StudioFeePolicy(),
+    )
+    with pytest.raises(TooManyMessages):
+        record_execution_fee_consumption(
+            accounting,
+            {"pending_transactions": messages},
+            StudioFeePolicy(),
+        )
+
+
+def test_record_reveal_message_fees_enforces_canonical_message_byte_cap():
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(total_message_fees=55),
+        num_of_validators=5,
+        submitted_value=1_155,
+        user_value=0,
+    )
+    message = {
+        "messageType": 1,
+        "recipient": "0x2222222222222222222222222222222222222222",
+        "onAcceptance": True,
+        "feeParams": _encode_internal_fee_params(),
+        "declaredBudget": 55,
+        "useBalance": False,
+    }
+
+    with pytest.raises(SubmittedMessagesTooLarge, match="SubmittedMessagesTooLarge"):
+        record_reveal_message_fees(
+            accounting,
+            [message],
+            policy=StudioFeePolicy(max_submitted_messages_bytes=1),
+        )
+
+
 def test_consume_message_fees_rejects_allocation_overrun_and_fee_param_mismatch():
     fee_params = _encode_internal_fee_params()
     accounting = create_fee_accounting(
@@ -4990,7 +6995,7 @@ def test_settle_fee_accounting_pays_successful_appeal_bond_plus_profit():
     consensus_history = {
         "consensus_results": [
             {"consensus_round": "Accepted"},
-            {"consensus_round": "Leader Appeal Successful"},
+            {"consensus_round": "Validator Appeal Successful"},
         ]
     }
 
@@ -5001,7 +7006,8 @@ def test_settle_fee_accounting_pays_successful_appeal_bond_plus_profit():
         consensus_history=consensus_history,
     )
 
-    assert refund == 3650
+    assert refund == 4850
+    assert settled["primary_fee_spent"] == 3500
     assert settled["appeal_bonds_payout_total"] == 3500
     assert settled["appeal_profit_spent"] == 2100
     assert settled["appeal_bond_settlements"] == [
@@ -5013,9 +7019,58 @@ def test_settle_fee_accounting_pays_successful_appeal_bond_plus_profit():
             "status": "successful",
             "payout": 3500,
             "outcomeRound": 1,
-            "outcome": "Leader Appeal Successful",
+            "outcome": "Validator Appeal Successful",
         }
     ]
+
+
+def test_settle_fee_accounting_clamps_unfunded_appeal_profit_to_principal():
+    fees_distribution = _fees_distribution(appeals=1, rotations=[0, 0])
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5),
+        user_value=0,
+    )
+    recorded = record_appeal_bond(
+        accounting,
+        amount=1_400,
+        appealer="0x1111111111111111111111111111111111111111",
+        current_round=0,
+        status="ACCEPTED",
+    )
+    # Adversarial legacy state: less fee money remains than the complete
+    # 2,100-wei profit leg. Consensus promises no partial profit in this case.
+    recorded["primary_fee_budget"] = 2_000
+    history = {
+        "consensus_results": [
+            {"consensus_round": "Accepted"},
+            {
+                "consensus_round": "Validator Appeal Successful",
+                "validator_results": [
+                    _history_receipt(
+                        mode="validator",
+                        address="0x2222222222222222222222222222222222222222",
+                        vote="agree",
+                    )
+                ],
+            },
+        ]
+    }
+
+    settled, refund = settle_fee_accounting(
+        recorded,
+        actual_final_round=1,
+        num_of_validators=5,
+        consensus_history=history,
+    )
+
+    assert settled["appeal_profit_requested"] == 2_100
+    assert settled["appeal_profit_spent"] == 0
+    assert settled["appeal_bonds_payout_total"] == 1_400
+    assert settled["appeal_bond_settlements"][0]["payout"] == 1_400
+    assert settled["appeal_bond_settlements"][0]["profitFunded"] is False
+    assert refund == 1_800
 
 
 def test_settle_fee_accounting_explicitly_forfeits_failed_appeal_bond():
@@ -5036,7 +7091,7 @@ def test_settle_fee_accounting_explicitly_forfeits_failed_appeal_bond():
     consensus_history = {
         "consensus_results": [
             {"consensus_round": "Accepted"},
-            {"consensus_round": "Leader Appeal Failed"},
+            {"consensus_round": "Validator Appeal Failed"},
         ]
     }
 
@@ -5047,7 +7102,7 @@ def test_settle_fee_accounting_explicitly_forfeits_failed_appeal_bond():
         consensus_history=consensus_history,
     )
 
-    assert refund == 5750
+    assert refund == 5850
     assert settled["appeal_bonds_payout_total"] == 0
     assert settled["appeal_bond_settlements"][0]["status"] == "forfeited"
     assert settled["appeal_bond_settlements"][0]["bond_forfeited"] == 1400
@@ -5154,6 +7209,29 @@ def test_leader_timeout_bond_matches_fee_simulator_configured_round_vector():
     assert bond_with_two_rotations_left == 3 * (100 + 5 * 200)
 
 
+def test_leader_timeout_live_seats_gate_eligibility_not_configured_pricing():
+    fees_distribution = _fees_distribution()
+
+    assert (
+        calculate_min_appeal_bond(
+            fees_distribution,
+            current_round=0,
+            status="LEADER_TIMEOUT",
+            leader_timeout_live_seats=1,
+        )
+        == 0
+    )
+    assert (
+        calculate_min_appeal_bond(
+            fees_distribution,
+            current_round=0,
+            status="LEADER_TIMEOUT",
+            leader_timeout_live_seats=4,
+        )
+        == 100 + 5 * 200
+    )
+
+
 def test_leader_appeal_bonds_count_the_mandatory_attempt():
     fees_distribution = _fees_distribution(
         appeals=1,
@@ -5178,6 +7256,21 @@ def test_leader_appeal_bonds_count_the_mandatory_attempt():
     )
 
 
+def test_later_undetermined_appeal_bond_uses_next_normal_rotation_ordinal():
+    fees_distribution = _fees_distribution(
+        appeals=3,
+        rotations=[0, 1, 2, 3],
+    )
+
+    # A leader appeal from raw round 2 induces raw round 4, which is normal
+    # ordinal 2 and therefore uses rotations[2] (three attempts).
+    assert calculate_min_appeal_bond(
+        fees_distribution,
+        current_round=2,
+        status="UNDETERMINED",
+    ) == 3 * (100 + 23 * 200)
+
+
 def test_successful_appeal_return_matches_fee_simulator_exact_integer_math():
     bond = 10**30 + 1
 
@@ -5193,8 +7286,9 @@ def test_timeout_appeal_bond_bypasses_stale_max_price_cap():
         max_price_gen_per_time_unit=10,
     )
 
-    with pytest.raises(MaxPriceExceeded):
-        calculate_round_fees(fees_distribution, 5, policy=policy)
+    # Submission quoting stays at the user's ceiling even when the live price
+    # has already risen; the transaction is canceled only at activation.
+    assert calculate_round_fees(fees_distribution, 5, policy=policy) > 0
 
     bond = calculate_min_appeal_bond(
         fees_distribution,
@@ -5309,6 +7403,9 @@ def test_appeal_admission_uses_current_overlay_with_locked_gen_price():
     breakdown = updated["appeal_bonds"][0]["fundingBreakdown"]
     assert breakdown["taxableWork"] == 3_700 * 3
     assert breakdown["overlay"] == breakdown["taxableWork"] * 2_000 // 8_000
+    assert updated["time_unit_overlay_budget"] == (
+        accounting["time_unit_overlay_budget"] + breakdown["overlay"]
+    )
 
 
 def test_top_up_and_submit_appeal_refreshes_recommended_fee_preset():
@@ -5376,9 +7473,9 @@ def test_create_child_fee_accounting_seeds_mode1_bucket_without_child_allocation
     )
 
     assert child_fees["totalMessageFees"] == 15
-    assert child_fees["maxPriceGenPerTimeUnit"] == 999
-    assert child_fees["storageFeeMaxGasPrice"] == 888
-    assert child_fees["receiptFeeMaxGasPrice"] == 777
+    assert child_fees["maxPriceGenPerTimeUnit"] == 1
+    assert child_fees["storageFeeMaxGasPrice"] == 2**200
+    assert child_fees["receiptFeeMaxGasPrice"] == 2**200
     assert child_accounting["paid_fee_value"] == 70
     assert child_accounting["primary_fee_budget"] == 55
     assert child_accounting["message_fee_budget"] == 15
@@ -5386,7 +7483,7 @@ def test_create_child_fee_accounting_seeds_mode1_bucket_without_child_allocation
     assert child_accounting["user_value"] == 7
 
 
-def test_create_child_fee_accounting_validates_primary_before_inherited_caps():
+def test_create_child_fee_accounting_prices_primary_at_child_owned_caps():
     policy = StudioFeePolicy(
         gen_per_time_unit=2,
         storage_unit_price=3,
@@ -5395,11 +7492,15 @@ def test_create_child_fee_accounting_validates_primary_before_inherited_caps():
     fee_params = _encode_internal_fee_params(
         leader_timeunits=5,
         validator_timeunits=10,
+        max_price_gen_per_time_unit=2,
+        storage_fee_max_gas_price=3,
+        receipt_fee_max_gas_price=4,
     )
     child_primary = calculate_round_fees(
         _fees_distribution(
             leader_timeunits=5,
             validator_timeunits=10,
+            max_price_gen_per_time_unit=2,
         ),
         5,
         policy=policy,
@@ -5424,9 +7525,9 @@ def test_create_child_fee_accounting_validates_primary_before_inherited_caps():
         policy=policy,
     )
 
-    assert child_fees["maxPriceGenPerTimeUnit"] == 1
-    assert child_fees["storageFeeMaxGasPrice"] == 2
-    assert child_fees["receiptFeeMaxGasPrice"] == 3
+    assert child_fees["maxPriceGenPerTimeUnit"] == 2
+    assert child_fees["storageFeeMaxGasPrice"] == 3
+    assert child_fees["receiptFeeMaxGasPrice"] == 4
     assert child_fees["totalMessageFees"] == 0
     assert child_accounting["primary_fee_required"] == child_primary
     assert child_accounting["primary_fee_budget"] == child_primary
@@ -5470,6 +7571,7 @@ def test_create_child_fee_accounting_installs_child_allocation_subtree():
         message_allocations=[
             _allocation(
                 recipient="0x3333333333333333333333333333333333333333",
+                call_key=EMPTY_CALL_KEY,
                 budget=110,
                 fee_params=_encode_internal_fee_params(),
             ),
@@ -5522,6 +7624,7 @@ def test_create_child_fee_accounting_strips_leaf_matched_root_subtree():
         message_allocations=[
             _allocation(
                 recipient="0x3333333333333333333333333333333333333333",
+                call_key=EMPTY_CALL_KEY,
                 budget=55,
                 fee_params=fee_params,
             )
@@ -5583,6 +7686,7 @@ class _MessageDispatchTxProcessor:
 
 def _message_dispatch_context(accounting):
     processor = _MessageDispatchTxProcessor()
+    executor = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
     tx = SimpleNamespace(
         hash="0x" + "ab" * 32,
         to_address="0x9999999999999999999999999999999999999999",
@@ -5591,7 +7695,17 @@ def _message_dispatch_context(accounting):
         data={FEE_ACCOUNTING_KEY: accounting},
         status=None,
     )
-    return SimpleNamespace(transaction=tx, transactions_processor=processor), processor
+    consensus_data = SimpleNamespace(
+        leader_receipt=[SimpleNamespace(node_config={"address": executor})]
+    )
+    return (
+        SimpleNamespace(
+            transaction=tx,
+            transactions_processor=processor,
+            consensus_data=consensus_data,
+        ),
+        processor,
+    )
 
 
 class _MessageValueAccountsManager:
@@ -5665,7 +7779,14 @@ def _pending_external_value(value, *, on="accepted", recipient=None):
     )
 
 
-def _pending_internal_value(value, *, on="accepted", recipient=None):
+def _pending_internal_value(
+    value,
+    *,
+    on="accepted",
+    recipient=None,
+    use_balance=False,
+    declared_budget=0,
+):
     return PendingTransaction(
         address=recipient or "0x5555555555555555555555555555555555555555",
         calldata=b"\x12\x34",
@@ -5673,6 +7794,8 @@ def _pending_internal_value(value, *, on="accepted", recipient=None):
         salt_nonce=0,
         on=on,
         value=value,
+        use_balance=use_balance,
+        declared_budget=declared_budget,
     )
 
 
@@ -5761,6 +7884,77 @@ def test_external_message_freeze_counts_prior_finalization_reservations():
     }
 
 
+def test_message_freeze_counts_external_and_use_balance_obligations_together():
+    context = _message_value_context(balance=10)
+    receipt = _leader_receipt_with_messages(
+        [
+            _pending_external_value(2, on="accepted"),
+            _pending_internal_value(
+                2,
+                on="finalized",
+                use_balance=True,
+                declared_budget=7,
+            ),
+        ]
+    )
+
+    _apply_external_message_freeze_check(context, receipt)
+
+    assert receipt.execution_result == ExecutionResultStatus.ERROR
+    assert receipt.pending_transactions == []
+    assert b"ContractMessageFreezeExceeded" in receipt.result
+    assert receipt.genvm_result["error_code"] == "CONTRACT_MESSAGE_FREEZE_EXCEEDED"
+    assert receipt.genvm_result["external_message_freeze"] == {
+        "declaredValue": 11,
+        "availableLimit": 10,
+        "balance": 10,
+        "reservedExternal": 0,
+        "externalValue": 2,
+        "useBalanceFee": 7,
+        "useBalanceValue": 2,
+    }
+
+
+def test_message_freeze_counts_prior_use_balance_finalization_reservations():
+    prior_row = SimpleNamespace(
+        consensus_data={
+            "leader_receipt": [
+                {
+                    "execution_result": ExecutionResultStatus.SUCCESS.value,
+                    "pending_transactions": [
+                        {
+                            "messageType": 1,
+                            "onAcceptance": False,
+                            "value": 2,
+                            "declaredBudget": 5,
+                            "useBalance": True,
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    context = _message_value_context(
+        balance=10,
+        session=_ExternalFreezeSession(accepted_rows=[prior_row]),
+    )
+    receipt = _leader_receipt_with_messages(
+        [
+            _pending_internal_value(
+                0,
+                use_balance=True,
+                declared_budget=4,
+            )
+        ]
+    )
+
+    _apply_external_message_freeze_check(context, receipt)
+
+    assert receipt.execution_result == ExecutionResultStatus.ERROR
+    assert receipt.genvm_result["external_message_freeze"]["reservedExternal"] == 7
+    assert receipt.genvm_result["external_message_freeze"]["availableLimit"] == 3
+
+
 def test_message_value_withdrawal_reserves_finalized_external_value_before_internal():
     context = _message_value_context(balance=20)
     accepted_external = _pending_external_value(7, on="accepted")
@@ -5803,16 +7997,63 @@ def test_message_value_withdrawal_drops_unbacked_external_value():
     ]
 
 
+def test_message_value_withdrawal_debits_use_balance_fee_and_value_from_ghost():
+    context = _message_value_context(balance=20)
+    use_balance_child = _pending_internal_value(
+        3,
+        use_balance=True,
+        declared_budget=7,
+    )
+    ordinary_child = _pending_internal_value(4)
+
+    adjusted = _apply_message_value_withdrawals_for_phase(
+        context,
+        [use_balance_child, ordinary_child],
+        "accepted",
+    )
+
+    assert adjusted == [use_balance_child, ordinary_child]
+    assert context.accounts_manager.balance == 6
+    assert context.accounts_manager.debits == [
+        (context.transaction.to_address, 10),
+        (context.transaction.to_address, 4),
+    ]
+
+
+def test_message_value_withdrawal_keeps_short_use_balance_child_unfunded():
+    context = _message_value_context(balance=9)
+    use_balance_child = _pending_internal_value(
+        3,
+        use_balance=True,
+        declared_budget=7,
+    )
+
+    adjusted = _apply_message_value_withdrawals_for_phase(
+        context,
+        [use_balance_child],
+        "accepted",
+    )
+
+    assert len(adjusted) == 1
+    assert adjusted[0].value == 0
+    assert adjusted[0].declared_budget == 0
+    assert adjusted[0].use_balance is True
+    assert context.accounts_manager.balance == 9
+    assert context.accounts_manager.debits == []
+
+
 def test_message_dispatch_creates_mode1_child_fee_accounting_from_pending_metadata(
     monkeypatch,
 ):
     monkeypatch.setenv("GENLAYER_STUDIO_GEN_PER_TIME_UNIT", "1")
     monkeypatch.setenv("GENLAYER_STUDIO_STORAGE_UNIT_PRICE", "0")
     monkeypatch.setenv("GENLAYER_STUDIO_RECEIPT_GAS_PRICE", "0")
+    monkeypatch.setenv("GENLAYER_STUDIO_MIN_PROPOSE_TIMEUNITS", "1")
+    monkeypatch.setenv("GENLAYER_STUDIO_MIN_COMMIT_TIMEUNITS", "1")
     policy = StudioFeePolicy.from_env()
     fee_params = _encode_internal_fee_params()
     child_budget = 64
-    fees_distribution = _fees_distribution(total_message_fees=child_budget)
+    fees_distribution = _env_fees_distribution(total_message_fees=child_budget)
     accounting = create_fee_accounting(
         fees_distribution=fees_distribution,
         num_of_validators=5,
@@ -5873,6 +8114,8 @@ def test_message_dispatch_fills_mode2_child_fee_accounting_from_allocation_subtr
     monkeypatch.setenv("GENLAYER_STUDIO_GEN_PER_TIME_UNIT", "1")
     monkeypatch.setenv("GENLAYER_STUDIO_STORAGE_UNIT_PRICE", "0")
     monkeypatch.setenv("GENLAYER_STUDIO_RECEIPT_GAS_PRICE", "0")
+    monkeypatch.setenv("GENLAYER_STUDIO_MIN_PROPOSE_TIMEUNITS", "1")
+    monkeypatch.setenv("GENLAYER_STUDIO_MIN_COMMIT_TIMEUNITS", "1")
     policy = StudioFeePolicy.from_env()
     root_fee_params = _encode_internal_fee_params(leader_timeunits=6)
     child_fee_params = _encode_internal_fee_params(leader_timeunits=7)
@@ -5882,7 +8125,7 @@ def test_message_dispatch_fills_mode2_child_fee_accounting_from_allocation_subtr
     child_call_key = "0x" + "34" * 32
     child_budget = 67
     root_budget = 132
-    fees_distribution = _fees_distribution(total_message_fees=root_budget)
+    fees_distribution = _env_fees_distribution(total_message_fees=root_budget)
     accounting = create_fee_accounting(
         fees_distribution=fees_distribution,
         message_allocations=[
@@ -5962,7 +8205,7 @@ def test_message_dispatch_records_revealed_external_message_execution_fees(
         budget=1_000,
         fee_params=fee_params,
     )
-    fees_distribution = _fees_distribution(total_message_fees=1_000)
+    fees_distribution = _env_fees_distribution(total_message_fees=1_000)
     accounting = create_fee_accounting(
         fees_distribution=fees_distribution,
         message_allocations=[allocation],
@@ -6010,9 +8253,21 @@ def test_message_dispatch_records_revealed_external_message_execution_fees(
     assert updated["external_message_fee_reserved"] == 700
     assert updated["external_message_fee_reimbursed"] == 420
     assert updated["external_message_fee_remainder"] == 280
-    assert updated["message_fee_consumed"] == 420
+    assert updated["message_fee_consumed"] == 700
     assert updated["external_message_events"][0]["executionRecorded"] is True
     assert updated["external_message_events"][0]["gasUsed"] == 60
+    assert updated["external_message_fee_payouts"] == [
+        {
+            "recipient": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "amount": 420,
+            "source": "external-executor-reimbursement",
+        },
+        {
+            "recipient": "0x1111111111111111111111111111111111111111",
+            "amount": 280,
+            "source": "external-execution-remainder",
+        },
+    ]
 
 
 def test_apply_fee_top_up_extends_budgets():
@@ -6034,6 +8289,137 @@ def test_apply_fee_top_up_extends_budgets():
     assert updated["paid_fee_value"] == 2255
     assert updated["primary_fee_budget"] == 2200
     assert updated["message_fee_budget"] == 55
+
+
+def test_apply_fee_top_up_rejects_zero_value_like_consensus():
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(),
+        num_of_validators=5,
+        submitted_value=1_100,
+        user_value=0,
+    )
+
+    with pytest.raises(InsufficientFees):
+        apply_fee_top_up(
+            accounting,
+            fees_distribution=_top_up_distribution(),
+            amount=0,
+        )
+
+
+def test_apply_fee_top_up_carves_cumulative_overlay_reserve():
+    policy = StudioFeePolicy(gen_per_time_unit=1, time_unit_overlay_bps=1_000)
+    fees_distribution = _fees_distribution(max_price_gen_per_time_unit=1)
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5, policy),
+        user_value=0,
+        policy=policy,
+    )
+
+    updated = apply_fee_top_up(
+        accounting,
+        fees_distribution=_top_up_distribution(),
+        amount=1_000,
+        perform_fee_checks=False,
+        policy=policy,
+    )
+
+    assert accounting["time_unit_overlay_budget"] == 122
+    assert updated["time_unit_overlay_budget"] == 222
+
+
+def test_settlement_refunds_top_up_contributors_fifo():
+    original = "0x1111111111111111111111111111111111111111"
+    rescuer = "0x2222222222222222222222222222222222222222"
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(),
+        num_of_validators=5,
+        submitted_value=1_100,
+        user_value=0,
+        sender=original,
+    )
+    topped_up = apply_fee_top_up(
+        accounting,
+        fees_distribution=_top_up_distribution(),
+        amount=500,
+        sender=rescuer,
+        perform_fee_checks=False,
+    )
+
+    settled, refund = settle_fee_accounting(
+        topped_up,
+        actual_final_round=0,
+        num_of_validators=5,
+        policy=StudioFeePolicy(),
+    )
+
+    assert refund == 500
+    assert settled["contributions"] == [
+        {"depositor": original, "amount": 1_100},
+        {"depositor": rescuer, "amount": 500},
+    ]
+    assert settled["fee_refund_settlements"] == [
+        {"recipient": rescuer, "amount": 500, "source": "fifo"}
+    ]
+
+
+def test_third_party_top_up_cannot_raise_original_depositor_price_caps():
+    owner = "0x1111111111111111111111111111111111111111"
+    third_party = "0x2222222222222222222222222222222222222222"
+    fees_distribution = _fees_distribution(
+        max_price_gen_per_time_unit=10,
+        storage_fee_max_gas_price=10,
+        receipt_fee_max_gas_price=10,
+    )
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5),
+        user_value=0,
+        sender=owner,
+    )
+    raised_caps = _top_up_distribution(
+        max_price_gen_per_time_unit=20,
+        storage_fee_max_gas_price=20,
+        receipt_fee_max_gas_price=20,
+    )
+
+    third_party_update = apply_fee_top_up(
+        accounting,
+        fees_distribution=raised_caps,
+        amount=1,
+        sender=third_party,
+    )
+    owner_update = apply_fee_top_up(
+        accounting,
+        fees_distribution=raised_caps,
+        amount=11_000,
+        sender=owner,
+    )
+
+    assert third_party_update["fees_distribution"]["maxPriceGenPerTimeUnit"] == 10
+    assert third_party_update["fees_distribution"]["storageFeeMaxGasPrice"] == 10
+    assert third_party_update["fees_distribution"]["receiptFeeMaxGasPrice"] == 10
+    assert owner_update["fees_distribution"]["maxPriceGenPerTimeUnit"] == 20
+    assert owner_update["fees_distribution"]["storageFeeMaxGasPrice"] == 20
+    assert owner_update["fees_distribution"]["receiptFeeMaxGasPrice"] == 20
+
+
+def test_submission_ignores_caller_supplied_execution_consumed():
+    fees_distribution = _fees_distribution(execution_consumed=999)
+
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5),
+        user_value=0,
+    )
+
+    assert accounting["fees_distribution"]["executionConsumed"] == 0
+    assert accounting["execution_fee_consumed"] == 0
+    assert accounting["top_ups"][0]["feesDistribution"]["executionConsumed"] == 0
 
 
 def test_apply_fee_top_up_rejects_schedule_extension_after_activation():
@@ -6183,7 +8569,7 @@ def test_apply_fee_top_up_only_raises_existing_price_caps():
             storage_fee_max_gas_price=0,
             receipt_fee_max_gas_price=60,
         ),
-        amount=0,
+        amount=1,
     )
 
     assert unchanged["fees_distribution"]["maxPriceGenPerTimeUnit"] == 100
@@ -6218,7 +8604,7 @@ def test_apply_fee_top_up_only_raises_existing_price_caps():
             storage_fee_max_gas_price=85,
             receipt_fee_max_gas_price=70,
         ),
-        amount=0,
+        amount=1,
     )
 
     assert still_uncapped["fees_distribution"]["maxPriceGenPerTimeUnit"] == 0
@@ -6352,7 +8738,7 @@ def _fee_accounted_tx(*, status="PENDING", accounting=None):
 
 def _env_fee_accounting(fees_distribution=None):
     policy = StudioFeePolicy.from_env()
-    fees_distribution = fees_distribution or _fees_distribution()
+    fees_distribution = fees_distribution or _env_fees_distribution()
     return create_fee_accounting(
         fees_distribution=fees_distribution,
         num_of_validators=5,
@@ -6393,8 +8779,28 @@ def test_top_up_fees_endpoint_updates_accounting_and_debits_sender():
     assert accounts.debits == [("0x1111111111111111111111111111111111111111", amount)]
 
 
+def test_terminal_committee_excludes_compacted_leader_appeal_replay_leader():
+    history = {
+        "consensus_results": [
+            {"consensus_round": "Undetermined"},
+            {"consensus_round": "Leader Appeal Successful"},
+        ]
+    }
+
+    assert _current_fee_round(history) == 2
+    assert _normal_leader_count(history) == 2
+
+
 @pytest.mark.parametrize(
-    "status", ["ACCEPTED", "UNDETERMINED", "FINALIZED", "CANCELED"]
+    "status",
+    [
+        "ACCEPTED",
+        "UNDETERMINED",
+        "LEADER_TIMEOUT",
+        "VALIDATORS_TIMEOUT",
+        "FINALIZED",
+        "CANCELED",
+    ],
 )
 def test_top_up_fees_endpoint_rejects_final_decided_transaction_status(status):
     tx = _fee_accounted_tx(status=status)
@@ -6451,6 +8857,90 @@ def test_submit_appeal_endpoint_records_separate_bond_and_typed_funding():
     assert accounts.debits == [
         ("0x1111111111111111111111111111111111111111", submitted)
     ]
+
+
+def test_leader_timeout_appeal_uses_live_transaction_rotations_not_fee_schedule():
+    fees = _env_fees_distribution(rotations=[3])
+    accounting = _env_fee_accounting(fees)
+    tx = _fee_accounted_tx(status="LEADER_TIMEOUT", accounting=accounting)
+    tx["config_rotation_rounds"] = 1
+    tx["leader_timeout_validators"] = [
+        "0x1111111111111111111111111111111111111111",
+        "0x2222222222222222222222222222222222222222",
+        "0x3333333333333333333333333333333333333333",
+        "0x4444444444444444444444444444444444444444",
+        "0x5555555555555555555555555555555555555555",
+    ]
+    charge = calculate_appeal_charge(
+        fees,
+        current_round=0,
+        status="LEADER_TIMEOUT",
+        replacement_rotations=1,
+        leader_timeout_live_seats=5,
+        policy=StudioFeePolicy.from_env(),
+    )
+    transactions = _FakeTransactionsProcessor(tx)
+
+    class _MsgHandler:
+        def send_message(self, log_event, log_to_terminal=True):
+            pass
+
+    _handle_appeal_or_top_up_and_submit(
+        accounts_manager=_FakeAccountsManager(balance=0),
+        transactions_processor=transactions,
+        msg_handler=_MsgHandler(),
+        decoded_rollup_transaction=_decoded_appeal(
+            tx["hash"],
+            amount=charge["bond"] + charge["funding"],
+        ),
+    )
+
+    recorded = transactions.updated_fee_accounting["appeal_bonds"][0]
+    assert recorded["minimumRequired"] == charge["bond"]
+    assert recorded["fundingBreakdown"] == charge["fundingBreakdown"]
+    assert recorded["fundingBreakdown"]["executionBacking"] == (
+        3 * int(fees["executionBudgetPerRound"])
+    )
+
+
+def test_submit_appeal_prices_against_frozen_activation_pool():
+    accounting = _env_fee_accounting()
+    accounting, should_cancel = activate_fee_accounting(
+        accounting,
+        StudioFeePolicy.from_env(),
+        selection_pool_count=9,
+    )
+    assert should_cancel is False
+    tx = _fee_accounted_tx(status="ACCEPTED", accounting=accounting)
+    tx["consensus_history"] = {"consensus_results": [{"consensus_round": "Accepted"}]}
+    transactions = _FakeTransactionsProcessor(tx)
+    charge = calculate_appeal_charge(
+        accounting["fees_distribution"],
+        current_round=0,
+        status="ACCEPTED",
+        # One normal leader is durably excluded from the frozen pool.
+        terminal_committee_upper_bound=8,
+        policy=StudioFeePolicy.from_env(),
+    )
+
+    class _MsgHandler:
+        def send_message(self, log_event, log_to_terminal=True):
+            pass
+
+    _handle_appeal_or_top_up_and_submit(
+        accounts_manager=_FakeAccountsManager(balance=0),
+        transactions_processor=transactions,
+        msg_handler=_MsgHandler(),
+        decoded_rollup_transaction=_decoded_appeal(
+            tx["hash"],
+            amount=charge["bond"] + charge["funding"],
+        ),
+    )
+
+    assert (
+        transactions.updated_fee_accounting["appeal_bonds"][0]["fundingBreakdown"]
+        == charge["fundingBreakdown"]
+    )
 
 
 def test_top_up_and_submit_appeal_endpoint_expands_capacity_only():
@@ -6543,6 +9033,43 @@ def test_submit_appeal_endpoint_rejects_stale_decision_id_before_charging():
     assert transactions.appeal_updates == []
 
 
+def test_submit_appeal_endpoint_rejects_elapsed_appeal_window_before_charging(
+    monkeypatch,
+):
+    accounting = _env_fee_accounting()
+    tx = _fee_accounted_tx(status="ACCEPTED", accounting=accounting)
+    tx["timestamp_awaiting_finalization"] = 1_000
+    tx["appeal_processing_time"] = 5
+    tx["appeal_failed"] = 1
+    transactions = _FakeTransactionsProcessor(tx)
+    charge = _env_appeal_charge(accounting)
+    monkeypatch.setenv("VITE_FINALITY_WINDOW", "30")
+    monkeypatch.setenv("VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION", "0.2")
+    # Deadline = 1000 + 5 paused seconds + 30 * 0.8 = 1029. Consensus
+    # rejects at the boundary, before accepting or escrowing any appeal value.
+    monkeypatch.setattr("backend.protocol_rpc.endpoints.time.time", lambda: 1_029)
+
+    class _MsgHandler:
+        def send_message(self, log_event, log_to_terminal=True):
+            pass
+
+    accounts = _FakeAccountsManager(balance=5000)
+    with pytest.raises(InvalidTransactionError, match="CanNotAppeal"):
+        _handle_appeal_or_top_up_and_submit(
+            accounts_manager=accounts,
+            transactions_processor=transactions,
+            msg_handler=_MsgHandler(),
+            decoded_rollup_transaction=_decoded_appeal(
+                tx["hash"],
+                amount=charge["bond"] + charge["funding"],
+            ),
+        )
+
+    assert transactions.updated_fee_accounting is None
+    assert transactions.appeal_updates == []
+    assert accounts.debits == []
+
+
 def test_submit_appeal_endpoint_rejects_zero_bond_when_fee_accounting_enabled():
     tx = _fee_accounted_tx(status="ACCEPTED", accounting=_env_fee_accounting())
     transactions = _FakeTransactionsProcessor(tx)
@@ -6563,7 +9090,67 @@ def test_submit_appeal_endpoint_rejects_zero_bond_when_fee_accounting_enabled():
     assert transactions.appeal_updates == []
 
 
-def test_current_fee_round_ignores_leader_rotation_events():
+@pytest.mark.parametrize("status", ["PENDING", "FINALIZED", "CANCELED"])
+def test_gasless_submit_appeal_still_enforces_appealable_status(status):
+    tx = _fee_accounted_tx(status=status)
+    tx["data"] = {}
+    transactions = _FakeTransactionsProcessor(tx)
+
+    class _MsgHandler:
+        def send_message(self, log_event, log_to_terminal=True):
+            pass
+
+    with pytest.raises(InvalidTransactionError, match="CanNotAppeal"):
+        _handle_appeal_or_top_up_and_submit(
+            accounts_manager=_FakeAccountsManager(balance=0),
+            transactions_processor=transactions,
+            msg_handler=_MsgHandler(),
+            decoded_rollup_transaction=_decoded_appeal(tx["hash"], amount=0),
+        )
+
+    assert transactions.updated_fee_accounting is None
+    assert transactions.appeal_updates == []
+
+
+def test_gasless_submit_appeal_still_rejects_stale_decision_and_duplicate():
+    tx = _fee_accounted_tx(status="ACCEPTED")
+    tx["data"] = {}
+
+    class _MsgHandler:
+        def send_message(self, log_event, log_to_terminal=True):
+            pass
+
+    stale_transactions = _FakeTransactionsProcessor(tx)
+    with pytest.raises(InvalidTransactionError, match="CanNotAppeal"):
+        _handle_appeal_or_top_up_and_submit(
+            accounts_manager=_FakeAccountsManager(balance=0),
+            transactions_processor=stale_transactions,
+            msg_handler=_MsgHandler(),
+            decoded_rollup_transaction=_decoded_appeal(
+                tx["hash"],
+                amount=0,
+                expected_decision_id=2,
+            ),
+        )
+    assert stale_transactions.appeal_updates == []
+
+    tx["appealed"] = True
+    duplicate_transactions = _FakeTransactionsProcessor(tx)
+    with pytest.raises(InvalidTransactionError, match="CanNotAppeal"):
+        _handle_appeal_or_top_up_and_submit(
+            accounts_manager=_FakeAccountsManager(balance=0),
+            transactions_processor=duplicate_transactions,
+            msg_handler=_MsgHandler(),
+            decoded_rollup_transaction=_decoded_appeal(
+                tx["hash"],
+                amount=0,
+                expected_decision_id=1,
+            ),
+        )
+    assert duplicate_transactions.appeal_updates == []
+
+
+def test_current_fee_round_ignores_rotation_events_and_expands_leader_appeal():
     consensus_history = {
         "consensus_results": [
             {"consensus_round": "Accepted"},
@@ -6573,8 +9160,8 @@ def test_current_fee_round_ignores_leader_rotation_events():
         ]
     }
 
-    assert _current_fee_round(consensus_history) == 1
-    assert _infer_final_round(consensus_history) == 1
+    assert _current_fee_round(consensus_history) == 2
+    assert _infer_final_round(consensus_history) == 2
 
 
 def _processor_transaction(*, accounting=None, execution_result=None):

@@ -102,3 +102,24 @@ class TestPendingTransactionEthSend:
             is_eth_send=True,
         )
         assert pt.is_deploy() is False
+
+
+def test_internal_message_use_balance_roundtrip():
+    original = PendingTransaction(
+        address="0xcontract",
+        calldata=b"\x01\x02",
+        code=None,
+        salt_nonce=0,
+        on="accepted",
+        value=7,
+        fee_params=b"fee-params",
+        declared_budget=55,
+        use_balance=True,
+    )
+
+    serialized = original.to_dict()
+    restored = PendingTransaction.from_dict(serialized)
+
+    assert serialized["use_balance"] is True
+    assert restored.use_balance is True
+    assert restored.declared_budget == 55

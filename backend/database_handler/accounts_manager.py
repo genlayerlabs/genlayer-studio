@@ -203,8 +203,9 @@ class AccountsManager:
         data[FEE_ACCOUNTING_KEY] = updated
         transaction.data = data
         if refund > 0:
-            self.credit_account_balance(sender_address, refund)
+            self._credit_fee_refund_settlements(updated, sender_address, refund)
         if not was_terminal:
+            self._credit_external_message_fee_payouts(updated)
             self._credit_appeal_bond_payouts(updated)
         return refund
 
@@ -234,14 +235,43 @@ class AccountsManager:
             actual_final_round=_infer_final_round(transaction.consensus_history),
             num_of_validators=transaction.num_of_initial_validators,
             consensus_history=transaction.consensus_history,
+            execution_mode=(
+                transaction.execution_mode.value
+                if hasattr(transaction.execution_mode, "value")
+                else str(transaction.execution_mode or "NORMAL")
+            ),
         )
         data[FEE_ACCOUNTING_KEY] = updated
         transaction.data = data
         if refund > 0:
-            self.credit_account_balance(sender_address, refund)
+            self._credit_fee_refund_settlements(updated, sender_address, refund)
         if not was_terminal:
+            self._credit_external_message_fee_payouts(updated)
             self._credit_appeal_bond_payouts(updated)
         return refund
+
+    def _credit_fee_refund_settlements(
+        self,
+        accounting: dict,
+        fallback_recipient: str,
+        total_refund: int,
+    ) -> None:
+        settlements = accounting.get("fee_refund_settlements") or []
+        credited = 0
+        for settlement in settlements:
+            if not isinstance(settlement, dict):
+                continue
+            recipient = settlement.get("recipient")
+            amount = int(settlement.get("amount", 0) or 0)
+            if recipient and amount > 0:
+                self.credit_account_balance(recipient, amount)
+                credited += amount
+        remainder = max(0, int(total_refund) - credited)
+        if remainder > 0:
+            self.credit_account_balance(
+                accounting.get("sender") or fallback_recipient,
+                remainder,
+            )
 
     def _credit_appeal_bond_payouts(self, accounting: dict) -> None:
         for payout in accounting.get("appeal_bond_settlements") or []:
@@ -251,6 +281,15 @@ class AccountsManager:
             appealer = payout.get("appealer")
             if amount > 0 and appealer:
                 self.credit_account_balance(appealer, amount)
+
+    def _credit_external_message_fee_payouts(self, accounting: dict) -> None:
+        for payout in accounting.get("external_message_fee_payouts") or []:
+            if not isinstance(payout, dict):
+                continue
+            recipient = payout.get("recipient")
+            amount = int(payout.get("amount", 0) or 0)
+            if amount > 0 and recipient:
+                self.credit_account_balance(recipient, amount)
 
 
 def _infer_final_round(consensus_history: dict | None) -> int:

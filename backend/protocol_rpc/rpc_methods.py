@@ -310,6 +310,24 @@ def sim_calculate_round_fees(
     )
 
 
+@rpc.method("sim_minMessagePrimaryFees", log_policy=LogPolicy.debug())
+def sim_min_message_primary_fees(fee_params: str) -> str:
+    return impl.sim_min_message_primary_fees(fee_params)
+
+
+@rpc.method("sim_estimateProposeReceiptGas", log_policy=LogPolicy.debug())
+def sim_estimate_propose_receipt_gas(eq_outputs_length: int = 0) -> dict[str, str]:
+    return impl.sim_estimate_propose_receipt_gas(eq_outputs_length)
+
+
+@rpc.method("sim_estimateMessageRevealGas", log_policy=LogPolicy.debug())
+def sim_estimate_message_reveal_gas(
+    message_bytes: int,
+    message_count: int,
+) -> dict[str, str]:
+    return impl.sim_estimate_message_reveal_gas(message_bytes, message_count)
+
+
 @rpc.method("sim_getConsensusContract", log_policy=LogPolicy.debug())
 def get_consensus_contract(
     contract_name: str,

@@ -254,6 +254,88 @@ def test_settle_tx_fee_accounting_once_refunds_surplus_and_is_idempotent(
     assert fee_accounting["message_fee_refunded"] == 55
 
 
+def test_settle_tx_fee_accounting_credits_external_execution_payouts_once(
+    accounts_manager: AccountsManager,
+    session: Session,
+):
+    sender = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
+    executor = "0x9999999999999999999999999999999999999999"
+    tx_hash = "0x" + "cf" * 32
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(total_message_fees=1_000),
+        num_of_validators=5,
+        submitted_value=2_100,
+        user_value=0,
+        sender=sender,
+    )
+    accounting["message_fee_consumed"] = 700
+    accounting["external_message_fee_reserved"] = 700
+    accounting["external_message_fee_reimbursed"] = 420
+    accounting["external_message_fee_remainder"] = 280
+    accounting["external_message_fee_settled"] = 700
+    accounting["external_message_fee_payouts"] = [
+        {
+            "recipient": executor,
+            "amount": 420,
+            "source": "external-executor-reimbursement",
+        },
+        {
+            "recipient": sender,
+            "amount": 280,
+            "source": "external-execution-remainder",
+        },
+    ]
+    _insert_fee_accounted_transaction(
+        session,
+        sender=sender,
+        accounting=accounting,
+        tx_hash=tx_hash,
+    )
+
+    refund = accounts_manager.settle_tx_fee_accounting_once(tx_hash, sender)
+    second_refund = accounts_manager.settle_tx_fee_accounting_once(tx_hash, sender)
+    session.flush()
+    session.expire_all()
+
+    assert refund == 300
+    assert second_refund == 0
+    assert accounts_manager.get_account_balance(executor) == 420
+    assert accounts_manager.get_account_balance(sender) == 580
+
+
+def test_settle_tx_fee_accounting_refunds_to_accounting_sender(
+    accounts_manager: AccountsManager,
+    session: Session,
+):
+    transaction_origin = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
+    contract_fee_sender = "0x1111111111111111111111111111111111111111"
+    tx_hash = "0x" + "ce" * 32
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(total_message_fees=55),
+        num_of_validators=5,
+        submitted_value=1_155,
+        user_value=0,
+        sender=contract_fee_sender,
+    )
+    _insert_fee_accounted_transaction(
+        session,
+        sender=transaction_origin,
+        accounting=accounting,
+        tx_hash=tx_hash,
+    )
+
+    refund = accounts_manager.settle_tx_fee_accounting_once(
+        tx_hash,
+        transaction_origin,
+    )
+    session.flush()
+    session.expire_all()
+
+    assert refund == 55
+    assert accounts_manager.get_account_balance(contract_fee_sender) == 55
+    assert accounts_manager.get_account_balance(transaction_origin) == 0
+
+
 def test_settle_tx_fee_accounting_once_uses_actual_final_round_for_refund(
     accounts_manager: AccountsManager,
     session: Session,
