@@ -1277,6 +1277,11 @@ DEFAULT_CONSENSUS_MAIN_ABI = """[
           "internalType": "bytes32",
           "name": "_txId",
           "type": "bytes32"
+        },
+        {
+          "internalType": "uint256",
+          "name": "_expectedDecisionId",
+          "type": "uint256"
         }
       ],
       "name": "submitAppeal",

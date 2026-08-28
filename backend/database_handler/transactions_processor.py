@@ -1899,6 +1899,31 @@ class TransactionsProcessor:
         transaction_status = transaction.status
         return self._status_payload(transaction_status.value)
 
+    def is_transaction_finalization_head(self, transaction_hash: str) -> bool:
+        """Return whether no older non-terminal transaction blocks this decision.
+
+        This mirrors the per-recipient ordering gate used by
+        ``claim_next_finalization`` so lifecycle projection never advertises a
+        Finalize action that the worker is not allowed to execute.
+        """
+        transaction = (
+            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
+        )
+        if transaction is None:
+            return False
+        return (
+            not self.session.query(Transactions.hash)
+            .filter(
+                Transactions.to_address == transaction.to_address,
+                Transactions.created_at < transaction.created_at,
+                Transactions.hash != transaction.hash,
+                Transactions.status.notin_(
+                    [TransactionStatus.FINALIZED, TransactionStatus.CANCELED]
+                ),
+            )
+            .first()
+        )
+
     def get_processing_transaction_for_contract(
         self, contract_address: str
     ) -> dict | None:

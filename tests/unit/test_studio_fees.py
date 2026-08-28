@@ -30,6 +30,8 @@ from backend.protocol_rpc.endpoints import (
     _handle_appeal_or_top_up_and_submit,
     _handle_top_up_fees,
     _normal_leader_count,
+    estimate_latest_appeal_charge,
+    get_transaction_lifecycle,
     get_transaction_status_details,
     get_transaction_status,
     _stage_simulated_call_value,
@@ -8711,6 +8713,7 @@ class _FakeTransactionsProcessor:
         self.transaction = transaction
         self.updated_fee_accounting = None
         self.appeal_updates = []
+        self.finalization_head = True
 
     def get_transaction_by_hash(self, tx_hash):
         if tx_hash != self.transaction["hash"]:
@@ -8726,6 +8729,10 @@ class _FakeTransactionsProcessor:
         assert tx_hash == self.transaction["hash"]
         self.appeal_updates.append((tx_hash, appeal))
         self.transaction["appealed"] = appeal
+
+    def is_transaction_finalization_head(self, tx_hash):
+        assert tx_hash == self.transaction["hash"]
+        return self.finalization_head
 
 
 def _decoded_top_up(tx_id, *, amount, fees_distribution=None):
@@ -9344,6 +9351,128 @@ def test_transaction_status_details_rpc_shape_includes_canonical_status_code():
     assert get_transaction_status_details(_Processor(), "0x1234") == {
         "status": "ACCEPTED",
         "statusCode": 5,
+    }
+
+
+def test_transaction_lifecycle_exposes_active_v06_decision_before_deadline(
+    monkeypatch,
+):
+    monkeypatch.setenv("VITE_FINALITY_WINDOW", "30")
+    tx = _fee_accounted_tx(status="ACCEPTED")
+    tx.update(
+        timestamp_awaiting_finalization=1_000,
+        appeal_processing_time=5,
+        appeal_failed=0,
+        appealed=False,
+        execution_mode="NORMAL",
+    )
+    processor = _FakeTransactionsProcessor(tx)
+
+    assert get_transaction_lifecycle(
+        processor, {"txId": tx["hash"], "timestamp": 1_034}
+    ) == {
+        "storedStatusCode": 5,
+        "projectedStatusCode": 5,
+        "resolutionActionCode": 0,
+        "resolutionSourceCode": 6,
+        "decisionId": "1",
+        "decisionActive": True,
+        "evaluatedAt": 1_034,
+    }
+
+
+def test_transaction_lifecycle_projects_finalize_at_exact_deadline(monkeypatch):
+    monkeypatch.setenv("VITE_FINALITY_WINDOW", "30")
+    tx = _fee_accounted_tx(status="VALIDATORS_TIMEOUT")
+    tx.update(
+        timestamp_awaiting_finalization=1_000,
+        appeal_processing_time=5,
+        appeal_failed=0,
+        appealed=False,
+        execution_mode="NORMAL",
+    )
+    processor = _FakeTransactionsProcessor(tx)
+
+    lifecycle = get_transaction_lifecycle(
+        processor, {"txId": tx["hash"], "timestamp": 1_035}
+    )
+
+    assert lifecycle["storedStatusCode"] == 11
+    assert lifecycle["projectedStatusCode"] == 11
+    assert lifecycle["resolutionActionCode"] == 6
+    assert lifecycle["resolutionSourceCode"] == 7
+    assert lifecycle["decisionId"] == "1"
+    assert lifecycle["decisionActive"] is True
+
+
+def test_transaction_lifecycle_does_not_finalize_behind_older_transaction(
+    monkeypatch,
+):
+    monkeypatch.setenv("VITE_FINALITY_WINDOW", "30")
+    tx = _fee_accounted_tx(status="ACCEPTED")
+    tx.update(
+        timestamp_awaiting_finalization=1_000,
+        appeal_processing_time=0,
+        appeal_failed=0,
+        appealed=False,
+        execution_mode="NORMAL",
+    )
+    processor = _FakeTransactionsProcessor(tx)
+    processor.finalization_head = False
+
+    lifecycle = get_transaction_lifecycle(
+        processor, {"txId": tx["hash"], "timestamp": 1_030}
+    )
+
+    assert lifecycle["resolutionActionCode"] == 0
+
+
+def test_transaction_lifecycle_uses_appeal_decision_ordinal_and_source():
+    tx = _fee_accounted_tx(status="ACCEPTED")
+    tx.update(
+        consensus_history={
+            "consensus_results": [
+                {"consensus_round": "Accepted"},
+                {"consensus_round": "Validator Appeal Failed"},
+            ]
+        },
+        timestamp_awaiting_finalization=1_000,
+        appealed=False,
+        execution_mode="NORMAL",
+    )
+    processor = _FakeTransactionsProcessor(tx)
+
+    lifecycle = get_transaction_lifecycle(
+        processor, {"txId": tx["hash"], "timestamp": 1_000}
+    )
+
+    assert lifecycle["decisionId"] == "2"
+    assert lifecycle["resolutionSourceCode"] == 9
+
+
+def test_latest_appeal_charge_rpc_uses_admission_quote_and_decision_id(
+    monkeypatch,
+):
+    monkeypatch.setenv("VITE_FINALITY_WINDOW", "30")
+    monkeypatch.setattr("backend.protocol_rpc.endpoints.time.time", lambda: 1_001)
+    accounting = _env_fee_accounting()
+    tx = _fee_accounted_tx(status="ACCEPTED", accounting=accounting)
+    tx.update(
+        timestamp_awaiting_finalization=1_000,
+        appeal_processing_time=0,
+        appeal_failed=0,
+        appealed=False,
+        execution_mode="NORMAL",
+    )
+    expected = _env_appeal_charge(accounting)
+
+    assert estimate_latest_appeal_charge(
+        _FakeTransactionsProcessor(tx), {"txId": tx["hash"]}
+    ) == {
+        "decisionId": "1",
+        "bond": str(expected["bond"]),
+        "funding": str(expected["funding"]),
+        "appealDeadline": "1030",
     }
 
 

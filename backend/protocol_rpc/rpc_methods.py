@@ -548,6 +548,28 @@ def get_transaction_status_details(
     )
 
 
+@rpc.method("gen_getTransactionLifecycle", log_policy=LogPolicy.debug())
+def get_transaction_lifecycle(
+    params: dict,
+    transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
+) -> dict:
+    return impl.get_transaction_lifecycle(
+        transactions_processor=transactions_processor,
+        params=params,
+    )
+
+
+@rpc.method("gen_estimateLatestAppealCharge", log_policy=LogPolicy.debug())
+def estimate_latest_appeal_charge(
+    params: dict,
+    transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
+) -> dict:
+    return impl.estimate_latest_appeal_charge(
+        transactions_processor=transactions_processor,
+        params=params,
+    )
+
+
 @rpc.method("eth_call", log_policy=LogPolicy.debug())
 async def eth_call(
     params: dict,

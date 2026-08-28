@@ -1,5 +1,6 @@
 # rpc/endpoints.py
 import copy
+import math
 import random
 import json
 import time
@@ -52,6 +53,7 @@ from backend.protocol_rpc.fees import (
     FeeValidationError,
     StudioFeePolicy,
     apply_fee_top_up,
+    calculate_appeal_charge,
     calculate_round_fees,
     decode_internal_message_fee_params,
     create_fee_accounting,
@@ -73,6 +75,7 @@ from backend.errors.errors import InvalidAddressError, InvalidTransactionError
 from backend.database_handler.errors import ContractNotFoundError
 
 from backend.database_handler.transactions_processor import (
+    TRANSACTION_STATUS_CODES,
     TransactionAddressFilter,
     TransactionsProcessor,
 )
@@ -1804,6 +1807,189 @@ def get_transaction_status_details(
     return status
 
 
+_DECISION_STATUSES = {
+    TransactionStatus.ACCEPTED.value,
+    TransactionStatus.UNDETERMINED.value,
+    TransactionStatus.LEADER_TIMEOUT.value,
+    TransactionStatus.VALIDATORS_TIMEOUT.value,
+}
+
+
+def _transaction_appeal_deadline(transaction: dict) -> float | None:
+    started_at = transaction.get("timestamp_awaiting_finalization")
+    if started_at is None:
+        return None
+    if str(transaction.get("execution_mode") or "") in {
+        "LEADER_ONLY",
+        "LEADER_SELF_VALIDATOR",
+    }:
+        return float(started_at)
+    finality_window = int(os.environ.get("VITE_FINALITY_WINDOW", "1800"))
+    failed_reduction = float(
+        os.environ.get("VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION", "0")
+    )
+    failed_reduction = min(1.0, max(0.0, failed_reduction))
+    return (
+        float(started_at)
+        + float(transaction.get("appeal_processing_time") or 0)
+        + finality_window
+        * ((1.0 - failed_reduction) ** int(transaction.get("appeal_failed") or 0))
+    )
+
+
+def get_transaction_lifecycle(
+    transactions_processor: TransactionsProcessor,
+    params: dict,
+) -> dict:
+    """Project Studio's stored decision state through the v0.6 lifecycle ABI."""
+    if not isinstance(params, dict):
+        raise JSONRPCError(code=-32602, message="params must be an object", data={})
+    transaction_hash = params.get("txId") or params.get("tx_id")
+    if not isinstance(transaction_hash, str) or not transaction_hash:
+        raise JSONRPCError(code=-32602, message="txId is required", data={})
+    transaction = transactions_processor.get_transaction_by_hash(transaction_hash)
+    if transaction is None:
+        raise NotFoundError(
+            message=f"Transaction {transaction_hash} not found",
+            data={"hash": transaction_hash},
+        )
+
+    requested_timestamp = params.get("timestamp")
+    try:
+        evaluated_at = (
+            int(time.time())
+            if requested_timestamp is None
+            else int(requested_timestamp)
+        )
+    except (TypeError, ValueError) as exc:
+        raise JSONRPCError(
+            code=-32602,
+            message="timestamp must be a non-negative integer",
+            data={},
+        ) from exc
+    if evaluated_at < 0:
+        raise JSONRPCError(
+            code=-32602,
+            message="timestamp must be a non-negative integer",
+            data={},
+        )
+
+    status = str(transaction.get("status") or "UNINITIALIZED").upper()
+    stored_status_code = TRANSACTION_STATUS_CODES.get(status, 0)
+    decision_active = status in _DECISION_STATUSES and not bool(
+        transaction.get("appealed")
+    )
+    current_round = _current_fee_round(transaction.get("consensus_history"))
+    decision_id = 1 + ((current_round + 1) // 2) if decision_active else None
+
+    if not decision_active:
+        resolution_source_code = 0
+    elif status == TransactionStatus.LEADER_TIMEOUT.value:
+        resolution_source_code = 3  # LeaderReceiptTimeout
+    else:
+        appeal_attempt = current_round % 2 == 1
+        reveal_timed_out = status == TransactionStatus.VALIDATORS_TIMEOUT.value
+        if appeal_attempt:
+            resolution_source_code = 10 if reveal_timed_out else 9
+        else:
+            resolution_source_code = 7 if reveal_timed_out else 6
+
+    resolution_action_code = 0
+    deadline = _transaction_appeal_deadline(transaction)
+    if (
+        decision_active
+        and deadline is not None
+        and evaluated_at >= deadline
+        and transactions_processor.is_transaction_finalization_head(transaction_hash)
+    ):
+        resolution_action_code = 6  # Finalize
+
+    return {
+        "storedStatusCode": stored_status_code,
+        # ResolutionKernel leaves a decision in its stored status until the
+        # separately reported Finalize action is actually committed.
+        "projectedStatusCode": stored_status_code,
+        "resolutionActionCode": resolution_action_code,
+        "resolutionSourceCode": resolution_source_code,
+        "decisionId": str(decision_id) if decision_id is not None else None,
+        "decisionActive": decision_active,
+        "evaluatedAt": evaluated_at,
+    }
+
+
+def estimate_latest_appeal_charge(
+    transactions_processor: TransactionsProcessor,
+    params: dict,
+) -> dict:
+    """Return the exact decision-bound appeal quote used by Studio admission."""
+    if not isinstance(params, dict):
+        raise JSONRPCError(code=-32602, message="params must be an object", data={})
+    transaction_hash = params.get("txId") or params.get("tx_id")
+    if not isinstance(transaction_hash, str) or not transaction_hash:
+        raise JSONRPCError(code=-32602, message="txId is required", data={})
+    transaction = transactions_processor.get_transaction_by_hash(transaction_hash)
+    if transaction is None:
+        raise NotFoundError(
+            message=f"Transaction {transaction_hash} not found",
+            data={"hash": transaction_hash},
+        )
+
+    status = str(transaction.get("status") or "")
+    if (
+        status not in _DECISION_STATUSES
+        or bool(transaction.get("appealed"))
+        or has_terminal_validator_appeal(transaction.get("consensus_history"))
+    ):
+        raise InvalidTransactionError("CanNotAppeal")
+    deadline = _transaction_appeal_deadline(transaction)
+    if deadline is not None and time.time() >= deadline:
+        raise InvalidTransactionError("CanNotAppeal")
+
+    fee_accounting = (transaction.get("data") or {}).get(FEE_ACCOUNTING_KEY)
+    if fee_accounting is None:
+        raise InvalidTransactionError("FeeAccountingMissing")
+    session = getattr(transactions_processor, "session", None)
+    frozen_pool_count = fee_accounting.get("selection_pool_count")
+    validator_count = (
+        int(frozen_pool_count)
+        if frozen_pool_count is not None
+        else (
+            ValidatorsRegistry(session).count_validators()
+            if session is not None
+            else int(
+                fee_accounting.get("num_of_initial_validators")
+                or transaction.get("num_of_initial_validators")
+                or 5
+            )
+        )
+    )
+    current_round = _current_fee_round(transaction.get("consensus_history"))
+    live_seats = None
+    if status == TransactionStatus.LEADER_TIMEOUT.value:
+        live_validators = transaction.get("leader_timeout_validators")
+        if isinstance(live_validators, list):
+            live_seats = len(live_validators)
+    charge = calculate_appeal_charge(
+        fee_accounting["fees_distribution"],
+        current_round=current_round,
+        status=status,
+        terminal_committee_upper_bound=max(
+            0,
+            validator_count
+            - _normal_leader_count(transaction.get("consensus_history")),
+        ),
+        leader_timeout_live_seats=live_seats,
+        policy=StudioFeePolicy.from_env(),
+    )
+    decision_id = 1 + ((current_round + 1) // 2)
+    return {
+        "decisionId": str(decision_id),
+        "bond": str(int(charge["bond"])),
+        "funding": str(int(charge["funding"])),
+        "appealDeadline": str(math.ceil(deadline)) if deadline is not None else "0",
+    }
+
+
 async def eth_call(
     session: Session,
     accounts_manager: AccountsManager,
@@ -2153,19 +2339,8 @@ def _handle_appeal_or_top_up_and_submit(
         raise InvalidTransactionError("CanNotAppeal")
     if has_terminal_validator_appeal(tx.get("consensus_history")):
         raise InvalidTransactionError("CanNotAppeal")
-    appeal_window_started = tx.get("timestamp_awaiting_finalization")
-    if appeal_window_started is not None:
-        finality_window = int(os.environ.get("VITE_FINALITY_WINDOW", "1800"))
-        failed_reduction = float(
-            os.environ.get("VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION", "0")
-        )
-        failed_reduction = min(1.0, max(0.0, failed_reduction))
-        appeal_deadline = (
-            float(appeal_window_started)
-            + float(tx.get("appeal_processing_time") or 0)
-            + finality_window
-            * ((1.0 - failed_reduction) ** int(tx.get("appeal_failed") or 0))
-        )
+    appeal_deadline = _transaction_appeal_deadline(tx)
+    if appeal_deadline is not None:
         # Consensus rejects at `block.timestamp >= appealDeadline`; do the
         # same at the RPC admission boundary instead of relying on the
         # asynchronous finalization worker to win the race first.
