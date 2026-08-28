@@ -48,16 +48,23 @@ def test_default_consensus_abi_exports_exact_decision_guarded_actions():
         "bytes32",
         "uint256",
     ]
-    for function_name in ("addTransaction", "deploySalted"):
-        assert [item["type"] for item in functions[function_name]["inputs"]] == [
-            "tuple"
-        ]
-        assert functions[function_name]["stateMutability"] == "payable"
+    assert [item["type"] for item in functions["deploySalted"]["inputs"]] == ["tuple"]
+    assert functions["deploySalted"]["stateMutability"] == "payable"
+    # addTransaction is deliberately served at its pre-fee signature; the
+    # fee-aware overload stays on the decode surface only. See
+    # _SERVED_PRE_FEE_FUNCTION_NAMES.
+    assert [item["type"] for item in functions["addTransaction"]["inputs"]] == [
+        "address",
+        "address",
+        "uint256",
+        "uint256",
+        "bytes",
+    ]
     assert [item["type"] for item in functions["topUpFees"]["inputs"]] == [
         "bytes32",
         "tuple",
     ]
-    add_params = functions["addTransaction"]["inputs"][0]["components"]
+    add_params = functions["deploySalted"]["inputs"][0]["components"]
     assert [item["type"] for item in add_params] == [
         "address",
         "address",
@@ -765,23 +772,36 @@ def test_decode_finalize_transaction_preserves_optional_decision_guard(
     assert decoded.data.expected_decision_id == expected_decision_id
 
 
-def _default_abi_signatures() -> set[str]:
+def _served_abi_functions() -> list:
+    return [
+        entry
+        for entry in get_default_consensus_main_contract()["abi"]
+        if entry.get("type") == "function"
+    ]
+
+
+def _decode_abi_signatures() -> set[str]:
+    consensus_service = Mock()
+    consensus_service.web3 = Web3()
+    consensus_service.load_contract = Mock(
+        return_value=get_default_consensus_main_contract()
+    )
+    parser = TransactionParser(consensus_service)
     return {
         _abi_function_signature(entry)
-        for entry in get_default_consensus_main_contract()["abi"]
+        for entry in parser._get_contract_abi()
         if entry.get("type") == "function"
     }
 
 
-def test_default_consensus_abi_keeps_pre_fee_entrypoints_alongside_v06():
-    """The v0.6 entrypoints are overloads, not replacements.
+def test_decode_surface_keeps_pre_fee_entrypoints_alongside_v06():
+    """Decoding must accept every generation of every entrypoint.
 
-    Studio's deployed ConsensusMain still exposes the pre-fee signatures, and
-    this ABI is what TransactionParser decodes against whenever the hardhat
-    deployment artifacts are missing. Dropping them made every deploy and
-    method call undecodable, so it was stored as a plain SEND.
+    This is the union TransactionParser matches selectors against. Losing the
+    pre-fee addTransaction made every deploy and method call undecodable, so
+    it was stored as a plain SEND.
     """
-    signatures = _default_abi_signatures()
+    signatures = _decode_abi_signatures()
 
     assert "addTransaction(address,address,uint256,uint256,bytes)" in signatures
     assert "submitAppeal(bytes32)" in signatures
@@ -794,15 +814,43 @@ def test_default_consensus_abi_keeps_pre_fee_entrypoints_alongside_v06():
     ), signatures
 
 
-def test_default_consensus_abi_has_no_duplicate_selectors():
-    functions = [
-        entry
-        for entry in get_default_consensus_main_contract()["abi"]
-        if entry.get("type") == "function"
-    ]
-    signatures = [_abi_function_signature(entry) for entry in functions]
+def test_served_abi_function_names_are_unique():
+    """The served ABI must be name-unique.
 
-    assert len(signatures) == len(set(signatures))
+    Clients build a web3 contract from sim_getConsensusContract and resolve
+    entrypoints with get_function_by_name(), which raises Web3ValueError as
+    soon as a name is overloaded.
+    """
+    names = [entry["name"] for entry in _served_abi_functions()]
+
+    assert len(names) == len(set(names)), sorted(
+        name for name in names if names.count(name) > 1
+    )
+
+
+def test_served_abi_resolves_the_entrypoints_clients_look_up_by_name():
+    """Mirrors genlayer_py._encode_add_transaction_data's exact lookup."""
+    contract = Web3().eth.contract(abi=get_default_consensus_main_contract()["abi"])
+
+    add_transaction = contract.get_function_by_name("addTransaction")
+    assert add_transaction.signature == (
+        "addTransaction(address,address,uint256,uint256,bytes)"
+    )
+    # Released and train genlayer-py both build five positional arguments and
+    # encode them against argument_types; the fee-aware tuple form would make
+    # that raise.
+    assert len(add_transaction.argument_types) == 5
+
+    # No Studio client encodes these from the served ABI, so they keep the
+    # v0.6 decision-bound form the train genlayer-py requires.
+    assert (
+        contract.get_function_by_name("submitAppeal").signature
+        == "submitAppeal(bytes32,uint256)"
+    )
+    assert (
+        contract.get_function_by_name("finalizeTransaction").signature
+        == "finalizeTransaction(bytes32,uint256)"
+    )
 
 
 def test_pre_fee_deploy_decodes_when_deployment_artifacts_are_missing(monkeypatch):

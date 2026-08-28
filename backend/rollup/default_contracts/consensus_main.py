@@ -1485,29 +1485,52 @@ def _abi_function_signature(entry: dict) -> str:
     return f"{entry['name']}({inputs})"
 
 
+# Names kept at their pre-fee signature on the *served* surface.
+#
+# This ABI has two consumers with opposite requirements:
+#
+#   * Decoding. TransactionParser matches an incoming selector against
+#     this ABI plus the FEE_AWARE_* overloads it appends itself, so it wants
+#     every generation of every entrypoint. That union lives in
+#     TransactionParser._get_contract_abi, not here.
+#   * Serving. sim_getConsensusContract hands this ABI to clients, and
+#     genlayer-py resolves entrypoints with web3's get_function_by_name(),
+#     which raises Web3ValueError on an overloaded name. The served surface
+#     must therefore be name-unique, and each shared name must carry the
+#     generation its callers actually encode.
+#
+# addTransaction is the one name where those callers disagree. Every client
+# that reaches Studio through sim_getConsensusContract — released genlayer-py
+# (so gltest and the load tests) and the train genlayer-py alike — builds five
+# positional arguments and encodes them against contract_fn.argument_types.
+# The single-tuple fee-aware form makes that raise, and it is also not a
+# function Studio's deployed ConsensusMain.sol exposes. Train clients detect
+# the pre-fee shape and fall back to the same five-argument path, so serving
+# it satisfies both generations; the fee-aware form stays decodable through
+# FEE_AWARE_ADD_TRANSACTION_ABI.
+#
+# submitAppeal and finalizeTransaction keep their v0.6 decision-bound form:
+# no Studio client encodes them from the served ABI (genlayer-js embeds its
+# own train ABI, and released genlayer-py's appeal path is unreachable here),
+# while the train genlayer-py requires the DecisionId argument.
+_SERVED_PRE_FEE_FUNCTION_NAMES = frozenset({"addTransaction"})
+
+
 def get_default_consensus_main_contract():
     abi = json.loads(DEFAULT_CONSENSUS_MAIN_ABI)
-    # The v0.6 fee-aware entrypoints are *overloads* of the deployed surface,
-    # never substitutes for it: Studio's own ConsensusMain and the pinned
-    # clients still call the pre-fee signatures, and this default ABI is what
-    # TransactionParser decodes against whenever the hardhat deployment
-    # artifacts are absent (hosted Studio and CI both hit that path).
-    # Deduplicating by *name* dropped
-    # addTransaction(address,address,uint256,uint256,bytes) — so every deploy
-    # and method call failed to match a selector, decoded as None, and was
-    # stored as a plain SEND to the ConsensusMain address with no
-    # consensus_data. Deduplicate on the selector signature instead, so both
-    # encodings stay decodable side by side.
-    train_transaction_signatures = {
-        _abi_function_signature(entry) for entry in _STUDIO_TRAIN_TRANSACTION_ABI
-    }
+    served_train_abi = [
+        entry
+        for entry in _STUDIO_TRAIN_TRANSACTION_ABI
+        if entry["name"] not in _SERVED_PRE_FEE_FUNCTION_NAMES
+    ]
+    served_train_names = {entry["name"] for entry in served_train_abi}
     abi = [
         entry
         for entry in abi
         if entry.get("type") != "function"
-        or _abi_function_signature(entry) not in train_transaction_signatures
+        or entry.get("name") not in served_train_names
     ]
-    abi.extend(_STUDIO_TRAIN_TRANSACTION_ABI)
+    abi.extend(served_train_abi)
     return {
         "address": DEFAULT_CONSENSUS_MAIN_ADDRESS,
         "abi": abi,
