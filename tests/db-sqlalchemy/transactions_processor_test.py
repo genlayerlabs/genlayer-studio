@@ -18,6 +18,7 @@ from backend.database_handler.transactions_processor import (
 from backend.database_handler.models import EvmEnvelope, Transactions
 from backend.consensus.types import ConsensusRound
 from backend.consensus.base import _external_message_pending_freeze_total
+from backend.domain.types import TransactionType
 from backend.node.types import ExecutionResultStatus
 
 
@@ -941,6 +942,20 @@ class TestGetTransactions:
     def test_get_transaction_by_hash_not_found(self, tp):
         result = tp.get_transaction_by_hash("0x" + "ff" * 32)
         assert result is None
+
+    def test_transaction_slot_is_recipient_scoped_and_excludes_send_rows(self, tp):
+        recipient = "0xAcec3A6d871C25F591aBd4fC24054e524BBbF794"
+        other_recipient = "0x1111111111111111111111111111111111111111"
+        first = _make_tx(tp, to_address=recipient, type=TransactionType.RUN_CONTRACT)
+        _make_tx(tp, to_address=recipient, type=TransactionType.SEND)
+        other = _make_tx(
+            tp, to_address=other_recipient, type=TransactionType.RUN_CONTRACT
+        )
+        second = _make_tx(tp, to_address=recipient, type=TransactionType.RUN_CONTRACT)
+
+        assert tp.get_transaction_by_hash(first)["tx_slot"] == "0"
+        assert tp.get_transaction_by_hash(other)["tx_slot"] == "0"
+        assert tp.get_transaction_by_hash(second)["tx_slot"] == "1"
 
     def test_get_transactions_for_address(self, tp):
         addr_a = "0xAcec3A6d871C25F591aBd4fC24054e524BBbF794"

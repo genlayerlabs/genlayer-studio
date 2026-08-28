@@ -3442,39 +3442,42 @@ def get_transaction_receipt(
             "status": hex(1 if envelope.success else 0),
         }
 
-    # CreationPhase always emits CreatedTransaction from ConsensusMain. It only
-    # additionally emits NewTransaction when this transaction was the recipient
-    # queue head at admission. Studio does not persist that historical boolean,
-    # so expose the universal event instead of fabricating a NewTransaction for
-    # queued submissions. SDKs accept either event when extracting the GenLayer
-    # transaction id.
-    event_signature = "CreatedTransaction(bytes32,uint256)"
-    event_signature_hash = eth_utils.keccak(text=event_signature).hex()
-
     protocol_to_addr = envelope.to_address if envelope is not None else None
     to_addr = protocol_to_addr or transaction.get("to_address")
     from_addr = transaction.get("from_address")
-    try:
-        tx_slot = int(transaction.get("tx_slot", 0))
-    except (TypeError, ValueError):
-        tx_slot = 0
+    logs = []
+    if int(transaction.get("type", TransactionType.SEND.value)) != int(
+        TransactionType.SEND.value
+    ):
+        # CreationPhase always emits CreatedTransaction for a Consensus
+        # transaction. It only additionally emits NewTransaction when this was
+        # the recipient queue head at admission. Studio does not persist that
+        # historical boolean, so expose the universal event instead of
+        # fabricating NewTransaction. Plain EVM value transfers are not created
+        # through CreationPhase and therefore emit neither event.
+        event_signature = "CreatedTransaction(bytes32,uint256)"
+        event_signature_hash = eth_utils.keccak(text=event_signature).hex()
+        try:
+            tx_slot = int(transaction.get("tx_slot", 0))
+        except (TypeError, ValueError):
+            tx_slot = 0
 
-    logs = [
-        {
-            "address": to_addr,
-            "topics": [
-                f"0x{event_signature_hash}",
-                transaction_hash,
-            ],
-            "data": "0x" + tx_slot.to_bytes(32, "big").hex(),
-            "blockNumber": 0,
-            "transactionHash": transaction_hash,
-            "transactionIndex": 0,
-            "blockHash": transaction_hash,
-            "logIndex": 0,
-            "removed": False,
-        }
-    ]
+        logs.append(
+            {
+                "address": to_addr,
+                "topics": [
+                    f"0x{event_signature_hash}",
+                    transaction_hash,
+                ],
+                "data": "0x" + tx_slot.to_bytes(32, "big").hex(),
+                "blockNumber": 0,
+                "transactionHash": transaction_hash,
+                "transactionIndex": 0,
+                "blockHash": transaction_hash,
+                "logIndex": 0,
+                "removed": False,
+            }
+        )
 
     receipt = {
         "transactionHash": transaction_hash,

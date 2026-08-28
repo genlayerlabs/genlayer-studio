@@ -833,7 +833,6 @@ class TransactionsProcessor:
         transaction_data["current_timestamp"] = str(round(time.time()))
         transaction_data["sender"] = transaction_data["from_address"]
         transaction_data["recipient"] = transaction_data["to_address"]
-        transaction_data["tx_slot"] = "0"
         transaction_data["created_timestamp"] = str(
             int(datetime.fromisoformat(transaction_data["created_at"]).timestamp())
         )
@@ -884,6 +883,32 @@ class TransactionsProcessor:
         else:
             transaction_data["last_leader"] = ""
         return transaction_data
+
+    def _transaction_issued_slot(self, transaction: Transactions) -> int:
+        """Return Consensus' recipient-scoped, zero-based issuance slot.
+
+        ``Queues.enqueueNewPending`` assigns ``txSlot`` from the recipient's
+        monotonically increasing ``issuedTxCount``. Studio's durable
+        ``queue_order`` gives us the same serialization boundary. Local SEND
+        rows are execution effects rather than Consensus transactions, so they
+        must not advance the protocol slot.
+        """
+
+        if transaction.type == TransactionType.SEND.value:
+            return 0
+        if transaction.to_address is None:
+            return 0
+        return int(
+            self.session.query(func.count(Transactions.hash))
+            .filter(
+                func.lower(Transactions.to_address)
+                == str(transaction.to_address).lower(),
+                Transactions.type != TransactionType.SEND.value,
+                Transactions.queue_order < transaction.queue_order,
+            )
+            .scalar()
+            or 0
+        )
 
     def _encode_transaction_data(self, transaction_data: dict) -> dict:
         to_encode = []
@@ -1137,6 +1162,7 @@ class TransactionsProcessor:
 
         # Process for testnet
         transaction_data = self._prepare_basic_transaction_data(transaction_data)
+        transaction_data["tx_slot"] = str(self._transaction_issued_slot(transaction))
         transaction_data = self._process_result(transaction_data)
         transaction_data = self._encode_transaction_data(transaction_data)
         transaction_data = self._process_execution_hash(transaction_data)

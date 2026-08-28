@@ -126,6 +126,7 @@ def test_eth_transaction_receipt_requests_no_contract_snapshot():
         "hash": "0xabc",
         "from_address": "0x1111111111111111111111111111111111111111",
         "to_address": "0x2222222222222222222222222222222222222222",
+        "type": 2,
         "tx_slot": "7",
         "contract_address": "0x3333333333333333333333333333333333333333",
         "status": "FINALIZED",
@@ -150,6 +151,25 @@ def test_eth_transaction_receipt_requests_no_contract_snapshot():
     transactions_processor.get_transaction_by_hash.assert_called_once_with(
         "0xabc", include_contract_snapshot=False
     )
+
+
+def test_eth_transaction_receipt_does_not_fabricate_creation_event_for_send():
+    transactions_processor = MagicMock()
+    transactions_processor.get_transaction_by_hash.return_value = {
+        "hash": "0xabc",
+        "from_address": "0x1111111111111111111111111111111111111111",
+        "to_address": "0x2222222222222222222222222222222222222222",
+        "type": 0,
+        "tx_slot": "0",
+        "status": "FINALIZED",
+    }
+    transactions_processor.get_evm_envelope.return_value = SimpleNamespace(
+        to_address="0x2222222222222222222222222222222222222222",
+    )
+
+    receipt = endpoints.get_transaction_receipt(transactions_processor, "0xabc")
+
+    assert receipt["logs"] == []
 
 
 def test_eth_transaction_receipt_reports_reverted_lifecycle_envelope():
