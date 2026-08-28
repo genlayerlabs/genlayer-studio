@@ -29,6 +29,7 @@ contract ConsensusMain is
 	struct InternalMessageEmission {
 		bool processed;
 		bytes32[] txIds;
+		address[] recipients;
 	}
 
 	/// @notice Consolidated external contract addresses used in ConsensusMain
@@ -127,6 +128,7 @@ contract ConsensusMain is
 	struct internalMessageData {
 		address sender;
 		address recipient;
+		uint256 saltNonce;
 		bytes data;
 	}
 
@@ -189,8 +191,12 @@ contract ConsensusMain is
 
 	function _processInternalMessages(
 		internalMessageData[] calldata internalMessages
-	) internal returns (bytes32[] memory txIds) {
+	)
+		internal
+		returns (bytes32[] memory txIds, address[] memory recipients)
+	{
 		txIds = new bytes32[](internalMessages.length);
+		recipients = new address[](internalMessages.length);
 		for (uint256 i = 0; i < internalMessages.length; i++) {
 			(
 				bytes32 generated_txId,
@@ -200,12 +206,16 @@ contract ConsensusMain is
 				internalMessages[i].recipient,
 				5, // or pass as part of internalMessages.data
 				0, // or pass as part of internalMessages.data
+				internalMessages[i].saltNonce,
 				internalMessages[i].data
 			);
 			txIds[i] = generated_txId;
+			recipients[i] = contracts.genTransactions.getTransactionRecipient(
+				generated_txId
+			);
 			emit InternalMessageProcessed(
 				generated_txId,
-				internalMessages[i].recipient,
+				recipients[i],
 				newActivator
 			);
 		}
@@ -233,6 +243,17 @@ contract ConsensusMain is
 		bytes32 descriptor = keccak256(abi.encode(internalMessages));
 		return
 			internalMessageEmissions[parentTxId][onAcceptance][descriptor].txIds;
+	}
+
+	function getInternalMessageRecipients(
+		bytes32 parentTxId,
+		bool onAcceptance,
+		internalMessageData[] calldata internalMessages
+	) external view returns (address[] memory) {
+		bytes32 descriptor = keccak256(abi.encode(internalMessages));
+		return
+			internalMessageEmissions[parentTxId][onAcceptance][descriptor]
+				.recipients;
 	}
 
 	function emitAppealStarted(
@@ -265,6 +286,7 @@ contract ConsensusMain is
 				_recipient,
 				_numOfInitialValidators,
 				_maxRotations,
+				0,
 				_txData
 			);
 		} else {
@@ -606,9 +628,13 @@ contract ConsensusMain is
 		// Install the replay guard before creating children. Any downstream
 		// revert rolls this write back with the entire EVM transaction.
 		emission.processed = true;
-		bytes32[] memory txIds = _processInternalMessages(internalMessages);
+		(
+			bytes32[] memory txIds,
+			address[] memory recipients
+		) = _processInternalMessages(internalMessages);
 		for (uint256 i = 0; i < txIds.length; i++) {
 			emission.txIds.push(txIds[i]);
+			emission.recipients.push(recipients[i]);
 		}
 
 		if (onAcceptance) {
@@ -623,6 +649,7 @@ contract ConsensusMain is
 		address _recipient,
 		uint256 _numOfInitialValidators,
 		uint256 _maxRotations,
+		uint256 _saltNonce,
 		bytes memory _txData
 	) internal returns (bytes32 txId, address activator) {
 		if (_sender == address(0)) {
@@ -633,7 +660,7 @@ contract ConsensusMain is
 			: contracts.genManager.recipientRandomSeed(_recipient);
 		if (_recipient == address(0)) {
 			// Contract deployment transaction
-			contracts.ghostFactory.createGhost();
+			contracts.ghostFactory.createGhost(_saltNonce);
 			address ghost = contracts.ghostFactory.latestGhost();
 			_storeGhost(ghost);
 			_recipient = ghost;
@@ -811,6 +838,7 @@ contract ConsensusMain is
 						message.recipient, // recipient (target ghost)
 						5, // or pass as part of message.data
 						0, // or pass as part of message.data
+						0,
 						message.data // transaction data
 					);
 				emit InternalMessageProcessed(

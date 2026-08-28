@@ -5,6 +5,7 @@ describe("ConsensusMain internal message bridge", function () {
     let consensusMain;
     let ghostFactory;
     let queues;
+	let transactions;
     let owner;
     let recipient;
     let deploymentTxId;
@@ -24,6 +25,10 @@ describe("ConsensusMain internal message bridge", function () {
             "Queues",
             (await deployments.get("Queues")).address,
         );
+		transactions = await ethers.getContractAt(
+			"Transactions",
+			(await deployments.get("Transactions")).address,
+		);
 
         const deploymentTx = await consensusMain.addTransaction(
             owner.address,
@@ -52,11 +57,13 @@ describe("ConsensusMain internal message bridge", function () {
             {
                 sender: recipient,
                 recipient,
+				saltNonce: 0,
                 data: "0x0102",
             },
             {
                 sender: recipient,
                 recipient,
+				saltNonce: 0,
                 data: "0x0304",
             },
         ];
@@ -95,6 +102,7 @@ describe("ConsensusMain internal message bridge", function () {
             {
                 sender: recipient,
                 recipient,
+				saltNonce: 0,
                 data: "0x0102",
             },
         ];
@@ -126,6 +134,56 @@ describe("ConsensusMain internal message bridge", function () {
         );
     });
 
+	for (const saltNonce of [0n, 42n]) {
+		it(`lets the helper authoritatively deploy and durably replay a child ghost with salt ${saltNonce}`, async function () {
+			const parentTxId = ethers.keccak256(
+				ethers.toUtf8Bytes(`deployment-parent-${saltNonce}`),
+			);
+			const messages = [
+				{
+					sender: recipient,
+					recipient: ethers.ZeroAddress,
+					saltNonce,
+					data: "0xdeadbeef",
+				},
+			];
+
+			await consensusMain.emitTransactionAccepted(parentTxId, messages);
+			const childIds = await consensusMain.getInternalMessageTxIds(
+				parentTxId,
+				true,
+				messages,
+			);
+			const childRecipients =
+				await consensusMain.getInternalMessageRecipients(
+					parentTxId,
+					true,
+					messages,
+				);
+
+			expect(childIds).to.have.length(1);
+			expect(childRecipients).to.have.length(1);
+			expect(childRecipients[0]).to.not.equal(ethers.ZeroAddress);
+			expect(await consensusMain.ghostContracts(childRecipients[0])).to.equal(
+				true,
+			);
+			expect(
+				await transactions.getTransactionRecipient(childIds[0]),
+			).to.equal(childRecipients[0]);
+			expect(await queues.getIssuedTxCount(childRecipients[0])).to.equal(1n);
+
+			await consensusMain.emitTransactionAccepted(parentTxId, messages);
+			expect(
+				await consensusMain.getInternalMessageRecipients(
+					parentTxId,
+					true,
+					messages,
+				),
+			).to.deep.equal(childRecipients);
+			expect(await queues.getIssuedTxCount(childRecipients[0])).to.equal(1n);
+		});
+	}
+
     it("indexes finalized history by recipient issuance order", async function () {
         await consensusMain.cancelTransaction(deploymentTxId);
 
@@ -145,6 +203,7 @@ describe("ConsensusMain internal message bridge", function () {
                 {
                     sender: recipient,
                     recipient: owner.address,
+					saltNonce: 0,
                     data: "0x0102",
                 },
             ]);

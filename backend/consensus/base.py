@@ -17,7 +17,7 @@ from copy import deepcopy
 import json
 import base64
 
-from eth_utils import to_checksum_address
+from eth_utils import is_address, to_checksum_address
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from backend.consensus.vrf import get_validators_for_transaction
@@ -53,6 +53,7 @@ from backend.protocol_rpc.message_handler.types import (
     EventType,
     EventScope,
 )
+from backend.protocol_rpc.types import ZERO_ADDRESS
 from backend.protocol_rpc.fees import (
     FEE_ACCOUNTING_KEY,
     VALIDATORS_PER_ROUND,
@@ -3796,9 +3797,22 @@ def _get_messages_data(
     base_nonce = context.transactions_processor.get_transaction_count(
         context.transaction.to_address
     )
-    for nonce_offset, pending_transaction in enumerate(
+    phase_pending_transactions = list(
         _pending_transactions_for_phase(pending_transactions, on)
-    ):
+    )
+    identity_payloads = (
+        _reveal_message_fee_payloads(parent_fee_accounting, phase_pending_transactions)
+        if parent_fee_accounting
+        else [
+            _pending_transaction_fee_payload(pending_transaction, on)
+            for pending_transaction in phase_pending_transactions
+        ]
+    )
+    effect_identities = message_effect_identities(
+        context.transaction.hash,
+        identity_payloads,
+    )
+    for nonce_offset, pending_transaction in enumerate(phase_pending_transactions):
         nonce = base_nonce + nonce_offset
         transaction_type, data = _child_transaction_payload(
             context, pending_transaction
@@ -3815,17 +3829,23 @@ def _get_messages_data(
 
         insert_transactions_data.append(
             [
-                pending_transaction.address,
+                (
+                    ZERO_ADDRESS
+                    if pending_transaction.is_deploy()
+                    else pending_transaction.address
+                ),
                 data,
                 transaction_type.value,
                 nonce,
                 pending_transaction.value,
+                effect_identities[nonce_offset][0],
             ]
         )
 
-        internal_messages_data.append(
-            _internal_message_event_data(context, pending_transaction, data)
-        )
+        if not pending_transaction.is_eth_send:
+            internal_messages_data.append(
+                _internal_message_event_data(context, pending_transaction, data)
+            )
 
     _record_parent_message_fee_consumption(
         context,
@@ -3863,38 +3883,17 @@ def _deploy_child_transaction_payload(
     context: TransactionContext,
     pending_transaction: PendingTransaction,
 ) -> tuple[TransactionType, dict]:
-    new_contract_address = _child_contract_address(context, pending_transaction)
-    pending_transaction.address = new_contract_address
     return (
         TransactionType.DEPLOY_CONTRACT,
         {
-            "contract_address": new_contract_address,
+            # Consensus is the address authority for internal deployments.
+            # Keep the payload stable across retries and bind the local child
+            # to the returned CREATE/CREATE2 recipient after helper delivery.
+            "contract_address": ZERO_ADDRESS,
             "contract_code": pending_transaction.code,
             "calldata": pending_transaction.calldata,
         },
     )
-
-
-def _child_contract_address(
-    context: TransactionContext,
-    pending_transaction: PendingTransaction,
-) -> str:
-    if pending_transaction.salt_nonce == 0:
-        # NOTE: this address is random, which doesn't 100% align with consensus spec
-        return context.accounts_manager.create_new_account().address
-
-    from eth_utils.crypto import keccak
-    from backend.node.types import Address
-    from backend.node.base import get_simulator_chain_id
-
-    arr = bytearray()
-    arr.append(1)
-    arr.extend(Address(context.transaction.to_address).as_bytes)
-    arr.extend(pending_transaction.salt_nonce.to_bytes(32, "big", signed=False))
-    arr.extend(get_simulator_chain_id().to_bytes(32, "big", signed=False))
-    new_contract_address = Address(keccak(arr)[:20]).as_hex
-    context.accounts_manager.create_new_account_with_address(new_contract_address)
-    return new_contract_address
 
 
 def _append_message_fee_payload(
@@ -3987,7 +3986,12 @@ def _internal_message_event_data(
 ) -> dict[str, Any]:
     return {
         "sender": context.transaction.to_address,
-        "recipient": pending_transaction.address,
+        "recipient": (
+            ZERO_ADDRESS
+            if pending_transaction.is_deploy()
+            else pending_transaction.address
+        ),
+        "saltNonce": pending_transaction.salt_nonce,
         "data": json.dumps(_serializable_message_data(data)).encode(),
     }
 
@@ -4515,30 +4519,84 @@ def _emit_messages(
     *,
     rollup_skipped: bool = False,
 ):
+    helper_transaction_count = sum(
+        insert_transaction_data[2] != TransactionType.SEND.value
+        for insert_transaction_data in insert_transactions_data
+    )
     if rollup_skipped:
-        # No rollup to mint child ids: this deployment never forwards to one
-        # (see ConsensusService.transaction_forwarding_skipped). Fall back to
-        # the pre-fee behaviour and let insert_transaction derive each child
-        # hash locally, exactly as a NULL tx_ids_hex entry did before. The
-        # strict checks below stay in force whenever a rollup IS attached —
-        # there a missing or short receipt really is a lost emission.
-        tx_ids = [None] * len(insert_transactions_data)
+        # No helper chain exists to mint child ids or deployment recipients.
+        # Preserve the pre-rollup fallback: the local insertion layer derives
+        # both, while external effects keep their durable occurrence id.
+        tx_ids = [None] * helper_transaction_count
+        recipients = [
+            insert_transaction_data[0]
+            for insert_transaction_data in insert_transactions_data
+            if insert_transaction_data[2] != TransactionType.SEND.value
+        ]
     else:
         if not isinstance(receipt, dict):
             raise InternalMessageEmissionError(
                 f"InternalMessageEmissionFailed({context.transaction.hash},{triggered_on})"
             )
         tx_ids = receipt.get("tx_ids_hex")
-        if not isinstance(tx_ids, list) or len(tx_ids) != len(insert_transactions_data):
+        if not isinstance(tx_ids, list) or len(tx_ids) != helper_transaction_count:
             raise InternalMessageEmissionError(
                 "InternalMessageEmissionCountMismatch"
                 f"({context.transaction.hash},{triggered_on},"
-                f"{len(insert_transactions_data)},"
+                f"{helper_transaction_count},"
                 f"{len(tx_ids) if isinstance(tx_ids, list) else 'missing'})"
             )
+        recipients = receipt.get("recipients")
+        if (
+            not isinstance(recipients, list)
+            or len(recipients) != helper_transaction_count
+        ):
+            raise InternalMessageEmissionError(
+                "InternalMessageEmissionRecipientCountMismatch"
+                f"({context.transaction.hash},{triggered_on},"
+                f"{helper_transaction_count},"
+                f"{len(recipients) if isinstance(recipients, list) else 'missing'})"
+            )
 
+    helper_index = 0
     for i, insert_transaction_data in enumerate(insert_transactions_data):
-        transaction_hash = tx_ids[i]
+        is_external = insert_transaction_data[2] == TransactionType.SEND.value
+        if is_external:
+            # Consensus external messages are effects, not child consensus
+            # transactions. The logical occurrence is their durable local id.
+            transaction_hash = insert_transaction_data[5]
+            actual_recipient = insert_transaction_data[0]
+        else:
+            transaction_hash = tx_ids[helper_index]
+            actual_recipient = recipients[helper_index]
+            helper_index += 1
+        is_deploy = insert_transaction_data[2] == TransactionType.DEPLOY_CONTRACT.value
+        if not (rollup_skipped and is_deploy) and (
+            not isinstance(actual_recipient, str) or not is_address(actual_recipient)
+        ):
+            raise InternalMessageEmissionError(
+                "InternalMessageEmissionInvalidRecipient"
+                f"({context.transaction.hash},{triggered_on},{i})"
+            )
+        if not (rollup_skipped and is_deploy):
+            actual_recipient = to_checksum_address(actual_recipient)
+        if is_deploy and not rollup_skipped:
+            if actual_recipient == to_checksum_address(ZERO_ADDRESS):
+                raise InternalMessageEmissionError(
+                    "InternalMessageEmissionZeroDeploymentRecipient"
+                    f"({context.transaction.hash},{triggered_on},{i})"
+                )
+            insert_transaction_data[1]["contract_address"] = actual_recipient
+            context.accounts_manager.create_new_account_with_address(actual_recipient)
+        elif (
+            not is_deploy
+            and actual_recipient.lower() != str(insert_transaction_data[0]).lower()
+        ):
+            raise InternalMessageEmissionError(
+                "InternalMessageEmissionRecipientMismatch"
+                f"({context.transaction.hash},{triggered_on},{i},"
+                f"{insert_transaction_data[0]},{actual_recipient})"
+            )
         # Determine execution_mode to cascade from parent transaction
         execution_mode_str = (
             context.transaction.execution_mode.value
@@ -4550,7 +4608,7 @@ def _emit_messages(
 
         context.transactions_processor.insert_transaction(
             context.transaction.to_address,  # new calls are done by the contract
-            insert_transaction_data[0],
+            actual_recipient,
             insert_transaction_data[1],
             value=insert_transaction_data[4],
             type=insert_transaction_data[2],

@@ -1285,7 +1285,10 @@ def test_internal_child_uses_protocol_round_zero_committee_not_parent_size():
                 0,
             )
         ],
-        {"tx_ids_hex": ["0x" + "34" * 32]},
+        {
+            "tx_ids_hex": ["0x" + "34" * 32],
+            "recipients": ["0x2222222222222222222222222222222222222222"],
+        },
         "accepted",
     )
 
@@ -1324,6 +1327,16 @@ def test_internal_child_insert_requires_exact_helper_chain_ids():
     with pytest.raises(RuntimeError, match="InternalMessageEmissionCountMismatch"):
         _emit_messages(context, [child], {"tx_ids_hex": []}, "accepted")
 
+    with pytest.raises(
+        RuntimeError, match="InternalMessageEmissionRecipientCountMismatch"
+    ):
+        _emit_messages(
+            context,
+            [child],
+            {"tx_ids_hex": ["0x" + "34" * 32]},
+            "accepted",
+        )
+
     assert calls == []
 
 
@@ -1343,6 +1356,103 @@ def _rollup_free_context(calls):
         ),
         transactions_processor=_Processor(),
     )
+
+
+def test_internal_deployment_binds_local_child_to_helper_created_recipient():
+    calls = []
+    created_accounts = []
+
+    class _Processor:
+        def insert_transaction(self, *args, **kwargs):
+            calls.append((args, kwargs))
+
+    class _Accounts:
+        def create_new_account_with_address(self, address):
+            created_accounts.append(address)
+
+    context = SimpleNamespace(
+        transaction=SimpleNamespace(
+            to_address="0x1111111111111111111111111111111111111111",
+            execution_mode="NORMAL",
+            hash="0x" + "12" * 32,
+            config_rotation_rounds=0,
+            sim_config=None,
+            origin_address=None,
+        ),
+        transactions_processor=_Processor(),
+        accounts_manager=_Accounts(),
+    )
+    child_data = {
+        "contract_address": "0x0000000000000000000000000000000000000000",
+        "contract_code": b"contract",
+        "calldata": b"",
+    }
+    helper_recipient = "0x3333333333333333333333333333333333333333"
+
+    _emit_messages(
+        context,
+        [
+            (
+                "0x0000000000000000000000000000000000000000",
+                child_data,
+                TransactionType.DEPLOY_CONTRACT.value,
+                0,
+                0,
+            )
+        ],
+        {
+            "tx_ids_hex": ["0x" + "34" * 32],
+            "recipients": [helper_recipient],
+        },
+        "accepted",
+    )
+
+    assert created_accounts == [Web3.to_checksum_address(helper_recipient)]
+    assert calls[0][0][1] == Web3.to_checksum_address(helper_recipient)
+    assert child_data["contract_address"] == Web3.to_checksum_address(helper_recipient)
+
+
+def test_external_message_does_not_require_a_helper_child_transaction():
+    calls = []
+
+    class _Processor:
+        def insert_transaction(self, *args, **kwargs):
+            calls.append((args, kwargs))
+
+    context = SimpleNamespace(
+        transaction=SimpleNamespace(
+            to_address="0x1111111111111111111111111111111111111111",
+            execution_mode="NORMAL",
+            hash="0x" + "12" * 32,
+            config_rotation_rounds=0,
+            sim_config=None,
+            origin_address=None,
+        ),
+        transactions_processor=_Processor(),
+    )
+
+    external_recipient = "0x4444444444444444444444444444444444444444"
+    occurrence = "0x" + "56" * 32
+
+    _emit_messages(
+        context,
+        [
+            (
+                external_recipient,
+                {},
+                TransactionType.SEND.value,
+                0,
+                7,
+                occurrence,
+            )
+        ],
+        {"tx_ids_hex": [], "recipients": []},
+        "finalized",
+    )
+
+    assert calls[0][0][1] == Web3.to_checksum_address(external_recipient)
+    assert calls[0][1]["transaction_hash"] == occurrence
+    assert calls[0][1]["value"] == 7
 
 
 def test_message_phase_without_a_rollup_commits_when_there_are_no_children():
@@ -8475,11 +8585,12 @@ def test_message_dispatch_creates_mode1_child_fee_accounting_from_pending_metada
     internal_messages, inserts = _get_messages_data(context, [pending], "accepted")
 
     assert len(inserts) == 1
-    recipient, data, tx_type, nonce, value = inserts[0]
+    recipient, data, tx_type, nonce, value, effect_identity = inserts[0]
     assert recipient == pending.address
     assert tx_type == TransactionType.RUN_CONTRACT.value
     assert nonce == 3
     assert value == 7
+    assert effect_identity.startswith("0x")
     assert data["calldata"] == b"\x12\x34"
     assert data["fee_value"] == child_budget
     assert data["user_value"] == 7
@@ -8503,6 +8614,27 @@ def test_message_dispatch_creates_mode1_child_fee_accounting_from_pending_metada
         "externalReimbursed": 0,
         "remaining": 0,
     }
+
+
+def test_internal_deployment_descriptor_stays_zero_address_and_carries_salt():
+    context, _ = _message_dispatch_context({})
+    pending = PendingTransaction(
+        address="0x",
+        calldata=b"\x12\x34",
+        code=b"contract source",
+        salt_nonce=42,
+        on="accepted",
+        value=0,
+    )
+
+    internal_messages, inserts = _get_messages_data(context, [pending], "accepted")
+
+    zero = "0x0000000000000000000000000000000000000000"
+    assert inserts[0][0] == zero
+    assert inserts[0][1]["contract_address"] == zero
+    assert internal_messages[0]["recipient"] == zero
+    assert internal_messages[0]["saltNonce"] == 42
+    assert pending.address == "0x"
 
 
 def test_message_dispatch_fills_mode2_child_fee_accounting_from_allocation_subtree(
@@ -8642,8 +8774,9 @@ def test_message_dispatch_records_revealed_external_message_execution_fees(
     internal_messages, inserts = _get_messages_data(context, [pending], "finalized")
 
     assert len(inserts) == 1
-    assert inserts[0] == [recipient, {}, TransactionType.SEND.value, 3, 0]
-    assert json.loads(internal_messages[0]["data"]) == {}
+    assert inserts[0][:5] == [recipient, {}, TransactionType.SEND.value, 3, 0]
+    assert inserts[0][5].startswith("0x")
+    assert internal_messages == []
     updated = processor.updated_fee_accounting
     assert updated["message_fees_recorded_at_reveal"] is True
     assert updated["allocation_consumed"] == {"0": 700}

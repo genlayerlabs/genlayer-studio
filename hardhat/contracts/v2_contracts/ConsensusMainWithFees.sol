@@ -89,6 +89,7 @@ contract ConsensusMainWithFees is
 			_recipient,
 			_numOfInitialValidators,
 			_maxRotations,
+			0,
 			_txData
 		);
 		feeManager.topUpFees(
@@ -412,6 +413,7 @@ contract ConsensusMainWithFees is
 		address _recipient,
 		uint256 _numOfInitialValidators,
 		uint256 _maxRotations,
+		uint256 _saltNonce,
 		bytes memory _txData
 	) internal returns (bytes32 tx_id, address activator) {
 		if (_sender == address(0)) {
@@ -422,7 +424,7 @@ contract ConsensusMainWithFees is
 			: genManager.recipientRandomSeed(_recipient);
 		if (_recipient == address(0)) {
 			// Contract deployment transaction
-			ghostFactory.createGhost();
+			ghostFactory.createGhost(_saltNonce);
 			address ghost = ghostFactory.latestGhost();
 			ghostContracts[ghost] = true;
 			_recipient = ghost;
@@ -606,6 +608,7 @@ contract ConsensusMainWithFees is
 						message.recipient, // recipient (target ghost)
 						5, // or pass as part of message.data
 						0, // or pass as part of message.data
+						0,
 						message.data // transaction data
 					);
 				emit InternalMessageProcessed(

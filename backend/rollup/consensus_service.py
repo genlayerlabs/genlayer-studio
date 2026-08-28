@@ -300,11 +300,13 @@ class ConsensusService:
                 )
 
                 tx_ids_hex = []
+                recipients = []
                 for new_tx_event in new_tx_events:
                     tx_id = new_tx_event["args"]["txId"]
                     tx_ids_hex.append(
                         "0x" + tx_id.hex() if isinstance(tx_id, bytes) else tx_id
                     )
+                    recipients.append(new_tx_event["args"]["recipient"])
 
                 # The Studio helper bridge makes each parent/phase/payload
                 # emission one-shot. A worker retry emits no new events, but
@@ -327,9 +329,24 @@ class ConsensusService:
                 except Exception:
                     pass
 
+                # Deploy messages intentionally submit recipient zero. The
+                # helper returns the actual CREATE/CREATE2 ghost address, and
+                # retries recover that same address from durable storage.
+                try:
+                    recipients = list(
+                        consensus_main_contract.functions.getInternalMessageRecipients(
+                            args[0],
+                            event_name == "emitTransactionAccepted",
+                            args[1],
+                        ).call()
+                    )
+                except Exception:
+                    pass
+
                 return {
                     "receipt": receipt,
                     "tx_ids_hex": tx_ids_hex,
+                    "recipients": recipients,
                 }
 
             return receipt

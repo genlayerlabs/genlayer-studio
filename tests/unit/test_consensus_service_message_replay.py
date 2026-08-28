@@ -27,6 +27,13 @@ def test_retried_message_phase_recovers_stored_child_ids_without_new_events():
     contract.functions.getInternalMessageTxIds.return_value.call.return_value = (
         child_ids
     )
+    child_recipients = [
+        "0x1111111111111111111111111111111111111111",
+        "0x2222222222222222222222222222222222222222",
+    ]
+    contract.functions.getInternalMessageRecipients.return_value.call.return_value = (
+        child_recipients
+    )
     service = _service_with_contract(contract)
     parent_id = "0x" + "aa" * 32
 
@@ -41,7 +48,11 @@ def test_retried_message_phase_recovers_stored_child_ids_without_new_events():
         "0x" + "11" * 32,
         "0x" + "22" * 32,
     ]
+    assert result["recipients"] == child_recipients
     contract.functions.getInternalMessageTxIds.assert_called_once_with(
+        parent_id, True, []
+    )
+    contract.functions.getInternalMessageRecipients.assert_called_once_with(
         parent_id, True, []
     )
 
@@ -52,9 +63,17 @@ def test_legacy_bridge_falls_back_to_child_ids_from_receipt_events():
         {}
     )
     contract.events.NewTransaction.return_value.process_receipt.return_value = [
-        {"args": {"txId": bytes.fromhex("33" * 32)}}
+        {
+            "args": {
+                "txId": bytes.fromhex("33" * 32),
+                "recipient": "0x3333333333333333333333333333333333333333",
+            }
+        }
     ]
     contract.functions.getInternalMessageTxIds.return_value.call.side_effect = (
+        RuntimeError("legacy deployment")
+    )
+    contract.functions.getInternalMessageRecipients.return_value.call.side_effect = (
         RuntimeError("legacy deployment")
     )
     service = _service_with_contract(contract)
@@ -68,7 +87,11 @@ def test_legacy_bridge_falls_back_to_child_ids_from_receipt_events():
     )
 
     assert result["tx_ids_hex"] == ["0x" + "33" * 32]
+    assert result["recipients"] == ["0x3333333333333333333333333333333333333333"]
     contract.functions.getInternalMessageTxIds.assert_called_once_with(
+        parent_id, False, []
+    )
+    contract.functions.getInternalMessageRecipients.assert_called_once_with(
         parent_id, False, []
     )
 
