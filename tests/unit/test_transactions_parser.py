@@ -12,7 +12,9 @@ from typing import Optional, List, Any
 from rlp import encode
 from web3 import Web3
 import backend.node.genvm.origin.calldata as calldata
+from backend.domain.types import TransactionType
 from backend.rollup.default_contracts.consensus_main import (
+    _abi_function_signature,
     get_default_consensus_main_contract,
 )
 
@@ -761,3 +763,101 @@ def test_decode_finalize_transaction_preserves_optional_decision_guard(
     assert decoded is not None
     assert decoded.data.tx_id == b"\x9a" * 32
     assert decoded.data.expected_decision_id == expected_decision_id
+
+
+def _default_abi_signatures() -> set[str]:
+    return {
+        _abi_function_signature(entry)
+        for entry in get_default_consensus_main_contract()["abi"]
+        if entry.get("type") == "function"
+    }
+
+
+def test_default_consensus_abi_keeps_pre_fee_entrypoints_alongside_v06():
+    """The v0.6 entrypoints are overloads, not replacements.
+
+    Studio's deployed ConsensusMain still exposes the pre-fee signatures, and
+    this ABI is what TransactionParser decodes against whenever the hardhat
+    deployment artifacts are missing. Dropping them made every deploy and
+    method call undecodable, so it was stored as a plain SEND.
+    """
+    signatures = _default_abi_signatures()
+
+    assert "addTransaction(address,address,uint256,uint256,bytes)" in signatures
+    assert "submitAppeal(bytes32)" in signatures
+    assert "finalizeTransaction(bytes32)" in signatures
+
+    assert "submitAppeal(bytes32,uint256)" in signatures
+    assert "finalizeTransaction(bytes32,uint256)" in signatures
+    assert any(
+        signature.startswith("addTransaction((") for signature in signatures
+    ), signatures
+
+
+def test_default_consensus_abi_has_no_duplicate_selectors():
+    functions = [
+        entry
+        for entry in get_default_consensus_main_contract()["abi"]
+        if entry.get("type") == "function"
+    ]
+    signatures = [_abi_function_signature(entry) for entry in functions]
+
+    assert len(signatures) == len(set(signatures))
+
+
+def test_pre_fee_deploy_decodes_when_deployment_artifacts_are_missing(monkeypatch):
+    """A pre-fee deploy must stay a DEPLOY_CONTRACT, never degrade to a SEND.
+
+    ``ConsensusService.load_contract`` returns the default contract when
+    ``hardhat/deployments/genlayer_network/ConsensusMain.json`` is absent. When
+    the default ABI lost the pre-fee ``addTransaction`` overload, no selector
+    matched, ``decode_signed_transaction`` produced ``data=None``, and
+    ``get_genlayer_transaction`` fell back to a value transfer addressed to
+    ConsensusMain — finalized immediately with no consensus_data.
+    """
+    sender = "0x715A17BA32a50bC11DADC257cb7c360FcaeE9dFA"
+    monkeypatch.setattr(
+        "backend.protocol_rpc.transactions_parser.Account.recover_transaction",
+        lambda raw: sender,
+    )
+
+    consensus_service = Mock()
+    consensus_service.web3 = Web3()
+    consensus_service.load_contract = Mock(
+        return_value=get_default_consensus_main_contract()
+    )
+    parser = TransactionParser(consensus_service)
+
+    contract_code = b"class Storage: pass"
+    calldata = b"\xc3\x01"
+    raw = _build_eip1559_raw(
+        nonce=0,
+        to=bytes.fromhex("b7278a61aa25c888815afc32ad3cc52ff24fe575"),
+        value=0,
+        data=_contract_call_data(
+            parser,
+            "addTransaction",
+            [
+                sender,
+                "0x0000000000000000000000000000000000000000",
+                5,
+                3,
+                encode([contract_code, calldata]),
+            ],
+            input_count=5,
+        ),
+    )
+
+    decoded = parser.decode_signed_transaction(raw)
+    assert decoded is not None
+    assert decoded.data is not None
+
+    genlayer_transaction = parser.get_genlayer_transaction(decoded)
+
+    assert genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT
+    assert (
+        genlayer_transaction.to_address == "0x0000000000000000000000000000000000000000"
+    )
+    assert genlayer_transaction.num_of_initial_validators == 5
+    assert genlayer_transaction.data.contract_code == contract_code
+    assert genlayer_transaction.data.calldata == calldata

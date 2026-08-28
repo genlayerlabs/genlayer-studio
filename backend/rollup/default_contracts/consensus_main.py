@@ -1277,11 +1277,6 @@ DEFAULT_CONSENSUS_MAIN_ABI = """[
           "internalType": "bytes32",
           "name": "_txId",
           "type": "bytes32"
-        },
-        {
-          "internalType": "uint256",
-          "name": "_expectedDecisionId",
-          "type": "uint256"
         }
       ],
       "name": "submitAppeal",
@@ -1474,14 +1469,43 @@ _STUDIO_TRAIN_TRANSACTION_ABI = [
 ]
 
 
+def _abi_function_signature(entry: dict) -> str:
+    """Canonical ``name(type,...)`` signature, i.e. the 4-byte selector identity."""
+
+    def canonical(component: dict) -> str:
+        component_type = component["type"]
+        if not component_type.startswith("tuple"):
+            return component_type
+        inner = ",".join(
+            canonical(nested) for nested in component.get("components", [])
+        )
+        return f"({inner}){component_type[len('tuple'):]}"
+
+    inputs = ",".join(canonical(entry_input) for entry_input in entry.get("inputs", []))
+    return f"{entry['name']}({inputs})"
+
+
 def get_default_consensus_main_contract():
     abi = json.loads(DEFAULT_CONSENSUS_MAIN_ABI)
-    train_transaction_names = {entry["name"] for entry in _STUDIO_TRAIN_TRANSACTION_ABI}
+    # The v0.6 fee-aware entrypoints are *overloads* of the deployed surface,
+    # never substitutes for it: Studio's own ConsensusMain and the pinned
+    # clients still call the pre-fee signatures, and this default ABI is what
+    # TransactionParser decodes against whenever the hardhat deployment
+    # artifacts are absent (hosted Studio and CI both hit that path).
+    # Deduplicating by *name* dropped
+    # addTransaction(address,address,uint256,uint256,bytes) — so every deploy
+    # and method call failed to match a selector, decoded as None, and was
+    # stored as a plain SEND to the ConsensusMain address with no
+    # consensus_data. Deduplicate on the selector signature instead, so both
+    # encodings stay decodable side by side.
+    train_transaction_signatures = {
+        _abi_function_signature(entry) for entry in _STUDIO_TRAIN_TRANSACTION_ABI
+    }
     abi = [
         entry
         for entry in abi
         if entry.get("type") != "function"
-        or entry.get("name") not in train_transaction_names
+        or _abi_function_signature(entry) not in train_transaction_signatures
     ]
     abi.extend(_STUDIO_TRAIN_TRANSACTION_ABI)
     return {
