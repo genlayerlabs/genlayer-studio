@@ -134,4 +134,25 @@ describe("ConsensusMain internal message bridge", function () {
             deploymentTxId,
         );
     });
+
+    it("rejects an internal child targeting an unregistered nonzero recipient", async function () {
+        const parentTxId = ethers.keccak256(
+            ethers.toUtf8Bytes("non-ghost-parent"),
+        );
+        let rejected = false;
+        try {
+            await consensusMain.emitTransactionAccepted(parentTxId, [
+                {
+                    sender: recipient,
+                    recipient: owner.address,
+                    data: "0x0102",
+                },
+            ]);
+        } catch (error) {
+            rejected = String(error).includes("NonGenVMContract");
+        }
+
+        expect(rejected).to.equal(true);
+        expect(await consensusMain.ghostContracts(owner.address)).to.equal(false);
+    });
 });

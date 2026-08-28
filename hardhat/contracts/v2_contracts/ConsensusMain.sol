@@ -192,9 +192,6 @@ contract ConsensusMain is
 	) internal returns (bytes32[] memory txIds) {
 		txIds = new bytes32[](internalMessages.length);
 		for (uint256 i = 0; i < internalMessages.length; i++) {
-			if (!ghostContracts[internalMessages[i].recipient]) {
-				_storeGhost(internalMessages[i].recipient);
-			}
 			(
 				bytes32 generated_txId,
 				address newActivator
