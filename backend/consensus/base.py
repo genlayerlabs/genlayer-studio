@@ -17,7 +17,7 @@ from copy import deepcopy
 import json
 import base64
 
-from eth_utils import is_address, to_checksum_address
+from eth_utils import is_address, keccak, to_bytes, to_checksum_address
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from backend.consensus.vrf import get_validators_for_transaction
@@ -54,6 +54,7 @@ from backend.protocol_rpc.message_handler.types import (
     EventScope,
 )
 from backend.protocol_rpc.types import ZERO_ADDRESS
+from backend.protocol_rpc.ghost_factory import GhostFactoryConfig
 from backend.protocol_rpc.fees import (
     FEE_ACCOUNTING_KEY,
     VALIDATORS_PER_ROUND,
@@ -1914,8 +1915,10 @@ def _external_message_pending_freeze_total(context: TransactionContext) -> int:
     if not contract_address or not hasattr(context.transactions_processor, "session"):
         return 0
 
-    current_created_at = (
-        context.transactions_processor.session.query(Transactions.created_at)
+    current_queue_order = (
+        context.transactions_processor.session.query(
+            Transactions.queue_order,
+        )
         .filter(Transactions.hash == context.transaction.hash)
         .scalar()
     )
@@ -1925,8 +1928,8 @@ def _external_message_pending_freeze_total(context: TransactionContext) -> int:
         Transactions.hash != context.transaction.hash,
         Transactions.consensus_data.isnot(None),
     ]
-    if current_created_at is not None:
-        filters.append(Transactions.created_at < current_created_at)
+    if current_queue_order is not None:
+        filters.append(Transactions.queue_order < int(current_queue_order))
 
     rows = (
         context.transactions_processor.session.query(
@@ -2462,6 +2465,7 @@ def _apply_message_value_withdrawals_for_phase(
     updated_accounting = mutate_accounting(
         context.transaction.hash,
         reserve_latest,
+        commit=False,
     )
     context.transaction.data = dict(context.transaction.data or {})
     context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
@@ -2473,6 +2477,27 @@ def _apply_message_value_withdrawals_for_phase(
         updated_accounting.get("message_value_effects") or {},
         on,
     )
+
+
+def _pending_valid_until_expired(
+    transaction: Transaction,
+    *,
+    now: float | None = None,
+) -> bool:
+    # Appeals/recomputation reuse Studio's PENDING state after the transaction
+    # has already activated. Consensus deliberately ignores validUntil on that
+    # re-entry path (the original activation deadline is not a lifetime cap).
+    if (
+        bool(getattr(transaction, "consensus_history", None))
+        or bool(getattr(transaction, "appealed", False))
+        or bool(getattr(transaction, "appeal_undetermined", False))
+        or bool(getattr(transaction, "appeal_leader_timeout", False))
+        or bool(getattr(transaction, "appeal_validators_timeout", False))
+    ):
+        return False
+    valid_until = int((transaction.data or {}).get("valid_until", 0) or 0)
+    # EVM block timestamps are integer seconds; equality remains valid.
+    return valid_until > 0 and int(time.time() if now is None else now) > valid_until
 
 
 class PendingState(TransactionState):
@@ -2493,6 +2518,37 @@ class PendingState(TransactionState):
             )
         )
         context.active_fee_round = _active_execution_fee_round(context.transaction)
+
+        # v0.6 validUntil is an activation deadline. Consensus leaves an
+        # expired transaction queued until it reaches the pending head, then
+        # terminalizes it without activating or executing it. Studio used to
+        # decode and persist this field but ignored it entirely.
+        if _pending_valid_until_expired(context.transaction):
+            value_sender = context.transaction.from_address
+            if value_sender:
+                context.accounts_manager.refund_tx_value(
+                    context.transaction.hash,
+                    value_sender,
+                )
+            fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
+            fee_sender = (
+                fee_accounting.get("sender")
+                if isinstance(fee_accounting, dict)
+                else None
+            ) or value_sender
+            if fee_sender:
+                context.accounts_manager.cancel_tx_fee_accounting_once(
+                    context.transaction.hash,
+                    fee_sender,
+                    "valid_until_expired",
+                )
+            await ConsensusAlgorithm.dispatch_transaction_status_update(
+                context.transactions_processor,
+                context.transaction.hash,
+                TransactionStatus.CANCELED,
+                context.msg_handler,
+            )
+            return None
 
         # Pre-effects: timestamp + reset rotation count
         pre_effects = decide_pending_pre(
@@ -3795,7 +3851,7 @@ def _get_messages_data(
         parent_fee_accounting
         and parent_fee_accounting.get("message_fees_recorded_at_reveal")
     )
-    base_nonce = context.transactions_processor.get_transaction_count(
+    base_nonce = context.transactions_processor.get_genlayer_transaction_count(
         context.transaction.to_address
     )
     phase_pending_transactions = list(
@@ -3956,7 +4012,11 @@ def _attach_child_fee_accounting(
         child_fees, child_fee_accounting = create_child_fee_accounting(
             message=message_payload,
             parent_fees_distribution=parent_fee_accounting.get("fees_distribution"),
-            message_allocations=message_payload.get("allocationSubtree") or [],
+            message_allocations=(
+                message_payload.get("_studioResolvedAllocationSubtree")
+                or message_payload.get("allocationSubtree")
+                or []
+            ),
             sender=(
                 context.transaction.to_address
                 if pending_transaction.use_balance
@@ -4027,6 +4087,7 @@ def _record_parent_message_fee_consumption(
                 reveal_recorded,
                 _message_execution_fee_recipient(context),
             ),
+            commit=False,
         )
     )
     context.transaction.data = dict(context.transaction.data or {})
@@ -4127,6 +4188,7 @@ def _sync_reveal_message_fee_accounting(
         context.transactions_processor.mutate_transaction_fee_accounting(
             context.transaction.hash,
             prepare_latest,
+            commit=False,
         )
     )
 
@@ -4213,6 +4275,7 @@ def _mark_message_phase_delivered(
         context.transactions_processor.mutate_transaction_fee_accounting(
             context.transaction.hash,
             mark_latest,
+            commit=False,
         )
     )
     context.transaction.data = dict(context.transaction.data or {})
@@ -4284,7 +4347,7 @@ def _dispatch_messages_for_phase(
         context,
         leader_receipt.pending_transactions,
     )
-    internal_messages_data, insert_transactions_data = _get_messages_data(
+    _internal_messages_data, insert_transactions_data = _get_messages_data(
         context,
         _apply_message_value_withdrawals_for_phase(
             context,
@@ -4293,29 +4356,20 @@ def _dispatch_messages_for_phase(
         ),
         on,
     )
-    event_name = (
-        "emitTransactionAccepted" if on == "accepted" else "emitTransactionFinalized"
-    )
-    rollup_receipt = context.consensus_service.emit_transaction_event(
-        event_name,
-        leader_receipt.node_config,
-        context.transaction.hash,
-        internal_messages_data,
-    )
-    # A None receipt is ambiguous: it means both "this deployment has no
-    # rollup" and "forwarding failed". Only the latter may abort the commit.
-    rollup_skipped = (
-        rollup_receipt is None
-        and context.consensus_service.transaction_forwarding_skipped(
-            leader_receipt.node_config
-        )
+    # Studio's normal topology intentionally has no Hardhat node.  Make the DB
+    # transaction the sole authority for child ids, CREATE/CREATE2 recipients,
+    # and per-child admission failure instead of allowing an optional, older
+    # shadow deployment to decide protocol state differently across replicas.
+    rollup_receipt = _author_message_phase_locally(
+        context,
+        insert_transactions_data,
+        on,
     )
     _emit_messages(
         context,
         insert_transactions_data,
         rollup_receipt,
         on,
-        rollup_skipped=rollup_skipped,
     )
     _mark_message_phase_delivered(
         context,
@@ -4323,6 +4377,152 @@ def _dispatch_messages_for_phase(
         on,
     )
     return True
+
+
+def _author_message_phase_locally(
+    context: TransactionContext,
+    insert_transactions_data: list,
+    on: Literal["accepted", "finalized"],
+) -> dict[str, list[str]]:
+    """Mirror MessagePayments + CreationPhase in the request DB transaction."""
+
+    context.transactions_processor.lock_ghost_factory()
+    factory = GhostFactoryConfig.from_env()
+    successful_deployments = (
+        context.transactions_processor.get_successful_ghost_creation_count()
+    )
+    batch_deployments: set[str] = set()
+    tx_ids: list[str] = []
+    recipients: list[str] = []
+    zero_tx_id = "0x" + ("00" * 32)
+    prepared_children: list[tuple[list, int, str, bool]] = []
+
+    try:
+        pending_cap = int(os.environ.get("MAX_PENDING_PER_CONTRACT_DEFAULT", "20"))
+    except (TypeError, ValueError):
+        pending_cap = 20
+    if pending_cap <= 0:
+        pending_cap = 20
+
+    for insert_transaction_data in insert_transactions_data:
+        transaction_type = insert_transaction_data[2]
+        if transaction_type == TransactionType.SEND.value:
+            continue
+
+        actual_recipient = insert_transaction_data[0]
+        message_payload = insert_transaction_data[6]
+        # MessagePayments rejects an empty internal message before calling
+        # CreationPhase. Keep it a per-child contained failure: no ghost,
+        # queue slot, child id, or factory nonce is consumed.
+        payload_data = message_payload.get("data")
+        creation_failed = payload_data in {b"", "", "0x", None}
+        if (
+            not creation_failed
+            and transaction_type == TransactionType.DEPLOY_CONTRACT.value
+        ):
+            salt_nonce = int(message_payload.get("saltNonce", 0) or 0)
+            actual_recipient = factory.address_for(
+                salt_nonce,
+                successful_deployments,
+            )
+            normalized = actual_recipient.lower()
+            if (
+                normalized in batch_deployments
+                or context.transactions_processor.is_genvm_contract_address(
+                    actual_recipient
+                )
+            ):
+                creation_failed = True
+            else:
+                batch_deployments.add(normalized)
+                successful_deployments += 1
+        elif (
+            not creation_failed
+            and not context.transactions_processor.is_genvm_contract_address(
+                actual_recipient
+            )
+        ):
+            creation_failed = True
+
+        prepared_children.append(
+            (
+                insert_transaction_data,
+                transaction_type,
+                actual_recipient,
+                creation_failed,
+            )
+        )
+
+    # A single Consensus transaction serializes every Queues.enqueueNewPending
+    # call. Studio workers processing unrelated parents do not, so lock all
+    # recipient queues in deterministic order before observing their depths.
+    context.transactions_processor.lock_pending_recipients(
+        actual_recipient
+        for _data, _type, actual_recipient, creation_failed in prepared_children
+        if not creation_failed
+    )
+
+    batch_pending: dict[str, int] = {}
+    for (
+        insert_transaction_data,
+        transaction_type,
+        actual_recipient,
+        creation_failed,
+    ) in prepared_children:
+
+        normalized_recipient = str(actual_recipient).lower()
+        if not creation_failed:
+            pending = context.transactions_processor.get_pending_transaction_count_for_address(
+                actual_recipient
+            ) + batch_pending.get(
+                normalized_recipient, 0
+            )
+            if pending >= pending_cap:
+                creation_failed = True
+
+        if creation_failed:
+            tx_ids.append(zero_tx_id)
+            recipients.append(
+                ZERO_ADDRESS
+                if transaction_type == TransactionType.DEPLOY_CONTRACT.value
+                else to_checksum_address(actual_recipient)
+            )
+            continue
+
+        batch_pending[normalized_recipient] = (
+            batch_pending.get(normalized_recipient, 0) + 1
+        )
+        occurrence = insert_transaction_data[5]
+        tx_ids.append(
+            _studio_child_transaction_id(
+                context.transaction.hash,
+                on,
+                occurrence,
+            )
+        )
+        recipients.append(to_checksum_address(actual_recipient))
+
+    return {"tx_ids_hex": tx_ids, "recipients": recipients}
+
+
+def _studio_child_transaction_id(
+    parent_tx_id: str,
+    on: Literal["accepted", "finalized"],
+    occurrence: str,
+) -> str:
+    """Stable Studio tx id for one Consensus message occurrence."""
+
+    domain = keccak(text="GenLayer/Studio/child-tx/v1")
+    phase = b"\x01" if on == "accepted" else b"\x00"
+    return (
+        "0x"
+        + keccak(
+            domain
+            + to_bytes(hexstr=parent_tx_id).rjust(32, b"\x00")
+            + phase
+            + to_bytes(hexstr=occurrence).rjust(32, b"\x00")
+        ).hex()
+    )
 
 
 def _unwind_discarded_reveal_message_fee_accounting(
@@ -4370,6 +4570,7 @@ def _unwind_discarded_reveal_message_fee_accounting(
         context.transactions_processor.mutate_transaction_fee_accounting(
             context.transaction.hash,
             unwind_latest,
+            commit=False,
         )
     )
     context.transaction.data = dict(context.transaction.data or {})
@@ -4588,6 +4789,7 @@ def _refund_skipped_internal_message(
     updated_accounting = mutate_accounting(
         context.transaction.hash,
         refund_latest,
+        commit=False,
     )
     context.transaction.data = dict(context.transaction.data or {})
     context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
@@ -4676,7 +4878,10 @@ def _emit_messages(
                     f"({context.transaction.hash},{triggered_on},{i})"
                 )
             insert_transaction_data[1]["contract_address"] = actual_recipient
-            context.accounts_manager.create_new_account_with_address(actual_recipient)
+            context.accounts_manager.create_new_account_with_address(
+                actual_recipient,
+                commit=False,
+            )
         elif (
             not is_deploy
             and actual_recipient.lower() != str(insert_transaction_data[0]).lower()
@@ -4721,4 +4926,8 @@ def _emit_messages(
             triggered_on=triggered_on,
             execution_mode=execution_mode_str,  # Cascade execution mode
             origin_address=context.transaction.origin_address,
+            # MessagePayments creates the whole batch in one EVM transaction.
+            # Do not commit each Studio child independently; the worker commits
+            # the parent phase, child rows, accounts, values, and fees together.
+            commit=False,
         )

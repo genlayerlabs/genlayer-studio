@@ -364,12 +364,12 @@ def _emission_external_fee_params(emission: dict) -> bytes:
     return _bytes_from_emission_value(value)
 
 
-def _emission_allocation_subtree(emission: dict) -> list[dict]:
+def _emission_allocation_subtree(emission: dict) -> list[dict] | str:
     value = _emission_value(emission, "allocationSubtree")
     if isinstance(value, list):
         return value
 
-    subtree = _emission_value(emission, "subtree")
+    subtree = value if value is not None else _emission_value(emission, "subtree")
     if subtree is None:
         return []
 
@@ -380,7 +380,10 @@ def _emission_allocation_subtree(emission: dict) -> list[dict]:
     try:
         decoded = decode([MESSAGE_ALLOCATION_NODE_ABI_TYPE], raw)[0]
     except Exception:
-        return []
+        # Consensus hashes the raw SubmittedMessage field even when later
+        # inheritance decoding is contained as a restricted child. Preserve
+        # those bytes instead of aliasing every malformed payload to empty.
+        return "0x" + raw.hex()
 
     allocation_subtree = []
     for node in decoded:

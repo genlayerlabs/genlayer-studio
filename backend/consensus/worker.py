@@ -366,7 +366,7 @@ class ConsensusWorker:
                         -- Ordering invariant: no older non-terminal tx on the same contract
                         SELECT 1 FROM transactions earlier
                         WHERE earlier.to_address IS NOT DISTINCT FROM t.to_address
-                            AND earlier.created_at < t.created_at
+                            AND earlier.queue_order < t.queue_order
                             AND earlier.status NOT IN ('FINALIZED', 'CANCELED')
                             AND earlier.hash != t.hash
                     )
@@ -379,13 +379,13 @@ class ConsensusWorker:
                             AND t2.hash != t.hash
                     )
                     AND pg_try_advisory_xact_lock(hashtext(COALESCE(t.to_address, t.hash)))
-                ORDER BY t.created_at ASC
+                ORDER BY t.queue_order ASC
                 FOR UPDATE SKIP LOCKED
             ),
             ready_for_finalization AS (
                 SELECT *, ROW_NUMBER() OVER (
                     PARTITION BY to_address
-                    ORDER BY created_at ASC
+                    ORDER BY queue_order ASC
                 ) as rn
                 FROM locked_finalizations
             ),
@@ -394,7 +394,7 @@ class ConsensusWorker:
                 SELECT *
                 FROM ready_for_finalization
                 WHERE rn = 1
-                ORDER BY created_at ASC
+                ORDER BY queue_order ASC
                 LIMIT 1
             )
             UPDATE transactions
@@ -443,7 +443,7 @@ class ConsensusWorker:
         query = text(
             f"""
             WITH locked_appeals AS (
-                SELECT t.hash, t.to_address, t.created_at
+                SELECT t.hash, t.to_address, t.queue_order
                 FROM transactions t
                 WHERE t.appealed = true
                     AND t.status IN ('ACCEPTED', 'UNDETERMINED', 'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT')
@@ -459,13 +459,13 @@ class ConsensusWorker:
                             AND t2.hash != t.hash
                     )
                     AND pg_try_advisory_xact_lock(hashtext(COALESCE(t.to_address, t.hash)))
-                ORDER BY t.created_at ASC
+                ORDER BY t.queue_order ASC
                 FOR UPDATE SKIP LOCKED
             ),
             available_appeals AS (
                 SELECT *, ROW_NUMBER() OVER (
                     PARTITION BY to_address
-                    ORDER BY created_at ASC
+                    ORDER BY queue_order ASC
                 ) as rn
                 FROM locked_appeals
             ),
@@ -474,7 +474,7 @@ class ConsensusWorker:
                 SELECT *
                 FROM available_appeals
                 WHERE rn = 1
-                ORDER BY created_at ASC
+                ORDER BY queue_order ASC
                 LIMIT 1
             )
             UPDATE transactions
@@ -518,7 +518,7 @@ class ConsensusWorker:
         query = text(
             f"""
             WITH candidate_transactions AS (
-                SELECT t.hash, t.to_address, t.type, t.created_at, t.recovery_count
+                SELECT t.hash, t.to_address, t.type, t.queue_order, t.recovery_count
                 FROM transactions t
                 WHERE t.status IN ('PENDING', 'ACTIVATED')
                     AND (t.blocked_at IS NULL
@@ -546,7 +546,7 @@ class ConsensusWorker:
                     AND NOT EXISTS (
                         SELECT 1 FROM transactions t3
                         WHERE t3.to_address IS NOT DISTINCT FROM t.to_address
-                            AND t3.created_at < t.created_at
+                            AND t3.queue_order < t.queue_order
                             AND t3.status IN ('ACCEPTED', 'UNDETERMINED', 'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT')
                             AND t3.appealed = false
                             AND (
@@ -582,14 +582,15 @@ class ConsensusWorker:
                     -- COALESCE handles NULL to_address (e.g. burn transactions) by
                     -- falling back to the tx hash, giving each such tx its own lock.
                     AND pg_try_advisory_xact_lock(hashtext(COALESCE(t.to_address, t.hash)))
-                ORDER BY CASE WHEN t.type = 3 THEN 0 ELSE 1 END, t.created_at ASC
+                ORDER BY CASE WHEN t.type = 3 THEN 0 ELSE 1 END,
+                         t.queue_order ASC
                 FOR UPDATE SKIP LOCKED
             ),
             oldest_per_contract AS (
                 SELECT *, ROW_NUMBER() OVER (
                     PARTITION BY to_address
                     ORDER BY CASE WHEN type = 3 THEN 0 ELSE 1 END,
-                             created_at ASC
+                             queue_order ASC
                 ) as rn
                 FROM candidate_transactions
             ),
@@ -604,8 +605,7 @@ class ConsensusWorker:
                 WHERE rn = 1
                 ORDER BY CASE WHEN recovery_count > 0 THEN 1 ELSE 0 END,
                          CASE WHEN type = 3 THEN 0 ELSE 1 END,
-                         created_at ASC,
-                         hash ASC
+                         queue_order ASC
                 LIMIT 1
             )
             UPDATE transactions

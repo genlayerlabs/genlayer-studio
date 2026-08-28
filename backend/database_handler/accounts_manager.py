@@ -33,16 +33,21 @@ class AccountsManager:
             "updated_at": account_data.updated_at.isoformat(),
         }
 
-    def create_new_account(self) -> Account:
+    def create_new_account(self, *, commit: bool = True) -> Account:
         """
         Used when generating intelligent contract's accounts or sending funds to a new account.
         Users should create their accounts client-side
         """
         account = Account.create()
-        self.create_new_account_with_address(account.address)
+        self.create_new_account_with_address(account.address, commit=commit)
         return account
 
-    def create_new_account_with_address(self, address: str) -> Account:
+    def create_new_account_with_address(
+        self,
+        address: str,
+        *,
+        commit: bool = True,
+    ) -> Account:
         # Check if account already exists
         if not is_address(address):
             raise ValueError(f"Invalid address: {address}")
@@ -61,7 +66,10 @@ class AccountsManager:
         # If account doesn't exist, create it
         account = CurrentState(id=address, data={}, balance=0)
         self.session.add(account)
-        self.session.commit()
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
         return account
 
     def is_valid_address(self, address: str) -> bool:

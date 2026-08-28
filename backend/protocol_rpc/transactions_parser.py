@@ -5,6 +5,7 @@ from rlp.sedes import binary, big_endian_int
 from rlp.exceptions import DeserializationError, SerializationError
 from eth_account import Account
 from eth_account._utils.legacy_transactions import Transaction
+from eth_account._utils.signing import extract_chain_id
 import eth_utils
 from eth_utils import to_checksum_address
 from hexbytes import HexBytes
@@ -391,6 +392,12 @@ class TransactionParser:
             else:
                 to_address = None
             nonce = signed_transaction_as_dict["nonce"]
+            chain_id = signed_transaction_as_dict.get("chainId")
+            if chain_id is None and signed_transaction_as_dict.get("v") is not None:
+                raw_v = signed_transaction_as_dict["v"]
+                if isinstance(raw_v, (bytes, bytearray, HexBytes)):
+                    raw_v = int.from_bytes(raw_v, byteorder="big")
+                chain_id, _ = extract_chain_id(int(raw_v))
             value = signed_transaction_as_dict["value"]
             submitted_value = int(value)
             fee_value = 0
@@ -408,6 +415,7 @@ class TransactionParser:
                 data = input_raw
             else:
                 data = None
+            raw_data = f"0x{data.removeprefix('0x')}" if data else None
             decoded_data = None
             contract_abi = self._get_contract_abi()
             if data and contract_abi:
@@ -510,6 +518,8 @@ class TransactionParser:
                 value=value,
                 fee_value=fee_value,
                 submitted_value=submitted_value,
+                raw_data=raw_data,
+                chain_id=int(chain_id) if chain_id is not None else None,
             )
 
         except Exception as e:
@@ -582,7 +592,15 @@ class TransactionParser:
             )
 
         sender = rollup_transaction.data.args.sender
-        recipient = rollup_transaction.data.args.recipient
+        # The v0.6 deploySalted selector is authoritative: Consensus ignores
+        # the tuple recipient and always passes address(0) into CreationPhase.
+        # Inferring only from the user-controlled recipient let a salted deploy
+        # be misclassified as a normal contract call in Studio.
+        recipient = (
+            ZERO_ADDRESS
+            if rollup_transaction.data.function_name == "deploySalted"
+            else rollup_transaction.data.args.recipient
+        )
         max_rotations = rollup_transaction.data.args.max_rotations
         type = self._get_genlayer_transaction_type(recipient)
         data = self._get_genlayer_transaction_data(type, rollup_transaction.data.args)

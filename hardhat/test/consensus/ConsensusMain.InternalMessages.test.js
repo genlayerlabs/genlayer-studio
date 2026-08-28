@@ -5,6 +5,7 @@ describe("ConsensusMain internal message bridge", function () {
     let consensusMain;
     let ghostFactory;
     let queues;
+	let consensusData;
 	let transactions;
     let owner;
     let recipient;
@@ -25,6 +26,10 @@ describe("ConsensusMain internal message bridge", function () {
             "Queues",
             (await deployments.get("Queues")).address,
         );
+		consensusData = await ethers.getContractAt(
+			"ConsensusData",
+			(await deployments.get("ConsensusData")).address,
+		);
 		transactions = await ethers.getContractAt(
 			"Transactions",
 			(await deployments.get("Transactions")).address,
@@ -296,6 +301,9 @@ describe("ConsensusMain internal message bridge", function () {
         expect(await queues.getFinalizedTxId(recipient, 0)).to.equal(
             deploymentTxId,
         );
+		expect(
+			await consensusData.getLatestFinalizedTransactions(recipient, 0, 1),
+		).to.deep.equal([]);
     });
 
     it("skips an unregistered internal recipient without stranding valid siblings", async function () {

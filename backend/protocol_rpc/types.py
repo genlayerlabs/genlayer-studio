@@ -84,6 +84,8 @@ class DecodedRollupTransaction:
     value: int
     fee_value: int = 0
     submitted_value: int | None = None
+    raw_data: str | None = None
+    chain_id: int | None = None
 
     @property
     def total_spend(self) -> int:

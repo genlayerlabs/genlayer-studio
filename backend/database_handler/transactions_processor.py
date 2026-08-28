@@ -5,17 +5,17 @@ import rlp
 import re
 import random
 from sqlalchemy.orm import Session, defer, selectinload
-from sqlalchemy import or_, desc, and_, JSON, type_coerce, text
+from sqlalchemy import or_, desc, and_, func, JSON, type_coerce, text
 
 from backend.node.types import Receipt, ExecutionResultStatus
-from .models import Transactions, TransactionStatus
+from .models import EvmEnvelope, Transactions, TransactionStatus
 from eth_utils import to_bytes, keccak, is_address, to_checksum_address
 import json
 import base64
 import time
 import os
 import copy
-from typing import Callable
+from typing import Callable, Iterable
 from backend.domain.types import TransactionType
 from web3 import Web3
 from backend.consensus.types import (
@@ -47,6 +47,17 @@ from backend.database_handler.terminal_snapshot_pruner import (
 from backend.rollup.web3_pool import Web3ConnectionPool
 
 MAX_JSON_SAFE_INTEGER = (2**53) - 1
+
+
+def _transaction_order_tuple(model=Transactions):
+    """Durable Studio queue-slot authority."""
+
+    return model.queue_order
+
+
+def _transaction_order_value(transaction: Transactions):
+    return int(transaction.queue_order)
+
 
 # Canonical v0.6 ITransactions.TransactionStatus ordinals (0-13). Studio-only
 # states map to their on-chain equivalents (ACTIVATED -> Proposing: activation
@@ -233,6 +244,11 @@ class TransactionsProcessor:
             "triggered_transactions": [
                 transaction.hash
                 for transaction in transaction_data.triggered_transactions
+                # Consensus exposes only child consensus transactions through
+                # getTriggeredTransactionIds. Studio keeps external SEND rows
+                # as local execution effects, but they are not protocol child
+                # transactions and must not leak into that shared surface.
+                if transaction.type != TransactionType.SEND.value
             ],
             "appealed": transaction_data.appealed,
             "timestamp_awaiting_finalization": transaction_data.timestamp_awaiting_finalization,
@@ -614,10 +630,11 @@ class TransactionsProcessor:
         triggered_on: str | None = None,  # "accepted" or "finalized"
         execution_mode: str = "NORMAL",  # "NORMAL", "LEADER_ONLY", or "LEADER_SELF_VALIDATOR"
         origin_address: str | None = None,
+        commit: bool = True,
     ) -> str:
 
         if transaction_hash is None:
-            current_nonce = self.get_transaction_count(from_address)
+            current_nonce = self.get_genlayer_transaction_count(from_address)
             transaction_hash = self._generate_transaction_hash(
                 from_address, to_address, data, value, type, current_nonce
             )
@@ -676,7 +693,8 @@ class TransactionsProcessor:
         self.session.add(new_transaction)
 
         self.session.flush()  # So that `created_at` gets set
-        self.session.commit()  # Persist the transaction to the database
+        if commit:
+            self.session.commit()  # Persist the transaction to the database
 
         return transaction_hash
 
@@ -1388,6 +1406,8 @@ class TransactionsProcessor:
         self,
         transaction_hash: str,
         mutator: Callable[[dict], dict],
+        *,
+        commit: bool = True,
     ) -> dict:
         """Mutate the latest fee accounting while holding the transaction row.
 
@@ -1420,7 +1440,8 @@ class TransactionsProcessor:
             ),
             {"hash": transaction_hash, "data": json.dumps(data)},
         )
-        self.session.commit()
+        if commit:
+            self.session.commit()
         return updated
 
     def apply_transaction_fee_top_up(
@@ -1492,14 +1513,201 @@ class TransactionsProcessor:
         except:
             checksum_address = address
 
-        # Always use database count as source of truth
-        # Our transactions are stored in PostgreSQL, not on Hardhat blockchain
-        count = (
+        if address is not None:
+            ledger_address = str(checksum_address).lower()
+            highest_nonce = (
+                self.session.query(func.max(EvmEnvelope.nonce))
+                .filter(EvmEnvelope.from_address == ledger_address)
+                .scalar()
+            )
+            return 0 if highest_nonce is None else int(highest_nonce) + 1
+
+        # Studio-only system transactions (funding) are not signed EVM
+        # envelopes and retain their historical database-count nonce.
+        return int(
             self.session.query(Transactions)
-            .filter(Transactions.from_address == checksum_address)
+            .filter(Transactions.from_address.is_(None))
             .count()
         )
-        return count
+
+    def get_genlayer_transaction_count(self, address: str | None) -> int:
+        """Count Studio transaction rows authored by one logical sender.
+
+        This is deliberately separate from ``eth_getTransactionCount``. Ghost
+        contracts do not submit signed EVM envelopes when MessagePayments
+        creates children, but Studio still needs a stable monotonically
+        increasing child metadata nonce and fallback-hash input.
+        """
+
+        if address is None:
+            return int(
+                self.session.query(Transactions)
+                .filter(Transactions.from_address.is_(None))
+                .count()
+            )
+        try:
+            address = self.web3.to_checksum_address(address)
+        except Exception:
+            pass
+        return int(
+            self.session.query(Transactions)
+            .filter(Transactions.from_address == address)
+            .count()
+        )
+
+    def begin_evm_envelope(
+        self,
+        transaction_hash: str,
+        from_address: str,
+        nonce: int,
+    ) -> str | None:
+        """Lock one sender and validate exact EVM nonce/replay semantics.
+
+        Returns the prior successful response for an identical raw envelope.
+        The caller records a new success only after all protocol mutations have
+        completed, in the same DB transaction.
+        """
+
+        from_address = to_checksum_address(from_address).lower()
+        nonce = int(nonce)
+        if nonce < 0:
+            raise ValueError("InvalidNonce")
+
+        bind = self.session.get_bind()
+        if bind.dialect.name == "postgresql":
+            self.session.execute(
+                text(
+                    "SELECT pg_advisory_xact_lock(" "hashtextextended(:sender_key, 0))"
+                ),
+                {"sender_key": f"evm-sender:{from_address.lower()}"},
+            )
+
+        existing = self.session.get(EvmEnvelope, transaction_hash)
+        if existing is not None:
+            return existing.result
+
+        expected = self.get_transaction_count(from_address)
+        if nonce < expected:
+            raise ValueError(f"NonceTooLow(expected={expected},actual={nonce})")
+        if nonce > expected:
+            raise ValueError(f"NonceTooHigh(expected={expected},actual={nonce})")
+        return None
+
+    def record_evm_envelope(
+        self,
+        transaction_hash: str,
+        from_address: str,
+        nonce: int,
+        result: str,
+        *,
+        to_address: str | None = None,
+        success: bool = True,
+        error: str | None = None,
+    ) -> None:
+        self.session.add(
+            EvmEnvelope(
+                hash=transaction_hash,
+                from_address=to_checksum_address(from_address).lower(),
+                nonce=int(nonce),
+                result=result,
+                to_address=(str(to_address).lower() if to_address else None),
+                success=bool(success),
+                error=(str(error)[:1024] if error else None),
+            )
+        )
+        self.session.flush()
+
+    def get_evm_envelope(self, transaction_hash: str) -> EvmEnvelope | None:
+        return self.session.get(EvmEnvelope, transaction_hash)
+
+    def lock_transaction_admission(self, transaction_hash: str) -> None:
+        """Serialize one raw transaction's admission across RPC workers.
+
+        The lock is held by the request transaction until insert_transaction
+        commits. This keeps duplicate submissions from both authoring shadow
+        helper state before either worker can observe the canonical DB row.
+        """
+
+        bind = self.session.get_bind()
+        if bind.dialect.name != "postgresql":
+            return
+        self.session.execute(
+            text(
+                "SELECT pg_advisory_xact_lock("
+                "hashtextextended(:transaction_hash, 0))"
+            ),
+            {"transaction_hash": transaction_hash},
+        )
+
+    def lock_ghost_factory(self) -> None:
+        """Serialize Studio's virtual GhostFactory for this DB transaction."""
+
+        bind = self.session.get_bind()
+        if bind.dialect.name != "postgresql":
+            return
+        self.session.execute(
+            text(
+                "SELECT pg_advisory_xact_lock("
+                "hashtextextended('studio-v0.6-ghost-factory', 0))"
+            )
+        )
+
+    def lock_pending_recipients(self, addresses: Iterable[str]) -> None:
+        """Serialize child admission for every touched recipient queue.
+
+        One Consensus EVM transaction processes a message batch serially.  A
+        Studio worker can process unrelated parents concurrently, so acquire
+        the same recipient-scoped locks used by top-level RPC admission before
+        reading queue depth.  Sorting the complete set keeps overlapping
+        multi-recipient batches deadlock-free.
+        """
+
+        bind = self.session.get_bind()
+        if bind.dialect.name != "postgresql":
+            return
+        for address in sorted(
+            {
+                str(address).lower()
+                for address in addresses
+                if isinstance(address, str) and address
+            }
+        ):
+            self.session.execute(
+                text("SELECT pg_advisory_xact_lock(" "hashtextextended(:lock_key, 0))"),
+                {"lock_key": f"pending-recipient:{address}"},
+            )
+
+    def get_successful_ghost_creation_count(self) -> int:
+        """Return the virtual factory nonce offset.
+
+        GhostFactory creates and registers the proxy during transaction
+        admission, before GenVM executes.  A later failed or canceled deploy
+        therefore still consumed one successful CREATE/CREATE2 and remains a
+        registered ghost, so every admitted deployment row is counted.
+        """
+
+        return int(
+            self.session.query(Transactions)
+            .filter(Transactions.type == TransactionType.DEPLOY_CONTRACT.value)
+            .count()
+        )
+
+    def is_genvm_contract_address(self, address: str) -> bool:
+        """Whether Consensus would have registered ``address`` as a ghost."""
+
+        try:
+            address = to_checksum_address(address)
+        except (TypeError, ValueError):
+            return False
+        return (
+            self.session.query(Transactions.hash)
+            .filter(
+                Transactions.type == TransactionType.DEPLOY_CONTRACT.value,
+                Transactions.to_address == address,
+            )
+            .first()
+            is not None
+        )
 
     def get_transactions_for_address(
         self,
@@ -1526,7 +1734,11 @@ class TransactionsProcessor:
                 )
             )
 
-        transactions = query.order_by(Transactions.created_at.desc()).all()
+        transactions = query.order_by(
+            Transactions.created_at.desc(),
+            Transactions.nonce.desc().nullslast(),
+            Transactions.hash.desc(),
+        ).all()
 
         return [
             self._parse_transaction_data(transaction) for transaction in transactions
@@ -1849,10 +2061,10 @@ class TransactionsProcessor:
             self.session.query(Transactions)
             .options(selectinload(Transactions.triggered_transactions))
             .filter(
-                Transactions.created_at > transaction.created_at,
+                _transaction_order_tuple() > _transaction_order_value(transaction),
                 Transactions.to_address == transaction.to_address,
             )
-            .order_by(Transactions.created_at)
+            .order_by(Transactions.queue_order)
             .all()
         )
         return [
@@ -2012,7 +2224,10 @@ class TransactionsProcessor:
                 ),
             )
             .distinct(Transactions.to_address)
-            .order_by(Transactions.to_address, Transactions.created_at.asc())
+            .order_by(
+                Transactions.to_address,
+                Transactions.queue_order.asc(),
+            )
             .all()
         )
 
@@ -2036,7 +2251,7 @@ class TransactionsProcessor:
             return None
 
         filters = [
-            Transactions.created_at < transaction.created_at,
+            _transaction_order_tuple() < _transaction_order_value(transaction),
             Transactions.to_address == transaction.to_address,
         ]
         if status is not None:
@@ -2067,7 +2282,7 @@ class TransactionsProcessor:
         closest_transaction = (
             self.session.query(Transactions)
             .filter(*filters)
-            .order_by(desc(Transactions.created_at))
+            .order_by(Transactions.queue_order.desc())
             .first()
         )
 
@@ -2154,7 +2369,10 @@ class TransactionsProcessor:
 
     def get_pending_transaction_count_for_address(self, address: str) -> int:
         """
-        Get the count of pending transactions for a given recipient address.
+        Get Consensus pending-queue membership for a recipient.
+
+        The activated head remains in Queues.pending until it reaches a
+        decision, so all pre-decision processing states consume one slot.
 
         Args:
             address: The recipient address to count pending transactions for
@@ -2164,8 +2382,8 @@ class TransactionsProcessor:
         """
         try:
             # Normalize address to checksum format
-            checksum_address = self.web3.to_checksum_address(address)
-        except ValueError:
+            checksum_address = to_checksum_address(address)
+        except (TypeError, ValueError):
             # If address normalization fails, use as-is
             checksum_address = address
 
@@ -2173,7 +2391,15 @@ class TransactionsProcessor:
             self.session.query(Transactions)
             .filter(
                 Transactions.to_address == checksum_address,
-                Transactions.status == TransactionStatus.PENDING,
+                Transactions.status.in_(
+                    [
+                        TransactionStatus.PENDING,
+                        TransactionStatus.ACTIVATED,
+                        TransactionStatus.PROPOSING,
+                        TransactionStatus.COMMITTING,
+                        TransactionStatus.REVEALING,
+                    ]
+                ),
             )
             .count()
         )
@@ -2204,7 +2430,7 @@ class TransactionsProcessor:
             not self.session.query(Transactions.hash)
             .filter(
                 Transactions.to_address == transaction.to_address,
-                Transactions.created_at < transaction.created_at,
+                _transaction_order_tuple() < _transaction_order_value(transaction),
                 Transactions.hash != transaction.hash,
                 Transactions.status.notin_(
                     [TransactionStatus.FINALIZED, TransactionStatus.CANCELED]
@@ -2267,7 +2493,7 @@ class TransactionsProcessor:
                 Transactions.to_address == contract_address,
                 Transactions.status == TransactionStatus.PENDING,
             )
-            .order_by(Transactions.created_at)
+            .order_by(Transactions.queue_order)
             .first()
         )
 

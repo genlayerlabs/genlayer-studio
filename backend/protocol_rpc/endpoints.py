@@ -8,7 +8,7 @@ import eth_utils
 import logging
 from contextlib import asynccontextmanager
 from functools import partial, wraps
-from typing import Any, Final, get_args
+from typing import Any, Final, NoReturn, get_args
 from backend.protocol_rpc.exceptions import (
     JSONRPCError,
     NotFoundError,
@@ -67,6 +67,7 @@ from backend.protocol_rpc.fees import (
     studio_fee_config,
     validate_transaction_fee_deposit,
 )
+from backend.protocol_rpc.ghost_factory import GhostFactoryConfig
 from backend.consensus.history import (
     actual_leader_rotations_by_round,
     completed_consensus_round_index,
@@ -100,6 +101,7 @@ import secrets as secrets_module
 from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope
 from backend.protocol_rpc.types import (
     DecodedRollupTransaction,
+    DecodedRollupTransactionData,
     DecodedTopUpFeesDataArgs,
     DecodedFinalizeTransactionDataArgs,
     DecodedsubmitAppealDataArgs,
@@ -114,6 +116,27 @@ import asyncio
 # consensus/base.py; keep the RPC path bounded too.
 _GENVM_CONCURRENCY = int(os.environ.get("GENVM_MAX_CONCURRENT", "8"))
 _genvm_admission_semaphore = asyncio.Semaphore(_GENVM_CONCURRENCY)
+
+
+class _EvmExecutionReverted(Exception):
+    """A valid signed protocol envelope was mined but its call reverted."""
+
+    def __init__(
+        self,
+        *,
+        transaction_hash: str,
+        from_address: str,
+        to_address: str | None,
+        nonce: int,
+        reason: Exception,
+    ) -> None:
+        super().__init__(str(reason))
+        self.transaction_hash = transaction_hash
+        self.from_address = from_address
+        self.to_address = to_address
+        self.nonce = int(nonce)
+        self.reason = reason
+
 
 # ---------------------------------------------------------------------------
 # Per-address rate limiting for gen_call / sim_call
@@ -277,14 +300,10 @@ async def _run_singleflight_gen_call(
 # ---------------------------------------------------------------------------
 # Admission control on PENDING queue depth (eth_sendRawTransaction path).
 #
-# Studio Prod is a shared sandbox. Without this, a single user can submit
-# thousands of txs to one contract and starve everyone else's contracts
-# behind a 5-day backlog. We cap PENDING per (to_address) and per
-# (from_address) at submission time and return a structured error pointing
-# users at non-shared deployments for production-volume workloads.
-#
-# Both caps default to unset (unlimited) — meaningful only when explicitly
-# configured (the public studio deployment sets them; self-hosted does not).
+# Consensus Queues initializes maxPendingTxsPerRecipient to 20. Studio uses the
+# same per-recipient default; deployments may lower/raise it explicitly when
+# they apply the matching governance setting on Consensus. The Studio-only
+# sender cap remains optional.
 # ---------------------------------------------------------------------------
 def _parse_optional_positive_int(env_name: str) -> int | None:
     raw = os.environ.get(env_name)
@@ -297,18 +316,14 @@ def _parse_optional_positive_int(env_name: str) -> int | None:
     return parsed if parsed > 0 else None
 
 
-_MAX_PENDING_PER_CONTRACT = _parse_optional_positive_int(
-    "MAX_PENDING_PER_CONTRACT_DEFAULT"
+_MAX_PENDING_PER_CONTRACT = (
+    _parse_optional_positive_int("MAX_PENDING_PER_CONTRACT_DEFAULT") or 20
 )
 _MAX_PENDING_PER_SENDER = _parse_optional_positive_int("MAX_PENDING_PER_SENDER_DEFAULT")
 
 # Generic guidance text in the error response — directs heavy users to
 # non-shared deployments rather than retrying against the same instance.
-_QUEUE_DEPTH_HELP = (
-    "The public Studio is a shared sandbox with per-contract and "
-    "per-sender PENDING transaction caps. For production-volume "
-    "workloads, run a self-hosted instance."
-)
+_QUEUE_DEPTH_HELP = "The protocol limits each recipient's pending queue depth."
 
 
 def _enforce_pending_queue_caps(
@@ -318,17 +333,29 @@ def _enforce_pending_queue_caps(
 ) -> None:
     """Raise QueueDepthExceeded if the per-contract or per-sender cap is hit.
 
-    Both checks are best-effort and racy by design — two concurrent
-    submissions can both pass the COUNT(*) check before either commits,
-    so the actual depth can transiently exceed the cap by a few. That's
-    fine; the goal is to prevent unbounded growth, not to enforce an
-    exact bound.
+    Postgres admissions take deterministic advisory locks before counting so
+    two concurrent submissions cannot both claim the final queue slot. This
+    mirrors the serialized Queues insertion performed by Consensus.
     """
+    session = transactions_processor.session
+    bind = session.get_bind()
+    if bind.dialect.name == "postgresql":
+        lock_keys = []
+        if _MAX_PENDING_PER_CONTRACT is not None and to_address is not None:
+            lock_keys.append(f"pending-recipient:{str(to_address).lower()}")
+        if _MAX_PENDING_PER_SENDER is not None and from_address is not None:
+            lock_keys.append(f"pending-sender:{str(from_address).lower()}")
+        for lock_key in sorted(lock_keys):
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(" "hashtextextended(:lock_key, 0))"),
+                {"lock_key": lock_key},
+            )
     if _MAX_PENDING_PER_CONTRACT is not None and to_address is not None:
-        contract_pending = transactions_processor.session.execute(
+        contract_pending = session.execute(
             text(
                 "SELECT COUNT(*) FROM transactions "
-                "WHERE to_address = :addr AND status = 'PENDING'"
+                "WHERE to_address = :addr AND status IN "
+                "('PENDING', 'ACTIVATED', 'PROPOSING', 'COMMITTING', 'REVEALING')"
             ),
             {"addr": to_address},
         ).scalar()
@@ -351,7 +378,7 @@ def _enforce_pending_queue_caps(
             )
 
     if _MAX_PENDING_PER_SENDER is not None and from_address is not None:
-        sender_pending = transactions_processor.session.execute(
+        sender_pending = session.execute(
             text(
                 "SELECT COUNT(*) FROM transactions "
                 "WHERE from_address = :addr AND status = 'PENDING'"
@@ -372,6 +399,22 @@ def _enforce_pending_queue_caps(
                     "limit": _MAX_PENDING_PER_SENDER,
                 },
             )
+
+
+def _allocate_top_level_ghost_address(
+    transactions_processor: TransactionsProcessor,
+    salt_nonce: int,
+) -> str:
+    """Reserve the next virtual GhostFactory address until admission commits."""
+
+    transactions_processor.lock_ghost_factory()
+    deployment_count = transactions_processor.get_successful_ghost_creation_count()
+    address = GhostFactoryConfig.from_env().address_for(salt_nonce, deployment_count)
+    if transactions_processor.is_genvm_contract_address(address):
+        # GhostFactory rejects a reused CREATE2 address and the enclosing
+        # Consensus submission reverts.  The factory nonce is unchanged.
+        raise InvalidTransactionError("GhostAlreadyDeployed")
+    return address
 
 
 def get_studio_fee_config() -> dict[str, Any]:
@@ -2356,7 +2399,15 @@ def _validate_fee_envelope(
         return
 
     args = decoded_rollup_transaction.data.args
+    policy = StudioFeePolicy.from_env()
+    if (
+        decoded_rollup_transaction.data.function_name == "deploySalted"
+        and int(args.salt_nonce or 0) == 0
+    ):
+        raise InvalidTransactionError("InvalidDeploymentWithSalt")
     if args.fees_distribution is None:
+        if policy.fee_accounting_enabled():
+            raise InvalidTransactionError("FeesDistributionMissing")
         return
 
     try:
@@ -2366,7 +2417,7 @@ def _validate_fee_envelope(
             num_of_validators=args.num_of_initial_validators,
             submitted_value=decoded_rollup_transaction.total_spend,
             user_value=int(args.user_value or 0),
-            policy=StudioFeePolicy.from_env(),
+            policy=policy,
         )
     except FeeValidationError as exc:
         raise InvalidTransactionError(str(exc)) from exc
@@ -2405,8 +2456,6 @@ def _handle_top_up_fees(
             decoded_rollup_transaction.from_address,
             decoded_rollup_transaction.total_spend,
         )
-        if session is not None:
-            session.commit()
     except FeeValidationError as exc:
         if session is not None:
             session.rollback()
@@ -2432,6 +2481,7 @@ def _handle_appeal_or_top_up_and_submit(
     transactions_processor: TransactionsProcessor,
     msg_handler: IMessageHandler,
     decoded_rollup_transaction: DecodedRollupTransaction,
+    emit_event: bool = True,
 ) -> str:
     assert isinstance(decoded_rollup_transaction.data, DecodedsubmitAppealDataArgs)
     tx_id = _tx_id_to_hex(decoded_rollup_transaction.data.tx_id)
@@ -2582,8 +2632,6 @@ def _handle_appeal_or_top_up_and_submit(
                 decoded_rollup_transaction.from_address,
                 surplus_refund,
             )
-        if session is not None:
-            session.commit()
     except FeeValidationError as exc:
         if session is not None:
             session.rollback()
@@ -2596,19 +2644,22 @@ def _handle_appeal_or_top_up_and_submit(
         if session is not None:
             session.rollback()
         raise
-    msg_handler.send_message(
-        log_event=LogEvent(
-            "transaction_appeal_updated",
-            EventType.INFO,
-            EventScope.CONSENSUS,
-            "Set transaction appealed",
-            {
-                "hash": tx_id,
-            },
-        ),
-        log_to_terminal=False,
-    )
+    if emit_event:
+        msg_handler.send_message(
+            log_event=_transaction_appeal_updated_event(tx_id),
+            log_to_terminal=False,
+        )
     return tx_id
+
+
+def _transaction_appeal_updated_event(tx_id: str) -> LogEvent:
+    return LogEvent(
+        "transaction_appeal_updated",
+        EventType.INFO,
+        EventScope.CONSENSUS,
+        "Set transaction appealed",
+        {"hash": tx_id},
+    )
 
 
 def _handle_finalize_transaction(
@@ -2821,6 +2872,63 @@ def send_raw_transaction(
     signed_rollup_transaction: str,
     sim_config: dict | None = None,
 ) -> str:
+    """Admit one signed envelope atomically with its protocol mutation."""
+
+    try:
+        return _send_raw_transaction_impl(
+            session,
+            msg_handler,
+            transactions_parser,
+            consensus_service,
+            signed_rollup_transaction,
+            sim_config,
+        )
+    except _EvmExecutionReverted as reverted:
+        # Solidity execution reverts roll back the protocol mutation, but the
+        # execution-chain envelope is still mined and consumes the account
+        # nonce. Start a fresh DB transaction after the handler rollback and
+        # persist the status-0 receipt boundary.
+        rollback = getattr(session, "rollback", None)
+        if callable(rollback):
+            rollback()
+        transactions_processor = TransactionsProcessor(session)
+        try:
+            prior_result = transactions_processor.begin_evm_envelope(
+                reverted.transaction_hash,
+                reverted.from_address,
+                reverted.nonce,
+            )
+        except ValueError as exc:
+            raise InvalidTransactionError(str(exc)) from exc
+        if prior_result is None:
+            transactions_processor.record_evm_envelope(
+                reverted.transaction_hash,
+                reverted.from_address,
+                reverted.nonce,
+                reverted.transaction_hash,
+                to_address=reverted.to_address,
+                success=False,
+                error=str(reverted.reason),
+            )
+            commit = getattr(session, "commit", None)
+            if callable(commit):
+                commit()
+        return reverted.transaction_hash
+    except Exception:
+        rollback = getattr(session, "rollback", None)
+        if callable(rollback):
+            rollback()
+        raise
+
+
+def _send_raw_transaction_impl(
+    session: Session,
+    msg_handler: IMessageHandler,
+    transactions_parser: TransactionParser,
+    consensus_service: ConsensusService,
+    signed_rollup_transaction: str,
+    sim_config: dict | None = None,
+) -> str:
     """Persist a raw transaction using a request-scoped session."""
     _validate_genvm_executor_selector(sim_config)
 
@@ -2837,6 +2945,60 @@ def send_raw_transaction(
     if decoded_rollup_transaction is None:
         raise InvalidTransactionError("Invalid transaction data")
 
+    transaction_chain_id = getattr(decoded_rollup_transaction, "chain_id", None)
+    if (
+        transaction_chain_id is not None
+        and int(transaction_chain_id) != get_simulator_chain_id()
+    ):
+        raise InvalidTransactionError("InvalidChainId")
+
+    protocol_data_types = (
+        DecodedRollupTransactionData,
+        DecodedsubmitAppealDataArgs,
+        DecodedTopUpFeesDataArgs,
+        DecodedFinalizeTransactionDataArgs,
+    )
+    lifecycle_data_types = (
+        DecodedsubmitAppealDataArgs,
+        DecodedTopUpFeesDataArgs,
+        DecodedFinalizeTransactionDataArgs,
+    )
+    decoded_protocol_call = isinstance(
+        getattr(decoded_rollup_transaction, "data", None), protocol_data_types
+    )
+    decoded_lifecycle_call = isinstance(
+        getattr(decoded_rollup_transaction, "data", None), lifecycle_data_types
+    )
+    consensus_address = consensus_service.public_consensus_main_address()
+    envelope_destination = getattr(decoded_rollup_transaction, "to_address", None)
+    unknown_consensus_selector = False
+    if decoded_protocol_call:
+        # Calldata only has protocol meaning when the EVM envelope targets
+        # ConsensusMain. Previously Studio decoded the selector regardless of
+        # ``to``, so the same signed transaction that was a harmless transfer
+        # (or a revert) on Consensus could create/finalize/appeal in Studio.
+        if (
+            not consensus_address
+            or not envelope_destination
+            or str(envelope_destination).lower() != str(consensus_address).lower()
+        ):
+            raise InvalidTransactionError("InvalidConsensusDestination")
+    elif (
+        envelope_destination
+        and consensus_address
+        and str(envelope_destination).lower() == str(consensus_address).lower()
+        and getattr(decoded_rollup_transaction, "raw_data", None)
+    ):
+        # ConsensusMain has no catch-all protocol entry point. Do not reinterpret
+        # an unknown selector as a plain Studio value transfer. It remains a
+        # valid signed EVM envelope, though, so classify the failure after nonce
+        # admission as a mined execution revert.
+        unknown_consensus_selector = True
+    elif envelope_destination is None:
+        # Raw EVM bytecode deployment is outside Studio's transaction model;
+        # intelligent-contract deployment must use deploySalted/addTransaction.
+        raise InvalidTransactionError("UnsupportedEvmDeployment")
+
     from_address = decoded_rollup_transaction.from_address
     value = decoded_rollup_transaction.value
     total_spend = getattr(decoded_rollup_transaction, "total_spend", value)
@@ -2846,44 +3008,120 @@ def send_raw_transaction(
             from_address, f"Invalid address from_address: {from_address}"
         )
 
-    # Ensure sender account exists
-    if accounts_manager.get_account(from_address) is None:
-        accounts_manager.create_new_account_with_address(from_address)
-
     transaction_signature_valid = transactions_parser.transaction_has_valid_signature(
         signed_rollup_transaction, decoded_rollup_transaction
     )
     if not transaction_signature_valid:
         raise InvalidTransactionError("Transaction signature verification failed")
 
-    if isinstance(decoded_rollup_transaction.data, DecodedsubmitAppealDataArgs):
-        _reject_genvm_executor_selector_unless_deploy(sim_config, is_deploy=False)
-        return _handle_appeal_or_top_up_and_submit(
-            accounts_manager=accounts_manager,
-            transactions_processor=transactions_processor,
-            msg_handler=msg_handler,
-            decoded_rollup_transaction=decoded_rollup_transaction,
+    transaction_hash = consensus_service.generate_transaction_hash(
+        signed_rollup_transaction
+    )
+    try:
+        prior_result = transactions_processor.begin_evm_envelope(
+            transaction_hash,
+            from_address,
+            decoded_rollup_transaction.nonce,
         )
-    elif isinstance(decoded_rollup_transaction.data, DecodedTopUpFeesDataArgs):
-        _reject_genvm_executor_selector_unless_deploy(sim_config, is_deploy=False)
-        return _handle_top_up_fees(
-            accounts_manager=accounts_manager,
-            transactions_processor=transactions_processor,
-            decoded_rollup_transaction=decoded_rollup_transaction,
+    except ValueError as exc:
+        raise InvalidTransactionError(str(exc)) from exc
+    if prior_result is not None:
+        return prior_result
+
+    def execution_revert(reason: Exception) -> NoReturn:
+        """Classify a post-admission protocol rejection as a mined revert."""
+        raise _EvmExecutionReverted(
+            transaction_hash=transaction_hash,
+            from_address=from_address,
+            to_address=envelope_destination,
+            nonce=decoded_rollup_transaction.nonce,
+            reason=reason,
+        ) from reason
+
+    if unknown_consensus_selector:
+        execution_revert(InvalidTransactionError("UnknownConsensusSelector"))
+
+    # A rejected or invalid signed envelope must not leave a new account row.
+    if accounts_manager.get_account(from_address) is None:
+        accounts_manager.create_new_account_with_address(from_address, commit=False)
+
+    def finish_envelope(result: str) -> str:
+        transactions_processor.record_evm_envelope(
+            transaction_hash,
+            from_address,
+            decoded_rollup_transaction.nonce,
+            result,
+            to_address=envelope_destination,
         )
-    elif isinstance(
-        decoded_rollup_transaction.data, DecodedFinalizeTransactionDataArgs
-    ):
-        _reject_genvm_executor_selector_unless_deploy(sim_config, is_deploy=False)
-        return _handle_finalize_transaction(
-            transactions_processor=transactions_processor,
-            decoded_rollup_transaction=decoded_rollup_transaction,
-        )
+        commit = getattr(session, "commit", None)
+        if callable(commit):
+            commit()
+        return result
+
+    if decoded_lifecycle_call:
+        post_commit_event = None
+        try:
+            _reject_genvm_executor_selector_unless_deploy(sim_config, is_deploy=False)
+            if isinstance(decoded_rollup_transaction.data, DecodedsubmitAppealDataArgs):
+                appealed_tx_id = _handle_appeal_or_top_up_and_submit(
+                    accounts_manager=accounts_manager,
+                    transactions_processor=transactions_processor,
+                    msg_handler=msg_handler,
+                    decoded_rollup_transaction=decoded_rollup_transaction,
+                    emit_event=False,
+                )
+                post_commit_event = _transaction_appeal_updated_event(appealed_tx_id)
+            elif isinstance(decoded_rollup_transaction.data, DecodedTopUpFeesDataArgs):
+                _handle_top_up_fees(
+                    accounts_manager=accounts_manager,
+                    transactions_processor=transactions_processor,
+                    decoded_rollup_transaction=decoded_rollup_transaction,
+                )
+            else:
+                assert isinstance(
+                    decoded_rollup_transaction.data,
+                    DecodedFinalizeTransactionDataArgs,
+                )
+                _handle_finalize_transaction(
+                    transactions_processor=transactions_processor,
+                    decoded_rollup_transaction=decoded_rollup_transaction,
+                )
+        except (InvalidTransactionError, InvalidAddressError, JSONRPCError) as exc:
+            raise _EvmExecutionReverted(
+                transaction_hash=transaction_hash,
+                from_address=from_address,
+                to_address=envelope_destination,
+                nonce=decoded_rollup_transaction.nonce,
+                reason=exc,
+            ) from exc
+        result = finish_envelope(transaction_hash)
+        if post_commit_event is not None:
+            try:
+                msg_handler.send_message(
+                    log_event=post_commit_event,
+                    log_to_terminal=False,
+                )
+            except Exception:
+                # The protocol mutation and EVM envelope are already committed.
+                # A transient websocket/log transport failure must not turn a
+                # mined transaction into an RPC error or invite a duplicate.
+                logger.exception("Failed to publish committed appeal event")
+        return result
     else:
-        _validate_fee_envelope(decoded_rollup_transaction)
-        transaction_hash = consensus_service.generate_transaction_hash(
-            signed_rollup_transaction
-        )
+        try:
+            _validate_fee_envelope(decoded_rollup_transaction)
+        except InvalidTransactionError as exc:
+            # The fee tuple, deployment salt, and submitted value are checked
+            # by ConsensusMain after the signed EVM envelope is admitted. A
+            # rejection therefore consumes the EVM nonce and has a status-0
+            # receipt; it is not an eth_sendRawTransaction preflight error.
+            execution_revert(exc)
+        # Raw transaction submission is idempotent. Resolve duplicates before
+        # reserving a virtual-factory sequence slot or touching balances.
+        transactions_processor.lock_transaction_admission(transaction_hash)
+        is_duplicate = transactions_processor.get_transaction_by_hash(transaction_hash)
+        if is_duplicate is not None:
+            return finish_envelope(transaction_hash)
         to_address = decoded_rollup_transaction.to_address
         nonce = decoded_rollup_transaction.nonce
         value = decoded_rollup_transaction.value
@@ -2891,6 +3129,11 @@ def send_raw_transaction(
         genlayer_transaction = transactions_parser.get_genlayer_transaction(
             decoded_rollup_transaction
         )
+        # CreationPhase treats an ordinary direct caller as authoritative and
+        # ignores a spoofed sender embedded in calldata. Bind Studio's durable
+        # transaction owner to the recovered signed-envelope sender as well;
+        # otherwise value debits and later refunds can name different parties.
+        genlayer_transaction.from_address = from_address
         genlayer_transaction.max_rotations = _funded_max_rotations(
             decoded_rollup_transaction,
             genlayer_transaction.max_rotations,
@@ -2900,45 +3143,80 @@ def send_raw_transaction(
             is_deploy=genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT,
         )
 
+        # Complete every discoverable admission check before reserving storage,
+        # a virtual-factory sequence slot, or sender funds.
+        storage_reservation = None
+        if genlayer_transaction.type == TransactionType.RUN_CONTRACT:
+            to_address = genlayer_transaction.to_address
+            if not accounts_manager.is_valid_address(to_address):
+                raise InvalidAddressError(
+                    to_address, f"Invalid address to_address: {to_address}"
+                )
+
+            if not transactions_processor.is_genvm_contract_address(to_address):
+                execution_revert(InvalidTransactionError("NonGenVMContract"))
+
+            # Size-only lookup: do not hydrate current_state.data (can be
+            # tens of MB) just to test existence.
+            if live_state_column_size(session, to_address) is None:
+                raise NotFoundError(
+                    message="Contract not found",
+                    data={"address": to_address},
+                )
+
+            try:
+                _enforce_pending_queue_caps(
+                    transactions_processor=transactions_processor,
+                    to_address=to_address,
+                    from_address=from_address,
+                )
+            except QueueDepthExceeded as exc:
+                execution_revert(exc)
+            storage_reservation = enforce_contract_storage_quota(
+                session, to_address, transaction_hash
+            )
+        elif genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT:
+            # A successful deployment always creates a fresh recipient (and a
+            # reused CREATE2 salt is rejected by the virtual factory), so only the
+            # sender cap can be non-zero before the authoritative address is
+            # known.
+            try:
+                _enforce_pending_queue_caps(
+                    transactions_processor=transactions_processor,
+                    to_address=None,
+                    from_address=from_address,
+                )
+            except QueueDepthExceeded as exc:
+                execution_revert(exc)
+
         transaction_data = {}
         leader_only = False
         execution_mode = "NORMAL"
-        rollup_transaction_details = None
         if genlayer_transaction.type != TransactionType.SEND:
             leader_only = genlayer_transaction.data.leader_only
             execution_mode = genlayer_transaction.data.execution_mode
-            rollup_transaction_details = consensus_service.add_transaction(
-                signed_rollup_transaction, from_address
-            )  # because hardhat accounts are not funded
-
-            if (
-                consensus_service.web3.is_connected()
-                and rollup_transaction_details is None
-            ):
-                # raise JSONRPCError(
-                #     code=-32000,
-                #     message="Failed to add transaction to consensus layer",
-                #     data={},
-                # )
-                logger.warning(
-                    "Failed to add transaction to consensus layer",
-                    extra={
-                        "from_address": from_address,
-                        "transaction_type": genlayer_transaction.type.name,
-                        "leader_only": leader_only,
-                    },
-                )
 
         if genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT:
-            if (
-                rollup_transaction_details is None
-                or not "recipient" in rollup_transaction_details
-            ):
-                new_account = accounts_manager.create_new_account()
-                new_contract_address = new_account.address
-            else:
-                new_contract_address = rollup_transaction_details["recipient"]
-                accounts_manager.create_new_account_with_address(new_contract_address)
+            try:
+                new_contract_address = _allocate_top_level_ghost_address(
+                    transactions_processor,
+                    int(decoded_rollup_transaction.data.args.salt_nonce or 0),
+                )
+                # Keep the address row in the transaction admission unit. A
+                # premature commit here would release the duplicate-admission
+                # and virtual-factory advisory locks before the raw tx exists.
+                accounts_manager.create_new_account_with_address(
+                    new_contract_address,
+                    commit=False,
+                )
+            except InvalidTransactionError as exc:
+                if storage_reservation is not None:
+                    storage_reservation.release()
+                execution_revert(exc)
+            except Exception:
+                if storage_reservation is not None:
+                    storage_reservation.release()
+                raise
 
             transaction_data = {
                 "contract_address": new_contract_address,
@@ -2951,56 +3229,17 @@ def send_raw_transaction(
         elif genlayer_transaction.type == TransactionType.RUN_CONTRACT:
             # Contract Call
             to_address = genlayer_transaction.to_address
-            if not accounts_manager.is_valid_address(to_address):
-                raise InvalidAddressError(
-                    to_address, f"Invalid address to_address: {to_address}"
-                )
-
-            # Size-only lookup: do not hydrate current_state.data (can be
-            # tens of MB) just to test existence.
-            if live_state_column_size(session, to_address) is None:
-                raise NotFoundError(
-                    message="Contract not found",
-                    data={"address": to_address},
-                )
-
             transaction_data = {"calldata": genlayer_transaction.data.calldata}
             if fee_metadata := _fee_metadata(decoded_rollup_transaction):
                 transaction_data.update(fee_metadata)
 
-        # Check for duplicate before debit+insert to avoid TOCTOU races
-        is_duplicate = transactions_processor.get_transaction_by_hash(transaction_hash)
-
-        # Queue-depth admission control: refuse new submissions when a
-        # contract or a sender already has too many txs queued. Studio Prod
-        # is a shared sandbox; without this, one heavy user (e.g. an
-        # external oracle backend running batch verifications) can pile up
-        # thousands of PENDING txs on a single contract and starve the
-        # network for everyone else.
-        #
-        # Skip duplicates (resubmission of an already-known hash is benign)
-        # and SEND txs (faucet/transfer; not subject to per-contract pile-up
-        # because to_address is a user account, not a contract).
-        storage_reservation = None
-        if is_duplicate is None and genlayer_transaction.type != TransactionType.SEND:
-            _enforce_pending_queue_caps(
-                transactions_processor=transactions_processor,
-                to_address=to_address,
-                from_address=from_address,
-            )
-            if genlayer_transaction.type == TransactionType.RUN_CONTRACT:
-                storage_reservation = enforce_contract_storage_quota(
-                    session, to_address, transaction_hash
-                )
-
         try:
             # Debit sender BEFORE insert. Mint on demand if insufficient (Studio sandbox).
-            # Skip for SEND (execute_transfer handles it) and duplicates.
+            # Skip for SEND (execute_transfer handles it).
             if (
                 total_spend > 0
                 and from_address
                 and genlayer_transaction.type != TransactionType.SEND
-                and is_duplicate is None
             ):
                 _sandbox_debit_sender(accounts_manager, from_address, total_spend)
 
@@ -3020,6 +3259,7 @@ def send_raw_transaction(
                 sim_config,
                 None,  # triggered_on
                 execution_mode,
+                commit=False,
             )
         except Exception:
             if storage_reservation is not None:
@@ -3059,7 +3299,7 @@ def send_raw_transaction(
                 log_to_terminal=False,
             )
 
-        return transaction_hash
+        return finish_envelope(transaction_hash)
 
 
 def get_transactions_for_address(
@@ -3181,14 +3421,43 @@ def get_transaction_receipt(
     transaction = transactions_processor.get_transaction_by_hash(
         transaction_hash, include_contract_snapshot=False
     )
+    envelope = transactions_processor.get_evm_envelope(transaction_hash)
     if not transaction:
-        return None
+        if envelope is None:
+            return None
+        return {
+            "transactionHash": transaction_hash,
+            "transactionIndex": hex(0),
+            "blockHash": transaction_hash,
+            "blockNumber": hex(0),
+            "from": envelope.from_address,
+            "to": envelope.to_address,
+            "cumulativeGasUsed": hex(0),
+            "gasUsed": hex(0),
+            "effectiveGasPrice": "0x0",
+            "type": "0x0",
+            "contractAddress": None,
+            "logs": [],
+            "logsBloom": "0x" + "00" * 256,
+            "status": hex(1 if envelope.success else 0),
+        }
 
-    event_signature = "NewTransaction(bytes32,address,address)"
+    # CreationPhase always emits CreatedTransaction from ConsensusMain. It only
+    # additionally emits NewTransaction when this transaction was the recipient
+    # queue head at admission. Studio does not persist that historical boolean,
+    # so expose the universal event instead of fabricating a NewTransaction for
+    # queued submissions. SDKs accept either event when extracting the GenLayer
+    # transaction id.
+    event_signature = "CreatedTransaction(bytes32,uint256)"
     event_signature_hash = eth_utils.keccak(text=event_signature).hex()
 
-    to_addr = transaction.get("to_address")
+    protocol_to_addr = envelope.to_address if envelope is not None else None
+    to_addr = protocol_to_addr or transaction.get("to_address")
     from_addr = transaction.get("from_address")
+    try:
+        tx_slot = int(transaction.get("tx_slot", 0))
+    except (TypeError, ValueError):
+        tx_slot = 0
 
     logs = [
         {
@@ -3196,18 +3465,8 @@ def get_transaction_receipt(
             "topics": [
                 f"0x{event_signature_hash}",
                 transaction_hash,
-                (
-                    "0x000000000000000000000000" + to_addr.replace("0x", "")
-                    if to_addr
-                    else None
-                ),
-                (
-                    "0x000000000000000000000000" + from_addr.replace("0x", "")
-                    if from_addr
-                    else None
-                ),
             ],
-            "data": "0x",
+            "data": "0x" + tx_slot.to_bytes(32, "big").hex(),
             "blockNumber": 0,
             "transactionHash": transaction_hash,
             "transactionIndex": 0,
@@ -3228,11 +3487,9 @@ def get_transaction_receipt(
         "gasUsed": hex(transaction.get("gas_used", 8000000)),
         "effectiveGasPrice": "0x0",
         "type": "0x0",
-        "contractAddress": (
-            transaction.get("contract_address")
-            if transaction.get("contract_address")
-            else None
-        ),
+        # The signed EVM envelope calls ConsensusMain; deploySalted authors a
+        # GenVM ghost inside that call and is not EVM contract creation.
+        "contractAddress": None,
         "logs": logs,
         "logsBloom": "0x" + "00" * 256,
         "status": hex(1 if transaction.get("status", True) else 0),
@@ -3303,7 +3560,11 @@ def get_contract(consensus_service: ConsensusService, contract_name: str) -> dic
         )
 
     return {
-        "address": contract["address"],
+        "address": (
+            consensus_service.public_consensus_main_address()
+            if contract_name == "ConsensusMain"
+            else contract["address"]
+        ),
         "abi": contract["abi"],
         "bytecode": contract["bytecode"],
     }

@@ -90,6 +90,40 @@ class CurrentState(Base):
     )
 
 
+transactions_queue_order_seq = Sequence("transactions_queue_order_seq")
+
+
+class EvmEnvelope(Base):
+    """Mined signed EVM envelopes, including execution reverts.
+
+    Consensus relies on the execution-chain account nonce and transaction hash
+    for replay protection. Studio records the same boundary explicitly because
+    lifecycle calls do not create GenLayer ``transactions`` rows.
+    """
+
+    __tablename__ = "evm_envelopes"
+    __table_args__ = (
+        PrimaryKeyConstraint("hash", name="evm_envelopes_pkey"),
+        UniqueConstraint(
+            "from_address",
+            "nonce",
+            name="evm_envelopes_from_address_nonce_key",
+        ),
+        CheckConstraint("nonce >= 0", name="evm_envelopes_nonce_unsigned"),
+    )
+
+    hash: Mapped[str] = mapped_column(String(66), primary_key=True)
+    from_address: Mapped[str] = mapped_column(String(255), nullable=False)
+    nonce: Mapped[int] = mapped_column(IntNumeric(), nullable=False)
+    result: Mapped[str] = mapped_column(String(66), nullable=False)
+    to_address: Mapped[Optional[str]] = mapped_column(String(255), default=None)
+    success: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    error: Mapped[Optional[str]] = mapped_column(String(1024), default=None)
+    created_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), server_default=func.current_timestamp(), init=False
+    )
+
+
 class Transactions(Base):
     __tablename__ = "transactions"
     __table_args__ = (
@@ -120,6 +154,16 @@ class Transactions(Base):
     gaslimit: Mapped[Optional[int]] = mapped_column(BigInteger)
     created_at: Mapped[Optional[datetime.datetime]] = mapped_column(
         DateTime(True), server_default=func.current_timestamp(), init=False
+    )
+    # Durable issuance order. Consensus queues are slot-ordered; timestamps are
+    # only metadata and PostgreSQL CURRENT_TIMESTAMP is fixed at transaction
+    # start, so it cannot safely order concurrent admissions.
+    queue_order: Mapped[int] = mapped_column(
+        BigInteger,
+        transactions_queue_order_seq,
+        server_default=transactions_queue_order_seq.next_value(),
+        nullable=False,
+        init=False,
     )
     leader_only: Mapped[bool] = mapped_column(Boolean)
     r: Mapped[Optional[int]] = mapped_column(Integer)

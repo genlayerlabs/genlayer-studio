@@ -179,7 +179,10 @@ class PendingTransaction:
     fee_params: bytes = b""
     declared_budget: int = 0
     call_key: str = "0x" + ("0" * 64)
-    allocation_subtree: list[dict] = field(default_factory=list)
+    # Decoded FlatArrays/HashCommitments nodes when well formed; otherwise the
+    # exact receipt bytes as a 0x string so descriptor hashing does not erase a
+    # malformed or Merkle-proof payload.
+    allocation_subtree: list[dict] | str = field(default_factory=list)
     gas_used: int = 0
     use_balance: bool = False
 

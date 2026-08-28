@@ -2,7 +2,7 @@ import os
 import json
 
 DEFAULT_CONSENSUS_MAIN_ADDRESS = os.environ.get(
-    "DEFAULT_CONSENSUS_MAIN_ADDRESS", "0x0000000000000000000000000000000000000000"
+    "DEFAULT_CONSENSUS_MAIN_ADDRESS", "0xb7278A61aa25c888815aFC32Ad3cC52fF24fE575"
 )
 DEFAULT_CONSENSUS_MAIN_ABI = """[
     {
@@ -1468,6 +1468,28 @@ _STUDIO_TRAIN_TRANSACTION_ABI = [
     },
 ]
 
+_STUDIO_TRAIN_EVENT_ABI = [
+    {
+        "anonymous": False,
+        "inputs": [
+            {
+                "indexed": True,
+                "internalType": "bytes32",
+                "name": "txId",
+                "type": "bytes32",
+            },
+            {
+                "indexed": False,
+                "internalType": "uint256",
+                "name": "txSlot",
+                "type": "uint256",
+            },
+        ],
+        "name": "CreatedTransaction",
+        "type": "event",
+    }
+]
+
 
 def _abi_function_signature(entry: dict) -> str:
     """Canonical ``name(type,...)`` signature, i.e. the 4-byte selector identity."""
@@ -1531,6 +1553,7 @@ def get_default_consensus_main_contract():
         or entry.get("name") not in served_train_names
     ]
     abi.extend(served_train_abi)
+    abi.extend(_STUDIO_TRAIN_EVENT_ABI)
     return {
         "address": DEFAULT_CONSENSUS_MAIN_ADDRESS,
         "abi": abi,

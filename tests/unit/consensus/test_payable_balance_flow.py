@@ -8,8 +8,17 @@ Verifies the core accounting invariants:
 - Cumulative accepted message debits across appeal rounds
 """
 
-from unittest.mock import Mock
-from backend.consensus.base import TransactionContext
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
+import pytest
+
+from backend.consensus import base as consensus_base
+from backend.consensus.base import (
+    PendingState,
+    TransactionContext,
+    _pending_valid_until_expired,
+)
 from backend.domain.types import (
     Transaction,
     TransactionType,
@@ -17,6 +26,7 @@ from backend.domain.types import (
     TransactionExecutionMode,
 )
 from backend.database_handler.contract_snapshot import ContractSnapshot
+from backend.protocol_rpc.fees import FEE_ACCOUNTING_KEY
 
 
 def _make_snapshot(states=None, balance=0):
@@ -139,6 +149,73 @@ class TestActivationCredit:
         # Simulate second call returning False (already credited)
         am.credit_tx_value_once.return_value = False
         assert am.credit_tx_value_once("0xhash", "0xcontract", 500) is False
+
+
+@pytest.mark.asyncio
+async def test_expired_pending_transaction_cancels_before_activation(monkeypatch):
+    transaction_hash = "0x" + "ab" * 32
+    sender = "0x1111111111111111111111111111111111111111"
+    transaction = {
+        "hash": transaction_hash,
+        "status": TransactionStatus.PENDING.value,
+        "type": TransactionType.RUN_CONTRACT.value,
+        "from_address": sender,
+        "to_address": "0x2222222222222222222222222222222222222222",
+        "value": 17,
+        "data": {
+            "valid_until": 99,
+            FEE_ACCOUNTING_KEY: {"sender": sender},
+        },
+    }
+    transactions_processor = Mock()
+    transactions_processor.get_transaction_by_hash.return_value = transaction
+    accounts_manager = Mock()
+    dispatch = AsyncMock()
+    monkeypatch.setattr(consensus_base.time, "time", lambda: 100)
+    monkeypatch.setattr(
+        consensus_base.ConsensusAlgorithm,
+        "dispatch_transaction_status_update",
+        dispatch,
+    )
+    context = SimpleNamespace(
+        transaction=SimpleNamespace(hash=transaction_hash),
+        transactions_processor=transactions_processor,
+        accounts_manager=accounts_manager,
+        msg_handler=Mock(),
+    )
+
+    result = await PendingState().handle(context)
+
+    assert result is None
+    accounts_manager.refund_tx_value.assert_called_once_with(transaction_hash, sender)
+    accounts_manager.cancel_tx_fee_accounting_once.assert_called_once_with(
+        transaction_hash,
+        sender,
+        "valid_until_expired",
+    )
+    dispatch.assert_awaited_once_with(
+        transactions_processor,
+        transaction_hash,
+        TransactionStatus.CANCELED,
+        context.msg_handler,
+    )
+
+
+def test_valid_until_equality_remains_activatable_for_full_evm_second():
+    transaction = SimpleNamespace(data={"valid_until": 100}, consensus_history={})
+
+    assert _pending_valid_until_expired(transaction, now=100.999) is False
+    assert _pending_valid_until_expired(transaction, now=101.0) is True
+
+
+def test_valid_until_does_not_cancel_appeal_recomputation():
+    transaction = SimpleNamespace(
+        data={"valid_until": 100},
+        consensus_history={"current_status_changes": ["ACCEPTED"]},
+        appealed=True,
+    )
+
+    assert _pending_valid_until_expired(transaction, now=10_000) is False
 
 
 class TestAppealReentry:

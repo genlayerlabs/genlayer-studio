@@ -10,6 +10,7 @@ from web3 import Web3
 
 from backend.consensus.base import (
     ConsensusAlgorithm,
+    _author_message_phase_locally,
     _apply_external_message_freeze_check,
     _apply_message_value_withdrawals_for_phase,
     _child_config_rotation_rounds,
@@ -17,6 +18,7 @@ from backend.consensus.base import (
     _emit_messages,
     _get_messages_data,
     _runtime_rotation_limit,
+    _studio_child_transaction_id,
     _validators_in_frozen_selection_pool,
 )
 from backend.consensus.history import (
@@ -54,9 +56,9 @@ from backend.protocol_rpc.endpoints import (
     sim_min_message_primary_fees,
 )
 from backend.protocol_rpc.fees import (
+    ArithmeticOverflow,
     AllocationDuplicateKey,
     AllocationLifecycleBudgetInsufficient,
-    AllocationSubtreeMismatch,
     AllocationTreeBudgetInconsistent,
     AllocationTreeMalformed,
     AllocationTreeTooDeep,
@@ -131,6 +133,7 @@ from backend.protocol_rpc.fees import (
     refund_failed_external_message_fee,
     required_fee_deposit,
     settle_fee_accounting,
+    _settlement_storage_recipient_count,
     stamp_receipt_execution_policy,
     studio_fee_config,
     successful_appeal_profit,
@@ -441,6 +444,37 @@ def test_calculate_round_fees_rejects_invalid_appeal_rounds():
 
     with pytest.raises(InvalidAppealRounds):
         calculate_round_fees(fees_distribution, 5)
+
+
+def test_calculate_round_fees_rejects_uint256_work_overflow():
+    fees_distribution = _fees_distribution(
+        leader_timeunits=2**256 - 1,
+        validator_timeunits=1,
+    )
+
+    with pytest.raises(ArithmeticOverflow):
+        calculate_round_fees(fees_distribution, 5)
+
+
+def test_calculate_round_fees_rejects_uint256_execution_budget_overflow():
+    fees_distribution = _fees_distribution(
+        execution_budget_per_round=2**256 - 1,
+    )
+
+    with pytest.raises(ArithmeticOverflow):
+        calculate_round_fees(fees_distribution, 5)
+
+
+def test_successful_appeal_reward_uses_consensus_overflow_avoiding_arrangement():
+    # bond * 5 would overflow here, but AppealEconomics computes bond * 2 +
+    # bond / 2 and the result is representable.
+    bond = (2**256 - 1) // 4
+    assert successful_appeal_profit(bond) == bond * 3 // 2
+
+
+def test_successful_appeal_reward_rejects_unrepresentable_result():
+    with pytest.raises(ArithmeticOverflow):
+        successful_appeal_profit((2**256 - 1) // 2)
 
 
 def test_calculate_round_fees_applies_gen_per_time_unit_multiplier():
@@ -1180,6 +1214,67 @@ def test_endpoint_fee_envelope_accepts_exact_fee_deposit():
     _validate_fee_envelope(decoded)
 
 
+def test_fee_enabled_endpoint_rejects_legacy_submission_without_distribution(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        StudioFeePolicy,
+        "from_env",
+        classmethod(lambda cls: StudioFeePolicy(gen_per_time_unit=1)),
+    )
+    decoded = DecodedRollupTransaction(
+        from_address="0x1111111111111111111111111111111111111111",
+        to_address="0x0000000000000000000000000000000000000000",
+        data=DecodedRollupTransactionData(
+            function_name="addTransaction",
+            args=DecodedRollupTransactionDataArgs(
+                sender="0x1111111111111111111111111111111111111111",
+                recipient="0x2222222222222222222222222222222222222222",
+                num_of_initial_validators=5,
+                max_rotations=0,
+                data="0x",
+                fees_distribution=None,
+            ),
+        ),
+        type="2",
+        nonce=0,
+        value=0,
+    )
+
+    with pytest.raises(InvalidTransactionError, match="FeesDistributionMissing"):
+        _validate_fee_envelope(decoded)
+
+
+def test_endpoint_rejects_zero_salt_for_deploy_salted(monkeypatch):
+    monkeypatch.setattr(
+        StudioFeePolicy,
+        "from_env",
+        classmethod(lambda cls: StudioFeePolicy()),
+    )
+    decoded = DecodedRollupTransaction(
+        from_address="0x1111111111111111111111111111111111111111",
+        to_address="0x0000000000000000000000000000000000000000",
+        data=DecodedRollupTransactionData(
+            function_name="deploySalted",
+            args=DecodedRollupTransactionDataArgs(
+                sender="0x1111111111111111111111111111111111111111",
+                recipient="0x2222222222222222222222222222222222222222",
+                num_of_initial_validators=5,
+                max_rotations=0,
+                salt_nonce=0,
+                data="0x",
+                fees_distribution=None,
+            ),
+        ),
+        type="2",
+        nonce=0,
+        value=0,
+    )
+
+    with pytest.raises(InvalidTransactionError, match="InvalidDeploymentWithSalt"):
+        _validate_fee_envelope(decoded)
+
+
 def test_submission_preserves_largest_funded_round_as_global_rotation_cap():
     fees_distribution = _env_fees_distribution(
         appeals=2,
@@ -1359,7 +1454,7 @@ def _rollup_free_context(calls):
     )
 
 
-def test_internal_deployment_binds_local_child_to_helper_created_recipient():
+def test_internal_deployment_binds_local_child_to_authoritative_recipient():
     calls = []
     created_accounts = []
 
@@ -1368,8 +1463,8 @@ def test_internal_deployment_binds_local_child_to_helper_created_recipient():
             calls.append((args, kwargs))
 
     class _Accounts:
-        def create_new_account_with_address(self, address):
-            created_accounts.append(address)
+        def create_new_account_with_address(self, address, *, commit=True):
+            created_accounts.append((address, commit))
 
     context = SimpleNamespace(
         transaction=SimpleNamespace(
@@ -1408,7 +1503,7 @@ def test_internal_deployment_binds_local_child_to_helper_created_recipient():
         "accepted",
     )
 
-    assert created_accounts == [Web3.to_checksum_address(helper_recipient)]
+    assert created_accounts == [(Web3.to_checksum_address(helper_recipient), False)]
     assert calls[0][0][1] == Web3.to_checksum_address(helper_recipient)
     assert child_data["contract_address"] == Web3.to_checksum_address(helper_recipient)
 
@@ -1557,8 +1652,9 @@ def test_non_ghost_internal_message_is_skipped_and_refunded_once(
         def insert_transaction(self, *args, **kwargs):
             insert_calls.append((args, kwargs))
 
-        def mutate_transaction_fee_accounting(self, tx_hash, mutator):
+        def mutate_transaction_fee_accounting(self, tx_hash, mutator, *, commit=True):
             assert tx_hash == parent_hash
+            assert commit is False
             updated = mutator(self.accounting)
             self.accounting = updated
             return updated
@@ -1612,6 +1708,165 @@ def test_non_ghost_internal_message_is_skipped_and_refunded_once(
     assert record["skipped"] is True
     assert record["skippedRefunded"] is True
     assert record["skippedRefundAmount"] == expected_account_refund
+
+
+def test_local_message_authority_applies_ghost_factory_and_per_child_failures():
+    registered = "0x2222222222222222222222222222222222222222"
+    missing = "0x3333333333333333333333333333333333333333"
+    parent_hash = "0x" + ("11" * 32)
+
+    class _Processor:
+        def __init__(self):
+            self.ghosts = {registered.lower()}
+            self.locked = False
+
+        def lock_ghost_factory(self):
+            self.locked = True
+
+        def lock_pending_recipients(self, addresses):
+            self.locked_recipients = list(addresses)
+
+        def get_successful_ghost_creation_count(self):
+            return 0
+
+        def is_genvm_contract_address(self, address):
+            return str(address).lower() in self.ghosts
+
+        def get_pending_transaction_count_for_address(self, _address):
+            return 0
+
+    processor = _Processor()
+    context = SimpleNamespace(
+        transaction=SimpleNamespace(hash=parent_hash),
+        transactions_processor=processor,
+    )
+
+    def child(recipient, tx_type, occurrence, salt=0):
+        return [
+            recipient,
+            {},
+            tx_type,
+            0,
+            0,
+            occurrence,
+            {"saltNonce": salt, "data": b"\x01"},
+        ]
+
+    first_occurrence = "0x" + ("01" * 32)
+    missing_occurrence = "0x" + ("02" * 32)
+    deploy_occurrence = "0x" + ("03" * 32)
+    duplicate_occurrence = "0x" + ("04" * 32)
+    receipt = _author_message_phase_locally(
+        context,
+        [
+            child(registered, TransactionType.RUN_CONTRACT.value, first_occurrence),
+            child(missing, TransactionType.RUN_CONTRACT.value, missing_occurrence),
+            child(
+                "0x0000000000000000000000000000000000000000",
+                TransactionType.DEPLOY_CONTRACT.value,
+                deploy_occurrence,
+                42,
+            ),
+            child(
+                "0x0000000000000000000000000000000000000000",
+                TransactionType.DEPLOY_CONTRACT.value,
+                duplicate_occurrence,
+                42,
+            ),
+        ],
+        "accepted",
+    )
+
+    zero = "0x" + ("00" * 32)
+    assert processor.locked is True
+    assert {address.lower() for address in processor.locked_recipients} == {
+        registered.lower(),
+        "0x4104e3b744e60be5e612b909f04d1547fc87094a",
+    }
+    assert receipt["tx_ids_hex"] == [
+        _studio_child_transaction_id(parent_hash, "accepted", first_occurrence),
+        zero,
+        _studio_child_transaction_id(parent_hash, "accepted", deploy_occurrence),
+        zero,
+    ]
+    assert receipt["recipients"][0] == Web3.to_checksum_address(registered)
+    assert receipt["recipients"][1] == Web3.to_checksum_address(missing)
+    assert receipt["recipients"][2] == "0x4104e3b744E60be5E612b909f04D1547Fc87094a"
+    assert receipt["recipients"][3] == Web3.to_checksum_address(
+        "0x0000000000000000000000000000000000000000"
+    )
+
+
+def test_local_message_authority_enforces_recipient_queue_capacity(monkeypatch):
+    monkeypatch.setenv("MAX_PENDING_PER_CONTRACT_DEFAULT", "20")
+    recipient = "0x2222222222222222222222222222222222222222"
+
+    processor = SimpleNamespace(
+        lock_ghost_factory=lambda: None,
+        lock_pending_recipients=lambda _addresses: None,
+        get_successful_ghost_creation_count=lambda: 0,
+        is_genvm_contract_address=lambda address: address.lower() == recipient.lower(),
+        get_pending_transaction_count_for_address=lambda _address: 20,
+    )
+    occurrence = "0x" + ("05" * 32)
+    receipt = _author_message_phase_locally(
+        SimpleNamespace(
+            transaction=SimpleNamespace(hash="0x" + ("22" * 32)),
+            transactions_processor=processor,
+        ),
+        [
+            [
+                recipient,
+                {},
+                TransactionType.RUN_CONTRACT.value,
+                0,
+                0,
+                occurrence,
+                {"saltNonce": 0, "data": b"\x01"},
+            ]
+        ],
+        "finalized",
+    )
+
+    assert receipt == {
+        "tx_ids_hex": ["0x" + ("00" * 32)],
+        "recipients": [Web3.to_checksum_address(recipient)],
+    }
+
+
+def test_local_message_authority_skips_empty_payload_before_deployment():
+    processor = SimpleNamespace(
+        lock_ghost_factory=lambda: None,
+        lock_pending_recipients=lambda _addresses: None,
+        get_successful_ghost_creation_count=lambda: 0,
+        is_genvm_contract_address=lambda _address: False,
+        get_pending_transaction_count_for_address=lambda _address: 0,
+    )
+    receipt = _author_message_phase_locally(
+        SimpleNamespace(
+            transaction=SimpleNamespace(hash="0x" + ("23" * 32)),
+            transactions_processor=processor,
+        ),
+        [
+            [
+                "0x0000000000000000000000000000000000000000",
+                {},
+                TransactionType.DEPLOY_CONTRACT.value,
+                0,
+                0,
+                "0x" + ("06" * 32),
+                {"saltNonce": 0, "data": b""},
+            ]
+        ],
+        "accepted",
+    )
+
+    assert receipt == {
+        "tx_ids_hex": ["0x" + ("00" * 32)],
+        "recipients": [
+            Web3.to_checksum_address("0x0000000000000000000000000000000000000000")
+        ],
+    }
 
 
 def test_simulation_fee_accounting_accepts_sdk_style_fee_options():
@@ -3254,23 +3509,6 @@ def test_simulation_fee_consumption_fills_mode2_payload_from_allocation():
         StudioFeePolicy(),
     )
     message = recorded["execution_fee_report"]["messageReveal"]["messages"][0]
-    expected_subtree = encode(
-        [MESSAGE_ALLOCATION_NODE_ABI_TYPE],
-        [
-            [
-                (
-                    1,
-                    True,
-                    NODE_ROOT_SENTINEL,
-                    recipient,
-                    bytes.fromhex(CALL_KEY_WILDCARD[2:]),
-                    75,
-                    fee_params,
-                )
-            ]
-        ],
-    )
-
     assert recorded["execution_fee_consumed"] == 80
     assert recorded["execution_fee_consumed_buckets"] == [80, 0]
     assert recorded["genvm_fee_consumed_buckets"] == [80, 0, 55]
@@ -3289,8 +3527,8 @@ def test_simulation_fee_consumption_fills_mode2_payload_from_allocation():
     assert message["messageFeeMode"] == "mode2"
     assert message["feeParams"] == "0x" + fee_params.hex()
     assert message["declaredBudget"] == 75
-    assert message["allocationSubtree"] == "0x" + expected_subtree.hex()
-    assert message["allocationSubtreeBytes"] == len(expected_subtree)
+    assert message["allocationSubtree"] == "0x"
+    assert message["allocationSubtreeBytes"] == 0
     assert recorded_again["message_fee_consumed"] == 75
     assert recorded_again["allocation_consumed"] == {"0": 75}
 
@@ -3494,7 +3732,7 @@ def test_simulation_fee_report_labels_prepopulated_allocation_messages_as_mode2(
     assert message["messageFeeMode"] == "mode2"
 
 
-def test_simulation_fee_report_fills_missing_subtree_for_prepopulated_mode2_message():
+def test_flat_array_simulation_fee_report_preserves_missing_receipt_subtree():
     fee_params = _encode_internal_fee_params()
     child_fee_params = _encode_internal_fee_params()
     recipient = "0x2222222222222222222222222222222222222222"
@@ -3539,37 +3777,11 @@ def test_simulation_fee_report_fills_missing_subtree_for_prepopulated_mode2_mess
 
     recorded = record_execution_fee_consumption(accounting, receipt, StudioFeePolicy())
     message = recorded["execution_fee_report"]["messageReveal"]["messages"][0]
-    expected_subtree = encode(
-        [MESSAGE_ALLOCATION_NODE_ABI_TYPE],
-        [
-            [
-                (
-                    1,
-                    True,
-                    NODE_ROOT_SENTINEL,
-                    recipient,
-                    bytes.fromhex("12" * 32),
-                    110,
-                    fee_params,
-                ),
-                (
-                    1,
-                    True,
-                    0,
-                    child_recipient,
-                    bytes.fromhex("34" * 32),
-                    55,
-                    child_fee_params,
-                ),
-            ]
-        ],
-    )
-
     assert recorded["message_fee_consumed"] == 110
     assert recorded["allocation_consumed"] == {"0": 110}
     assert message["messageFeeMode"] == "mode2"
-    assert message["allocationSubtree"] == "0x" + expected_subtree.hex()
-    assert message["allocationSubtreeBytes"] == len(expected_subtree)
+    assert message["allocationSubtree"] == "0x"
+    assert message["allocationSubtreeBytes"] == 0
 
 
 def test_simulation_fee_consumption_records_external_allocation_reservation():
@@ -5480,6 +5692,203 @@ def test_failed_leader_appeal_dv_replay_withholds_leader_and_refunds_bond_dust()
     assert settled["appeal_bond_settlements"][0]["bondDistributed"] == 2_298
 
 
+def test_failed_leader_appeal_bond_recipients_share_storage_with_zero_validator_work():
+    leader = f"0x{20:040x}"
+    replay_validators = [
+        _history_receipt(
+            mode="validator",
+            address=f"0x{index:040x}",
+            vote="agree" if index < 23 else "disagree",
+        )
+        for index in range(20, 25)
+    ]
+    history = {
+        "consensus_results": [
+            {"consensus_round": "Undetermined"},
+            {
+                "consensus_round": "Leader Appeal Failed",
+                "leader_result": [
+                    _history_receipt(mode="leader", address=leader),
+                    replay_validators[0],
+                ],
+                "validator_results": replay_validators[1:],
+            },
+        ]
+    }
+
+    recipients = _settlement_storage_recipient_count(
+        history,
+        [
+            {
+                "round": 2,
+                "outcome": "Leader Appeal Failed",
+                "rule": "leader_appeal_replay",
+                "rotations": 0,
+                "timeUnitAmount": 100,
+            }
+        ],
+        _fees_distribution(leader_timeunits=100, validator_timeunits=0),
+        StudioFeePolicy(),
+        "NORMAL",
+        bond_settlements=[
+            {
+                "outcomeRound": 2,
+                "bondDistributed": 2_298,
+            }
+        ],
+    )
+
+    # Three aligned replay voters receive the bond; the leader overlaps the
+    # first of those seats, so the unique on-chain distribution index has 3.
+    assert recipients == 3
+
+
+def test_zero_failed_leader_appeal_bond_does_not_create_storage_recipients():
+    leader = f"0x{20:040x}"
+    replay_validators = [
+        _history_receipt(
+            mode="validator",
+            address=f"0x{index:040x}",
+            vote="agree" if index < 23 else "disagree",
+        )
+        for index in range(20, 25)
+    ]
+    history = {
+        "consensus_results": [
+            {"consensus_round": "Undetermined"},
+            {
+                "consensus_round": "Leader Appeal Failed",
+                "leader_result": [
+                    _history_receipt(mode="leader", address=leader),
+                    replay_validators[0],
+                ],
+                "validator_results": replay_validators[1:],
+            },
+        ]
+    }
+
+    recipients = _settlement_storage_recipient_count(
+        history,
+        [
+            {
+                "round": 2,
+                "outcome": "Leader Appeal Failed",
+                "rule": "leader_appeal_replay",
+                "rotations": 0,
+                "timeUnitAmount": 0,
+            }
+        ],
+        _fees_distribution(leader_timeunits=0, validator_timeunits=0),
+        StudioFeePolicy(),
+        "NORMAL",
+        bond_settlements=[
+            {
+                "outcomeRound": 2,
+                "bondDistributed": 0,
+            }
+        ],
+    )
+
+    assert recipients == 0
+
+
+def test_zero_failed_timeout_leader_share_does_not_create_storage_recipient():
+    leader = "0x2222222222222222222222222222222222222222"
+    history = {
+        "consensus_results": [
+            {"consensus_round": "Leader Timeout"},
+            {
+                "consensus_round": "Leader Timeout Appeal Failed",
+                "leader_result": [
+                    _history_receipt(mode="leader", address=leader, timeout=True)
+                ],
+                "validator_results": [],
+            },
+        ]
+    }
+    settlement_rounds = [
+        {
+            "round": 2,
+            "outcome": "Leader Timeout Appeal Failed",
+            "rule": "post_timeout_appeal_repeated_timeout",
+            "rotations": 0,
+            "timeUnitAmount": 0,
+        }
+    ]
+    fees = _fees_distribution(leader_timeunits=0, validator_timeunits=0)
+
+    no_payout = _settlement_storage_recipient_count(
+        history,
+        settlement_rounds,
+        fees,
+        StudioFeePolicy(),
+        "NORMAL",
+        bond_settlements=[{"outcomeRound": 2, "leaderPayout": 0}],
+    )
+    paid = _settlement_storage_recipient_count(
+        history,
+        settlement_rounds,
+        fees,
+        StudioFeePolicy(),
+        "NORMAL",
+        bond_settlements=[{"outcomeRound": 2, "leaderPayout": 1}],
+    )
+
+    assert no_payout == 0
+    assert paid == 1
+
+
+def test_zero_failed_validator_appeal_bond_does_not_create_storage_recipients():
+    validators = [
+        _history_receipt(
+            mode="validator",
+            address=f"0x{index:040x}",
+            vote="agree" if index < 3 else "disagree",
+        )
+        for index in range(1, 6)
+    ]
+    history = {
+        "consensus_results": [
+            {"consensus_round": "Accepted"},
+            {
+                "consensus_round": "Validator Appeal Failed",
+                "leader_result": validators[0],
+                "validator_results": validators[1:],
+            },
+        ]
+    }
+    settlement_rounds = [
+        {
+            "round": 1,
+            "outcome": "Validator Appeal Failed",
+            "rule": "validator_appeal_failed_redistribution",
+            "rotations": 0,
+            "timeUnitAmount": 0,
+        }
+    ]
+    fees = _fees_distribution(leader_timeunits=0, validator_timeunits=0)
+
+    no_payout = _settlement_storage_recipient_count(
+        history,
+        settlement_rounds,
+        fees,
+        StudioFeePolicy(),
+        "NORMAL",
+        bond_settlements=[{"outcomeRound": 1, "bondDistributed": 0}],
+    )
+    paid = _settlement_storage_recipient_count(
+        history,
+        settlement_rounds,
+        fees,
+        StudioFeePolicy(),
+        "NORMAL",
+        bond_settlements=[{"outcomeRound": 1, "bondDistributed": 9}],
+    )
+
+    assert no_payout == 0
+    assert paid == 3
+
+
 def test_failed_leader_timeout_appeal_refunds_sender_half_of_bond():
     fees_distribution = _fees_distribution(appeals=1, rotations=[0, 0])
     accounting = create_fee_accounting(
@@ -5717,6 +6126,57 @@ def test_settlement_accumulates_receipt_fees_for_every_leader_attempt():
     assert settled["execution_fee_consumed_buckets"] == [expected_receipts, 37]
     assert settled["execution_fee_consumed"] == expected_receipts + 37
     assert len(settled["historical_execution_attempts"]) == 2
+
+
+def test_settlement_does_not_fabricate_validator_pay_for_timeout_rotation():
+    fees_distribution = _fees_distribution(rotations=[1])
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5),
+        user_value=0,
+    )
+    rotated_out = _history_receipt(
+        mode="leader",
+        address="0x1111111111111111111111111111111111111111",
+    )
+    final_leader = _history_receipt(
+        mode="leader",
+        address="0x2222222222222222222222222222222222222222",
+    )
+    final_validators = [
+        _history_receipt(
+            mode="validator",
+            address=f"0x{index:040x}",
+            vote="agree",
+        )
+        for index in range(20, 25)
+    ]
+    history = {
+        "consensus_results": [
+            {
+                "consensus_round": "Leader Rotation",
+                "leader_result": [rotated_out],
+                "validator_results": [],
+            },
+            {
+                "consensus_round": "Accepted",
+                "leader_result": [final_leader, final_validators[0]],
+                "validator_results": final_validators[1:],
+            },
+        ]
+    }
+
+    settled, _ = settle_fee_accounting(
+        accounting,
+        actual_final_round=0,
+        num_of_validators=5,
+        consensus_history=history,
+    )
+
+    # Consensus pays the timed-out, rotated leader 50%, then pays the final
+    # normal attempt. The empty prior validator array is not five hidden votes.
+    assert settled["settlement_rounds"][0]["timeUnitAmount"] == 50 + 100 + 5 * 200
 
 
 def test_settlement_preserves_each_attempts_live_metering_snapshot():
@@ -6211,14 +6671,16 @@ def test_fill_message_fee_payload_from_allocation_uses_matching_policy_and_subtr
 
     assert message["declaredBudget"] == 111
     assert message["feeParams"].startswith("0x")
-    assert len(message["allocationSubtree"]) == 2
-    assert message["allocationSubtree"][0]["parentIndex"] == NODE_ROOT_SENTINEL
-    assert message["allocationSubtree"][0]["budget"] == 111
-    assert message["allocationSubtree"][1]["parentIndex"] == 0
-    assert message["allocationSubtree"][1]["budget"] == 56
+    assert "allocationSubtree" not in message
+    resolved = message["_studioResolvedAllocationSubtree"]
+    assert len(resolved) == 2
+    assert resolved[0]["parentIndex"] == NODE_ROOT_SENTINEL
+    assert resolved[0]["budget"] == 111
+    assert resolved[1]["parentIndex"] == 0
+    assert resolved[1]["budget"] == 56
 
 
-def test_fill_message_fee_payload_rejects_mismatched_prepopulated_subtree():
+def test_flat_array_message_fee_payload_ignores_mismatched_receipt_subtree():
     fee_params = _encode_internal_fee_params()
     child_fee_params = _encode_internal_fee_params(leader_timeunits=6)
     recipient = "0x2222222222222222222222222222222222222222"
@@ -6242,25 +6704,28 @@ def test_fill_message_fee_payload_rejects_mismatched_prepopulated_subtree():
         user_value=0,
     )
 
-    with pytest.raises(AllocationSubtreeMismatch):
-        fill_message_fee_payload_from_allocation(
-            accounting,
-            {
-                "messageType": 1,
-                "recipient": recipient,
-                "onAcceptance": True,
-                "declaredBudget": 111,
-                "feeParams": fee_params,
-                "callKey": "0x" + "0" * 64,
-                "allocationSubtree": [
-                    _allocation(
-                        recipient=recipient,
-                        budget=111,
-                        fee_params=fee_params,
-                    )
-                ],
-            },
+    supplied = [
+        _allocation(
+            recipient=recipient,
+            budget=111,
+            fee_params=fee_params,
         )
+    ]
+    message = fill_message_fee_payload_from_allocation(
+        accounting,
+        {
+            "messageType": 1,
+            "recipient": recipient,
+            "onAcceptance": True,
+            "declaredBudget": 111,
+            "feeParams": fee_params,
+            "callKey": "0x" + "0" * 64,
+            "allocationSubtree": supplied,
+        },
+    )
+
+    assert message["allocationSubtree"] == supplied
+    assert len(message["_studioResolvedAllocationSubtree"]) == 2
 
 
 def test_mode2_message_fees_reject_missing_allocation_and_phase_mismatch():
@@ -8066,6 +8531,66 @@ def test_create_child_fee_accounting_prices_primary_at_child_owned_caps():
     assert child_accounting["user_value"] == 7
 
 
+def test_zero_work_internal_child_and_zero_principal_appeal_match_consensus():
+    fee_params = _encode_internal_fee_params(
+        leader_timeunits=0,
+        validator_timeunits=0,
+        appeals=1,
+        rotations=[0, 0],
+        execution_budget_per_round=0,
+    )
+    child_fees, child_accounting = create_child_fee_accounting(
+        message={
+            "messageType": 1,
+            "recipient": "0x3333333333333333333333333333333333333333",
+            "value": 0,
+            "onAcceptance": True,
+            "feeParams": fee_params,
+            "declaredBudget": 0,
+            "callKey": "0x" + "0" * 64,
+        },
+        parent_fees_distribution=_fees_distribution(),
+        sender="0x1111111111111111111111111111111111111111",
+    )
+
+    assert child_fees["leaderTimeunitsAllocation"] == 0
+    assert child_fees["validatorTimeunitsAllocation"] == 0
+    assert child_accounting["paid_fee_value"] == 0
+    assert child_accounting["primary_fee_required"] == 0
+
+    appealed = record_appeal_bond(
+        child_accounting,
+        amount=0,
+        appealer="0x1111111111111111111111111111111111111111",
+        current_round=0,
+        status="ACCEPTED",
+        available_appeal_validators=7,
+    )
+    assert appealed["appeal_bonds"][0]["amount"] == 0
+    assert appealed["appeal_bonds"][0]["requiredCharge"] == 0
+
+
+def test_zero_bond_does_not_make_one_seat_leader_timeout_appealable():
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(),
+        num_of_validators=5,
+        submitted_value=1100,
+        user_value=0,
+    )
+    accounting["fees_distribution"]["leaderTimeunitsAllocation"] = 0
+    accounting["fees_distribution"]["validatorTimeunitsAllocation"] = 0
+
+    with pytest.raises(InvalidAppealBond):
+        record_appeal_bond(
+            accounting,
+            amount=0,
+            appealer="0x1111111111111111111111111111111111111111",
+            current_round=0,
+            status="LEADER_TIMEOUT",
+            leader_timeout_live_seats=1,
+        )
+
+
 def test_create_child_fee_accounting_rejects_budget_below_child_primary_fee():
     with pytest.raises(MessageDeclaredBudgetInsufficient):
         create_child_fee_accounting(
@@ -8207,7 +8732,7 @@ class _MessageDispatchTxProcessor:
         self.updated_hash = None
         self.fee_accounting = fee_accounting
 
-    def get_transaction_count(self, address):
+    def get_genlayer_transaction_count(self, address):
         return 3
 
     def update_transaction_fee_accounting(self, tx_hash, accounting):
@@ -8215,7 +8740,8 @@ class _MessageDispatchTxProcessor:
         self.updated_fee_accounting = accounting
         self.fee_accounting = accounting
 
-    def mutate_transaction_fee_accounting(self, tx_hash, mutator):
+    def mutate_transaction_fee_accounting(self, tx_hash, mutator, *, commit=True):
+        assert commit is False
         updated = mutator(self.fee_accounting)
         self.update_transaction_fee_accounting(tx_hash, updated)
         return updated
@@ -8265,36 +8791,37 @@ class _MessageValueReservationProcessor:
     def __init__(self, fee_accounting):
         self.fee_accounting = fee_accounting
 
-    def mutate_transaction_fee_accounting(self, tx_hash, mutator):
+    def mutate_transaction_fee_accounting(self, tx_hash, mutator, *, commit=True):
+        assert commit is False
         self.fee_accounting = mutator(self.fee_accounting)
         return self.fee_accounting
 
 
 class _ExternalFreezeQuery:
-    def __init__(self, *, scalar_value=None, rows=None):
-        self.scalar_value = scalar_value
+    def __init__(self, *, one_value=None, rows=None):
+        self.one_value = one_value
         self.rows = rows or []
 
     def filter(self, *args):
         return self
 
     def scalar(self):
-        return self.scalar_value
+        return self.one_value
 
     def all(self):
         return self.rows
 
 
 class _ExternalFreezeSession:
-    def __init__(self, *, current_created_at=None, accepted_rows=None):
-        self.current_created_at = current_created_at
+    def __init__(self, *, current_order=None, accepted_rows=None):
+        self.current_order = current_order
         self.accepted_rows = accepted_rows or []
         self.query_count = 0
 
     def query(self, *args):
         self.query_count += 1
         if self.query_count == 1:
-            return _ExternalFreezeQuery(scalar_value=self.current_created_at)
+            return _ExternalFreezeQuery(one_value=self.current_order)
         return _ExternalFreezeQuery(rows=self.accepted_rows)
 
 
@@ -8741,7 +9268,7 @@ def test_internal_deployment_descriptor_stays_zero_address_and_carries_salt():
     assert pending.address == "0x"
 
 
-def test_message_dispatch_fills_mode2_child_fee_accounting_from_allocation_subtree(
+def test_flat_array_message_dispatch_ignores_bad_receipt_subtree_and_inherits_parent(
     monkeypatch,
 ):
     monkeypatch.setenv("GENLAYER_STUDIO_GEN_PER_TIME_UNIT", "1")
@@ -8793,6 +9320,14 @@ def test_message_dispatch_fills_mode2_child_fee_accounting_from_allocation_subtr
         fee_params=b"",
         declared_budget=0,
         call_key=root_call_key,
+        allocation_subtree=[
+            _allocation(
+                recipient=recipient,
+                call_key=root_call_key,
+                budget=root_budget,
+                fee_params=root_fee_params,
+            )
+        ],
     )
 
     _, inserts = _get_messages_data(context, [pending], "accepted")
@@ -11482,7 +12017,7 @@ def test_transaction_payload_fees_null_when_fee_accounting_disabled():
     assert parsed["txExecutionResultName"] == "NOT_VOTED"
 
 
-def _acceptance_dispatch_context(calls, *, forwarding_skipped):
+def _acceptance_dispatch_context(calls):
     """A parent owing an acceptance-phase emission that carries no children."""
 
     accounting = {
@@ -11496,10 +12031,19 @@ def _acceptance_dispatch_context(calls, *, forwarding_skipped):
         def insert_transaction(self, *args, **kwargs):
             calls.append((args, kwargs))
 
-        def get_transaction_count(self, _address):
+        def get_genlayer_transaction_count(self, _address):
             return 0
 
-        def mutate_transaction_fee_accounting(self, _hash, mutate):
+        def lock_ghost_factory(self):
+            return None
+
+        def get_successful_ghost_creation_count(self):
+            return 0
+
+        def lock_pending_recipients(self, _recipients):
+            return None
+
+        def mutate_transaction_fee_accounting(self, _hash, mutate, *, commit=True):
             transaction.data[FEE_ACCOUNTING_KEY] = mutate(
                 transaction.data[FEE_ACCOUNTING_KEY]
             )
@@ -11514,14 +12058,9 @@ def _acceptance_dispatch_context(calls, *, forwarding_skipped):
         origin_address=None,
         data={FEE_ACCOUNTING_KEY: accounting},
     )
-    consensus_service = SimpleNamespace(
-        emit_transaction_event=lambda *args, **kwargs: None,
-        transaction_forwarding_skipped=lambda _account: forwarding_skipped,
-    )
     return SimpleNamespace(
         transaction=transaction,
         transactions_processor=_Processor(),
-        consensus_service=consensus_service,
     )
 
 
@@ -11533,16 +12072,10 @@ def _empty_success_receipt():
     )
 
 
-def test_acceptance_dispatch_completes_without_a_rollup():
-    """Regression: this looped forever instead of committing.
-
-    A parent owing an acceptance emission but carrying no children still
-    reaches _emit_messages. With no rollup attached the receipt is None by
-    design, which the strict check read as a lost emission and retried
-    forever, so acceptanceDispatched was never set.
-    """
+def test_acceptance_dispatch_completes_without_a_helper_rollup():
+    """An empty acceptance phase commits through Studio's local authority."""
     calls = []
-    context = _acceptance_dispatch_context(calls, forwarding_skipped=True)
+    context = _acceptance_dispatch_context(calls)
 
     assert (
         _dispatch_messages_for_phase(context, _empty_success_receipt(), "accepted")
@@ -11553,14 +12086,6 @@ def test_acceptance_dispatch_completes_without_a_rollup():
         "active_message_generation"
     ]
     assert generation["acceptanceDispatched"] is True
-
-
-def test_acceptance_dispatch_still_fails_loudly_when_a_rollup_is_attached():
-    calls = []
-    context = _acceptance_dispatch_context(calls, forwarding_skipped=False)
-
-    with pytest.raises(RuntimeError, match="InternalMessageEmissionFailed"):
-        _dispatch_messages_for_phase(context, _empty_success_receipt(), "accepted")
 
 
 def test_child_rotation_clamp_tolerates_a_null_parent_schedule():
@@ -11602,3 +12127,25 @@ def test_triggered_child_insert_survives_a_parent_without_a_rotation_schedule():
 
     assert len(calls) == 1
     assert isinstance(calls[0][1]["config_rotation_rounds"], int)
+
+
+def test_transaction_payload_exposes_only_consensus_child_transactions():
+    transaction = _processor_transaction()
+    transaction.triggered_transactions = [
+        SimpleNamespace(hash="0x" + "01" * 32, type=TransactionType.SEND.value),
+        SimpleNamespace(
+            hash="0x" + "02" * 32,
+            type=TransactionType.RUN_CONTRACT.value,
+        ),
+        SimpleNamespace(
+            hash="0x" + "03" * 32,
+            type=TransactionType.DEPLOY_CONTRACT.value,
+        ),
+    ]
+
+    parsed = TransactionsProcessor._parse_transaction_data(transaction)
+
+    assert parsed["triggered_transactions"] == [
+        "0x" + "02" * 32,
+        "0x" + "03" * 32,
+    ]

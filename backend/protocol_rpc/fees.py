@@ -46,6 +46,7 @@ MESSAGE_REVEAL_LENGTH_SLOTS = 32
 MAX_ALLOCATED_MESSAGES_CAP = 20
 NONDET_OUTPUT_LENGTH_BYTES = 32
 NODE_ROOT_SENTINEL = (1 << 256) - 1
+UINT256_MAX = (1 << 256) - 1
 MAX_CONTRIBUTION_SEGMENTS = 64
 EMPTY_CALL_KEY = "0x" + ("0" * 64)
 # Consensus reserves keccak256("") as the allocation wildcard. bytes32(0)
@@ -101,11 +102,13 @@ DEFAULT_MAX_PROPOSE_TIMEUNITS = 600
 DEFAULT_MIN_COMMIT_TIMEUNITS = 30
 DEFAULT_MAX_COMMIT_TIMEUNITS = 600
 GENVM_UNMETERED_DATA_FEE_BUCKET = (1 << 256) - 1
-SUCCESSFUL_APPEAL_REWARD_NUMERATOR = 5
-SUCCESSFUL_APPEAL_REWARD_DENOMINATOR = 2
 
 
 class FeeValidationError(ValueError):
+    pass
+
+
+class ArithmeticOverflow(FeeValidationError):
     pass
 
 
@@ -556,10 +559,38 @@ def _int_field(fees_distribution: dict[str, Any], field: str) -> int:
     return int(fees_distribution.get(field, 0) or 0)
 
 
+def _require_uint256(value: int) -> int:
+    value = int(value)
+    if value < 0:
+        raise InvalidFeeParams("InvalidFeeParams")
+    if value > UINT256_MAX:
+        raise ArithmeticOverflow("ArithmeticOverflow")
+    return value
+
+
+def _u256_add(*values: int) -> int:
+    total = 0
+    for value in values:
+        total += _require_uint256(value)
+        if total > UINT256_MAX:
+            raise ArithmeticOverflow("ArithmeticOverflow")
+    return total
+
+
+def _u256_mul(*values: int) -> int:
+    total = 1
+    for value in values:
+        value = _require_uint256(value)
+        if value != 0 and total > UINT256_MAX // value:
+            raise ArithmeticOverflow("ArithmeticOverflow")
+        total *= value
+    return total
+
+
 def normalize_fees_distribution(
     fees_distribution: dict[str, Any],
 ) -> dict[str, int | list[int]]:
-    return {
+    normalized = {
         "leaderTimeunitsAllocation": _int_field(
             fees_distribution, "leaderTimeunitsAllocation"
         ),
@@ -581,12 +612,25 @@ def normalize_fees_distribution(
         "storageFeeMaxGasPrice": _int_field(fees_distribution, "storageFeeMaxGasPrice"),
         "receiptFeeMaxGasPrice": _int_field(fees_distribution, "receiptFeeMaxGasPrice"),
     }
+    for field, value in normalized.items():
+        if field == "rotations":
+            for rotation in value:
+                _require_uint256(rotation)
+        else:
+            _require_uint256(value)
+    return normalized
 
 
 def get_leader_rounds(fees_distribution: dict[str, Any]) -> int:
     fees = normalize_fees_distribution(fees_distribution)
-    return sum(rotation + 1 for rotation in fees["rotations"]) + int(
-        fees["appealRounds"]
+    rotations = fees["rotations"]
+    assert isinstance(rotations, list)
+    leader_attempts = 0
+    for rotation in rotations:
+        leader_attempts = _u256_add(leader_attempts, _u256_add(rotation, 1))
+    return _u256_add(
+        leader_attempts,
+        int(fees["appealRounds"]),
     )
 
 
@@ -606,10 +650,13 @@ def get_leader_rounds_through_round(
     rotations_index = 1
     for offset in range(1, min(final_round, int(fees["appealRounds"]) * 2) + 1):
         if offset % 2 == 1:
-            total += 1
+            total = _u256_add(total, 1)
         elif rotations_index < len(rotations):
-            total += _leader_slots_for_round(
-                rotations, rotations_index, actual_rotations, round_index=offset
+            total = _u256_add(
+                total,
+                _leader_slots_for_round(
+                    rotations, rotations_index, actual_rotations, round_index=offset
+                ),
             )
             rotations_index += 1
     return total
@@ -634,11 +681,11 @@ def calculate_time_unit_fees_through_round(
     if policy.gen_per_time_unit > 0:
         if max_price > 0 and policy.gen_per_time_unit > max_price:
             raise MaxPriceExceeded("MaxPriceExceeded")
-        leader_timeunits = (
-            int(fees["leaderTimeunitsAllocation"]) * policy.gen_per_time_unit
+        leader_timeunits = _u256_mul(
+            int(fees["leaderTimeunitsAllocation"]), policy.gen_per_time_unit
         )
-        validator_timeunits = (
-            int(fees["validatorTimeunitsAllocation"]) * policy.gen_per_time_unit
+        validator_timeunits = _u256_mul(
+            int(fees["validatorTimeunitsAllocation"]), policy.gen_per_time_unit
         )
     else:
         leader_timeunits = int(fees["leaderTimeunitsAllocation"])
@@ -664,12 +711,15 @@ def calculate_time_unit_fees_through_round(
             rotations_index += 1
         else:
             rotations_this_round = 1
-        total += _calculate_fee_for_round(
-            _validators_per_round_safe(offset),
-            rotations_this_round,
-            leader_timeunits,
-            validator_timeunits,
-            leader_multiplier=_round_leader_multiplier(round_outcomes.get(offset)),
+        total = _u256_add(
+            total,
+            _calculate_fee_for_round(
+                _validators_per_round_safe(offset),
+                rotations_this_round,
+                leader_timeunits,
+                validator_timeunits,
+                leader_multiplier=_round_leader_multiplier(round_outcomes.get(offset)),
+            ),
         )
 
     return total
@@ -767,11 +817,11 @@ def _calculate_settled_time_unit_fees(
         }
     }
     if policy.gen_per_time_unit > 0:
-        leader_timeunits = (
-            int(fees["leaderTimeunitsAllocation"]) * policy.gen_per_time_unit
+        leader_timeunits = _u256_mul(
+            int(fees["leaderTimeunitsAllocation"]), policy.gen_per_time_unit
         )
-        validator_timeunits = (
-            int(fees["validatorTimeunitsAllocation"]) * policy.gen_per_time_unit
+        validator_timeunits = _u256_mul(
+            int(fees["validatorTimeunitsAllocation"]), policy.gen_per_time_unit
         )
     else:
         leader_timeunits = int(fees["leaderTimeunitsAllocation"])
@@ -801,26 +851,29 @@ def _calculate_settled_time_unit_fees(
         prior_attempts = attempts[:rotations]
         current_attempt = attempts[-1] if attempts else None
         prior_rotation_fee = 0
-        if prior_attempts and all(
-            _entry_validator_receipts(attempt) for attempt in prior_attempts
-        ):
-            for attempt in prior_attempts:
-                aligned = _aligned_validator_count(
-                    attempt,
-                    exclude_leader=True,
-                    electorate_size=round_electorate_size,
-                )
-                rotated_leader_fee = (
-                    0
-                    if _fee_alignment_result(
-                        attempt, electorate_size=round_electorate_size
-                    )
-                    == "deterministic_violation"
-                    else leader_timeunits // 2
-                )
-                prior_rotation_fee += aligned * validator_timeunits + rotated_leader_fee
-        else:
-            prior_rotation_fee = rotations * _calculate_fee_for_round(
+        # FeesRecorder keeps a proposal-timeout rotation with an empty
+        # validator array. FeesProcessor therefore pays that rotated-out
+        # leader one half allocation but pays zero validator seats. Treat an
+        # explicitly recorded empty array as material evidence, not as missing
+        # history that should be expanded to a full committee.
+        for attempt in prior_attempts:
+            aligned = _aligned_validator_count(
+                attempt,
+                exclude_leader=True,
+                electorate_size=round_electorate_size,
+            )
+            rotated_leader_fee = (
+                0
+                if _fee_alignment_result(attempt, electorate_size=round_electorate_size)
+                == "deterministic_violation"
+                else leader_timeunits // 2
+            )
+            prior_rotation_fee += aligned * validator_timeunits + rotated_leader_fee
+        # Legacy/synthetic histories can expose only a rotation count. Preserve
+        # the configured upper-bound fallback for slots with no attempt record.
+        missing_rotation_attempts = max(0, rotations - len(prior_attempts))
+        if missing_rotation_attempts:
+            prior_rotation_fee += missing_rotation_attempts * _calculate_fee_for_round(
                 max(0, validators - 1),
                 1,
                 leader_timeunits,
@@ -1166,6 +1219,7 @@ def _settlement_storage_recipient_count(
     fees_distribution: dict[str, Any],
     policy: StudioFeePolicy,
     execution_mode: str,
+    bond_settlements: list[dict[str, Any]] | None = None,
     terminal_electorate_size: int | None = None,
 ) -> int:
     """Count the unique fee-ledger recipients that share persistent storage.
@@ -1203,6 +1257,14 @@ def _settlement_storage_recipient_count(
     leader_value = int(fees["leaderTimeunitsAllocation"]) * (price if price > 0 else 1)
     leader_only = str(execution_mode).upper() == "LEADER_ONLY"
     recipients: set[str] = set()
+
+    def bond_distribution_for_round(round_index: int, key: str) -> int:
+        return sum(
+            max(0, int(item.get(key, 0) or 0))
+            for item in (bond_settlements or [])
+            if item.get("outcomeRound") is not None
+            and int(item["outcomeRound"]) == int(round_index)
+        )
 
     def add_leader(
         attempt: dict[str, Any],
@@ -1262,6 +1324,7 @@ def _settlement_storage_recipient_count(
     for round_index, attempts in attempts_by_round.items():
         settlement = settlement_by_round.get(round_index) or {}
         rule = str(settlement.get("rule") or "")
+        outcome = outcomes.get(round_index, "")
         if rule in non_material_rules:
             continue
 
@@ -1316,9 +1379,25 @@ def _settlement_storage_recipient_count(
                         electorate_size=round_electorate_size,
                     )
                 )
+            elif outcome == ConsensusRound.LEADER_APPEAL_FAILED.value:
+                # A failed leader appeal redistributes its forfeited bond to
+                # aligned replay voters. Even when validator time-unit work is
+                # explicitly zero, recipients enter FeesProcessor's index only
+                # when integer division actually gives them nonzero principal.
+                if bond_distribution_for_round(round_index, "bondDistributed") > 0:
+                    recipients.update(
+                        validator_addresses(
+                            current_attempt,
+                            aligned_only=True,
+                            forced_result=(
+                                str(alignment_result) if alignment_result else None
+                            ),
+                            electorate_size=round_electorate_size,
+                        )
+                    )
         elif rule in leader_timeout_rules:
             payable_value = (
-                1
+                bond_distribution_for_round(round_index, "leaderPayout")
                 if rule == "post_timeout_appeal_repeated_timeout"
                 else leader_value // 2
             )
@@ -1330,12 +1409,16 @@ def _settlement_storage_recipient_count(
             # With a nonzero validator allocation every revealer is either
             # paid or penalized. If it is zero, only aligned recipients of the
             # forfeited bond enter the distribution index.
-            recipients.update(
-                validator_addresses(
-                    current_attempt,
-                    aligned_only=validator_value == 0,
+            if (
+                validator_value > 0
+                or bond_distribution_for_round(round_index, "bondDistributed") > 0
+            ):
+                recipients.update(
+                    validator_addresses(
+                        current_attempt,
+                        aligned_only=validator_value == 0,
+                    )
                 )
-            )
 
     # A successful validator appeal also tracks each vindicated voter from the
     # skipped original round, even when that address is not on the appeal jury.
@@ -1398,10 +1481,10 @@ def calculate_round_fees(
         policy,
         enforce_cap=enforce_gen_price_cap,
     )
-    total = (
-        priced_work
-        + _time_unit_overlay(priced_work, policy.time_unit_overlay_bps)
-        + appeal_profit_reserve
+    total = _u256_add(
+        priced_work,
+        _time_unit_overlay(priced_work, policy.time_unit_overlay_bps),
+        appeal_profit_reserve,
     )
     _enforce_gas_price_cap(
         policy.storage_unit_price, int(fees["storageFeeMaxGasPrice"])
@@ -1409,7 +1492,10 @@ def calculate_round_fees(
     _enforce_gas_price_cap(policy.receipt_gas_price, int(fees["receiptFeeMaxGasPrice"]))
 
     if round == 0:
-        total += int(fees["executionBudgetPerRound"]) * get_leader_rounds(fees)
+        total = _u256_add(
+            total,
+            _u256_mul(int(fees["executionBudgetPerRound"]), get_leader_rounds(fees)),
+        )
 
     return total
 
@@ -1420,8 +1506,9 @@ def required_fee_deposit(
     policy: StudioFeePolicy | None = None,
 ) -> int:
     fees = normalize_fees_distribution(fees_distribution)
-    return calculate_round_fees(fees, num_of_validators, 0, policy) + int(
-        fees["totalMessageFees"]
+    return _u256_add(
+        calculate_round_fees(fees, num_of_validators, 0, policy),
+        int(fees["totalMessageFees"]),
     )
 
 
@@ -1728,7 +1815,10 @@ def create_child_fee_accounting(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     policy = policy or StudioFeePolicy()
     declared_budget = int(message.get("declaredBudget", 0) or 0)
-    if declared_budget <= 0:
+    # Consensus permits a zero-budget child when its complete calculated
+    # primary obligation and allocation subtree are also zero. Negative
+    # values are impossible in the ABI and remain invalid locally.
+    if declared_budget < 0:
         raise MessageDeclaredBudgetInsufficient("MessageDeclaredBudgetInsufficient")
 
     fee_params = decode_internal_message_fee_params(message.get("feeParams", b""))
@@ -2058,7 +2148,16 @@ def record_appeal_bond(
     bond = int(charge["bond"])
     funding = int(charge["funding"])
     total_required = bond + funding
-    if bond <= 0 or amount < bond:
+    if (
+        str(status).upper() == "LEADER_TIMEOUT"
+        and leader_timeout_live_seats is not None
+        and int(leader_timeout_live_seats) <= 1
+    ):
+        raise InvalidAppealBond("InvalidAppealBond")
+    # Zero is a valid economic bond when an internal child explicitly opts
+    # out of both phase-time allocations. Consensus still admits that appeal
+    # (and records zero-valued custody); only an underpayment is invalid.
+    if bond < 0 or amount < bond:
         raise InvalidAppealBond("InvalidAppealBond")
     if amount < total_required:
         raise InsufficientFees("InsufficientFees")
@@ -2247,28 +2346,32 @@ def calculate_appeal_charge(
             ),
         )
         if pre_funded:
-            time_units = max(0, replacement_count - scheduled_replacement) * int(
-                fees["validatorTimeunitsAllocation"]
+            time_units = _u256_mul(
+                max(0, replacement_count - scheduled_replacement),
+                int(fees["validatorTimeunitsAllocation"]),
             )
         else:
-            time_units = (
-                jury_count * int(fees["validatorTimeunitsAllocation"])
-                + replacement_count * int(fees["validatorTimeunitsAllocation"])
-                + int(fees["leaderTimeunitsAllocation"])
+            time_units = _u256_add(
+                _u256_mul(jury_count, int(fees["validatorTimeunitsAllocation"])),
+                _u256_mul(
+                    replacement_count,
+                    int(fees["validatorTimeunitsAllocation"]),
+                ),
+                int(fees["leaderTimeunitsAllocation"]),
             )
         taxable_work = (
-            time_units * policy.gen_per_time_unit
+            _u256_mul(time_units, policy.gen_per_time_unit)
             if policy.gen_per_time_unit > 0
-            else time_units
+            else _require_uint256(time_units)
         )
 
     appellant_profit = 0 if pre_funded else successful_appeal_profit(bond)
     execution_slots = 0
     if not pre_funded:
-        execution_slots = replacement_rotations + 2 if leader_appeal else 2
-    execution_backing = execution_slots * int(fees["executionBudgetPerRound"])
-    overlay = _time_unit_overlay(taxable_work, policy.time_unit_overlay_bps)
-    funding = taxable_work + overlay + appellant_profit + execution_backing
+        execution_slots = _u256_add(replacement_rotations, 2) if leader_appeal else 2
+    execution_backing = _u256_mul(execution_slots, int(fees["executionBudgetPerRound"]))
+    overlay = _time_unit_overlay_muldiv(taxable_work, policy.time_unit_overlay_bps)
+    funding = _u256_add(taxable_work, overlay, appellant_profit, execution_backing)
     return {
         "bond": bond,
         "funding": funding,
@@ -2315,12 +2418,14 @@ def calculate_min_appeal_bond(
         )
         total = _calculate_fee_for_round(
             _validators_per_round_safe(current_round),
-            rotations_left + 1,
+            _u256_add(rotations_left, 1),
             int(fees["leaderTimeunitsAllocation"]),
             int(fees["validatorTimeunitsAllocation"]),
         )
         return (
-            total * policy.gen_per_time_unit if policy.gen_per_time_unit > 0 else total
+            _u256_mul(total, policy.gen_per_time_unit)
+            if policy.gen_per_time_unit > 0
+            else total
         )
 
     if status_value == "UNDETERMINED":
@@ -2333,12 +2438,14 @@ def calculate_min_appeal_bond(
         )
         total = _calculate_fee_for_round(
             _validators_per_round_safe(target_round),
-            rotations + 1,
+            _u256_add(rotations, 1),
             int(fees["leaderTimeunitsAllocation"]),
             int(fees["validatorTimeunitsAllocation"]),
         )
         return (
-            total * policy.gen_per_time_unit if policy.gen_per_time_unit > 0 else total
+            _u256_mul(total, policy.gen_per_time_unit)
+            if policy.gen_per_time_unit > 0
+            else total
         )
 
     if status_value in {"VALIDATORS_TIMEOUT", "ACCEPTED"}:
@@ -2347,7 +2454,9 @@ def calculate_min_appeal_bond(
             fees["validatorTimeunitsAllocation"]
         )
         return (
-            total * policy.gen_per_time_unit if policy.gen_per_time_unit > 0 else total
+            _u256_mul(total, policy.gen_per_time_unit)
+            if policy.gen_per_time_unit > 0
+            else total
         )
 
     return 0
@@ -2429,12 +2538,14 @@ def fill_message_fee_payload_from_allocation(
         updated.get("callKey", allocation["callKey"])
     )
     expected_subtree = _allocation_subtree(allocations, index)
-    if not updated.get("allocationSubtree"):
-        updated["allocationSubtree"] = expected_subtree
-    elif (
-        _canonical_allocation_subtree(updated["allocationSubtree"]) != expected_subtree
-    ):
-        raise AllocationSubtreeMismatch("AllocationSubtreeMismatch")
+    # The deployed/default Consensus storage mode is FlatArrays. In that mode
+    # allocationSubtree is receipt data only: MessagePayments ignores it and
+    # inherits the canonical subtree from the parent's stored allocation tree.
+    # Keep the leader/GenVM bytes untouched for the SubmittedMessage descriptor,
+    # while carrying Studio's local FlatArrays resolution out-of-band for child
+    # materialization. In particular, a missing or malformed supplied subtree
+    # must not invalidate the reveal or skip a child.
+    updated["_studioResolvedAllocationSubtree"] = expected_subtree
     updated["messageFeeMode"] = "mode2"
     return updated
 
@@ -3002,12 +3113,18 @@ def settle_fee_accounting(
         list(updated.get("execution_fee_consumed_buckets") or []),
         1,
     )
+    bond_settlements, bond_payout = _settle_appeal_bonds(
+        updated,
+        consensus_history=consensus_history,
+        cancel=False,
+    )
     storage_recipients = _settlement_storage_recipient_count(
         consensus_history,
         settlement_rounds if actual_final_round is not None else [],
         fees_distribution,
         locked_policy,
         execution_mode,
+        bond_settlements=bond_settlements,
         terminal_electorate_size=(
             int(updated["selection_pool_count"])
             if updated.get("selection_pool_count") is not None
@@ -3027,11 +3144,6 @@ def settle_fee_accounting(
         else capped_storage_fee
     )
     execution_spent = max(0, execution_spent - storage_dust)
-    bond_settlements, bond_payout = _settle_appeal_bonds(
-        updated,
-        consensus_history=consensus_history,
-        cancel=False,
-    )
     appeal_profit_requested = sum(
         max(0, int(item.get("payout", 0)) - int(item.get("amount", 0)))
         for item in bond_settlements
@@ -3601,7 +3713,7 @@ def _calculate_appeal_round_total(
     )
     return _calculate_fee_for_round(
         _validators_per_round_safe(round),
-        rotations + 1,
+        _u256_add(rotations, 1),
         int(fees["leaderTimeunitsAllocation"]),
         int(fees["validatorTimeunitsAllocation"]),
     )
@@ -3624,13 +3736,13 @@ def _calculate_appeal_profit_reserve(
         )
         next_normal_bond = _calculate_fee_for_round(
             _validators_per_round_safe((appeal_ordinal + 1) * 2),
-            funded_rotations + 1,
+            _u256_add(funded_rotations, 1),
             int(fees["leaderTimeunitsAllocation"]),
             int(fees["validatorTimeunitsAllocation"]),
         )
         if gen_per_time_unit > 0:
-            next_normal_bond *= gen_per_time_unit
-        reserve += successful_appeal_profit(next_normal_bond)
+            next_normal_bond = _u256_mul(next_normal_bond, gen_per_time_unit)
+        reserve = _u256_add(reserve, successful_appeal_profit(next_normal_bond))
     return reserve
 
 
@@ -3645,7 +3757,7 @@ def _apply_time_unit_price(
         raise MaxPriceExceeded("MaxPriceExceeded")
     # Consensus reserves at the caller's ceiling. The live price is checked
     # against that ceiling and locked separately for settlement.
-    return total * max_price if max_price > 0 else total
+    return _u256_mul(total, max_price) if max_price > 0 else _require_uint256(total)
 
 
 def _time_unit_overlay(time_unit_work: int, split_bps: int) -> int:
@@ -3654,7 +3766,18 @@ def _time_unit_overlay(time_unit_work: int, split_bps: int) -> int:
         return 0
     if split_bps >= 10_000:
         raise FeeValidationError("InvalidTimeUnitOverlayBps")
-    return time_unit_work * split_bps // (10_000 - split_bps)
+    return _u256_mul(time_unit_work, split_bps) // (10_000 - split_bps)
+
+
+def _time_unit_overlay_muldiv(time_unit_work: int, split_bps: int) -> int:
+    """Mirror AppealEconomics' full-precision Math.mulDiv overlay quote."""
+    time_unit_work = _require_uint256(time_unit_work)
+    split_bps = int(split_bps)
+    if time_unit_work <= 0 or split_bps <= 0:
+        return 0
+    if split_bps >= 10_000:
+        raise FeeValidationError("InvalidTimeUnitOverlayBps")
+    return _require_uint256(time_unit_work * split_bps // (10_000 - split_bps))
 
 
 def _carve_time_unit_overlay_reserve(
@@ -3684,16 +3807,17 @@ def _carve_time_unit_overlay_reserve(
 
 
 def successful_appeal_reward(appeal_bond: int) -> int:
-    appeal_bond = int(appeal_bond)
-    return (
-        appeal_bond
-        * SUCCESSFUL_APPEAL_REWARD_NUMERATOR
-        // SUCCESSFUL_APPEAL_REWARD_DENOMINATOR
+    appeal_bond = _require_uint256(appeal_bond)
+    # AppealEconomics deliberately arranges floor(5*bond/2) this way so an
+    # otherwise representable result does not overflow in bond * 5.
+    return _u256_add(
+        _u256_mul(appeal_bond, 2),
+        appeal_bond // 2,
     )
 
 
 def successful_appeal_profit(appeal_bond: int) -> int:
-    return successful_appeal_reward(appeal_bond) - int(appeal_bond)
+    return successful_appeal_reward(appeal_bond) - _require_uint256(appeal_bond)
 
 
 def _validators_per_round_safe(round: int) -> int:
@@ -3728,7 +3852,7 @@ def _calculate_fees(
     validator_timeunits = int(fees_distribution["validatorTimeunitsAllocation"])
     calculated_fees = _calculate_fee_for_round(
         VALIDATORS_PER_ROUND[validator_index],
-        int(rotations[0]) + 1,
+        _u256_add(int(rotations[0]), 1),
         leader_timeunits,
         validator_timeunits,
     )
@@ -3742,16 +3866,19 @@ def _calculate_fees(
         # ladder saturate at its final size.
         round_validators = _validators_per_round_safe(offset)
         if offset % 2 == 0 and rotations_index < len(rotations):
-            rotations_this_round = int(rotations[rotations_index]) + 1
+            rotations_this_round = _u256_add(int(rotations[rotations_index]), 1)
             rotations_index += 1
         elif offset % 2 == 1:
             rotations_this_round = 1
 
-        calculated_fees += _calculate_fee_for_round(
-            round_validators,
-            rotations_this_round,
-            leader_timeunits,
-            validator_timeunits,
+        calculated_fees = _u256_add(
+            calculated_fees,
+            _calculate_fee_for_round(
+                round_validators,
+                rotations_this_round,
+                leader_timeunits,
+                validator_timeunits,
+            ),
         )
 
     return calculated_fees
@@ -3765,10 +3892,14 @@ def _calculate_fee_for_round(
     leader_multiplier: tuple[int, int] = (1, 1),
 ) -> int:
     leader_num, leader_den = leader_multiplier
-    leader_total = rotations * leader_timeunits_allocation
-    leader_fee = leader_total * leader_num // leader_den
-    validator_fee = rotations * (num_of_validators * validator_timeunits_allocation)
-    return leader_fee + validator_fee
+    leader_total = _u256_mul(rotations, leader_timeunits_allocation)
+    leader_fee = _u256_mul(leader_total, leader_num) // leader_den
+    validator_fee = _u256_mul(
+        rotations,
+        num_of_validators,
+        validator_timeunits_allocation,
+    )
+    return _u256_add(leader_fee, validator_fee)
 
 
 def _leader_slots_for_round(
@@ -3778,11 +3909,11 @@ def _leader_slots_for_round(
     *,
     round_index: int | None = None,
 ) -> int:
-    funded_slots = int(funded_rotations[funded_index]) + 1
+    funded_slots = _u256_add(int(funded_rotations[funded_index]), 1)
     if not actual_rotations:
         return funded_slots
     actual_round_index = funded_index if round_index is None else round_index
-    actual_slots = int(actual_rotations.get(actual_round_index, 0)) + 1
+    actual_slots = _u256_add(int(actual_rotations.get(actual_round_index, 0)), 1)
     return min(funded_slots, actual_slots)
 
 

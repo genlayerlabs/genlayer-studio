@@ -17,6 +17,43 @@ def _service_with_contract(contract):
     return service
 
 
+def test_fee_aware_submission_uses_funded_shadow_account_and_requires_event():
+    contract = MagicMock()
+    contract.address = "0x2222222222222222222222222222222222222222"
+    service = ConsensusService.__new__(ConsensusService)
+    service.web3 = MagicMock()
+    service.web3.is_connected.return_value = True
+    service.web3.eth.accounts = ["0x1111111111111111111111111111111111111111"]
+    service.web3.eth.send_transaction.return_value = b"shadow-hash"
+    service.web3.eth.wait_for_transaction_receipt.return_value = {"status": 1}
+    service._get_contract = MagicMock(return_value=contract)
+    service.wait_new_transaction_event = MagicMock(
+        return_value={"tx_id": b"child", "recipient": contract.address}
+    )
+    service.forward_transaction = MagicMock()
+
+    calldata = "0x35a251fb" + f"{32:064x}" + ("00" * 32)
+    authoritative_sender = "0x3333333333333333333333333333333333333333"
+    result = service.add_transaction(
+        "0xraw",
+        authoritative_sender,
+        calldata=calldata,
+    )
+
+    assert result["recipient"] == contract.address
+    service.web3.eth.send_transaction.assert_called_once_with(
+        {
+            "from": "0x1111111111111111111111111111111111111111",
+            "to": contract.address,
+            "data": (
+                "0x35a251fb" + f"{32:064x}" + ("00" * 12) + authoritative_sender[2:]
+            ),
+            "value": 0,
+        }
+    )
+    service.forward_transaction.assert_not_called()
+
+
 def test_retried_message_phase_recovers_stored_child_ids_without_new_events():
     contract = MagicMock()
     contract.functions.emitTransactionAccepted.return_value.build_transaction.return_value = (

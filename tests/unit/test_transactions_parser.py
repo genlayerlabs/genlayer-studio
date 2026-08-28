@@ -7,6 +7,13 @@ from backend.protocol_rpc.transactions_parser import (
     DecodedMethodSendData,
     DecodedDeploymentData,
 )
+from backend.protocol_rpc.types import (
+    DecodedRollupTransaction,
+    DecodedRollupTransactionData,
+    DecodedRollupTransactionDataArgs,
+    ZERO_ADDRESS,
+)
+from backend.domain.types import TransactionType
 import re
 from typing import Optional, List, Any
 from rlp import encode
@@ -30,7 +37,9 @@ def transaction_parser():
 
 
 def test_default_consensus_abi_exports_exact_decision_guarded_actions():
-    abi = get_default_consensus_main_contract()["abi"]
+    default_contract = get_default_consensus_main_contract()
+    assert default_contract["address"] == "0xb7278A61aa25c888815aFC32Ad3cC52fF24fE575"
+    abi = default_contract["abi"]
     functions = {
         entry["name"]: entry for entry in abi if entry.get("type") == "function"
     }
@@ -97,6 +106,15 @@ def test_default_consensus_abi_exports_exact_decision_guarded_actions():
         "bytes32",
         "uint256",
         "bytes",
+    ]
+    created = next(
+        entry
+        for entry in abi
+        if entry.get("type") == "event" and entry.get("name") == "CreatedTransaction"
+    )
+    assert [(item["type"], item["indexed"]) for item in created["inputs"]] == [
+        ("bytes32", True),
+        ("uint256", False),
     ]
 
 
@@ -510,11 +528,12 @@ def test_decode_signed_transaction_fee_aware_v06(function_name, monkeypatch):
         message_allocations,
     )
 
+    fee_aware_data = _fee_aware_call_data(parser, function_name, params)
     raw = _build_eip1559_raw(
         nonce=8,
         to=bytes.fromhex("0000000000000000000000000000000000000000"),
         value=70,
-        data=_fee_aware_call_data(parser, function_name, params),
+        data=fee_aware_data,
     )
 
     decoded = parser.decode_signed_transaction(raw)
@@ -524,6 +543,8 @@ def test_decode_signed_transaction_fee_aware_v06(function_name, monkeypatch):
     assert decoded.fee_value == 58
     assert decoded.submitted_value == 70
     assert decoded.total_spend == 70
+    assert decoded.raw_data == "0x" + fee_aware_data.hex()
+    assert decoded.chain_id == 1
     assert decoded.data.function_name == function_name
     assert decoded.data.args.sender == "0x3333333333333333333333333333333333333333"
     assert decoded.data.args.recipient == Web3.to_checksum_address(recipient)
@@ -557,6 +578,35 @@ def test_decode_signed_transaction_fee_aware_v06(function_name, monkeypatch):
         "storageFeeMaxGasPrice": 77,
         "receiptFeeMaxGasPrice": 88,
     }
+
+
+def test_deploy_salted_selector_ignores_spoofed_nonzero_recipient(
+    transaction_parser,
+):
+    deployment_payload = encode([b"class Contract: pass", b"init"])
+    decoded = DecodedRollupTransaction(
+        from_address="0x1111111111111111111111111111111111111111",
+        to_address=ZERO_ADDRESS,
+        data=DecodedRollupTransactionData(
+            function_name="deploySalted",
+            args=DecodedRollupTransactionDataArgs(
+                sender="0x1111111111111111111111111111111111111111",
+                recipient="0x2222222222222222222222222222222222222222",
+                num_of_initial_validators=5,
+                max_rotations=0,
+                salt_nonce=7,
+                data="0x" + deployment_payload.hex(),
+            ),
+        ),
+        type="2",
+        nonce=0,
+        value=0,
+    )
+
+    parsed = transaction_parser.get_genlayer_transaction(decoded)
+
+    assert parsed.type == TransactionType.DEPLOY_CONTRACT
+    assert parsed.to_address == ZERO_ADDRESS
 
 
 @pytest.mark.parametrize(

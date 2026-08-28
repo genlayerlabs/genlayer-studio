@@ -8,7 +8,12 @@ from eth_abi import encode
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.domain.types import LLMProvider, Validator
 from backend.node.base import Node, _SnapshotView
-from backend.node.genvm.base import Context, ExecutionResult, ExecutionReturn
+from backend.node.genvm.base import (
+    Context,
+    ExecutionResult,
+    ExecutionReturn,
+    _emission_allocation_subtree,
+)
 from backend.node.genvm.base import Host as GenVMHost
 import backend.node.genvm.origin.calldata as gvm_calldata
 from backend.node.genvm.origin.base_host import RunHostAndProgramRes
@@ -231,6 +236,10 @@ def test_host_provide_result_preserves_fee_metadata_from_genvm_emissions():
     assert eth_send.call_key == "0x" + "56" * 32
     assert eth_send.gas_used == 123
     assert execution.data_fees_remaining == [100, 90, 80]
+
+
+def test_malformed_allocation_subtree_preserves_exact_receipt_bytes():
+    assert _emission_allocation_subtree({"subtree": b"\x01\x02\xff"}) == "0x0102ff"
 
 
 @pytest.mark.asyncio
