@@ -234,6 +234,19 @@ class ConsensusService:
             print(f"[CONSENSUS_SERVICE]: Error forwarding transaction: {error_str}")
             return None
 
+    def transaction_forwarding_skipped(self, account: dict) -> bool:
+        """Reports whether emit_transaction_event is a deliberate no-op.
+
+        Studio runs in deployments that have no rollup at all — the load-test
+        compose brings up only jsonrpc + consensus-worker, and hosted Studio
+        may hold an account with no private key. In both modes
+        emit_transaction_event returns None *by design*, which callers must
+        not confuse with a forwarding failure (which also returns None).
+        """
+        if not self.web3.is_connected():
+            return True
+        return account.get("private_key") is None
+
     def emit_transaction_event(self, event_name: str, account: dict, *args):
         """
         Generic method to emit transaction events
@@ -243,20 +256,15 @@ class ConsensusService:
             account (dict): Account object containing address and private key
             *args: Arguments to pass to the event function
         """
-        if not self.web3.is_connected():
-            # print(
-            #     "[CONSENSUS_SERVICE]: Not connected to Hardhat node, skipping transaction forwarding"
-            # )
+        if self.transaction_forwarding_skipped(account):
+            if self.web3.is_connected():
+                print(
+                    f"[CONSENSUS_SERVICE]: Error emitting {event_name}: Account object must contain private_key"
+                )
             return None
 
-        if account.get("private_key") is not None:
-            account_address = account["address"]
-            account_private_key = account["private_key"]
-        else:
-            print(
-                f"[CONSENSUS_SERVICE]: Error emitting {event_name}: Account object must contain private_key"
-            )
-            return None
+        account_address = account["address"]
+        account_private_key = account["private_key"]
 
         consensus_main_contract = self._get_contract("ConsensusMain")
 

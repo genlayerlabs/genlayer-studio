@@ -4296,7 +4296,21 @@ def _dispatch_messages_for_phase(
         context.transaction.hash,
         internal_messages_data,
     )
-    _emit_messages(context, insert_transactions_data, rollup_receipt, on)
+    # A None receipt is ambiguous: it means both "this deployment has no
+    # rollup" and "forwarding failed". Only the latter may abort the commit.
+    rollup_skipped = (
+        rollup_receipt is None
+        and context.consensus_service.transaction_forwarding_skipped(
+            leader_receipt.node_config
+        )
+    )
+    _emit_messages(
+        context,
+        insert_transactions_data,
+        rollup_receipt,
+        on,
+        rollup_skipped=rollup_skipped,
+    )
     _mark_message_phase_delivered(
         context,
         leader_receipt.pending_transactions,
@@ -4487,19 +4501,30 @@ def _emit_messages(
     insert_transactions_data: list,
     receipt: dict,
     triggered_on: Literal["accepted", "finalized"],
+    *,
+    rollup_skipped: bool = False,
 ):
-    if not isinstance(receipt, dict):
-        raise InternalMessageEmissionError(
-            f"InternalMessageEmissionFailed({context.transaction.hash},{triggered_on})"
-        )
-    tx_ids = receipt.get("tx_ids_hex")
-    if not isinstance(tx_ids, list) or len(tx_ids) != len(insert_transactions_data):
-        raise InternalMessageEmissionError(
-            "InternalMessageEmissionCountMismatch"
-            f"({context.transaction.hash},{triggered_on},"
-            f"{len(insert_transactions_data)},"
-            f"{len(tx_ids) if isinstance(tx_ids, list) else 'missing'})"
-        )
+    if rollup_skipped:
+        # No rollup to mint child ids: this deployment never forwards to one
+        # (see ConsensusService.transaction_forwarding_skipped). Fall back to
+        # the pre-fee behaviour and let insert_transaction derive each child
+        # hash locally, exactly as a NULL tx_ids_hex entry did before. The
+        # strict checks below stay in force whenever a rollup IS attached —
+        # there a missing or short receipt really is a lost emission.
+        tx_ids = [None] * len(insert_transactions_data)
+    else:
+        if not isinstance(receipt, dict):
+            raise InternalMessageEmissionError(
+                f"InternalMessageEmissionFailed({context.transaction.hash},{triggered_on})"
+            )
+        tx_ids = receipt.get("tx_ids_hex")
+        if not isinstance(tx_ids, list) or len(tx_ids) != len(insert_transactions_data):
+            raise InternalMessageEmissionError(
+                "InternalMessageEmissionCountMismatch"
+                f"({context.transaction.hash},{triggered_on},"
+                f"{len(insert_transactions_data)},"
+                f"{len(tx_ids) if isinstance(tx_ids, list) else 'missing'})"
+            )
 
     for i, insert_transaction_data in enumerate(insert_transactions_data):
         transaction_hash = tx_ids[i]

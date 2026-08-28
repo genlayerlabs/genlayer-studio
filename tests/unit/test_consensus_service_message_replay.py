@@ -71,3 +71,40 @@ def test_legacy_bridge_falls_back_to_child_ids_from_receipt_events():
     contract.functions.getInternalMessageTxIds.assert_called_once_with(
         parent_id, False, []
     )
+
+
+def test_forwarding_is_skipped_when_no_rollup_is_attached():
+    """The load-test compose runs jsonrpc + consensus-worker with no hardhat.
+
+    emit_transaction_event returns None there by design, and consensus must
+    be able to tell that apart from a forwarding failure.
+    """
+    service = ConsensusService.__new__(ConsensusService)
+    service.web3 = MagicMock()
+    service.web3.is_connected.return_value = False
+
+    account = {"address": "0x" + "01" * 20, "private_key": "0x" + "02" * 32}
+
+    assert service.transaction_forwarding_skipped(account) is True
+    assert service.emit_transaction_event("emitTransactionAccepted", account) is None
+
+
+def test_forwarding_is_skipped_when_the_account_has_no_private_key():
+    service = ConsensusService.__new__(ConsensusService)
+    service.web3 = MagicMock()
+    service.web3.is_connected.return_value = True
+
+    assert service.transaction_forwarding_skipped({"address": "0x" + "01" * 20}) is True
+
+
+def test_forwarding_is_active_for_a_connected_node_with_a_key():
+    service = ConsensusService.__new__(ConsensusService)
+    service.web3 = MagicMock()
+    service.web3.is_connected.return_value = True
+
+    assert (
+        service.transaction_forwarding_skipped(
+            {"address": "0x" + "01" * 20, "private_key": "0x" + "02" * 32}
+        )
+        is False
+    )

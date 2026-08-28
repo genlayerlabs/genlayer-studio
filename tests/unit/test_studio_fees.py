@@ -13,6 +13,7 @@ from backend.consensus.base import (
     _apply_external_message_freeze_check,
     _apply_message_value_withdrawals_for_phase,
     _child_config_rotation_rounds,
+    _dispatch_messages_for_phase,
     _emit_messages,
     _get_messages_data,
     _runtime_rotation_limit,
@@ -1322,6 +1323,80 @@ def test_internal_child_insert_requires_exact_helper_chain_ids():
         _emit_messages(context, [child], None, "accepted")
     with pytest.raises(RuntimeError, match="InternalMessageEmissionCountMismatch"):
         _emit_messages(context, [child], {"tx_ids_hex": []}, "accepted")
+
+    assert calls == []
+
+
+def _rollup_free_context(calls):
+    class _Processor:
+        def insert_transaction(self, *args, **kwargs):
+            calls.append((args, kwargs))
+
+    return SimpleNamespace(
+        transaction=SimpleNamespace(
+            to_address="0x1111111111111111111111111111111111111111",
+            execution_mode="NORMAL",
+            hash="0x" + "12" * 32,
+            config_rotation_rounds=0,
+            sim_config=None,
+            origin_address=None,
+        ),
+        transactions_processor=_Processor(),
+    )
+
+
+def test_message_phase_without_a_rollup_commits_when_there_are_no_children():
+    """A rollup-free deployment must not turn an empty phase into a retry loop.
+
+    Studio deployments with no hardhat node get None from
+    emit_transaction_event by design. Treating that as a lost emission
+    stalled every accepted transaction forever, children or not.
+    """
+    calls = []
+    context = _rollup_free_context(calls)
+
+    _emit_messages(context, [], None, "accepted", rollup_skipped=True)
+
+    assert calls == []
+
+
+def test_message_phase_without_a_rollup_derives_child_ids_locally():
+    """Pre-fee behaviour: a NULL child id lets insert_transaction derive one."""
+    calls = []
+    context = _rollup_free_context(calls)
+    child = (
+        "0x2222222222222222222222222222222222222222",
+        {},
+        TransactionType.RUN_CONTRACT.value,
+        0,
+        0,
+    )
+
+    _emit_messages(context, [child], None, "accepted", rollup_skipped=True)
+
+    assert len(calls) == 1
+    assert calls[0][1]["transaction_hash"] is None
+    assert calls[0][1]["triggered_by_hash"] == "0x" + "12" * 32
+
+
+def test_message_phase_with_a_rollup_still_rejects_a_malformed_receipt():
+    """The strict checks stay in force wherever a rollup is actually attached."""
+    calls = []
+    context = _rollup_free_context(calls)
+    child = (
+        "0x2222222222222222222222222222222222222222",
+        {},
+        TransactionType.RUN_CONTRACT.value,
+        0,
+        0,
+    )
+
+    with pytest.raises(RuntimeError, match="InternalMessageEmissionFailed"):
+        _emit_messages(context, [child], None, "accepted", rollup_skipped=False)
+    with pytest.raises(RuntimeError, match="InternalMessageEmissionCountMismatch"):
+        _emit_messages(
+            context, [child], {"tx_ids_hex": []}, "accepted", rollup_skipped=False
+        )
 
     assert calls == []
 
@@ -11168,3 +11243,84 @@ def test_transaction_payload_fees_null_when_fee_accounting_disabled():
     assert parsed["fees"] is None
     assert parsed["txExecutionResult"] == 0
     assert parsed["txExecutionResultName"] == "NOT_VOTED"
+
+
+def _acceptance_dispatch_context(calls, *, forwarding_skipped):
+    """A parent owing an acceptance-phase emission that carries no children."""
+
+    accounting = {
+        "active_message_generation": {
+            "acceptanceDispatchRequired": True,
+            "acceptanceDispatched": False,
+        }
+    }
+
+    class _Processor:
+        def insert_transaction(self, *args, **kwargs):
+            calls.append((args, kwargs))
+
+        def get_transaction_count(self, _address):
+            return 0
+
+        def mutate_transaction_fee_accounting(self, _hash, mutate):
+            transaction.data[FEE_ACCOUNTING_KEY] = mutate(
+                transaction.data[FEE_ACCOUNTING_KEY]
+            )
+            return transaction.data[FEE_ACCOUNTING_KEY]
+
+    transaction = SimpleNamespace(
+        to_address="0x1111111111111111111111111111111111111111",
+        execution_mode="NORMAL",
+        hash="0x" + "12" * 32,
+        config_rotation_rounds=0,
+        sim_config=None,
+        origin_address=None,
+        data={FEE_ACCOUNTING_KEY: accounting},
+    )
+    consensus_service = SimpleNamespace(
+        emit_transaction_event=lambda *args, **kwargs: None,
+        transaction_forwarding_skipped=lambda _account: forwarding_skipped,
+    )
+    return SimpleNamespace(
+        transaction=transaction,
+        transactions_processor=_Processor(),
+        consensus_service=consensus_service,
+    )
+
+
+def _empty_success_receipt():
+    return SimpleNamespace(
+        execution_result=ExecutionResultStatus.SUCCESS,
+        pending_transactions=[],
+        node_config={"address": "0x" + "01" * 20, "private_key": "0x" + "02" * 32},
+    )
+
+
+def test_acceptance_dispatch_completes_without_a_rollup():
+    """Regression: this looped forever instead of committing.
+
+    A parent owing an acceptance emission but carrying no children still
+    reaches _emit_messages. With no rollup attached the receipt is None by
+    design, which the strict check read as a lost emission and retried
+    forever, so acceptanceDispatched was never set.
+    """
+    calls = []
+    context = _acceptance_dispatch_context(calls, forwarding_skipped=True)
+
+    assert (
+        _dispatch_messages_for_phase(context, _empty_success_receipt(), "accepted")
+        is True
+    )
+    assert calls == []
+    generation = context.transaction.data[FEE_ACCOUNTING_KEY][
+        "active_message_generation"
+    ]
+    assert generation["acceptanceDispatched"] is True
+
+
+def test_acceptance_dispatch_still_fails_loudly_when_a_rollup_is_attached():
+    calls = []
+    context = _acceptance_dispatch_context(calls, forwarding_skipped=False)
+
+    with pytest.raises(RuntimeError, match="InternalMessageEmissionFailed"):
+        _dispatch_messages_for_phase(context, _empty_success_receipt(), "accepted")
