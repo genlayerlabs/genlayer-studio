@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 from backend.consensus.types import ConsensusRound
@@ -38,6 +39,101 @@ TERMINAL_VALIDATOR_APPEAL_ROUNDS = {
     ConsensusRound.VALIDATOR_APPEAL_SUCCESSFUL.value,
     ConsensusRound.VALIDATOR_TIMEOUT_APPEAL_SUCCESSFUL.value,
 }
+
+# Studio has no deployed TransactionManager, so persist the small part of its
+# immutable DecisionRecord that governs exact-ID commands and appeal timing in
+# consensus_history. Keeping it beside the round history makes snapshots and
+# existing transaction reads carry the authority without a schema migration.
+LATEST_DECISION_KEY = "latestDecision"
+ACTIVE_APPEAL_BASIS_KEY = "activeAppealBasis"
+
+
+def latest_decision_metadata(
+    consensus_history: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(consensus_history, dict):
+        return None
+    value = consensus_history.get(LATEST_DECISION_KEY)
+    return value if isinstance(value, dict) else None
+
+
+def current_decision_id(consensus_history: dict[str, Any] | None) -> int:
+    """Return Studio's equivalent of the latest materialized DecisionId."""
+
+    metadata = latest_decision_metadata(consensus_history)
+    if metadata is not None:
+        try:
+            decision_id = int(metadata.get("decisionId") or 0)
+        except (TypeError, ValueError):
+            decision_id = 0
+        if decision_id > 0:
+            return decision_id
+    round_index = completed_consensus_round_index(consensus_history)
+    return 1 + ((round_index + 1) // 2)
+
+
+def prepare_appeal_decision_basis(
+    consensus_history: dict[str, Any] | None,
+    *,
+    expected_decision_id: int,
+    submitted_at: int,
+    appeal_deadline: int,
+    retention_bps: int,
+) -> dict[str, Any]:
+    """Freeze the exact reduced window that Consensus freezes at submission."""
+
+    updated = copy.deepcopy(consensus_history or {})
+    decision_id = current_decision_id(updated)
+    if decision_id != int(expected_decision_id):
+        raise ValueError("DecisionBasisMismatch")
+    remaining = int(appeal_deadline) - int(submitted_at)
+    if remaining <= 0:
+        raise ValueError("CanNotAppeal")
+    retention_bps = min(10_000, max(0, int(retention_bps)))
+    next_window = (remaining * retention_bps) // 10_000
+    if next_window == 0:
+        next_window = 1
+    updated[ACTIVE_APPEAL_BASIS_KEY] = {
+        "decisionId": decision_id,
+        "submittedAt": int(submitted_at),
+        "nextAppealWindow": next_window,
+    }
+    return updated
+
+
+def materialize_decision_metadata(
+    consensus_history: dict[str, Any] | None,
+    *,
+    status: str,
+    materialized_at: int,
+    default_appeal_window: int,
+) -> dict[str, Any]:
+    """Advance DecisionId and bind one immutable Studio decision window."""
+
+    updated = copy.deepcopy(consensus_history or {})
+    round_index = completed_consensus_round_index(updated)
+    decision_id = 1 + ((round_index + 1) // 2)
+    basis = updated.get(ACTIVE_APPEAL_BASIS_KEY)
+    if isinstance(basis, dict):
+        try:
+            basis_decision_id = int(basis.get("decisionId") or 0)
+            appeal_window = int(basis.get("nextAppealWindow") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("DecisionBasisMismatch") from exc
+        if basis_decision_id != decision_id - 1 or appeal_window <= 0:
+            raise ValueError("DecisionBasisMismatch")
+    else:
+        appeal_window = max(1, int(default_appeal_window))
+
+    materialized_at = int(materialized_at)
+    updated[LATEST_DECISION_KEY] = {
+        "decisionId": decision_id,
+        "status": str(status).upper(),
+        "materializedAt": materialized_at,
+        "appealDeadline": materialized_at + appeal_window,
+    }
+    updated.pop(ACTIVE_APPEAL_BASIS_KEY, None)
+    return updated
 
 
 def is_completed_consensus_round(entry: dict[str, Any]) -> bool:

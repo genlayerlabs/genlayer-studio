@@ -13,6 +13,8 @@ from eth_utils import to_bytes, keccak, is_address, to_checksum_address
 import json
 import base64
 import time
+import os
+from typing import Callable
 from backend.domain.types import TransactionType
 from web3 import Web3
 from backend.consensus.types import (
@@ -24,11 +26,14 @@ from backend.consensus.types import (
 from backend.consensus.history import (
     completed_consensus_round_index,
     completed_consensus_rounds,
+    materialize_decision_metadata,
+    prepare_appeal_decision_basis,
     time_unit_consumption,
 )
 from backend.consensus.utils import determine_consensus_from_votes
 from backend.protocol_rpc.fees import (
     FEE_ACCOUNTING_KEY,
+    apply_fee_top_up,
     normalize_fees_distribution,
     runtime_rotations_for_round,
 )
@@ -1376,6 +1381,107 @@ class TransactionsProcessor:
         data["fee_accounting"] = fee_accounting
         self.update_transaction_data(transaction_hash, data)
 
+    def mutate_transaction_fee_accounting(
+        self,
+        transaction_hash: str,
+        mutator: Callable[[dict], dict],
+    ) -> dict:
+        """Mutate the latest fee accounting while holding the transaction row.
+
+        Consensus workers run asynchronously, while RPC top-ups can arrive at
+        any in-flight status. Every worker-side accounting transition must
+        therefore derive from the post-lock JSON value; writing a snapshot
+        captured before a concurrent top-up would erase paid budget.
+        """
+
+        row = (
+            self.session.execute(
+                text("SELECT data FROM transactions WHERE hash = :hash FOR UPDATE"),
+                {"hash": transaction_hash},
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            raise ValueError("TransactionNotFound")
+        data = dict(row["data"] or {})
+        current = data.get(FEE_ACCOUNTING_KEY)
+        if not isinstance(current, dict):
+            raise ValueError("FeeAccountingMissing")
+        updated = mutator(current)
+        data[FEE_ACCOUNTING_KEY] = updated
+        self.session.execute(
+            text(
+                "UPDATE transactions SET data = CAST(:data AS jsonb)"
+                " WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash, "data": json.dumps(data)},
+        )
+        self.session.commit()
+        return updated
+
+    def apply_transaction_fee_top_up(
+        self,
+        transaction_hash: str,
+        *,
+        fees_distribution: dict,
+        amount: int,
+        sender: str,
+        policy,
+    ) -> dict:
+        """Apply one top-up to the latest accounting snapshot under a row lock.
+
+        The caller commits only after debiting the sender on this same session.
+        This gives Studio the serial execution semantics of FeeManager.topUpFees:
+        concurrent top-ups compose instead of both charging against one stale
+        read and allowing the last JSON write to erase the other contribution.
+        """
+
+        row = (
+            self.session.execute(
+                text(
+                    "SELECT status, data, num_of_initial_validators"
+                    " FROM transactions WHERE hash = :hash FOR UPDATE"
+                ),
+                {"hash": transaction_hash},
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            raise ValueError("TransactionNotFound")
+        if row["status"] in {
+            TransactionStatus.ACCEPTED.value,
+            TransactionStatus.UNDETERMINED.value,
+            TransactionStatus.LEADER_TIMEOUT.value,
+            TransactionStatus.VALIDATORS_TIMEOUT.value,
+            TransactionStatus.FINALIZED.value,
+            TransactionStatus.CANCELED.value,
+        }:
+            raise ValueError("InvalidTransactionStatus")
+
+        data = dict(row["data"] or {})
+        current = data.get(FEE_ACCOUNTING_KEY)
+        if current is None:
+            raise ValueError("FeeAccountingMissing")
+        updated = apply_fee_top_up(
+            current,
+            fees_distribution=fees_distribution,
+            amount=amount,
+            sender=sender,
+            num_of_validators=int(row["num_of_initial_validators"] or 5),
+            policy=policy,
+        )
+        data[FEE_ACCOUNTING_KEY] = updated
+        self.session.execute(
+            text(
+                "UPDATE transactions SET data = CAST(:data AS jsonb)"
+                " WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash, "data": json.dumps(data)},
+        )
+        return updated
+
     def get_transaction_count(self, address: str) -> int:
         # Normalize address to checksum format
         try:
@@ -1446,6 +1552,80 @@ class TransactionsProcessor:
             )
             if result.rowcount > 0:
                 self.session.commit()
+
+    def admit_transaction_appeal(
+        self,
+        transaction_hash: str,
+        *,
+        expected_decision_id: int,
+        submitted_at: int,
+        appeal_deadline: int,
+        retention_bps: int,
+        prepare_fee_accounting: Callable[[dict | None], tuple[dict | None, int]],
+    ) -> int:
+        """Atomically reserve one exact-decision appeal.
+
+        The caller deliberately commits only after applying the matching
+        account debit/refund on this same session. This keeps Studio's appeal
+        admission equivalent to one payable Solidity transaction and makes a
+        concurrent second submission lose at the ``appealed = false`` gate.
+        """
+
+        row = (
+            self.session.execute(
+                text(
+                    "SELECT status, appealed, consensus_history, data FROM transactions"
+                    " WHERE hash = :hash FOR UPDATE"
+                ),
+                {"hash": transaction_hash},
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            raise ValueError("TransactionNotFound")
+        if row["status"] not in {
+            TransactionStatus.ACCEPTED.value,
+            TransactionStatus.UNDETERMINED.value,
+            TransactionStatus.LEADER_TIMEOUT.value,
+            TransactionStatus.VALIDATORS_TIMEOUT.value,
+        } or bool(row["appealed"]):
+            raise ValueError("CanNotAppeal")
+        # The RPC may have waited for this row lock. Consensus evaluates the
+        # deadline at transaction execution, not when the caller began
+        # submitting it, so re-sample after lock acquisition and reject an
+        # appeal whose window expired while queued.
+        admitted_at = max(int(submitted_at), int(time.time()))
+        updated = prepare_appeal_decision_basis(
+            row["consensus_history"],
+            expected_decision_id=expected_decision_id,
+            submitted_at=admitted_at,
+            appeal_deadline=appeal_deadline,
+            retention_bps=retention_bps,
+        )
+        data = dict(row["data"] or {})
+        fee_accounting, surplus_refund = prepare_fee_accounting(
+            data.get(FEE_ACCOUNTING_KEY)
+        )
+        if fee_accounting is not None:
+            data[FEE_ACCOUNTING_KEY] = fee_accounting
+        self.session.execute(
+            text(
+                "UPDATE transactions"
+                " SET appealed = true,"
+                " timestamp_appeal = :submitted_at,"
+                " consensus_history = CAST(:history AS jsonb),"
+                " data = CAST(:data AS jsonb)"
+                " WHERE hash = :hash"
+            ),
+            {
+                "hash": transaction_hash,
+                "submitted_at": admitted_at,
+                "history": json.dumps(updated),
+                "data": json.dumps(data),
+            },
+        )
+        return int(surplus_refund)
 
     def set_transaction_timestamp_awaiting_finalization(
         self, transaction_hash: str, timestamp_awaiting_finalization: int = None
@@ -1636,6 +1816,20 @@ class TransactionsProcessor:
             "current_status_changes": [],
             "current_monitoring": {},
         }
+        if extra_status_change in {
+            TransactionStatus.ACCEPTED,
+            TransactionStatus.UNDETERMINED,
+            TransactionStatus.LEADER_TIMEOUT,
+            TransactionStatus.VALIDATORS_TIMEOUT,
+        }:
+            new_history = materialize_decision_metadata(
+                new_history,
+                status=extra_status_change.value,
+                materialized_at=int(time.time()),
+                default_appeal_window=int(
+                    os.environ.get("VITE_FINALITY_WINDOW", "1800")
+                ),
+            )
 
         self.session.execute(
             text(

@@ -2,7 +2,9 @@ from backend.consensus.types import ConsensusResult
 from backend.node.types import Vote
 
 
-def determine_consensus_from_votes(votes_list: list[str]) -> ConsensusResult:
+def determine_consensus_from_votes(
+    votes_list: list[str], electorate_size: int | None = None
+) -> ConsensusResult:
     """
     Determine consensus from a list of votes using actual majority (>50%).
 
@@ -14,7 +16,14 @@ def determine_consensus_from_votes(votes_list: list[str]) -> ConsensusResult:
     Returns:
         ConsensusResult: The consensus result
     """
-    total = len(votes_list)
+    # Terminal normal rounds deliberately keep the strict-majority threshold
+    # of the full frozen electorate even though prior normal leaders are not
+    # seated. Ordinary rounds use their local committee size.
+    total = (
+        len(votes_list)
+        if electorate_size is None
+        else max(len(votes_list), int(electorate_size))
+    )
     majority = total / 2  # need strictly more than half
 
     agree_count = votes_list.count(Vote.AGREE.value)

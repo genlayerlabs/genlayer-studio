@@ -23,6 +23,7 @@ from backend.protocol_rpc.types import (
     DecodedGenlayerTransactionData,
     DecodedsubmitAppealDataArgs,
     DecodedTopUpFeesDataArgs,
+    DecodedFinalizeTransactionDataArgs,
     ZERO_ADDRESS,
 )
 
@@ -202,6 +203,28 @@ FEE_AWARE_TOP_UP_AND_SUBMIT_APPEAL_ABI = {
 FEE_AWARE_LEGACY_TOP_UP_AND_SUBMIT_APPEAL_ABI = {
     **FEE_AWARE_TOP_UP_FEES_ABI,
     "name": "topUpAndSubmitAppeal",
+}
+
+FEE_AWARE_FINALIZE_TRANSACTION_ABI = {
+    "inputs": [
+        {"internalType": "bytes32", "name": "_txId", "type": "bytes32"},
+        {
+            "internalType": "uint256",
+            "name": "_expectedDecisionId",
+            "type": "uint256",
+        },
+    ],
+    "name": "finalizeTransaction",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function",
+}
+
+# Decode old SDK calls only so Studio returns the canonical guarded failure;
+# admission below still requires the exact active DecisionId.
+FEE_AWARE_LEGACY_FINALIZE_TRANSACTION_ABI = {
+    **FEE_AWARE_FINALIZE_TRANSACTION_ABI,
+    "inputs": [FEE_AWARE_FINALIZE_TRANSACTION_ABI["inputs"][0]],
 }
 
 FEES_DISTRIBUTION_FIELDS = [
@@ -469,6 +492,14 @@ class TransactionParser:
                                 )
                                 fee_value = int(value)
                                 value = 0
+                            elif decoded_data["function"] == "finalizeTransaction":
+                                params = decoded_data["params"]
+                                decoded_data = DecodedFinalizeTransactionDataArgs(
+                                    tx_id=params["_txId"],
+                                    expected_decision_id=params.get(
+                                        "_expectedDecisionId"
+                                    ),
+                                )
 
             return DecodedRollupTransaction(
                 from_address=sender,
@@ -725,6 +756,8 @@ class TransactionParser:
                 FEE_AWARE_TOP_UP_FEES_ABI,
                 FEE_AWARE_TOP_UP_AND_SUBMIT_APPEAL_ABI,
                 FEE_AWARE_LEGACY_TOP_UP_AND_SUBMIT_APPEAL_ABI,
+                FEE_AWARE_FINALIZE_TRANSACTION_ABI,
+                FEE_AWARE_LEGACY_FINALIZE_TRANSACTION_ABI,
             ]
         )
         return contract_abi

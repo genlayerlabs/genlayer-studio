@@ -50,9 +50,9 @@ from backend.node.create_nodes.create_nodes import (
 from backend.protocol_rpc.transactions_parser import TransactionParser
 from backend.protocol_rpc.fees import (
     FEE_ACCOUNTING_KEY,
+    VALIDATORS_PER_ROUND,
     FeeValidationError,
     StudioFeePolicy,
-    apply_fee_top_up,
     calculate_appeal_charge,
     calculate_round_fees,
     decode_internal_message_fee_params,
@@ -67,8 +67,11 @@ from backend.protocol_rpc.fees import (
     validate_transaction_fee_deposit,
 )
 from backend.consensus.history import (
+    actual_leader_rotations_by_round,
     completed_consensus_round_index,
+    current_decision_id as history_current_decision_id,
     has_terminal_validator_appeal,
+    latest_decision_metadata,
     logical_fee_round_entries,
 )
 from backend.errors.errors import InvalidAddressError, InvalidTransactionError
@@ -97,6 +100,7 @@ from backend.protocol_rpc.message_handler.types import LogEvent, EventType, Even
 from backend.protocol_rpc.types import (
     DecodedRollupTransaction,
     DecodedTopUpFeesDataArgs,
+    DecodedFinalizeTransactionDataArgs,
     DecodedsubmitAppealDataArgs,
 )
 from backend.database_handler.snapshot_manager import SnapshotManager
@@ -1814,16 +1818,64 @@ _DECISION_STATUSES = {
     TransactionStatus.VALIDATORS_TIMEOUT.value,
 }
 
+_PROTOCOL_TRANSACTION_STATUS_NAMES = (
+    "Uninitialized",
+    "Pending",
+    "Proposing",
+    "Committing",
+    "Revealing",
+    "Accepted",
+    "Undetermined",
+    "Finalized",
+    "Canceled",
+    "AppealRevealing",
+    "AppealCommitting",
+    "ValidatorsTimeout",
+    "LeaderTimeout",
+    "LeaderRevealing",
+)
+_RESOLUTION_ACTION_NAMES = (
+    "NoOp",
+    "Cancel",
+    "ReplaceActor",
+    "RotateLeader",
+    "ResolveAppeal",
+    "MaterializeDecision",
+    "Finalize",
+)
+_RESOLUTION_SOURCE_NAMES = (
+    "Unspecified",
+    "ActivationInsufficientValidators",
+    "ProposalHanging",
+    "LeaderReceiptTimeout",
+    "CommitHanging",
+    "LeaderRevealHanging",
+    "FullReveal",
+    "RevealDeadline",
+    "AppealCommitHanging",
+    "AppealFullReveal",
+    "AppealRevealDeadline",
+    "SelectionDepleted",
+)
+
 
 def _transaction_appeal_deadline(transaction: dict) -> float | None:
     started_at = transaction.get("timestamp_awaiting_finalization")
-    if started_at is None:
-        return None
-    if str(transaction.get("execution_mode") or "") in {
+    if started_at is not None and str(transaction.get("execution_mode") or "") in {
         "LEADER_ONLY",
         "LEADER_SELF_VALIDATOR",
     }:
         return float(started_at)
+    decision = latest_decision_metadata(transaction.get("consensus_history"))
+    if decision is not None:
+        try:
+            deadline = int(decision.get("appealDeadline") or 0)
+        except (TypeError, ValueError):
+            deadline = 0
+        if deadline > 0:
+            return float(deadline)
+    if started_at is None:
+        return None
     finality_window = int(os.environ.get("VITE_FINALITY_WINDOW", "1800"))
     failed_reduction = float(
         os.environ.get("VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION", "0")
@@ -1835,6 +1887,10 @@ def _transaction_appeal_deadline(transaction: dict) -> float | None:
         + finality_window
         * ((1.0 - failed_reduction) ** int(transaction.get("appeal_failed") or 0))
     )
+
+
+def _transaction_decision_id(transaction: dict) -> int:
+    return history_current_decision_id(transaction.get("consensus_history"))
 
 
 def get_transaction_lifecycle(
@@ -1880,7 +1936,7 @@ def get_transaction_lifecycle(
         transaction.get("appealed")
     )
     current_round = _current_fee_round(transaction.get("consensus_history"))
-    decision_id = 1 + ((current_round + 1) // 2) if decision_active else None
+    decision_id = _transaction_decision_id(transaction) if decision_active else None
 
     if not decision_active:
         resolution_source_code = 0
@@ -1888,11 +1944,10 @@ def get_transaction_lifecycle(
         resolution_source_code = 3  # LeaderReceiptTimeout
     else:
         appeal_attempt = current_round % 2 == 1
-        reveal_timed_out = status == TransactionStatus.VALIDATORS_TIMEOUT.value
-        if appeal_attempt:
-            resolution_source_code = 10 if reveal_timed_out else 9
-        else:
-            resolution_source_code = 7 if reveal_timed_out else 6
+        # Studio materializes these outcomes only after its RevealingState has
+        # tallied the complete receipt set. A validator execution timeout is a
+        # VoteType.Timeout ballot, not a Consensus RevealDeadline trigger.
+        resolution_source_code = 9 if appeal_attempt else 6
 
     resolution_action_code = 0
     deadline = _transaction_appeal_deadline(transaction)
@@ -1905,11 +1960,15 @@ def get_transaction_lifecycle(
         resolution_action_code = 6  # Finalize
 
     return {
+        "storedStatus": _PROTOCOL_TRANSACTION_STATUS_NAMES[stored_status_code],
         "storedStatusCode": stored_status_code,
         # ResolutionKernel leaves a decision in its stored status until the
         # separately reported Finalize action is actually committed.
+        "projectedStatus": _PROTOCOL_TRANSACTION_STATUS_NAMES[stored_status_code],
         "projectedStatusCode": stored_status_code,
+        "resolutionAction": _RESOLUTION_ACTION_NAMES[resolution_action_code],
         "resolutionActionCode": resolution_action_code,
+        "resolutionSource": _RESOLUTION_SOURCE_NAMES[resolution_source_code],
         "resolutionSourceCode": resolution_source_code,
         "decisionId": str(decision_id) if decision_id is not None else None,
         "decisionActive": decision_active,
@@ -1964,11 +2023,34 @@ def estimate_latest_appeal_charge(
         )
     )
     current_round = _current_fee_round(transaction.get("consensus_history"))
+    available_appeal_validators = _available_appeal_validator_count(
+        transaction,
+        validator_count,
+    )
+    if (
+        status
+        in {
+            TransactionStatus.ACCEPTED.value,
+            TransactionStatus.VALIDATORS_TIMEOUT.value,
+        }
+        and available_appeal_validators == 0
+    ):
+        raise InvalidTransactionError("CanNotAppeal")
+    if (
+        status == TransactionStatus.UNDETERMINED.value
+        and available_appeal_validators is not None
+        and available_appeal_validators
+        < VALIDATORS_PER_ROUND[min(current_round + 1, len(VALIDATORS_PER_ROUND) - 1)]
+    ):
+        raise InvalidTransactionError("CanNotAppeal")
     live_seats = None
     if status == TransactionStatus.LEADER_TIMEOUT.value:
         live_validators = transaction.get("leader_timeout_validators")
         if isinstance(live_validators, list):
-            live_seats = len(live_validators)
+            # Studio persists the survivors after removing the timed-out
+            # leader; Consensus applies its eligibility gate to the original
+            # committee before that removal.
+            live_seats = len(live_validators) + 1
     charge = calculate_appeal_charge(
         fee_accounting["fees_distribution"],
         current_round=current_round,
@@ -1978,10 +2060,11 @@ def estimate_latest_appeal_charge(
             validator_count
             - _normal_leader_count(transaction.get("consensus_history")),
         ),
+        available_appeal_validators=available_appeal_validators,
         leader_timeout_live_seats=live_seats,
         policy=StudioFeePolicy.from_env(),
     )
-    decision_id = 1 + ((current_round + 1) // 2)
+    decision_id = _transaction_decision_id(transaction)
     return {
         "decisionId": str(decision_id),
         "bond": str(int(charge["bond"])),
@@ -2081,6 +2164,9 @@ def _fee_metadata(decoded_rollup_transaction: DecodedRollupTransaction) -> dict:
         decoded_rollup_transaction.data is None
         or isinstance(decoded_rollup_transaction.data, DecodedsubmitAppealDataArgs)
         or isinstance(decoded_rollup_transaction.data, DecodedTopUpFeesDataArgs)
+        or isinstance(
+            decoded_rollup_transaction.data, DecodedFinalizeTransactionDataArgs
+        )
         or not hasattr(decoded_rollup_transaction.data, "args")
         or decoded_rollup_transaction.data.args is None
     ):
@@ -2125,7 +2211,14 @@ def _funded_max_rotations(
     data = decoded_rollup_transaction.data
     if (
         data is None
-        or isinstance(data, (DecodedsubmitAppealDataArgs, DecodedTopUpFeesDataArgs))
+        or isinstance(
+            data,
+            (
+                DecodedsubmitAppealDataArgs,
+                DecodedTopUpFeesDataArgs,
+                DecodedFinalizeTransactionDataArgs,
+            ),
+        )
         or not hasattr(data, "args")
         or data.args is None
         or data.args.fees_distribution is None
@@ -2235,6 +2328,9 @@ def _validate_fee_envelope(
         decoded_rollup_transaction.data is None
         or isinstance(decoded_rollup_transaction.data, DecodedsubmitAppealDataArgs)
         or isinstance(decoded_rollup_transaction.data, DecodedTopUpFeesDataArgs)
+        or isinstance(
+            decoded_rollup_transaction.data, DecodedFinalizeTransactionDataArgs
+        )
         or not hasattr(decoded_rollup_transaction.data, "args")
         or decoded_rollup_transaction.data.args is None
     ):
@@ -2276,43 +2372,38 @@ def _handle_top_up_fees(
 ) -> str:
     assert isinstance(decoded_rollup_transaction.data, DecodedTopUpFeesDataArgs)
     tx_id = _tx_id_to_hex(decoded_rollup_transaction.data.tx_id)
-    tx = transactions_processor.get_transaction_by_hash(tx_id)
-    if tx is None:
-        raise NotFoundError(message=TRANSACTION_NOT_FOUND_MESSAGE, data={"hash": tx_id})
-
-    status = tx.get("status")
-    if status in {
-        TransactionStatus.ACCEPTED.value,
-        TransactionStatus.UNDETERMINED.value,
-        TransactionStatus.LEADER_TIMEOUT.value,
-        TransactionStatus.VALIDATORS_TIMEOUT.value,
-        TransactionStatus.FINALIZED.value,
-        TransactionStatus.CANCELED.value,
-    }:
-        raise InvalidTransactionError("InvalidTransactionStatus")
-
-    fee_accounting = (tx.get("data") or {}).get(FEE_ACCOUNTING_KEY)
-    if fee_accounting is None:
-        raise InvalidTransactionError("FeeAccountingMissing")
-
+    session = getattr(transactions_processor, "session", None)
     try:
-        updated = apply_fee_top_up(
-            fee_accounting,
+        transactions_processor.apply_transaction_fee_top_up(
+            tx_id,
             fees_distribution=decoded_rollup_transaction.data.fees_distribution,
             amount=decoded_rollup_transaction.total_spend,
             sender=decoded_rollup_transaction.from_address,
-            num_of_validators=int(tx.get("num_of_initial_validators") or 5),
             policy=StudioFeePolicy.from_env(),
         )
+        _sandbox_debit_sender(
+            accounts_manager,
+            decoded_rollup_transaction.from_address,
+            decoded_rollup_transaction.total_spend,
+        )
+        if session is not None:
+            session.commit()
     except FeeValidationError as exc:
+        if session is not None:
+            session.rollback()
         raise InvalidTransactionError(str(exc)) from exc
-
-    _sandbox_debit_sender(
-        accounts_manager,
-        decoded_rollup_transaction.from_address,
-        decoded_rollup_transaction.total_spend,
-    )
-    transactions_processor.update_transaction_fee_accounting(tx_id, updated)
+    except ValueError as exc:
+        if session is not None:
+            session.rollback()
+        if str(exc) == "TransactionNotFound":
+            raise NotFoundError(
+                message=TRANSACTION_NOT_FOUND_MESSAGE, data={"hash": tx_id}
+            ) from exc
+        raise InvalidTransactionError(str(exc)) from exc
+    except Exception:
+        if session is not None:
+            session.rollback()
+        raise
     return tx_id
 
 
@@ -2349,10 +2440,9 @@ def _handle_appeal_or_top_up_and_submit(
     consensus_history = tx.get("consensus_history")
     expected_decision_id = decoded_rollup_transaction.data.expected_decision_id
     current_round = _current_fee_round(consensus_history)
-    # Studio has no on-chain DecisionRecord, so derive the equivalent
-    # monotonic ordinal from its alternating normal/appeal round history.
-    # Round 0 -> decision 1; rounds 1/2 -> decision 2; rounds 3/4 -> 3.
-    current_decision_id = 1 + ((current_round + 1) // 2)
+    # New Studio decisions persist their exact materialized ID. Legacy rows
+    # derive the same monotonic ordinal from alternating normal/appeal history.
+    current_decision_id = _transaction_decision_id(tx)
     # v0.6 binds every appeal to one exact materialized decision.  Older SDKs
     # emitted selectors without this argument; Studio may still decode those
     # transactions to surface a canonical error, but must never admit the
@@ -2361,6 +2451,8 @@ def _handle_appeal_or_top_up_and_submit(
         raise InvalidTransactionError("CanNotAppeal")
 
     fee_accounting = (tx.get("data") or {}).get(FEE_ACCOUNTING_KEY)
+    if fee_accounting is None:
+        raise InvalidTransactionError("FeeAccountingMissing")
     if fee_accounting is not None:
         session = getattr(accounts_manager, "session", None)
         frozen_pool_count = fee_accounting.get("selection_pool_count")
@@ -2378,15 +2470,40 @@ def _handle_appeal_or_top_up_and_submit(
             )
         )
         normal_leader_count = _normal_leader_count(consensus_history)
+        available_appeal_validators = _available_appeal_validator_count(
+            tx,
+            validator_count,
+        )
+        if (
+            status
+            in {
+                TransactionStatus.ACCEPTED.value,
+                TransactionStatus.VALIDATORS_TIMEOUT.value,
+            }
+            and available_appeal_validators == 0
+        ):
+            raise InvalidTransactionError("CanNotAppeal")
+        if (
+            status == TransactionStatus.UNDETERMINED.value
+            and available_appeal_validators is not None
+            and available_appeal_validators
+            < VALIDATORS_PER_ROUND[
+                min(current_round + 1, len(VALIDATORS_PER_ROUND) - 1)
+            ]
+        ):
+            raise InvalidTransactionError("CanNotAppeal")
         replacement_rotations = None
         leader_timeout_live_seats = None
         if status == TransactionStatus.LEADER_TIMEOUT.value:
             live_validators = tx.get("leader_timeout_validators")
             if isinstance(live_validators, list):
-                leader_timeout_live_seats = len(live_validators)
-        try:
+                leader_timeout_live_seats = len(live_validators) + 1
+
+        def prepare_fee_accounting(current_fee_accounting):
+            if current_fee_accounting is None:
+                raise FeeValidationError("FeeAccountingMissing")
             updated = record_appeal_bond(
-                fee_accounting,
+                current_fee_accounting,
                 amount=decoded_rollup_transaction.total_spend,
                 appealer=decoded_rollup_transaction.from_address,
                 current_round=current_round,
@@ -2397,26 +2514,56 @@ def _handle_appeal_or_top_up_and_submit(
                     0,
                     validator_count - normal_leader_count,
                 ),
+                available_appeal_validators=available_appeal_validators,
                 replacement_rotations=replacement_rotations,
                 leader_timeout_live_seats=leader_timeout_live_seats,
                 time_unit_overlay_bps=StudioFeePolicy.from_env().time_unit_overlay_bps,
             )
-        except FeeValidationError as exc:
-            raise InvalidTransactionError(str(exc)) from exc
+            return updated, int(updated["appeal_bonds"][-1]["surplusRefund"])
+
+    submitted_at = int(time.time())
+    failed_reduction = float(
+        os.environ.get("VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION", "0")
+    )
+    failed_reduction = min(1.0, max(0.0, failed_reduction))
+    session = getattr(transactions_processor, "session", None)
+    try:
+        surplus_refund = transactions_processor.admit_transaction_appeal(
+            tx_id,
+            expected_decision_id=current_decision_id,
+            submitted_at=submitted_at,
+            appeal_deadline=(
+                int(appeal_deadline)
+                if appeal_deadline is not None
+                else submitted_at + int(os.environ.get("VITE_FINALITY_WINDOW", "1800"))
+            ),
+            retention_bps=round((1.0 - failed_reduction) * 10_000),
+            prepare_fee_accounting=prepare_fee_accounting,
+        )
         _sandbox_debit_sender(
             accounts_manager,
             decoded_rollup_transaction.from_address,
             decoded_rollup_transaction.total_spend,
         )
-        surplus_refund = int(updated["appeal_bonds"][-1]["surplusRefund"])
         if surplus_refund > 0:
             accounts_manager.credit_account_balance(
                 decoded_rollup_transaction.from_address,
                 surplus_refund,
             )
-        transactions_processor.update_transaction_fee_accounting(tx_id, updated)
-
-    transactions_processor.set_transaction_appeal(tx_id, True)
+        if session is not None:
+            session.commit()
+    except FeeValidationError as exc:
+        if session is not None:
+            session.rollback()
+        raise InvalidTransactionError(str(exc)) from exc
+    except ValueError as exc:
+        if session is not None:
+            session.rollback()
+        raise InvalidTransactionError("CanNotAppeal") from exc
+    except Exception:
+        if session is not None:
+            session.rollback()
+        raise
     msg_handler.send_message(
         log_event=LogEvent(
             "transaction_appeal_updated",
@@ -2429,6 +2576,47 @@ def _handle_appeal_or_top_up_and_submit(
         ),
         log_to_terminal=False,
     )
+    return tx_id
+
+
+def _handle_finalize_transaction(
+    *,
+    transactions_processor: TransactionsProcessor,
+    decoded_rollup_transaction: DecodedRollupTransaction,
+) -> str:
+    """Validate an exact-decision finalization request.
+
+    Studio's worker owns the asynchronous state/contract commit. This boundary
+    mirrors v0.6 admission: it accepts only the active decision, at or after its
+    immutable deadline, and only at the recipient's finalization head. The
+    already-eligible row is then consumed by the worker without inventing a
+    second Studio-only lifecycle transition.
+    """
+    assert isinstance(
+        decoded_rollup_transaction.data, DecodedFinalizeTransactionDataArgs
+    )
+    if int(decoded_rollup_transaction.total_spend) != 0:
+        # ConsensusMain.finalizeTransaction is nonpayable. Do not silently
+        # accept value that an EVM call would reject (or leave it undebited).
+        raise InvalidTransactionError("NonPayableCall")
+    tx_id = _tx_id_to_hex(decoded_rollup_transaction.data.tx_id)
+    transaction = transactions_processor.get_transaction_by_hash(tx_id)
+    if transaction is None:
+        raise NotFoundError(message=TRANSACTION_NOT_FOUND_MESSAGE, data={"hash": tx_id})
+
+    status = str(transaction.get("status") or "")
+    if status not in _DECISION_STATUSES or bool(transaction.get("appealed")):
+        raise InvalidTransactionError("FinalizationNotAllowed")
+    current_decision_id = _transaction_decision_id(transaction)
+    expected_decision_id = decoded_rollup_transaction.data.expected_decision_id
+    if expected_decision_id is None or int(expected_decision_id) != current_decision_id:
+        raise InvalidTransactionError("FinalizationNotAllowed")
+
+    deadline = _transaction_appeal_deadline(transaction)
+    if deadline is None or time.time() < deadline:
+        raise InvalidTransactionError("FinalizationNotAllowed")
+    if not transactions_processor.is_transaction_finalization_head(tx_id):
+        raise InvalidTransactionError("FinalizationNotAllowed")
     return tx_id
 
 
@@ -2445,11 +2633,60 @@ def _normal_leader_count(consensus_history: dict | None) -> int:
     # replacement committee. Studio compacts a leader appeal's hidden appeal
     # round and replay into one history entry, so raw list parity is not a safe
     # way to identify normal rounds after the first leader appeal.
+    rotations_by_round = actual_leader_rotations_by_round(consensus_history)
     return sum(
-        1
+        1 + int(rotations_by_round.get(logical_round, 0))
         for logical_round, _entry in logical_fee_round_entries(consensus_history)
         if logical_round % 2 == 0
     )
+
+
+def _receipt_validator_address(receipt: Any) -> str | None:
+    if not isinstance(receipt, dict):
+        return None
+    node_config = receipt.get("node_config")
+    if not isinstance(node_config, dict):
+        return None
+    address = node_config.get("address")
+    return str(address).lower() if address else None
+
+
+def _available_appeal_validator_count(
+    transaction: dict,
+    frozen_pool_count: int,
+) -> int | None:
+    """Mirror Studio's fresh-juror pool; unknown legacy state stays conservative."""
+    used_addresses: set[str] = set()
+    consensus_data = transaction.get("consensus_data")
+    if isinstance(consensus_data, dict):
+        validator_receipts = consensus_data.get("validators")
+        if isinstance(validator_receipts, dict):
+            validator_receipts = [validator_receipts]
+        if isinstance(validator_receipts, list):
+            for receipt in validator_receipts:
+                address = _receipt_validator_address(receipt)
+                if address:
+                    used_addresses.add(address)
+
+    history = transaction.get("consensus_history")
+    results = history.get("consensus_results") if isinstance(history, dict) else None
+    if isinstance(results, list):
+        for entry in results:
+            if not isinstance(entry, dict):
+                continue
+            leader_receipts = entry.get("leader_result")
+            if isinstance(leader_receipts, dict):
+                leader_receipts = [leader_receipts]
+            if not isinstance(leader_receipts, list):
+                continue
+            for receipt in leader_receipts:
+                address = _receipt_validator_address(receipt)
+                if address:
+                    used_addresses.add(address)
+
+    if not used_addresses:
+        return None
+    return max(0, int(frozen_pool_count) - len(used_addresses))
 
 
 def _simulation_fee_accounting(
@@ -2616,6 +2853,14 @@ def send_raw_transaction(
         _reject_genvm_executor_selector_unless_deploy(sim_config, is_deploy=False)
         return _handle_top_up_fees(
             accounts_manager=accounts_manager,
+            transactions_processor=transactions_processor,
+            decoded_rollup_transaction=decoded_rollup_transaction,
+        )
+    elif isinstance(
+        decoded_rollup_transaction.data, DecodedFinalizeTransactionDataArgs
+    ):
+        _reject_genvm_executor_selector_unless_deploy(sim_config, is_deploy=False)
+        return _handle_finalize_transaction(
             transactions_processor=transactions_processor,
             decoded_rollup_transaction=decoded_rollup_transaction,
         )
@@ -2828,8 +3073,8 @@ def set_finality_window_time(consensus: ConsensusAlgorithm, time: int) -> None:
 
 def get_finality_window_time(consensus: ConsensusAlgorithm) -> int:
     if consensus is None:
-        # Return default finality window time when consensus is not initialized
-        return os.environ.get("VITE_FINALITY_WINDOW", 1800)  # Default to 60 seconds
+        # Preserve the RPC's numeric contract even while consensus is starting.
+        return int(os.environ.get("VITE_FINALITY_WINDOW", "1800"))
     return consensus.finality_window_time
 
 

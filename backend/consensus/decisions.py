@@ -533,23 +533,18 @@ def merge_appeal_validators(
     current_validation_results: list,
     appeal_failed: int,
 ) -> tuple[dict, list]:
-    """Pure merge of appeal vote/validator data.
+    """Retain the transaction-wide consumed set after a fresh appeal jury.
 
     Returns:
         (merged_votes, merged_validators)
     """
     merged_votes = existing_votes | current_votes
 
-    if appeal_failed == 0:
-        merged_validators = existing_validators + current_validation_results
-    elif appeal_failed == 1:
-        n = (len(existing_validators) - 1) // 2
-        merged_validators = existing_validators[: n - 1] + current_validation_results
-    else:
-        n = len(current_validation_results) - (len(existing_validators) + 1)
-        merged_validators = existing_validators[: n - 1] + current_validation_results
-
-    return merged_votes, merged_validators
+    # Consensus's selection authority permanently excludes every registry
+    # index consumed by earlier rounds. Studio stores the equivalent address
+    # set in consensus_data; never slice old validators back out after a failed
+    # appeal or a later jury could select them again.
+    return merged_votes, existing_validators + current_validation_results
 
 
 def decide_revealing(

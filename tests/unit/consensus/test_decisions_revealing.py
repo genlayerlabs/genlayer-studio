@@ -76,7 +76,7 @@ class TestMergeAppealValidators:
         assert merged_votes == {"a": "agree", "b": "disagree"}
         assert merged_vals == ["v1", "v2", "v3", "v4"]
 
-    def test_appeal_failed_1_overwrites_half(self):
+    def test_appeal_failed_1_retains_consumed_validators(self):
         existing = list(range(5))  # 5 existing validators
         current = ["new1", "new2", "new3"]
         _, merged_vals = merge_appeal_validators(
@@ -86,10 +86,9 @@ class TestMergeAppealValidators:
             current_validation_results=current,
             appeal_failed=1,
         )
-        # n = (5-1)//2 = 2, keep existing[:1], then current
-        assert merged_vals == [0] + current
+        assert merged_vals == existing + current
 
-    def test_appeal_failed_2(self):
+    def test_appeal_failed_2_retains_consumed_validators(self):
         existing = list(range(7))
         current = ["n1", "n2", "n3", "n4"]
         _, merged_vals = merge_appeal_validators(
@@ -99,10 +98,7 @@ class TestMergeAppealValidators:
             current_validation_results=current,
             appeal_failed=2,
         )
-        # n = len(current) - (len(existing) + 1) = 4 - 8 = -4
-        # existing[:n-1] = existing[:-5] = existing[:2] (negative index)
-        n = len(current) - (len(existing) + 1)
-        assert merged_vals == existing[: n - 1] + current
+        assert merged_vals == existing + current
 
     def test_votes_merged_with_pipe(self):
         merged_votes, _ = merge_appeal_validators(

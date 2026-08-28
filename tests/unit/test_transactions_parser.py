@@ -12,6 +12,9 @@ from typing import Optional, List, Any
 from rlp import encode
 from web3 import Web3
 import backend.node.genvm.origin.calldata as calldata
+from backend.rollup.default_contracts.consensus_main import (
+    get_default_consensus_main_contract,
+)
 
 
 @pytest.fixture
@@ -22,6 +25,70 @@ def transaction_parser():
     # Ensure no ABI is returned so function decoding is skipped
     consensus_service.load_contract = Mock(return_value=None)
     return TransactionParser(consensus_service)
+
+
+def test_default_consensus_abi_exports_exact_decision_guarded_actions():
+    abi = get_default_consensus_main_contract()["abi"]
+    functions = {
+        entry["name"]: entry for entry in abi if entry.get("type") == "function"
+    }
+
+    assert [item["type"] for item in functions["submitAppeal"]["inputs"]] == [
+        "bytes32",
+        "uint256",
+    ]
+    assert [item["type"] for item in functions["topUpAndSubmitAppeal"]["inputs"]] == [
+        "bytes32",
+        "uint256",
+        "tuple",
+    ]
+    assert [item["type"] for item in functions["finalizeTransaction"]["inputs"]] == [
+        "bytes32",
+        "uint256",
+    ]
+    for function_name in ("addTransaction", "deploySalted"):
+        assert [item["type"] for item in functions[function_name]["inputs"]] == [
+            "tuple"
+        ]
+        assert functions[function_name]["stateMutability"] == "payable"
+    assert [item["type"] for item in functions["topUpFees"]["inputs"]] == [
+        "bytes32",
+        "tuple",
+    ]
+    add_params = functions["addTransaction"]["inputs"][0]["components"]
+    assert [item["type"] for item in add_params] == [
+        "address",
+        "address",
+        "uint256",
+        "uint256",
+        "uint256",
+        "uint256",
+        "uint256",
+        "tuple",
+        "bytes",
+        "tuple[]",
+    ]
+    assert [item["type"] for item in add_params[7]["components"]] == [
+        "uint256",
+        "uint256",
+        "uint256",
+        "uint256",
+        "uint256",
+        "uint256",
+        "uint256[]",
+        "uint256",
+        "uint256",
+        "uint256",
+    ]
+    assert [item["type"] for item in add_params[9]["components"]] == [
+        "uint8",
+        "bool",
+        "uint256",
+        "address",
+        "bytes32",
+        "uint256",
+        "bytes",
+    ]
 
 
 def test_transaction_rpc_payload_stringifies_unsafe_fee_integers():
@@ -656,3 +723,41 @@ def test_decode_latest_top_up_and_submit_appeal_preserves_decision_id(monkeypatc
     assert decoded.data.expected_decision_id == 9
     assert decoded.data.top_up_and_submit is True
     assert decoded.data.fees_distribution["rotations"] == [3, 4, 5]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "input_count", "expected_decision_id"),
+    [
+        ([b"\x9a" * 32, 17], 2, 17),
+        ([b"\x9a" * 32], 1, None),
+    ],
+)
+def test_decode_finalize_transaction_preserves_optional_decision_guard(
+    monkeypatch, arguments, input_count, expected_decision_id
+):
+    monkeypatch.setattr(
+        "backend.protocol_rpc.transactions_parser.Account.recover_transaction",
+        lambda raw: "0x3333333333333333333333333333333333333333",
+    )
+    consensus_service = Mock()
+    consensus_service.web3 = Web3()
+    consensus_service.load_contract = Mock(return_value={"abi": []})
+    parser = TransactionParser(consensus_service)
+
+    raw = _build_eip1559_raw(
+        nonce=12,
+        to=bytes.fromhex("0000000000000000000000000000000000000000"),
+        value=0,
+        data=_contract_call_data(
+            parser,
+            "finalizeTransaction",
+            arguments,
+            input_count=input_count,
+        ),
+    )
+
+    decoded = parser.decode_signed_transaction(raw)
+
+    assert decoded is not None
+    assert decoded.data.tx_id == b"\x9a" * 32
+    assert decoded.data.expected_decision_id == expected_decision_id

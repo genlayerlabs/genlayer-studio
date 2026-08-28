@@ -682,6 +682,7 @@ def _calculate_settled_time_unit_fees(
     policy: StudioFeePolicy,
     consensus_history: dict[str, Any] | None,
     execution_mode: str = "NORMAL",
+    terminal_electorate_size: int | None = None,
 ) -> tuple[int, list[dict[str, Any]]]:
     """Aggregate the fee-funded round payouts made by FeesProcessor.
 
@@ -756,6 +757,15 @@ def _calculate_settled_time_unit_fees(
     rotations_by_round = actual_leader_rotations_by_round(consensus_history)
     attempts_by_round = _consensus_attempt_entries_by_round(consensus_history)
     outcomes = _round_outcomes(consensus_history)
+    terminal_rounds = {
+        round_index
+        for round_index, predecessor in previous_completed_round.items()
+        if outcomes.get(predecessor)
+        in {
+            ConsensusRound.VALIDATOR_APPEAL_SUCCESSFUL.value,
+            ConsensusRound.VALIDATOR_TIMEOUT_APPEAL_SUCCESSFUL.value,
+        }
+    }
     if policy.gen_per_time_unit > 0:
         leader_timeunits = (
             int(fees["leaderTimeunitsAllocation"]) * policy.gen_per_time_unit
@@ -771,6 +781,10 @@ def _calculate_settled_time_unit_fees(
     leader_only = str(execution_mode).upper() == "LEADER_ONLY"
 
     for round_index in range(capped_final_round + 1):
+        round_electorate_size = (
+            terminal_electorate_size if round_index in terminal_rounds else None
+        )
+        alignment_result: str | None = None
         outcome = outcomes.get(round_index, "")
         is_leader_appeal_replay = outcome in LEADER_APPEAL_CONSENSUS_ROUNDS
         is_leader_appeal_placeholder = (
@@ -791,10 +805,17 @@ def _calculate_settled_time_unit_fees(
             _entry_validator_receipts(attempt) for attempt in prior_attempts
         ):
             for attempt in prior_attempts:
-                aligned = _aligned_validator_count(attempt, exclude_leader=True)
+                aligned = _aligned_validator_count(
+                    attempt,
+                    exclude_leader=True,
+                    electorate_size=round_electorate_size,
+                )
                 rotated_leader_fee = (
                     0
-                    if _fee_alignment_result(attempt) == "deterministic_violation"
+                    if _fee_alignment_result(
+                        attempt, electorate_size=round_electorate_size
+                    )
+                    == "deterministic_violation"
                     else leader_timeunits // 2
                 )
                 prior_rotation_fee += aligned * validator_timeunits + rotated_leader_fee
@@ -925,10 +946,14 @@ def _calculate_settled_time_unit_fees(
             rule = "leader_appeal"
         else:
             current_result = (
-                _fee_alignment_result(current_attempt)
+                _fee_alignment_result(
+                    current_attempt,
+                    electorate_size=round_electorate_size,
+                )
                 if current_attempt is not None
                 else "unknown"
             )
+            alignment_result = current_result
             leader_fee = (
                 0 if current_result == "deterministic_violation" else leader_timeunits
             )
@@ -944,7 +969,11 @@ def _calculate_settled_time_unit_fees(
             else:
                 rule = "normal"
             aligned = (
-                _aligned_validator_count(current_attempt)
+                _aligned_validator_count(
+                    current_attempt,
+                    forced_result=current_result,
+                    electorate_size=round_electorate_size,
+                )
                 if current_attempt is not None
                 and _entry_validator_receipts(current_attempt)
                 else (0 if leader_only else validators)
@@ -952,15 +981,19 @@ def _calculate_settled_time_unit_fees(
             round_fee = prior_rotation_fee + aligned * validator_timeunits + leader_fee
 
         base_total += round_fee
-        by_round.append(
-            {
-                "round": round_index,
-                "outcome": outcome,
-                "rule": rule,
-                "rotations": rotations,
-                "timeUnitAmount": round_fee,
-            }
-        )
+        settlement_round = {
+            "round": round_index,
+            "outcome": outcome,
+            "rule": rule,
+            "rotations": rotations,
+            "timeUnitAmount": round_fee,
+        }
+        # Preserve the existing receipt shape for ordinary rounds. The
+        # terminal result is material because it was derived against the
+        # frozen transaction electorate rather than the local committee.
+        if round_electorate_size is not None and alignment_result is not None:
+            settlement_round["alignmentResult"] = alignment_result
+        by_round.append(settlement_round)
 
     return base_total, by_round
 
@@ -1058,7 +1091,11 @@ def _entry_leader_address(entry: dict[str, Any] | None) -> str:
     return ""
 
 
-def _fee_alignment_result(entry: dict[str, Any] | None) -> str:
+def _fee_alignment_result(
+    entry: dict[str, Any] | None,
+    *,
+    electorate_size: int | None = None,
+) -> str:
     votes = [
         str(receipt.get("vote") or "").lower()
         for receipt in _entry_validator_receipts(entry)
@@ -1066,7 +1103,10 @@ def _fee_alignment_result(entry: dict[str, Any] | None) -> str:
     total = len(votes)
     if total == 0:
         return "unknown"
-    majority = total / 2
+    threshold_base = (
+        total if electorate_size is None else max(total, int(electorate_size))
+    )
+    majority = threshold_base / 2
     if votes.count("agree") > majority:
         return "agree"
     if votes.count("disagree") > majority:
@@ -1087,6 +1127,7 @@ def _aligned_validator_count(
     *,
     exclude_leader: bool = False,
     forced_result: str | None = None,
+    electorate_size: int | None = None,
 ) -> int:
     receipts = _entry_validator_receipts(entry)
     if exclude_leader:
@@ -1100,7 +1141,9 @@ def _aligned_validator_count(
             filtered.append(receipt)
         receipts = filtered
 
-    result = forced_result or _fee_alignment_result(entry)
+    result = forced_result or _fee_alignment_result(
+        entry, electorate_size=electorate_size
+    )
     if result == "no_majority":
         return len(receipts)
     if result == "unknown":
@@ -1123,6 +1166,7 @@ def _settlement_storage_recipient_count(
     fees_distribution: dict[str, Any],
     policy: StudioFeePolicy,
     execution_mode: str,
+    terminal_electorate_size: int | None = None,
 ) -> int:
     """Count the unique fee-ledger recipients that share persistent storage.
 
@@ -1160,11 +1204,17 @@ def _settlement_storage_recipient_count(
     leader_only = str(execution_mode).upper() == "LEADER_ONLY"
     recipients: set[str] = set()
 
-    def add_leader(attempt: dict[str, Any], *, payable_value: int) -> None:
+    def add_leader(
+        attempt: dict[str, Any],
+        *,
+        payable_value: int,
+        electorate_size: int | None = None,
+    ) -> None:
         leader = _entry_leader_address(attempt)
         if leader and (
             payable_value > 0
-            or _fee_alignment_result(attempt) == "deterministic_violation"
+            or _fee_alignment_result(attempt, electorate_size=electorate_size)
+            == "deterministic_violation"
         ):
             recipients.add(leader)
 
@@ -1174,6 +1224,7 @@ def _settlement_storage_recipient_count(
         aligned_only: bool = False,
         exclude_leader: bool = False,
         forced_result: str | None = None,
+        electorate_size: int | None = None,
     ) -> list[str]:
         receipts = _entry_validator_receipts(attempt)
         if exclude_leader:
@@ -1190,7 +1241,9 @@ def _settlement_storage_recipient_count(
                     continue
                 filtered.append(receipt)
             receipts = filtered
-        result = forced_result or _fee_alignment_result(attempt)
+        result = forced_result or _fee_alignment_result(
+            attempt, electorate_size=electorate_size
+        )
         addresses: list[str] = []
         for receipt in receipts:
             vote = str(receipt.get("vote") or "").lower()
@@ -1214,18 +1267,55 @@ def _settlement_storage_recipient_count(
 
         current_attempt = attempts[-1] if attempts else None
         rotation_attempts = attempts[:-1] if attempts else []
+        predecessor = max(
+            (candidate for candidate in outcomes if candidate < round_index),
+            default=None,
+        )
+        round_electorate_size = (
+            terminal_electorate_size
+            if predecessor is not None
+            and outcomes.get(predecessor)
+            in {
+                ConsensusRound.VALIDATOR_APPEAL_SUCCESSFUL.value,
+                ConsensusRound.VALIDATOR_TIMEOUT_APPEAL_SUCCESSFUL.value,
+            }
+            else None
+        )
         if int(settlement.get("rotations", 0) or 0) > 0:
             for attempt in rotation_attempts:
-                add_leader(attempt, payable_value=leader_value // 2)
+                add_leader(
+                    attempt,
+                    payable_value=leader_value // 2,
+                    electorate_size=round_electorate_size,
+                )
                 if validator_value > 0:
-                    recipients.update(validator_addresses(attempt, exclude_leader=True))
+                    recipients.update(
+                        validator_addresses(
+                            attempt,
+                            exclude_leader=True,
+                            electorate_size=round_electorate_size,
+                        )
+                    )
 
         if current_attempt is None:
             continue
         if rule in normal_rules:
-            add_leader(current_attempt, payable_value=leader_value)
+            alignment_result = settlement.get("alignmentResult")
+            add_leader(
+                current_attempt,
+                payable_value=leader_value,
+                electorate_size=round_electorate_size,
+            )
             if validator_value > 0 and not leader_only:
-                recipients.update(validator_addresses(current_attempt))
+                recipients.update(
+                    validator_addresses(
+                        current_attempt,
+                        forced_result=(
+                            str(alignment_result) if alignment_result else None
+                        ),
+                        electorate_size=round_electorate_size,
+                    )
+                )
         elif rule in leader_timeout_rules:
             payable_value = (
                 1
@@ -1909,6 +1999,7 @@ def record_appeal_bond(
     fees_distribution: dict[str, Any] | None = None,
     top_up_and_submit: bool = False,
     terminal_committee_upper_bound: int | None = None,
+    available_appeal_validators: int | None = None,
     replacement_rotations: int | None = None,
     leader_timeout_live_seats: int | None = None,
     time_unit_overlay_bps: int | None = None,
@@ -1933,6 +2024,7 @@ def record_appeal_bond(
         current_round=current_round,
         status=status,
         terminal_committee_upper_bound=terminal_committee_upper_bound,
+        available_appeal_validators=available_appeal_validators,
         replacement_rotations=replacement_rotations,
         leader_timeout_live_seats=leader_timeout_live_seats,
         policy=policy,
@@ -1940,8 +2032,10 @@ def record_appeal_bond(
     bond = int(charge["bond"])
     funding = int(charge["funding"])
     total_required = bond + funding
-    if bond <= 0 or amount < total_required:
+    if bond <= 0 or amount < bond:
         raise InvalidAppealBond("InvalidAppealBond")
+    if amount < total_required:
+        raise InsufficientFees("InsufficientFees")
 
     if bool(charge["extendsSchedule"]):
         merged = normalize_fees_distribution(updated.get("fees_distribution") or {})
@@ -1991,6 +2085,7 @@ def record_appeal_bond(
             "round": current_round if round is None else round,
             "sourceRound": current_round,
             "appealRound": int(charge["appealRound"]),
+            "juryCount": int(charge["juryCount"]),
             "status": status,
             "minimumRequired": bond,
             "topUpAndSubmit": bool(top_up_and_submit),
@@ -2008,6 +2103,7 @@ def calculate_appeal_charge(
     current_round: int,
     status: str,
     terminal_committee_upper_bound: int | None = None,
+    available_appeal_validators: int | None = None,
     replacement_rotations: int | None = None,
     leader_timeout_live_seats: int | None = None,
     policy: StudioFeePolicy | None = None,
@@ -2037,7 +2133,15 @@ def calculate_appeal_charge(
         appeal_round = (
             current_round + 1 if current_round % 2 == 0 else current_round + 2
         )
-        jury_count = _validators_per_round_safe(current_round + 1)
+        scheduled_jury_count = _validators_per_round_safe(current_round + 1)
+        jury_count = (
+            scheduled_jury_count
+            if available_appeal_validators is None
+            else min(
+                scheduled_jury_count,
+                max(0, int(available_appeal_validators)),
+            )
+        )
         replacement_rotations = 0
     else:
         appeal_round = current_round + 2
@@ -2753,6 +2857,11 @@ def settle_fee_accounting(
             locked_policy,
             consensus_history,
             execution_mode,
+            terminal_electorate_size=(
+                int(updated["selection_pool_count"])
+                if updated.get("selection_pool_count") is not None
+                else None
+            ),
         )
         # Consensus settles storage + receipt/write consumption against the
         # complete unified reserve quoted at submission:
@@ -2781,6 +2890,11 @@ def settle_fee_accounting(
         fees_distribution,
         locked_policy,
         execution_mode,
+        terminal_electorate_size=(
+            int(updated["selection_pool_count"])
+            if updated.get("selection_pool_count") is not None
+            else None
+        ),
     )
     if storage_recipients == 0 and time_unit_budget > 0 and not settlement_rounds:
         # Legacy/synthetic histories without receipt identities retain the
@@ -2898,7 +3012,14 @@ def _record_historical_execution_fee_consumption(
     consensus_history: dict[str, Any] | None,
     policy: StudioFeePolicy,
 ) -> dict[str, Any]:
-    attempts = _historical_leader_proposal_receipts(consensus_history)
+    attempts = _historical_leader_proposal_receipts(
+        consensus_history,
+        terminal_electorate_size=(
+            int(accounting["selection_pool_count"])
+            if accounting.get("selection_pool_count") is not None
+            else None
+        ),
+    )
     if not attempts:
         return accounting
 
@@ -2957,13 +3078,31 @@ def _record_historical_execution_fee_consumption(
 
 def _historical_leader_proposal_receipts(
     consensus_history: dict[str, Any] | None,
+    *,
+    terminal_electorate_size: int | None = None,
 ) -> list[tuple[int, int, dict[str, Any], bool]]:
     grouped = _consensus_attempt_entries_by_round(consensus_history)
+    outcomes = _round_outcomes(consensus_history)
     proposals: list[tuple[int, int, dict[str, Any], bool]] = []
     for round_index in sorted(grouped):
+        predecessor = max(
+            (candidate for candidate in outcomes if candidate < round_index),
+            default=None,
+        )
+        round_electorate_size = (
+            terminal_electorate_size
+            if predecessor is not None
+            and outcomes.get(predecessor)
+            in {
+                ConsensusRound.VALIDATOR_APPEAL_SUCCESSFUL.value,
+                ConsensusRound.VALIDATOR_TIMEOUT_APPEAL_SUCCESSFUL.value,
+            }
+            else None
+        )
         for attempt_index, entry in enumerate(grouped[round_index]):
             deterministic_violation = (
-                _fee_alignment_result(entry) == "deterministic_violation"
+                _fee_alignment_result(entry, electorate_size=round_electorate_size)
+                == "deterministic_violation"
             )
             value = entry.get("leader_result")
             candidates = value if isinstance(value, list) else [value]

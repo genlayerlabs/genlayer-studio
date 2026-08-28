@@ -1,10 +1,12 @@
 from datetime import datetime
 import time
+import threading
 from eth_account.signers.local import (
     LocalAccount,
 )
 import pytest
-from sqlalchemy.orm import Session
+from sqlalchemy import Engine
+from sqlalchemy.orm import Session, sessionmaker
 
 from backend.database_handler.accounts_manager import AccountsManager
 from backend.database_handler.errors import AccountNotFoundError
@@ -214,6 +216,53 @@ def test_cancel_tx_fee_accounting_once_refunds_and_is_idempotent(
     fee_accounting = tx["data"][FEE_ACCOUNTING_KEY]
     assert fee_accounting["status"] == "canceled"
     assert fee_accounting["total_refunded"] == 1155
+
+
+def test_concurrent_cancel_refunds_fee_accounting_only_once(engine: Engine):
+    SessionFactory = sessionmaker(bind=engine, expire_on_commit=False)
+    sender = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
+    tx_hash = "0x" + "ac" * 32
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(total_message_fees=55),
+        num_of_validators=5,
+        submitted_value=1_155,
+        user_value=0,
+        sender=sender,
+    )
+    with SessionFactory() as setup_session:
+        _insert_fee_accounted_transaction(
+            setup_session,
+            sender=sender,
+            accounting=accounting,
+            tx_hash=tx_hash,
+        )
+
+    barrier = threading.Barrier(2, timeout=5)
+    refunds: list[int] = []
+    errors: list[BaseException] = []
+
+    def cancel():
+        try:
+            with SessionFactory() as worker_session:
+                manager = AccountsManager(worker_session)
+                barrier.wait()
+                refunds.append(manager.cancel_tx_fee_accounting_once(tx_hash, sender))
+                worker_session.commit()
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=cancel)
+    second = threading.Thread(target=cancel)
+    first.start()
+    second.start()
+    first.join(timeout=10)
+    second.join(timeout=10)
+
+    assert not first.is_alive() and not second.is_alive()
+    assert errors == []
+    assert sorted(refunds) == [0, 1_155]
+    with SessionFactory() as read_session:
+        assert AccountsManager(read_session).get_account_balance(sender) == 1_155
 
 
 def test_settle_tx_fee_accounting_once_refunds_surplus_and_is_idempotent(

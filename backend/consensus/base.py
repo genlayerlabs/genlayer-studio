@@ -82,7 +82,11 @@ from backend.consensus.types import (
     ConsensusRound,
     consensus_vote_type_code,
 )
-from backend.consensus.history import logical_fee_round_entries
+from backend.consensus.history import (
+    TERMINAL_VALIDATOR_APPEAL_ROUNDS,
+    latest_decision_metadata,
+    logical_fee_round_entries,
+)
 from backend.consensus.utils import determine_consensus_from_votes
 from backend.consensus.decisions import (
     decide_undetermined,
@@ -99,7 +103,6 @@ from backend.consensus.decisions import (
     prepare_committing,
     decide_post_committing,
     should_rollback_after_accepted,
-    has_appeal_capacity,
 )
 from backend.consensus.effect_executor import EffectExecutor
 from backend.node.genvm import get_code_slot
@@ -839,13 +842,28 @@ class ConsensusAlgorithm:
         ]
 
         # Check if finalization criteria are met
+        decision = latest_decision_metadata(
+            getattr(transaction, "consensus_history", None)
+        )
+        exact_deadline = None
+        if decision is not None:
+            try:
+                exact_deadline = int(decision.get("appealDeadline") or 0)
+            except (TypeError, ValueError):
+                exact_deadline = None
         time_based_finalization = (
-            time.time()
-            - transaction.timestamp_awaiting_finalization
-            - transaction.appeal_processing_time
-        ) > self.finality_window_time * (
-            (1 - self.finality_window_appeal_failed_reduction)
-            ** transaction.appeal_failed
+            time.time() >= exact_deadline
+            if exact_deadline
+            else (
+                time.time()
+                - transaction.timestamp_awaiting_finalization
+                - transaction.appeal_processing_time
+            )
+            >= self.finality_window_time
+            * (
+                (1 - self.finality_window_appeal_failed_reduction)
+                ** transaction.appeal_failed
+            )
         )
 
         if immediate_finalization or time_based_finalization:
@@ -953,11 +971,19 @@ class ConsensusAlgorithm:
             )
         )
 
-        if not has_appeal_capacity(
-            num_involved_validators=len(transaction.consensus_data.validators),
-            num_used_leader_addresses=len(used_leader_addresses),
-            num_total_validators=len(validators_snapshot.nodes),
-        ):
+        logical_entries = logical_fee_round_entries(transaction.consensus_history)
+        current_round = logical_entries[-1][0] if logical_entries else 0
+        required_fresh = VALIDATORS_PER_ROUND[
+            min(current_round + 1, len(VALIDATORS_PER_ROUND) - 1)
+        ]
+        available_fresh = max(
+            0,
+            len(validators_snapshot.nodes)
+            - len(transaction.consensus_data.validators)
+            - len(used_leader_addresses),
+        )
+
+        if available_fresh < required_fresh:
             self.msg_handler.send_message(
                 LogEvent(
                     "consensus_event",
@@ -1050,19 +1076,7 @@ class ConsensusAlgorithm:
             )
             context.transaction.appeal_undetermined = False
 
-        used_leader_addresses = (
-            ConsensusAlgorithm.get_used_leader_addresses_from_consensus_history(
-                context.transactions_processor.get_transaction_by_hash(
-                    context.transaction.hash
-                )["consensus_history"]
-            )
-        )
-
-        if not has_appeal_capacity(
-            num_involved_validators=len(transaction.leader_timeout_validators),
-            num_used_leader_addresses=len(used_leader_addresses),
-            num_total_validators=len(validators_snapshot.nodes),
-        ):
+        if not transaction.leader_timeout_validators:
             self.msg_handler.send_message(
                 LogEvent(
                     "consensus_event",
@@ -1149,6 +1163,8 @@ class ConsensusAlgorithm:
         context.consensus_data.leader_receipt = (
             transaction.consensus_data.leader_receipt
         )
+        logical_entries = logical_fee_round_entries(transaction.consensus_history)
+        current_round = logical_entries[-1][0] if logical_entries else 0
         try:
             # Attempt to get extra validators for the appeal process
             _, context.remaining_validators = ConsensusAlgorithm.get_extra_validators(
@@ -1156,6 +1172,13 @@ class ConsensusAlgorithm:
                 transaction.consensus_history,
                 transaction.consensus_data,
                 transaction.appeal_failed,
+                required_extra_validators=VALIDATORS_PER_ROUND[
+                    min(
+                        current_round + 1,
+                        len(VALIDATORS_PER_ROUND) - 1,
+                    )
+                ],
+                allow_short=True,
             )
         except ValueError as e:
             # When no validators are found, then the appeal failed
@@ -1346,39 +1369,25 @@ class ConsensusAlgorithm:
         consensus_history: dict,
         consensus_data: ConsensusData,
         appeal_failed: int,
+        required_extra_validators: int | None = None,
+        allow_short: bool = False,
     ):
         """
-        Get extra validators for the appeal process according to the following formula:
-        - when appeal_failed = 0, add n + 2 validators
-        - when appeal_failed > 0, add (2 * appeal_failed * n + 1) + 2 validators
-        Note that for appeal_failed > 0, the returned set contains the old validators
-        from the previous appeal round and new validators.
+        Select validators not already consumed by the transaction.
 
-        Selection of the extra validators:
-        appeal_failed | PendingState | Reused validators | Extra selected     | Total
-                      | validators   | from the previous | validators for the | validators
-                      |              | appeal round      | appeal             |
-        ----------------------------------------------------------------------------------
-               0      |       n      |          0        |        n+2         |    2n+2
-               1      |       n      |        n+2        |        n+1         |    3n+3
-               2      |       n      |       2n+3        |         2n         |    5n+3
-               3      |       n      |       4n+3        |         2n         |    7n+3
-                              └───────┬──────┘  └─────────┬────────┘
-                                      │                   |
-        Validators after the ◄────────┘                   └──► Validators during the appeal
-        appeal. This equals                                    for appeal_failed > 0
-        the Total validators                                   = (2*appeal_failed*n+1)+2
-        of the row above,                                      This is the formula from
-        and are in consensus_data.                             above and it is what is
-        For appeal_failed > 0                                  returned by this function
-        = (2*appeal_failed-1)*n+3
-        This is used to calculate n
+        Train callers pass ``required_extra_validators`` from the canonical
+        round schedule. Validator appeals also pass ``allow_short=True`` so a
+        pool with 1..K-1 fresh validators seats all of them; leader appeals
+        retain the exact-size rule. The historical ``appeal_failed`` formulas
+        remain only as a fallback for callers outside the train path.
 
         Args:
             all_validators (List[dict]): List of all validators.
             consensus_history (dict): Dictionary of consensus rounds results and status changes.
             consensus_data (ConsensusData): Data related to the consensus process.
             appeal_failed (int): Number of times the appeal has failed.
+            required_extra_validators: Exact scheduled fresh jury/committee size.
+            allow_short: Whether a non-empty capacity-limited selection is valid.
 
         Returns:
             list: List of current validators.
@@ -1408,8 +1417,23 @@ class ConsensusAlgorithm:
             raise ValueError("No validators found")
 
         nb_current_validators = len(current_validators) + 1  # including the leader
-        if appeal_failed == 0:
-            # Calculate extra validators when no appeal has failed
+        if required_extra_validators is not None:
+            # v0.6 appeal juries are independent fresh selections. Every
+            # address retained in consensus_data was consumed by an earlier
+            # round; history leaders are excluded above. A validator appeal
+            # may seat every remaining 1..K-1 validator, while a leader appeal
+            # passes allow_short=False and therefore retains its exact K rule.
+            requested = max(0, int(required_extra_validators))
+            extra_validators = get_validators_for_transaction(
+                not_used_validators, requested
+            )
+            if not allow_short and len(extra_validators) != requested:
+                raise ValueError(
+                    f"Not enough fresh validators: required {requested}, "
+                    f"available {len(extra_validators)}"
+                )
+        elif appeal_failed == 0:
+            # Legacy caller fallback; train callers pass the explicit schedule.
             extra_validators = get_validators_for_transaction(
                 not_used_validators, nb_current_validators + 2
             )
@@ -1512,6 +1536,22 @@ class ConsensusAlgorithm:
         return new_validator + validators
 
     @staticmethod
+    def get_terminal_replacement_validators(
+        all_validators: List[dict], consensus_history: dict
+    ) -> list[dict]:
+        """Return the full terminal electorate minus prior normal leaders."""
+        used_leaders = (
+            ConsensusAlgorithm.get_used_leader_addresses_from_consensus_history(
+                consensus_history
+            )
+        )
+        return [
+            validator
+            for validator in all_validators
+            if validator["address"] not in used_leaders
+        ]
+
+    @staticmethod
     def get_used_leader_addresses_from_consensus_history(
         consensus_history: dict, current_leader_receipt: Receipt | None = None
     ):
@@ -1528,11 +1568,16 @@ class ConsensusAlgorithm:
         used_leader_addresses = set()
         if consensus_history is not None and "consensus_results" in consensus_history:
             for consensus_round in consensus_history["consensus_results"]:
-                leader_receipt = consensus_round["leader_result"]
-                if leader_receipt:
-                    used_leader_addresses.update(
-                        [leader_receipt[0]["node_config"]["address"]]
-                    )
+                leader_receipt = consensus_round.get("leader_result") or []
+                if not leader_receipt:
+                    continue
+                address = (
+                    (leader_receipt[0].get("node_config") or {}).get("address")
+                    if isinstance(leader_receipt[0], dict)
+                    else None
+                )
+                if address:
+                    used_leader_addresses.add(address)
 
         # consensus_history does not contain the latest consensus_data
         if current_leader_receipt:
@@ -2152,19 +2197,28 @@ class PendingState(TransactionState):
         # with a full value/fee refund; storage and receipt prices simply lock.
         fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
         if fee_accounting:
-            activated_accounting, should_cancel = activate_fee_accounting(
-                fee_accounting,
-                StudioFeePolicy.from_env(),
-                selection_pool_count=(
-                    len(context.validators_snapshot.nodes)
-                    if context.validators_snapshot is not None
-                    else None
-                ),
+            activation_result: dict[str, bool] = {}
+
+            def activate_latest(current_fee_accounting):
+                updated, should_cancel = activate_fee_accounting(
+                    current_fee_accounting,
+                    StudioFeePolicy.from_env(),
+                    selection_pool_count=(
+                        len(context.validators_snapshot.nodes)
+                        if context.validators_snapshot is not None
+                        else None
+                    ),
+                )
+                activation_result["should_cancel"] = should_cancel
+                return updated
+
+            activated_accounting = (
+                context.transactions_processor.mutate_transaction_fee_accounting(
+                    context.transaction.hash,
+                    activate_latest,
+                )
             )
-            context.transactions_processor.update_transaction_fee_accounting(
-                context.transaction.hash,
-                activated_accounting,
-            )
+            should_cancel = activation_result["should_cancel"]
             context.transaction.data = {
                 **(context.transaction.data or {}),
                 FEE_ACCOUNTING_KEY: activated_accounting,
@@ -2286,6 +2340,12 @@ class PendingState(TransactionState):
                         context.transaction.consensus_history,
                         context.transaction.consensus_data,
                         0,
+                        required_extra_validators=VALIDATORS_PER_ROUND[
+                            min(
+                                max(0, context.active_fee_round - 1),
+                                len(VALIDATORS_PER_ROUND) - 1,
+                            )
+                        ],
                     )
                 )
                 context.involved_validators = current_validators + extra_validators
@@ -2300,28 +2360,40 @@ class PendingState(TransactionState):
                 )
 
         elif context.transaction.appeal_leader_timeout:
-            used_leader_addresses = (
-                ConsensusAlgorithm.get_used_leader_addresses_from_consensus_history(
-                    context.transaction.consensus_history
-                )
-            )
-            assert context.validators_snapshot is not None
-            old_validators = [
-                x.validator.to_dict() for x in context.validators_snapshot.nodes
-            ]
-            context.involved_validators = ConsensusAlgorithm.add_new_validator(
-                old_validators,
-                context.transaction.leader_timeout_validators,
-                used_leader_addresses,
+            # Consensus removes the timed-out leader and replays with the
+            # surviving committee; it does not select a replacement seat.
+            context.involved_validators = list(
+                context.transaction.leader_timeout_validators
             )
 
         else:
             if context.transaction.consensus_data:
-                context.involved_validators, _ = (
-                    ConsensusAlgorithm.get_validators_from_consensus_data(
-                        all_validators, context.transaction.consensus_data, True
-                    )
+                history_entries = logical_fee_round_entries(
+                    context.transaction.consensus_history
                 )
+                last_outcome = (
+                    str(history_entries[-1][1].get("consensus_round") or "")
+                    if history_entries
+                    else ""
+                )
+                if last_outcome in TERMINAL_VALIDATOR_APPEAL_ROUNDS:
+                    # A successful validator review is followed by one
+                    # terminal normal recomputation over the full frozen
+                    # electorate, excluding only prior normal-round leaders.
+                    # Prior validators and jurors are deliberately eligible
+                    # again; this is not another fresh-jury selection.
+                    context.involved_validators = (
+                        ConsensusAlgorithm.get_terminal_replacement_validators(
+                            all_validators,
+                            context.transaction.consensus_history,
+                        )
+                    )
+                else:
+                    context.involved_validators, _ = (
+                        ConsensusAlgorithm.get_validators_from_consensus_data(
+                            all_validators, context.transaction.consensus_data, True
+                        )
+                    )
                 if not context.involved_validators:
                     context.msg_handler.send_message(
                         LogEvent(
@@ -2842,7 +2914,10 @@ class CommittingState(TransactionState):
                 Vote.IDLE.value,
             )
             outcomes = {
-                determine_consensus_from_votes(votes_so_far + [pending_vote] * pending)
+                determine_consensus_from_votes(
+                    votes_so_far + [pending_vote] * pending,
+                    _terminal_decision_electorate_size(context),
+                )
                 for pending_vote in possible_pending_votes
             }
             if len(outcomes) != 1:
@@ -2983,7 +3058,10 @@ class RevealingState(TransactionState):
             )
 
         # Determine consensus result
-        consensus_result = determine_consensus_from_votes(list(context.votes.values()))
+        consensus_result = determine_consensus_from_votes(
+            list(context.votes.values()),
+            _terminal_decision_electorate_size(context),
+        )
 
         # Build vote reveal entries with canonical v0.6 VoteType ordinals.
         vote_reveal_entries = []
@@ -3648,17 +3726,19 @@ def _record_parent_message_fee_consumption(
     if not parent_fee_accounting or not message_fee_payloads:
         return
 
-    updated_accounting = _consume_parent_message_fee_payloads(
-        parent_fee_accounting,
-        message_fee_payloads,
-        reveal_recorded,
-        _message_execution_fee_recipient(context),
+    updated_accounting = (
+        context.transactions_processor.mutate_transaction_fee_accounting(
+            context.transaction.hash,
+            lambda current: _consume_parent_message_fee_payloads(
+                current,
+                message_fee_payloads,
+                reveal_recorded,
+                _message_execution_fee_recipient(context),
+            ),
+        )
     )
     context.transaction.data = dict(context.transaction.data or {})
     context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
-    context.transactions_processor.update_transaction_fee_accounting(
-        context.transaction.hash, updated_accounting
-    )
 
 
 def _message_execution_fee_recipient(context: TransactionContext) -> str | None:
@@ -3740,28 +3820,31 @@ def _sync_reveal_message_fee_accounting(
     if not parent_fee_accounting:
         return
 
-    message_fee_payloads = _reveal_message_fee_payloads(
-        parent_fee_accounting,
-        leader_receipt.pending_transactions,
-    )
-    if not message_fee_payloads:
-        return
-
-    try:
-        updated_accounting = prepare_reveal_message_generation(
-            parent_fee_accounting,
-            context.transaction.hash,
-            message_fee_payloads,
+    def prepare_latest(current_fee_accounting):
+        message_fee_payloads = _reveal_message_fee_payloads(
+            current_fee_accounting,
+            leader_receipt.pending_transactions,
         )
-    except FeeValidationError as exc:
-        raise RuntimeError(str(exc)) from exc
+        if not message_fee_payloads:
+            return current_fee_accounting
+        try:
+            return prepare_reveal_message_generation(
+                current_fee_accounting,
+                context.transaction.hash,
+                message_fee_payloads,
+            )
+        except FeeValidationError as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    updated_accounting = (
+        context.transactions_processor.mutate_transaction_fee_accounting(
+            context.transaction.hash,
+            prepare_latest,
+        )
+    )
 
     context.transaction.data = dict(context.transaction.data or {})
     context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
-    context.transactions_processor.update_transaction_fee_accounting(
-        context.transaction.hash,
-        updated_accounting,
-    )
 
 
 def _reveal_message_fee_payloads(
@@ -3822,27 +3905,33 @@ def _mark_message_phase_delivered(
     parent_fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
     if not parent_fee_accounting:
         return
-    payloads = _reveal_message_fee_payloads(
-        parent_fee_accounting,
-        pending_transactions,
-    )
-    if not payloads:
-        return
-    try:
-        updated_accounting = mark_message_effects_delivered(
-            parent_fee_accounting,
-            context.transaction.hash,
-            payloads,
-            on,
+    pending_list = list(pending_transactions)
+
+    def mark_latest(current_fee_accounting):
+        payloads = _reveal_message_fee_payloads(
+            current_fee_accounting,
+            pending_list,
         )
-    except FeeValidationError as exc:
-        raise RuntimeError(str(exc)) from exc
+        if not payloads:
+            return current_fee_accounting
+        try:
+            return mark_message_effects_delivered(
+                current_fee_accounting,
+                context.transaction.hash,
+                payloads,
+                on,
+            )
+        except FeeValidationError as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    updated_accounting = (
+        context.transactions_processor.mutate_transaction_fee_accounting(
+            context.transaction.hash,
+            mark_latest,
+        )
+    )
     context.transaction.data = dict(context.transaction.data or {})
     context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
-    context.transactions_processor.update_transaction_fee_accounting(
-        context.transaction.hash,
-        updated_accounting,
-    )
 
 
 def _unwind_discarded_reveal_message_fee_accounting(
@@ -3852,18 +3941,6 @@ def _unwind_discarded_reveal_message_fee_accounting(
     if not parent_fee_accounting:
         return
 
-    if isinstance(parent_fee_accounting.get("active_message_generation"), dict):
-        updated_accounting = discard_active_message_generation(
-            parent_fee_accounting,
-        )
-        context.transaction.data = dict(context.transaction.data or {})
-        context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
-        context.transactions_processor.update_transaction_fee_accounting(
-            context.transaction.hash,
-            updated_accounting,
-        )
-        return
-
     prior_receipts = _leader_receipts_from_consensus_data(
         context.transaction.consensus_data
     )
@@ -3871,28 +3948,41 @@ def _unwind_discarded_reveal_message_fee_accounting(
         prior_receipts = _leader_receipts_from_consensus_history(
             context.transaction.consensus_history
         )
-    if not prior_receipts:
+    if (
+        not isinstance(parent_fee_accounting.get("active_message_generation"), dict)
+        and not prior_receipts
+    ):
         return
 
-    message_fee_payloads = _reveal_message_fee_payloads(
-        parent_fee_accounting,
-        _receipt_pending_transactions(prior_receipts[0]),
-    )
-    if not message_fee_payloads:
-        return
+    def unwind_latest(current_fee_accounting):
+        if isinstance(current_fee_accounting.get("active_message_generation"), dict):
+            return discard_active_message_generation(current_fee_accounting)
+        if not prior_receipts:
+            return current_fee_accounting
+        message_fee_payloads = _reveal_message_fee_payloads(
+            current_fee_accounting,
+            _receipt_pending_transactions(prior_receipts[0]),
+        )
+        if not message_fee_payloads:
+            return current_fee_accounting
+        updated = unwind_reveal_message_fees(
+            current_fee_accounting,
+            message_fee_payloads,
+            acceptance_dispatched=(
+                context.transaction.status == TransactionStatus.ACCEPTED
+            ),
+        )
+        updated["message_fees_recorded_at_reveal"] = True
+        return updated
 
-    updated_accounting = unwind_reveal_message_fees(
-        parent_fee_accounting,
-        message_fee_payloads,
-        acceptance_dispatched=context.transaction.status == TransactionStatus.ACCEPTED,
+    updated_accounting = (
+        context.transactions_processor.mutate_transaction_fee_accounting(
+            context.transaction.hash,
+            unwind_latest,
+        )
     )
-    updated_accounting["message_fees_recorded_at_reveal"] = True
     context.transaction.data = dict(context.transaction.data or {})
     context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
-    context.transactions_processor.update_transaction_fee_accounting(
-        context.transaction.hash,
-        updated_accounting,
-    )
 
 
 def _coerce_pending_transaction(raw: Any) -> PendingTransaction:
@@ -3976,6 +4066,27 @@ def _active_execution_fee_round(transaction: Transaction) -> int:
         # Successful validator review is followed by one terminal normal round.
         return last_round + 1
     return last_round
+
+
+def _terminal_decision_electorate_size(context: TransactionContext) -> int | None:
+    """Frozen threshold authority for a terminal normal recomputation."""
+
+    entries = logical_fee_round_entries(
+        getattr(context.transaction, "consensus_history", None)
+    )
+    if not entries:
+        return None
+    last_outcome = str(entries[-1][1].get("consensus_round") or "")
+    if last_outcome not in TERMINAL_VALIDATOR_APPEAL_ROUNDS:
+        return None
+
+    accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY) or {}
+    frozen_count = accounting.get("selection_pool_count")
+    if frozen_count is not None:
+        return max(0, int(frozen_count))
+    if context.validators_snapshot is not None:
+        return len(context.validators_snapshot.nodes)
+    return None
 
 
 def _runtime_rotation_limit(

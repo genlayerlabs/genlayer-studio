@@ -7,7 +7,7 @@ import type {
   TransactionItem,
 } from '@/types';
 import TransactionStatusBadge from '@/components/Simulator/TransactionStatusBadge.vue';
-import { useTimeAgo } from '@vueuse/core';
+import { useTimeAgo, useTimestamp } from '@vueuse/core';
 import ModalSection from '@/components/Simulator/ModalSection.vue';
 import JsonViewer from '@/components/JsonViewer/json-viewer.vue';
 import { useUIStore, useNodeStore, useTransactionsStore } from '@/stores';
@@ -78,6 +78,7 @@ const finalityWindowAppealFailedReduction = ref(
 );
 
 const isDetailsModalOpen = ref(false);
+const currentTimestamp = useTimestamp({ interval: 1000 });
 
 const timeThreshold = 6; // Number of hours after which the date should be displayed instead of time ago
 
@@ -447,6 +448,83 @@ const handleSetTransactionAppeal = async () => {
 };
 
 const isAppealed = computed(() => props.transaction.data.appealed);
+const appealableStatuses = new Set([
+  'ACCEPTED',
+  'UNDETERMINED',
+  'LEADER_TIMEOUT',
+  'VALIDATORS_TIMEOUT',
+]);
+const terminalValidatorAppealRounds = new Set([
+  'Validator Appeal Successful',
+  'Validator Timeout Appeal Successful',
+]);
+
+const canAppeal = computed(() => {
+  const transaction = props.transaction;
+  const data = asRecord(transaction.data);
+  const status = String(transaction.statusName).toUpperCase();
+  if (
+    !data ||
+    data.leader_only !== false ||
+    Boolean(data.appealed) ||
+    !appealableStatuses.has(status)
+  ) {
+    return false;
+  }
+
+  const history = asRecord(data.consensus_history);
+  const results = history?.consensus_results;
+  if (
+    Array.isArray(results) &&
+    results.some((entry) => {
+      const round = asRecord(entry)?.consensus_round;
+      return terminalValidatorAppealRounds.has(String(round || ''));
+    })
+  ) {
+    return false;
+  }
+
+  // New Studio decisions carry the same immutable appeal deadline and exact
+  // decision identity as Consensus. Once this metadata exists it is the
+  // authority; falling back to the old reconstructed window would revive an
+  // expired or stale decision.
+  const latestDecision = asRecord(history?.latestDecision);
+  if (latestDecision) {
+    const decisionId = Number(latestDecision.decisionId);
+    const appealDeadline = Number(latestDecision.appealDeadline);
+    const decisionStatus = String(latestDecision.status || '').toUpperCase();
+    if (
+      !Number.isSafeInteger(decisionId) ||
+      decisionId <= 0 ||
+      !Number.isFinite(appealDeadline) ||
+      appealDeadline <= 0 ||
+      (decisionStatus && decisionStatus !== status)
+    ) {
+      return false;
+    }
+    return currentTimestamp.value / 1000 < appealDeadline;
+  }
+
+  // Legacy rows do not have DecisionRecord metadata. Preserve their previous
+  // reconstructed window, but use Consensus' strict deadline boundary.
+  const startedAt = Number(data.timestamp_awaiting_finalization);
+  const processingTime = Number(data.appeal_processing_time || 0);
+  const failedAppeals = Number(data.appeal_failed || 0);
+  if (
+    !Number.isFinite(startedAt) ||
+    !Number.isFinite(processingTime) ||
+    !Number.isInteger(failedAppeals) ||
+    failedAppeals < 0
+  ) {
+    return false;
+  }
+  const legacyDeadline =
+    startedAt +
+    processingTime +
+    props.finalityWindow *
+      (1 - finalityWindowAppealFailedReduction.value) ** failedAppeals;
+  return currentTimestamp.value / 1000 < legacyDeadline;
+});
 const isHosted = getRuntimeConfigBoolean('VITE_IS_HOSTED', false);
 const hasSenderAddress = computed(() =>
   Boolean(
@@ -654,19 +732,7 @@ const badgeColorClass = computed(() => {
 
       <div @click.stop="">
         <Btn
-          v-if="
-            transaction.data.leader_only == false &&
-            (transaction.statusName == 'ACCEPTED' ||
-              transaction.statusName == 'UNDETERMINED' ||
-              transaction.statusName == 'LEADER_TIMEOUT' ||
-              transaction.statusName == 'VALIDATORS_TIMEOUT') &&
-            Date.now() / 1000 -
-              transaction.data.timestamp_awaiting_finalization -
-              transaction.data.appeal_processing_time <=
-              finalityWindow *
-                (1 - finalityWindowAppealFailedReduction) **
-                  transaction.data.appeal_failed
-          "
+          v-if="canAppeal"
           @click="handleSetTransactionAppeal"
           tiny
           class="!h-[18px] !px-[4px] !py-[1px] !text-[9px] !font-medium"

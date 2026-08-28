@@ -1337,9 +1337,155 @@ DEFAULT_CONSENSUS_MAIN_ABI = """[
 ]"""
 
 
+_FEES_DISTRIBUTION_COMPONENTS = [
+    {"internalType": "uint256", "name": "leaderTimeunitsAllocation", "type": "uint256"},
+    {
+        "internalType": "uint256",
+        "name": "validatorTimeunitsAllocation",
+        "type": "uint256",
+    },
+    {"internalType": "uint256", "name": "appealRounds", "type": "uint256"},
+    {"internalType": "uint256", "name": "executionBudgetPerRound", "type": "uint256"},
+    {"internalType": "uint256", "name": "executionConsumed", "type": "uint256"},
+    {"internalType": "uint256", "name": "totalMessageFees", "type": "uint256"},
+    {"internalType": "uint256[]", "name": "rotations", "type": "uint256[]"},
+    {"internalType": "uint256", "name": "maxPriceGenPerTimeUnit", "type": "uint256"},
+    {"internalType": "uint256", "name": "storageFeeMaxGasPrice", "type": "uint256"},
+    {"internalType": "uint256", "name": "receiptFeeMaxGasPrice", "type": "uint256"},
+]
+
+_MESSAGE_ALLOCATION_COMPONENTS = [
+    {
+        "internalType": "enum IMessages.MessageType",
+        "name": "messageType",
+        "type": "uint8",
+    },
+    {"internalType": "bool", "name": "onAcceptance", "type": "bool"},
+    {"internalType": "uint256", "name": "parentIndex", "type": "uint256"},
+    {"internalType": "address", "name": "recipient", "type": "address"},
+    {"internalType": "bytes32", "name": "callKey", "type": "bytes32"},
+    {"internalType": "uint256", "name": "budget", "type": "uint256"},
+    {"internalType": "bytes", "name": "feeParams", "type": "bytes"},
+]
+
+_ADD_TRANSACTION_PARAMS_COMPONENTS = [
+    {"internalType": "address", "name": "sender", "type": "address"},
+    {"internalType": "address", "name": "recipient", "type": "address"},
+    {"internalType": "uint256", "name": "numOfInitialValidators", "type": "uint256"},
+    {"internalType": "uint256", "name": "maxRotations", "type": "uint256"},
+    {"internalType": "uint256", "name": "validUntil", "type": "uint256"},
+    {"internalType": "uint256", "name": "saltNonce", "type": "uint256"},
+    {"internalType": "uint256", "name": "userValue", "type": "uint256"},
+    {
+        "components": _FEES_DISTRIBUTION_COMPONENTS,
+        "internalType": "struct IFeeManager.FeesDistribution",
+        "name": "feesDistribution",
+        "type": "tuple",
+    },
+    {"internalType": "bytes", "name": "txCalldata", "type": "bytes"},
+    {
+        "components": _MESSAGE_ALLOCATION_COMPONENTS,
+        "internalType": "struct IMessages.MessageFeeAllocationNode[]",
+        "name": "messageAllocations",
+        "type": "tuple[]",
+    },
+]
+
+_STUDIO_TRAIN_TRANSACTION_ABI = [
+    {
+        "inputs": [
+            {
+                "components": _ADD_TRANSACTION_PARAMS_COMPONENTS,
+                "internalType": "struct IConsensusMainWithFees.AddTransactionParams",
+                "name": "_params",
+                "type": "tuple",
+            }
+        ],
+        "name": function_name,
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function",
+    }
+    for function_name in ("addTransaction", "deploySalted")
+] + [
+    {
+        "inputs": [
+            {"internalType": "bytes32", "name": "_txId", "type": "bytes32"},
+            {
+                "components": _FEES_DISTRIBUTION_COMPONENTS,
+                "internalType": "struct IFeeManager.FeesDistribution",
+                "name": "_feesDistribution",
+                "type": "tuple",
+            },
+        ],
+        "name": "topUpFees",
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "bytes32", "name": "_txId", "type": "bytes32"},
+            {
+                "internalType": "uint256",
+                "name": "_expectedDecisionId",
+                "type": "uint256",
+            },
+            {
+                "components": _FEES_DISTRIBUTION_COMPONENTS,
+                "internalType": "struct IFeeManager.FeesDistribution",
+                "name": "_feesDistribution",
+                "type": "tuple",
+            },
+        ],
+        "name": "topUpAndSubmitAppeal",
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "bytes32", "name": "_txId", "type": "bytes32"},
+            {
+                "internalType": "uint256",
+                "name": "_expectedDecisionId",
+                "type": "uint256",
+            },
+        ],
+        "name": "submitAppeal",
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "bytes32", "name": "_txId", "type": "bytes32"},
+            {
+                "internalType": "uint256",
+                "name": "_expectedDecisionId",
+                "type": "uint256",
+            },
+        ],
+        "name": "finalizeTransaction",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+]
+
+
 def get_default_consensus_main_contract():
+    abi = json.loads(DEFAULT_CONSENSUS_MAIN_ABI)
+    train_transaction_names = {entry["name"] for entry in _STUDIO_TRAIN_TRANSACTION_ABI}
+    abi = [
+        entry
+        for entry in abi
+        if entry.get("type") != "function"
+        or entry.get("name") not in train_transaction_names
+    ]
+    abi.extend(_STUDIO_TRAIN_TRANSACTION_ABI)
     return {
         "address": DEFAULT_CONSENSUS_MAIN_ADDRESS,
-        "abi": json.loads(DEFAULT_CONSENSUS_MAIN_ABI),
+        "abi": abi,
         "bytecode": "0x",
     }

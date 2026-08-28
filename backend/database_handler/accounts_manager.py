@@ -188,7 +188,11 @@ class AccountsManager:
         self, tx_hash: str, sender_address: str, reason: str = "canceled"
     ) -> int:
         transaction = (
-            self.session.query(Transactions).filter_by(hash=tx_hash).one_or_none()
+            self.session.query(Transactions)
+            .filter_by(hash=tx_hash)
+            .populate_existing()
+            .with_for_update()
+            .one_or_none()
         )
         if transaction is None:
             return 0
@@ -217,7 +221,11 @@ class AccountsManager:
         reason: str = "finalized",
     ) -> int:
         transaction = (
-            self.session.query(Transactions).filter_by(hash=tx_hash).one_or_none()
+            self.session.query(Transactions)
+            .filter_by(hash=tx_hash)
+            .populate_existing()
+            .with_for_update()
+            .one_or_none()
         )
         if transaction is None:
             return 0

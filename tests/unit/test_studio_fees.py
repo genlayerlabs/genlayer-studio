@@ -9,6 +9,7 @@ from eth_abi import encode
 from web3 import Web3
 
 from backend.consensus.base import (
+    ConsensusAlgorithm,
     _apply_external_message_freeze_check,
     _apply_message_value_withdrawals_for_phase,
     _child_config_rotation_rounds,
@@ -16,7 +17,11 @@ from backend.consensus.base import (
     _get_messages_data,
     _runtime_rotation_limit,
 )
-from backend.domain.types import TransactionType
+from backend.consensus.history import (
+    materialize_decision_metadata,
+    prepare_appeal_decision_basis,
+)
+from backend.domain.types import TransactionExecutionMode, TransactionType
 from backend.errors.errors import InvalidTransactionError
 from backend.database_handler.accounts_manager import _infer_final_round
 from backend.database_handler.transactions_processor import (
@@ -28,6 +33,7 @@ from backend.protocol_rpc.endpoints import (
     _current_fee_round,
     _funded_max_rotations,
     _handle_appeal_or_top_up_and_submit,
+    _handle_finalize_transaction,
     _handle_top_up_fees,
     _normal_leader_count,
     estimate_latest_appeal_charge,
@@ -140,6 +146,7 @@ from backend.protocol_rpc.types import (
     DecodedRollupTransactionData,
     DecodedRollupTransactionDataArgs,
     DecodedTopUpFeesDataArgs,
+    DecodedFinalizeTransactionDataArgs,
 )
 
 
@@ -4854,6 +4861,93 @@ def test_successful_validator_appeal_with_no_majority_does_not_vindicate_origina
     assert settled["settlement_rounds"][1]["timeUnitAmount"] == 1_400
 
 
+def test_terminal_settlement_uses_frozen_electorate_threshold_not_local_majority():
+    fees_distribution = _fees_distribution(appeals=1, rotations=[0, 0])
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5),
+        user_value=0,
+    )
+    accounting["selection_pool_count"] = 22
+    # Within-quota appeal funding still covers the ten seats above the
+    # scheduled 11-seat replacement: 1,400 bond + 2,000 funding.
+    accounting = record_appeal_bond(
+        accounting,
+        amount=3_400,
+        appealer="0x9999999999999999999999999999999999999999",
+        current_round=0,
+        status="ACCEPTED",
+        terminal_committee_upper_bound=21,
+    )
+    original = [
+        _history_receipt(
+            mode="validator",
+            address=f"0x{index:040x}",
+            vote="agree" if index <= 3 else "disagree",
+        )
+        for index in range(1, 6)
+    ]
+    jury = [
+        _history_receipt(
+            mode="validator",
+            address=f"0x{index:040x}",
+            vote="disagree",
+        )
+        for index in range(30, 37)
+    ]
+    terminal = [
+        _history_receipt(
+            mode="validator",
+            address=f"0x{index:040x}",
+            vote="agree" if offset < 11 else "disagree",
+        )
+        for offset, index in enumerate(range(50, 71))
+    ]
+    history = {
+        "consensus_results": [
+            {
+                "consensus_round": "Accepted",
+                "leader_result": [
+                    _history_receipt(
+                        mode="leader",
+                        address="0x1111111111111111111111111111111111111111",
+                    ),
+                    original[0],
+                ],
+                "validator_results": original[1:],
+            },
+            {
+                "consensus_round": "Validator Appeal Successful",
+                "leader_result": None,
+                "validator_results": jury,
+            },
+            {
+                "consensus_round": "Undetermined",
+                "leader_result": [
+                    _history_receipt(
+                        mode="leader",
+                        address="0x2222222222222222222222222222222222222222",
+                    ),
+                    terminal[0],
+                ],
+                "validator_results": terminal[1:],
+            },
+        ]
+    }
+
+    settled, _ = settle_fee_accounting(
+        accounting,
+        actual_final_round=2,
+        num_of_validators=5,
+        consensus_history=history,
+    )
+
+    terminal_round = settled["settlement_rounds"][2]
+    assert terminal_round["alignmentResult"] == "no_majority"
+    assert terminal_round["timeUnitAmount"] == 100 + 21 * 200
+
+
 def test_failed_validator_appeal_charges_only_revealers_and_refunds_distribution_dust():
     fees_distribution = _fees_distribution(appeals=1, rotations=[0, 0])
     accounting = create_fee_accounting(
@@ -7722,9 +7816,10 @@ def test_create_child_fee_accounting_rejects_phase_mismatched_root_subtree():
 
 
 class _MessageDispatchTxProcessor:
-    def __init__(self):
+    def __init__(self, fee_accounting):
         self.updated_fee_accounting = None
         self.updated_hash = None
+        self.fee_accounting = fee_accounting
 
     def get_transaction_count(self, address):
         return 3
@@ -7732,10 +7827,16 @@ class _MessageDispatchTxProcessor:
     def update_transaction_fee_accounting(self, tx_hash, accounting):
         self.updated_hash = tx_hash
         self.updated_fee_accounting = accounting
+        self.fee_accounting = accounting
+
+    def mutate_transaction_fee_accounting(self, tx_hash, mutator):
+        updated = mutator(self.fee_accounting)
+        self.update_transaction_fee_accounting(tx_hash, updated)
+        return updated
 
 
 def _message_dispatch_context(accounting):
-    processor = _MessageDispatchTxProcessor()
+    processor = _MessageDispatchTxProcessor(accounting)
     executor = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
     tx = SimpleNamespace(
         hash="0x" + "ab" * 32,
@@ -8725,10 +8826,50 @@ class _FakeTransactionsProcessor:
         self.updated_fee_accounting = fee_accounting
         self.transaction["data"]["fee_accounting"] = fee_accounting
 
+    def apply_transaction_fee_top_up(self, tx_hash, **kwargs):
+        assert tx_hash == self.transaction["hash"]
+        if self.transaction["status"] in {
+            "ACCEPTED",
+            "UNDETERMINED",
+            "LEADER_TIMEOUT",
+            "VALIDATORS_TIMEOUT",
+            "FINALIZED",
+            "CANCELED",
+        }:
+            raise ValueError("InvalidTransactionStatus")
+        current = self.transaction["data"].get("fee_accounting")
+        if current is None:
+            raise ValueError("FeeAccountingMissing")
+        updated = apply_fee_top_up(
+            current,
+            num_of_validators=int(
+                self.transaction.get("num_of_initial_validators") or 5
+            ),
+            **kwargs,
+        )
+        self.update_transaction_fee_accounting(tx_hash, updated)
+        return updated
+
     def set_transaction_appeal(self, tx_hash, appeal):
         assert tx_hash == self.transaction["hash"]
         self.appeal_updates.append((tx_hash, appeal))
         self.transaction["appealed"] = appeal
+
+    def admit_transaction_appeal(self, tx_hash, *, prepare_fee_accounting, **kwargs):
+        assert tx_hash == self.transaction["hash"]
+        if self.transaction.get("appealed"):
+            raise ValueError("CanNotAppeal")
+        self.transaction["consensus_history"] = prepare_appeal_decision_basis(
+            self.transaction.get("consensus_history"),
+            **kwargs,
+        )
+        fee_accounting, surplus_refund = prepare_fee_accounting(
+            self.transaction["data"].get("fee_accounting")
+        )
+        if fee_accounting is not None:
+            self.update_transaction_fee_accounting(tx_hash, fee_accounting)
+        self.set_transaction_appeal(tx_hash, True)
+        return surplus_refund
 
     def is_transaction_finalization_head(self, tx_hash):
         assert tx_hash == self.transaction["hash"]
@@ -8765,6 +8906,20 @@ def _decoded_appeal(
             expected_decision_id=expected_decision_id,
             fees_distribution=fees_distribution,
             top_up_and_submit=top_up_and_submit,
+        ),
+        type="2",
+        nonce=0,
+        value=amount,
+    )
+
+
+def _decoded_finalize(tx_id, *, expected_decision_id=1, amount=0):
+    return DecodedRollupTransaction(
+        from_address="0x1111111111111111111111111111111111111111",
+        to_address="0x0000000000000000000000000000000000000000",
+        data=DecodedFinalizeTransactionDataArgs(
+            tx_id=tx_id,
+            expected_decision_id=expected_decision_id,
         ),
         type="2",
         nonce=0,
@@ -8846,6 +9001,23 @@ def test_terminal_committee_excludes_compacted_leader_appeal_replay_leader():
     assert _normal_leader_count(history) == 2
 
 
+def test_terminal_committee_excludes_every_rotated_normal_leader():
+    history = {
+        "consensus_results": [
+            {"consensus_round": "Leader Rotation"},
+            {"consensus_round": "Leader Rotation"},
+            {"consensus_round": "Accepted"},
+            {"consensus_round": "Leader Rotation Appeal"},
+            {"consensus_round": "Leader Appeal Failed"},
+        ]
+    }
+
+    # Consensus records the initial leader and every forked normal-round
+    # generation. Appeal-jury leaders are excluded, but a leader-appeal replay
+    # and its rotations are normal-round leaders too.
+    assert _normal_leader_count(history) == 5
+
+
 @pytest.mark.parametrize(
     "status",
     [
@@ -8871,7 +9043,10 @@ def test_top_up_fees_endpoint_rejects_final_decided_transaction_status(status):
     assert transactions.updated_fee_accounting is None
 
 
-def test_submit_appeal_endpoint_records_separate_bond_and_typed_funding():
+def test_submit_appeal_endpoint_records_separate_bond_and_typed_funding(monkeypatch):
+    monkeypatch.setenv("VITE_FINALITY_WINDOW", "30")
+    monkeypatch.setenv("VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION", "0.2")
+    monkeypatch.setattr("backend.protocol_rpc.endpoints.time.time", lambda: 1_000)
     accounting = _env_fee_accounting()
     tx = _fee_accounted_tx(status="ACCEPTED", accounting=accounting)
     accounts = _FakeAccountsManager(balance=0)
@@ -8905,6 +9080,11 @@ def test_submit_appeal_endpoint_records_separate_bond_and_typed_funding():
     assert updated["appeal_bonds"][0]["minimumRequired"] == appeal_bond
     assert updated["appeal_bonds"][0]["topUpAndSubmit"] is False
     assert transactions.appeal_updates == [(tx["hash"], True)]
+    assert tx["consensus_history"]["activeAppealBasis"] == {
+        "decisionId": 1,
+        "submittedAt": 1_000,
+        "nextAppealWindow": 24,
+    }
     assert len(handler.events) == 1
     assert accounts.credits == [
         ("0x1111111111111111111111111111111111111111", submitted)
@@ -8912,6 +9092,42 @@ def test_submit_appeal_endpoint_records_separate_bond_and_typed_funding():
     assert accounts.debits == [
         ("0x1111111111111111111111111111111111111111", submitted)
     ]
+
+
+def test_concurrent_appeal_loser_is_not_charged_or_recorded(monkeypatch):
+    monkeypatch.setenv("VITE_FINALITY_WINDOW", "30")
+    monkeypatch.setattr("backend.protocol_rpc.endpoints.time.time", lambda: 1_000)
+    accounting = _env_fee_accounting()
+    tx = _fee_accounted_tx(status="ACCEPTED", accounting=accounting)
+    accounts = _FakeAccountsManager(balance=10_000)
+
+    class _RacingTransactionsProcessor(_FakeTransactionsProcessor):
+        def admit_transaction_appeal(self, tx_hash, **kwargs):
+            # The competing request won after this request's initial read but
+            # before its row-locked compare-and-set.
+            raise ValueError("CanNotAppeal")
+
+    class _MsgHandler:
+        def send_message(self, log_event, log_to_terminal=True):
+            raise AssertionError("a losing admission must not emit success")
+
+    transactions = _RacingTransactionsProcessor(tx)
+    charge = _env_appeal_charge(accounting)
+
+    with pytest.raises(InvalidTransactionError, match="CanNotAppeal"):
+        _handle_appeal_or_top_up_and_submit(
+            accounts_manager=accounts,
+            transactions_processor=transactions,
+            msg_handler=_MsgHandler(),
+            decoded_rollup_transaction=_decoded_appeal(
+                tx["hash"], amount=charge["bond"] + charge["funding"]
+            ),
+        )
+
+    assert transactions.updated_fee_accounting is None
+    assert transactions.appeal_updates == []
+    assert accounts.debits == []
+    assert accounts.credits == []
 
 
 def test_leader_timeout_appeal_uses_next_normal_fee_schedule():
@@ -8924,7 +9140,6 @@ def test_leader_timeout_appeal_uses_next_normal_fee_schedule():
         "0x2222222222222222222222222222222222222222",
         "0x3333333333333333333333333333333333333333",
         "0x4444444444444444444444444444444444444444",
-        "0x5555555555555555555555555555555555555555",
     ]
     charge = calculate_appeal_charge(
         fees,
@@ -9062,7 +9277,7 @@ def test_top_up_and_submit_appeal_endpoint_expands_capacity_only():
     assert transactions.appeal_updates == [(tx["hash"], True)]
 
 
-def test_submit_appeal_endpoint_rejects_bond_below_required_minimum():
+def test_submit_appeal_endpoint_rejects_underfunded_induced_work():
     accounting = _env_fee_accounting()
     tx = _fee_accounted_tx(status="ACCEPTED", accounting=accounting)
     transactions = _FakeTransactionsProcessor(tx)
@@ -9072,7 +9287,7 @@ def test_submit_appeal_endpoint_rejects_bond_below_required_minimum():
         def send_message(self, log_event, log_to_terminal=True):
             pass
 
-    with pytest.raises(InvalidTransactionError, match="InvalidAppealBond"):
+    with pytest.raises(InvalidTransactionError, match="InsufficientFees"):
         _handle_appeal_or_top_up_and_submit(
             accounts_manager=_FakeAccountsManager(balance=5000),
             transactions_processor=transactions,
@@ -9371,9 +9586,13 @@ def test_transaction_lifecycle_exposes_active_v06_decision_before_deadline(
     assert get_transaction_lifecycle(
         processor, {"txId": tx["hash"], "timestamp": 1_034}
     ) == {
+        "storedStatus": "Accepted",
         "storedStatusCode": 5,
+        "projectedStatus": "Accepted",
         "projectedStatusCode": 5,
+        "resolutionAction": "NoOp",
         "resolutionActionCode": 0,
+        "resolutionSource": "FullReveal",
         "resolutionSourceCode": 6,
         "decisionId": "1",
         "decisionActive": True,
@@ -9398,9 +9617,13 @@ def test_transaction_lifecycle_projects_finalize_at_exact_deadline(monkeypatch):
     )
 
     assert lifecycle["storedStatusCode"] == 11
+    assert lifecycle["storedStatus"] == "ValidatorsTimeout"
     assert lifecycle["projectedStatusCode"] == 11
+    assert lifecycle["projectedStatus"] == "ValidatorsTimeout"
     assert lifecycle["resolutionActionCode"] == 6
-    assert lifecycle["resolutionSourceCode"] == 7
+    assert lifecycle["resolutionAction"] == "Finalize"
+    assert lifecycle["resolutionSourceCode"] == 6
+    assert lifecycle["resolutionSource"] == "FullReveal"
     assert lifecycle["decisionId"] == "1"
     assert lifecycle["decisionActive"] is True
 
@@ -9448,6 +9671,67 @@ def test_transaction_lifecycle_uses_appeal_decision_ordinal_and_source():
 
     assert lifecycle["decisionId"] == "2"
     assert lifecycle["resolutionSourceCode"] == 9
+    assert lifecycle["resolutionSource"] == "AppealFullReveal"
+
+
+def test_transaction_lifecycle_exposes_terminal_replacement_for_finalization():
+    tx = _fee_accounted_tx(status="ACCEPTED")
+    tx.update(
+        consensus_history={
+            "consensus_results": [
+                {"consensus_round": "Accepted"},
+                {"consensus_round": "Validator Appeal Successful"},
+                {"consensus_round": "Accepted"},
+            ]
+        },
+        timestamp_awaiting_finalization=1_000,
+        appealed=False,
+        execution_mode="NORMAL",
+    )
+
+    lifecycle = get_transaction_lifecycle(
+        _FakeTransactionsProcessor(tx),
+        {"txId": tx["hash"], "timestamp": 10_000},
+    )
+
+    # Consensus keeps the terminal replacement's DecisionRecord active so it
+    # can finalize; terminality suppresses only a further appeal.
+    assert lifecycle["decisionId"] == "2"
+    assert lifecycle["decisionActive"] is True
+    assert lifecycle["resolutionAction"] == "Finalize"
+    assert lifecycle["resolutionSource"] == "FullReveal"
+
+
+def test_terminal_replacement_can_finalize_but_cannot_be_appealed(monkeypatch):
+    monkeypatch.setenv("VITE_FINALITY_WINDOW", "30")
+    monkeypatch.setattr("backend.protocol_rpc.endpoints.time.time", lambda: 1_030)
+    tx = _fee_accounted_tx(status="ACCEPTED", accounting=_env_fee_accounting())
+    tx.update(
+        consensus_history={
+            "consensus_results": [
+                {"consensus_round": "Accepted"},
+                {"consensus_round": "Validator Appeal Successful"},
+                {"consensus_round": "Accepted"},
+            ]
+        },
+        timestamp_awaiting_finalization=1_000,
+        appeal_processing_time=0,
+        appealed=False,
+        execution_mode="NORMAL",
+    )
+    processor = _FakeTransactionsProcessor(tx)
+
+    assert (
+        _handle_finalize_transaction(
+            transactions_processor=processor,
+            decoded_rollup_transaction=_decoded_finalize(
+                tx["hash"], expected_decision_id=2
+            ),
+        )
+        == tx["hash"]
+    )
+    with pytest.raises(InvalidTransactionError, match="CanNotAppeal"):
+        estimate_latest_appeal_charge(processor, {"txId": tx["hash"]})
 
 
 def test_latest_appeal_charge_rpc_uses_admission_quote_and_decision_id(
@@ -9474,6 +9758,575 @@ def test_latest_appeal_charge_rpc_uses_admission_quote_and_decision_id(
         "funding": str(expected["funding"]),
         "appealDeadline": "1030",
     }
+
+
+def test_latest_appeal_charge_rpc_prices_capacity_limited_jury_exactly(monkeypatch):
+    monkeypatch.setenv("VITE_FINALITY_WINDOW", "30")
+    monkeypatch.setattr("backend.protocol_rpc.endpoints.time.time", lambda: 1_001)
+    accounting = _env_fee_accounting()
+    accounting["selection_pool_count"] = 10
+    tx = _fee_accounted_tx(status="ACCEPTED", accounting=accounting)
+    tx.update(
+        timestamp_awaiting_finalization=1_000,
+        appeal_processing_time=0,
+        appeal_failed=0,
+        appealed=False,
+        execution_mode="NORMAL",
+        consensus_data={
+            "validators": [
+                _history_receipt(
+                    mode="validator",
+                    address=f"0x{index:040x}",
+                )
+                for index in range(2, 6)
+            ]
+        },
+        consensus_history={
+            "consensus_results": [
+                {
+                    "consensus_round": "Accepted",
+                    "leader_result": [
+                        _history_receipt(
+                            mode="leader",
+                            address="0x0000000000000000000000000000000000000001",
+                        )
+                    ],
+                    "validator_results": [],
+                }
+            ]
+        },
+    )
+    expected = calculate_appeal_charge(
+        accounting["fees_distribution"],
+        current_round=0,
+        status="ACCEPTED",
+        terminal_committee_upper_bound=9,
+        available_appeal_validators=5,
+        policy=StudioFeePolicy.from_env(),
+    )
+    scheduled = calculate_appeal_charge(
+        accounting["fees_distribution"],
+        current_round=0,
+        status="ACCEPTED",
+        terminal_committee_upper_bound=9,
+        policy=StudioFeePolicy.from_env(),
+    )
+
+    quote = estimate_latest_appeal_charge(
+        _FakeTransactionsProcessor(tx), {"txId": tx["hash"]}
+    )
+
+    assert expected["juryCount"] == 5
+    assert scheduled["juryCount"] == 7
+    assert int(quote["funding"]) == expected["funding"]
+    assert expected["funding"] < scheduled["funding"]
+
+    class _MsgHandler:
+        def send_message(self, log_event, log_to_terminal=True):
+            pass
+
+    processor = _FakeTransactionsProcessor(tx)
+    total = int(quote["bond"]) + int(quote["funding"])
+    with pytest.raises(InvalidTransactionError, match="InsufficientFees"):
+        _handle_appeal_or_top_up_and_submit(
+            accounts_manager=_FakeAccountsManager(balance=total),
+            transactions_processor=processor,
+            msg_handler=_MsgHandler(),
+            decoded_rollup_transaction=_decoded_appeal(
+                tx["hash"],
+                amount=total - 1,
+            ),
+        )
+
+    _handle_appeal_or_top_up_and_submit(
+        accounts_manager=_FakeAccountsManager(balance=total),
+        transactions_processor=processor,
+        msg_handler=_MsgHandler(),
+        decoded_rollup_transaction=_decoded_appeal(tx["hash"], amount=total),
+    )
+    assert processor.updated_fee_accounting["appeal_bonds"][0]["juryCount"] == 5
+
+
+def test_latest_appeal_charge_rejects_capacity_limited_undetermined_replay(
+    monkeypatch,
+):
+    monkeypatch.setenv("VITE_FINALITY_WINDOW", "30")
+    monkeypatch.setattr("backend.protocol_rpc.endpoints.time.time", lambda: 1_001)
+    accounting = _env_fee_accounting()
+    accounting["selection_pool_count"] = 10
+    tx = _fee_accounted_tx(status="UNDETERMINED", accounting=accounting)
+    tx.update(
+        timestamp_awaiting_finalization=1_000,
+        appealed=False,
+        consensus_data={
+            "validators": [
+                _history_receipt(
+                    mode="validator",
+                    address=f"0x{index:040x}",
+                )
+                for index in range(2, 6)
+            ]
+        },
+        consensus_history={
+            "consensus_results": [
+                {
+                    "consensus_round": "Undetermined",
+                    "leader_result": [
+                        _history_receipt(
+                            mode="leader",
+                            address="0x0000000000000000000000000000000000000001",
+                        )
+                    ],
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(InvalidTransactionError, match="CanNotAppeal"):
+        estimate_latest_appeal_charge(
+            _FakeTransactionsProcessor(tx), {"txId": tx["hash"]}
+        )
+
+
+def test_leader_appeal_requires_the_full_fresh_scheduled_set():
+    all_validators = [
+        {"address": f"0x{index:040x}", "stake": 1} for index in range(1, 11)
+    ]
+    consensus_data = SimpleNamespace(
+        leader_receipt=[
+            SimpleNamespace(
+                node_config={"address": "0x0000000000000000000000000000000000000001"}
+            )
+        ],
+        validators=[
+            SimpleNamespace(node_config={"address": f"0x{index:040x}"})
+            for index in range(2, 6)
+        ],
+    )
+    history = {
+        "consensus_results": [
+            {
+                "consensus_round": "Undetermined",
+                "leader_result": [
+                    {
+                        "node_config": {
+                            "address": "0x0000000000000000000000000000000000000001"
+                        }
+                    }
+                ],
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match="required 7, available 5"):
+        ConsensusAlgorithm.get_extra_validators(
+            all_validators,
+            history,
+            consensus_data,
+            0,
+            required_extra_validators=7,
+        )
+
+
+def test_repeated_validator_appeal_selects_fresh_scheduled_jury():
+    all_validators = [
+        {"address": f"0x{index:040x}", "stake": 1} for index in range(1, 31)
+    ]
+    consumed = [
+        SimpleNamespace(node_config={"address": f"0x{index:040x}"})
+        for index in range(2, 13)
+    ]
+    consensus_data = SimpleNamespace(validators=consumed)
+    history = {
+        "consensus_results": [
+            {
+                "consensus_round": "Accepted",
+                "leader_result": [
+                    {
+                        "node_config": {
+                            "address": "0x0000000000000000000000000000000000000001"
+                        }
+                    }
+                ],
+            },
+            {"consensus_round": "Validator Appeal Failed", "leader_result": None},
+        ]
+    }
+
+    current, jury = ConsensusAlgorithm.get_extra_validators(
+        all_validators,
+        history,
+        consensus_data,
+        appeal_failed=1,
+        required_extra_validators=11,
+        allow_short=True,
+    )
+
+    consumed_addresses = {item["address"] for item in current}
+    consumed_addresses.add("0x0000000000000000000000000000000000000001")
+    assert len(jury) == 11
+    assert consumed_addresses.isdisjoint({item["address"] for item in jury})
+
+
+def test_repeated_validator_appeal_uses_every_remaining_fresh_validator():
+    all_validators = [
+        {"address": f"0x{index:040x}", "stake": 1} for index in range(1, 18)
+    ]
+    consensus_data = SimpleNamespace(
+        validators=[
+            SimpleNamespace(node_config={"address": f"0x{index:040x}"})
+            for index in range(2, 13)
+        ]
+    )
+    history = {
+        "consensus_results": [
+            {
+                "consensus_round": "Accepted",
+                "leader_result": [
+                    {
+                        "node_config": {
+                            "address": "0x0000000000000000000000000000000000000001"
+                        }
+                    }
+                ],
+            },
+            {"consensus_round": "Validator Appeal Failed", "leader_result": None},
+        ]
+    }
+
+    _, jury = ConsensusAlgorithm.get_extra_validators(
+        all_validators,
+        history,
+        consensus_data,
+        appeal_failed=1,
+        required_extra_validators=11,
+        allow_short=True,
+    )
+
+    assert len(jury) == 5
+
+
+def test_terminal_replacement_readmits_prior_participants_but_excludes_leaders():
+    all_validators = [
+        {"address": f"0x{index:040x}", "stake": 1} for index in range(1, 24)
+    ]
+    history = {
+        "consensus_results": [
+            {
+                "consensus_round": "Leader Rotation",
+                "leader_result": [
+                    {
+                        "node_config": {
+                            "address": "0x0000000000000000000000000000000000000001"
+                        }
+                    }
+                ],
+            },
+            {
+                "consensus_round": "Accepted",
+                "leader_result": [
+                    {
+                        "node_config": {
+                            "address": "0x0000000000000000000000000000000000000002"
+                        }
+                    }
+                ],
+            },
+            {"consensus_round": "Validator Appeal Successful", "leader_result": None},
+        ]
+    }
+
+    terminal = ConsensusAlgorithm.get_terminal_replacement_validators(
+        all_validators, history
+    )
+
+    assert len(terminal) == 21
+    assert {item["address"] for item in terminal} == {
+        item["address"] for item in all_validators[2:]
+    }
+
+
+def test_terminal_replacement_keeps_full_frozen_electorate_threshold():
+    from backend.consensus.types import ConsensusResult
+    from backend.consensus.utils import determine_consensus_from_votes
+    from backend.node.types import Vote
+
+    votes = [Vote.AGREE.value] * 11 + [Vote.DISAGREE.value] * 10
+
+    assert determine_consensus_from_votes(votes) == ConsensusResult.MAJORITY_AGREE
+    assert (
+        determine_consensus_from_votes(votes, electorate_size=23)
+        == ConsensusResult.NO_MAJORITY
+    )
+
+
+def test_finalize_request_accepts_exact_active_decision_at_deadline(monkeypatch):
+    monkeypatch.setenv("VITE_FINALITY_WINDOW", "30")
+    monkeypatch.setattr("backend.protocol_rpc.endpoints.time.time", lambda: 1_030)
+    tx = _fee_accounted_tx(status="ACCEPTED")
+    tx.update(
+        timestamp_awaiting_finalization=1_000,
+        appeal_processing_time=0,
+        appealed=False,
+        execution_mode="NORMAL",
+    )
+    processor = _FakeTransactionsProcessor(tx)
+
+    assert (
+        _handle_finalize_transaction(
+            transactions_processor=processor,
+            decoded_rollup_transaction=_decoded_finalize(
+                tx["hash"], expected_decision_id=1
+            ),
+        )
+        == tx["hash"]
+    )
+
+
+def test_worker_finalization_is_ready_at_the_exact_consensus_deadline(monkeypatch):
+    algorithm = ConsensusAlgorithm.__new__(ConsensusAlgorithm)
+    algorithm.finality_window_time = 30
+    algorithm.finality_window_appeal_failed_reduction = 0
+    transaction = SimpleNamespace(
+        execution_mode=TransactionExecutionMode.NORMAL,
+        timestamp_awaiting_finalization=1_000,
+        appeal_processing_time=0,
+        appeal_failed=0,
+    )
+    monkeypatch.setattr("backend.consensus.base.time.time", lambda: 1_030)
+
+    assert algorithm.can_finalize_transaction(None, transaction, 0, []) is True
+
+
+def test_failed_appeal_window_uses_remaining_time_at_submission_like_consensus():
+    initial_history = {
+        "consensus_results": [{"consensus_round": "Accepted"}],
+    }
+    initial_history = materialize_decision_metadata(
+        initial_history,
+        status="ACCEPTED",
+        materialized_at=1_000,
+        default_appeal_window=30,
+    )
+    assert initial_history["latestDecision"] == {
+        "decisionId": 1,
+        "status": "ACCEPTED",
+        "materializedAt": 1_000,
+        "appealDeadline": 1_030,
+    }
+
+    # Ten seconds of the original window have already elapsed. Consensus
+    # freezes 80% of the remaining 20 seconds, then starts that exact 16-second
+    # window when the failed appeal materializes its replacement decision.
+    appealed_history = prepare_appeal_decision_basis(
+        initial_history,
+        expected_decision_id=1,
+        submitted_at=1_010,
+        appeal_deadline=1_030,
+        retention_bps=8_000,
+    )
+    appealed_history["consensus_results"].append(
+        {"consensus_round": "Validator Appeal Failed"}
+    )
+    failed_history = materialize_decision_metadata(
+        appealed_history,
+        status="ACCEPTED",
+        materialized_at=1_020,
+        default_appeal_window=30,
+    )
+
+    assert "activeAppealBasis" not in failed_history
+    assert failed_history["latestDecision"] == {
+        "decisionId": 2,
+        "status": "ACCEPTED",
+        "materializedAt": 1_020,
+        "appealDeadline": 1_036,
+    }
+
+
+def test_successful_appeal_carries_frozen_window_to_terminal_decision():
+    initial_history = materialize_decision_metadata(
+        {"consensus_results": [{"consensus_round": "Accepted"}]},
+        status="ACCEPTED",
+        materialized_at=1_000,
+        default_appeal_window=30,
+    )
+    appealed_history = prepare_appeal_decision_basis(
+        initial_history,
+        expected_decision_id=1,
+        submitted_at=1_010,
+        appeal_deadline=1_030,
+        retention_bps=8_000,
+    )
+    appealed_history["consensus_results"].append(
+        {"consensus_round": "Validator Appeal Successful"}
+    )
+
+    # A successful validator appeal first opens the terminal normal round. It
+    # does not materialize a decision or consume the frozen basis by itself.
+    assert appealed_history["activeAppealBasis"]["nextAppealWindow"] == 16
+    appealed_history["consensus_results"].append({"consensus_round": "Undetermined"})
+    terminal_history = materialize_decision_metadata(
+        appealed_history,
+        status="UNDETERMINED",
+        materialized_at=1_025,
+        default_appeal_window=30,
+    )
+
+    assert "activeAppealBasis" not in terminal_history
+    assert terminal_history["latestDecision"] == {
+        "decisionId": 2,
+        "status": "UNDETERMINED",
+        "materializedAt": 1_025,
+        "appealDeadline": 1_041,
+    }
+
+
+def test_worker_prefers_persisted_remaining_time_deadline(monkeypatch):
+    algorithm = ConsensusAlgorithm.__new__(ConsensusAlgorithm)
+    algorithm.finality_window_time = 30
+    algorithm.finality_window_appeal_failed_reduction = 0.2
+    transaction = SimpleNamespace(
+        execution_mode=TransactionExecutionMode.NORMAL,
+        timestamp_awaiting_finalization=1_000,
+        appeal_processing_time=10,
+        appeal_failed=1,
+        consensus_history={
+            "latestDecision": {
+                "decisionId": 2,
+                "appealDeadline": 1_036,
+            }
+        },
+    )
+
+    # The retired shortcut would finalize at 1000 + 10 + 30*0.8 = 1034.
+    monkeypatch.setattr("backend.consensus.base.time.time", lambda: 1_035)
+    assert algorithm.can_finalize_transaction(None, transaction, 0, []) is False
+    monkeypatch.setattr("backend.consensus.base.time.time", lambda: 1_036)
+    assert algorithm.can_finalize_transaction(None, transaction, 0, []) is True
+
+
+def test_lifecycle_and_finalize_use_persisted_decision_deadline(monkeypatch):
+    tx = _fee_accounted_tx(status="ACCEPTED")
+    tx.update(
+        timestamp_awaiting_finalization=1_000,
+        appeal_processing_time=10,
+        appeal_failed=1,
+        appealed=False,
+        execution_mode="NORMAL",
+    )
+    tx["consensus_history"] = {
+        "consensus_results": [
+            {"consensus_round": "Accepted"},
+            {"consensus_round": "Validator Appeal Failed"},
+        ],
+        "latestDecision": {
+            "decisionId": 2,
+            "status": "ACCEPTED",
+            "materializedAt": 1_020,
+            "appealDeadline": 1_036,
+        },
+    }
+    processor = _FakeTransactionsProcessor(tx)
+    monkeypatch.setenv("VITE_FINALITY_WINDOW", "30")
+    monkeypatch.setenv("VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION", "0.2")
+
+    before = get_transaction_lifecycle(
+        processor,
+        {"txId": tx["hash"], "timestamp": 1_035},
+    )
+    at_deadline = get_transaction_lifecycle(
+        processor,
+        {"txId": tx["hash"], "timestamp": 1_036},
+    )
+    assert before["decisionId"] == "2"
+    assert before["resolutionAction"] == "NoOp"
+    assert at_deadline["resolutionAction"] == "Finalize"
+
+    monkeypatch.setattr("backend.protocol_rpc.endpoints.time.time", lambda: 1_036)
+    assert (
+        _handle_finalize_transaction(
+            transactions_processor=processor,
+            decoded_rollup_transaction=_decoded_finalize(
+                tx["hash"], expected_decision_id=2
+            ),
+        )
+        == tx["hash"]
+    )
+
+
+@pytest.mark.parametrize("expected_decision_id", [None, 2])
+def test_finalize_request_rejects_missing_or_stale_decision_before_mutation(
+    monkeypatch, expected_decision_id
+):
+    monkeypatch.setenv("VITE_FINALITY_WINDOW", "30")
+    monkeypatch.setattr("backend.protocol_rpc.endpoints.time.time", lambda: 1_030)
+    tx = _fee_accounted_tx(status="ACCEPTED")
+    tx.update(
+        timestamp_awaiting_finalization=1_000,
+        appeal_processing_time=0,
+        appealed=False,
+        execution_mode="NORMAL",
+    )
+    processor = _FakeTransactionsProcessor(tx)
+
+    with pytest.raises(InvalidTransactionError, match="FinalizationNotAllowed"):
+        _handle_finalize_transaction(
+            transactions_processor=processor,
+            decoded_rollup_transaction=_decoded_finalize(
+                tx["hash"], expected_decision_id=expected_decision_id
+            ),
+        )
+
+    assert processor.updated_fee_accounting is None
+    assert processor.appeal_updates == []
+
+
+def test_finalize_request_rejects_value_like_nonpayable_consensus_call(monkeypatch):
+    monkeypatch.setenv("VITE_FINALITY_WINDOW", "30")
+    monkeypatch.setattr("backend.protocol_rpc.endpoints.time.time", lambda: 1_030)
+    tx = _fee_accounted_tx(status="ACCEPTED")
+    tx.update(
+        timestamp_awaiting_finalization=1_000,
+        appeal_processing_time=0,
+        appealed=False,
+        execution_mode="NORMAL",
+    )
+
+    with pytest.raises(InvalidTransactionError, match="NonPayableCall"):
+        _handle_finalize_transaction(
+            transactions_processor=_FakeTransactionsProcessor(tx),
+            decoded_rollup_transaction=_decoded_finalize(tx["hash"], amount=1),
+        )
+
+
+def test_finalize_request_rejects_before_deadline_or_behind_older_transaction(
+    monkeypatch,
+):
+    monkeypatch.setenv("VITE_FINALITY_WINDOW", "30")
+    tx = _fee_accounted_tx(status="ACCEPTED")
+    tx.update(
+        timestamp_awaiting_finalization=1_000,
+        appeal_processing_time=0,
+        appealed=False,
+        execution_mode="NORMAL",
+    )
+    processor = _FakeTransactionsProcessor(tx)
+
+    monkeypatch.setattr("backend.protocol_rpc.endpoints.time.time", lambda: 1_029)
+    with pytest.raises(InvalidTransactionError, match="FinalizationNotAllowed"):
+        _handle_finalize_transaction(
+            transactions_processor=processor,
+            decoded_rollup_transaction=_decoded_finalize(tx["hash"]),
+        )
+
+    monkeypatch.setattr("backend.protocol_rpc.endpoints.time.time", lambda: 1_030)
+    processor.finalization_head = False
+    with pytest.raises(InvalidTransactionError, match="FinalizationNotAllowed"):
+        _handle_finalize_transaction(
+            transactions_processor=processor,
+            decoded_rollup_transaction=_decoded_finalize(tx["hash"]),
+        )
 
 
 @pytest.mark.parametrize(

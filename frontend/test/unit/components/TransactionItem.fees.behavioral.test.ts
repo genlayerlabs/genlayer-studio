@@ -2,12 +2,14 @@ import { mount } from '@vue/test-utils';
 import { describe, expect, it, vi } from 'vitest';
 import TransactionItem from '@/components/Simulator/TransactionItem.vue';
 
+const setTransactionAppealMock = vi.fn();
+
 vi.mock('@/stores', () => ({
   useUIStore: vi.fn(() => ({ mode: 'light' })),
   useNodeStore: vi.fn(() => ({ searchFilter: '' })),
   useTransactionsStore: vi.fn(() => ({
     cancelTransaction: vi.fn(),
-    setTransactionAppeal: vi.fn(),
+    setTransactionAppeal: setTransactionAppealMock,
   })),
 }));
 
@@ -17,6 +19,7 @@ vi.mock('@kyvg/vue3-notification', () => ({
 
 vi.mock('@vueuse/core', () => ({
   useTimeAgo: vi.fn(() => ({ value: 'just now' })),
+  useTimestamp: vi.fn(() => ({ value: Date.now() })),
 }));
 
 vi.mock('@/utils/runtimeConfig', () => ({
@@ -267,5 +270,165 @@ describe('TransactionItem fee accounting display', () => {
       'Leader 5, Validator 10, Appeals 1, Exec budget 0.001 GEN (1,000,000,000,000,000 wei), Rotations 0 / 1',
     );
     expect(text).toContain('55,000,000,000,000,000 wei');
+  });
+
+  it('uses the exact persisted decision deadline instead of the legacy reconstruction', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-28T12:00:00Z'));
+    const now = Date.now() / 1000;
+    const exactExpired = {
+      ...transaction,
+      data: {
+        ...transaction.data,
+        timestamp_awaiting_finalization: now,
+        consensus_history: {
+          latestDecision: {
+            decisionId: 1,
+            status: 'ACCEPTED',
+            materializedAt: now - 30,
+            appealDeadline: now,
+          },
+          consensus_results: [],
+        },
+      },
+    };
+
+    const wrapper = mount(TransactionItem, {
+      props: { transaction: exactExpired, finalityWindow: 60 },
+      global: {
+        directives: { tooltip: vi.fn() },
+        stubs: {
+          Modal: ModalStub,
+          Btn: {
+            template: '<button @click="$emit(\'click\')"><slot /></button>',
+          },
+          CopyTextButton: true,
+          JsonViewer: true,
+          Loader: true,
+          TransactionStatusBadge: { template: '<span><slot /></span>' },
+          CheckCircleIcon: true,
+          XCircleIcon: true,
+          EllipsisHorizontalCircleIcon: true,
+          FilterIcon: true,
+          GavelIcon: true,
+          UserPen: true,
+          UserSearch: true,
+          ExternalLink: true,
+        },
+      },
+    });
+
+    expect(
+      wrapper
+        .find(`[data-testid="appeal-transaction-btn-${transaction.hash}"]`)
+        .exists(),
+    ).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it('shows an exact active decision even when the legacy formula would be expired', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-28T12:00:00Z'));
+    const now = Date.now() / 1000;
+    const exactActive = {
+      ...transaction,
+      data: {
+        ...transaction.data,
+        timestamp_awaiting_finalization: now - 600,
+        consensus_history: {
+          latestDecision: {
+            decisionId: 2,
+            status: 'ACCEPTED',
+            materializedAt: now - 10,
+            appealDeadline: now + 20,
+          },
+          consensus_results: [],
+        },
+      },
+    };
+
+    const wrapper = mount(TransactionItem, {
+      props: { transaction: exactActive, finalityWindow: 60 },
+      global: {
+        directives: { tooltip: vi.fn() },
+        stubs: {
+          Modal: ModalStub,
+          Btn: {
+            template: '<button @click="$emit(\'click\')"><slot /></button>',
+          },
+          CopyTextButton: true,
+          JsonViewer: true,
+          Loader: true,
+          TransactionStatusBadge: { template: '<span><slot /></span>' },
+          CheckCircleIcon: true,
+          XCircleIcon: true,
+          EllipsisHorizontalCircleIcon: true,
+          FilterIcon: true,
+          GavelIcon: true,
+          UserPen: true,
+          UserSearch: true,
+          ExternalLink: true,
+        },
+      },
+    });
+
+    const appealButton = wrapper.find(
+      `[data-testid="appeal-transaction-btn-${transaction.hash}"]`,
+    );
+    expect(appealButton.exists()).toBe(true);
+    await appealButton.trigger('click');
+    expect(setTransactionAppealMock).toHaveBeenCalledWith(transaction.hash);
+    vi.useRealTimers();
+  });
+
+  it('hides appeals after a terminal successful validator appeal', () => {
+    const terminal = {
+      ...transaction,
+      data: {
+        ...transaction.data,
+        consensus_history: {
+          latestDecision: {
+            decisionId: 2,
+            status: 'ACCEPTED',
+            materializedAt: Date.now() / 1000,
+            appealDeadline: Date.now() / 1000 + 60,
+          },
+          consensus_results: [
+            { consensus_round: 'Validator Appeal Successful' },
+          ],
+        },
+      },
+    };
+
+    const wrapper = mount(TransactionItem, {
+      props: { transaction: terminal, finalityWindow: 60 },
+      global: {
+        directives: { tooltip: vi.fn() },
+        stubs: {
+          Modal: ModalStub,
+          Btn: {
+            template: '<button @click="$emit(\'click\')"><slot /></button>',
+          },
+          CopyTextButton: true,
+          JsonViewer: true,
+          Loader: true,
+          TransactionStatusBadge: { template: '<span><slot /></span>' },
+          CheckCircleIcon: true,
+          XCircleIcon: true,
+          EllipsisHorizontalCircleIcon: true,
+          FilterIcon: true,
+          GavelIcon: true,
+          UserPen: true,
+          UserSearch: true,
+          ExternalLink: true,
+        },
+      },
+    });
+
+    expect(
+      wrapper
+        .find(`[data-testid="appeal-transaction-btn-${transaction.hash}"]`)
+        .exists(),
+    ).toBe(false);
   });
 });

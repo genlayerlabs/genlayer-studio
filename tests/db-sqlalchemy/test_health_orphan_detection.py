@@ -74,6 +74,7 @@ def _insert_tx(
     blocked_at: datetime | None = None,
     worker_id: str | None = None,
     timestamp_awaiting_finalization: int | None = None,
+    appealed: bool = False,
     recovery_count: int = 0,
     consensus_history: dict | None = None,
     consensus_data: dict | None = None,
@@ -94,7 +95,7 @@ def _insert_tx(
             ) VALUES (
                 :hash, CAST(:status AS transaction_status),
                 '0xfromaddress', :to_addr, CAST('{}' AS jsonb), 0, 2,
-                :nonce, false, 'NORMAL', false, 0,
+                :nonce, false, 'NORMAL', :appealed, 0,
                 false, false, false, 0, :recovery_count, false,
                 CAST(:consensus_history AS jsonb), CAST(:consensus_data AS jsonb),
                 :created_at, :blocked_at, :worker_id,
@@ -111,6 +112,7 @@ def _insert_tx(
             "blocked_at": blocked_at,
             "worker_id": worker_id,
             "timestamp_awaiting_finalization": timestamp_awaiting_finalization,
+            "appealed": appealed,
             "recovery_count": recovery_count,
             "consensus_history": (
                 json.dumps(consensus_history) if consensus_history is not None else None
@@ -576,9 +578,9 @@ async def test_status_threshold_matches_dashboard_alert_gate(engine: Engine):
 # only need finalization. They live under this metric. The detector
 # has two arms:
 #
-#   1. timestamp_awaiting_finalization set + stale → finalizer not
-#      making progress on these rows (e.g., finalization scheduler
-#      starvation, finalization claim path broken).
+#   1. exact/reconstructed appeal deadline + stale → finalizer not making
+#      progress on these rows (e.g., finalization scheduler starvation,
+#      finalization claim path broken).
 #   2. timestamp_awaiting_finalization NULL + row is old → defensive:
 #      catches future bugs like the May 2026 insufficient-balance SEND
 #      path, which reached UNDETERMINED without ever stamping the
@@ -702,6 +704,118 @@ async def test_recent_finalization_eligible_row_is_not_flagged(engine: Engine):
     assert (
         result["stuck_finalization_count"] == 0
     ), f"Fresh finalization-eligible row must not be flagged. Got: {result}"
+    assert result["stuck_finalization_transactions"] == []
+
+
+@pytest.mark.asyncio
+async def test_exact_decision_deadline_prevents_early_stuck_flag(engine: Engine):
+    """An old materialization timestamp is not a stall while the exact
+    DecisionRecord appeal window is still open."""
+    import time
+
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    current_timestamp = int(time.time())
+
+    with Session_() as s:
+        _insert_tx(
+            s,
+            tx_hash="0x" + "f5" * 32,
+            to_address="0x" + "f5" * 20,
+            status="ACCEPTED",
+            nonce=0,
+            created_at=now - timedelta(days=1),
+            timestamp_awaiting_finalization=current_timestamp - 24 * 3600,
+            consensus_history={
+                "latestDecision": {
+                    "decisionId": 2,
+                    "status": "ACCEPTED",
+                    "appealDeadline": current_timestamp + 300,
+                }
+            },
+        )
+        s.commit()
+
+    from backend.protocol_rpc import health as health_module
+
+    result = await health_module._check_consensus_health()
+
+    assert result["stuck_finalization_count"] == 0
+    assert result["stuck_finalization_transactions"] == []
+
+
+@pytest.mark.asyncio
+async def test_exact_decision_deadline_drives_stuck_flag(engine: Engine):
+    """The persisted deadline remains authoritative when legacy timestamps
+    would incorrectly describe the decision as recent."""
+    import time
+
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    current_timestamp = int(time.time())
+
+    with Session_() as s:
+        _insert_tx(
+            s,
+            tx_hash="0x" + "f6" * 32,
+            to_address="0x" + "f6" * 20,
+            status="UNDETERMINED",
+            nonce=0,
+            created_at=now - timedelta(hours=1),
+            timestamp_awaiting_finalization=current_timestamp,
+            consensus_history={
+                "latestDecision": {
+                    "decisionId": 2,
+                    "status": "UNDETERMINED",
+                    "appealDeadline": current_timestamp - 601,
+                }
+            },
+        )
+        s.commit()
+
+    from backend.protocol_rpc import health as health_module
+
+    result = await health_module._check_consensus_health()
+
+    assert result["stuck_finalization_count"] == 1
+    assert result["stuck_finalization_transactions"][0]["hash"] == "0x" + "f6" * 32
+
+
+@pytest.mark.asyncio
+async def test_submitted_appeal_is_not_a_stuck_finalization(engine: Engine):
+    """An appeal freezes finalization while its new round is being admitted;
+    the previous decision deadline must not create a false health alert."""
+    import time
+
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    current_timestamp = int(time.time())
+
+    with Session_() as s:
+        _insert_tx(
+            s,
+            tx_hash="0x" + "f7" * 32,
+            to_address="0x" + "f7" * 20,
+            status="ACCEPTED",
+            nonce=0,
+            created_at=now - timedelta(hours=1),
+            timestamp_awaiting_finalization=current_timestamp - 3600,
+            appealed=True,
+            consensus_history={
+                "latestDecision": {
+                    "decisionId": 1,
+                    "status": "ACCEPTED",
+                    "appealDeadline": current_timestamp - 1800,
+                }
+            },
+        )
+        s.commit()
+
+    from backend.protocol_rpc import health as health_module
+
+    result = await health_module._check_consensus_health()
+
+    assert result["stuck_finalization_count"] == 0
     assert result["stuck_finalization_transactions"] == []
 
 

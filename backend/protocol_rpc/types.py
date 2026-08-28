@@ -42,6 +42,12 @@ class DecodedTopUpFeesDataArgs:
 
 
 @dataclass
+class DecodedFinalizeTransactionDataArgs:
+    tx_id: str
+    expected_decision_id: int | None = None
+
+
+@dataclass
 class DecodedRollupTransactionDataArgs:
     sender: str
     recipient: str
@@ -70,6 +76,7 @@ class DecodedRollupTransaction:
         DecodedRollupTransactionData
         | DecodedsubmitAppealDataArgs
         | DecodedTopUpFeesDataArgs
+        | DecodedFinalizeTransactionDataArgs
         | None
     )
     type: str

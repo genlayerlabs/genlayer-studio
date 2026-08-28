@@ -311,8 +311,16 @@ class ConsensusWorker:
                          AND (
                             t.execution_mode IN ('LEADER_ONLY', 'LEADER_SELF_VALIDATOR')
                             OR (
-                                EXTRACT(EPOCH FROM NOW()) - t.timestamp_awaiting_finalization - COALESCE(t.appeal_processing_time, 0)
-                            ) > :finality_window_seconds * POWER(1 - :appeal_failed_reduction, COALESCE(t.appeal_failed, 0))
+                                EXTRACT(EPOCH FROM NOW()) >= COALESCE(
+                                    NULLIF(t.consensus_history->'latestDecision'->>'appealDeadline', '')::double precision,
+                                    t.timestamp_awaiting_finalization
+                                        + COALESCE(t.appeal_processing_time, 0)
+                                        + :finality_window_seconds * POWER(
+                                            1 - :appeal_failed_reduction,
+                                            COALESCE(t.appeal_failed, 0)
+                                        )
+                                )
+                            )
                          ))
                         OR
                         -- Defensive: timestamp NULL + row past stranded threshold
@@ -512,8 +520,16 @@ class ConsensusWorker:
                             AND (
                                 t3.execution_mode IN ('LEADER_ONLY', 'LEADER_SELF_VALIDATOR')
                                 OR (
-                                    EXTRACT(EPOCH FROM NOW()) - t3.timestamp_awaiting_finalization - COALESCE(t3.appeal_processing_time, 0)
-                                ) > :finality_window_seconds * POWER(1 - :appeal_failed_reduction, COALESCE(t3.appeal_failed, 0))
+                                    EXTRACT(EPOCH FROM NOW()) >= COALESCE(
+                                        NULLIF(t3.consensus_history->'latestDecision'->>'appealDeadline', '')::double precision,
+                                        t3.timestamp_awaiting_finalization
+                                            + COALESCE(t3.appeal_processing_time, 0)
+                                            + :finality_window_seconds * POWER(
+                                                1 - :appeal_failed_reduction,
+                                                COALESCE(t3.appeal_failed, 0)
+                                            )
+                                    )
+                                )
                             )
                             AND (t3.blocked_at IS NULL
                                  OR t3.blocked_at < NOW() - CAST(:timeout AS INTERVAL))
