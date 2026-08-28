@@ -298,6 +298,27 @@ class ConsensusService:
                         "0x" + tx_id.hex() if isinstance(tx_id, bytes) else tx_id
                     )
 
+                # The Studio helper bridge makes each parent/phase/payload
+                # emission one-shot. A worker retry emits no new events, but
+                # it can recover the exact child ids stored by the first call.
+                # Always prefer that durable view when the deployed helper
+                # exposes it; the event-derived list remains compatible with
+                # older local deployments.
+                try:
+                    stored_tx_ids = (
+                        consensus_main_contract.functions.getInternalMessageTxIds(
+                            args[0],
+                            event_name == "emitTransactionAccepted",
+                            args[1],
+                        ).call()
+                    )
+                    tx_ids_hex = [
+                        "0x" + tx_id.hex() if isinstance(tx_id, bytes) else tx_id
+                        for tx_id in stored_tx_ids
+                    ]
+                except Exception:
+                    pass
+
                 return {
                     "receipt": receipt,
                     "tx_ids_hex": tx_ids_hex,

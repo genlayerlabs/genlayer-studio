@@ -26,14 +26,23 @@ contract ConsensusMain is
 	ReentrancyGuardUpgradeable,
 	AccessControlUpgradeable
 {
+	struct InternalMessageEmission {
+		bool processed;
+		bytes32[] txIds;
+	}
+
 	/// @notice Consolidated external contract addresses used in ConsensusMain
 	IConsensusMain.ExternalContracts public contracts;
 
 	/// @notice Mapping of ghost contracts
 	mapping(address addr => bool isGhost) public ghostContracts;
 
+	/// @notice Durable one-shot child emission keyed by parent, phase, and payload.
+	mapping(bytes32 parentTxId => mapping(bool onAcceptance => mapping(bytes32 descriptor => InternalMessageEmission emission)))
+		private internalMessageEmissions;
+
 	/// @notice Gap for future upgrades
-	uint256[50] private __gap;
+	uint256[49] private __gap;
 
 	// EVENTS
 	// In: addTransaction
@@ -178,7 +187,10 @@ contract ConsensusMain is
 		emit VoteRevealed(txId, validator, voteType, isLastVote, result);
 	}
 
-	function _processInternalMessages(internalMessageData[] calldata internalMessages) internal {
+	function _processInternalMessages(
+		internalMessageData[] calldata internalMessages
+	) internal returns (bytes32[] memory txIds) {
+		txIds = new bytes32[](internalMessages.length);
 		for (uint256 i = 0; i < internalMessages.length; i++) {
 			if (!ghostContracts[internalMessages[i].recipient]) {
 				_storeGhost(internalMessages[i].recipient);
@@ -193,6 +205,7 @@ contract ConsensusMain is
 				0, // or pass as part of internalMessages.data
 				internalMessages[i].data
 			);
+			txIds[i] = generated_txId;
 			emit InternalMessageProcessed(
 				generated_txId,
 				internalMessages[i].recipient,
@@ -205,20 +218,24 @@ contract ConsensusMain is
 		bytes32 txId,
 		internalMessageData[] calldata internalMessages
 	) external {
-		if (internalMessages.length > 0) {
-			_processInternalMessages(internalMessages);
-		}
-		emit TransactionAccepted(txId);
+		_processTransactionMessagesOnce(txId, true, internalMessages);
 	}
 
 	function emitTransactionFinalized(
 		bytes32 txId,
 		internalMessageData[] calldata internalMessages
 	) external {
-		if (internalMessages.length > 0) {
-			_processInternalMessages(internalMessages);
-		}
-		emit TransactionFinalized(txId);
+		_processTransactionMessagesOnce(txId, false, internalMessages);
+	}
+
+	function getInternalMessageTxIds(
+		bytes32 parentTxId,
+		bool onAcceptance,
+		internalMessageData[] calldata internalMessages
+	) external view returns (bytes32[] memory) {
+		bytes32 descriptor = keccak256(abi.encode(internalMessages));
+		return
+			internalMessageEmissions[parentTxId][onAcceptance][descriptor].txIds;
 	}
 
 	function emitAppealStarted(
@@ -576,6 +593,34 @@ contract ConsensusMain is
 
 	// INTERNAL FUNCTIONS
 
+	function _processTransactionMessagesOnce(
+		bytes32 parentTxId,
+		bool onAcceptance,
+		internalMessageData[] calldata internalMessages
+	) internal {
+		bytes32 descriptor = keccak256(abi.encode(internalMessages));
+		InternalMessageEmission storage emission = internalMessageEmissions[
+			parentTxId
+		][onAcceptance][descriptor];
+		if (emission.processed) {
+			return;
+		}
+
+		// Install the replay guard before creating children. Any downstream
+		// revert rolls this write back with the entire EVM transaction.
+		emission.processed = true;
+		bytes32[] memory txIds = _processInternalMessages(internalMessages);
+		for (uint256 i = 0; i < txIds.length; i++) {
+			emission.txIds.push(txIds[i]);
+		}
+
+		if (onAcceptance) {
+			emit TransactionAccepted(parentTxId);
+		} else {
+			emit TransactionFinalized(parentTxId);
+		}
+	}
+
 	function _addTransaction(
 		address _sender,
 		address _recipient,
@@ -647,8 +692,14 @@ contract ConsensusMain is
 		bytes32 _randomSeed,
 		bytes memory _txData
 	) internal returns (bytes32 txId, address activator) {
+		uint256 issuedTxCount = contracts.genQueue.getIssuedTxCount(_recipient);
 		txId = keccak256(
-			abi.encodePacked(_recipient, block.timestamp, _randomSeed)
+			abi.encodePacked(
+				_recipient,
+				block.timestamp,
+				_randomSeed,
+				issuedTxCount
+			)
 		);
 		(uint256 txSlot, ) = contracts.genQueue.addTransactionToPendingQueue(
 			_recipient,
