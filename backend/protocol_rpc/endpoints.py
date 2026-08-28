@@ -2008,6 +2008,15 @@ def estimate_latest_appeal_charge(
     if fee_accounting is None:
         raise InvalidTransactionError("FeeAccountingMissing")
     session = getattr(transactions_processor, "session", None)
+    frozen_pool_addresses = fee_accounting.get("selection_pool_addresses")
+    live_pool_addresses = None
+    if session is not None and isinstance(frozen_pool_addresses, list):
+        live_pool_addresses = [
+            validator.get("address")
+            for validator in ValidatorsRegistry(session).get_all_validators(
+                include_private_key=False
+            )
+        ]
     frozen_pool_count = fee_accounting.get("selection_pool_count")
     validator_count = (
         int(frozen_pool_count)
@@ -2026,6 +2035,8 @@ def estimate_latest_appeal_charge(
     available_appeal_validators = _available_appeal_validator_count(
         transaction,
         validator_count,
+        frozen_pool_addresses=frozen_pool_addresses,
+        live_pool_addresses=live_pool_addresses,
     )
     if (
         status
@@ -2456,6 +2467,15 @@ def _handle_appeal_or_top_up_and_submit(
     if fee_accounting is not None:
         session = getattr(accounts_manager, "session", None)
         frozen_pool_count = fee_accounting.get("selection_pool_count")
+        frozen_pool_addresses = fee_accounting.get("selection_pool_addresses")
+        live_pool_addresses = None
+        if session is not None and isinstance(frozen_pool_addresses, list):
+            live_pool_addresses = [
+                validator.get("address")
+                for validator in ValidatorsRegistry(session).get_all_validators(
+                    include_private_key=False
+                )
+            ]
         validator_count = (
             int(frozen_pool_count)
             if frozen_pool_count is not None
@@ -2473,6 +2493,8 @@ def _handle_appeal_or_top_up_and_submit(
         available_appeal_validators = _available_appeal_validator_count(
             tx,
             validator_count,
+            frozen_pool_addresses=frozen_pool_addresses,
+            live_pool_addresses=live_pool_addresses,
         )
         if (
             status
@@ -2641,51 +2663,30 @@ def _normal_leader_count(consensus_history: dict | None) -> int:
     )
 
 
-def _receipt_validator_address(receipt: Any) -> str | None:
-    if not isinstance(receipt, dict):
-        return None
-    node_config = receipt.get("node_config")
-    if not isinstance(node_config, dict):
-        return None
-    address = node_config.get("address")
-    return str(address).lower() if address else None
-
-
 def _available_appeal_validator_count(
     transaction: dict,
     frozen_pool_count: int,
+    *,
+    frozen_pool_addresses: list[str] | None = None,
+    live_pool_addresses: list[str] | None = None,
 ) -> int | None:
     """Mirror Studio's fresh-juror pool; unknown legacy state stays conservative."""
-    used_addresses: set[str] = set()
-    consensus_data = transaction.get("consensus_data")
-    if isinstance(consensus_data, dict):
-        validator_receipts = consensus_data.get("validators")
-        if isinstance(validator_receipts, dict):
-            validator_receipts = [validator_receipts]
-        if isinstance(validator_receipts, list):
-            for receipt in validator_receipts:
-                address = _receipt_validator_address(receipt)
-                if address:
-                    used_addresses.add(address)
-
-    history = transaction.get("consensus_history")
-    results = history.get("consensus_results") if isinstance(history, dict) else None
-    if isinstance(results, list):
-        for entry in results:
-            if not isinstance(entry, dict):
-                continue
-            leader_receipts = entry.get("leader_result")
-            if isinstance(leader_receipts, dict):
-                leader_receipts = [leader_receipts]
-            if not isinstance(leader_receipts, list):
-                continue
-            for receipt in leader_receipts:
-                address = _receipt_validator_address(receipt)
-                if address:
-                    used_addresses.add(address)
+    used_addresses = ConsensusAlgorithm.get_consumed_validator_addresses(
+        transaction.get("consensus_history"),
+        transaction.get("consensus_data"),
+    )
 
     if not used_addresses:
         return None
+    if isinstance(frozen_pool_addresses, list):
+        eligible = {
+            str(address).lower() for address in frozen_pool_addresses if address
+        }
+        if isinstance(live_pool_addresses, list):
+            eligible &= {
+                str(address).lower() for address in live_pool_addresses if address
+            }
+        return len(eligible - used_addresses)
     return max(0, int(frozen_pool_count) - len(used_addresses))
 
 

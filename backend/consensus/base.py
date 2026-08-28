@@ -109,6 +109,28 @@ from backend.node.genvm import get_code_slot
 from backend.node.genvm.error_codes import GenVMInternalError, GenVMErrorCode
 from backend.node.base import Manager as GenVMManager
 
+
+def _validators_in_frozen_selection_pool(
+    all_validators: list[dict],
+    fee_accounting: dict | None,
+) -> list[dict]:
+    """Apply Consensus's activation-pinned selection-pool identity gate."""
+
+    frozen_pool = (
+        fee_accounting.get("selection_pool_addresses")
+        if isinstance(fee_accounting, dict)
+        else None
+    )
+    if not isinstance(frozen_pool, list) or not frozen_pool:
+        return list(all_validators)
+    frozen_addresses = {str(address).lower() for address in frozen_pool if address}
+    return [
+        validator
+        for validator in all_validators
+        if str(validator.get("address") or "").lower() in frozen_addresses
+    ]
+
+
 # Cap on concurrently executing validators per transaction. Bounds GenVM
 # subprocess memory, fd, and DB-session usage; larger committees run through
 # this window. See issue #1721.
@@ -963,13 +985,24 @@ class ConsensusAlgorithm:
         transactions_processor.set_transaction_appeal(transaction.hash, False)
         transaction.appealed = False
 
-        used_leader_addresses = (
-            ConsensusAlgorithm.get_used_leader_addresses_from_consensus_history(
-                context.transactions_processor.get_transaction_by_hash(
-                    context.transaction.hash
-                )["consensus_history"]
-            )
+        consumed_addresses = ConsensusAlgorithm.get_consumed_validator_addresses(
+            context.transactions_processor.get_transaction_by_hash(
+                context.transaction.hash
+            )["consensus_history"],
+            transaction.consensus_data,
         )
+        fee_accounting = (transaction.data or {}).get(FEE_ACCOUNTING_KEY) or {}
+        live_validators = [
+            node.validator.to_dict() for node in validators_snapshot.nodes
+        ]
+        selection_pool = {
+            str(validator.get("address") or "").lower()
+            for validator in _validators_in_frozen_selection_pool(
+                live_validators,
+                fee_accounting,
+            )
+            if validator.get("address")
+        }
 
         logical_entries = logical_fee_round_entries(transaction.consensus_history)
         current_round = logical_entries[-1][0] if logical_entries else 0
@@ -978,9 +1011,7 @@ class ConsensusAlgorithm:
         ]
         available_fresh = max(
             0,
-            len(validators_snapshot.nodes)
-            - len(transaction.consensus_data.validators)
-            - len(used_leader_addresses),
+            len(selection_pool - consumed_addresses),
         )
 
         if available_fresh < required_fresh:
@@ -1400,15 +1431,16 @@ class ConsensusAlgorithm:
             )
         )
 
-        # Remove used leaders from validator_map
-        used_leader_addresses = (
-            ConsensusAlgorithm.get_used_leader_addresses_from_consensus_history(
-                consensus_history
-            )
+        # Consensus excludes every consumed registry index from a fresh appeal
+        # selection. Do not rely on consensus_data retaining every prior jury:
+        # legacy rows and chained failures can leave receipts only in history.
+        consumed_addresses = ConsensusAlgorithm.get_consumed_validator_addresses(
+            consensus_history,
+            consensus_data,
         )
-        for used_leader_address in used_leader_addresses:
-            if used_leader_address in validator_map:
-                validator_map.pop(used_leader_address)
+        for address in list(validator_map):
+            if address.lower() in consumed_addresses:
+                validator_map.pop(address)
 
         # Set not_used_validators to the remaining validators in validator_map
         not_used_validators = list(validator_map.values())
@@ -1586,6 +1618,52 @@ class ConsensusAlgorithm:
             )
 
         return used_leader_addresses
+
+    @staticmethod
+    def get_consumed_validator_addresses(
+        consensus_history: dict | None,
+        current_consensus_data: ConsensusData | dict | None = None,
+    ) -> set[str]:
+        """Return every address consumed by the transaction's fresh pool."""
+
+        consumed: set[str] = set()
+
+        def add_receipts(value) -> None:
+            receipts = value if isinstance(value, list) else [value]
+            for receipt in receipts:
+                if receipt is None:
+                    continue
+                node_config = (
+                    receipt.get("node_config")
+                    if isinstance(receipt, dict)
+                    else getattr(receipt, "node_config", None)
+                )
+                if not isinstance(node_config, dict):
+                    continue
+                address = node_config.get("address")
+                if address:
+                    consumed.add(str(address).lower())
+
+        results = (
+            consensus_history.get("consensus_results")
+            if isinstance(consensus_history, dict)
+            else None
+        )
+        if isinstance(results, list):
+            for entry in results:
+                if not isinstance(entry, dict):
+                    continue
+                add_receipts(entry.get("leader_result"))
+                add_receipts(entry.get("validator_results"))
+
+        if isinstance(current_consensus_data, dict):
+            add_receipts(current_consensus_data.get("leader_receipt"))
+            add_receipts(current_consensus_data.get("validators"))
+        elif current_consensus_data is not None:
+            add_receipts(getattr(current_consensus_data, "leader_receipt", None))
+            add_receipts(getattr(current_consensus_data, "validators", None))
+
+        return consumed
 
     def set_finality_window_time(self, time: int):
         """
@@ -2208,6 +2286,14 @@ class PendingState(TransactionState):
                         if context.validators_snapshot is not None
                         else None
                     ),
+                    selection_pool_addresses=(
+                        [
+                            node.validator.address
+                            for node in context.validators_snapshot.nodes
+                        ]
+                        if context.validators_snapshot is not None
+                        else None
+                    ),
                 )
                 activation_result["should_cancel"] = should_cancel
                 return updated
@@ -2284,6 +2370,16 @@ class PendingState(TransactionState):
             all_validators = [
                 n.validator.to_dict() for n in context.validators_snapshot.nodes
             ]
+
+        # Consensus executes every later round against the activation-pinned
+        # selection pool. Validators added afterwards are not eligible; a
+        # removed validator is simply unavailable and can reduce capacity.
+        fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
+        if all_validators:
+            all_validators = _validators_in_frozen_selection_pool(
+                all_validators,
+                fee_accounting,
+            )
 
         if not all_validators:
             context.msg_handler.send_message(

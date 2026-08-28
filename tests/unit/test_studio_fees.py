@@ -16,6 +16,7 @@ from backend.consensus.base import (
     _emit_messages,
     _get_messages_data,
     _runtime_rotation_limit,
+    _validators_in_frozen_selection_pool,
 )
 from backend.consensus.history import (
     materialize_decision_metadata,
@@ -30,6 +31,7 @@ from backend.database_handler.transactions_processor import (
 )
 from backend.protocol_rpc.exceptions import JSONRPCError, NotFoundError
 from backend.protocol_rpc.endpoints import (
+    _available_appeal_validator_count,
     _current_fee_round,
     _funded_max_rotations,
     _handle_appeal_or_top_up_and_submit,
@@ -1014,7 +1016,7 @@ def test_activation_checks_live_gen_cap_and_locks_all_live_prices():
             storage_unit_price=7,
             receipt_gas_price=8,
         ),
-        selection_pool_count=11,
+        selection_pool_addresses=[f"0x{index:040x}" for index in range(1, 12)],
     )
     assert should_cancel is False
     assert activated["activation_prices_locked"] is True
@@ -1027,6 +1029,9 @@ def test_activation_checks_live_gen_cap_and_locks_all_live_prices():
     assert activated["policy_snapshot"]["storage_unit_price"] == 7
     assert activated["policy_snapshot"]["receipt_gas_price"] == 8
     assert activated["selection_pool_count"] == 11
+    assert activated["selection_pool_addresses"] == [
+        f"0x{index:040x}" for index in range(1, 12)
+    ]
 
     relocked, should_cancel = activate_fee_accounting(
         activated,
@@ -9847,6 +9852,115 @@ def test_latest_appeal_charge_rpc_prices_capacity_limited_jury_exactly(monkeypat
     assert processor.updated_fee_accounting["appeal_bonds"][0]["juryCount"] == 5
 
 
+def test_latest_appeal_charge_excludes_historical_jurors_from_fresh_capacity(
+    monkeypatch,
+):
+    monkeypatch.setenv("VITE_FINALITY_WINDOW", "30")
+    monkeypatch.setattr("backend.protocol_rpc.endpoints.time.time", lambda: 1_001)
+    accounting = _env_fee_accounting()
+    accounting["selection_pool_count"] = 10
+    tx = _fee_accounted_tx(status="ACCEPTED", accounting=accounting)
+    tx.update(
+        timestamp_awaiting_finalization=1_000,
+        appealed=False,
+        consensus_data={
+            "leader_receipt": _history_receipt(
+                mode="leader",
+                address="0x0000000000000000000000000000000000000001",
+            ),
+            "validators": [
+                _history_receipt(mode="validator", address=f"0x{index:040x}")
+                for index in range(2, 5)
+            ],
+        },
+        consensus_history={
+            "consensus_results": [
+                {
+                    "consensus_round": "Accepted",
+                    "leader_result": [
+                        _history_receipt(
+                            mode="leader",
+                            address="0x0000000000000000000000000000000000000001",
+                        )
+                    ],
+                    "validator_results": [],
+                },
+                {
+                    "consensus_round": "Validator Appeal Failed",
+                    "leader_result": [],
+                    "validator_results": [
+                        _history_receipt(
+                            mode="validator",
+                            address=f"0x{index:040x}",
+                        )
+                        for index in range(5, 9)
+                    ],
+                },
+            ]
+        },
+    )
+
+    quote = estimate_latest_appeal_charge(
+        _FakeTransactionsProcessor(tx), {"txId": tx["hash"]}
+    )
+    expected = calculate_appeal_charge(
+        accounting["fees_distribution"],
+        current_round=1,
+        status="ACCEPTED",
+        terminal_committee_upper_bound=9,
+        available_appeal_validators=2,
+        policy=StudioFeePolicy.from_env(),
+    )
+
+    assert expected["juryCount"] == 2
+    assert int(quote["funding"]) == expected["funding"]
+
+
+def test_appeal_capacity_uses_frozen_pool_identities_and_live_availability():
+    tx = {
+        "consensus_data": {
+            "leader_receipt": _history_receipt(
+                mode="leader",
+                address="0x0000000000000000000000000000000000000001",
+            ),
+            "validators": [
+                _history_receipt(
+                    mode="validator",
+                    address="0x0000000000000000000000000000000000000002",
+                )
+            ],
+        },
+        "consensus_history": None,
+    }
+
+    available = _available_appeal_validator_count(
+        tx,
+        5,
+        frozen_pool_addresses=[f"0x{index:040x}" for index in range(1, 6)],
+        # Frozen validator 5 was removed; new validator 6 is ineligible.
+        live_pool_addresses=[f"0x{index:040x}" for index in (1, 2, 3, 4, 6)],
+    )
+
+    assert available == 2
+
+
+def test_execution_selection_rejects_post_activation_validator_additions():
+    validators = [
+        {"address": f"0x{index:040x}", "stake": 1} for index in (1, 2, 3, 4, 6)
+    ]
+    accounting = {
+        "selection_pool_addresses": [f"0x{index:040x}" for index in (1, 2, 3, 4, 5)]
+    }
+
+    eligible = _validators_in_frozen_selection_pool(validators, accounting)
+
+    # Removed frozen validator 5 is unavailable; newly-added validator 6 is
+    # not part of this transaction's activation authority.
+    assert {validator["address"] for validator in eligible} == {
+        f"0x{index:040x}" for index in (1, 2, 3, 4)
+    }
+
+
 def test_latest_appeal_charge_rejects_capacity_limited_undetermined_replay(
     monkeypatch,
 ):
@@ -9926,6 +10040,52 @@ def test_leader_appeal_requires_the_full_fresh_scheduled_set():
             0,
             required_extra_validators=7,
         )
+
+
+def test_appeal_selection_excludes_jurors_retained_only_in_history():
+    all_validators = [
+        {"address": f"0x{index:040x}", "stake": 1} for index in range(1, 11)
+    ]
+    consensus_data = SimpleNamespace(
+        leader_receipt=[
+            SimpleNamespace(
+                node_config={"address": "0x0000000000000000000000000000000000000001"}
+            )
+        ],
+        validators=[
+            SimpleNamespace(node_config={"address": f"0x{index:040x}"})
+            for index in range(2, 5)
+        ],
+    )
+    history = {
+        "consensus_results": [
+            {
+                "consensus_round": "Validator Appeal Failed",
+                "leader_result": [],
+                "validator_results": [
+                    _history_receipt(
+                        mode="validator",
+                        address=f"0x{index:040x}",
+                    )
+                    for index in range(5, 9)
+                ],
+            }
+        ]
+    }
+
+    _current, selected = ConsensusAlgorithm.get_extra_validators(
+        all_validators,
+        history,
+        consensus_data,
+        0,
+        required_extra_validators=2,
+        allow_short=True,
+    )
+
+    assert {item["address"] for item in selected} == {
+        "0x0000000000000000000000000000000000000009",
+        "0x000000000000000000000000000000000000000a",
+    }
 
 
 def test_repeated_validator_appeal_selects_fresh_scheduled_jury():

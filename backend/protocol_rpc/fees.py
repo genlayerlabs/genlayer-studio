@@ -1661,6 +1661,7 @@ def activate_fee_accounting(
     policy: StudioFeePolicy | None = None,
     *,
     selection_pool_count: int | None = None,
+    selection_pool_addresses: list[str] | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Lock v0.6 execution prices on first activation.
 
@@ -1674,7 +1675,18 @@ def activate_fee_accounting(
     if updated.get("activation_prices_locked"):
         return updated, False
 
-    if selection_pool_count is not None:
+    if selection_pool_addresses is not None:
+        # Consensus pins the activation selection-pool authority, including
+        # identities. Later registry additions must not become eligible for an
+        # already-activated transaction.
+        frozen_addresses = list(
+            dict.fromkeys(
+                str(address).lower() for address in selection_pool_addresses if address
+            )
+        )
+        updated["selection_pool_addresses"] = frozen_addresses
+        updated["selection_pool_count"] = len(frozen_addresses)
+    elif selection_pool_count is not None:
         # Consensus appeal reservations use the activation epoch's frozen
         # selection-pool authority, never the live staking population.
         updated["selection_pool_count"] = max(0, int(selection_pool_count))
