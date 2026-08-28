@@ -79,6 +79,7 @@ from backend.protocol_rpc.fees import (
     MessageFeesReportMismatch,
     MessageNoMatchingAllocation,
     Mode1MessageFeesRequireGenVMPerEmissionSupport,
+    message_effect_identities,
     PhaseTimeoutOutOfBounds,
     SubmittedMessagesTooLarge,
     CALL_KEY_WILDCARD,
@@ -1509,6 +1510,108 @@ def test_message_phase_with_a_rollup_still_rejects_a_malformed_receipt():
         )
 
     assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("use_balance", "initial_consumed", "expected_account_refund"),
+    [(False, 55, 7), (True, 0, 62)],
+)
+def test_non_ghost_internal_message_is_skipped_and_refunded_once(
+    use_balance,
+    initial_consumed,
+    expected_account_refund,
+):
+    insert_calls = []
+    account_refunds = []
+    recipient = "0x4444444444444444444444444444444444444444"
+    parent_hash = "0x" + "12" * 32
+    payload = {
+        "messageType": 1,
+        "recipient": recipient,
+        "value": 7,
+        "data": b"\x12\x34",
+        "onAcceptance": True,
+        "saltNonce": 0,
+        "feeParams": b"",
+        "declaredBudget": 55,
+        "allocationSubtree": [],
+        "callKey": "0x" + "00" * 32,
+        "useBalance": use_balance,
+    }
+    occurrence, descriptor = message_effect_identities(parent_hash, [payload])[0]
+    accounting = {
+        "message_fee_budget": 55,
+        "message_fee_consumed": initial_consumed,
+        "message_value_effects": {
+            occurrence: {
+                "descriptor": descriptor,
+                "phase": "accepted",
+                "include": True,
+                "value": 7,
+                "declaredBudget": 55,
+            }
+        },
+    }
+
+    class _Processor:
+        def insert_transaction(self, *args, **kwargs):
+            insert_calls.append((args, kwargs))
+
+        def mutate_transaction_fee_accounting(self, tx_hash, mutator):
+            assert tx_hash == parent_hash
+            updated = mutator(self.accounting)
+            self.accounting = updated
+            return updated
+
+    processor = _Processor()
+    processor.accounting = accounting
+
+    class _Accounts:
+        def credit_account_balance(self, address, amount):
+            account_refunds.append((address, amount))
+
+    context = SimpleNamespace(
+        transaction=SimpleNamespace(
+            to_address="0x1111111111111111111111111111111111111111",
+            execution_mode="NORMAL",
+            hash=parent_hash,
+            config_rotation_rounds=0,
+            sim_config=None,
+            origin_address=None,
+            data={FEE_ACCOUNTING_KEY: accounting},
+        ),
+        transactions_processor=processor,
+        accounts_manager=_Accounts(),
+    )
+    skipped_child = [
+        recipient,
+        {},
+        TransactionType.RUN_CONTRACT.value,
+        0,
+        7,
+        occurrence,
+        payload,
+    ]
+    helper_result = {
+        "tx_ids_hex": ["0x" + "00" * 32],
+        "recipients": [recipient],
+    }
+
+    _emit_messages(context, [skipped_child], helper_result, "accepted")
+    _emit_messages(context, [skipped_child], helper_result, "accepted")
+
+    assert insert_calls == []
+    assert account_refunds == [
+        (context.transaction.to_address, expected_account_refund)
+    ]
+    assert processor.accounting["message_fee_consumed"] == 0
+    assert len(processor.accounting.get("failed_internal_message_refunds", [])) == (
+        0 if use_balance else 1
+    )
+    record = processor.accounting["message_value_effects"][occurrence]
+    assert record["skipped"] is True
+    assert record["skippedRefunded"] is True
+    assert record["skippedRefundAmount"] == expected_account_refund
 
 
 def test_simulation_fee_accounting_accepts_sdk_style_fee_options():
@@ -8585,12 +8688,13 @@ def test_message_dispatch_creates_mode1_child_fee_accounting_from_pending_metada
     internal_messages, inserts = _get_messages_data(context, [pending], "accepted")
 
     assert len(inserts) == 1
-    recipient, data, tx_type, nonce, value, effect_identity = inserts[0]
+    recipient, data, tx_type, nonce, value, effect_identity, effect_payload = inserts[0]
     assert recipient == pending.address
     assert tx_type == TransactionType.RUN_CONTRACT.value
     assert nonce == 3
     assert value == 7
     assert effect_identity.startswith("0x")
+    assert effect_payload["recipient"] == pending.address
     assert data["calldata"] == b"\x12\x34"
     assert data["fee_value"] == child_budget
     assert data["user_value"] == 7

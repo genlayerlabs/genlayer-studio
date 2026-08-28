@@ -96,6 +96,77 @@ describe("ConsensusMain internal message bridge", function () {
         );
     });
 
+	it("accepts the v0.6 fee-aware tuple selectors and authors salted recipients", async function () {
+		const feeAwareInterface = new ethers.Interface([
+			"function addTransaction((address sender,address recipient,uint256 numOfInitialValidators,uint256 maxRotations,uint256 validUntil,uint256 saltNonce,uint256 userValue,(uint256 leaderTimeunitsAllocation,uint256 validatorTimeunitsAllocation,uint256 appealRounds,uint256 executionBudgetPerRound,uint256 executionConsumed,uint256 totalMessageFees,uint256[] rotations,uint256 maxPriceGenPerTimeUnit,uint256 storageFeeMaxGasPrice,uint256 receiptFeeMaxGasPrice) feesDistribution,bytes txCalldata,(uint8 messageType,bool onAcceptance,uint256 parentIndex,address recipient,bytes32 callKey,uint256 budget,bytes feeParams)[] messageAllocations) params) payable",
+			"function deploySalted((address sender,address recipient,uint256 numOfInitialValidators,uint256 maxRotations,uint256 validUntil,uint256 saltNonce,uint256 userValue,(uint256 leaderTimeunitsAllocation,uint256 validatorTimeunitsAllocation,uint256 appealRounds,uint256 executionBudgetPerRound,uint256 executionConsumed,uint256 totalMessageFees,uint256[] rotations,uint256 maxPriceGenPerTimeUnit,uint256 storageFeeMaxGasPrice,uint256 receiptFeeMaxGasPrice) feesDistribution,bytes txCalldata,(uint8 messageType,bool onAcceptance,uint256 parentIndex,address recipient,bytes32 callKey,uint256 budget,bytes feeParams)[] messageAllocations) params) payable",
+		]);
+		const feesDistribution = {
+			leaderTimeunitsAllocation: 1,
+			validatorTimeunitsAllocation: 1,
+			appealRounds: 0,
+			executionBudgetPerRound: 0,
+			executionConsumed: 0,
+			totalMessageFees: 0,
+			rotations: [0],
+			maxPriceGenPerTimeUnit: 1,
+			storageFeeMaxGasPrice: 0,
+			receiptFeeMaxGasPrice: 0,
+		};
+		const baseParams = {
+			sender: owner.address,
+			recipient,
+			numOfInitialValidators: 5,
+			maxRotations: 0,
+			validUntil: 0,
+			saltNonce: 0,
+			userValue: 0,
+			feesDistribution,
+			txCalldata: "0x0102",
+			messageAllocations: [],
+		};
+		const issuedBefore = await queues.getIssuedTxCount(recipient);
+
+		await owner.sendTransaction({
+			to: await consensusMain.getAddress(),
+			data: feeAwareInterface.encodeFunctionData("addTransaction", [
+				baseParams,
+			]),
+		});
+		expect(await queues.getIssuedTxCount(recipient)).to.equal(
+			issuedBefore + 1n,
+		);
+
+		const saltedTx = await owner.sendTransaction({
+			to: await consensusMain.getAddress(),
+			data: feeAwareInterface.encodeFunctionData("deploySalted", [
+				{
+					...baseParams,
+					recipient: ethers.ZeroAddress,
+					saltNonce: 777n,
+				},
+			]),
+		});
+		const saltedReceipt = await saltedTx.wait();
+		const newTransaction = saltedReceipt.logs
+			.map((log) => {
+				try {
+					return consensusMain.interface.parseLog(log);
+				} catch (_error) {
+					return null;
+				}
+			})
+			.find((event) => event && event.name === "NewTransaction");
+
+		expect(newTransaction.args.recipient).to.not.equal(ethers.ZeroAddress);
+		expect(newTransaction.args.recipient).to.equal(
+			await ghostFactory.latestGhost(),
+		);
+		expect(
+			await consensusMain.ghostContracts(newTransaction.args.recipient),
+		).to.equal(true);
+	});
+
     it("seats a distinct decision payload once without duplicating its retries", async function () {
         const parentTxId = ethers.keccak256(ethers.toUtf8Bytes("drift-parent"));
         const messages = [
@@ -184,6 +255,40 @@ describe("ConsensusMain internal message bridge", function () {
 		});
 	}
 
+	it("keeps a successful salted deployment when a colliding sibling is skipped", async function () {
+		const parentTxId = ethers.keccak256(
+			ethers.toUtf8Bytes("deployment-collision-parent"),
+		);
+		const messages = [0, 1].map((index) => ({
+			sender: recipient,
+			recipient: ethers.ZeroAddress,
+			saltNonce: 99n,
+			data: index === 0 ? "0x0102" : "0x0304",
+		}));
+
+		await consensusMain.emitTransactionAccepted(parentTxId, messages);
+		const childIds = await consensusMain.getInternalMessageTxIds(
+			parentTxId,
+			true,
+			messages,
+		);
+		const childRecipients =
+			await consensusMain.getInternalMessageRecipients(
+				parentTxId,
+				true,
+				messages,
+			);
+
+		expect(childIds[0]).to.not.equal(ethers.ZeroHash);
+		expect(childIds[1]).to.equal(ethers.ZeroHash);
+		expect(childRecipients[0]).to.not.equal(ethers.ZeroAddress);
+		expect(childRecipients[1]).to.equal(ethers.ZeroAddress);
+		expect(await queues.getIssuedTxCount(childRecipients[0])).to.equal(1n);
+
+		await consensusMain.emitTransactionAccepted(parentTxId, messages);
+		expect(await queues.getIssuedTxCount(childRecipients[0])).to.equal(1n);
+	});
+
     it("indexes finalized history by recipient issuance order", async function () {
         await consensusMain.cancelTransaction(deploymentTxId);
 
@@ -193,25 +298,51 @@ describe("ConsensusMain internal message bridge", function () {
         );
     });
 
-    it("rejects an internal child targeting an unregistered nonzero recipient", async function () {
+    it("skips an unregistered internal recipient without stranding valid siblings", async function () {
         const parentTxId = ethers.keccak256(
             ethers.toUtf8Bytes("non-ghost-parent"),
         );
-        let rejected = false;
-        try {
-            await consensusMain.emitTransactionAccepted(parentTxId, [
+        const messages = [
                 {
                     sender: recipient,
                     recipient: owner.address,
 					saltNonce: 0,
                     data: "0x0102",
                 },
-            ]);
-        } catch (error) {
-            rejected = String(error).includes("NonGenVMContract");
-        }
+                {
+                    sender: recipient,
+                    recipient,
+                    saltNonce: 0,
+                    data: "0x0304",
+                },
+            ];
+        const issuedBefore = await queues.getIssuedTxCount(recipient);
 
-        expect(rejected).to.equal(true);
+        await consensusMain.emitTransactionAccepted(parentTxId, messages);
+
+        const childIds = await consensusMain.getInternalMessageTxIds(
+            parentTxId,
+            true,
+            messages,
+        );
+        const childRecipients =
+            await consensusMain.getInternalMessageRecipients(
+                parentTxId,
+                true,
+                messages,
+            );
+
+        expect(childIds[0]).to.equal(ethers.ZeroHash);
+        expect(childIds[1]).to.not.equal(ethers.ZeroHash);
+        expect(childRecipients).to.deep.equal([owner.address, recipient]);
         expect(await consensusMain.ghostContracts(owner.address)).to.equal(false);
+        expect(await queues.getIssuedTxCount(recipient)).to.equal(
+            issuedBefore + 1n,
+        );
+
+        await consensusMain.emitTransactionAccepted(parentTxId, messages);
+        expect(await queues.getIssuedTxCount(recipient)).to.equal(
+            issuedBefore + 1n,
+        );
     });
 });

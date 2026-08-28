@@ -105,6 +105,7 @@ contract ConsensusMain is
 		address indexed recipient,
 		address indexed activator
 	);
+	event InternalMessageSkipped(address indexed recipient);
 	event TransactionCancelled(bytes32 indexed txId, address indexed sender);
 	event TransactionIdleValidatorReplacementFailed(
 		bytes32 indexed txId,
@@ -131,6 +132,14 @@ contract ConsensusMain is
 		uint256 saltNonce;
 		bytes data;
 	}
+
+	bytes4 private constant FEE_AWARE_ADD_TRANSACTION_SELECTOR = 0x35a251fb;
+	bytes4 private constant FEE_AWARE_DEPLOY_SALTED_SELECTOR = 0x98863702;
+	uint256 private constant FEE_AWARE_PARAMS_HEAD_SIZE = 10 * 32;
+	uint256 private constant FEE_AWARE_TX_CALLDATA_OFFSET = 8 * 32;
+
+	error InvalidFeeAwareTransactionEncoding();
+	error InvalidSalt();
 
 	/**
 	 * @notice Initializes the contract
@@ -198,27 +207,41 @@ contract ConsensusMain is
 		txIds = new bytes32[](internalMessages.length);
 		recipients = new address[](internalMessages.length);
 		for (uint256 i = 0; i < internalMessages.length; i++) {
-			(
-				bytes32 generated_txId,
-				address newActivator
-			) = _addTransaction(
-				internalMessages[i].sender,
-				internalMessages[i].recipient,
-				5, // or pass as part of internalMessages.data
-				0, // or pass as part of internalMessages.data
-				internalMessages[i].saltNonce,
-				internalMessages[i].data
-			);
-			txIds[i] = generated_txId;
-			recipients[i] = contracts.genTransactions.getTransactionRecipient(
-				generated_txId
-			);
-			emit InternalMessageProcessed(
-				generated_txId,
-				recipients[i],
-				newActivator
-			);
+			try this.addInternalMessageTransaction(internalMessages[i]) returns (
+				bytes32 generatedTxId,
+				address newActivator,
+				address actualRecipient
+			) {
+				txIds[i] = generatedTxId;
+				recipients[i] = actualRecipient;
+				emit InternalMessageProcessed(
+					generatedTxId,
+					actualRecipient,
+					newActivator
+				);
+			} catch {
+				recipients[i] = internalMessages[i].recipient;
+				emit InternalMessageSkipped(internalMessages[i].recipient);
+			}
 		}
+	}
+
+	/// @dev Isolates each internal child creation so one invalid child does not
+	/// revert its siblings or strand the parent phase.
+	function addInternalMessageTransaction(
+		internalMessageData calldata internalMessage
+	) external returns (bytes32 txId, address activator, address recipient) {
+		require(msg.sender == address(this), "Only self");
+		if (internalMessage.data.length == 0) revert Errors.EmptyTransaction();
+		(txId, activator) = _addTransaction(
+			internalMessage.sender,
+			internalMessage.recipient,
+			5,
+			0,
+			internalMessage.saltNonce,
+			internalMessage.data
+		);
+		recipient = contracts.genTransactions.getTransactionRecipient(txId);
 	}
 
 	function emitTransactionAccepted(
@@ -293,6 +316,93 @@ contract ConsensusMain is
 			revert Errors.EmptyTransaction();
 		}
 		// TODO: Fee verification handling
+	}
+
+	/// @dev Studio forwards the user's already-signed v0.6 fee-aware payload to
+	/// this local shadow helper. Decoding the full nested fee tuple with a typed
+	/// Solidity entrypoint exceeds the EVM contract-size limit, so the bridge
+	/// reads only the transaction fields needed to author the protocol id and
+	/// deployment address. The Python RPC layer validates the complete envelope
+	/// before forwarding it here.
+	fallback() external payable {
+		if (msg.sig == FEE_AWARE_ADD_TRANSACTION_SELECTOR) {
+			_addFeeAwareTransaction(false);
+			return;
+		}
+		if (msg.sig == FEE_AWARE_DEPLOY_SALTED_SELECTOR) {
+			_addFeeAwareTransaction(true);
+			return;
+		}
+		revert InvalidFeeAwareTransactionEncoding();
+	}
+
+	function _addFeeAwareTransaction(bool isSaltedDeployment) internal {
+		uint256 tupleOffset;
+		assembly {
+			tupleOffset := calldataload(4)
+		}
+		if (tupleOffset != 32) revert InvalidFeeAwareTransactionEncoding();
+
+		uint256 tupleStart = 4 + tupleOffset;
+		if (msg.data.length < tupleStart + FEE_AWARE_PARAMS_HEAD_SIZE) {
+			revert InvalidFeeAwareTransactionEncoding();
+		}
+
+		uint256 senderWord;
+		uint256 recipientWord;
+		uint256 numOfInitialValidators;
+		uint256 maxRotations;
+		uint256 saltNonce;
+		uint256 txCalldataOffset;
+		assembly {
+			senderWord := calldataload(tupleStart)
+			recipientWord := calldataload(add(tupleStart, 32))
+			numOfInitialValidators := calldataload(add(tupleStart, 64))
+			maxRotations := calldataload(add(tupleStart, 96))
+			saltNonce := calldataload(add(tupleStart, 160))
+			txCalldataOffset := calldataload(
+				add(tupleStart, FEE_AWARE_TX_CALLDATA_OFFSET)
+			)
+		}
+		if (
+			senderWord > type(uint160).max ||
+			recipientWord > type(uint160).max ||
+			txCalldataOffset < FEE_AWARE_PARAMS_HEAD_SIZE ||
+			txCalldataOffset % 32 != 0
+		) revert InvalidFeeAwareTransactionEncoding();
+
+		uint256 txCalldataLengthOffset = tupleStart + txCalldataOffset;
+		if (txCalldataLengthOffset > msg.data.length - 32) {
+			revert InvalidFeeAwareTransactionEncoding();
+		}
+		uint256 txCalldataLength;
+		assembly {
+			txCalldataLength := calldataload(txCalldataLengthOffset)
+		}
+		uint256 txCalldataStart = txCalldataLengthOffset + 32;
+		if (txCalldataLength > msg.data.length - txCalldataStart) {
+			revert InvalidFeeAwareTransactionEncoding();
+		}
+		if (txCalldataLength == 0) revert Errors.EmptyTransaction();
+
+		bytes memory txCalldata = new bytes(txCalldataLength);
+		assembly {
+			calldatacopy(add(txCalldata, 32), txCalldataStart, txCalldataLength)
+		}
+		if (isSaltedDeployment) {
+			if (saltNonce == 0) revert InvalidSalt();
+			recipientWord = 0;
+		} else {
+			saltNonce = 0;
+		}
+		_addTransaction(
+			address(uint160(senderWord)),
+			address(uint160(recipientWord)),
+			numOfInitialValidators,
+			maxRotations,
+			saltNonce,
+			txCalldata
+		);
 	}
 
 	/**

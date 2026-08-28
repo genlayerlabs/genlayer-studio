@@ -70,6 +70,7 @@ from backend.protocol_rpc.fees import (
     message_novelty_mask,
     prepare_reveal_message_generation,
     record_external_message_execution_fees,
+    refund_failed_internal_message_fee,
     runtime_rotations_for_round,
     stamp_receipt_execution_policy,
     unwind_reveal_message_fees,
@@ -3839,6 +3840,7 @@ def _get_messages_data(
                 nonce,
                 pending_transaction.value,
                 effect_identities[nonce_offset][0],
+                identity_payloads[nonce_offset],
             ]
         )
 
@@ -4511,6 +4513,86 @@ def _runtime_rotation_limit(
     )
 
 
+def _is_zero_transaction_hash(transaction_hash: Any) -> bool:
+    if not isinstance(transaction_hash, str):
+        return False
+    try:
+        return int(transaction_hash, 16) == 0
+    except ValueError:
+        return False
+
+
+def _refund_skipped_internal_message(
+    context: TransactionContext,
+    insert_transaction_data: list,
+    triggered_on: Literal["accepted", "finalized"],
+) -> None:
+    occurrence = insert_transaction_data[5]
+    message_payload = insert_transaction_data[6]
+    refund_amount = int(insert_transaction_data[4] or 0)
+    if bool(message_payload.get("useBalance", False)):
+        refund_amount += int(message_payload.get("declaredBudget", 0) or 0)
+
+    parent_fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
+    mutate_accounting = getattr(
+        context.transactions_processor,
+        "mutate_transaction_fee_accounting",
+        None,
+    )
+    if not isinstance(parent_fee_accounting, dict) or not callable(mutate_accounting):
+        if refund_amount > 0:
+            context.accounts_manager.credit_account_balance(
+                context.transaction.to_address,
+                refund_amount,
+            )
+        return
+
+    expected_descriptor = message_effect_identities(
+        context.transaction.hash,
+        [message_payload],
+    )[0][1]
+
+    def refund_latest(current_fee_accounting: dict[str, Any]) -> dict[str, Any]:
+        current_record = (
+            current_fee_accounting.get("message_value_effects") or {}
+        ).get(occurrence)
+        if not isinstance(current_record, dict):
+            raise RuntimeError(f"MessageValueEffectMissing({occurrence})")
+        if (
+            current_record.get("descriptor") != expected_descriptor
+            or current_record.get("phase") != triggered_on
+        ):
+            raise RuntimeError(
+                "MessageValueEffectDescriptorMismatch"
+                f"({occurrence},{current_record.get('descriptor')},"
+                f"{expected_descriptor})"
+            )
+        if bool(current_record.get("skippedRefunded", False)):
+            return current_fee_accounting
+
+        updated = refund_failed_internal_message_fee(
+            current_fee_accounting,
+            message_payload,
+        )
+        updated_record = updated.setdefault("message_value_effects", {})[occurrence]
+        updated_record["skipped"] = True
+        updated_record["skippedRefunded"] = True
+        updated_record["skippedRefundAmount"] = refund_amount
+        if refund_amount > 0:
+            context.accounts_manager.credit_account_balance(
+                context.transaction.to_address,
+                refund_amount,
+            )
+        return updated
+
+    updated_accounting = mutate_accounting(
+        context.transaction.hash,
+        refund_latest,
+    )
+    context.transaction.data = dict(context.transaction.data or {})
+    context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
+
+
 def _emit_messages(
     context: TransactionContext,
     insert_transactions_data: list,
@@ -4580,6 +4662,13 @@ def _emit_messages(
             )
         if not (rollup_skipped and is_deploy):
             actual_recipient = to_checksum_address(actual_recipient)
+        if not is_external and _is_zero_transaction_hash(transaction_hash):
+            _refund_skipped_internal_message(
+                context,
+                insert_transaction_data,
+                triggered_on,
+            )
+            continue
         if is_deploy and not rollup_skipped:
             if actual_recipient == to_checksum_address(ZERO_ADDRESS):
                 raise InternalMessageEmissionError(

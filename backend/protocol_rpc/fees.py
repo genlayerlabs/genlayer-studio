@@ -2718,6 +2718,43 @@ def refund_failed_external_message_fee(
     return updated
 
 
+def refund_failed_internal_message_fee(
+    accounting: dict[str, Any],
+    message: dict[str, Any],
+) -> dict[str, Any]:
+    """Return a skipped internal child's allowance to the parent bucket.
+
+    Consensus does not create a transaction for a non-ghost internal
+    recipient. Its declared budget therefore never moves to a child escrow.
+    Contract-funded (useBalance) budgets live outside the parent bucket and
+    are refunded by the account-value bridge instead.
+    """
+
+    updated = copy.deepcopy(accounting)
+    if int(message.get("messageType", MESSAGE_TYPE_INTERNAL)) != MESSAGE_TYPE_INTERNAL:
+        return updated
+    if bool(message.get("useBalance", False)):
+        return updated
+
+    declared_budget = int(message.get("declaredBudget", 0) or 0)
+    if declared_budget <= 0:
+        return updated
+    _decrement_allocation_consumed(updated, message, declared_budget)
+    updated["message_fee_consumed"] = max(
+        0,
+        int(updated.get("message_fee_consumed", 0)) - declared_budget,
+    )
+    updated.setdefault("failed_internal_message_refunds", []).append(
+        {
+            "recipient": str(message.get("recipient", "")).lower(),
+            "callKey": _normalize_call_key(message.get("callKey", EMPTY_CALL_KEY)),
+            "declaredBudget": declared_budget,
+        }
+    )
+    _refresh_message_fee_accounting_report_if_present(updated)
+    return updated
+
+
 def unwind_reveal_message_fees(
     accounting: dict[str, Any],
     messages: list[dict[str, Any]],
