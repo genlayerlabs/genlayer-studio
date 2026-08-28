@@ -506,7 +506,7 @@ class ConsumedResult:
     result_fingerprint: ResultFingerprint | None = None
     result_storage_deltas: list[tuple[bytes, bytes]] = field(default_factory=list)
     result_emissions: list[ResultEmission] = field(default_factory=list)
-    result_nondet_results: list[bytes] = field(default_factory=list)
+    result_leader_public_data: bytes = b""
     data_fees_remaining: list[int] = field(default_factory=list)
 
     @classmethod
@@ -559,7 +559,7 @@ class ConsumedResult:
             result_fingerprint=decoded.get("fingerprint"),
             result_storage_deltas=decoded.get("storage_deltas", []),
             result_emissions=decoded.get("emissions", []),
-            result_nondet_results=decoded.get("nondet_results", []),
+            result_leader_public_data=decoded.get("leader_public_data", b""),
             data_fees_remaining=decoded.get("data_fees_remaining", []),
         )
 
@@ -579,7 +579,7 @@ class RunHostAndProgramRes:
     result_fingerprint: ResultFingerprint | None
     result_storage_deltas: list[tuple[bytes, bytes]]
     result_emissions: list[ResultEmission]
-    result_nondet_results: list[bytes]
+    result_leader_public_data: bytes
     data_fees_remaining: list[int]
     metrics: dict[str, typing.Any] | None = None
     vm_error_description: str | None = None
@@ -1177,7 +1177,7 @@ async def run_genvm(
     bucket_totals: list[int],
     code: bytes | None = None,
     calldata: bytes,
-    leader_nondet_results: list[bytes] | None = None,
+    leader_public_data: bytes | None = None,
     message_fee_allocation: collections.abc.Sequence[fees.MessageAllocationNode] = (),
     unsafe_overrides: UnsafeOverrides | None = None,
     request_extra: collections.abc.Mapping[
@@ -1228,7 +1228,7 @@ async def run_genvm(
             "extra_args": list(extra_args),
             "code": code,
             "calldata": calldata,
-            "leader_nondet_results": leader_nondet_results,
+            "leader_public_data": leader_public_data,
             "bucket_totals": bucket_totals,
             "gas_data": effective_gas_data,
             "message_fee_allocation": list(message_fee_allocation),
@@ -1403,7 +1403,7 @@ async def run_genvm(
             result_fingerprint=consumed.result_fingerprint,
             result_storage_deltas=consumed.result_storage_deltas,
             result_emissions=consumed.result_emissions,
-            result_nondet_results=consumed.result_nondet_results,
+            result_leader_public_data=consumed.result_leader_public_data,
             data_fees_remaining=consumed.data_fees_remaining,
             vm_error_description=vm_error_description,
             execution_time=time.time() - started_at,

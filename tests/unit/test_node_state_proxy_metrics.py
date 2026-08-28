@@ -13,6 +13,7 @@ from backend.node.genvm.base import Host as GenVMHost
 import backend.node.genvm.origin.calldata as gvm_calldata
 from backend.node.genvm.origin.base_host import RunHostAndProgramRes
 from backend.node.genvm.origin.host_fns import ResultCode
+from backend.node.genvm.origin.leader_public_data import LeaderPublicData
 from backend.node.types import Address, ExecutionMode, ExecutionResultStatus
 from backend.protocol_rpc.fees import (
     GENVM_UNMETERED_DATA_FEE_BUCKET,
@@ -192,7 +193,7 @@ def test_host_provide_result_preserves_fee_metadata_from_genvm_emissions():
                 "gasUsed": 123,
             },
         ],
-        result_nondet_results=[],
+        result_leader_public_data=LeaderPublicData([]).encode(),
         data_fees_remaining=[100, 90, 80],
     )
 

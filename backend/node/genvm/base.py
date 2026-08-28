@@ -51,6 +51,7 @@ from .origin import host_fns
 # subset the SDK exposes, so import it last to win over the star import.
 from .origin.host_fns import ResultCode
 from .origin import logger as genvm_logger
+from .origin.leader_public_data import LeaderPublicData
 from .error_codes import (
     extract_error_code,
     extract_error_code_from_timeout,
@@ -670,8 +671,10 @@ class Host(genvmhost.IHost):
                         )
                     )
 
-        # Extract eq_outputs from result_nondet_results
-        eq_outputs = {i: data for i, data in enumerate(res.result_nondet_results)}
+        leader_public_data = LeaderPublicData.decode(res.result_leader_public_data)
+        eq_outputs = {
+            i: data for i, data in enumerate(leader_public_data.nondet_block_outputs)
+        }
 
         execution_stats = dict(ctx.stats)
         llm_token_metrics = _extract_llm_token_metrics(res.metrics)
@@ -923,16 +926,16 @@ def _create_timeout_result(
     )
 
 
-def _leader_results_to_list(
+def _encode_leader_public_data(
     leader_results: dict[int, bytes] | None,
-) -> list[bytes] | None:
-    """Convert dict[int, bytes] keyed by call_no to ordered list[bytes]."""
+) -> bytes | None:
     if leader_results is None:
         return None
-    if not leader_results:
-        return []
-    max_key = max(leader_results.keys())
-    return [leader_results.get(i, b"") for i in range(max_key + 1)]
+    outputs = []
+    if leader_results:
+        max_key = max(leader_results.keys())
+        outputs = [leader_results.get(i, b"") for i in range(max_key + 1)]
+    return LeaderPublicData(outputs).encode()
 
 
 async def run_genvm_host(
@@ -1049,7 +1052,7 @@ async def run_genvm_host(
                 leader_results = fresh_args.get(
                     "leader_results", host_args.get("leader_results")
                 )
-                leader_nondet_results = _leader_results_to_list(leader_results)
+                leader_public_data = _encode_leader_public_data(leader_results)
 
                 try:
                     # Fresh manager websocket per attempt: run_genvm never owns
@@ -1079,7 +1082,7 @@ async def run_genvm_host(
                             calldata=fresh_args.get(
                                 "calldata_bytes", host_args.get("calldata_bytes", b"")
                             ),
-                            leader_nondet_results=leader_nondet_results,
+                            leader_public_data=leader_public_data,
                             unsafe_overrides=base_host.UnsafeOverrides(
                                 reroute_to=genvm_executor_selector or ""
                             ),
