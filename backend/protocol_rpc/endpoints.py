@@ -58,6 +58,7 @@ from backend.protocol_rpc.fees import (
     calculate_round_fees,
     decode_internal_message_fee_params,
     create_fee_accounting,
+    funding_policy_for_accounting,
     get_leader_rounds,
     normalize_fees_distribution,
     min_message_primary_fees,
@@ -2124,7 +2125,10 @@ def estimate_latest_appeal_charge(
         ),
         available_appeal_validators=available_appeal_validators,
         leader_timeout_live_seats=live_seats,
-        policy=StudioFeePolicy.from_env(),
+        policy=funding_policy_for_accounting(
+            fee_accounting,
+            StudioFeePolicy.from_env(),
+        ),
     )
     decision_id = _transaction_decision_id(transaction)
     return {
@@ -2599,7 +2603,10 @@ def _handle_appeal_or_top_up_and_submit(
                 available_appeal_validators=available_appeal_validators,
                 replacement_rotations=replacement_rotations,
                 leader_timeout_live_seats=leader_timeout_live_seats,
-                time_unit_overlay_bps=StudioFeePolicy.from_env().time_unit_overlay_bps,
+                policy=funding_policy_for_accounting(
+                    current_fee_accounting,
+                    StudioFeePolicy.from_env(),
+                ),
             )
             return updated, int(updated["appeal_bonds"][-1]["surplusRefund"])
 

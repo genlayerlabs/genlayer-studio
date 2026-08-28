@@ -15,8 +15,11 @@ import pytest
 
 from backend.consensus import base as consensus_base
 from backend.consensus.base import (
+    FinalizingState,
     PendingState,
+    ProposingState,
     TransactionContext,
+    UndeterminedState,
     _pending_valid_until_expired,
 )
 from backend.domain.types import (
@@ -26,6 +29,7 @@ from backend.domain.types import (
     TransactionExecutionMode,
 )
 from backend.database_handler.contract_snapshot import ContractSnapshot
+from backend.database_handler.types import ConsensusData
 from backend.protocol_rpc.fees import FEE_ACCOUNTING_KEY
 
 
@@ -68,6 +72,7 @@ def _make_transaction(
     tx.appeal_leader_timeout = False
     tx.appeal_validators_timeout = False
     tx.triggered_by_hash = triggered_by_hash
+    tx.origin_address = None
     tx.status = status
     tx.consensus_history = consensus_history or {}
     tx.consensus_data = Mock()
@@ -218,6 +223,76 @@ def test_valid_until_does_not_cancel_appeal_recomputation():
     assert _pending_valid_until_expired(transaction, now=10_000) is False
 
 
+def _pending_context_with_validator_capacity(*, requested, available):
+    transaction_hash = "0x" + "ab" * 32
+    transaction = {
+        "hash": transaction_hash,
+        "status": TransactionStatus.PENDING.value,
+        "type": TransactionType.RUN_CONTRACT.value,
+        "from_address": "0x1111111111111111111111111111111111111111",
+        "to_address": "0x2222222222222222222222222222222222222222",
+        "value": 0,
+        "data": {"calldata": "AA=="},
+        "consensus_data": None,
+        "consensus_history": {},
+        "num_of_initial_validators": requested,
+    }
+    transactions_processor = Mock()
+    transactions_processor.get_transaction_by_hash.return_value = transaction
+    validator_nodes = [
+        SimpleNamespace(
+            validator=SimpleNamespace(
+                to_dict=lambda index=index: {
+                    "address": f"0x{index:040x}",
+                    "stake": 1,
+                }
+            )
+        )
+        for index in range(1, available + 1)
+    ]
+    return SimpleNamespace(
+        transaction=SimpleNamespace(hash=transaction_hash),
+        transactions_processor=transactions_processor,
+        accounts_manager=Mock(),
+        msg_handler=SimpleNamespace(send_message=Mock()),
+        consensus_service=Mock(),
+        contract_processor=Mock(),
+        validators_snapshot=SimpleNamespace(nodes=validator_nodes),
+        involved_validators=[],
+        consensus_data=ConsensusData(votes={}, leader_receipt=None, validators=[]),
+        contract_snapshot=_make_snapshot(balance=0),
+    )
+
+
+@pytest.mark.asyncio
+async def test_initial_committee_shortfall_becomes_undetermined_without_execution():
+    context = _pending_context_with_validator_capacity(requested=7, available=5)
+
+    result = await PendingState().handle(context)
+
+    assert isinstance(result, UndeterminedState)
+    assert context.involved_validators == []
+    context.accounts_manager.credit_tx_value_once.assert_not_called()
+
+    await result.handle(context)
+
+    context.transactions_processor.update_transaction_status.assert_called_once_with(
+        context.transaction.hash,
+        TransactionStatus.UNDETERMINED,
+        False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_initial_committee_uses_exact_requested_size_when_available():
+    context = _pending_context_with_validator_capacity(requested=7, available=7)
+
+    result = await PendingState().handle(context)
+
+    assert isinstance(result, ProposingState)
+    assert len(context.involved_validators) == 7
+
+
 class TestAppealReentry:
     """On appeal re-entry, value_credited flag prevents double credit."""
 
@@ -301,6 +376,94 @@ class TestValueCreditedFlag:
         ctx = _make_context(tx, accounts_manager=am)
         # With value=0, credit should never be called
         am.credit_tx_value_once.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_terminal_no_result_returns_child_value_to_emitting_contract(monkeypatch):
+    """The outer origin must never receive value funded by a child sender."""
+
+    tx = _make_transaction(
+        value=500,
+        triggered_by_hash="0xparent",
+        status=TransactionStatus.LEADER_TIMEOUT,
+    )
+    tx.from_address = "0xemitting-contract"
+    tx.origin_address = "0xouter-user"
+    tx.consensus_data.leader_receipt = [
+        SimpleNamespace(
+            execution_result=SimpleNamespace(value="ERROR"),
+            node_config={"address": "0xleader"},
+            pending_transactions=[],
+        )
+    ]
+    accounts_manager = _make_accounts_manager()
+    context = _make_context(tx, accounts_manager=accounts_manager)
+    executor = Mock()
+    executor.execute = AsyncMock()
+    monkeypatch.setattr(
+        consensus_base,
+        "EffectExecutor",
+        Mock(return_value=executor),
+    )
+    monkeypatch.setattr(
+        consensus_base,
+        "_dispatch_messages_for_phase",
+        Mock(return_value=False),
+    )
+
+    await FinalizingState().handle(context)
+
+    accounts_manager.refund_activated_tx_value_once.assert_called_once_with(
+        tx.hash,
+        tx.to_address,
+        "0xemitting-contract",
+    )
+    assert accounts_manager.refund_activated_tx_value_once.call_args.args[2] != (
+        tx.origin_address
+    )
+
+
+@pytest.mark.asyncio
+async def test_receiptless_undetermined_finalizes_and_refunds_uncredited_value(
+    monkeypatch,
+):
+    tx = _make_transaction(value=500, status=TransactionStatus.UNDETERMINED)
+    tx.consensus_data = ConsensusData(votes={}, leader_receipt=None, validators=[])
+    accounts_manager = _make_accounts_manager()
+    accounts_manager.refund_activated_tx_value_once.return_value = False
+    context = _make_context(tx, accounts_manager=accounts_manager)
+    executor = Mock()
+    executor.execute = AsyncMock()
+    monkeypatch.setattr(
+        consensus_base,
+        "EffectExecutor",
+        Mock(return_value=executor),
+    )
+    dispatch_messages = Mock(return_value=False)
+    monkeypatch.setattr(
+        consensus_base,
+        "_dispatch_messages_for_phase",
+        dispatch_messages,
+    )
+
+    await FinalizingState().handle(context)
+
+    dispatch_messages.assert_not_called()
+    accounts_manager.refund_activated_tx_value_once.assert_called_once_with(
+        tx.hash,
+        tx.to_address,
+        tx.from_address,
+    )
+    accounts_manager.refund_tx_value.assert_called_once_with(
+        tx.hash,
+        tx.from_address,
+    )
+    accounts_manager.settle_tx_fee_accounting_once.assert_called_once_with(
+        tx.hash,
+        tx.from_address,
+        receipt=None,
+        reason="finalized",
+    )
 
 
 class TestMintOnDemand:

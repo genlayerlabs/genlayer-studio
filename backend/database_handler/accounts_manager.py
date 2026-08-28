@@ -185,16 +185,61 @@ class AccountsManager:
         Returns True if refund was applied."""
         result = self.session.execute(
             text(
-                "SELECT value, value_credited FROM transactions " "WHERE hash = :hash"
+                "UPDATE transactions "
+                "SET data = jsonb_set(COALESCE(data, '{}'::jsonb), "
+                "'{uncreditedValueRefunded}', 'true'::jsonb, true) "
+                "WHERE hash = :hash AND value_credited = false AND value > 0 "
+                "AND COALESCE(data ->> 'uncreditedValueRefunded', 'false') <> 'true' "
+                "RETURNING value"
             ),
             {"hash": tx_hash},
         )
         row = result.first()
-        if row is None or row.value is None or row.value <= 0:
+        if row is None:
             return False
-        if row.value_credited:
-            return False  # target already received funds, can't refund
         self.credit_account_balance(sender_address, row.value)
+        self.session.expire_all()
+        return True
+
+    def refund_activated_tx_value_once(
+        self,
+        tx_hash: str,
+        target_address: str,
+        beneficiary_address: str,
+    ) -> bool:
+        """Return an activated transaction's value to its principal owner once.
+
+        Activation credits the destination before consensus has a terminal
+        result.  A no-result/error finalization must reverse that provisional
+        credit.  For an internal child the owner is ``from_address`` (the
+        emitting contract), never the outer transaction origin.
+        """
+
+        result = self.session.execute(
+            text(
+                "UPDATE transactions "
+                "SET data = jsonb_set(COALESCE(data, '{}'::jsonb), "
+                "'{activatedValueRefunded}', 'true'::jsonb, true) "
+                "WHERE hash = :hash AND value_credited = true AND value > 0 "
+                "AND COALESCE(data ->> 'activatedValueRefunded', 'false') <> 'true' "
+                "RETURNING value"
+            ),
+            {"hash": tx_hash},
+        )
+        row = result.first()
+        if row is None:
+            return False
+
+        amount = int(row.value)
+        if not self.debit_account_balance(target_address, amount):
+            # Raising keeps the status update, marker, debit, and refund in one
+            # database rollback domain.  A retry can therefore repair the
+            # lifecycle instead of silently minting or misdirecting value.
+            raise RuntimeError(
+                f"ActivatedValueRefundInsufficientBalance({tx_hash},{target_address},{amount})"
+            )
+        self.credit_account_balance(beneficiary_address, amount)
+        self.session.expire_all()
         return True
 
     def cancel_tx_fee_accounting_once(
@@ -215,6 +260,7 @@ class AccountsManager:
         accounting = data.get(FEE_ACCOUNTING_KEY)
         if not accounting:
             return 0
+        sender_address = accounting.get("sender") or sender_address
         was_terminal = accounting.get("status") in {"settled", "canceled"}
         updated, refund = cancel_fee_accounting(accounting, reason=reason)
         data[FEE_ACCOUNTING_KEY] = updated
@@ -292,6 +338,7 @@ class AccountsManager:
         accounting = data.get(FEE_ACCOUNTING_KEY)
         if not accounting:
             return 0
+        sender_address = accounting.get("sender") or sender_address
         was_terminal = accounting.get("status") in {"settled", "canceled"}
         updated, refund = settle_fee_accounting(
             accounting,

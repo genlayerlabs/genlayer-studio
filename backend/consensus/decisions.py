@@ -483,7 +483,7 @@ def decide_finalizing(
     tx_hash: str,
     tx_status_accepted: bool,
     execution_result_success: bool,
-    leader_node_config: dict,
+    leader_node_config: dict | None,
 ) -> tuple[list[Effect], list[Effect], bool]:
     """Decide effects for FinalizingState.
 
@@ -506,7 +506,7 @@ def decide_finalizing(
 
     should_finalize_contract = tx_status_accepted and execution_result_success
 
-    if not should_finalize_contract:
+    if not should_finalize_contract and leader_node_config:
         # Emit rollup event with empty messages
         pre_effects.append(
             EmitRollupEventEffect(

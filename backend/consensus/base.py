@@ -65,6 +65,7 @@ from backend.protocol_rpc.fees import (
     create_child_fee_accounting,
     derive_external_message_call_key,
     discard_active_message_generation,
+    execution_policy_for_accounting,
     fill_message_fee_payload_from_allocation,
     mark_message_effects_delivered,
     message_effect_identities,
@@ -1544,6 +1545,42 @@ class ConsensusAlgorithm:
         return current_validators, extra_validators
 
     @staticmethod
+    def get_leader_replay_validators(
+        all_validators: List[dict],
+        consensus_history: dict,
+        consensus_data: ConsensusData,
+        target_committee_size: int,
+    ) -> list[dict]:
+        """Build an exact fee-plan-sized leader replay committee.
+
+        The initial committee is caller-selectable, while later raw rounds use
+        the protocol's absolute committee ladder. Reusing every survivor and
+        then adding a fixed ladder increment over-seats a replay whenever the
+        initial committee was not five. Retain at most the target number of
+        survivors, then fill only the remaining seats with fresh validators.
+        """
+
+        current_validators, _ = ConsensusAlgorithm.get_validators_from_consensus_data(
+            all_validators,
+            consensus_data,
+            False,
+        )
+        target = max(0, int(target_committee_size))
+        retained = current_validators[:target]
+        required_fresh = target - len(retained)
+        if required_fresh == 0:
+            return retained
+
+        _, fresh = ConsensusAlgorithm.get_extra_validators(
+            all_validators,
+            consensus_history,
+            consensus_data,
+            0,
+            required_extra_validators=required_fresh,
+        )
+        return retained + fresh
+
+    @staticmethod
     def get_validators_from_consensus_data(
         all_validators: List[dict], consensus_data: ConsensusData, include_leader: bool
     ):
@@ -2258,9 +2295,8 @@ def _adjust_unbacked_message_values(
             and pending_transaction.use_balance
             and not use_balance_funding_backed
         ):
-            unfunded = _pending_transaction_with_value(pending_transaction, 0)
-            unfunded.declared_budget = 0
-            adjusted_pending_transactions.append(unfunded)
+            # MessagePayments must not turn a failed contract-funded debit
+            # into an executable zero-fee child transaction.
             continue
         value = int(pending_transaction.value or 0)
         if pending_transaction.on == on and value > 0:
@@ -2320,8 +2356,7 @@ def _message_value_effect_record(
     adjusted_budget = int(pending_transaction.declared_budget or 0)
 
     if pending_transaction.use_balance and not use_balance_funding_backed:
-        adjusted_value = 0
-        adjusted_budget = 0
+        include = False
     elif value > 0 and pending_transaction.is_eth_send and not external_value_backed:
         include = False
     elif (
@@ -2558,10 +2593,10 @@ class PendingState(TransactionState):
         )
         await EffectExecutor(context).execute(pre_effects)
 
-        # Consensus reserves the time-unit pool at the user's cap during
-        # submission, then locks live execution prices only when the queued
-        # transaction first activates. A live GEN price above the cap cancels
-        # with a full value/fee refund; storage and receipt prices simply lock.
+        # Consensus reserves time-unit work at the submitted ceiling, then
+        # validates all three signed price caps and the live execution floor
+        # when the queued transaction activates. The complete activation-time
+        # execution policy is then immutable for this transaction.
         fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
         if fee_accounting:
             activation_result: dict[str, bool] = {}
@@ -2610,7 +2645,10 @@ class PendingState(TransactionState):
                     context.accounts_manager.cancel_tx_fee_accounting_once(
                         context.transaction.hash,
                         fee_sender,
-                        "activation_gen_price_cap_exceeded",
+                        str(
+                            activated_accounting.get("activation_cancel_reason")
+                            or "activation_fee_policy_rejected"
+                        ),
                     )
                 await ConsensusAlgorithm.dispatch_transaction_status_update(
                     context.transactions_processor,
@@ -2670,6 +2708,41 @@ class PendingState(TransactionState):
                 fee_accounting,
             )
 
+        is_initial_activation = not (
+            bool(context.transaction.consensus_data)
+            or bool(context.transaction.consensus_history)
+            or bool(context.transaction.appealed)
+            or bool(context.transaction.appeal_undetermined)
+            or bool(context.transaction.appeal_leader_timeout)
+            or bool(context.transaction.appeal_validators_timeout)
+        )
+        requested_initial_validators = int(
+            context.transaction.num_of_initial_validators or DEFAULT_VALIDATORS_COUNT
+        )
+        if (
+            is_initial_activation
+            and len(all_validators or []) < requested_initial_validators
+        ):
+            # Consensus admission prices the exact caller-selected committee.
+            # Activation must not silently execute a cheaper/smaller round when
+            # that many frozen-pool validators are unavailable. Its canonical
+            # no-capacity outcome is Undetermined (Pending -> Undetermined).
+            context.msg_handler.send_message(
+                LogEvent(
+                    "consensus_event",
+                    EventType.WARNING,
+                    EventScope.CONSENSUS,
+                    "Requested initial validator committee is unavailable",
+                    {
+                        "transaction_hash": context.transaction.hash,
+                        "requested_validators": requested_initial_validators,
+                        "available_validators": len(all_validators or []),
+                    },
+                    transaction_hash=context.transaction.hash,
+                )
+            )
+            return UndeterminedState()
+
         if not all_validators:
             context.msg_handler.send_message(
                 LogEvent(
@@ -2719,21 +2792,19 @@ class PendingState(TransactionState):
                     all_validators, context.transaction.num_of_initial_validators
                 )
             else:
-                current_validators, extra_validators = (
-                    ConsensusAlgorithm.get_extra_validators(
+                context.involved_validators = (
+                    ConsensusAlgorithm.get_leader_replay_validators(
                         all_validators,
                         context.transaction.consensus_history,
                         context.transaction.consensus_data,
-                        0,
-                        required_extra_validators=VALIDATORS_PER_ROUND[
+                        VALIDATORS_PER_ROUND[
                             min(
-                                max(0, context.active_fee_round - 1),
+                                max(0, context.active_fee_round),
                                 len(VALIDATORS_PER_ROUND) - 1,
                             )
                         ],
                     )
                 )
-                context.involved_validators = current_validators + extra_validators
 
                 context.consensus_service.emit_transaction_event(
                     "emitAppealStarted",
@@ -3774,12 +3845,19 @@ class FinalizingState(TransactionState):
     """
 
     async def handle(self, context):
-        leader_receipt = context.transaction.consensus_data.leader_receipt[0]
+        consensus_data = context.transaction.consensus_data
+        leader_receipts = (
+            consensus_data.leader_receipt
+            if consensus_data is not None and consensus_data.leader_receipt
+            else []
+        )
+        leader_receipt = leader_receipts[0] if leader_receipts else None
 
         # Acceptance is a separate message lifecycle phase. If the helper EVM
         # or worker died after the agreed decision was committed, repair that
         # phase before allowing finalization to overtake it.
-        _dispatch_messages_for_phase(context, leader_receipt, "accepted")
+        if leader_receipt is not None:
+            _dispatch_messages_for_phase(context, leader_receipt, "accepted")
 
         pre_effects, post_effects, should_finalize_contract = decide_finalizing(
             tx_hash=context.transaction.hash,
@@ -3787,13 +3865,32 @@ class FinalizingState(TransactionState):
                 context.transaction.status == TransactionStatus.ACCEPTED
             ),
             execution_result_success=(
-                leader_receipt.execution_result == ExecutionResultStatus.SUCCESS
+                leader_receipt is not None
+                and leader_receipt.execution_result == ExecutionResultStatus.SUCCESS
             ),
-            leader_node_config=leader_receipt.node_config,
+            leader_node_config=(
+                leader_receipt.node_config if leader_receipt is not None else None
+            ),
         )
 
         executor = EffectExecutor(context)
         await executor.execute(pre_effects)
+
+        if not should_finalize_contract and int(context.transaction.value or 0) > 0:
+            value_beneficiary = context.transaction.from_address
+            if value_beneficiary:
+                refunded_activated = (
+                    context.accounts_manager.refund_activated_tx_value_once(
+                        context.transaction.hash,
+                        context.transaction.to_address,
+                        value_beneficiary,
+                    )
+                )
+                if not refunded_activated:
+                    context.accounts_manager.refund_tx_value(
+                        context.transaction.hash,
+                        value_beneficiary,
+                    )
 
         # Impure: contract finalization + triggered transactions (needs DB reads)
         if should_finalize_contract:
@@ -4023,7 +4120,10 @@ def _attach_child_fee_accounting(
                 else context.transaction.origin_address
                 or context.transaction.from_address
             ),
-            policy=StudioFeePolicy.from_env(),
+            policy=execution_policy_for_accounting(
+                parent_fee_accounting,
+                StudioFeePolicy.from_env(),
+            ),
         )
     except FeeValidationError as exc:
         raise RuntimeError(str(exc)) from exc

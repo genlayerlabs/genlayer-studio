@@ -419,7 +419,7 @@ async def test_run_genvm_passes_mode2_message_fee_allocations_to_genvm():
         )
 
     allocations = run_genvm_host.await_args.kwargs["fee_context"].message_fee_allocation
-    assert len(allocations) == 2
+    assert len(allocations) == 1
     allocation = allocations[0]
     assert allocation["recipient"].as_hex.lower() == recipient
     assert allocation["call_key"] == bytes.fromhex("34" * 32)
@@ -439,17 +439,6 @@ async def test_run_genvm_passes_mode2_message_fee_allocations_to_genvm():
     assert allocation["children"][0]["recipient"].as_hex.lower() == child_recipient
     assert allocation["children"][0]["call_key"] == bytes.fromhex("56" * 32)
     assert allocation["children"][0]["budget"] == 60
-    fallback = allocations[1]
-    assert fallback["recipient"] is None
-    assert fallback["call_key"] is None
-    assert fallback["budget"] == 2**200
-    assert fallback["on"] == "finalized"
-    assert fallback["fee_params"] == {
-        "External": {
-            "gas_limit": 2**200,
-            "max_gas_price": 0,
-        },
-    }
 
 
 @pytest.mark.asyncio

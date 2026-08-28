@@ -200,6 +200,14 @@ class MessageBudgetExceeded(FeeValidationError):
     pass
 
 
+class MessageAllocationsRestricted(FeeValidationError):
+    pass
+
+
+class ContributionSegmentsFull(FeeValidationError):
+    pass
+
+
 def _with_cap_headroom(
     value: int, headroom_bps: int = DEFAULT_PRICE_CAP_HEADROOM_BPS
 ) -> int:
@@ -276,6 +284,11 @@ class StudioFeePolicy:
                 "invalid max allocated messages: "
                 f"{self.max_allocated_messages} (protocol cap "
                 f"{MAX_ALLOCATED_MESSAGES_CAP})"
+            )
+        if not 0 <= int(self.time_unit_overlay_bps) < 10_000:
+            raise ValueError(
+                "invalid time-unit overlay bps: "
+                f"{self.time_unit_overlay_bps} (expected 0..9999)"
             )
         for minimum, maximum, label in (
             (
@@ -494,18 +507,16 @@ def _live_policy_for_accounting(
     accounting: dict[str, Any] | None,
     override: StudioFeePolicy | None = None,
 ) -> StudioFeePolicy:
-    """Return the governance policy that applies to work performed now.
+    """Return the policy applicable to this transaction's next operation.
 
-    Before activation, the submission snapshot is also the best available
-    representation of the live configuration (and keeps pure callers/tests
-    independent of process environment). Once prices are locked, Consensus
-    continues reading every non-price metering parameter and admission cap
-    live from FeeManager/Messages.
+    Before activation an explicit/live policy is authoritative. Activation
+    commits the complete receipt formula, limits, and prices so later config
+    changes cannot reprice or invalidate work already admitted under escrow.
     """
+    if accounting and accounting.get("activation_prices_locked"):
+        return _accounting_policy(accounting)
     if override is not None:
         return override
-    if accounting and accounting.get("activation_prices_locked"):
-        return StudioFeePolicy.from_env()
     return _accounting_policy(accounting)
 
 
@@ -513,17 +524,24 @@ def execution_policy_for_accounting(
     accounting: dict[str, Any] | None,
     live_policy: StudioFeePolicy | None = None,
 ) -> StudioFeePolicy:
-    """Combine live metering configuration with activation-locked prices."""
-    live_policy = _live_policy_for_accounting(accounting, live_policy)
-    if not accounting or not accounting.get("activation_prices_locked"):
-        return live_policy
+    """Return the activation-committed execution policy when available."""
+    return _live_policy_for_accounting(accounting, live_policy)
 
-    locked_policy = _accounting_policy(accounting)
+
+def funding_policy_for_accounting(
+    accounting: dict[str, Any] | None,
+    live_policy: StudioFeePolicy | None = None,
+) -> StudioFeePolicy:
+    """Return execution prices/config plus the transaction's funding-time split."""
+    policy = _live_policy_for_accounting(accounting, live_policy)
     return replace(
-        live_policy,
-        gen_per_time_unit=int(locked_policy.gen_per_time_unit),
-        storage_unit_price=int(locked_policy.storage_unit_price),
-        receipt_gas_price=int(locked_policy.receipt_gas_price),
+        policy,
+        time_unit_overlay_bps=int(
+            (accounting or {}).get(
+                "funding_overlay_bps",
+                policy.time_unit_overlay_bps,
+            )
+        ),
     )
 
 
@@ -997,6 +1015,18 @@ def _calculate_settled_time_unit_fees(
         elif outcome in leader_appeal_outcomes:
             round_fee = 0
             rule = "leader_appeal"
+        elif (
+            outcome == ConsensusRound.UNDETERMINED.value
+            and current_attempt is not None
+            and not _entry_leader_address(current_attempt)
+            and not _entry_validator_receipts(current_attempt)
+        ):
+            # An activation-time committee shortfall materializes an explicit
+            # Undetermined round without selecting a leader or validators.
+            # Empty participant evidence is authoritative: charge no invented
+            # seats, while retaining any real prior-rotation work.
+            round_fee = prior_rotation_fee
+            rule = "committee_unavailable"
         else:
             current_result = (
                 _fee_alignment_result(
@@ -1750,14 +1780,7 @@ def activate_fee_accounting(
     selection_pool_count: int | None = None,
     selection_pool_addresses: list[str] | None = None,
 ) -> tuple[dict[str, Any], bool]:
-    """Lock v0.6 execution prices on first activation.
-
-    Submission reserves time-unit work at the user's GEN ceiling. Consensus
-    checks the live GEN price only once the pending transaction activates; an
-    over-cap transaction is canceled with its escrow untouched. Storage and
-    receipt prices are also locked at activation, but do not cause a second
-    cap check after the submission-time quote.
-    """
+    """Validate ceilings and commit the complete v0.6 fee policy at activation."""
     updated = copy.deepcopy(accounting)
     if updated.get("activation_prices_locked"):
         return updated, False
@@ -1780,20 +1803,52 @@ def activate_fee_accounting(
 
     live_policy = policy or StudioFeePolicy.from_env()
     fees = normalize_fees_distribution(updated.get("fees_distribution") or {})
-    max_gen_price = int(fees["maxPriceGenPerTimeUnit"])
-    if max_gen_price > 0 and live_policy.gen_per_time_unit > max_gen_price:
-        updated["activation_price_cap_exceeded"] = {
-            "actual": int(live_policy.gen_per_time_unit),
-            "maximum": max_gen_price,
+    cap_checks = (
+        (
+            "genPerTimeUnit",
+            int(live_policy.gen_per_time_unit),
+            int(fees["maxPriceGenPerTimeUnit"]),
+        ),
+        (
+            "storageUnitPrice",
+            int(live_policy.storage_unit_price),
+            int(fees["storageFeeMaxGasPrice"]),
+        ),
+        (
+            "receiptGasPrice",
+            int(live_policy.receipt_gas_price),
+            int(fees["receiptFeeMaxGasPrice"]),
+        ),
+    )
+    for cap_type, actual, maximum in cap_checks:
+        if maximum > 0 and actual > maximum:
+            updated["activation_price_cap_exceeded"] = {
+                "actual": actual,
+                "maximum": maximum,
+            }
+            updated["activation_price_cap_type"] = cap_type
+            updated["activation_cancel_reason"] = (
+                "activation_price_cap_exceeded:" + cap_type
+            )
+            return updated, True
+
+    execution_budget_per_round = int(fees["executionBudgetPerRound"])
+    activation_floor = int(live_policy.message_fee_params_budget_floor())
+    if execution_budget_per_round > 0 and execution_budget_per_round < activation_floor:
+        updated["activation_budget_floor_not_met"] = {
+            "actual": execution_budget_per_round,
+            "minimum": activation_floor,
         }
+        updated["activation_cancel_reason"] = "activation_budget_floor_not_met"
         return updated, True
 
-    submission_policy = _accounting_policy(updated)
+    # Receipt execution inputs are activation-pinned. The overlay split is a
+    # funding-ownership term and was already committed when escrow began.
     locked_policy = replace(
-        submission_policy,
-        gen_per_time_unit=int(live_policy.gen_per_time_unit),
-        storage_unit_price=int(live_policy.storage_unit_price),
-        receipt_gas_price=int(live_policy.receipt_gas_price),
+        live_policy,
+        time_unit_overlay_bps=int(
+            updated.get("funding_overlay_bps", live_policy.time_unit_overlay_bps)
+        ),
     )
     updated["policy_snapshot"] = locked_policy.to_snapshot()
     updated["activation_prices_locked"] = True
@@ -1980,8 +2035,6 @@ def genvm_message_fee_allocation(
         if 0 <= parent_index < len(genvm_nodes):
             genvm_nodes[parent_index]["children"].append(genvm_nodes[index])
 
-    if roots:
-        roots.append(_genvm_external_legacy_fallback_message_fee_allocation())
     return roots
 
 
@@ -1995,10 +2048,9 @@ def apply_fee_top_up(
     perform_fee_checks: bool = True,
     policy: StudioFeePolicy | None = None,
 ) -> dict[str, Any]:
-    # Top-up validation uses the FeeManager configuration at the time of the
-    # top-up. Activation locks execution prices, not governance parameters or
-    # the gas-based minimum-budget floor.
-    policy = _live_policy_for_accounting(accounting, policy)
+    # After activation the complete fee formula and its budget floor are part
+    # of the transaction's committed economics.
+    policy = funding_policy_for_accounting(accounting, policy)
     amount = int(amount)
     if amount <= 0:
         raise InsufficientFees("InsufficientFees")
@@ -2014,6 +2066,10 @@ def apply_fee_top_up(
         ):
             incoming[cap] = 0
     incoming_message_fees = int(incoming["totalMessageFees"])
+    if incoming_message_fees > 0 and bool(
+        accounting.get("message_allocations_restricted", False)
+    ):
+        raise MessageAllocationsRestricted("MessageAllocationsRestricted")
     if incoming_message_fees > amount:
         raise InsufficientFees("InsufficientFees")
 
@@ -2075,7 +2131,9 @@ def apply_fee_top_up(
     _record_fee_contribution(
         updated,
         sender,
-        primary_amount - overlay_reserve_delta + incoming_message_fees,
+        primary=primary_amount - overlay_reserve_delta,
+        overlay=overlay_reserve_delta,
+        message=incoming_message_fees,
     )
     updated.setdefault("top_ups", []).append(
         {
@@ -2120,17 +2178,10 @@ def record_appeal_bond(
             "appeal_bonds_total",
             "contributions",
             "untracked_contributions",
+            "untracked_contribution_pools",
         )
     }
-    policy = _accounting_policy(updated, policy)
-    if time_unit_overlay_bps is not None:
-        # Consensus prices the developer/DAO overlay at appeal admission;
-        # unlike the transaction's GEN multiplier, this split is not locked at
-        # initial activation.
-        policy = replace(
-            policy,
-            time_unit_overlay_bps=int(time_unit_overlay_bps),
-        )
+    policy = funding_policy_for_accounting(updated, policy)
     amount = int(amount)
 
     if status is None:
@@ -2188,7 +2239,8 @@ def record_appeal_bond(
     _record_fee_contribution(
         updated,
         appealer,
-        funding - int(charge["fundingBreakdown"]["overlay"]),
+        primary=funding - int(charge["fundingBreakdown"]["overlay"]),
+        overlay=int(charge["fundingBreakdown"]["overlay"]),
     )
     updated["appeal_bonds_total"] = int(updated.get("appeal_bonds_total", 0)) + bond
     surplus = amount - total_required
@@ -2574,24 +2626,36 @@ def consume_message_fees(
         updated.get("external_message_fee_remainder", 0) or 0
     )
 
+    # Attribute the independently consumed message pool deterministically:
+    # child escrows consume first, then external reservations in reveal order.
+    # This keeps contributor ownership independent from receipt message order.
     for message in messages:
         message_type = _message_type_value(message)
-        if message_type == MESSAGE_TYPE_EXTERNAL:
-            external_consumption_total += _consume_external_message_fee(
-                updated,
-                message,
-                execution_policy,
-                reimburse_external,
-                external_executor,
-            )
-            continue
-
         if message_type == MESSAGE_TYPE_INTERNAL:
             recalculated_total += _consume_internal_message_fee(
                 updated,
                 message,
                 live_policy,
             )
+
+    funding_offset = _next_external_funding_offset(
+        updated,
+        int(updated.get("message_fee_consumed", 0)) + recalculated_total,
+    )
+    external_reserved_total = 0
+    for message in messages:
+        if _message_type_value(message) != MESSAGE_TYPE_EXTERNAL:
+            continue
+        consumed, reserved = _consume_external_message_fee(
+            updated,
+            message,
+            execution_policy,
+            reimburse_external,
+            external_executor,
+            funding_offset=funding_offset + external_reserved_total,
+        )
+        external_consumption_total += consumed
+        external_reserved_total += reserved
 
     if reported_total is not None and int(reported_total) < recalculated_total:
         raise MessageFeesReportMismatch("MessageFeesReportMismatch")
@@ -2644,16 +2708,25 @@ def _consume_external_message_fee(
     policy: StudioFeePolicy,
     reimburse_external: bool,
     external_executor: str | None,
-) -> int:
+    *,
+    funding_offset: int,
+) -> tuple[int, int]:
     if int(message.get("declaredBudget", 0) or 0) != 0:
         raise MessageDeclaredBudgetInsufficient("MessageDeclaredBudgetInsufficient")
-    return _reserve_external_execution(
+    event_count = len(accounting.get("external_message_events") or [])
+    consumed = _reserve_external_execution(
         accounting,
         message,
         policy,
         reimburse=reimburse_external,
         executor=external_executor,
+        funding_offset=funding_offset,
     )
+    events = accounting.get("external_message_events") or []
+    if len(events) == event_count:
+        return consumed, 0
+    event = events[-1]
+    return consumed, int(event.get("reservation", 0) or 0)
 
 
 def _consume_internal_message_fee(
@@ -2719,7 +2792,7 @@ def record_external_message_execution_fees(
     executor: str | None = None,
 ) -> dict[str, Any]:
     updated = copy.deepcopy(accounting)
-    policy = _accounting_policy(updated, policy)
+    policy = execution_policy_for_accounting(updated, policy)
     consumed_total = 0
     reimbursement_total = 0
     remainder_total = 0
@@ -2914,6 +2987,7 @@ def unwind_reveal_message_fees(
             0,
             int(updated.get("message_fee_consumed", 0)) - internal_refund,
         )
+        _reindex_unexecuted_external_funding(updated)
 
     if (
         internal_refund > 0
@@ -3152,21 +3226,26 @@ def settle_fee_accounting(
     appeal_bond_sender_refund = sum(
         int(item.get("senderRefund", 0) or 0) for item in bond_settlements
     )
-    current_overlay_bps = (
-        int(policy_override.time_unit_overlay_bps)
-        if policy_override is not None
-        else int(StudioFeePolicy.from_env().time_unit_overlay_bps)
+    current_overlay_bps = int(
+        updated.get("funding_overlay_bps", locked_policy.time_unit_overlay_bps)
     )
     time_unit_overlay_requested = _time_unit_overlay(
         time_unit_budget,
         current_overlay_bps,
     )
-    overlay_budget = int(updated.get("time_unit_overlay_budget", primary_budget) or 0)
+    overlay_budget = min(
+        primary_budget,
+        max(0, int(updated.get("time_unit_overlay_budget", 0) or 0)),
+    )
+    primary_core_budget = max(0, primary_budget - overlay_budget)
     time_unit_overlay_spent = min(time_unit_overlay_requested, overlay_budget)
-    non_profit_spend = time_unit_budget + time_unit_overlay_spent + execution_spent
+    primary_core_non_profit_spend = time_unit_budget + execution_spent
+    if primary_core_non_profit_spend > primary_core_budget:
+        raise InsufficientFees("InsufficientFeesForRound")
     appeal_profit_spent = (
         appeal_profit_requested
-        if non_profit_spend + appeal_profit_requested <= primary_budget
+        if primary_core_non_profit_spend + appeal_profit_requested
+        <= primary_core_budget
         else 0
     )
     if appeal_profit_requested > 0 and appeal_profit_spent == 0:
@@ -3182,10 +3261,8 @@ def settle_fee_accounting(
             bond_payout -= max(0, payout - amount)
             item["payout"] = amount
             item["profitFunded"] = False
-    primary_spent = min(
-        primary_budget,
-        non_profit_spend + appeal_profit_spent,
-    )
+    primary_core_spent = primary_core_non_profit_spend + appeal_profit_spent
+    primary_spent = primary_core_spent + time_unit_overlay_spent
     primary_refund = max(
         0, primary_budget - primary_spent - int(updated.get("primary_fee_refunded", 0))
     )
@@ -3221,7 +3298,18 @@ def settle_fee_accounting(
         int(updated.get("appeal_bonds_payout_total", 0)) + bond_payout
     )
     updated["appeal_bond_settlements"] = bond_settlements
-    updated["fee_refund_settlements"] = _allocate_fee_refund(updated, refund)
+    primary_core_refund = max(0, primary_core_budget - primary_core_spent)
+    overlay_refund = max(0, overlay_budget - time_unit_overlay_spent)
+    updated["fee_refund_settlements"] = _allocate_fee_refund(
+        updated,
+        primary=primary_core_refund,
+        overlay=overlay_refund,
+        message=message_refund,
+        unattributed=(
+            appeal_bond_sender_refund
+            + max(0, primary_refund - primary_core_refund - overlay_refund)
+        ),
+    )
     updated.setdefault("refunds", []).append(
         {
             "reason": reason,
@@ -3411,7 +3499,26 @@ def cancel_fee_accounting(
         int(updated.get("appeal_bonds_payout_total", 0)) + bond_payout
     )
     updated["appeal_bond_settlements"] = bond_settlements
-    updated["fee_refund_settlements"] = _allocate_fee_refund(updated, refund)
+    updated["canceled_message_allocations"] = copy.deepcopy(
+        updated.get("message_allocations") or []
+    )
+    updated["message_allocations"] = []
+    updated["allocation_consumed"] = {}
+    updated["message_allocations_invalidated"] = True
+    overlay_budget = min(
+        primary_refund,
+        max(
+            0,
+            int(updated.get("time_unit_overlay_budget", 0) or 0)
+            - int(updated.get("time_unit_overlay_spent", 0) or 0),
+        ),
+    )
+    updated["fee_refund_settlements"] = _allocate_fee_refund(
+        updated,
+        primary=primary_refund - overlay_budget,
+        overlay=overlay_budget,
+        message=message_refund,
+    )
     updated.setdefault("refunds", []).append(
         {
             "reason": reason,
@@ -4119,15 +4226,26 @@ def _fee_params_bytes(fee_params: bytes | str) -> bytes:
 def _record_fee_contribution(
     accounting: dict[str, Any],
     depositor: str | None,
-    amount: int,
+    *,
+    primary: int = 0,
+    overlay: int = 0,
+    message: int = 0,
 ) -> None:
-    amount = max(0, int(amount))
+    pools = {
+        "primary": max(0, int(primary)),
+        "overlay": max(0, int(overlay)),
+        "message": max(0, int(message)),
+    }
+    amount = sum(pools.values())
     if amount == 0:
         return
     if not depositor:
         accounting["untracked_contributions"] = (
             int(accounting.get("untracked_contributions", 0) or 0) + amount
         )
+        untracked_pools = accounting.setdefault("untracked_contribution_pools", {})
+        for pool, pool_amount in pools.items():
+            untracked_pools[pool] = int(untracked_pools.get(pool, 0) or 0) + pool_amount
         return
 
     contributions = accounting.setdefault("contributions", [])
@@ -4135,25 +4253,92 @@ def _record_fee_contribution(
         contributions
         and str(contributions[-1].get("depositor", "")).lower()
         == str(depositor).lower()
+        and all(pool in contributions[-1] for pool in pools)
     ):
         contributions[-1]["amount"] = int(contributions[-1].get("amount", 0)) + amount
+        for pool, pool_amount in pools.items():
+            contributions[-1][pool] = (
+                int(contributions[-1].get(pool, 0) or 0) + pool_amount
+            )
         return
     if len(contributions) >= MAX_CONTRIBUTION_SEGMENTS:
-        accounting["untracked_contributions"] = (
-            int(accounting.get("untracked_contributions", 0) or 0) + amount
-        )
-        return
-    contributions.append({"depositor": depositor, "amount": amount})
+        raise ContributionSegmentsFull("ContributionSegmentsFull")
+    contributions.append({"depositor": depositor, "amount": amount, **pools})
 
 
 def _allocate_fee_refund(
     accounting: dict[str, Any],
-    refundable: int,
+    *,
+    primary: int = 0,
+    overlay: int = 0,
+    message: int = 0,
+    unattributed: int = 0,
 ) -> list[dict[str, Any]]:
-    refundable = max(0, int(refundable))
+    refunds_by_pool = {
+        "primary": max(0, int(primary)),
+        "overlay": max(0, int(overlay)),
+        "message": max(0, int(message)),
+    }
+    unattributed = max(0, int(unattributed))
+    refundable = sum(refunds_by_pool.values()) + unattributed
     if refundable == 0:
         return []
 
+    raw_contributions = [
+        item
+        for item in accounting.get("contributions") or []
+        if isinstance(item, dict) and item.get("depositor")
+    ]
+    typed = bool(raw_contributions) and all(
+        all(pool in item for pool in refunds_by_pool) for item in raw_contributions
+    )
+    if not typed:
+        return _allocate_legacy_fee_refund(accounting, refundable)
+
+    settlements: list[dict[str, Any]] = []
+    for pool, pool_refundable in refunds_by_pool.items():
+        if pool_refundable <= 0:
+            continue
+        contributions = [
+            {
+                "depositor": item.get("depositor"),
+                "amount": max(0, int(item.get(pool, 0) or 0)),
+            }
+            for item in raw_contributions
+        ]
+        tracked_total = sum(item["amount"] for item in contributions)
+        tracked_refundable = min(pool_refundable, tracked_total)
+        consumed = tracked_total - tracked_refundable
+        cumulative = 0
+        for item in contributions:
+            end = cumulative + item["amount"]
+            amount = 0
+            if cumulative >= consumed:
+                amount = item["amount"]
+            elif end > consumed:
+                amount = end - consumed
+            if amount > 0:
+                settlements.append(
+                    {
+                        "recipient": item["depositor"],
+                        "amount": amount,
+                        "source": f"{pool}-fifo",
+                    }
+                )
+            cumulative = end
+    remainder = refundable - sum(item["amount"] for item in settlements)
+    fallback = accounting.get("sender")
+    if remainder > 0 and fallback:
+        settlements.append(
+            {"recipient": fallback, "amount": remainder, "source": "remainder"}
+        )
+    return settlements
+
+
+def _allocate_legacy_fee_refund(
+    accounting: dict[str, Any],
+    refundable: int,
+) -> list[dict[str, Any]]:
     contributions = [
         {
             "depositor": item.get("depositor"),
@@ -4183,15 +4368,9 @@ def _allocate_fee_refund(
     remainder = refundable - sum(item["amount"] for item in settlements)
     fallback = accounting.get("sender")
     if remainder > 0 and fallback:
-        for settlement in settlements:
-            if str(settlement["recipient"]).lower() == str(fallback).lower():
-                settlement["amount"] += remainder
-                settlement["source"] = "fifo+remainder"
-                break
-        else:
-            settlements.append(
-                {"recipient": fallback, "amount": remainder, "source": "remainder"}
-            )
+        settlements.append(
+            {"recipient": fallback, "amount": remainder, "source": "remainder"}
+        )
     return settlements
 
 
@@ -4225,9 +4404,8 @@ def _new_fee_accounting(
         incoming_primary=primary_budget,
         split_bps=policy.time_unit_overlay_bps,
     )
-    tracked_contribution = primary_budget - overlay_budget + total_message_fees
     return {
-        "version": 1,
+        "version": 2,
         "source": source,
         "status": "active",
         "policy_snapshot": policy.to_snapshot(),
@@ -4242,6 +4420,7 @@ def _new_fee_accounting(
         "primary_fee_refunded": 0,
         "execution_budget_total": execution_budget_total,
         "time_unit_overlay_budget": overlay_budget,
+        "funding_overlay_bps": int(policy.time_unit_overlay_bps),
         "execution_fee_consumed": 0,
         "execution_fee_consumed_buckets": [],
         "genvm_fee_consumed_buckets": [],
@@ -4274,16 +4453,30 @@ def _new_fee_accounting(
             }
         ],
         "contributions": (
-            [{"depositor": sender, "amount": tracked_contribution}]
-            if sender and tracked_contribution > 0
+            [
+                {
+                    "depositor": sender,
+                    "amount": primary_budget + total_message_fees,
+                    "primary": primary_budget - overlay_budget,
+                    "overlay": overlay_budget,
+                    "message": total_message_fees,
+                }
+            ]
+            if sender and primary_budget + total_message_fees > 0
             else []
         ),
         "untracked_contributions": 0,
+        "untracked_contribution_pools": {},
         "fees_distribution": fees,
         "message_allocations": [
             _serializable_message_allocation(allocation)
             for allocation in message_allocations
         ],
+        # Studio resolves the canonical FlatArrays subtree locally, so an
+        # ordinary child with no descendants is open Mode 1, not Consensus'
+        # distinct sealed-child failure state. Keep the explicit bit for
+        # imported/recovered sealed state without conflating the two.
+        "message_allocations_restricted": False,
         "allocation_consumed": {},
         "message_consumption_events": [],
     }
@@ -4600,6 +4793,7 @@ def _reserve_external_execution(
     *,
     reimburse: bool = True,
     executor: str | None = None,
+    funding_offset: int = 0,
 ) -> int:
     if bool(message.get("onAcceptance", False)):
         raise ExternalAllocationInvalid("ExternalOnAcceptanceNotSupported")
@@ -4610,7 +4804,7 @@ def _reserve_external_execution(
 
     candidates = list(_matching_root_allocations(allocations, message))
     if not candidates:
-        return 0
+        raise MessageNoMatchingAllocation("MessageNoMatchingAllocation")
 
     selected: tuple[int, dict[str, Any], int, int, int] | None = None
     for index, allocation in candidates:
@@ -4624,6 +4818,8 @@ def _reserve_external_execution(
             if policy.receipt_gas_price > 0
             else 0
         )
+        if locked_price <= 0:
+            raise ExternalAllocationInvalid("ExternalExecutionPriceUnavailable")
         reservation = gas_limit * locked_price
         key = str(index)
         consumed = int(accounting.setdefault("allocation_consumed", {}).get(key, 0))
@@ -4667,6 +4863,12 @@ def _reserve_external_execution(
         "reimbursement": reimbursement if reimburse else 0,
         "remainder": remainder if reimburse else 0,
         "executionRecorded": bool(reimburse),
+        "fundingOffset": max(0, int(funding_offset)),
+        "fundingOwners": _message_pool_owner_slices(
+            accounting,
+            max(0, int(funding_offset)),
+            reservation,
+        ),
     }
     accounting.setdefault("external_message_events", []).append(event)
     if reimburse:
@@ -4684,8 +4886,8 @@ def _record_external_message_fee_payouts(
 ) -> None:
     reimbursement = int(event.get("reimbursement", 0) or 0)
     remainder = int(event.get("remainder", 0) or 0)
-    depositor = accounting.get("sender")
-    executor_recipient = executor or depositor
+    fallback_depositor = accounting.get("sender")
+    executor_recipient = executor or fallback_depositor
     payouts = accounting.setdefault("external_message_fee_payouts", [])
     if reimbursement > 0 and executor_recipient:
         payouts.append(
@@ -4695,14 +4897,109 @@ def _record_external_message_fee_payouts(
                 "source": "external-executor-reimbursement",
             }
         )
-    if remainder > 0 and depositor:
-        payouts.append(
-            {
-                "recipient": depositor,
-                "amount": remainder,
-                "source": "external-execution-remainder",
-            }
+    if remainder > 0:
+        owner_refunds = _external_remainder_owner_slices(event, reimbursement)
+        if not owner_refunds and fallback_depositor:
+            owner_refunds = [{"recipient": fallback_depositor, "amount": remainder}]
+        for owner_refund in owner_refunds:
+            recipient = owner_refund.get("recipient")
+            amount = int(owner_refund.get("amount", 0) or 0)
+            if recipient and amount > 0:
+                payouts.append(
+                    {
+                        "recipient": recipient,
+                        "amount": amount,
+                        "source": "external-execution-remainder",
+                    }
+                )
+
+
+def _message_pool_owner_slices(
+    accounting: dict[str, Any],
+    offset: int,
+    amount: int,
+) -> list[dict[str, Any]]:
+    """Resolve an exact message-pool range to its ordered funders."""
+    remaining_offset = max(0, int(offset))
+    remaining = max(0, int(amount))
+    owners: list[dict[str, Any]] = []
+    for contribution in accounting.get("contributions") or []:
+        if not isinstance(contribution, dict):
+            continue
+        pool_amount = max(0, int(contribution.get("message", 0) or 0))
+        if remaining_offset >= pool_amount:
+            remaining_offset -= pool_amount
+            continue
+        available = pool_amount - remaining_offset
+        owned = min(remaining, available)
+        recipient = contribution.get("depositor")
+        if owned > 0 and recipient:
+            owners.append({"recipient": recipient, "amount": owned})
+        remaining -= owned
+        remaining_offset = 0
+        if remaining == 0:
+            break
+
+    if remaining > 0 and accounting.get("sender"):
+        owners.append({"recipient": accounting["sender"], "amount": remaining})
+    return owners
+
+
+def _external_remainder_owner_slices(
+    event: dict[str, Any],
+    reimbursement: int,
+) -> list[dict[str, Any]]:
+    """The executor consumes the reservation prefix; its tail returns to funders."""
+    skip = max(0, int(reimbursement))
+    refunds: list[dict[str, Any]] = []
+    for owner in event.get("fundingOwners") or []:
+        if not isinstance(owner, dict):
+            continue
+        owned = max(0, int(owner.get("amount", 0) or 0))
+        if skip >= owned:
+            skip -= owned
+            continue
+        refundable = owned - skip
+        skip = 0
+        recipient = owner.get("recipient")
+        if refundable > 0 and recipient:
+            refunds.append({"recipient": recipient, "amount": refundable})
+    return refunds
+
+
+def _next_external_funding_offset(
+    accounting: dict[str, Any],
+    baseline: int,
+) -> int:
+    next_offset = max(0, int(baseline))
+    for event in accounting.get("external_message_events") or []:
+        if not isinstance(event, dict):
+            continue
+        if event.get("executionRecorded") or event.get("unreserved"):
+            continue
+        next_offset = max(
+            next_offset,
+            int(event.get("fundingOffset", 0) or 0)
+            + int(event.get("reservation", 0) or 0),
         )
+    return next_offset
+
+
+def _reindex_unexecuted_external_funding(accounting: dict[str, Any]) -> None:
+    cursor = max(0, int(accounting.get("message_fee_consumed", 0) or 0))
+    for event in accounting.get("external_message_events") or []:
+        if not isinstance(event, dict):
+            continue
+        if event.get("executionRecorded") or event.get("unreserved"):
+            continue
+        reservation = max(0, int(event.get("reservation", 0) or 0))
+        event["fundingOffset"] = cursor
+        event["fundingOwners"] = _message_pool_owner_slices(
+            accounting,
+            cursor,
+            reservation,
+        )
+        cursor += reservation
 
 
 def _find_unrefunded_external_message_event(
@@ -4789,6 +5086,7 @@ def _unreserve_external_message_fee(
         int(accounting.get("external_message_fee_settled", 0)) - reservation,
     )
     event["unreserved"] = True
+    _reindex_unexecuted_external_funding(accounting)
     return reservation, reimbursement, remainder
 
 
