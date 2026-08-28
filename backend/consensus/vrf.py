@@ -1,6 +1,6 @@
 from datetime import datetime
 import numpy as np
-from backend.consensus.base import DEFAULT_VALIDATORS_COUNT
+from backend.consensus.base import DEFAULT_VALIDATORS_COUNT, NoValidatorsAvailableError
 
 
 def get_validators_for_transaction(
@@ -18,6 +18,10 @@ def get_validators_for_transaction(
     num_validators = min(num_validators, len(nodes))
 
     total_stake = sum(validator["stake"] for validator in nodes)
+    if total_stake == 0:
+        raise NoValidatorsAvailableError(
+            "Cannot select validators: all validators have zero stake."
+        )
     probabilities = [validator["stake"] / total_stake for validator in nodes]
 
     selected_validators = rng.choice(

@@ -1,4 +1,6 @@
+import pytest
 from backend.consensus.vrf import get_validators_for_transaction
+from backend.consensus.base import NoValidatorsAvailableError
 from unittest.mock import Mock
 
 
@@ -66,3 +68,14 @@ def test_get_validators_for_transaction_3():
 
     rng.choice.assert_called_once()
     assert validators == [{"stake": 3}, {"stake": 2}, {"stake": 1}]
+
+
+def test_get_validators_for_transaction_zero_stake_raises() -> None:
+    """
+    Regression test for #1732: ZeroDivisionError when all validators have stake=0.
+    get_validators_for_transaction must raise NoValidatorsAvailableError instead of
+    crashing with ZeroDivisionError.
+    """
+    nodes = [{"stake": 0}, {"stake": 0}, {"stake": 0}]
+    with pytest.raises(NoValidatorsAvailableError, match="zero stake"):
+        get_validators_for_transaction(nodes, 2)
