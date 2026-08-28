@@ -101,6 +101,7 @@ from backend.protocol_rpc.fees import (
     StudioFeePolicy,
     TopUpCannotExtendSchedule,
     TooManyMessages,
+    abort_latest_appeal_admission,
     apply_fee_top_up,
     activate_fee_accounting,
     calculate_appeal_charge,
@@ -7271,6 +7272,52 @@ def test_cancel_fee_accounting_returns_unadjudicated_appeal_bond():
     assert canceled["appeal_bond_settlements"][0]["payout"] == 1400
 
 
+def test_abort_unstarted_appeal_restores_accounting_and_returns_typed_charge():
+    fees_distribution = _fees_distribution(appeals=0, rotations=[0])
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5),
+        user_value=0,
+        sender="0x2222222222222222222222222222222222222222",
+    )
+    appealer = "0x1111111111111111111111111111111111111111"
+    charge = calculate_appeal_charge(
+        accounting["fees_distribution"],
+        current_round=0,
+        status="ACCEPTED",
+    )
+    recorded = record_appeal_bond(
+        accounting,
+        amount=charge["bond"] + charge["funding"],
+        appealer=appealer,
+        current_round=0,
+        status="ACCEPTED",
+    )
+
+    restored, recipient, refund = abort_latest_appeal_admission(
+        recorded,
+        reason="appeal_committee_unavailable",
+    )
+
+    assert recipient == appealer
+    assert refund == charge["bond"] + charge["funding"]
+    for key in (
+        "fees_distribution",
+        "execution_budget_total",
+        "primary_fee_budget",
+        "paid_fee_value",
+        "appeal_funding_total",
+        "time_unit_overlay_budget",
+        "appeal_bonds_total",
+        "contributions",
+        "untracked_contributions",
+    ):
+        assert restored[key] == accounting[key]
+    assert restored["appeal_bonds"] == []
+    assert restored["aborted_appeals"][0]["refund"] == refund
+
+
 def test_top_up_and_submit_appeal_records_only_typed_funding_in_fee_budget():
     fees_distribution = _fees_distribution(
         max_price_gen_per_time_unit=100,
@@ -10204,6 +10251,43 @@ def test_terminal_replacement_readmits_prior_participants_but_excludes_leaders()
     assert {item["address"] for item in terminal} == {
         item["address"] for item in all_validators[2:]
     }
+
+
+def test_terminal_replacement_excludes_prior_leader_case_insensitively():
+    leader = "0xAbCdEf0000000000000000000000000000000001"
+    validator = "0x0000000000000000000000000000000000000002"
+    history = {
+        "consensus_results": [
+            {
+                "consensus_round": "Accepted",
+                "leader_result": [{"node_config": {"address": leader.lower()}}],
+            }
+        ]
+    }
+
+    terminal = ConsensusAlgorithm.get_terminal_replacement_validators(
+        [{"address": leader}, {"address": validator}], history
+    )
+
+    assert terminal == [{"address": validator}]
+
+
+def test_consensus_data_validator_lookup_is_case_insensitive():
+    leader = "0xAbCdEf0000000000000000000000000000000001"
+    validator = "0xFeDcBa0000000000000000000000000000000002"
+    consensus_data = SimpleNamespace(
+        leader_receipt=[SimpleNamespace(node_config={"address": leader.lower()})],
+        validators=[SimpleNamespace(node_config={"address": validator.lower()})],
+    )
+
+    selected, remaining = ConsensusAlgorithm.get_validators_from_consensus_data(
+        [{"address": leader}, {"address": validator}],
+        consensus_data,
+        include_leader=True,
+    )
+
+    assert selected == [{"address": leader}, {"address": validator}]
+    assert remaining == {}
 
 
 def test_terminal_replacement_keeps_full_frozen_electorate_threshold():

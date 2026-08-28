@@ -982,9 +982,6 @@ class ConsensusAlgorithm:
             genvm_manager=self.genvm_manager,
         )
 
-        transactions_processor.set_transaction_appeal(transaction.hash, False)
-        transaction.appealed = False
-
         consumed_addresses = ConsensusAlgorithm.get_consumed_validator_addresses(
             context.transactions_processor.get_transaction_by_hash(
                 context.transaction.hash
@@ -1015,6 +1012,11 @@ class ConsensusAlgorithm:
         )
 
         if available_fresh < required_fresh:
+            accounts_manager.abort_tx_appeal_admission_once(
+                transaction.hash,
+                "appeal_committee_unavailable",
+            )
+            transaction.appealed = False
             self.msg_handler.send_message(
                 LogEvent(
                     "consensus_event",
@@ -1041,6 +1043,8 @@ class ConsensusAlgorithm:
             )
 
         else:
+            transactions_processor.set_transaction_appeal(transaction.hash, False)
+            transaction.appealed = False
             # Appeal data member is used in the frontend for all types of appeals
             # Here the type is refined based on the status
             transactions_processor.set_transaction_appeal_undetermined(
@@ -1098,9 +1102,6 @@ class ConsensusAlgorithm:
             genvm_manager=self.genvm_manager,
         )
 
-        transactions_processor.set_transaction_appeal(transaction.hash, False)
-        transaction.appealed = False
-
         if context.transaction.appeal_undetermined:
             context.transactions_processor.set_transaction_appeal_undetermined(
                 context.transaction.hash, False
@@ -1108,6 +1109,11 @@ class ConsensusAlgorithm:
             context.transaction.appeal_undetermined = False
 
         if not transaction.leader_timeout_validators:
+            accounts_manager.abort_tx_appeal_admission_once(
+                transaction.hash,
+                "appeal_committee_unavailable",
+            )
+            transaction.appealed = False
             self.msg_handler.send_message(
                 LogEvent(
                     "consensus_event",
@@ -1134,6 +1140,8 @@ class ConsensusAlgorithm:
             )
 
         else:
+            transactions_processor.set_transaction_appeal(transaction.hash, False)
+            transaction.appealed = False
             # Appeal data member is used in the frontend for all types of appeals
             # Here the type is refined based on the status
             transaction.appeal_leader_timeout = (
@@ -1196,10 +1204,15 @@ class ConsensusAlgorithm:
         )
         logical_entries = logical_fee_round_entries(transaction.consensus_history)
         current_round = logical_entries[-1][0] if logical_entries else 0
+        fee_accounting = (transaction.data or {}).get(FEE_ACCOUNTING_KEY) or {}
+        eligible_validators = _validators_in_frozen_selection_pool(
+            [x.validator.to_dict() for x in validators_snapshot.nodes],
+            fee_accounting,
+        )
         try:
             # Attempt to get extra validators for the appeal process
             _, context.remaining_validators = ConsensusAlgorithm.get_extra_validators(
-                [x.validator.to_dict() for x in validators_snapshot.nodes],
+                eligible_validators,
                 transaction.consensus_history,
                 transaction.consensus_data,
                 transaction.appeal_failed,
@@ -1226,8 +1239,9 @@ class ConsensusAlgorithm:
                     transaction_hash=context.transaction.hash,
                 )
             )
-            context.transactions_processor.set_transaction_appeal(
-                context.transaction.hash, False
+            accounts_manager.abort_tx_appeal_admission_once(
+                context.transaction.hash,
+                "appeal_committee_unavailable",
             )
             context.transaction.appealed = False
             self.msg_handler.send_message(
@@ -1506,8 +1520,12 @@ class ConsensusAlgorithm:
             return [], {}
 
         # Create a dictionary to map addresses to a validator
+        # Solidity addresses are values, not case-sensitive strings. Studio's
+        # registry and serialized receipts can legitimately disagree only in
+        # checksum casing, so every identity comparison uses one normalized
+        # key.
         validator_map = {
-            validator["address"]: validator for validator in all_validators
+            str(validator["address"]).lower(): validator for validator in all_validators
         }
 
         # Extract address of the leader from consensus data
@@ -1525,9 +1543,9 @@ class ConsensusAlgorithm:
 
         # Return validators whose addresses are in the receipt addresses
         validators = [
-            validator_map.pop(receipt_address)
+            validator_map.pop(str(receipt_address).lower())
             for receipt_address in receipt_addresses
-            if receipt_address in validator_map
+            if str(receipt_address).lower() in validator_map
         ]
 
         return validators, validator_map
@@ -1552,14 +1570,14 @@ class ConsensusAlgorithm:
             raise ValueError("No more validators found to add a new validator")
 
         # Extract a set of addresses of validators and leaders
-        addresses = {validator["address"] for validator in validators}
-        addresses.update(leader_addresses)
+        addresses = {str(validator["address"]).lower() for validator in validators}
+        addresses.update(str(address).lower() for address in leader_addresses)
 
         # Get not used validators
         not_used_validators = [
             validator
             for validator in all_validators
-            if validator["address"] not in addresses
+            if str(validator["address"]).lower() not in addresses
         ]
 
         # Get new validator
@@ -1580,7 +1598,7 @@ class ConsensusAlgorithm:
         return [
             validator
             for validator in all_validators
-            if validator["address"] not in used_leaders
+            if str(validator["address"]).lower() not in used_leaders
         ]
 
     @staticmethod
@@ -1609,12 +1627,12 @@ class ConsensusAlgorithm:
                     else None
                 )
                 if address:
-                    used_leader_addresses.add(address)
+                    used_leader_addresses.add(str(address).lower())
 
         # consensus_history does not contain the latest consensus_data
         if current_leader_receipt:
             used_leader_addresses.update(
-                [current_leader_receipt.node_config["address"]]
+                [str(current_leader_receipt.node_config["address"]).lower()]
             )
 
         return used_leader_addresses

@@ -7,10 +7,14 @@ from .models import CurrentState, Transactions
 from backend.database_handler.errors import AccountNotFoundError
 from backend.protocol_rpc.fees import (
     FEE_ACCOUNTING_KEY,
+    abort_latest_appeal_admission,
     cancel_fee_accounting,
     settle_fee_accounting,
 )
-from backend.consensus.history import completed_consensus_round_index
+from backend.consensus.history import (
+    ACTIVE_APPEAL_BASIS_KEY,
+    completed_consensus_round_index,
+)
 
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -211,6 +215,48 @@ class AccountsManager:
         if not was_terminal:
             self._credit_external_message_fee_payouts(updated)
             self._credit_appeal_bond_payouts(updated)
+        return refund
+
+    def abort_tx_appeal_admission_once(
+        self,
+        tx_hash: str,
+        reason: str = "appeal_committee_unavailable",
+    ) -> int:
+        """Atomically undo a paid appeal that never formed its committee."""
+
+        transaction = (
+            self.session.query(Transactions)
+            .filter_by(hash=tx_hash)
+            .populate_existing()
+            .with_for_update()
+            .one_or_none()
+        )
+        if transaction is None or not isinstance(transaction.data, dict):
+            return 0
+        data = dict(transaction.data)
+        accounting = data.get(FEE_ACCOUNTING_KEY)
+        if not isinstance(accounting, dict):
+            return 0
+        updated, recipient, refund = abort_latest_appeal_admission(
+            accounting,
+            reason=reason,
+        )
+        if refund <= 0 or not recipient:
+            return 0
+
+        data[FEE_ACCOUNTING_KEY] = updated
+        transaction.data = data
+        history = dict(transaction.consensus_history or {})
+        history.pop(ACTIVE_APPEAL_BASIS_KEY, None)
+        transaction.consensus_history = history
+        transaction.appealed = False
+        transaction.timestamp_appeal = None
+        # Persist the ORM rollback before the raw-SQL credit and cache expiry;
+        # expiring an unflushed row would resurrect the paid appeal and make a
+        # retry refund it a second time.
+        self.session.flush()
+        self.credit_account_balance(str(recipient), refund)
+        self.session.expire_all()
         return refund
 
     def settle_tx_fee_accounting_once(

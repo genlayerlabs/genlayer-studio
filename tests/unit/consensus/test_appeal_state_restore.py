@@ -27,6 +27,7 @@ from backend.consensus.worker import ConsensusWorker
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.database_handler.transactions_processor import TransactionStatus
 from backend.domain.types import Transaction, TransactionType
+from backend.protocol_rpc.fees import FEE_ACCOUNTING_KEY
 
 TX_HASH = "0xtxhash"
 CONTRACT_ADDRESS = "0xcontract"
@@ -226,6 +227,57 @@ class TestValidatorAppealStateRestore:
             CONTRACT_ADDRESS, accepted_state=saved_accepted
         )
         transactions_processor.get_transaction_by_hash.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_validator_appeal_filters_live_registry_through_frozen_pool(
+        self, monkeypatch
+    ):
+        """A validator registered after activation cannot join an old appeal."""
+        frozen = ["0x0000000000000000000000000000000000000001"]
+        added_later = "0x0000000000000000000000000000000000000002"
+        transaction = _make_transaction(contract_snapshot=None)
+        transaction.data = {FEE_ACCOUNTING_KEY: {"selection_pool_addresses": frozen}}
+
+        captured = {}
+
+        def capture_eligible(validators, *_args, **_kwargs):
+            captured["validators"] = validators
+            raise ValueError("stop after selection authority check")
+
+        monkeypatch.setattr(
+            ConsensusAlgorithm,
+            "get_extra_validators",
+            staticmethod(capture_eligible),
+        )
+
+        validators_snapshot = Mock()
+        validators_snapshot.nodes = [
+            SimpleNamespace(
+                validator=SimpleNamespace(
+                    to_dict=lambda address=address: {"address": address}
+                )
+            )
+            for address in [*frozen, added_later]
+        ]
+        transactions_processor = Mock()
+        accounts_manager = Mock()
+
+        await _make_algorithm().process_validator_appeal(
+            transaction=transaction,
+            transactions_processor=transactions_processor,
+            chain_snapshot=None,
+            accounts_manager=accounts_manager,
+            contract_snapshot_factory=Mock(),
+            contract_processor=Mock(),
+            node_factory=Mock(),
+            validators_snapshot=validators_snapshot,
+        )
+
+        assert captured["validators"] == [{"address": frozen[0]}]
+        accounts_manager.abort_tx_appeal_admission_once.assert_called_once_with(
+            TX_HASH,
+            "appeal_committee_unavailable",
+        )
 
 
 def _make_worker():

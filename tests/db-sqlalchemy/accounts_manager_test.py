@@ -12,9 +12,12 @@ from backend.database_handler.accounts_manager import AccountsManager
 from backend.database_handler.errors import AccountNotFoundError
 from backend.database_handler.models import Transactions
 from backend.database_handler.transactions_processor import TransactionsProcessor
+from backend.consensus.history import ACTIVE_APPEAL_BASIS_KEY
 from backend.protocol_rpc.fees import (
     FEE_ACCOUNTING_KEY,
+    calculate_appeal_charge,
     create_fee_accounting,
+    record_appeal_bond,
     required_fee_deposit,
 )
 
@@ -216,6 +219,143 @@ def test_cancel_tx_fee_accounting_once_refunds_and_is_idempotent(
     fee_accounting = tx["data"][FEE_ACCOUNTING_KEY]
     assert fee_accounting["status"] == "canceled"
     assert fee_accounting["total_refunded"] == 1155
+
+
+def test_abort_tx_appeal_admission_refunds_charge_and_restores_decision(
+    accounts_manager: AccountsManager,
+    session: Session,
+):
+    sender = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
+    appealer = "0x1111111111111111111111111111111111111111"
+    tx_hash = "0x" + "ad" * 32
+    fees = _fees_distribution(appeals=0, rotations=[0])
+    accounting = create_fee_accounting(
+        fees_distribution=fees,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees, 5),
+        user_value=0,
+        sender=sender,
+    )
+    charge = calculate_appeal_charge(
+        accounting["fees_distribution"],
+        current_round=0,
+        status="ACCEPTED",
+    )
+    recorded = record_appeal_bond(
+        accounting,
+        amount=charge["bond"] + charge["funding"],
+        appealer=appealer,
+        current_round=0,
+        status="ACCEPTED",
+    )
+    _insert_fee_accounted_transaction(
+        session,
+        sender=sender,
+        accounting=recorded,
+        tx_hash=tx_hash,
+    )
+    tx_model = session.query(Transactions).filter_by(hash=tx_hash).one()
+    tx_model.appealed = True
+    tx_model.timestamp_appeal = 123
+    tx_model.consensus_history = {
+        ACTIVE_APPEAL_BASIS_KEY: {
+            "decisionId": 1,
+            "submittedAt": 123,
+            "nextAppealWindow": 10,
+        }
+    }
+    session.commit()
+
+    expected_refund = charge["bond"] + charge["funding"]
+    assert accounts_manager.abort_tx_appeal_admission_once(tx_hash) == expected_refund
+    session.commit()
+    assert accounts_manager.abort_tx_appeal_admission_once(tx_hash) == 0
+    session.expire_all()
+
+    assert accounts_manager.get_account_balance(appealer) == expected_refund
+    tx = session.query(Transactions).filter_by(hash=tx_hash).one()
+    restored = tx.data[FEE_ACCOUNTING_KEY]
+    assert tx.appealed is False
+    assert tx.timestamp_appeal is None
+    assert ACTIVE_APPEAL_BASIS_KEY not in tx.consensus_history
+    assert restored["appeal_bonds"] == []
+    assert restored["primary_fee_budget"] == accounting["primary_fee_budget"]
+    assert restored["fees_distribution"] == accounting["fees_distribution"]
+
+
+def test_concurrent_appeal_admission_abort_refunds_only_once(engine: Engine):
+    SessionFactory = sessionmaker(bind=engine, expire_on_commit=False)
+    sender = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
+    appealer = "0x1111111111111111111111111111111111111111"
+    tx_hash = "0x" + "ae" * 32
+    fees = _fees_distribution(appeals=0, rotations=[0])
+    accounting = create_fee_accounting(
+        fees_distribution=fees,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees, 5),
+        user_value=0,
+        sender=sender,
+    )
+    charge = calculate_appeal_charge(
+        accounting["fees_distribution"], current_round=0, status="ACCEPTED"
+    )
+    recorded = record_appeal_bond(
+        accounting,
+        amount=charge["bond"] + charge["funding"],
+        appealer=appealer,
+        current_round=0,
+        status="ACCEPTED",
+    )
+    with SessionFactory() as setup_session:
+        _insert_fee_accounted_transaction(
+            setup_session,
+            sender=sender,
+            accounting=recorded,
+            tx_hash=tx_hash,
+        )
+        tx = setup_session.query(Transactions).filter_by(hash=tx_hash).one()
+        tx.appealed = True
+        tx.consensus_history = {
+            ACTIVE_APPEAL_BASIS_KEY: {
+                "decisionId": 1,
+                "submittedAt": 123,
+                "nextAppealWindow": 10,
+            }
+        }
+        setup_session.commit()
+
+    barrier = threading.Barrier(2, timeout=5)
+    refunds: list[int] = []
+    errors: list[BaseException] = []
+
+    def abort():
+        try:
+            with SessionFactory() as worker_session:
+                manager = AccountsManager(worker_session)
+                barrier.wait()
+                refunds.append(manager.abort_tx_appeal_admission_once(tx_hash))
+                worker_session.commit()
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=abort)
+    second = threading.Thread(target=abort)
+    first.start()
+    second.start()
+    first.join(timeout=10)
+    second.join(timeout=10)
+
+    expected_refund = charge["bond"] + charge["funding"]
+    assert not first.is_alive() and not second.is_alive()
+    assert errors == []
+    assert sorted(refunds) == [0, expected_refund]
+    with SessionFactory() as read_session:
+        assert (
+            AccountsManager(read_session).get_account_balance(appealer)
+            == expected_refund
+        )
+        tx = read_session.query(Transactions).filter_by(hash=tx_hash).one()
+        assert tx.data[FEE_ACCOUNTING_KEY]["appeal_bonds"] == []
 
 
 def test_concurrent_cancel_refunds_fee_accounting_only_once(engine: Engine):

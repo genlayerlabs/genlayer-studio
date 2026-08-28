@@ -2018,6 +2018,20 @@ def record_appeal_bond(
     policy: StudioFeePolicy | None = None,
 ) -> dict[str, Any]:
     updated = copy.deepcopy(accounting)
+    admission_rollback = {
+        key: copy.deepcopy(updated.get(key))
+        for key in (
+            "fees_distribution",
+            "execution_budget_total",
+            "primary_fee_budget",
+            "paid_fee_value",
+            "appeal_funding_total",
+            "time_unit_overlay_budget",
+            "appeal_bonds_total",
+            "contributions",
+            "untracked_contributions",
+        )
+    }
     policy = _accounting_policy(updated, policy)
     if time_unit_overlay_bps is not None:
         # Consensus prices the developer/DAO overlay at appeal admission;
@@ -2103,10 +2117,65 @@ def record_appeal_bond(
             "topUpAndSubmit": bool(top_up_and_submit),
             "feesDistributionIgnored": fees_distribution is not None,
             "extendsSchedule": bool(charge["extendsSchedule"]),
+            # Studio forms the actual jury asynchronously. If the frozen/live
+            # pool changes before the worker can start, Consensus would have
+            # reverted the atomic submission. Preserve the exact pre-admission
+            # accounting state so Studio can make that failure equally
+            # non-value-bearing instead of silently forfeiting the bond.
+            "admissionRollback": admission_rollback,
         }
     )
     _refresh_message_fee_accounting_report_if_present(updated, policy)
     return updated
+
+
+def abort_latest_appeal_admission(
+    accounting: dict[str, Any],
+    *,
+    reason: str,
+) -> tuple[dict[str, Any], str | None, int]:
+    """Undo an admitted appeal that never formed a committee."""
+
+    updated = copy.deepcopy(accounting)
+    bonds = updated.get("appeal_bonds")
+    if not isinstance(bonds, list) or not bonds:
+        return updated, None, 0
+    bond = bonds[-1]
+    if not isinstance(bond, dict):
+        return updated, None, 0
+    rollback = bond.get("admissionRollback")
+    if not isinstance(rollback, dict):
+        return updated, None, 0
+
+    recipient = bond.get("appealer")
+    refund = max(0, int(bond.get("amount", 0) or 0)) + max(
+        0, int(bond.get("funding", 0) or 0)
+    )
+    for key, value in rollback.items():
+        updated[key] = copy.deepcopy(value)
+    updated["appeal_bonds"] = bonds[:-1]
+    updated.setdefault("aborted_appeals", []).append(
+        {
+            "appealer": recipient,
+            "amount": int(bond.get("amount", 0) or 0),
+            "funding": int(bond.get("funding", 0) or 0),
+            "sourceRound": int(bond.get("sourceRound", 0) or 0),
+            "reason": str(reason),
+            "refund": refund,
+        }
+    )
+    updated["total_refunded"] = int(updated.get("total_refunded", 0) or 0) + refund
+    updated.setdefault("refunds", []).append(
+        {
+            "reason": str(reason),
+            "primary": int(bond.get("funding", 0) or 0),
+            "message": 0,
+            "appealBond": int(bond.get("amount", 0) or 0),
+            "amount": refund,
+        }
+    )
+    _refresh_message_fee_accounting_report_if_present(updated)
+    return updated, recipient, refund
 
 
 def calculate_appeal_charge(
