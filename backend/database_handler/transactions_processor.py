@@ -151,7 +151,9 @@ class TransactionsProcessor:
             self.snapshot_archive = SnapshotArchiveReader.from_environment()
 
         # Use singleton Web3 connection pool
-        self.web3 = Web3ConnectionPool.get()
+        # Only used for checksum normalisation here, which needs no rollup —
+        # and the rollup bridge is optional (HARDHAT_URL may be empty).
+        self.web3 = Web3ConnectionPool.get_for_utilities()
 
     @staticmethod
     def _select_receipt(receipts, index: int = 0) -> dict | None:

@@ -11,6 +11,7 @@ from eth_utils import to_checksum_address
 from hexbytes import HexBytes
 import os
 from backend.rollup.consensus_service import ConsensusService
+from backend.rollup.web3_pool import Web3ConnectionPool
 from backend.domain.types import TransactionType
 
 from backend.protocol_rpc.types import (
@@ -301,7 +302,11 @@ EXECUTION_MODE_STR_TO_INT = {v: k for k, v in EXECUTION_MODE_INT_TO_STR.items()}
 class TransactionParser:
     def __init__(self, consensus_service: ConsensusService):
         self.consensus_service = consensus_service
-        self.web3 = consensus_service.web3
+        # Decoding a signed envelope is pure keccak + ABI codec work. The
+        # rollup bridge is optional (HARDHAT_URL may be empty), so the
+        # service's Web3 can be None; falling back keeps every submission
+        # decodable instead of failing the whole RPC boundary.
+        self.web3 = consensus_service.web3 or Web3ConnectionPool.get_for_utilities()
 
     def decode_signed_transaction(
         self, raw_transaction: str

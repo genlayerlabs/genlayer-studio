@@ -959,3 +959,69 @@ def test_pre_fee_deploy_decodes_when_deployment_artifacts_are_missing(monkeypatc
     assert genlayer_transaction.num_of_initial_validators == 5
     assert genlayer_transaction.data.contract_code == contract_code
     assert genlayer_transaction.data.calldata == calldata
+
+
+def test_utilities_web3_available_without_a_rollup(monkeypatch):
+    """HARDHAT_URL is optional, so the pool legitimately yields None."""
+    from backend.rollup.web3_pool import Web3ConnectionPool
+
+    monkeypatch.setattr(Web3ConnectionPool, "get", classmethod(lambda cls: None))
+    assert isinstance(Web3ConnectionPool.get_for_utilities(), Web3)
+
+    connected = Web3()
+    monkeypatch.setattr(Web3ConnectionPool, "get", classmethod(lambda cls: connected))
+    assert Web3ConnectionPool.get_for_utilities() is connected
+
+
+def test_pre_fee_submission_decodes_without_a_rollup_connection(monkeypatch):
+    """Regression: every submission was rejected as 'Invalid transaction data'.
+
+    With HARDHAT_URL empty, ConsensusService.web3 is None. The parser used it
+    for keccak and the ABI codec, so decode_signed_transaction raised
+    AttributeError, returned None, and _send_raw_transaction_impl rejected
+    every transaction at the RPC boundary with -32602.
+    """
+    sender = "0x715A17BA32a50bC11DADC257cb7c360FcaeE9dFA"
+    monkeypatch.setattr(
+        "backend.protocol_rpc.transactions_parser.Account.recover_transaction",
+        lambda raw: sender,
+    )
+
+    consensus_service = Mock()
+    consensus_service.web3 = None  # HARDHAT_URL='' -> Web3ConnectionPool.get() is None
+    consensus_service.load_contract = Mock(
+        return_value=get_default_consensus_main_contract()
+    )
+    parser = TransactionParser(consensus_service)
+    assert parser.web3 is not None
+
+    contract_code = b"class Storage: pass"
+    calldata = b"\xc3\x01"
+    raw = _build_eip1559_raw(
+        nonce=0,
+        to=bytes.fromhex("b7278a61aa25c888815afc32ad3cc52ff24fe575"),
+        value=0,
+        data=_contract_call_data(
+            parser,
+            "addTransaction",
+            [
+                sender,
+                "0x0000000000000000000000000000000000000000",
+                5,
+                3,
+                encode([contract_code, calldata]),
+            ],
+            input_count=5,
+        ),
+    )
+
+    decoded = parser.decode_signed_transaction(raw)
+
+    # This is the exact gate _send_raw_transaction_impl applies before raising
+    # InvalidTransactionError("Invalid transaction data").
+    assert decoded is not None
+    assert decoded.data is not None
+
+    genlayer_transaction = parser.get_genlayer_transaction(decoded)
+    assert genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT
+    assert genlayer_transaction.data.contract_code == contract_code
