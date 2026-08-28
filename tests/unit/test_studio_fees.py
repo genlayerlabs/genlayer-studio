@@ -11324,3 +11324,44 @@ def test_acceptance_dispatch_still_fails_loudly_when_a_rollup_is_attached():
 
     with pytest.raises(RuntimeError, match="InternalMessageEmissionFailed"):
         _dispatch_messages_for_phase(context, _empty_success_receipt(), "accepted")
+
+
+def test_child_rotation_clamp_tolerates_a_null_parent_schedule():
+    """transactions.config_rotation_rounds is nullable.
+
+    int(None) raised TypeError for every triggered child, which the worker
+    retried until it cancelled the parent.
+    """
+    assert _child_config_rotation_rounds(None, {}) >= 0
+    assert (
+        _child_config_rotation_rounds(
+            None, {"fees_distribution": _fees_distribution(rotations=[2])}
+        )
+        == 2
+    )
+    # A known parent schedule still clamps the funded one.
+    assert (
+        _child_config_rotation_rounds(
+            1, {"fees_distribution": _fees_distribution(rotations=[5])}
+        )
+        == 1
+    )
+
+
+def test_triggered_child_insert_survives_a_parent_without_a_rotation_schedule():
+    """End-to-end over _emit_messages, the frame that actually crashed."""
+    calls = []
+    context = _rollup_free_context(calls)
+    context.transaction.config_rotation_rounds = None
+    child = (
+        "0x2222222222222222222222222222222222222222",
+        {},
+        TransactionType.RUN_CONTRACT.value,
+        0,
+        0,
+    )
+
+    _emit_messages(context, [child], None, "finalized", rollup_skipped=True)
+
+    assert len(calls) == 1
+    assert isinstance(calls[0][1]["config_rotation_rounds"], int)

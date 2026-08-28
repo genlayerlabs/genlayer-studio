@@ -305,6 +305,7 @@ def _make_appeal_row(contract_snapshot, consensus_history):
         v=None,
         leader_only=False,
         execution_mode="NORMAL",
+        config_rotation_rounds=3,
         sim_config=None,
         status=TransactionStatus.ACCEPTED.value,
         consensus_data=None,

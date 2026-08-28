@@ -4424,9 +4424,20 @@ def _pending_transaction_fee_payload(
     }
 
 
-def _child_config_rotation_rounds(parent_rotations: int, data: dict[str, Any]) -> int:
-    """Clamp a triggered child's runtime rotations to its funded schedule."""
+def _child_config_rotation_rounds(
+    parent_rotations: int | None, data: dict[str, Any]
+) -> int:
+    """Clamp a triggered child's runtime rotations to its funded schedule.
 
+    ``transactions.config_rotation_rounds`` is nullable, so a parent may carry
+    no explicit schedule at all — rows written before the column was claimed,
+    or any row that legitimately stored NULL. Resolve that to the same default
+    Transaction itself uses rather than raising, which would fail every child
+    insert and retry the parent until it was cancelled.
+    """
+
+    if parent_rotations is None:
+        parent_rotations = int(os.getenv("VITE_MAX_ROTATIONS", 3))
     fees = data.get("fees_distribution")
     if not isinstance(fees, dict):
         return max(0, int(parent_rotations))

@@ -80,6 +80,11 @@ _TX_CLAIM_BASE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("v", "v"),
     ("leader_only", "leader_only"),
     ("execution_mode", "execution_mode"),
+    # Carried because the emission path clamps every triggered child to its
+    # parent's funded rotation schedule. Omitting it made
+    # Transaction.from_dict default the field to None, so each child insert
+    # raised TypeError and the parent retried until it was cancelled.
+    ("config_rotation_rounds", "config_rotation_rounds"),
     ("sim_config", "sim_config"),
     ("status", "status"),
     ("consensus_data", "consensus_data"),
