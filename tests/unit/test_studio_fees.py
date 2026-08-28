@@ -1292,6 +1292,40 @@ def test_internal_child_uses_protocol_round_zero_committee_not_parent_size():
     assert calls[0][1]["config_rotation_rounds"] == 0
 
 
+def test_internal_child_insert_requires_exact_helper_chain_ids():
+    calls = []
+
+    class _Processor:
+        def insert_transaction(self, *args, **kwargs):
+            calls.append((args, kwargs))
+
+    context = SimpleNamespace(
+        transaction=SimpleNamespace(
+            to_address="0x1111111111111111111111111111111111111111",
+            execution_mode="NORMAL",
+            hash="0x" + "12" * 32,
+            config_rotation_rounds=0,
+            sim_config=None,
+            origin_address=None,
+        ),
+        transactions_processor=_Processor(),
+    )
+    child = (
+        "0x2222222222222222222222222222222222222222",
+        {},
+        TransactionType.RUN_CONTRACT.value,
+        0,
+        0,
+    )
+
+    with pytest.raises(RuntimeError, match="InternalMessageEmissionFailed"):
+        _emit_messages(context, [child], None, "accepted")
+    with pytest.raises(RuntimeError, match="InternalMessageEmissionCountMismatch"):
+        _emit_messages(context, [child], {"tx_ids_hex": []}, "accepted")
+
+    assert calls == []
+
+
 def test_simulation_fee_accounting_accepts_sdk_style_fee_options():
     policy = StudioFeePolicy.from_env()
     fees_distribution = _env_fees_distribution(
@@ -6891,6 +6925,18 @@ def test_identical_accepted_message_rereveal_keeps_single_lifetime_charge():
     json.dumps(second["active_message_generation"])
 
 
+def test_empty_acceptance_phase_remains_repairable_until_helper_acknowledges_it():
+    tx_id = "0x" + ("ac" * 32)
+
+    prepared = prepare_reveal_message_generation({}, tx_id, [])
+    assert prepared["active_message_generation"]["acceptanceDispatchRequired"] is True
+    assert prepared["active_message_generation"]["acceptanceDispatched"] is False
+
+    delivered = mark_message_effects_delivered(prepared, tx_id, [], "accepted")
+    assert delivered["active_message_generation"]["acceptanceDispatched"] is True
+    assert delivered["message_phase_emitted"]["accepted"] is True
+
+
 def test_message_occurrence_descriptor_rejects_value_or_fee_drift():
     tx_id = "0x" + ("bc" * 32)
     message = {
@@ -7927,6 +7973,15 @@ class _MessageValueAccountsManager:
         return True
 
 
+class _MessageValueReservationProcessor:
+    def __init__(self, fee_accounting):
+        self.fee_accounting = fee_accounting
+
+    def mutate_transaction_fee_accounting(self, tx_hash, mutator):
+        self.fee_accounting = mutator(self.fee_accounting)
+        return self.fee_accounting
+
+
 class _ExternalFreezeQuery:
     def __init__(self, *, scalar_value=None, rows=None):
         self.scalar_value = scalar_value
@@ -7964,6 +8019,21 @@ def _message_value_context(balance, *, session=None):
         transaction=SimpleNamespace(
             hash="0x" + "cd" * 32,
             to_address=address,
+        ),
+        transactions_processor=processor,
+        accounts_manager=_MessageValueAccountsManager(balance),
+    )
+
+
+def _recorded_message_value_context(balance):
+    address = "0x9999999999999999999999999999999999999999"
+    accounting = {"paid_fee_value": 0}
+    processor = _MessageValueReservationProcessor(accounting)
+    return SimpleNamespace(
+        transaction=SimpleNamespace(
+            hash="0x" + "cd" * 32,
+            to_address=address,
+            data={FEE_ACCOUNTING_KEY: accounting},
         ),
         transactions_processor=processor,
         accounts_manager=_MessageValueAccountsManager(balance),
@@ -8197,6 +8267,55 @@ def test_message_value_withdrawal_drops_unbacked_external_value():
     assert context.accounts_manager.debits == [
         (context.transaction.to_address, 5),
         (context.transaction.to_address, 2),
+    ]
+
+
+def test_message_value_reservation_is_replayed_without_a_second_debit():
+    context = _recorded_message_value_context(balance=9)
+    message = _pending_external_value(5)
+
+    first = _apply_message_value_withdrawals_for_phase(
+        context,
+        [message],
+        "accepted",
+    )
+    second = _apply_message_value_withdrawals_for_phase(
+        context,
+        [message],
+        "accepted",
+    )
+
+    assert first == [message]
+    assert second == [message]
+    assert context.accounts_manager.balance == 4
+    assert context.accounts_manager.debits == [
+        (context.transaction.to_address, 5),
+    ]
+    assert (
+        len(context.transactions_processor.fee_accounting["message_value_effects"]) == 1
+    )
+
+
+def test_unbacked_message_value_outcome_is_stable_across_worker_retry():
+    context = _recorded_message_value_context(balance=3)
+    message = _pending_external_value(5)
+
+    first = _apply_message_value_withdrawals_for_phase(
+        context,
+        [message],
+        "accepted",
+    )
+    second = _apply_message_value_withdrawals_for_phase(
+        context,
+        [message],
+        "accepted",
+    )
+
+    assert first == []
+    assert second == []
+    assert context.accounts_manager.balance == 3
+    assert context.accounts_manager.debits == [
+        (context.transaction.to_address, 5),
     ]
 
 
@@ -9146,6 +9265,32 @@ def test_submit_appeal_endpoint_records_separate_bond_and_typed_funding(monkeypa
     ]
 
 
+def test_submit_appeal_rejects_until_acceptance_effects_are_acknowledged(
+    monkeypatch,
+):
+    monkeypatch.setattr("backend.protocol_rpc.endpoints.time.time", lambda: 1_000)
+    accounting = _env_fee_accounting()
+    accounting["active_message_generation"] = {
+        "acceptanceDispatchRequired": True,
+        "acceptanceDispatched": False,
+    }
+    tx = _fee_accounted_tx(status="ACCEPTED", accounting=accounting)
+    accounts = _FakeAccountsManager(balance=10_000)
+
+    with pytest.raises(InvalidTransactionError, match="CanNotAppeal"):
+        _handle_appeal_or_top_up_and_submit(
+            accounts_manager=accounts,
+            transactions_processor=_FakeTransactionsProcessor(tx),
+            msg_handler=SimpleNamespace(),
+            decoded_rollup_transaction=_decoded_appeal(
+                tx["hash"],
+                amount=10_000,
+            ),
+        )
+
+    assert accounts.debits == []
+
+
 def test_concurrent_appeal_loser_is_not_charged_or_recorded(monkeypatch):
     monkeypatch.setenv("VITE_FINALITY_WINDOW", "30")
     monkeypatch.setattr("backend.protocol_rpc.endpoints.time.time", lambda: 1_000)
@@ -9648,8 +9793,44 @@ def test_transaction_lifecycle_exposes_active_v06_decision_before_deadline(
         "resolutionSourceCode": 6,
         "decisionId": "1",
         "decisionActive": True,
+        "effectsPending": False,
         "evaluatedAt": 1_034,
     }
+
+
+def test_transaction_lifecycle_blocks_actions_while_acceptance_effects_are_pending(
+    monkeypatch,
+):
+    monkeypatch.setenv("VITE_FINALITY_WINDOW", "30")
+    accounting = _env_fee_accounting()
+    accounting["active_message_generation"] = {
+        "acceptanceDispatchRequired": True,
+        "acceptanceDispatched": False,
+    }
+    tx = _fee_accounted_tx(status="ACCEPTED", accounting=accounting)
+    tx.update(
+        timestamp_awaiting_finalization=1_000,
+        appeal_processing_time=0,
+        appeal_failed=0,
+        appealed=False,
+        execution_mode="NORMAL",
+    )
+    processor = _FakeTransactionsProcessor(tx)
+
+    lifecycle = get_transaction_lifecycle(
+        processor, {"txId": tx["hash"], "timestamp": 2_000}
+    )
+    assert lifecycle["decisionActive"] is True
+    assert lifecycle["effectsPending"] is True
+    assert lifecycle["resolutionAction"] == "NoOp"
+
+    with pytest.raises(InvalidTransactionError, match="CanNotAppeal"):
+        estimate_latest_appeal_charge(processor, {"txId": tx["hash"]})
+    with pytest.raises(InvalidTransactionError, match="FinalizationNotAllowed"):
+        _handle_finalize_transaction(
+            transactions_processor=processor,
+            decoded_rollup_transaction=_decoded_finalize(tx["hash"]),
+        )
 
 
 def test_transaction_lifecycle_projects_finalize_at_exact_deadline(monkeypatch):

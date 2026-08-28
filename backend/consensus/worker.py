@@ -15,8 +15,13 @@ from backend.database_handler.accounts_manager import AccountsManager
 from backend.database_handler.errors import ContractNotFoundError
 from backend.domain.types import Transaction
 from backend.node.genvm.error_codes import GenVMInternalError
-from backend.consensus.base import ConsensusAlgorithm, NoValidatorsAvailableError
+from backend.consensus.base import (
+    ConsensusAlgorithm,
+    InternalMessageEmissionError,
+    NoValidatorsAvailableError,
+)
 from backend.consensus.history import APPEAL_RECOVERY_SNAPSHOT_KEY
+from backend.protocol_rpc.fees import acceptance_dispatch_pending
 
 # Alias for use in context manager (avoids circular import issues)
 _NoValidatorsError = NoValidatorsAvailableError
@@ -33,6 +38,17 @@ from backend.services.usage_metrics_service import UsageMetricsService
 # NO_PROVIDER_FOR_PROMPT for its own node address. These must not trip the
 # stop-the-worker circuit breaker (see _transaction_context).
 _TRANSIENT_LEADER_FATAL_CAUSES = frozenset({"NO_PROVIDER_FOR_PROMPT"})
+
+
+def _acceptance_dispatch_pending(transaction_data: dict[str, Any]) -> bool:
+    data = transaction_data.get("data")
+    if not isinstance(data, dict):
+        return False
+    accounting = data.get("fee_accounting")
+    if not isinstance(accounting, dict):
+        return False
+    return acceptance_dispatch_pending(accounting)
+
 
 # ---------------------------------------------------------------------------
 # Claim column manifest
@@ -307,6 +323,17 @@ class ConsensusWorker:
                 WHERE t.status IN ('ACCEPTED', 'UNDETERMINED', 'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT')
                     AND t.appealed = false
                     AND (
+                        -- Repair an acceptance-phase helper emission before
+                        -- the appeal deadline; finalization must not be the
+                        -- first later opportunity to deliver accepted children.
+                        (t.data->'fee_accounting'->'active_message_generation'
+                            ->>'acceptanceDispatchRequired' = 'true'
+                         AND COALESCE(
+                            t.data->'fee_accounting'->'active_message_generation'
+                                ->>'acceptanceDispatched',
+                            'false'
+                         ) != 'true')
+                        OR
                         -- Normal: timestamp set and finality window elapsed
                         (t.timestamp_awaiting_finalization IS NOT NULL
                          AND (
@@ -517,18 +544,27 @@ class ConsensusWorker:
                             AND t3.created_at < t.created_at
                             AND t3.status IN ('ACCEPTED', 'UNDETERMINED', 'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT')
                             AND t3.appealed = false
-                            AND t3.timestamp_awaiting_finalization IS NOT NULL
                             AND (
-                                t3.execution_mode IN ('LEADER_ONLY', 'LEADER_SELF_VALIDATOR')
+                                (t3.data->'fee_accounting'->'active_message_generation'
+                                    ->>'acceptanceDispatchRequired' = 'true'
+                                 AND COALESCE(
+                                    t3.data->'fee_accounting'->'active_message_generation'
+                                        ->>'acceptanceDispatched',
+                                    'false'
+                                 ) != 'true')
                                 OR (
-                                    EXTRACT(EPOCH FROM NOW()) >= COALESCE(
-                                        NULLIF(t3.consensus_history->'latestDecision'->>'appealDeadline', '')::double precision,
-                                        t3.timestamp_awaiting_finalization
-                                            + COALESCE(t3.appeal_processing_time, 0)
-                                            + :finality_window_seconds * POWER(
-                                                1 - :appeal_failed_reduction,
-                                                COALESCE(t3.appeal_failed, 0)
-                                            )
+                                    t3.timestamp_awaiting_finalization IS NOT NULL
+                                    AND (
+                                        t3.execution_mode IN ('LEADER_ONLY', 'LEADER_SELF_VALIDATOR')
+                                        OR EXTRACT(EPOCH FROM NOW()) >= COALESCE(
+                                            NULLIF(t3.consensus_history->'latestDecision'->>'appealDeadline', '')::double precision,
+                                            t3.timestamp_awaiting_finalization
+                                                + COALESCE(t3.appeal_processing_time, 0)
+                                                + :finality_window_seconds * POWER(
+                                                    1 - :appeal_failed_reduction,
+                                                    COALESCE(t3.appeal_failed, 0)
+                                                )
+                                        )
                                     )
                                 )
                             )
@@ -921,7 +957,10 @@ class ConsensusWorker:
             await self._handle_generic_error_retry(
                 tx_hash,
                 e,
-                cancel_on_exhaustion=not protected_appeal_work,
+                cancel_on_exhaustion=(
+                    not protected_appeal_work
+                    and not isinstance(e, InternalMessageEmissionError)
+                ),
             )
         finally:
             # Clear current transaction tracking
@@ -1918,6 +1957,27 @@ class ConsensusWorker:
                 )
 
                 transactions_processor = transactions_processor_factory(session)
+
+                if _acceptance_dispatch_pending(finalization_data):
+                    logger.info(
+                        f"[Worker {self.worker_id}] Repairing accepted message delivery "
+                        f"for transaction {transaction.hash}"
+                    )
+                    await self.consensus_algorithm.repair_accepted_message_delivery(
+                        transaction,
+                        transactions_processor,
+                        accounts_manager_factory(session),
+                        lambda contract_address: contract_snapshot_factory(
+                            contract_address, session, transaction
+                        ),
+                        contract_processor_factory(session),
+                        node_factory,
+                    )
+                    latest_transaction = transactions_processor.get_transaction_by_hash(
+                        transaction.hash
+                    )
+                    if latest_transaction is not None:
+                        transaction = Transaction.from_dict(latest_transaction)
 
                 # Check if can finalize (appeal window expired)
                 can_finalize = self.consensus_algorithm.can_finalize_transaction(

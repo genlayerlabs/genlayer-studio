@@ -5396,6 +5396,33 @@ def _message_effect_identities(
     return identities
 
 
+def message_effect_identities(
+    tx_id: str,
+    messages: list[dict[str, Any]],
+) -> list[tuple[str, str]]:
+    """Return Consensus-compatible stable occurrence and descriptor pairs.
+
+    Message delivery, value reservation, and fee accounting all need to share
+    one logical identity. Keeping that identity authority here prevents the
+    asynchronous Studio worker from inventing a second retry key.
+    """
+
+    return _message_effect_identities(tx_id, messages)
+
+
+def acceptance_dispatch_pending(accounting: dict[str, Any] | None) -> bool:
+    """Whether the current agreed decision still owes its acceptance phase."""
+
+    if not isinstance(accounting, dict):
+        return False
+    generation = accounting.get("active_message_generation")
+    return (
+        isinstance(generation, dict)
+        and bool(generation.get("acceptanceDispatchRequired", False))
+        and not bool(generation.get("acceptanceDispatched", False))
+    )
+
+
 def message_novelty_mask(
     accounting: dict[str, Any],
     tx_id: str,
@@ -5454,6 +5481,10 @@ def prepare_reveal_message_generation(
         "messages": _message_accounting_json_safe(messages),
         "occurrences": [occurrence for occurrence, _ in identities],
         "novelty": novelty,
+        # Acceptance itself is a durable helper-chain phase, including when
+        # the receipt contains no accepted children. The worker clears this
+        # only after the helper call and local child insertion both succeed.
+        "acceptanceDispatchRequired": True,
         "acceptanceDispatched": False,
     }
     return updated
@@ -5501,7 +5532,6 @@ def mark_message_effects_delivered(
     # Reuse descriptor validation before installing an irreversible tombstone.
     message_novelty_mask(updated, tx_id, messages)
     delivered = updated.setdefault("message_effect_delivered", {})
-    delivered_any = False
     for message, (occurrence, descriptor) in zip(messages, identities):
         if bool(message.get("onAcceptance", False)) != (on == "accepted"):
             continue
@@ -5509,10 +5539,10 @@ def mark_message_effects_delivered(
             occurrence, descriptor
         )
         delivered[occurrence] = True
-        delivered_any = True
 
+    updated.setdefault("message_phase_emitted", {})[on] = True
     generation = updated.get("active_message_generation")
-    if delivered_any and on == "accepted" and isinstance(generation, dict):
+    if on == "accepted" and isinstance(generation, dict):
         generation["acceptanceDispatched"] = True
     return updated
 

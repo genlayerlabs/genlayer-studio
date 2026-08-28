@@ -65,6 +65,7 @@ from backend.protocol_rpc.fees import (
     discard_active_message_generation,
     fill_message_fee_payload_from_allocation,
     mark_message_effects_delivered,
+    message_effect_identities,
     message_novelty_mask,
     prepare_reveal_message_generation,
     record_external_message_execution_fees,
@@ -158,6 +159,10 @@ type NodeFactory = Callable[
 
 class NoValidatorsAvailableError(Exception):
     """Raised when no validators are available to process a transaction."""
+
+
+class InternalMessageEmissionError(RuntimeError):
+    """Raised when the helper EVM did not durably accept a message phase."""
 
 
 def _redact_consensus_data_for_log(consensus_data_dict: dict) -> dict:
@@ -904,6 +909,41 @@ class ConsensusAlgorithm:
                     return False
         else:
             return False
+
+    async def repair_accepted_message_delivery(
+        self,
+        transaction: Transaction,
+        transactions_processor: TransactionsProcessor,
+        accounts_manager: AccountsManager,
+        contract_snapshot_factory: Callable[[str], ContractSnapshot],
+        contract_processor: ContractProcessor,
+        node_factory: NodeFactory,
+    ) -> None:
+        """Replay an agreed acceptance phase without finalizing the tx."""
+
+        context = TransactionContext(
+            transaction=transaction,
+            transactions_processor=transactions_processor,
+            chain_snapshot=None,
+            accounts_manager=accounts_manager,
+            contract_snapshot_factory=contract_snapshot_factory,
+            contract_processor=contract_processor,
+            node_factory=node_factory,
+            msg_handler=self.msg_handler,
+            consensus_service=self.consensus_service,
+            validators_snapshot=None,
+            genvm_manager=self.genvm_manager,
+        )
+        leader_receipt = transaction.consensus_data.leader_receipt[0]
+        delivered = _dispatch_messages_for_phase(context, leader_receipt, "accepted")
+        if delivered:
+            await self.dispatch_transaction_status_update(
+                transactions_processor,
+                transaction.hash,
+                TransactionStatus.ACCEPTED,
+                self.msg_handler,
+                update_current_status_changes=False,
+            )
 
     async def process_finalization(
         self,
@@ -2232,7 +2272,7 @@ def _adjust_unbacked_message_values(
     return adjusted_pending_transactions
 
 
-def _apply_message_value_withdrawals_for_phase(
+def _apply_untracked_message_value_withdrawals_for_phase(
     context: TransactionContext,
     pending_transactions: Iterable[PendingTransaction],
     on: Literal["accepted", "finalized"],
@@ -2257,6 +2297,179 @@ def _apply_message_value_withdrawals_for_phase(
         external_value_backed=external_value_backed,
         internal_value_backed=internal_value_backed,
         use_balance_funding_backed=use_balance_funding_backed,
+    )
+
+
+def _message_value_effect_record(
+    pending_transaction: PendingTransaction,
+    descriptor: str,
+    on: Literal["accepted", "finalized"],
+    *,
+    external_value_backed: bool,
+    internal_value_backed: bool,
+    use_balance_funding_backed: bool,
+) -> dict[str, Any]:
+    value = int(pending_transaction.value or 0)
+    include = True
+    adjusted_value = value
+    adjusted_budget = int(pending_transaction.declared_budget or 0)
+
+    if pending_transaction.use_balance and not use_balance_funding_backed:
+        adjusted_value = 0
+        adjusted_budget = 0
+    elif value > 0 and pending_transaction.is_eth_send and not external_value_backed:
+        include = False
+    elif (
+        value > 0 and not pending_transaction.is_eth_send and not internal_value_backed
+    ):
+        adjusted_value = 0
+
+    return {
+        "descriptor": descriptor,
+        "phase": on,
+        "include": include,
+        "value": adjusted_value,
+        "declaredBudget": adjusted_budget,
+    }
+
+
+def _apply_recorded_message_value_effects(
+    pending_transactions: list[PendingTransaction],
+    identities: list[tuple[str, str]],
+    records: dict[str, Any],
+    on: Literal["accepted", "finalized"],
+) -> list[PendingTransaction]:
+    adjusted: list[PendingTransaction] = []
+    for pending_transaction, (occurrence, descriptor) in zip(
+        pending_transactions, identities
+    ):
+        if pending_transaction.on != on:
+            adjusted.append(pending_transaction)
+            continue
+
+        record = records.get(occurrence)
+        if not isinstance(record, dict):
+            raise RuntimeError(f"MessageValueEffectMissing({occurrence})")
+        if record.get("descriptor") != descriptor or record.get("phase") != on:
+            raise RuntimeError(
+                "MessageValueEffectDescriptorMismatch"
+                f"({occurrence},{record.get('descriptor')},{descriptor})"
+            )
+        if not bool(record.get("include", False)):
+            continue
+
+        value = int(record.get("value", 0) or 0)
+        declared_budget = int(record.get("declaredBudget", 0) or 0)
+        if value == int(pending_transaction.value or 0) and declared_budget == int(
+            pending_transaction.declared_budget or 0
+        ):
+            adjusted.append(pending_transaction)
+            continue
+
+        replayed = _pending_transaction_with_value(pending_transaction, value)
+        replayed.declared_budget = declared_budget
+        adjusted.append(replayed)
+    return adjusted
+
+
+def _apply_message_value_withdrawals_for_phase(
+    context: TransactionContext,
+    pending_transactions: Iterable[PendingTransaction],
+    on: Literal["accepted", "finalized"],
+) -> list[PendingTransaction]:
+    """Reserve message value once and replay the exact result after a crash.
+
+    Studio's account database and helper EVM cannot share one atomic
+    transaction. The reservation therefore lives in the parent's locked fee
+    accounting row: a worker may retry the helper call, but it cannot debit the
+    contract a second time or change an earlier insufficient-balance outcome.
+    """
+
+    pending_list = list(pending_transactions)
+    parent_fee_accounting = (getattr(context.transaction, "data", None) or {}).get(
+        FEE_ACCOUNTING_KEY
+    )
+    mutate_accounting = getattr(
+        context.transactions_processor,
+        "mutate_transaction_fee_accounting",
+        None,
+    )
+    if not isinstance(parent_fee_accounting, dict) or not callable(mutate_accounting):
+        return _apply_untracked_message_value_withdrawals_for_phase(
+            context, pending_list, on
+        )
+
+    def reserve_latest(current_fee_accounting: dict[str, Any]) -> dict[str, Any]:
+        updated = deepcopy(current_fee_accounting)
+        payloads = _reveal_message_fee_payloads(updated, pending_list)
+        identities = message_effect_identities(context.transaction.hash, payloads)
+        records = updated.setdefault("message_value_effects", {})
+
+        unrecorded_indexes: set[int] = set()
+        for index, (pending_transaction, (occurrence, descriptor)) in enumerate(
+            zip(pending_list, identities)
+        ):
+            if pending_transaction.on != on:
+                continue
+            record = records.get(occurrence)
+            if record is None:
+                unrecorded_indexes.add(index)
+                continue
+            if (
+                not isinstance(record, dict)
+                or record.get("descriptor") != descriptor
+                or record.get("phase") != on
+            ):
+                raise RuntimeError(
+                    "MessageValueEffectDescriptorMismatch"
+                    f"({occurrence},"
+                    f"{record.get('descriptor') if isinstance(record, dict) else None},"
+                    f"{descriptor})"
+                )
+
+        if unrecorded_indexes:
+            debit_candidates = [
+                pending_transaction
+                for index, pending_transaction in enumerate(pending_list)
+                if pending_transaction.on != on or index in unrecorded_indexes
+            ]
+            external_value_backed = _debit_external_message_value_for_phase(
+                context, debit_candidates, on
+            )
+            use_balance_funding_backed = _debit_use_balance_funding_for_phase(
+                context, debit_candidates, on
+            )
+            internal_value_backed = _debit_internal_message_value_for_phase(
+                context, debit_candidates, on
+            )
+
+            for index in unrecorded_indexes:
+                pending_transaction = pending_list[index]
+                occurrence, descriptor = identities[index]
+                records[occurrence] = _message_value_effect_record(
+                    pending_transaction,
+                    descriptor,
+                    on,
+                    external_value_backed=external_value_backed,
+                    internal_value_backed=internal_value_backed,
+                    use_balance_funding_backed=use_balance_funding_backed,
+                )
+
+        return updated
+
+    updated_accounting = mutate_accounting(
+        context.transaction.hash,
+        reserve_latest,
+    )
+    context.transaction.data = dict(context.transaction.data or {})
+    context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
+    payloads = _reveal_message_fee_payloads(updated_accounting, pending_list)
+    identities = message_effect_identities(context.transaction.hash, payloads)
+    return _apply_recorded_message_value_effects(
+        pending_list,
+        identities,
+        updated_accounting.get("message_value_effects") or {},
+        on,
     )
 
 
@@ -3375,38 +3588,15 @@ class AcceptedState(TransactionState):
         executor = EffectExecutor(context)
         await executor.execute(pre_effects)
 
-        # Impure: triggered transaction processing (needs DB reads for nonce/accounts).
-        # Consensus tombstones each tx-scoped logical message occurrence, so a
-        # successful appeal may re-reveal it but cannot charge or emit it twice.
+        # Consensus tombstones each tx-scoped logical message occurrence. The
+        # Studio bridge additionally makes the helper call, value reservation,
+        # and local child insertion replay-safe across worker/process failure.
         if execution_success:
-            novel_pending_transactions = _novel_pending_transactions(
+            _dispatch_messages_for_phase(
                 context,
-                leader_receipt.pending_transactions,
-            )
-            internal_messages_data, insert_transactions_data = _get_messages_data(
-                context,
-                _apply_message_value_withdrawals_for_phase(
-                    context,
-                    novel_pending_transactions,
-                    "accepted",
-                ),
+                leader_receipt,
                 "accepted",
-            )
-
-            rollup_receipt = context.consensus_service.emit_transaction_event(
-                "emitTransactionAccepted",
-                leader_receipt.node_config,
-                context.transaction.hash,
-                internal_messages_data,
-            )
-
-            _emit_messages(
-                context, insert_transactions_data, rollup_receipt, "accepted"
-            )
-            _mark_message_phase_delivered(
-                context,
-                leader_receipt.pending_transactions,
-                "accepted",
+                force_phase_event=True,
             )
 
         # Execute post-effects (status update + appeal cleanup)
@@ -3528,6 +3718,11 @@ class FinalizingState(TransactionState):
     async def handle(self, context):
         leader_receipt = context.transaction.consensus_data.leader_receipt[0]
 
+        # Acceptance is a separate message lifecycle phase. If the helper EVM
+        # or worker died after the agreed decision was committed, repair that
+        # phase before allowing finalization to overtake it.
+        _dispatch_messages_for_phase(context, leader_receipt, "accepted")
+
         pre_effects, post_effects, should_finalize_contract = decide_finalizing(
             tx_hash=context.transaction.hash,
             tx_status_accepted=(
@@ -3561,34 +3756,11 @@ class FinalizingState(TransactionState):
                 finalized_state=accepted_state,
             )
 
-            novel_pending_transactions = _novel_pending_transactions(
+            _dispatch_messages_for_phase(
                 context,
-                leader_receipt.pending_transactions,
-            )
-            internal_messages_data, insert_transactions_data = _get_messages_data(
-                context,
-                _apply_message_value_withdrawals_for_phase(
-                    context,
-                    novel_pending_transactions,
-                    "finalized",
-                ),
+                leader_receipt,
                 "finalized",
-            )
-
-            rollup_receipt = context.consensus_service.emit_transaction_event(
-                "emitTransactionFinalized",
-                leader_receipt.node_config,
-                context.transaction.hash,
-                internal_messages_data,
-            )
-
-            _emit_messages(
-                context, insert_transactions_data, rollup_receipt, "finalized"
-            )
-            _mark_message_phase_delivered(
-                context,
-                leader_receipt.pending_transactions,
-                "finalized",
+                force_phase_event=True,
             )
 
         await executor.execute(post_effects)
@@ -3923,10 +4095,7 @@ def _sync_reveal_message_fee_accounting(
     context: TransactionContext,
     leader_receipt: Receipt,
 ) -> None:
-    if (
-        leader_receipt.execution_result != ExecutionResultStatus.SUCCESS
-        or not leader_receipt.pending_transactions
-    ):
+    if leader_receipt.execution_result != ExecutionResultStatus.SUCCESS:
         _unwind_discarded_reveal_message_fee_accounting(context)
         return
 
@@ -3939,8 +4108,6 @@ def _sync_reveal_message_fee_accounting(
             current_fee_accounting,
             leader_receipt.pending_transactions,
         )
-        if not message_fee_payloads:
-            return current_fee_accounting
         try:
             return prepare_reveal_message_generation(
                 current_fee_accounting,
@@ -4026,8 +4193,6 @@ def _mark_message_phase_delivered(
             current_fee_accounting,
             pending_list,
         )
-        if not payloads:
-            return current_fee_accounting
         try:
             return mark_message_effects_delivered(
                 current_fee_accounting,
@@ -4046,6 +4211,98 @@ def _mark_message_phase_delivered(
     )
     context.transaction.data = dict(context.transaction.data or {})
     context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
+
+
+def _message_phase_delivery_required(
+    context: TransactionContext,
+    pending_transactions: Iterable[Any],
+    on: Literal["accepted", "finalized"],
+    *,
+    force_phase_event: bool = False,
+) -> bool:
+    if force_phase_event:
+        return True
+
+    parent_fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
+    if not isinstance(parent_fee_accounting, dict):
+        return False
+
+    pending_list = [
+        _coerce_pending_transaction(pending_transaction)
+        for pending_transaction in pending_transactions
+    ]
+    if pending_list:
+        payloads = _reveal_message_fee_payloads(parent_fee_accounting, pending_list)
+        novelty = message_novelty_mask(
+            parent_fee_accounting,
+            context.transaction.hash,
+            payloads,
+        )
+        if any(
+            is_novel and pending_transaction.on == on
+            for pending_transaction, is_novel in zip(pending_list, novelty)
+        ):
+            return True
+
+    if on == "accepted":
+        generation = parent_fee_accounting.get("active_message_generation")
+        if isinstance(generation, dict):
+            pending_generation = bool(
+                generation.get("acceptanceDispatchRequired", False)
+            ) and not bool(generation.get("acceptanceDispatched", False))
+            if pending_generation:
+                return True
+    if bool((parent_fee_accounting.get("message_phase_emitted") or {}).get(on, False)):
+        return False
+    return False
+
+
+def _dispatch_messages_for_phase(
+    context: TransactionContext,
+    leader_receipt: Receipt,
+    on: Literal["accepted", "finalized"],
+    *,
+    force_phase_event: bool = False,
+) -> bool:
+    if leader_receipt.execution_result != ExecutionResultStatus.SUCCESS:
+        return False
+    if not _message_phase_delivery_required(
+        context,
+        leader_receipt.pending_transactions,
+        on,
+        force_phase_event=force_phase_event,
+    ):
+        return False
+
+    novel_pending_transactions = _novel_pending_transactions(
+        context,
+        leader_receipt.pending_transactions,
+    )
+    internal_messages_data, insert_transactions_data = _get_messages_data(
+        context,
+        _apply_message_value_withdrawals_for_phase(
+            context,
+            novel_pending_transactions,
+            on,
+        ),
+        on,
+    )
+    event_name = (
+        "emitTransactionAccepted" if on == "accepted" else "emitTransactionFinalized"
+    )
+    rollup_receipt = context.consensus_service.emit_transaction_event(
+        event_name,
+        leader_receipt.node_config,
+        context.transaction.hash,
+        internal_messages_data,
+    )
+    _emit_messages(context, insert_transactions_data, rollup_receipt, on)
+    _mark_message_phase_delivered(
+        context,
+        leader_receipt.pending_transactions,
+        on,
+    )
+    return True
 
 
 def _unwind_discarded_reveal_message_fee_accounting(
@@ -4231,10 +4488,21 @@ def _emit_messages(
     receipt: dict,
     triggered_on: Literal["accepted", "finalized"],
 ):
-    for i, insert_transaction_data in enumerate(insert_transactions_data):
-        transaction_hash = (
-            receipt["tx_ids_hex"][i] if receipt and "tx_ids_hex" in receipt else None
+    if not isinstance(receipt, dict):
+        raise InternalMessageEmissionError(
+            f"InternalMessageEmissionFailed({context.transaction.hash},{triggered_on})"
         )
+    tx_ids = receipt.get("tx_ids_hex")
+    if not isinstance(tx_ids, list) or len(tx_ids) != len(insert_transactions_data):
+        raise InternalMessageEmissionError(
+            "InternalMessageEmissionCountMismatch"
+            f"({context.transaction.hash},{triggered_on},"
+            f"{len(insert_transactions_data)},"
+            f"{len(tx_ids) if isinstance(tx_ids, list) else 'missing'})"
+        )
+
+    for i, insert_transaction_data in enumerate(insert_transactions_data):
+        transaction_hash = tx_ids[i]
         # Determine execution_mode to cascade from parent transaction
         execution_mode_str = (
             context.transaction.execution_mode.value

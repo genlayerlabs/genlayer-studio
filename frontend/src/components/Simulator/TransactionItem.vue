@@ -472,6 +472,16 @@ const canAppeal = computed(() => {
     return false;
   }
 
+  const messageGeneration = asRecord(
+    asRecord(feeAccounting.value)?.active_message_generation,
+  );
+  if (
+    messageGeneration?.acceptanceDispatchRequired === true &&
+    messageGeneration?.acceptanceDispatched !== true
+  ) {
+    return false;
+  }
+
   const history = asRecord(data.consensus_history);
   const results = history?.consensus_results;
   if (

@@ -291,6 +291,58 @@ def test_abort_tx_appeal_admission_refunds_charge_and_restores_decision(
     assert restored["fees_distribution"] == accounting["fees_distribution"]
 
 
+def test_appeal_admission_rechecks_pending_acceptance_effects_under_lock(
+    session: Session,
+):
+    sender = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
+    tx_hash = "0x" + "ae" * 32
+    fees = _fees_distribution(appeals=0, rotations=[0])
+    accounting = create_fee_accounting(
+        fees_distribution=fees,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees, 5),
+        user_value=0,
+        sender=sender,
+    )
+    accounting["active_message_generation"] = {
+        "acceptanceDispatchRequired": True,
+        "acceptanceDispatched": False,
+    }
+    history = {
+        "latestDecision": {
+            "decisionId": 1,
+            "status": "ACCEPTED",
+            "materializedAt": 100,
+            "appealDeadline": 1_000_000_000_000,
+        },
+        "consensus_results": [{"consensus_round": "ACCEPTED"}],
+    }
+    _insert_fee_accounted_transaction(
+        session,
+        sender=sender,
+        accounting=accounting,
+        tx_hash=tx_hash,
+        consensus_history=history,
+    )
+    tx = session.query(Transactions).filter_by(hash=tx_hash).one()
+    tx.status = TransactionStatus.ACCEPTED
+    session.commit()
+
+    with pytest.raises(ValueError, match="CanNotAppeal"):
+        TransactionsProcessor(session).admit_transaction_appeal(
+            tx_hash,
+            expected_decision_id=1,
+            submitted_at=200,
+            appeal_deadline=1_000_000_000_000,
+            retention_bps=8_000,
+            prepare_fee_accounting=lambda current: (current, 0),
+        )
+
+    session.rollback()
+    session.expire_all()
+    assert session.query(Transactions).filter_by(hash=tx_hash).one().appealed is False
+
+
 def test_admitted_appeal_snapshot_restores_exact_agreed_state_for_retry(
     session: Session,
 ):

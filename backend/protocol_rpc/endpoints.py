@@ -53,6 +53,7 @@ from backend.protocol_rpc.fees import (
     VALIDATORS_PER_ROUND,
     FeeValidationError,
     StudioFeePolicy,
+    acceptance_dispatch_pending,
     calculate_appeal_charge,
     calculate_round_fees,
     decode_internal_message_fee_params,
@@ -1935,6 +1936,9 @@ def get_transaction_lifecycle(
     decision_active = status in _DECISION_STATUSES and not bool(
         transaction.get("appealed")
     )
+    effects_pending = acceptance_dispatch_pending(
+        (transaction.get("data") or {}).get(FEE_ACCOUNTING_KEY)
+    )
     current_round = _current_fee_round(transaction.get("consensus_history"))
     decision_id = _transaction_decision_id(transaction) if decision_active else None
 
@@ -1953,6 +1957,7 @@ def get_transaction_lifecycle(
     deadline = _transaction_appeal_deadline(transaction)
     if (
         decision_active
+        and not effects_pending
         and deadline is not None
         and evaluated_at >= deadline
         and transactions_processor.is_transaction_finalization_head(transaction_hash)
@@ -1972,6 +1977,7 @@ def get_transaction_lifecycle(
         "resolutionSourceCode": resolution_source_code,
         "decisionId": str(decision_id) if decision_id is not None else None,
         "decisionActive": decision_active,
+        "effectsPending": effects_pending,
         "evaluatedAt": evaluated_at,
     }
 
@@ -2007,6 +2013,8 @@ def estimate_latest_appeal_charge(
     fee_accounting = (transaction.get("data") or {}).get(FEE_ACCOUNTING_KEY)
     if fee_accounting is None:
         raise InvalidTransactionError("FeeAccountingMissing")
+    if acceptance_dispatch_pending(fee_accounting):
+        raise InvalidTransactionError("CanNotAppeal")
     session = getattr(transactions_processor, "session", None)
     frozen_pool_addresses = fee_accounting.get("selection_pool_addresses")
     live_pool_addresses = None
@@ -2464,6 +2472,8 @@ def _handle_appeal_or_top_up_and_submit(
     fee_accounting = (tx.get("data") or {}).get(FEE_ACCOUNTING_KEY)
     if fee_accounting is None:
         raise InvalidTransactionError("FeeAccountingMissing")
+    if acceptance_dispatch_pending(fee_accounting):
+        raise InvalidTransactionError("CanNotAppeal")
     if fee_accounting is not None:
         session = getattr(accounts_manager, "session", None)
         frozen_pool_count = fee_accounting.get("selection_pool_count")
@@ -2628,6 +2638,10 @@ def _handle_finalize_transaction(
 
     status = str(transaction.get("status") or "")
     if status not in _DECISION_STATUSES or bool(transaction.get("appealed")):
+        raise InvalidTransactionError("FinalizationNotAllowed")
+    if acceptance_dispatch_pending(
+        (transaction.get("data") or {}).get(FEE_ACCOUNTING_KEY)
+    ):
         raise InvalidTransactionError("FinalizationNotAllowed")
     current_decision_id = _transaction_decision_id(transaction)
     expected_decision_id = decoded_rollup_transaction.data.expected_decision_id

@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy.orm import Session
 
+from backend.consensus.base import InternalMessageEmissionError
 from backend.node.genvm.error_codes import GenVMInternalError
 
 
@@ -37,6 +38,27 @@ def _fatal_error(*, causes, is_leader=True):
         ctx=None,
         detail=None,
     )
+
+
+def test_acceptance_dispatch_pending_requires_current_unacknowledged_generation():
+    from backend.consensus.worker import _acceptance_dispatch_pending
+
+    pending = {
+        "data": {
+            "fee_accounting": {
+                "active_message_generation": {
+                    "acceptanceDispatchRequired": True,
+                    "acceptanceDispatched": False,
+                }
+            }
+        }
+    }
+
+    assert _acceptance_dispatch_pending(pending) is True
+    pending["data"]["fee_accounting"]["active_message_generation"][
+        "acceptanceDispatched"
+    ] = True
+    assert _acceptance_dispatch_pending(pending) is False
 
 
 @pytest.mark.asyncio
@@ -225,6 +247,28 @@ async def test_generic_appeal_failure_never_cancels_the_agreed_transaction():
     assert worker._generic_error_retries["0xtx"]["count"] == (
         worker.MAX_GENERIC_ERROR_RETRIES + 3
     )
+
+
+@pytest.mark.asyncio
+async def test_helper_message_failure_never_cancels_the_agreed_transaction():
+    worker = _make_worker()
+    session = MagicMock(spec=Session)
+
+    with (
+        patch.object(worker, "release_transaction") as release_transaction,
+        patch.object(
+            worker, "_handle_generic_error_retry", new_callable=AsyncMock
+        ) as handle_generic_error_retry,
+    ):
+        async with worker._transaction_context("0xtx", {}, session, "transaction"):
+            raise InternalMessageEmissionError("helper unavailable")
+
+    session.rollback.assert_called_once()
+    handle_generic_error_retry.assert_awaited_once()
+    assert handle_generic_error_retry.await_args.kwargs == {
+        "cancel_on_exhaustion": False
+    }
+    release_transaction.assert_called_once()
 
 
 @pytest.mark.asyncio

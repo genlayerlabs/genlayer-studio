@@ -381,6 +381,65 @@ describe('TransactionItem fee accounting display', () => {
     vi.useRealTimers();
   });
 
+  it('hides appeals while the accepted message phase is still being repaired', () => {
+    const now = Date.now() / 1000;
+    const effectsPending = {
+      ...transaction,
+      data: {
+        ...transaction.data,
+        data: {
+          fee_accounting: {
+            ...feeAccounting,
+            active_message_generation: {
+              acceptanceDispatchRequired: true,
+              acceptanceDispatched: false,
+            },
+          },
+        },
+        consensus_history: {
+          latestDecision: {
+            decisionId: 2,
+            status: 'ACCEPTED',
+            materializedAt: now - 10,
+            appealDeadline: now + 20,
+          },
+          consensus_results: [],
+        },
+      },
+    };
+
+    const wrapper = mount(TransactionItem, {
+      props: { transaction: effectsPending, finalityWindow: 60 },
+      global: {
+        directives: { tooltip: vi.fn() },
+        stubs: {
+          Modal: ModalStub,
+          Btn: {
+            template: '<button @click="$emit(\'click\')"><slot /></button>',
+          },
+          CopyTextButton: true,
+          JsonViewer: true,
+          Loader: true,
+          TransactionStatusBadge: { template: '<span><slot /></span>' },
+          CheckCircleIcon: true,
+          XCircleIcon: true,
+          EllipsisHorizontalCircleIcon: true,
+          FilterIcon: true,
+          GavelIcon: true,
+          UserPen: true,
+          UserSearch: true,
+          ExternalLink: true,
+        },
+      },
+    });
+
+    expect(
+      wrapper
+        .find(`[data-testid="appeal-transaction-btn-${transaction.hash}"]`)
+        .exists(),
+    ).toBe(false);
+  });
+
   it('hides appeals after a terminal successful validator appeal', () => {
     const terminal = {
       ...transaction,

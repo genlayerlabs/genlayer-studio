@@ -35,6 +35,7 @@ from backend.consensus.history import (
 from backend.consensus.utils import determine_consensus_from_votes
 from backend.protocol_rpc.fees import (
     FEE_ACCOUNTING_KEY,
+    acceptance_dispatch_pending,
     apply_fee_top_up,
     normalize_fees_distribution,
     runtime_rotations_for_round,
@@ -1597,6 +1598,8 @@ class TransactionsProcessor:
             TransactionStatus.LEADER_TIMEOUT.value,
             TransactionStatus.VALIDATORS_TIMEOUT.value,
         } or bool(row["appealed"]):
+            raise ValueError("CanNotAppeal")
+        if acceptance_dispatch_pending((row["data"] or {}).get(FEE_ACCOUNTING_KEY)):
             raise ValueError("CanNotAppeal")
         # The RPC may have waited for this row lock. Consensus evaluates the
         # deadline at transaction execution, not when the caller began
