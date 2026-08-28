@@ -10,9 +10,12 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from backend.database_handler.accounts_manager import AccountsManager
 from backend.database_handler.errors import AccountNotFoundError
-from backend.database_handler.models import Transactions
+from backend.database_handler.models import Transactions, TransactionStatus
 from backend.database_handler.transactions_processor import TransactionsProcessor
-from backend.consensus.history import ACTIVE_APPEAL_BASIS_KEY
+from backend.consensus.history import (
+    ACTIVE_APPEAL_BASIS_KEY,
+    APPEAL_RECOVERY_SNAPSHOT_KEY,
+)
 from backend.protocol_rpc.fees import (
     FEE_ACCOUNTING_KEY,
     calculate_appeal_charge,
@@ -264,6 +267,10 @@ def test_abort_tx_appeal_admission_refunds_charge_and_restores_decision(
             "nextAppealWindow": 10,
         }
     }
+    tx_model.data = {
+        **tx_model.data,
+        APPEAL_RECOVERY_SNAPSHOT_KEY: {"status": "ACCEPTED"},
+    }
     session.commit()
 
     expected_refund = charge["bond"] + charge["funding"]
@@ -278,9 +285,148 @@ def test_abort_tx_appeal_admission_refunds_charge_and_restores_decision(
     assert tx.appealed is False
     assert tx.timestamp_appeal is None
     assert ACTIVE_APPEAL_BASIS_KEY not in tx.consensus_history
+    assert APPEAL_RECOVERY_SNAPSHOT_KEY not in tx.data
     assert restored["appeal_bonds"] == []
     assert restored["primary_fee_budget"] == accounting["primary_fee_budget"]
     assert restored["fees_distribution"] == accounting["fees_distribution"]
+
+
+def test_admitted_appeal_snapshot_restores_exact_agreed_state_for_retry(
+    session: Session,
+):
+    sender = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
+    tx_hash = "0x" + "af" * 32
+    fees = _fees_distribution(appeals=0, rotations=[0])
+    accounting = create_fee_accounting(
+        fees_distribution=fees,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees, 5),
+        user_value=0,
+        sender=sender,
+    )
+    original_history = {
+        "latestDecision": {
+            "decisionId": 1,
+            "status": "ACCEPTED",
+            "materializedAt": 100,
+            "appealDeadline": 1_000_000_000_000,
+        },
+        "consensus_results": [{"consensus_round": "ACCEPTED"}],
+    }
+    original_consensus_data = {"leader_receipt": [{"result": "original"}]}
+    original_contract_snapshot = {"states": {"accepted": {"slot": "original"}}}
+    _insert_fee_accounted_transaction(
+        session,
+        sender=sender,
+        accounting=accounting,
+        tx_hash=tx_hash,
+        consensus_history=original_history,
+    )
+    tx = session.query(Transactions).filter_by(hash=tx_hash).one()
+    tx.status = TransactionStatus.ACCEPTED
+    tx.consensus_data = original_consensus_data
+    tx.contract_snapshot = original_contract_snapshot
+    tx.appeal_failed = 2
+    tx.appeal_processing_time = 7
+    tx.rotation_count = 1
+    tx.timestamp_awaiting_finalization = 99
+    session.commit()
+
+    processor = TransactionsProcessor(session)
+    processor.admit_transaction_appeal(
+        tx_hash,
+        expected_decision_id=1,
+        submitted_at=200,
+        appeal_deadline=1_000_000_000_000,
+        retention_bps=8_000,
+        prepare_fee_accounting=lambda current: (current, 0),
+    )
+    session.commit()
+    session.expire_all()
+
+    tx = session.query(Transactions).filter_by(hash=tx_hash).one()
+    admitted_history = tx.consensus_history
+    assert APPEAL_RECOVERY_SNAPSHOT_KEY in tx.data
+    tx.status = TransactionStatus.COMMITTING
+    tx.consensus_history = {"consensus_results": [{"partial": True}]}
+    tx.consensus_data = {"partial": True}
+    tx.contract_snapshot = {"states": {"accepted": {"slot": "partial"}}}
+    tx.appealed = False
+    tx.appeal_failed = 99
+    tx.appeal_undetermined = True
+    tx.appeal_leader_timeout = True
+    tx.appeal_validators_timeout = True
+    tx.appeal_processing_time = 999
+    tx.rotation_count = 999
+    tx.leader_timeout_validators = [{"address": "partial"}]
+    tx.timestamp_awaiting_finalization = None
+    tx.timestamp_appeal = None
+    session.commit()
+
+    assert processor.restore_transaction_appeal_for_retry(tx_hash) is True
+    session.commit()
+    session.expire_all()
+
+    restored = session.query(Transactions).filter_by(hash=tx_hash).one()
+    assert restored.status == TransactionStatus.ACCEPTED
+    assert restored.consensus_history == admitted_history
+    assert restored.consensus_data == original_consensus_data
+    assert restored.contract_snapshot == original_contract_snapshot
+    assert restored.appealed is True
+    assert restored.appeal_failed == 2
+    assert restored.appeal_undetermined is False
+    assert restored.appeal_leader_timeout is False
+    assert restored.appeal_validators_timeout is False
+    assert restored.appeal_processing_time == 7
+    assert restored.rotation_count == 1
+    assert restored.leader_timeout_validators is None
+    assert restored.timestamp_awaiting_finalization == 99
+    assert restored.timestamp_appeal is not None
+
+
+def test_appeal_recovery_snapshot_survives_pending_terminal_recomputation(
+    session: Session,
+):
+    sender = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
+    tx_hash = "0x" + "ae" * 32
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(appeals=0, rotations=[0]),
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(
+            _fees_distribution(appeals=0, rotations=[0]), 5
+        ),
+        user_value=0,
+        sender=sender,
+    )
+    _insert_fee_accounted_transaction(
+        session,
+        sender=sender,
+        accounting=accounting,
+        tx_hash=tx_hash,
+        consensus_history={"consensus_results": []},
+    )
+    tx = session.query(Transactions).filter_by(hash=tx_hash).one()
+    tx.status = TransactionStatus.PENDING
+    tx.data = {
+        **tx.data,
+        APPEAL_RECOVERY_SNAPSHOT_KEY: {"status": "ACCEPTED"},
+    }
+    session.commit()
+
+    processor = TransactionsProcessor(session)
+    processor.clear_transaction_appeal_recovery_snapshot(tx_hash, include_pending=False)
+    session.commit()
+    session.expire_all()
+    pending = session.query(Transactions).filter_by(hash=tx_hash).one()
+    assert APPEAL_RECOVERY_SNAPSHOT_KEY in pending.data
+
+    pending.status = TransactionStatus.ACCEPTED
+    session.commit()
+    processor.clear_transaction_appeal_recovery_snapshot(tx_hash, include_pending=False)
+    session.commit()
+    session.expire_all()
+    completed = session.query(Transactions).filter_by(hash=tx_hash).one()
+    assert APPEAL_RECOVERY_SNAPSHOT_KEY not in completed.data
 
 
 def test_concurrent_appeal_admission_abort_refunds_only_once(engine: Engine):

@@ -187,7 +187,9 @@ class TestWorkerAppealContractNotFoundHandling:
             new_callable=AsyncMock,
             side_effect=ContractNotFoundError(contract_address),
         ):
-            with patch.object(worker, "release_transaction"):
+            with patch.object(worker, "release_transaction"), patch(
+                "backend.consensus.worker.AccountsManager"
+            ) as accounts_manager_cls:
                 with patch(
                     "backend.consensus.base.ConsensusAlgorithm.dispatch_transaction_status_update",
                     new_callable=AsyncMock,
@@ -199,6 +201,10 @@ class TestWorkerAppealContractNotFoundHandling:
                     assert call_args.args[1] == "0xtest_appeal_hash"
                     assert call_args.args[2] == TransactionStatus.FINALIZED
                     assert call_args.args[3] == mock_msg_handler
+                    accounts_manager_cls.return_value.abort_tx_appeal_admission_once.assert_called_once_with(
+                        "0xtest_appeal_hash",
+                        "contract_not_found_during_appeal",
+                    )
 
 
 class TestGenCallContractNotFoundHandling:

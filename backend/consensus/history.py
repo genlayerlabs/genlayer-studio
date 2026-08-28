@@ -46,6 +46,11 @@ TERMINAL_VALIDATOR_APPEAL_ROUNDS = {
 # existing transaction reads carry the authority without a schema migration.
 LATEST_DECISION_KEY = "latestDecision"
 ACTIVE_APPEAL_BASIS_KEY = "activeAppealBasis"
+# Studio processes an admitted appeal asynchronously, unlike the atomic
+# on-chain call. Preserve the exact agreed transaction state so worker or
+# process failures can retry the paid appeal without resetting the original
+# decision or stranding its custody.
+APPEAL_RECOVERY_SNAPSHOT_KEY = "appealRecoverySnapshot"
 
 
 def latest_decision_metadata(

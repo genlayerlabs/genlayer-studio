@@ -16,6 +16,7 @@ from backend.database_handler.errors import ContractNotFoundError
 from backend.domain.types import Transaction
 from backend.node.genvm.error_codes import GenVMInternalError
 from backend.consensus.base import ConsensusAlgorithm, NoValidatorsAvailableError
+from backend.consensus.history import APPEAL_RECOVERY_SNAPSHOT_KEY
 
 # Alias for use in context manager (avoids circular import issues)
 _NoValidatorsError = NoValidatorsAvailableError
@@ -761,6 +762,11 @@ class ConsensusWorker:
             Control to the processing logic
         """
         transaction_reset = False
+        raw_transaction_data = tx_data.get("data")
+        protected_appeal_work = tx_type == "appeal" or (
+            isinstance(raw_transaction_data, dict)
+            and APPEAL_RECOVERY_SNAPSHOT_KEY in raw_transaction_data
+        )
         try:
             # Track current transaction for health monitoring
             self.current_transactions[tx_hash] = {
@@ -776,11 +782,58 @@ class ConsensusWorker:
                 f"is_leader={e.is_leader}, message={e}, detail={e.detail}, ctx={e.ctx}"
             )
             session.rollback()
+            if protected_appeal_work:
+                self._restore_admitted_appeal_for_retry(tx_hash)
 
-            # Only reset transaction and stop worker for leader errors (or unknown origin)
-            # Validator errors can be handled by the consensus algorithm
-            # (continue with remaining validators)
-            if e.is_leader is False:
+            # A paid appeal is already bound to an agreed decision. Reusing the
+            # ordinary transaction-reset path here would erase that decision and
+            # its consensus history while leaving the admitted appeal custody in
+            # ``transaction.data``. Preserve the appeal unchanged and release its
+            # claim so another worker can retry it instead. This is the Studio
+            # equivalent of an on-chain appeal call reverting before it mutates
+            # the transaction.
+            if protected_appeal_work:
+                if e.is_leader is False:
+                    logger.warning(
+                        f"[Worker {self.worker_id}] GenVM internal error in appeal validator "
+                        f"for {tx_hash}; preserving the admitted appeal for retry"
+                    )
+                elif e.is_fatal:
+                    transient_causes = _TRANSIENT_LEADER_FATAL_CAUSES.intersection(
+                        e.causes or []
+                    )
+                    if transient_causes:
+                        await asyncio.sleep(
+                            float(
+                                os.environ.get("GENVM_TRANSIENT_FATAL_BACKOFF_S", "3")
+                            )
+                        )
+                        logger.warning(
+                            f"[Worker {self.worker_id}] Transient fatal GenVM error in appeal "
+                            f"leader ({', '.join(sorted(transient_causes))}); preserving the "
+                            f"admitted appeal and keeping the worker alive"
+                        )
+                    else:
+                        logger.warning(
+                            f"[Worker {self.worker_id}] Fatal GenVM error in appeal leader; "
+                            f"preserving the admitted appeal for another worker and stopping "
+                            f"this worker"
+                        )
+                        self.running = False
+                else:
+                    logger.warning(
+                        f"[Worker {self.worker_id}] Retryable GenVM error in appeal leader for "
+                        f"{tx_hash}; preserving the admitted appeal for retry"
+                    )
+                await self._handle_generic_error_retry(
+                    tx_hash,
+                    e,
+                    cancel_on_exhaustion=False,
+                )
+            # Only reset an ordinary transaction for leader errors (or unknown
+            # origin). Validator errors can be handled by the consensus
+            # algorithm (continue with remaining validators).
+            elif e.is_leader is False:
                 # Validator error - don't reset, consensus will continue with remaining validators
                 logger.warning(
                     f"[Worker {self.worker_id}] GenVM internal error in validator for {tx_hash}, "
@@ -863,7 +916,13 @@ class ConsensusWorker:
                 f"[Worker {self.worker_id}] Error processing {tx_type} {tx_hash}: {e}"
             )
             session.rollback()
-            await self._handle_generic_error_retry(tx_hash, e)
+            if protected_appeal_work:
+                self._restore_admitted_appeal_for_retry(tx_hash)
+            await self._handle_generic_error_retry(
+                tx_hash,
+                e,
+                cancel_on_exhaustion=not protected_appeal_work,
+            )
         finally:
             # Clear current transaction tracking
             self.current_transactions.pop(tx_hash, None)
@@ -877,6 +936,27 @@ class ConsensusWorker:
                         f"[Worker {self.worker_id}] Failed to release {tx_type} {tx_hash}: {release_error}",
                         exc_info=True,
                     )
+
+    def _restore_admitted_appeal_for_retry(self, tx_hash: str) -> bool:
+        """Undo partial, independently committed appeal state transitions."""
+
+        try:
+            with self.get_session() as restore_session:
+                restored = TransactionsProcessor(
+                    restore_session
+                ).restore_transaction_appeal_for_retry(tx_hash)
+                if restored:
+                    restore_session.commit()
+                else:
+                    restore_session.rollback()
+                return restored
+        except Exception as restore_error:
+            logger.error(
+                f"[Worker {self.worker_id}] Failed to restore admitted appeal "
+                f"{tx_hash} for retry: {restore_error}",
+                exc_info=True,
+            )
+            return False
 
     # Statuses where the consensus result has been agreed and the tx is
     # awaiting finalization. Recovery must NOT wipe consensus_data /
@@ -916,6 +996,104 @@ class ConsensusWorker:
             Number of transactions reset (escalations are logged but not
             counted as recoveries).
         """
+        # Step 0: an interrupted paid appeal must resume from the exact agreed
+        # decision captured at admission. Appeal state handlers commit their
+        # progress incrementally, so an ordinary PENDING reset here would erase
+        # the decision while leaving its bond custody behind.
+        restore_appeals_query = text(
+            """
+            UPDATE transactions
+            SET status = CAST(data->'appealRecoverySnapshot'->>'status' AS transaction_status),
+                consensus_history = data->'appealRecoverySnapshot'->'consensusHistory',
+                consensus_data = NULLIF(
+                    data->'appealRecoverySnapshot'->'consensusData',
+                    'null'::jsonb
+                ),
+                contract_snapshot = NULLIF(
+                    data->'appealRecoverySnapshot'->'contractSnapshot',
+                    'null'::jsonb
+                ),
+                appealed = TRUE,
+                appeal_failed = COALESCE(
+                    (data->'appealRecoverySnapshot'->>'appealFailed')::integer,
+                    0
+                ),
+                appeal_undetermined = COALESCE(
+                    (data->'appealRecoverySnapshot'->>'appealUndetermined')::boolean,
+                    FALSE
+                ),
+                appeal_leader_timeout = COALESCE(
+                    (data->'appealRecoverySnapshot'->>'appealLeaderTimeout')::boolean,
+                    FALSE
+                ),
+                appeal_validators_timeout = COALESCE(
+                    (data->'appealRecoverySnapshot'->>'appealValidatorsTimeout')::boolean,
+                    FALSE
+                ),
+                appeal_processing_time = COALESCE(
+                    (data->'appealRecoverySnapshot'->>'appealProcessingTime')::integer,
+                    0
+                ),
+                rotation_count = COALESCE(
+                    (data->'appealRecoverySnapshot'->>'rotationCount')::integer,
+                    0
+                ),
+                leader_timeout_validators = NULLIF(
+                    data->'appealRecoverySnapshot'->'leaderTimeoutValidators',
+                    'null'::jsonb
+                ),
+                timestamp_awaiting_finalization = (
+                    data->'appealRecoverySnapshot'->>'timestampAwaitingFinalization'
+                )::bigint,
+                timestamp_appeal = (
+                    data->'appealRecoverySnapshot'->>'timestampAppeal'
+                )::bigint,
+                worker_id = NULL,
+                blocked_at = NULL
+            WHERE data ? 'appealRecoverySnapshot'
+              AND status IN :consensus_statuses
+              AND (
+                  (
+                   blocked_at IS NOT NULL
+                   AND blocked_at < NOW() - CAST(:timeout AS INTERVAL)
+                   AND COALESCE(
+                       (
+                           SELECT to_timestamp(MAX(progress.value::double precision))
+                           FROM jsonb_each_text(
+                               COALESCE(
+                                   transactions.consensus_history->'current_monitoring',
+                                   '{}'::jsonb
+                               )
+                           ) AS progress(key, value)
+                           WHERE progress.value ~ '^[0-9]+(\\.[0-9]+)?$'
+                       ),
+                       blocked_at
+                   ) < NOW() - CAST(:timeout AS INTERVAL)
+                  )
+                  OR
+                  (blocked_at IS NULL
+                   AND status IN ('PROPOSING', 'COMMITTING', 'REVEALING')
+                   AND created_at < NOW() - CAST(:orphan_timeout AS INTERVAL))
+              )
+            RETURNING hash, status;
+            """
+        ).bindparams(bindparam("consensus_statuses", expanding=True))
+        restored_appeals = session.execute(
+            restore_appeals_query,
+            {
+                "timeout": f"{self.transaction_timeout_minutes} minutes",
+                "orphan_timeout": "5 minutes",
+                "consensus_statuses": list(self._CONSENSUS_RECOVERABLE_STATUSES),
+            },
+        ).fetchall()
+        if restored_appeals:
+            session.commit()
+            for row in restored_appeals:
+                logger.info(
+                    f"[Worker {self.worker_id}] Restored interrupted paid appeal "
+                    f"{row.hash} to admitted status {row.status}"
+                )
+
         # Step 1: escalate txs that have already hit the recovery limit.
         # These have been reset N times and keep getting stuck — cancel
         # them so the per-contract queue can drain.
@@ -937,6 +1115,7 @@ class ConsensusWorker:
                                  )
             WHERE recovery_count >= :max_cycles
               AND status IN :consensus_statuses
+              AND NOT (data ? 'appealRecoverySnapshot')
               AND (
                   (
                    blocked_at IS NOT NULL
@@ -1031,6 +1210,7 @@ class ConsensusWorker:
                 recovery_count = recovery_count + 1
             WHERE recovery_count < :max_cycles
               AND status IN :consensus_statuses
+              AND NOT (data ? 'appealRecoverySnapshot')
               AND (
                   -- Case 1: Transactions with expired blocks
                   (
@@ -1125,7 +1305,7 @@ class ConsensusWorker:
                     f"Likely finalization-starvation — investigate."
                 )
 
-        return len(recovered)
+        return len(restored_appeals) + len(recovered)
 
     async def process_transaction(self, transaction_data: dict, session: Session):
         """
@@ -1235,6 +1415,9 @@ class ConsensusWorker:
                             validators_snapshot,
                         )
 
+                TransactionsProcessor(
+                    session
+                ).clear_transaction_appeal_recovery_snapshot(transaction.hash)
                 session.commit()
                 logger.info(
                     f"[Worker {self.worker_id}] Successfully processed transaction {transaction.hash}"
@@ -1253,7 +1436,19 @@ class ConsensusWorker:
             logger.warning(
                 f"[Worker {self.worker_id}] No validators available for transaction {transaction_data['hash']}"
             )
-            await self._handle_no_validators_retry(transaction_data, session)
+            raw_data = transaction_data.get("data")
+            if isinstance(raw_data, dict) and APPEAL_RECOVERY_SNAPSHOT_KEY in raw_data:
+                session.rollback()
+                self._restore_admitted_appeal_for_retry(tx_hash)
+                await self._handle_generic_error_retry(
+                    tx_hash,
+                    NoValidatorsAvailableError(
+                        "No validators available for appeal recomputation"
+                    ),
+                    cancel_on_exhaustion=False,
+                )
+            else:
+                await self._handle_no_validators_retry(transaction_data, session)
 
         except ContractNotFoundError as e:
             # Handle contract not found - mark as ACCEPTED with ERROR execution result
@@ -1376,10 +1571,19 @@ class ConsensusWorker:
                 f"next attempt in {backoff}s"
             )
 
-    async def _handle_generic_error_retry(self, tx_hash: str, error: Exception):
+    async def _handle_generic_error_retry(
+        self,
+        tx_hash: str,
+        error: Exception,
+        *,
+        cancel_on_exhaustion: bool = True,
+    ):
         """
         Handle retry logic for generic errors during transaction processing.
-        Implements exponential backoff and cancels after MAX_GENERIC_ERROR_RETRIES.
+        Implements exponential backoff and normally cancels after
+        MAX_GENERIC_ERROR_RETRIES. Paid appeals disable cancellation because
+        an infrastructure failure must not invalidate an already-agreed
+        decision or strand its appeal custody.
 
         Args:
             tx_hash: Transaction hash
@@ -1393,7 +1597,10 @@ class ConsensusWorker:
         retry_info["last_error"] = str(error)
         self._generic_error_retries[tx_hash] = retry_info
 
-        if retry_info["count"] >= self.MAX_GENERIC_ERROR_RETRIES:
+        if (
+            retry_info["count"] >= self.MAX_GENERIC_ERROR_RETRIES
+            and cancel_on_exhaustion
+        ):
             # Cancel the transaction after max retries
             logger.error(
                 f"[Worker {self.worker_id}] Transaction {tx_hash} canceled after "
@@ -1438,11 +1645,21 @@ class ConsensusWorker:
             del self._generic_error_retries[tx_hash]
         else:
             backoff = self._generic_error_base_backoff * (
-                2 ** (retry_info["count"] - 1)
+                2
+                ** min(
+                    retry_info["count"] - 1,
+                    self.MAX_GENERIC_ERROR_RETRIES - 1,
+                )
             )
             logger.warning(
                 f"[Worker {self.worker_id}] Generic error for {tx_hash}, "
-                f"retry {retry_info['count']}/{self.MAX_GENERIC_ERROR_RETRIES}, "
+                f"retry {retry_info['count']}"
+                + (
+                    f"/{self.MAX_GENERIC_ERROR_RETRIES}"
+                    if cancel_on_exhaustion
+                    else " (appeal preserved)"
+                )
+                + ", "
                 f"next attempt in {backoff}s - error: {error}"
             )
 
@@ -1852,7 +2069,12 @@ class ConsensusWorker:
                             validators_snapshot,
                         )
 
+                transactions_processor.clear_transaction_appeal_recovery_snapshot(
+                    transaction.hash, include_pending=False
+                )
                 session.commit()
+                self._generic_error_retries.pop(transaction.hash, None)
+                self._leader_crash_retries.pop(transaction.hash, None)
                 logger.info(
                     f"[Worker {self.worker_id}] Successfully processed appeal for transaction {transaction.hash}"
                 )
@@ -1865,6 +2087,16 @@ class ConsensusWorker:
 
             with self.get_session() as error_session:
                 transactions_processor = TransactionsProcessor(error_session)
+                accounts_manager = AccountsManager(error_session)
+
+                # The appeal never produced an outcome. Finalizing the original
+                # decision must not make its admitted bond look like a failed
+                # appeal: unwind the exact admission first, refunding both bond
+                # principal and induced-work funding to the appealer.
+                accounts_manager.abort_tx_appeal_admission_once(
+                    tx_hash,
+                    "contract_not_found_during_appeal",
+                )
 
                 await ConsensusAlgorithm.dispatch_transaction_status_update(
                     transactions_processor,
@@ -1875,7 +2107,7 @@ class ConsensusWorker:
                 tx = error_session.query(Transactions).filter_by(hash=tx_hash).one()
                 refund_recipient = tx.origin_address or tx.from_address
                 if refund_recipient:
-                    AccountsManager(error_session).settle_tx_fee_accounting_once(
+                    accounts_manager.settle_tx_fee_accounting_once(
                         tx_hash,
                         refund_recipient,
                         reason="finalized_contract_not_found_during_appeal",
@@ -1943,7 +2175,11 @@ class ConsensusWorker:
         generic_info = self._generic_error_retries.get(tx_hash)
         if generic_info:
             backoff = self._generic_error_base_backoff * (
-                2 ** (generic_info["count"] - 1)
+                2
+                ** min(
+                    generic_info["count"] - 1,
+                    self.MAX_GENERIC_ERROR_RETRIES - 1,
+                )
             )
             time_since_last = time.time() - generic_info["last_attempt"]
             if time_since_last < backoff:
@@ -1984,12 +2220,15 @@ class ConsensusWorker:
 
         appeal_data = await self.claim_next_appeal(session)
         if appeal_data:
-            logger.debug(
-                f"[Worker {self.worker_id}] Claimed appeal for transaction {appeal_data['hash']}"
-            )
-            task = asyncio.create_task(self._process_appeal_task(appeal_data))
-            self._active_tasks.add(task)
-            return True
+            tx_hash = appeal_data["hash"]
+            if not self._is_in_backoff(appeal_data):
+                logger.debug(
+                    f"[Worker {self.worker_id}] Claimed appeal for transaction {tx_hash}"
+                )
+                task = asyncio.create_task(self._process_appeal_task(appeal_data))
+                self._active_tasks.add(task)
+                return True
+            self.release_transaction(session, tx_hash)
 
         finalization_data = await self.claim_next_finalization(session)
         if finalization_data:

@@ -14,6 +14,7 @@ import json
 import base64
 import time
 import os
+import copy
 from typing import Callable
 from backend.domain.types import TransactionType
 from web3 import Web3
@@ -24,6 +25,7 @@ from backend.consensus.types import (
     consensus_vote_type_code,
 )
 from backend.consensus.history import (
+    APPEAL_RECOVERY_SNAPSHOT_KEY,
     completed_consensus_round_index,
     completed_consensus_rounds,
     materialize_decision_metadata,
@@ -1574,7 +1576,12 @@ class TransactionsProcessor:
         row = (
             self.session.execute(
                 text(
-                    "SELECT status, appealed, consensus_history, data FROM transactions"
+                    "SELECT status, appealed, consensus_history, consensus_data,"
+                    " contract_snapshot, appeal_failed, appeal_undetermined,"
+                    " appeal_leader_timeout, appeal_validators_timeout,"
+                    " appeal_processing_time, rotation_count,"
+                    " leader_timeout_validators, timestamp_awaiting_finalization, data"
+                    " FROM transactions"
                     " WHERE hash = :hash FOR UPDATE"
                 ),
                 {"hash": transaction_hash},
@@ -1609,6 +1616,26 @@ class TransactionsProcessor:
         )
         if fee_accounting is not None:
             data[FEE_ACCOUNTING_KEY] = fee_accounting
+        status_value = (
+            row["status"].value
+            if hasattr(row["status"], "value")
+            else str(row["status"])
+        )
+        data[APPEAL_RECOVERY_SNAPSHOT_KEY] = {
+            "status": status_value,
+            "consensusHistory": copy.deepcopy(updated),
+            "consensusData": copy.deepcopy(row["consensus_data"]),
+            "contractSnapshot": copy.deepcopy(row["contract_snapshot"]),
+            "appealFailed": int(row["appeal_failed"] or 0),
+            "appealUndetermined": bool(row["appeal_undetermined"]),
+            "appealLeaderTimeout": bool(row["appeal_leader_timeout"]),
+            "appealValidatorsTimeout": bool(row["appeal_validators_timeout"]),
+            "appealProcessingTime": int(row["appeal_processing_time"] or 0),
+            "rotationCount": int(row["rotation_count"] or 0),
+            "leaderTimeoutValidators": copy.deepcopy(row["leader_timeout_validators"]),
+            "timestampAwaitingFinalization": row["timestamp_awaiting_finalization"],
+            "timestampAppeal": admitted_at,
+        }
         self.session.execute(
             text(
                 "UPDATE transactions"
@@ -1626,6 +1653,71 @@ class TransactionsProcessor:
             },
         )
         return int(surplus_refund)
+
+    def restore_transaction_appeal_for_retry(self, transaction_hash: str) -> bool:
+        """Restore the exact admitted state after interrupted appeal work."""
+
+        transaction = (
+            self.session.query(Transactions)
+            .filter_by(hash=transaction_hash)
+            .populate_existing()
+            .with_for_update()
+            .one_or_none()
+        )
+        if transaction is None or not isinstance(transaction.data, dict):
+            return False
+        snapshot = transaction.data.get(APPEAL_RECOVERY_SNAPSHOT_KEY)
+        if not isinstance(snapshot, dict):
+            return False
+        try:
+            transaction.status = TransactionStatus(str(snapshot["status"]))
+        except (KeyError, TypeError, ValueError):
+            return False
+
+        transaction.consensus_history = copy.deepcopy(snapshot.get("consensusHistory"))
+        transaction.consensus_data = copy.deepcopy(snapshot.get("consensusData"))
+        transaction.contract_snapshot = copy.deepcopy(snapshot.get("contractSnapshot"))
+        transaction.appealed = True
+        transaction.appeal_failed = int(snapshot.get("appealFailed", 0) or 0)
+        transaction.appeal_undetermined = bool(
+            snapshot.get("appealUndetermined", False)
+        )
+        transaction.appeal_leader_timeout = bool(
+            snapshot.get("appealLeaderTimeout", False)
+        )
+        transaction.appeal_validators_timeout = bool(
+            snapshot.get("appealValidatorsTimeout", False)
+        )
+        transaction.appeal_processing_time = int(
+            snapshot.get("appealProcessingTime", 0) or 0
+        )
+        transaction.rotation_count = int(snapshot.get("rotationCount", 0) or 0)
+        transaction.leader_timeout_validators = copy.deepcopy(
+            snapshot.get("leaderTimeoutValidators")
+        )
+        transaction.timestamp_awaiting_finalization = snapshot.get(
+            "timestampAwaitingFinalization"
+        )
+        transaction.timestamp_appeal = int(snapshot.get("timestampAppeal", 0) or 0)
+        self.session.flush()
+        return True
+
+    def clear_transaction_appeal_recovery_snapshot(
+        self, transaction_hash: str, *, include_pending: bool = True
+    ) -> None:
+        """Drop the transient snapshot once an appeal has completed."""
+
+        pending_guard = "" if include_pending else " AND status != 'PENDING'"
+        self.session.execute(
+            text(
+                "UPDATE transactions SET data = data - :snapshot_key"
+                " WHERE hash = :hash AND data ? :snapshot_key" + pending_guard
+            ),
+            {
+                "hash": transaction_hash,
+                "snapshot_key": APPEAL_RECOVERY_SNAPSHOT_KEY,
+            },
+        )
 
     def set_transaction_timestamp_awaiting_finalization(
         self, transaction_hash: str, timestamp_awaiting_finalization: int = None

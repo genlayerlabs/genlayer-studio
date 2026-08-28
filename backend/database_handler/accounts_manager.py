@@ -13,6 +13,7 @@ from backend.protocol_rpc.fees import (
 )
 from backend.consensus.history import (
     ACTIVE_APPEAL_BASIS_KEY,
+    APPEAL_RECOVERY_SNAPSHOT_KEY,
     completed_consensus_round_index,
 )
 
@@ -209,6 +210,7 @@ class AccountsManager:
         was_terminal = accounting.get("status") in {"settled", "canceled"}
         updated, refund = cancel_fee_accounting(accounting, reason=reason)
         data[FEE_ACCOUNTING_KEY] = updated
+        data.pop(APPEAL_RECOVERY_SNAPSHOT_KEY, None)
         transaction.data = data
         if refund > 0:
             self._credit_fee_refund_settlements(updated, sender_address, refund)
@@ -245,6 +247,7 @@ class AccountsManager:
             return 0
 
         data[FEE_ACCOUNTING_KEY] = updated
+        data.pop(APPEAL_RECOVERY_SNAPSHOT_KEY, None)
         transaction.data = data
         history = dict(transaction.consensus_history or {})
         history.pop(ACTIVE_APPEAL_BASIS_KEY, None)
@@ -296,6 +299,7 @@ class AccountsManager:
             ),
         )
         data[FEE_ACCOUNTING_KEY] = updated
+        data.pop(APPEAL_RECOVERY_SNAPSHOT_KEY, None)
         transaction.data = data
         if refund > 0:
             self._credit_fee_refund_settlements(updated, sender_address, refund)

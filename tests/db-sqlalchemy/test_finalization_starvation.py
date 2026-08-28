@@ -25,6 +25,7 @@ These tests cover:
 
 import time
 import os
+import json
 import pytest
 from unittest.mock import MagicMock
 from sqlalchemy import Engine, text
@@ -445,6 +446,97 @@ async def test_recover_still_resets_stuck_consensus_txs(
     assert row.recovery_count == 1
     assert row.consensus_data is None
     assert row.consensus_history is None
+
+
+@pytest.mark.asyncio
+async def test_recover_restores_interrupted_paid_appeal_instead_of_resetting_it(
+    engine: Engine, worker: ConsensusWorker, session: Session
+):
+    _setup_contract(engine)
+    tx_hash = "0x" + "78" * 32
+    admitted_history = {
+        "latestDecision": {"decisionId": 1, "status": "ACCEPTED"},
+        "activeAppealBasis": {
+            "decisionId": 1,
+            "submittedAt": 123,
+            "nextAppealWindow": 10,
+        },
+        "consensus_results": [{"consensus_round": "ACCEPTED"}],
+    }
+    original_consensus_data = {"leader_receipt": [{"result": "original"}]}
+    original_contract_snapshot = {"states": {"accepted": {"slot": "original"}}}
+    snapshot = {
+        "status": "ACCEPTED",
+        "consensusHistory": admitted_history,
+        "consensusData": original_consensus_data,
+        "contractSnapshot": original_contract_snapshot,
+        "appealFailed": 2,
+        "appealUndetermined": False,
+        "appealLeaderTimeout": False,
+        "appealValidatorsTimeout": False,
+        "appealProcessingTime": 7,
+        "rotationCount": 1,
+        "leaderTimeoutValidators": None,
+        "timestampAwaitingFinalization": 99,
+        "timestampAppeal": 123,
+    }
+    _insert_tx(
+        session,
+        tx_hash=tx_hash,
+        status="COMMITTING",
+        nonce=0,
+        consensus_data={"partial": True},
+        consensus_history={"current_monitoring": {"COMMITTING": 1}},
+        blocked_at_offset_seconds=-25 * 60,
+        worker_id="dead-appeal-worker",
+    )
+    session.execute(
+        text(
+            "UPDATE transactions SET data = CAST(:data AS jsonb),"
+            " contract_snapshot = CAST(:snapshot AS jsonb), appealed = false,"
+            " appeal_failed = 99, appeal_undetermined = true,"
+            " appeal_leader_timeout = true, appeal_validators_timeout = true,"
+            " appeal_processing_time = 999, rotation_count = 999"
+            " WHERE hash = :hash"
+        ),
+        {
+            "hash": tx_hash,
+            "data": json.dumps({"appealRecoverySnapshot": snapshot}),
+            "snapshot": json.dumps({"states": {"accepted": {"slot": "partial"}}}),
+        },
+    )
+    session.commit()
+
+    recovered = await worker.recover_stuck_transactions(session)
+
+    row = session.execute(
+        text(
+            "SELECT status, blocked_at, worker_id, recovery_count, appealed,"
+            " appeal_failed, appeal_undetermined, appeal_leader_timeout,"
+            " appeal_validators_timeout, appeal_processing_time, rotation_count,"
+            " timestamp_appeal, timestamp_awaiting_finalization,"
+            " consensus_data, consensus_history, contract_snapshot"
+            " FROM transactions WHERE hash = :hash"
+        ),
+        {"hash": tx_hash},
+    ).one()
+    assert recovered == 1
+    assert row.status == TransactionStatus.ACCEPTED.value
+    assert row.blocked_at is None
+    assert row.worker_id is None
+    assert row.recovery_count == 0
+    assert row.appealed is True
+    assert row.appeal_failed == 2
+    assert row.appeal_undetermined is False
+    assert row.appeal_leader_timeout is False
+    assert row.appeal_validators_timeout is False
+    assert row.appeal_processing_time == 7
+    assert row.rotation_count == 1
+    assert row.timestamp_appeal == 123
+    assert row.timestamp_awaiting_finalization == 99
+    assert row.consensus_data == original_consensus_data
+    assert row.consensus_history == admitted_history
+    assert row.contract_snapshot == original_contract_snapshot
 
 
 def test_direct_genvm_reset_increments_recovery_count(
