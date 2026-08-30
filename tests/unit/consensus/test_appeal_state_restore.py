@@ -22,6 +22,7 @@ import pytest
 
 import backend.consensus.base as consensus_base
 from backend.consensus.base import ConsensusAlgorithm
+from backend.consensus.history import APPEAL_RECOVERY_SNAPSHOT_KEY
 from backend.consensus.types import ConsensusRound
 from backend.consensus.worker import ConsensusWorker
 from backend.database_handler.contract_snapshot import ContractSnapshot
@@ -371,6 +372,7 @@ class TestClaimNextAppealReturnsSnapshot:
             "AND pg_try_advisory", 1
         )[0]
         assert "t2.blocked_at IS NOT NULL" in blocked_guard
+        assert "t2.blocked_at >" not in blocked_guard
         assert "t2.appealed = true" not in blocked_guard
 
     @pytest.mark.asyncio
@@ -393,3 +395,62 @@ class TestClaimNextAppealReturnsSnapshot:
         assert transaction.contract_snapshot is not None
         assert transaction.contract_snapshot.states["accepted"] == stored_accepted
         assert transaction.consensus_history == stored_history
+
+
+@pytest.mark.asyncio
+async def test_ancestor_rewind_refunds_active_descendant_appeal_before_reset(
+    monkeypatch,
+):
+    future_hash = "0xfuture"
+    stale_data = {
+        FEE_ACCOUNTING_KEY: {"active_message_generation": {"generation": 1}},
+        APPEAL_RECOVERY_SNAPSHOT_KEY: {"status": "ACCEPTED"},
+    }
+    refunded_data = {
+        FEE_ACCOUNTING_KEY: {
+            "aborted_appeals": [{"reason": "ancestor_rewind", "refund": 123}],
+            "active_message_generation": {"generation": 1},
+        }
+    }
+    transactions_processor = Mock()
+    transactions_processor.get_newer_transactions.return_value = [
+        {"hash": future_hash, "appealed": True, "data": stale_data}
+    ]
+    transactions_processor.get_transaction_by_hash.return_value = {
+        "hash": future_hash,
+        "data": refunded_data,
+    }
+    accounts_manager = Mock()
+    context = SimpleNamespace(
+        transaction=SimpleNamespace(hash=TX_HASH),
+        transactions_processor=transactions_processor,
+        accounts_manager=accounts_manager,
+        msg_handler=Mock(),
+    )
+    status_update = AsyncMock()
+    monkeypatch.setattr(
+        ConsensusAlgorithm,
+        "dispatch_transaction_status_update",
+        staticmethod(status_update),
+    )
+
+    await ConsensusAlgorithm.__new__(ConsensusAlgorithm).rollback_transactions(context)
+
+    accounts_manager.abort_tx_appeal_admission_once.assert_called_once_with(
+        future_hash,
+        "ancestor_rewind",
+    )
+    reset_data = transactions_processor.reset_transaction_for_recomputation.call_args[
+        0
+    ][1]
+    assert APPEAL_RECOVERY_SNAPSHOT_KEY not in reset_data
+    assert reset_data[FEE_ACCOUNTING_KEY]["aborted_appeals"] == [
+        {"reason": "ancestor_rewind", "refund": 123}
+    ]
+    assert "active_message_generation" not in reset_data[FEE_ACCOUNTING_KEY]
+    status_update.assert_awaited_once_with(
+        transactions_processor,
+        future_hash,
+        TransactionStatus.PENDING,
+        context.msg_handler,
+    )

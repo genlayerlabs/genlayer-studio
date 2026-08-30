@@ -456,7 +456,6 @@ class ConsensusWorker:
                         SELECT 1 FROM transactions t2
                         WHERE t2.to_address IS NOT DISTINCT FROM t.to_address
                             AND t2.blocked_at IS NOT NULL
-                            AND t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
                             AND t2.hash != t.hash
                     )
                     AND pg_try_advisory_xact_lock(hashtext(COALESCE(t.to_address, t.hash)))

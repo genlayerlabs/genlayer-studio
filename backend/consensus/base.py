@@ -88,6 +88,7 @@ from backend.consensus.types import (
     consensus_vote_type_code,
 )
 from backend.consensus.history import (
+    APPEAL_RECOVERY_SNAPSHOT_KEY,
     TERMINAL_VALIDATOR_APPEAL_ROUNDS,
     latest_decision_metadata,
     logical_fee_round_entries,
@@ -1440,19 +1441,36 @@ class ConsensusAlgorithm:
             context.transaction.hash
         )
         for future_transaction in future_transactions:
+            future_hash = future_transaction["hash"]
             future_data = deepcopy(future_transaction.get("data") or {})
+            if bool(future_transaction.get("appealed")) or (
+                APPEAL_RECOVERY_SNAPSHOT_KEY in future_data
+            ):
+                # The ancestor invalidates the descendant decision that this
+                # paid appeal targets. Refund its still-active admission before
+                # dropping the stale decision/worker state, then reload the
+                # accounting so the reset cannot resurrect the charged bond.
+                context.accounts_manager.abort_tx_appeal_admission_once(
+                    future_hash,
+                    "ancestor_rewind",
+                )
+                refreshed = context.transactions_processor.get_transaction_by_hash(
+                    future_hash
+                )
+                future_data = deepcopy((refreshed or {}).get("data") or {})
+            future_data.pop(APPEAL_RECOVERY_SNAPSHOT_KEY, None)
             future_fee_accounting = future_data.get(FEE_ACCOUNTING_KEY)
             if isinstance(future_fee_accounting, dict):
                 future_data[FEE_ACCOUNTING_KEY] = discard_active_message_generation(
                     future_fee_accounting
                 )
             context.transactions_processor.reset_transaction_for_recomputation(
-                future_transaction["hash"],
+                future_hash,
                 future_data,
             )
             await ConsensusAlgorithm.dispatch_transaction_status_update(
                 context.transactions_processor,
-                future_transaction["hash"],
+                future_hash,
                 TransactionStatus.PENDING,
                 context.msg_handler,
             )
