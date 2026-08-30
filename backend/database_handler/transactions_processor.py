@@ -26,6 +26,8 @@ from backend.consensus.types import (
 )
 from backend.consensus.history import (
     APPEAL_RECOVERY_SNAPSHOT_KEY,
+    LEADER_APPEAL_REPLAY_CONTEXT,
+    VALIDATOR_APPEAL_CONTEXT,
     completed_consensus_round_index,
     completed_consensus_rounds,
     materialize_decision_metadata,
@@ -1852,6 +1854,15 @@ class TransactionsProcessor:
             submitted_at=admitted_at,
             appeal_deadline=appeal_deadline,
             retention_bps=retention_bps,
+            appeal_context=(
+                LEADER_APPEAL_REPLAY_CONTEXT
+                if row["status"]
+                in {
+                    TransactionStatus.UNDETERMINED.value,
+                    TransactionStatus.LEADER_TIMEOUT.value,
+                }
+                else VALIDATOR_APPEAL_CONTEXT
+            ),
         )
         data = dict(row["data"] or {})
         fee_accounting, surplus_refund = prepare_fee_accounting(
@@ -2183,6 +2194,52 @@ class TransactionsProcessor:
             ),
             {"hash": transaction_hash},
         )
+        self.session.commit()
+
+    def reset_transaction_for_recomputation(
+        self,
+        transaction_hash: str,
+        data: dict | None,
+    ) -> None:
+        """Invalidate every attempt-local field before an ancestor rewind.
+
+        The transaction identity, escrow, queue order, and credited user value
+        remain durable. Consensus evidence and worker ownership belong to the
+        invalidated descendant attempt and must not survive into recomputation.
+        """
+
+        result = self.session.execute(
+            text(
+                """
+                UPDATE transactions
+                SET status = 'PENDING'::transaction_status,
+                    data = CAST(:data AS jsonb),
+                    consensus_data = NULL,
+                    consensus_history = '{}'::jsonb,
+                    contract_snapshot = NULL,
+                    appealed = false,
+                    appeal_failed = 0,
+                    appeal_undetermined = false,
+                    appeal_leader_timeout = false,
+                    appeal_validators_timeout = false,
+                    timestamp_appeal = NULL,
+                    appeal_processing_time = 0,
+                    timestamp_awaiting_finalization = NULL,
+                    last_vote_timestamp = NULL,
+                    rotation_count = 0,
+                    leader_timeout_validators = NULL,
+                    blocked_at = NULL,
+                    worker_id = NULL
+                WHERE hash = :hash
+                """
+            ),
+            {
+                "hash": transaction_hash,
+                "data": json.dumps(data) if data is not None else None,
+            },
+        )
+        if result.rowcount == 0:
+            raise ValueError("TransactionNotFound")
         self.session.commit()
 
     def set_transaction_timestamp_appeal(

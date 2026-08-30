@@ -22,9 +22,13 @@ def test_top_level_deploy_uses_transactional_virtual_ghost_factory():
     processor.get_successful_ghost_creation_count.return_value = 0
     processor.is_genvm_contract_address.return_value = False
 
-    address = endpoints._allocate_top_level_ghost_address(processor, 42)
+    address = endpoints._allocate_top_level_ghost_address(
+        processor,
+        42,
+        "0x1111111111111111111111111111111111111111",
+    )
 
-    assert address == "0x4104e3b744E60be5E612b909f04D1547Fc87094a"
+    assert address == "0x25A58acd32f777db380EA378cCE191972aa62c5e"
     processor.lock_ghost_factory.assert_called_once_with()
     processor.get_successful_ghost_creation_count.assert_called_once_with()
     processor.is_genvm_contract_address.assert_called_once_with(address)
@@ -36,7 +40,11 @@ def test_top_level_deploy_rejects_reused_create2_address():
     processor.is_genvm_contract_address.return_value = True
 
     with pytest.raises(endpoints.InvalidTransactionError, match="GhostAlreadyDeployed"):
-        endpoints._allocate_top_level_ghost_address(processor, 42)
+        endpoints._allocate_top_level_ghost_address(
+            processor,
+            42,
+            "0x1111111111111111111111111111111111111111",
+        )
 
 
 def test_fund_account_uses_request_scoped_session(monkeypatch):

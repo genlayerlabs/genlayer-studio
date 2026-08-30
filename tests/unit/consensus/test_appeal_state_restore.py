@@ -359,6 +359,21 @@ class TestClaimNextAppealReturnsSnapshot:
         assert "transactions.consensus_history" in returning_clause
 
     @pytest.mark.asyncio
+    async def test_claim_waits_for_any_inflight_descendant_on_same_contract(self):
+        session = Mock()
+        session.execute.return_value.first.return_value = None
+
+        worker = _make_worker()
+        await worker.claim_next_appeal(session)
+
+        executed_sql = str(session.execute.call_args[0][0])
+        blocked_guard = executed_sql.split("An ancestor appeal", 1)[1].split(
+            "AND pg_try_advisory", 1
+        )[0]
+        assert "t2.blocked_at IS NOT NULL" in blocked_guard
+        assert "t2.appealed = true" not in blocked_guard
+
+    @pytest.mark.asyncio
     async def test_claimed_appeal_hydrates_transaction_snapshot(self):
         """End-to-end over the claimed dict: Transaction.from_dict must produce
         a non-None contract_snapshot and the stored consensus_history — the

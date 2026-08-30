@@ -1440,16 +1440,21 @@ class ConsensusAlgorithm:
             context.transaction.hash
         )
         for future_transaction in future_transactions:
+            future_data = deepcopy(future_transaction.get("data") or {})
+            future_fee_accounting = future_data.get(FEE_ACCOUNTING_KEY)
+            if isinstance(future_fee_accounting, dict):
+                future_data[FEE_ACCOUNTING_KEY] = discard_active_message_generation(
+                    future_fee_accounting
+                )
+            context.transactions_processor.reset_transaction_for_recomputation(
+                future_transaction["hash"],
+                future_data,
+            )
             await ConsensusAlgorithm.dispatch_transaction_status_update(
                 context.transactions_processor,
                 future_transaction["hash"],
                 TransactionStatus.PENDING,
                 context.msg_handler,
-            )
-
-            # Reset the contract snapshot for the transaction
-            context.transactions_processor.set_transaction_contract_snapshot(
-                future_transaction["hash"], None
             )
 
     @staticmethod
@@ -4524,6 +4529,7 @@ def _author_message_phase_locally(
             actual_recipient = factory.address_for(
                 salt_nonce,
                 successful_deployments,
+                namespace=context.transaction.to_address,
             )
             normalized = actual_recipient.lower()
             if (

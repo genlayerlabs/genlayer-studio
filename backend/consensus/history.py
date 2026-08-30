@@ -51,6 +51,8 @@ ACTIVE_APPEAL_BASIS_KEY = "activeAppealBasis"
 # process failures can retry the paid appeal without resetting the original
 # decision or stranding its custody.
 APPEAL_RECOVERY_SNAPSHOT_KEY = "appealRecoverySnapshot"
+VALIDATOR_APPEAL_CONTEXT = "validatorAppeal"
+LEADER_APPEAL_REPLAY_CONTEXT = "leaderAppealReplay"
 
 
 def latest_decision_metadata(
@@ -84,8 +86,9 @@ def prepare_appeal_decision_basis(
     submitted_at: int,
     appeal_deadline: int,
     retention_bps: int,
+    appeal_context: str | None = None,
 ) -> dict[str, Any]:
-    """Freeze the exact reduced window that Consensus freezes at submission."""
+    """Freeze the appeal authority and validator-failure window at submission."""
 
     updated = copy.deepcopy(consensus_history or {})
     decision_id = current_decision_id(updated)
@@ -94,12 +97,37 @@ def prepare_appeal_decision_basis(
     remaining = int(appeal_deadline) - int(submitted_at)
     if remaining <= 0:
         raise ValueError("CanNotAppeal")
+    if appeal_context is None:
+        decision = latest_decision_metadata(updated) or {}
+        decision_status = str(decision.get("status") or "").upper()
+        if not decision_status:
+            rounds = completed_consensus_rounds(updated)
+            if rounds:
+                decision_status = str(rounds[-1].get("consensus_round") or "").upper()
+        if decision_status in {
+            "ACCEPTED",
+            "VALIDATORS_TIMEOUT",
+            "VALIDATORS TIMEOUT",
+        }:
+            appeal_context = VALIDATOR_APPEAL_CONTEXT
+        elif decision_status in {
+            "UNDETERMINED",
+            "LEADER_TIMEOUT",
+            "LEADER TIMEOUT",
+        }:
+            appeal_context = LEADER_APPEAL_REPLAY_CONTEXT
+    if appeal_context not in {
+        VALIDATOR_APPEAL_CONTEXT,
+        LEADER_APPEAL_REPLAY_CONTEXT,
+    }:
+        raise ValueError("DecisionBasisMismatch")
     retention_bps = min(10_000, max(0, int(retention_bps)))
     next_window = (remaining * retention_bps) // 10_000
     if next_window == 0:
         next_window = 1
     updated[ACTIVE_APPEAL_BASIS_KEY] = {
         "decisionId": decision_id,
+        "context": appeal_context,
         "submittedAt": int(submitted_at),
         "nextAppealWindow": next_window,
     }
@@ -126,6 +154,28 @@ def materialize_decision_metadata(
         except (TypeError, ValueError) as exc:
             raise ValueError("DecisionBasisMismatch") from exc
         if basis_decision_id != decision_id - 1 or appeal_window <= 0:
+            raise ValueError("DecisionBasisMismatch")
+        context = basis.get("context")
+        if context == LEADER_APPEAL_REPLAY_CONTEXT:
+            # Leader appeals clear the reduced-window override at submission,
+            # regardless of whether the replay changes the application result.
+            appeal_window = max(1, int(default_appeal_window))
+        elif context == VALIDATOR_APPEAL_CONTEXT:
+            # Only a failed validator appeal resumes the incumbent with the
+            # submission-frozen reduced remainder. A successful challenge
+            # creates a new decision and therefore gets a fresh full window.
+            latest_appeal_round = next(
+                (
+                    str(entry.get("consensus_round") or "")
+                    for entry in reversed(completed_consensus_rounds(updated))
+                    if str(entry.get("consensus_round") or "")
+                    in VALIDATOR_APPEAL_CONSENSUS_ROUNDS
+                ),
+                None,
+            )
+            if latest_appeal_round in TERMINAL_VALIDATOR_APPEAL_ROUNDS:
+                appeal_window = max(1, int(default_appeal_window))
+        elif context is not None:
             raise ValueError("DecisionBasisMismatch")
     else:
         appeal_window = max(1, int(default_appeal_window))

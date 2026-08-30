@@ -65,7 +65,13 @@ class GhostFactoryConfig:
             initial_nonce=initial_nonce,
         )
 
-    def address_for(self, salt_nonce: int, successful_deployments: int) -> str:
+    def address_for(
+        self,
+        salt_nonce: int,
+        successful_deployments: int,
+        *,
+        namespace: str | None = None,
+    ) -> str:
         """Return the next GhostFactory address without mutating state.
 
         ``successful_deployments`` is the number of ghosts already created by
@@ -84,8 +90,15 @@ class GhostFactoryConfig:
                 raise OverflowError("GhostFactoryNonceOverflow")
             digest = keccak(rlp.encode([factory, factory_nonce]))
         else:
-            creation_phase = to_bytes(hexstr=self.creation_phase_address)
-            salt = keccak(creation_phase + salt_nonce.to_bytes(32, "big"))
+            if namespace is None or not is_address(namespace):
+                raise InvalidGhostFactoryConfiguration(
+                    "salted ghost deployment requires an EVM namespace"
+                )
+            # The authenticated deployment sender owns the salt namespace.
+            # Using the shared CreationPhase address here reproduces the live
+            # cross-user collision defect and disagrees with public prediction.
+            namespace_bytes = to_bytes(hexstr=to_checksum_address(namespace))
+            salt = keccak(namespace_bytes + salt_nonce.to_bytes(32, "big"))
             digest = keccak(b"\xff" + factory + salt + self.bytecode_hash)
         return to_checksum_address("0x" + digest[-20:].hex())
 

@@ -405,12 +405,17 @@ def _enforce_pending_queue_caps(
 def _allocate_top_level_ghost_address(
     transactions_processor: TransactionsProcessor,
     salt_nonce: int,
+    namespace: str,
 ) -> str:
     """Reserve the next virtual GhostFactory address until admission commits."""
 
     transactions_processor.lock_ghost_factory()
     deployment_count = transactions_processor.get_successful_ghost_creation_count()
-    address = GhostFactoryConfig.from_env().address_for(salt_nonce, deployment_count)
+    address = GhostFactoryConfig.from_env().address_for(
+        salt_nonce,
+        deployment_count,
+        namespace=namespace,
+    )
     if transactions_processor.is_genvm_contract_address(address):
         # GhostFactory rejects a reused CREATE2 address and the enclosing
         # Consensus submission reverts.  The factory nonce is unchanged.
@@ -3244,6 +3249,7 @@ def _send_raw_transaction_impl(
                 new_contract_address = _allocate_top_level_ghost_address(
                     transactions_processor,
                     int(decoded_rollup_transaction.data.args.salt_nonce or 0),
+                    from_address,
                 )
                 # Keep the address row in the transaction admission unit. A
                 # premature commit here would release the duplicate-admission

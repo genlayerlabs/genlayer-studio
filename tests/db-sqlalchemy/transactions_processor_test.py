@@ -623,6 +623,68 @@ def test_pending_queue_count_includes_active_head_but_not_decided_rows(
     assert pending_hash is not None
 
 
+def test_ancestor_rewind_clears_descendant_attempt_state(
+    transactions_processor: TransactionsProcessor, session
+):
+    tx_hash = _make_tx(transactions_processor, nonce=13)
+    session.execute(
+        text(
+            """
+            UPDATE transactions
+            SET status = CAST('ACCEPTED' AS transaction_status),
+                consensus_data = CAST('{"votes":{"0x1":"agree"}}' AS jsonb),
+                consensus_history = CAST('{"consensus_results":[{"consensus_round":"Accepted"}]}' AS jsonb),
+                contract_snapshot = CAST('{"states":{}}' AS jsonb),
+                appealed = true,
+                appeal_failed = 2,
+                appeal_undetermined = true,
+                appeal_leader_timeout = true,
+                appeal_validators_timeout = true,
+                timestamp_appeal = 123,
+                appeal_processing_time = 5,
+                timestamp_awaiting_finalization = 456,
+                last_vote_timestamp = 789,
+                rotation_count = 3,
+                leader_timeout_validators = CAST('[]' AS jsonb),
+                blocked_at = NOW(),
+                worker_id = 'stale-worker'
+            WHERE hash = :hash
+            """
+        ),
+        {"hash": tx_hash},
+    )
+    session.commit()
+
+    replacement_data = {"fee_accounting": {"message_fee_budget": 7}}
+    transactions_processor.reset_transaction_for_recomputation(
+        tx_hash,
+        replacement_data,
+    )
+    reset = transactions_processor.get_transaction_by_hash(tx_hash)
+
+    assert reset["status"] == TransactionStatus.PENDING.value
+    assert reset["data"] == replacement_data
+    assert reset["consensus_data"] is None
+    assert reset["consensus_history"] == {}
+    assert reset["contract_snapshot"] is None
+    assert reset["appealed"] is False
+    assert reset["appeal_failed"] == 0
+    assert reset["appeal_undetermined"] is False
+    assert reset["appeal_leader_timeout"] is False
+    assert reset["appeal_validators_timeout"] is False
+    assert reset["timestamp_appeal"] is None
+    assert reset["appeal_processing_time"] == 0
+    assert reset["timestamp_awaiting_finalization"] is None
+    # The legacy public parser stringifies this nullable timestamp.
+    assert reset["last_vote_timestamp"] == "None"
+    assert reset["rotation_count"] == 0
+    assert reset["leader_timeout_validators"] is None
+    reset_row = session.get(Transactions, tx_hash)
+    assert reset_row is not None
+    assert reset_row.blocked_at is None
+    assert reset_row.worker_id is None
+
+
 def test_get_transaction_by_hash_exposes_value_credited(
     transactions_processor: TransactionsProcessor, session
 ):

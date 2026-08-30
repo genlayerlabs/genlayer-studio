@@ -1837,7 +1837,7 @@ def test_local_message_authority_applies_ghost_factory_and_per_child_failures():
 
     processor = _Processor()
     context = SimpleNamespace(
-        transaction=SimpleNamespace(hash=parent_hash),
+        transaction=SimpleNamespace(hash=parent_hash, to_address=registered),
         transactions_processor=processor,
     )
 
@@ -1881,7 +1881,7 @@ def test_local_message_authority_applies_ghost_factory_and_per_child_failures():
     assert processor.locked is True
     assert {address.lower() for address in processor.locked_recipients} == {
         registered.lower(),
-        "0x4104e3b744e60be5e612b909f04d1547fc87094a",
+        "0x4e0065451873eaf51af1c7e00256a5db0f8a80ad",
     }
     assert receipt["tx_ids_hex"] == [
         _studio_child_transaction_id(parent_hash, "accepted", first_occurrence),
@@ -1891,7 +1891,7 @@ def test_local_message_authority_applies_ghost_factory_and_per_child_failures():
     ]
     assert receipt["recipients"][0] == Web3.to_checksum_address(registered)
     assert receipt["recipients"][1] == Web3.to_checksum_address(missing)
-    assert receipt["recipients"][2] == "0x4104e3b744E60be5E612b909f04D1547Fc87094a"
+    assert receipt["recipients"][2] == "0x4E0065451873eaf51AF1C7E00256A5db0f8a80aD"
     assert receipt["recipients"][3] == Web3.to_checksum_address(
         "0x0000000000000000000000000000000000000000"
     )
@@ -10489,6 +10489,14 @@ class _FakeTransactionsProcessor:
         assert tx_hash == self.transaction["hash"]
         if self.transaction.get("appealed"):
             raise ValueError("CanNotAppeal")
+        kwargs.setdefault(
+            "appeal_context",
+            (
+                "leaderAppealReplay"
+                if self.transaction.get("status") in {"UNDETERMINED", "LEADER_TIMEOUT"}
+                else "validatorAppeal"
+            ),
+        )
         self.transaction["consensus_history"] = prepare_appeal_decision_basis(
             self.transaction.get("consensus_history"),
             **kwargs,
@@ -10712,6 +10720,7 @@ def test_submit_appeal_endpoint_records_separate_bond_and_typed_funding(monkeypa
     assert transactions.appeal_updates == [(tx["hash"], True)]
     assert tx["consensus_history"]["activeAppealBasis"] == {
         "decisionId": 1,
+        "context": "validatorAppeal",
         "submittedAt": 1_000,
         "nextAppealWindow": 24,
     }
@@ -12152,7 +12161,7 @@ def test_failed_appeal_window_uses_remaining_time_at_submission_like_consensus()
     }
 
 
-def test_successful_appeal_carries_frozen_window_to_terminal_decision():
+def test_successful_validator_appeal_starts_fresh_full_window():
     initial_history = materialize_decision_metadata(
         {"consensus_results": [{"consensus_round": "Accepted"}]},
         status="ACCEPTED",
@@ -12186,8 +12195,43 @@ def test_successful_appeal_carries_frozen_window_to_terminal_decision():
         "decisionId": 2,
         "status": "UNDETERMINED",
         "materializedAt": 1_025,
-        "appealDeadline": 1_041,
+        "appealDeadline": 1_055,
     }
+
+
+@pytest.mark.parametrize(
+    "replay_round",
+    ["Leader Appeal Successful", "Leader Appeal Failed"],
+)
+def test_leader_appeal_replay_always_starts_fresh_full_window(replay_round):
+    initial_history = materialize_decision_metadata(
+        {"consensus_results": [{"consensus_round": "Undetermined"}]},
+        status="UNDETERMINED",
+        materialized_at=1_000,
+        default_appeal_window=30,
+    )
+    appealed_history = prepare_appeal_decision_basis(
+        initial_history,
+        expected_decision_id=1,
+        submitted_at=1_010,
+        appeal_deadline=1_030,
+        retention_bps=8_000,
+    )
+    assert appealed_history["activeAppealBasis"] == {
+        "decisionId": 1,
+        "context": "leaderAppealReplay",
+        "submittedAt": 1_010,
+        "nextAppealWindow": 16,
+    }
+    appealed_history["consensus_results"].append({"consensus_round": replay_round})
+    replayed_history = materialize_decision_metadata(
+        appealed_history,
+        status="UNDETERMINED",
+        materialized_at=1_025,
+        default_appeal_window=30,
+    )
+
+    assert replayed_history["latestDecision"]["appealDeadline"] == 1_055
 
 
 def test_worker_prefers_persisted_remaining_time_deadline(monkeypatch):

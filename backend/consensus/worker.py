@@ -375,7 +375,6 @@ class ConsensusWorker:
                         SELECT 1 FROM transactions t2
                         WHERE t2.to_address IS NOT DISTINCT FROM t.to_address
                             AND t2.blocked_at IS NOT NULL
-                            AND t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
                             AND t2.hash != t.hash
                     )
                     AND pg_try_advisory_xact_lock(hashtext(COALESCE(t.to_address, t.hash)))
@@ -450,10 +449,12 @@ class ConsensusWorker:
                     AND (t.blocked_at IS NULL
                          OR t.blocked_at < NOW() - CAST(:timeout AS INTERVAL))
                     AND NOT EXISTS (
-                        -- Ensure no other appeal for same contract is being processed
+                        -- An ancestor appeal can rewind every newer attempt on
+                        -- the recipient. Never overlap it with any descendant
+                        -- worker: otherwise that worker can publish ballots or
+                        -- effects from the state generation being invalidated.
                         SELECT 1 FROM transactions t2
                         WHERE t2.to_address IS NOT DISTINCT FROM t.to_address
-                            AND t2.appealed = true
                             AND t2.blocked_at IS NOT NULL
                             AND t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
                             AND t2.hash != t.hash
