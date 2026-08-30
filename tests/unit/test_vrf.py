@@ -66,3 +66,26 @@ def test_get_validators_for_transaction_3():
 
     rng.choice.assert_called_once()
     assert validators == [{"stake": 3}, {"stake": 2}, {"stake": 1}]
+
+
+def test_get_validators_for_transaction_independent_rng_per_call() -> None:
+    """
+    Regression test for #1733: mutable default argument caused a single RNG instance
+    to be shared across all calls, making the selection sequence predictable.
+
+    Each call without an explicit rng must use an independent generator so that
+    the selections are not correlated across invocations.
+    """
+    nodes = [{"stake": i + 1} for i in range(10)]
+
+    # Collect first-element selections over many independent calls.
+    # With a shared RNG the sequence would be perfectly deterministic; with
+    # independent generators the distribution should spread across all nodes.
+    first_selections = [get_validators_for_transaction(nodes, 1)[0] for _ in range(200)]
+    unique_first = {tuple(v.items()) for v in first_selections}
+
+    # All 10 nodes should appear as first choice at least once over 200 trials.
+    assert len(unique_first) > 1, (
+        "Only one unique first-validator returned across 200 calls — "
+        "the RNG is likely being shared (mutable default argument bug)."
+    )
