@@ -770,7 +770,7 @@ contract ConsensusMain is
 			: contracts.genManager.recipientRandomSeed(_recipient);
 		if (_recipient == address(0)) {
 			// Contract deployment transaction
-			contracts.ghostFactory.createGhost(_saltNonce);
+			contracts.ghostFactory.createGhost(_sender, _saltNonce);
 			address ghost = contracts.ghostFactory.latestGhost();
 			_storeGhost(ghost);
 			_recipient = ghost;

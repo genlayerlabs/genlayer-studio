@@ -33,6 +33,7 @@ contract GhostFactory is
 	}
 
 	function createGhost(
+		address _namespace,
 		uint256 _saltNonce
 	) external onlyGenConsensus returns (address) {
 		BeaconProxy beacon;
@@ -46,7 +47,7 @@ contract GhostFactory is
 			);
 		} else {
 			bytes32 salt = keccak256(
-				abi.encodePacked(msg.sender, _saltNonce)
+				abi.encodePacked(_namespace, _saltNonce)
 			);
 			beacon = new BeaconProxy{ salt: salt }(
 				ghostBeaconProxy,

@@ -424,7 +424,7 @@ contract ConsensusMainWithFees is
 			: genManager.recipientRandomSeed(_recipient);
 		if (_recipient == address(0)) {
 			// Contract deployment transaction
-			ghostFactory.createGhost(_saltNonce);
+			ghostFactory.createGhost(_sender, _saltNonce);
 			address ghost = ghostFactory.latestGhost();
 			ghostContracts[ghost] = true;
 			_recipient = ghost;
