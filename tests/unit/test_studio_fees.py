@@ -11214,6 +11214,24 @@ def test_transaction_status_rpc_returns_legacy_status_string():
     assert get_transaction_status(_Processor(), "0x1234") == "ACCEPTED"
 
 
+def test_transaction_status_rpc_returns_node_v06_payload_for_object_request():
+    class _Processor:
+        def get_transaction_status(self, transaction_hash):
+            assert transaction_hash == "0x1234"
+            return TransactionsProcessor._status_payload("ACCEPTED")
+
+    assert get_transaction_status(_Processor(), {"txId": "0x1234"}) == {
+        "status": "ACCEPTED",
+        "statusCode": 5,
+    }
+
+
+@pytest.mark.parametrize("params", [{}, {"txId": ""}, 123])
+def test_transaction_status_rpc_rejects_invalid_node_v06_request(params):
+    with pytest.raises(JSONRPCError, match="txId|transaction hash"):
+        get_transaction_status(SimpleNamespace(), params)
+
+
 def test_transaction_status_details_rpc_shape_includes_canonical_status_code():
     class _Processor:
         def get_transaction_status(self, transaction_hash):
@@ -11252,7 +11270,6 @@ def test_transaction_lifecycle_exposes_active_v06_decision_before_deadline(
         "resolutionSourceCode": 6,
         "decisionId": "1",
         "decisionActive": True,
-        "effectsPending": False,
         "evaluatedAt": 1_034,
     }
 
@@ -11280,7 +11297,7 @@ def test_transaction_lifecycle_blocks_actions_while_acceptance_effects_are_pendi
         processor, {"txId": tx["hash"], "timestamp": 2_000}
     )
     assert lifecycle["decisionActive"] is True
-    assert lifecycle["effectsPending"] is True
+    assert "effectsPending" not in lifecycle
     assert lifecycle["resolutionAction"] == "NoOp"
 
     with pytest.raises(InvalidTransactionError, match="CanNotAppeal"):
@@ -11318,6 +11335,32 @@ def test_transaction_lifecycle_projects_finalize_at_exact_deadline(monkeypatch):
     assert lifecycle["resolutionSource"] == "FullReveal"
     assert lifecycle["decisionId"] == "1"
     assert lifecycle["decisionActive"] is True
+
+
+def test_transaction_lifecycle_reports_activation_capacity_shortfall_source():
+    tx = _fee_accounted_tx(status="UNDETERMINED")
+    tx.update(
+        consensus_history={
+            "consensus_results": [
+                {
+                    "consensus_round": "Undetermined",
+                    "leader_result": None,
+                    "validator_results": [],
+                }
+            ]
+        },
+        timestamp_awaiting_finalization=1_000,
+        appealed=False,
+        execution_mode="NORMAL",
+    )
+
+    lifecycle = get_transaction_lifecycle(
+        _FakeTransactionsProcessor(tx),
+        {"txId": tx["hash"], "timestamp": 1_000},
+    )
+
+    assert lifecycle["resolutionSourceCode"] == 1
+    assert lifecycle["resolutionSource"] == "ActivationInsufficientValidators"
 
 
 def test_transaction_lifecycle_does_not_finalize_behind_older_transaction(

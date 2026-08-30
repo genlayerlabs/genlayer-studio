@@ -528,9 +528,9 @@ def get_studio_transaction_by_hash(
 
 @rpc.method("gen_getTransactionStatus", log_policy=LogPolicy.debug())
 def get_transaction_status(
-    transaction_hash: str,
+    transaction_hash: str | dict,
     transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
-) -> str:
+) -> str | dict:
     return impl.get_transaction_status(
         transactions_processor=transactions_processor,
         transaction_hash=transaction_hash,

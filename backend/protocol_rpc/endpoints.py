@@ -1831,17 +1831,30 @@ def get_studio_transaction_by_hash(
 
 
 def get_transaction_status(
-    transactions_processor: TransactionsProcessor, transaction_hash: str
-) -> str:
+    transactions_processor: TransactionsProcessor, transaction_hash: str | dict
+) -> str | dict:
+    return_details = isinstance(transaction_hash, dict)
+    if return_details:
+        transaction_hash = transaction_hash.get("txId") or transaction_hash.get("tx_id")
+        if not isinstance(transaction_hash, str) or not transaction_hash:
+            raise JSONRPCError(code=-32602, message="txId is required", data={})
+    elif not isinstance(transaction_hash, str) or not transaction_hash:
+        raise JSONRPCError(
+            code=-32602,
+            message="transaction hash must be a string or an object containing txId",
+            data={},
+        )
+
     status = transactions_processor.get_transaction_status(transaction_hash)
     if status is None:
         raise NotFoundError(
             message=f"Transaction {transaction_hash} not found",
             data={"hash": transaction_hash},
         )
-    # Compatibility contract for deployed apps (Rally): this legacy RPC returns
-    # the status string only. Extensions belong in gen_getTransactionStatusDetails.
-    return status["status"]
+    # Node v0.6 uses an object request and returns the canonical status payload.
+    # Keep the original positional-string response for deployed Studio clients
+    # (notably Rally) until they migrate to the train interface.
+    return status if return_details else status["status"]
 
 
 def get_transaction_status_details(
@@ -1938,6 +1951,32 @@ def _transaction_decision_id(transaction: dict) -> int:
     return history_current_decision_id(transaction.get("consensus_history"))
 
 
+def _transaction_resolution_source_code(
+    transaction: dict, *, status: str, current_round: int
+) -> int:
+    if status == TransactionStatus.LEADER_TIMEOUT.value:
+        return 3  # LeaderReceiptTimeout
+
+    logical_entries = logical_fee_round_entries(transaction.get("consensus_history"))
+    if status == TransactionStatus.UNDETERMINED.value and len(logical_entries) == 1:
+        _, entry = logical_entries[0]
+        if (
+            str(entry.get("consensus_round") or "") == "Undetermined"
+            and not entry.get("leader_result")
+            and not entry.get("validator_results")
+        ):
+            # Studio's exact-capacity activation path records the same
+            # receipt-less Pending -> Undetermined decision as Consensus's
+            # ActivationInsufficientValidators trigger.
+            return 1
+
+    appeal_attempt = current_round % 2 == 1
+    # Studio materializes these outcomes only after its RevealingState has
+    # tallied the complete receipt set. A validator execution timeout is a
+    # VoteType.Timeout ballot, not a Consensus RevealDeadline trigger.
+    return 9 if appeal_attempt else 6
+
+
 def get_transaction_lifecycle(
     transactions_processor: TransactionsProcessor,
     params: dict,
@@ -1988,14 +2027,12 @@ def get_transaction_lifecycle(
 
     if not decision_active:
         resolution_source_code = 0
-    elif status == TransactionStatus.LEADER_TIMEOUT.value:
-        resolution_source_code = 3  # LeaderReceiptTimeout
     else:
-        appeal_attempt = current_round % 2 == 1
-        # Studio materializes these outcomes only after its RevealingState has
-        # tallied the complete receipt set. A validator execution timeout is a
-        # VoteType.Timeout ballot, not a Consensus RevealDeadline trigger.
-        resolution_source_code = 9 if appeal_attempt else 6
+        resolution_source_code = _transaction_resolution_source_code(
+            transaction,
+            status=status,
+            current_round=current_round,
+        )
 
     resolution_action_code = 0
     deadline = _transaction_appeal_deadline(transaction)
@@ -2021,7 +2058,6 @@ def get_transaction_lifecycle(
         "resolutionSourceCode": resolution_source_code,
         "decisionId": str(decision_id) if decision_id is not None else None,
         "decisionActive": decision_active,
-        "effectsPending": effects_pending,
         "evaluatedAt": evaluated_at,
     }
 
