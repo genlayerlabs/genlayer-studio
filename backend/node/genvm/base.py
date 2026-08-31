@@ -84,7 +84,9 @@ MESSAGE_ALLOCATION_NODE_ABI_TYPE = (
 MESSAGE_TYPE_EXTERNAL = 0
 MESSAGE_TYPE_INTERNAL = 1
 NODE_ROOT_SENTINEL = (1 << 256) - 1
-CALL_KEY_WILDCARD = "0x" + ("0" * 64)
+# Consensus reserves keccak256("") as the wildcard. bytes32(0) is the real
+# call key for deploys and unnamed calls, so the two must never be aliased.
+CALL_KEY_WILDCARD = "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"
 
 
 @dataclass(frozen=True)
