@@ -328,6 +328,7 @@ class TestGenCallContractNotFoundHandling:
             "data": "0x1234",
             "to": "0x" + "ab" * 20,
             "from": "0x" + "cd" * 20,
+            "_allow_low_execution_budget_for_estimate": True,
             "_discover_message_allocations_for_estimate": True,
         }
 
@@ -345,7 +346,7 @@ class TestGenCallContractNotFoundHandling:
         ), patch(
             "backend.protocol_rpc.endpoints._effective_simulation_fee_accounting_for_genvm",
             side_effect=[{"initial": True}, exact_genvm_accounting],
-        ), patch(
+        ) as effective_accounting, patch(
             "backend.protocol_rpc.endpoints.fee_accounting_with_discovered_messages",
             return_value=rebuilt_accounting,
         ), patch(
@@ -378,6 +379,10 @@ class TestGenCallContractNotFoundHandling:
         assert (
             metered_node.run_contract.await_args.kwargs["fee_accounting"]
             == exact_genvm_accounting
+        )
+        assert all(
+            call.kwargs["unmeter_execution"] is True
+            for call in effective_accounting.call_args_list
         )
 
 

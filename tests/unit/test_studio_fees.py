@@ -48,6 +48,7 @@ from backend.protocol_rpc.endpoints import (
     get_transaction_status_details,
     get_transaction_status,
     _stage_simulated_call_value,
+    _effective_simulation_fee_accounting_for_genvm,
     _simulation_fee_accounting,
     _validate_fee_envelope,
     _with_default_simulation_fees,
@@ -2204,6 +2205,29 @@ def test_default_simulation_fees_are_injected_for_fee_estimation():
 
     caller_fees = {"fees": {"messageAllocations": [_allocation(budget=55)]}}
     assert _with_default_simulation_fees(caller_fees) == caller_fees
+
+
+def test_fee_estimation_unmeters_only_the_genvm_execution_bucket():
+    fees_distribution = _fees_distribution(execution_budget_per_round=1)
+    allocation = _allocation(budget=55)
+    accounting = {
+        "fees_distribution": fees_distribution,
+        "execution_budget_total": 1,
+        "message_fee_budget": 55,
+        "message_allocations": [allocation],
+    }
+
+    adjusted = _effective_simulation_fee_accounting_for_genvm(
+        accounting,
+        unmeter_execution=True,
+    )
+
+    assert accounting["fees_distribution"]["executionBudgetPerRound"] == 1
+    assert adjusted is not accounting
+    assert adjusted["fees_distribution"]["executionBudgetPerRound"] == (1 << 256) - 1
+    assert adjusted["execution_budget_total"] == (1 << 256) - 1
+    assert adjusted["message_fee_budget"] == 55
+    assert adjusted["message_allocations"] == [allocation]
 
 
 @pytest.mark.asyncio

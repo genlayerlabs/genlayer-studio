@@ -50,6 +50,7 @@ from backend.node.create_nodes.create_nodes import (
 from backend.protocol_rpc.transactions_parser import TransactionParser
 from backend.protocol_rpc.fees import (
     FEE_ACCOUNTING_KEY,
+    GENVM_UNMETERED_DATA_FEE_BUCKET,
     VALIDATORS_PER_ROUND,
     FeeValidationError,
     StudioFeePolicy,
@@ -1642,8 +1643,12 @@ async def _gen_call_with_validator(
         sender=from_address,
         user_value=call_value,
     )
+    unmeter_execution_for_fee_estimate = bool(
+        params.get("_allow_low_execution_budget_for_estimate")
+    )
     genvm_fee_accounting = _effective_simulation_fee_accounting_for_genvm(
-        simulation_fee_accounting
+        simulation_fee_accounting,
+        unmeter_execution=unmeter_execution_for_fee_estimate,
     )
     if not accounts_manager.is_valid_address(from_address):
         raise InvalidAddressError(from_address)
@@ -1812,7 +1817,8 @@ async def _gen_call_with_validator(
                 policy,
             )
             genvm_fee_accounting = _effective_simulation_fee_accounting_for_genvm(
-                simulation_fee_accounting
+                simulation_fee_accounting,
+                unmeter_execution=unmeter_execution_for_fee_estimate,
             )
             receipt = await execute(genvm_fee_accounting)
     except ContractNotFoundError as e:
@@ -2923,6 +2929,8 @@ def _simulation_fee_accounting(
 
 def _effective_simulation_fee_accounting_for_genvm(
     accounting: dict | None,
+    *,
+    unmeter_execution: bool = False,
 ) -> dict | None:
     if not accounting:
         return accounting
@@ -2937,9 +2945,17 @@ def _effective_simulation_fee_accounting_for_genvm(
     execution_budget_per_round = int(fees["executionBudgetPerRound"])
     # Consensus admits against the proposal-only receipt floor, while GenVM
     # reserves proposal/reveal/nondeterministic-output start costs before user
-    # code. Estimation must temporarily satisfy the latter or it cannot run far
-    # enough to recommend a realistic budget.
-    floor = policy.genvm_start_budget_floor()
+    # code. A fee estimate must additionally let the complete simulated write
+    # run so it can observe the required budget; capping that measurement at
+    # the startup floor makes any storage write fail exactly at the floor and
+    # prevents the estimator from returning its higher recommendation. Keep
+    # message allocations/budgets exact, but make the parent's execution bucket
+    # unmetered for this read-only measurement pass.
+    floor = (
+        GENVM_UNMETERED_DATA_FEE_BUCKET
+        if unmeter_execution
+        else policy.genvm_start_budget_floor()
+    )
     if execution_budget_per_round <= 0 or execution_budget_per_round >= floor:
         return accounting
 
