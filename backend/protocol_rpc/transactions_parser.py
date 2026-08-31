@@ -697,17 +697,21 @@ class TransactionParser:
     def decode_method_call_data(self, data: str) -> DecodedMethodCallData:
         raw_bytes = eth_utils.hexadecimal.decode_hex(data)
 
-        # Remove the null byte
-        if raw_bytes[-1] == 0:
+        # Newer clients send rlp([calldata, leader_only]). The boolean is a
+        # single literal byte in this encoding, for both false and true.
+        if len(raw_bytes) > 1 and raw_bytes[-1] in (0, 1):
             raw_bytes = raw_bytes[:-1]
 
-            # Try to decode the outer list first
-            if raw_bytes[0] >= 0xF8:  # Long list
-                raw_bytes = raw_bytes[2:]  # Skip list prefix and length
-            elif raw_bytes[0] >= 0xC0:  # Short list
+            # Strip the complete outer list header. For a long list the prefix
+            # encodes the number of following length bytes; the header grows
+            # from two to three bytes once the payload reaches 256 bytes.
+            prefix = raw_bytes[0]
+            if prefix >= 0xF8:
+                raw_bytes = raw_bytes[1 + (prefix - 0xF7) :]
+            elif prefix >= 0xC0:  # Short list
                 raw_bytes = raw_bytes[1:]  # Skip list prefix
 
-            # Now try to decode the inner string
+            # Now decode the inner calldata string.
             raw_bytes = rlp.decode(raw_bytes)
 
         return DecodedMethodCallData(raw_bytes)

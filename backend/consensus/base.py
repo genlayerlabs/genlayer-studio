@@ -1,6 +1,5 @@
 # backend/consensus/base.py
 
-DEFAULT_VALIDATORS_COUNT = 5
 ACTIVATED_TRANSACTION_TIMEOUT = 900
 MAX_IDLE_REPLACEMENTS = 5
 DEFAULT_EXEC_TIMEOUT_SECONDS = 600
@@ -20,6 +19,8 @@ import base64
 from eth_utils import is_address, keccak, to_bytes, to_checksum_address
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from backend.consensus.constants import DEFAULT_VALIDATORS_COUNT
+from backend.consensus.errors import NoValidatorsAvailableError
 from backend.consensus.vrf import get_validators_for_transaction
 from backend.database_handler.chain_snapshot import ChainSnapshot
 from backend.database_handler.contract_snapshot import ContractSnapshot
@@ -160,10 +161,6 @@ type NodeFactory = Callable[
     ],
     Node,
 ]
-
-
-class NoValidatorsAvailableError(Exception):
-    """Raised when no validators are available to process a transaction."""
 
 
 class InternalMessageEmissionError(RuntimeError):
@@ -782,13 +779,14 @@ class ConsensusAlgorithm:
         is_triggered = transaction.triggered_by_hash is not None
 
         if not is_triggered and transaction.from_address is not None:
-            # Get the balance of the sender account
-            from_balance = accounts_manager.get_account_balance(
-                transaction.from_address
+            # The finalization workers use independent database sessions. A
+            # read/check/write balance update lets concurrent transfers spend
+            # the same stale balance. Keep the sufficiency check and debit in
+            # one conditional SQL update instead.
+            debited = accounts_manager.debit_account_balance(
+                transaction.from_address, transaction.value
             )
-
-            # Check if the sender has enough balance
-            if from_balance < transaction.value:
+            if not debited:
                 # UNDETERMINED is finalization-eligible: claim_next_finalization
                 # filters on timestamp_awaiting_finalization IS NOT NULL.
                 # Without this stamp the row strands forever (16 such rows
@@ -805,18 +803,11 @@ class ConsensusAlgorithm:
 
                 return
 
-            # Update the balance of the sender account
-            accounts_manager.update_account_balance(
-                transaction.from_address, from_balance - transaction.value
-            )
-
         if transaction.to_address is not None:
-            # Get the balance of the recipient account
-            to_balance = accounts_manager.get_account_balance(transaction.to_address)
-
-            # Update the balance of the recipient account
-            accounts_manager.update_account_balance(
-                transaction.to_address, to_balance + transaction.value
+            # Atomic increment prevents concurrent credits from overwriting
+            # each other when they target the same recipient.
+            accounts_manager.credit_account_balance(
+                transaction.to_address, transaction.value
             )
 
         # Mark the tx as credited so a later retry (or duplicate sync path)

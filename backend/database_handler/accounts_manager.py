@@ -114,6 +114,10 @@ class AccountsManager:
         """Atomic conditional debit. Returns False if insufficient balance."""
         if amount <= 0:
             return True
+        try:
+            account_address = to_checksum_address(account_address)
+        except Exception:
+            pass
         result = self.session.execute(
             text(
                 "UPDATE current_state SET balance = balance - :amount "
@@ -127,6 +131,10 @@ class AccountsManager:
         """Atomic credit. Creates account if it doesn't exist."""
         if amount <= 0:
             return
+        try:
+            account_address = to_checksum_address(account_address)
+        except Exception:
+            pass
         self.session.execute(
             text(
                 "INSERT INTO current_state (id, data, balance) "

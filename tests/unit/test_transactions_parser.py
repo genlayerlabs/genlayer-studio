@@ -720,6 +720,51 @@ def test_decode_signed_transaction_submit_appeal_uses_value_as_bond(monkeypatch)
     assert decoded.data.top_up_and_submit is False
 
 
+# --- decode_method_call_data -------------------------------------------------
+# Wire format produced by genlayer-js readContract / eth_call is
+# rlp([calldata, leader_only]); see genlayer-js src/contracts/actions.ts.
+
+
+def _call_wire(calldata_bytes: bytes, leader_only: bool = False) -> str:
+    payload = encode([calldata_bytes, b"\x01" if leader_only else b"\x00"])
+    return "0x" + payload.hex()
+
+
+def _opaque_calldata(size: int) -> bytes:
+    return bytes([(3 << 3) | 6]) + b"\x41" * (size - 1)
+
+
+@pytest.mark.parametrize("size", [1, 5, 100, 252, 253, 300, 1000, 70000])
+def test_decode_method_call_data_roundtrip(transaction_parser, size):
+    calldata_bytes = _opaque_calldata(size)
+    decoded = transaction_parser.decode_method_call_data(_call_wire(calldata_bytes))
+    assert decoded.calldata == calldata_bytes
+
+
+@pytest.mark.parametrize("size", [5, 253, 1000])
+def test_decode_method_call_data_leader_only(transaction_parser, size):
+    calldata_bytes = _opaque_calldata(size)
+    decoded = transaction_parser.decode_method_call_data(
+        _call_wire(calldata_bytes, leader_only=True)
+    )
+    assert decoded.calldata == calldata_bytes
+
+
+def test_decode_method_call_data_long_list_header_boundary(transaction_parser):
+    # RLP switches from a 2-byte to a 3-byte list header at 256 payload bytes,
+    # which lands between these two calldata sizes.
+    for size in (252, 253):
+        calldata_bytes = _opaque_calldata(size)
+        decoded = transaction_parser.decode_method_call_data(_call_wire(calldata_bytes))
+        assert decoded.calldata == calldata_bytes
+
+
+@pytest.mark.parametrize("data", ["0x", "0x00", "0x01"])
+def test_decode_method_call_data_degenerate_input(transaction_parser, data):
+    # Too short to be a wrapped payload; must not raise.
+    transaction_parser.decode_method_call_data(data)
+
+
 def test_decode_latest_submit_appeal_preserves_expected_decision_id(monkeypatch):
     monkeypatch.setattr(
         "backend.protocol_rpc.transactions_parser.Account.recover_transaction",
