@@ -429,10 +429,21 @@ class TransactionsProcessor:
     @staticmethod
     def _storage_fee_used(accounting: dict) -> int:
         report = accounting.get("execution_fee_report") or {}
+        chargeable = (
+            report.get("chargeableExecution") if isinstance(report, dict) else {}
+        )
+        if isinstance(chargeable, dict) and chargeable.get("storage") is not None:
+            return int(chargeable.get("storage", 0) or 0)
+
+        chargeable_buckets = accounting.get("execution_fee_consumed_buckets") or []
+        if len(chargeable_buckets) > 1:
+            return int(chargeable_buckets[1])
+
+        # Legacy Studio receipts exposed storage as a distinct raw GenVM
+        # bucket. Retain this final fallback for persisted pre-v0.123 data.
         genvm_buckets = report.get("genvmBuckets") if isinstance(report, dict) else {}
         if isinstance(genvm_buckets, dict):
             return int(genvm_buckets.get("storage", 0) or 0)
-
         consumed_buckets = accounting.get("genvm_fee_consumed_buckets") or []
         if len(consumed_buckets) > 1:
             return int(consumed_buckets[1])

@@ -137,10 +137,13 @@ const genvmBuckets = computed(() => {
   );
 });
 const chargeableBucketRows = computed(() => {
-  return feeBucketRows(feeReport.value?.chargeableExecution ?? null);
+  return feeBucketRows(
+    feeReport.value?.chargeableExecution ?? null,
+    'chargeable',
+  );
 });
 const genvmBucketRows = computed(() => {
-  return feeBucketRows(genvmBuckets.value, 'GenVM message meter');
+  return feeBucketRows(genvmBuckets.value, 'genvm');
 });
 
 const messageFees = computed(() => feeReport.value?.messageFees ?? null);
@@ -275,24 +278,47 @@ function formatFeeDistributionValue(label: unknown, value: unknown): string {
 
 function feeBucketRows(
   bucket: StudioExecutionFeeReport['genvmBuckets'] | null | undefined,
-  messageLabel = 'Message meter',
+  layout: 'chargeable' | 'genvm',
 ) {
   if (!bucket) return [];
+  const resourceRows =
+    layout === 'genvm'
+      ? [
+          ['Shared execution meter', bucket.execution, 'fee'],
+          ['GenVM message meter', bucket.message, 'fee'],
+          [
+            'Nondeterministic output',
+            bucket.nondeterministicOutputBytes,
+            'bytes',
+          ],
+          ['Submitted message payload', bucket.submittedMessageBytes, 'bytes'],
+          ['Total with message', bucket.totalWithMessage, 'fee'],
+        ]
+      : [
+          [
+            'Receipt used',
+            bucket.receipt ?? bucket.receiptAndNondetOutput,
+            'fee',
+          ],
+          ['Storage/event writes used', bucket.storage, 'fee'],
+        ];
   return [
-    ['Receipt/nondet used', bucket.receiptAndNondetOutput, 'fee'],
-    ['Storage used', bucket.storage, 'fee'],
+    ...resourceRows,
     ['Total execution', bucket.totalExecution, 'fee'],
     ['Execution budget', bucket.executionBudgetPerRound, 'fee'],
     ['Budget remaining', bucket.executionBudgetRemaining, 'fee'],
     ['Budget overrun', bucket.executionBudgetOverrun, 'fee'],
     ['Budget exceeded', bucket.executionBudgetExceeded, 'boolean'],
-    [messageLabel, bucket.message, 'fee'],
-    ['Total with message', bucket.totalWithMessage, 'fee'],
   ]
     .filter(([, value]) => value !== undefined && value !== null)
     .map(([label, value, kind]) => ({
       label: String(label),
-      value: kind === 'boolean' ? String(value) : formatFeeAmount(value),
+      value:
+        kind === 'boolean'
+          ? String(value)
+          : kind === 'bytes'
+            ? `${formatNumber(value)} bytes`
+            : formatFeeAmount(value),
     }));
 }
 
@@ -400,6 +426,7 @@ const recommendedObservedRows = computed(() => {
   if (!observed) return [];
   return [
     ['Execution fee', observed.executionFee],
+    ['GenVM execution required', observed.genvmExecutionRequired],
     ['Message fee budget', observed.messageFeeBudget],
     ['Declared message fees', observed.declaredMessageFees],
     ['External reserved', observed.externalMessageReserved],

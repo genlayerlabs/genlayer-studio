@@ -85,6 +85,7 @@ const feeAccounting = {
     },
     observed: {
       executionFee: '400000',
+      genvmExecutionRequired: '400000',
       messageFeeBudget: '55000000000000000',
       declaredMessageFees: '55000000000000000',
       externalMessageReserved: '700',
@@ -136,9 +137,11 @@ const feeAccounting = {
       ],
     },
     genvmBuckets: {
-      receiptAndNondetOutput: '300000',
-      storage: '100000',
+      layout: 'genvm-v0.3',
+      execution: '400000',
       message: '1234',
+      nondeterministicOutputBytes: '2',
+      submittedMessageBytes: '320',
       totalExecution: '400000',
       totalWithMessage: '401234',
       executionBudgetPerRound: '500000',
@@ -147,9 +150,9 @@ const feeAccounting = {
       executionBudgetExceeded: false,
     },
     chargeableExecution: {
-      receiptAndNondetOutput: '314416',
-      storage: '0',
-      message: '0',
+      layout: 'consensus-chargeable',
+      receipt: '314416',
+      storage: '85584',
       totalExecution: '400000',
       totalWithMessage: '400000',
       executionBudgetPerRound: '500000',
@@ -159,8 +162,8 @@ const feeAccounting = {
     },
     executionMetering: {
       chargeableExecutionFee: '400000',
-      genvmReportedExecution: '401234',
-      genvmDeltaFromChargeable: '1234',
+      genvmReportedExecution: '400000',
+      genvmDeltaFromChargeable: '0',
     },
     messageFees: {
       budget: '55000000000000000',
@@ -261,7 +264,10 @@ describe('TransactionItem fee accounting display', () => {
     expect(text).toContain('External executor reimbursed');
     expect(text).toContain('Chargeable buckets');
     expect(text).toContain('GenVM raw buckets');
-    expect(text).toContain('Receipt/nondet used');
+    expect(text).toContain('Receipt used');
+    expect(text).toContain('Storage/event writes used');
+    expect(text).toContain('Shared execution meter');
+    expect(text).toContain('Nondeterministic output');
     expect(text).toContain('Budget remaining');
     expect(text).toContain('Budget exceeded');
     expect(text).toContain('false');

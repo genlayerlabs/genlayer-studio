@@ -144,6 +144,7 @@ from backend.protocol_rpc.fees import (
     record_reveal_message_fees,
     refund_failed_external_message_fee,
     required_fee_deposit,
+    _receipt_fee_report,
     settle_fee_accounting,
     _settlement_storage_recipient_count,
     stamp_receipt_execution_policy,
@@ -2377,13 +2378,15 @@ async def test_sim_estimate_transaction_fees_returns_mode2_recommended_preset(
                 "genvm_result": {
                     "data_fee_bucket_totals": [
                         execution_budget,
-                        execution_budget,
                         message_budget,
+                        GENVM_UNMETERED_DATA_FEE_BUCKET,
+                        GENVM_UNMETERED_DATA_FEE_BUCKET,
                     ],
                     "data_fees_remaining": [
                         execution_budget - 80,
-                        execution_budget,
                         0,
+                        GENVM_UNMETERED_DATA_FEE_BUCKET,
+                        GENVM_UNMETERED_DATA_FEE_BUCKET,
                     ],
                 },
                 "pending_transactions": [
@@ -3425,21 +3428,23 @@ def test_execution_fee_consumption_derives_spend_from_genvm_bucket_remaining():
     )
     receipt = {
         "genvm_result": {
-            "data_fee_bucket_totals": [100, 80, 60],
-            "data_fees_remaining": [70, 90, 10],
+            "data_fee_bucket_totals": [100, 60, 50, 40],
+            "data_fees_remaining": [70, 10, 50, 40],
         }
     }
 
     recorded = record_execution_fee_consumption(accounting, receipt)
     settled, refund = settle_fee_accounting(recorded)
 
-    assert recorded["genvm_fee_consumed_buckets"] == [30, 0, 50]
-    assert recorded["execution_fee_consumed_buckets"] == [30, 0]
+    assert recorded["genvm_fee_consumed_buckets"] == [30, 50, 0, 0]
+    assert recorded["execution_fee_consumed_buckets"] == [0, 30]
     assert recorded["execution_fee_consumed"] == 30
     assert recorded["genvm_fee_bucket_report"] == {
-        "receiptAndNondetOutput": 30,
-        "storage": 0,
+        "layout": "genvm-v0.3",
+        "execution": 30,
         "message": 50,
+        "nondeterministicOutputBytes": 0,
+        "submittedMessageBytes": 0,
         "totalExecution": 30,
         "totalWithMessage": 80,
         "executionBudgetPerRound": 100,
@@ -3447,9 +3452,20 @@ def test_execution_fee_consumption_derives_spend_from_genvm_bucket_remaining():
         "executionBudgetOverrun": 0,
         "executionBudgetExceeded": False,
         "buckets": [
-            {"index": 0, "name": "receiptAndNondetOutput", "consumed": 30},
-            {"index": 1, "name": "storage", "consumed": 0},
-            {"index": 2, "name": "message", "consumed": 50},
+            {"index": 0, "name": "execution", "unit": "fee", "consumed": 30},
+            {"index": 1, "name": "message", "unit": "fee", "consumed": 50},
+            {
+                "index": 2,
+                "name": "nondeterministicOutputBytes",
+                "unit": "bytes",
+                "consumed": 0,
+            },
+            {
+                "index": 3,
+                "name": "submittedMessageBytes",
+                "unit": "bytes",
+                "consumed": 0,
+            },
         ],
     }
     assert (
@@ -3512,7 +3528,7 @@ def test_execution_fee_consumption_reports_execution_budget_overrun():
     )
     receipt = {
         "genvm_result": {
-            "data_fees_consumed": [80, 35, 0],
+            "data_fees_consumed": [115, 0, 0, 0],
         }
     }
 
@@ -3541,7 +3557,7 @@ def test_execution_fee_consumption_reports_zero_execution_budget_overrun():
     )
     receipt = {
         "genvm_result": {
-            "data_fees_consumed": [1, 0, 0],
+            "data_fees_consumed": [1, 0, 0, 0],
         }
     }
 
@@ -3571,7 +3587,7 @@ def test_execution_fee_report_preserves_genvm_budget_exhaustion_reason():
         "genvm_result": {
             "budgetExhaustionReason": "MessageBudgetExceeded",
             "error_code": "ExecutionBudgetExceeded",
-            "data_fees_consumed": [10, 0, 90],
+            "data_fees_consumed": [10, 90, 0, 0],
         }
     }
 
@@ -3595,7 +3611,7 @@ def test_budget_exhaustion_discards_receipt_messages_from_fee_consumption():
     receipt = {
         "genvm_result": {
             "budgetExhaustionReason": "MessageBudgetExceeded",
-            "data_fees_consumed": [10, 3, 55],
+            "data_fees_consumed": [10, 55, 3, 0],
         },
         "pending_transactions": [
             {
@@ -3620,7 +3636,7 @@ def test_budget_exhaustion_discards_receipt_messages_from_fee_consumption():
     report = recorded["execution_fee_report"]
     assert recorded["message_fee_consumed"] == 0
     assert recorded["genvm_message_fee_consumed"] == 55
-    assert recorded["execution_fee_consumed_buckets"] == [10, 0]
+    assert recorded["execution_fee_consumed_buckets"] == [0, 0]
     assert "message_fees_recorded_from_receipt" not in recorded
     assert "messageReveal" not in report
     assert report["budgetExhaustionReason"] == "MessageBudgetExceeded"
@@ -3707,8 +3723,8 @@ def test_simulation_fee_consumption_fills_mode2_payload_from_allocation():
     )
     receipt = {
         "genvm_result": {
-            "data_fee_bucket_totals": [1_000, 1_000, 75],
-            "data_fees_remaining": [920, 1_000, 20],
+            "data_fee_bucket_totals": [1_000, 75, 100, 100],
+            "data_fees_remaining": [920, 20, 100, 100],
         },
         "pending_transactions": [
             {
@@ -3731,8 +3747,8 @@ def test_simulation_fee_consumption_fills_mode2_payload_from_allocation():
     )
     message = recorded["execution_fee_report"]["messageReveal"]["messages"][0]
     assert recorded["execution_fee_consumed"] == 80
-    assert recorded["execution_fee_consumed_buckets"] == [80, 0]
-    assert recorded["genvm_fee_consumed_buckets"] == [80, 0, 55]
+    assert recorded["execution_fee_consumed_buckets"] == [0, 80]
+    assert recorded["genvm_fee_consumed_buckets"] == [80, 55, 0, 0]
     assert recorded["genvm_message_fee_consumed"] == 55
     assert recorded["message_fee_consumed"] == 75
     assert recorded["allocation_consumed"] == {"0": 75}
@@ -4323,14 +4339,18 @@ def test_execution_fee_consumption_ignores_genvm_message_reveal_precharge_withou
         receipt_wrapper_bytes=0,
     )
     proposal_fee = policy.estimate_propose_receipt_gas(0) * policy.receipt_gas_price
-    reveal_precharge = (
-        policy.estimate_message_reveal_gas(0, 0) * policy.receipt_gas_price
-    )
+    genvm_receipt_fee = policy.genvm_start_budget_floor()
+    genvm_nonchargeable_overhead = genvm_receipt_fee - proposal_fee
     storage_fee = 15
     receipt = {
         "genvm_result": {
             "eqBlocksOutputsLength": 0,
-            "data_fees_consumed": [proposal_fee + reveal_precharge, storage_fee],
+            "data_fees_consumed": [
+                genvm_receipt_fee + storage_fee,
+                0,
+                0,
+                0,
+            ],
         }
     }
 
@@ -4349,9 +4369,55 @@ def test_execution_fee_consumption_ignores_genvm_message_reveal_precharge_withou
     assert report["genvmBuckets"]["executionBudgetExceeded"] is True
     assert report["executionMetering"] == {
         "chargeableExecutionFee": proposal_fee + storage_fee,
-        "genvmReportedExecution": proposal_fee + reveal_precharge + storage_fee,
-        "genvmDeltaFromChargeable": reveal_precharge,
+        "genvmReportedExecution": genvm_receipt_fee + storage_fee,
+        "genvmDeltaFromChargeable": genvm_nonchargeable_overhead,
     }
+
+
+def test_recommended_fee_preset_funds_shared_genvm_execution_with_storage():
+    policy = StudioFeePolicy(
+        gen_per_time_unit=1,
+        storage_unit_price=1,
+        receipt_gas_price=2,
+        intrinsic_gas=10,
+        bootloader_overhead=20,
+        gas_per_changed_slot=3,
+        calldata_gas_per_byte=4,
+        fixed_propose_receipt_gas=30,
+        fixed_message_reveal_gas=40,
+        receipt_wrapper_bytes=0,
+    )
+    fees_distribution = _fees_distribution(execution_budget_per_round=5_000)
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5, policy),
+        user_value=0,
+        sender="0x1111111111111111111111111111111111111111",
+        policy=policy,
+    )
+    proposal_fee = policy.estimate_propose_receipt_gas(0) * policy.receipt_gas_price
+    genvm_receipt_fee = policy.genvm_start_budget_floor()
+    storage_fee = 10_000
+    genvm_execution_required = genvm_receipt_fee + storage_fee
+    receipt = {
+        "genvm_result": {
+            "eqBlocksOutputsLength": 0,
+            "data_fees_consumed": [genvm_execution_required, 0, 0, 0],
+        }
+    }
+
+    recorded = record_execution_fee_consumption(accounting, receipt, policy)
+    preset = recorded["recommended_fee_preset"]
+
+    assert recorded["execution_fee_consumed"] == proposal_fee + storage_fee
+    assert recorded["execution_fee_consumed_buckets"] == [proposal_fee, storage_fee]
+    assert preset["observed"]["executionFee"] == proposal_fee + storage_fee
+    assert preset["observed"]["genvmExecutionRequired"] == genvm_execution_required
+    assert (
+        preset["distribution"]["executionBudgetPerRound"]
+        == (genvm_execution_required * DEFAULT_PRICE_CAP_HEADROOM_BPS + 9_999) // 10_000
+    )
 
 
 def test_execution_fee_consumption_charges_consensus_message_reveal_fee_only():
@@ -4376,7 +4442,8 @@ def test_execution_fee_consumption_charges_consensus_message_reveal_fee_only():
     receipt = {
         "genvm_result": {
             "eqBlocksOutputsLength": 0,
-            "data_fees_consumed": [999, storage_fee],
+            # calldata dynamic bytes (96) + empty allocation subtree (64)
+            "data_fees_consumed": [0, 0, 0, 160],
         },
         "pending_transactions": [
             {
@@ -4390,6 +4457,13 @@ def test_execution_fee_consumption_charges_consensus_message_reveal_fee_only():
             }
         ],
     }
+    genvm_receipt_fee = _receipt_fee_report(receipt, policy)["totalStudioMeteredFee"]
+    receipt["genvm_result"]["data_fees_consumed"] = [
+        genvm_receipt_fee + storage_fee,
+        0,
+        0,
+        160,
+    ]
 
     recorded = record_execution_fee_consumption(accounting, receipt, policy)
     report = recorded["execution_fee_report"]
@@ -4399,7 +4473,7 @@ def test_execution_fee_consumption_charges_consensus_message_reveal_fee_only():
 
     assert message_reveal["fee"] > message_reveal["consensusAdditionalFee"]
     assert report["totalEstimatedFee"] == chargeable_receipt_fee
-    assert report["totalStudioMeteredFee"] == proposal_fee + message_reveal["fee"]
+    assert report["totalStudioMeteredFee"] == genvm_receipt_fee
     assert recorded["execution_fee_consumed_buckets"] == [
         chargeable_receipt_fee,
         storage_fee,
@@ -4407,9 +4481,9 @@ def test_execution_fee_consumption_charges_consensus_message_reveal_fee_only():
     assert recorded["execution_fee_consumed"] == chargeable_receipt_fee + storage_fee
     assert report["executionMetering"] == {
         "chargeableExecutionFee": chargeable_receipt_fee + storage_fee,
-        "genvmReportedExecution": 999 + storage_fee,
+        "genvmReportedExecution": genvm_receipt_fee + storage_fee,
         "genvmDeltaFromChargeable": (
-            999 + storage_fee - chargeable_receipt_fee - storage_fee
+            genvm_receipt_fee + storage_fee - chargeable_receipt_fee - storage_fee
         ),
     }
 
@@ -4535,7 +4609,7 @@ def test_execution_fee_consumption_attaches_padded_recommended_fee_preset():
         policy=policy,
     )
     receipt = {
-        "genvm_result": {"data_fees_consumed": [80, 20, 130]},
+        "genvm_result": {"data_fees_consumed": [100, 130, 0, 0]},
         "pending_transactions": [
             {
                 "messageType": "Internal",
@@ -4575,6 +4649,7 @@ def test_execution_fee_consumption_attaches_padded_recommended_fee_preset():
     )
     assert preset["observed"] == {
         "executionFee": 100,
+        "genvmExecutionRequired": 100,
         "messageFeeBudget": 130,
         "declaredMessageFees": 130,
         "externalMessageReserved": 0,
@@ -4916,7 +4991,7 @@ def test_execution_fee_consumption_ignores_messages_from_error_receipt():
         "execution_result": "ERROR",
         "genvm_result": {
             "eq_blocks_outputs_length": 0,
-            "data_fees_consumed": [12, 34, 56],
+            "data_fees_consumed": [12, 56, 34, 0],
             "messageFeesConsumed": 1_000,
         },
         "pending_transactions": [
@@ -4941,16 +5016,16 @@ def test_execution_fee_consumption_ignores_messages_from_error_receipt():
     assert recorded["external_message_fee_reserved"] == 0
     assert "messageReveal" not in recorded["execution_fee_report"]
     assert recorded["genvm_message_fee_consumed"] == 56
-    assert recorded["execution_fee_consumed_buckets"] == [12, 0]
-    assert recorded["execution_fee_consumed"] == 12
+    assert recorded["execution_fee_consumed_buckets"] == [0, 0]
+    assert recorded["execution_fee_consumed"] == 0
     assert (
-        recorded["execution_fee_report"]["chargeableExecution"]["totalExecution"] == 12
+        recorded["execution_fee_report"]["chargeableExecution"]["totalExecution"] == 0
     )
-    assert recorded["execution_fee_report"]["genvmBuckets"]["totalExecution"] == 46
+    assert recorded["execution_fee_report"]["genvmBuckets"]["totalExecution"] == 12
     assert recorded["execution_fee_report"]["executionMetering"] == {
-        "chargeableExecutionFee": 12,
-        "genvmReportedExecution": 46,
-        "genvmDeltaFromChargeable": 34,
+        "chargeableExecutionFee": 0,
+        "genvmReportedExecution": 12,
+        "genvmDeltaFromChargeable": 12,
     }
 
 
@@ -4976,7 +5051,7 @@ def test_execution_fee_consumption_discards_storage_fee_for_error_receipt():
         "execution_result": "FinishedWithError",
         "genvm_result": {
             "eqBlocksOutputsLength": 5,
-            "data_fees_consumed": [999, 321],
+            "data_fees_consumed": [999, 321, 56, 78],
         },
         "pending_transactions": [
             {
@@ -5000,11 +5075,14 @@ def test_execution_fee_consumption_discards_storage_fee_for_error_receipt():
     assert recorded["execution_fee_consumed_buckets"] == [proposal_fee, 0]
     assert recorded["execution_fee_consumed"] == proposal_fee
     assert report["chargeableExecution"]["storage"] == 0
-    assert report["genvmBuckets"]["storage"] == 321
+    assert report["genvmBuckets"]["execution"] == 999
+    assert report["genvmBuckets"]["message"] == 321
+    assert report["genvmBuckets"]["nondeterministicOutputBytes"] == 56
+    assert report["genvmBuckets"]["submittedMessageBytes"] == 78
     assert report["executionMetering"] == {
         "chargeableExecutionFee": proposal_fee,
-        "genvmReportedExecution": 999 + 321,
-        "genvmDeltaFromChargeable": 999 + 321 - proposal_fee,
+        "genvmReportedExecution": 999,
+        "genvmDeltaFromChargeable": 999 - proposal_fee,
     }
 
 
@@ -5365,7 +5443,7 @@ def test_settlement_refunds_storage_division_dust_like_consensus():
 
     settled, refund = settle_fee_accounting(
         accounting,
-        receipt={"genvm_result": {"data_fees_consumed": [0, 5]}},
+        receipt={"genvm_result": {"data_fees_consumed": [5, 0, 0, 0]}},
         actual_final_round=0,
         num_of_validators=5,
         consensus_history=history,
@@ -5414,7 +5492,7 @@ def test_settlement_refunds_all_storage_when_zero_value_round_tracks_nobody():
 
     settled, refund = settle_fee_accounting(
         accounting,
-        receipt={"genvm_result": {"data_fees_consumed": [0, 5]}},
+        receipt={"genvm_result": {"data_fees_consumed": [5, 0, 0, 0]}},
         actual_final_round=0,
         num_of_validators=5,
         consensus_history=history,
@@ -6352,7 +6430,16 @@ def test_settlement_accumulates_receipt_fees_for_every_leader_attempt():
 
     first_proposal, first_validators = attempt(0, 0)
     final_proposal, final_validators = attempt(1, 64)
-    final_proposal["genvm_result"]["data_fees_consumed"] = [0, 37]
+    final_proposal["genvm_result"]["data_fees_consumed"] = [0, 0, 0, 0]
+    final_genvm_receipt_fee = _receipt_fee_report(final_proposal, policy)[
+        "totalStudioMeteredFee"
+    ]
+    final_proposal["genvm_result"]["data_fees_consumed"] = [
+        final_genvm_receipt_fee + 37,
+        0,
+        0,
+        0,
+    ]
     history = {
         "consensus_results": [
             {
@@ -12898,11 +12985,16 @@ def test_transaction_payload_includes_canonical_fee_object_with_decimal_strings(
         policy=StudioFeePolicy(storage_unit_price=1, receipt_gas_price=1),
         allow_low_execution_budget=True,
     )
-    recorded = record_execution_fee_consumption(
-        accounting,
-        {"genvm_result": {"data_fees_consumed": [20, 3, 0]}},
-        StudioFeePolicy(storage_unit_price=1, receipt_gas_price=1),
-    )
+    policy = StudioFeePolicy(storage_unit_price=1, receipt_gas_price=1)
+    receipt = {"genvm_result": {"data_fees_consumed": [0, 0, 0, 0]}}
+    genvm_receipt_fee = _receipt_fee_report(receipt, policy)["totalStudioMeteredFee"]
+    receipt["genvm_result"]["data_fees_consumed"] = [
+        genvm_receipt_fee + 3,
+        0,
+        0,
+        0,
+    ]
+    recorded = record_execution_fee_consumption(accounting, receipt, policy)
 
     parsed = TransactionsProcessor._parse_transaction_data(
         _processor_transaction(accounting=recorded, execution_result="SUCCESS")
