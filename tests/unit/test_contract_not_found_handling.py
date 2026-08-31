@@ -287,6 +287,99 @@ class TestGenCallContractNotFoundHandling:
 
                             assert contract_address in str(exc_info.value)
 
+    @pytest.mark.asyncio
+    async def test_fee_estimate_discovery_restarts_from_a_fresh_snapshot(self):
+        """The discovery pass must not leak simulated writes into metering."""
+        from backend.node.types import ExecutionResultStatus
+        from backend.protocol_rpc.endpoints import _gen_call_with_validator
+        from backend.protocol_rpc.fees import StudioFeePolicy
+
+        mock_session = MagicMock(spec=Session)
+        mock_accounts_manager = MagicMock()
+        mock_accounts_manager.is_valid_address.return_value = True
+        mock_genvm_manager = MagicMock()
+        mock_msg_handler = MagicMock()
+        mock_msg_handler.with_client_session.return_value = mock_msg_handler
+        mock_transactions_parser = MagicMock()
+        mock_decoded = MagicMock(calldata=b"write")
+        mock_transactions_parser.decode_method_send_data.return_value = mock_decoded
+
+        validators_snapshot = MagicMock()
+        validators_snapshot.nodes = [MagicMock(validator=MagicMock())]
+
+        discovery_receipt = MagicMock(
+            execution_result=ExecutionResultStatus.SUCCESS,
+            genvm_result={},
+        )
+        metered_receipt = MagicMock(
+            execution_result=ExecutionResultStatus.SUCCESS,
+            genvm_result={},
+        )
+        discovery_node = MagicMock()
+        discovery_node.run_contract = AsyncMock(return_value=discovery_receipt)
+        metered_node = MagicMock()
+        metered_node.run_contract = AsyncMock(return_value=metered_receipt)
+
+        initial_accounting = {"message_allocations": []}
+        rebuilt_accounting = {"message_allocations": [{"budget": 1}]}
+        exact_genvm_accounting = {"exact": True}
+        params = {
+            "type": "write",
+            "data": "0x1234",
+            "to": "0x" + "ab" * 20,
+            "from": "0x" + "cd" * 20,
+            "_discover_message_allocations_for_estimate": True,
+        }
+
+        with patch(
+            "backend.protocol_rpc.endpoints.ContractSnapshot",
+            side_effect=[MagicMock(), MagicMock()],
+        ) as snapshot_cls, patch(
+            "backend.protocol_rpc.endpoints.Node",
+            side_effect=[discovery_node, metered_node],
+        ) as node_cls, patch(
+            "backend.protocol_rpc.endpoints._check_rate_limit"
+        ), patch(
+            "backend.protocol_rpc.endpoints._simulation_fee_accounting",
+            return_value=initial_accounting,
+        ), patch(
+            "backend.protocol_rpc.endpoints._effective_simulation_fee_accounting_for_genvm",
+            side_effect=[{"initial": True}, exact_genvm_accounting],
+        ), patch(
+            "backend.protocol_rpc.endpoints.fee_accounting_with_discovered_messages",
+            return_value=rebuilt_accounting,
+        ), patch(
+            "backend.protocol_rpc.endpoints.record_execution_fee_consumption",
+            return_value={"recorded": True},
+        ), patch(
+            "backend.protocol_rpc.endpoints.StudioFeePolicy.from_env",
+            return_value=StudioFeePolicy(
+                gen_per_time_unit=1,
+                storage_unit_price=1,
+                receipt_gas_price=1,
+            ),
+        ):
+            receipt = await _gen_call_with_validator(
+                mock_session,
+                mock_accounts_manager,
+                mock_genvm_manager,
+                mock_msg_handler,
+                mock_transactions_parser,
+                validators_snapshot,
+                params,
+            )
+
+        assert receipt is metered_receipt
+        assert snapshot_cls.call_count == 2
+        first_snapshot = node_cls.call_args_list[0].kwargs["contract_snapshot"]
+        second_snapshot = node_cls.call_args_list[1].kwargs["contract_snapshot"]
+        assert first_snapshot is not second_snapshot
+        assert discovery_node.run_contract.await_args.kwargs["fee_accounting"] is None
+        assert (
+            metered_node.run_contract.await_args.kwargs["fee_accounting"]
+            == exact_genvm_accounting
+        )
+
 
 class TestEthCallContractNotFoundHandling:
     """Test that eth_call properly handles ContractNotFoundError from execution"""

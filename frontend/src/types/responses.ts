@@ -1,3 +1,5 @@
+import type { MessageFeeAllocationInput } from 'genlayer-js/types';
+
 export interface JsonRPCResponse<T> {
   id: string;
   jsonrpc: string;
@@ -130,7 +132,7 @@ export interface StudioRecommendedFeePreset {
   numOfInitialValidators?: string | number;
   distribution?: StudioFeesDistribution;
   feeValue?: string | number;
-  messageAllocations?: unknown[];
+  messageAllocations?: MessageFeeAllocationInput[];
   messageBudgetMode?:
     | 'current'
     | 'observed'
@@ -173,7 +175,7 @@ export interface StudioFeeAccounting {
   appeal_bonds_total?: string | number;
   total_refunded?: string | number;
   fees_distribution?: StudioFeesDistribution;
-  message_allocations?: unknown[];
+  message_allocations?: MessageFeeAllocationInput[];
   allocation_consumed?: Record<string, string | number>;
   message_consumption_events?: unknown[];
   refunds?: unknown[];

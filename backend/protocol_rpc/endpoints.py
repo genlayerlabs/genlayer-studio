@@ -58,6 +58,7 @@ from backend.protocol_rpc.fees import (
     calculate_round_fees,
     decode_internal_message_fee_params,
     create_fee_accounting,
+    fee_accounting_with_discovered_messages,
     funding_policy_for_accounting,
     get_leader_rounds,
     normalize_fees_distribution,
@@ -1550,6 +1551,7 @@ async def sim_estimate_transaction_fees(
         estimate_params = {
             **estimate_params,
             "_allow_low_execution_budget_for_estimate": True,
+            "_discover_message_allocations_for_estimate": True,
         }
     receipt = await sim_call(
         session=session,
@@ -1646,6 +1648,18 @@ async def _gen_call_with_validator(
     if not accounts_manager.is_valid_address(from_address):
         raise InvalidAddressError(from_address)
 
+    if type == "deploy":
+        deployment_count = (
+            TransactionsProcessor(session).get_successful_ghost_creation_count()
+            if session is not None
+            else 0
+        )
+        to_address = GhostFactoryConfig.from_env().address_for(
+            int(params.get("salt_nonce", params.get("saltNonce", 0)) or 0),
+            deployment_count,
+            namespace=from_address,
+        )
+
     if not accounts_manager.is_valid_address(to_address):
         raise InvalidAddressError(to_address)
 
@@ -1663,34 +1677,46 @@ async def _gen_call_with_validator(
             message="No validators available to execute the gen_call",
         )
 
-    # Create validator node
-    try:
-        contract_snapshot = ContractSnapshot(to_address, session)
-    except ContractNotFoundError:
-        raise NotFoundError(
-            message=f"Contract {to_address} not found",
-            data={"contract_address": to_address},
-        )
-    if type in {"write", "deploy"}:
-        _stage_simulated_call_value(contract_snapshot, call_value)
-    node = Node(
-        contract_snapshot=contract_snapshot,
-        contract_snapshot_factory=partial(ContractSnapshot, session=session),
-        validator_mode=ExecutionMode.LEADER,
-        validator=validator,
-        leader_receipt=None,
-        msg_handler=msg_handler.with_client_session(get_client_session_id()),
-        validators_snapshot=validators_snapshot,
-        manager=genvm_manager,
-    )
-
     sc_raw = params.get("sim_config")
+    _validate_genvm_executor_selector(sc_raw)
+    _reject_genvm_executor_selector_unless_deploy(
+        sc_raw,
+        is_deploy=type == "deploy",
+    )
     sim_config = SimConfig.from_dict(sc_raw) if sc_raw else None
     override_transaction_datetime: bool = (
         sim_config is not None and sim_config.genvm_datetime is not None
     )
 
-    try:
+    def create_node() -> Node:
+        # A fee estimate can execute twice: first to discover exact message
+        # keys and then to meter them. Each pass must start from the same DB
+        # snapshot; _SnapshotView writes through to its ContractSnapshot.
+        if type == "deploy":
+            contract_snapshot = ContractSnapshot(None, session)
+            contract_snapshot.contract_address = to_address
+            contract_snapshot.balance = 0
+            contract_snapshot.states = {"accepted": {}, "finalized": {}}
+            contract_snapshot.genvm_executor_selector = (
+                sim_config.genvm_executor_selector if sim_config else None
+            )
+        else:
+            contract_snapshot = ContractSnapshot(to_address, session)
+        if type in {"write", "deploy"}:
+            _stage_simulated_call_value(contract_snapshot, call_value)
+        return Node(
+            contract_snapshot=contract_snapshot,
+            contract_snapshot_factory=partial(ContractSnapshot, session=session),
+            validator_mode=ExecutionMode.LEADER,
+            validator=validator,
+            leader_receipt=None,
+            msg_handler=msg_handler.with_client_session(get_client_session_id()),
+            validators_snapshot=validators_snapshot,
+            manager=genvm_manager,
+        )
+
+    async def execute(active_fee_accounting):
+        node = create_node()
         if type == "read":
             # Pre-parse timestamp override and map errors
             txn_dt = None
@@ -1704,7 +1730,7 @@ async def _gen_call_with_validator(
                         data={},
                     ) from e
             decoded_data = transactions_parser.decode_method_call_data(data)
-            receipt = await node.get_contract_data(
+            return await node.get_contract_data(
                 from_address=from_address,
                 calldata=decoded_data.calldata,
                 state_status=state_status,
@@ -1724,13 +1750,13 @@ async def _gen_call_with_validator(
                         data={},
                     ) from e
             decoded_data = transactions_parser.decode_method_send_data(data)
-            receipt = await node.run_contract(
+            return await node.run_contract(
                 from_address=from_address,
                 calldata=decoded_data.calldata,
                 transaction_created_at=txn_created_at,
                 value=call_value,
                 origin_address=origin_address,
-                fee_accounting=genvm_fee_accounting,
+                fee_accounting=active_fee_accounting,
             )
         elif type == "deploy":
             txn_created_at = None
@@ -1745,20 +1771,50 @@ async def _gen_call_with_validator(
                         data={},
                     ) from e
             decoded_data = transactions_parser.decode_deployment_data(data)
-            receipt = await node.deploy_contract(
+            return await node.deploy_contract(
                 from_address=from_address,
                 code_to_deploy=decoded_data.contract_code,
                 calldata=decoded_data.calldata,
                 transaction_created_at=txn_created_at,
                 value=call_value,
                 origin_address=origin_address,
-                fee_accounting=genvm_fee_accounting,
+                fee_accounting=active_fee_accounting,
             )
         else:
             raise JSONRPCError(
                 code=-32602,
                 message=f"Invalid type '{type}': must be 'read', 'write', or 'deploy'",
             )
+
+    policy = StudioFeePolicy.from_env()
+    discover_message_allocations = bool(
+        params.get("_discover_message_allocations_for_estimate")
+        and type in {"write", "deploy"}
+        and simulation_fee_accounting is not None
+        and not simulation_fee_accounting.get("message_allocations")
+        and policy.fee_accounting_enabled()
+    )
+
+    try:
+        # The first pass reveals concrete recipient/call-key pairs without
+        # making the transaction envelope permissive. The second pass meters
+        # the same execution under the exact discovered allocation roots.
+        receipt = await execute(
+            None if discover_message_allocations else genvm_fee_accounting
+        )
+        if (
+            discover_message_allocations
+            and receipt.execution_result == ExecutionResultStatus.SUCCESS
+        ):
+            simulation_fee_accounting = fee_accounting_with_discovered_messages(
+                simulation_fee_accounting,
+                receipt,
+                policy,
+            )
+            genvm_fee_accounting = _effective_simulation_fee_accounting_for_genvm(
+                simulation_fee_accounting
+            )
+            receipt = await execute(genvm_fee_accounting)
     except ContractNotFoundError as e:
         raise NotFoundError(
             message=f"Contract {e.address} not found",

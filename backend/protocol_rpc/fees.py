@@ -96,6 +96,10 @@ DEFAULT_LEADER_TIMEUNITS_ALLOCATION = 100
 DEFAULT_VALIDATOR_TIMEUNITS_ALLOCATION = 200
 DEFAULT_PRICE_CAP_HEADROOM_BPS = 12_000
 DEFAULT_PARENT_MESSAGE_RECEIPT_HEADROOM = 10_000
+# Conservative off-chain quote for an allocated EVM message. Consensus refunds
+# unused reservation, while 21k only covers a plain value transfer and would
+# make common contract calls (for example ERC-20 transfer) deterministically OOG.
+DEFAULT_EXTERNAL_MESSAGE_GAS_LIMIT = 500_000
 DEFAULT_TIME_UNIT_OVERLAY_BPS = 1_500
 DEFAULT_MIN_PROPOSE_TIMEUNITS = 30
 DEFAULT_MAX_PROPOSE_TIMEUNITS = 600
@@ -267,6 +271,7 @@ class StudioFeePolicy:
     max_allocated_messages: int = MAX_ALLOCATED_MESSAGES_CAP
     max_messages_per_tx: int = 0
     min_external_gas_limit: int = 0
+    default_external_gas_limit: int = DEFAULT_EXTERNAL_MESSAGE_GAS_LIMIT
     max_eq_outputs_bytes: int = 0
     max_submitted_messages_bytes: int = 0
     time_unit_overlay_bps: int = 0
@@ -289,6 +294,11 @@ class StudioFeePolicy:
             raise ValueError(
                 "invalid time-unit overlay bps: "
                 f"{self.time_unit_overlay_bps} (expected 0..9999)"
+            )
+        if int(self.default_external_gas_limit) <= 0:
+            raise ValueError(
+                "invalid default external gas limit: "
+                f"{self.default_external_gas_limit} (expected > 0)"
             )
         for minimum, maximum, label in (
             (
@@ -345,6 +355,10 @@ class StudioFeePolicy:
             max_messages_per_tx=_env_int("GENLAYER_STUDIO_MAX_MESSAGES_PER_TX", 0),
             min_external_gas_limit=_env_int(
                 "GENLAYER_STUDIO_MIN_EXTERNAL_GAS_LIMIT", 0
+            ),
+            default_external_gas_limit=_env_int(
+                "GENLAYER_STUDIO_DEFAULT_EXTERNAL_GAS_LIMIT",
+                DEFAULT_EXTERNAL_MESSAGE_GAS_LIMIT,
             ),
             max_eq_outputs_bytes=_env_int("GENLAYER_STUDIO_MAX_EQ_OUTPUTS_BYTES", 0),
             max_submitted_messages_bytes=_env_int(
@@ -1612,6 +1626,7 @@ def studio_fee_config(policy: StudioFeePolicy | None = None) -> dict[str, Any]:
             "maxAllocatedMessages": str(policy.max_allocated_messages),
             "maxMessagesPerTx": str(policy.max_messages_per_tx),
             "minExternalGasLimit": str(policy.min_external_gas_limit),
+            "defaultExternalGasLimit": str(policy.default_external_gas_limit),
             "maxEqOutputsBytes": str(policy.max_eq_outputs_bytes),
             "maxSubmittedMessagesBytes": str(policy.max_submitted_messages_bytes),
             "timeUnitOverlayBps": str(policy.time_unit_overlay_bps),
@@ -5254,6 +5269,208 @@ def _receipt_pending_transaction_fee_payload(raw: Any) -> dict[str, Any]:
         "useBalance": bool(_message_field(message, "use_balance", "useBalance", False)),
         "gasUsed": int(_message_field(message, "gas_used", "gasUsed", 0) or 0),
     }
+
+
+def discovered_message_fee_allocations(
+    receipt: Any,
+    fees_distribution: dict[str, Any],
+    policy: StudioFeePolicy | None = None,
+) -> list[dict[str, Any]]:
+    """Build an exact root allocation tree from an unmetered simulation.
+
+    GenVM must receive an allocation before it can emit a fee-aware message,
+    which otherwise makes a transaction-specific estimate circular.  Studio's
+    estimate endpoint first executes without fee metering, then converts the
+    observed recipient/call-key pairs into the same FlatArrays roots accepted
+    by Consensus and reruns the transaction under those exact roots.
+
+    This intentionally does not create a wildcard recipient or call key.  The
+    returned preset therefore funds only the messages the representative
+    execution actually emitted.
+    """
+    policy = policy or StudioFeePolicy()
+    fees = normalize_fees_distribution(fees_distribution)
+    observed_messages = [
+        _receipt_pending_transaction_fee_payload(raw)
+        for raw in _receipt_pending_transactions(receipt)
+    ]
+    if not observed_messages:
+        return []
+    if len(observed_messages) > int(
+        policy.max_allocated_messages or MAX_ALLOCATED_MESSAGES_CAP
+    ):
+        raise TooManyMessages("TooManyMessages")
+    # Balance-funded internal messages reserve their declared budget from the
+    # emitting contract. They are deliberately outside the sender-funded
+    # message bucket and must not gain a root allocation during discovery.
+    messages = [
+        message
+        for message in observed_messages
+        if not (
+            int(message["messageType"]) == MESSAGE_TYPE_INTERNAL
+            and bool(message.get("useBalance", False))
+        )
+    ]
+    if not messages:
+        return []
+
+    leader_timeunits = int(fees["leaderTimeunitsAllocation"])
+    validator_timeunits = int(fees["validatorTimeunitsAllocation"])
+    if not (
+        int(policy.min_propose_timeunits)
+        <= leader_timeunits
+        <= int(policy.max_propose_timeunits)
+    ):
+        leader_timeunits = DEFAULT_LEADER_TIMEUNITS_ALLOCATION
+    if not (
+        int(policy.min_commit_timeunits)
+        <= validator_timeunits
+        <= int(policy.max_commit_timeunits)
+    ):
+        validator_timeunits = DEFAULT_VALIDATOR_TIMEUNITS_ALLOCATION
+
+    rotations = [int((fees.get("rotations") or [0])[0])]
+    execution_budget = max(
+        int(fees["executionBudgetPerRound"]),
+        int(policy.message_fee_params_budget_floor()),
+        int(policy.genvm_start_budget_floor()),
+    )
+    max_gen_price = max(
+        int(fees["maxPriceGenPerTimeUnit"]),
+        _with_cap_headroom(int(policy.gen_per_time_unit)),
+    )
+    storage_price_cap = max(
+        int(fees["storageFeeMaxGasPrice"]),
+        _with_cap_headroom(int(policy.storage_unit_price)),
+    )
+    receipt_price_cap = max(
+        int(fees["receiptFeeMaxGasPrice"]),
+        _with_cap_headroom(int(policy.receipt_gas_price)),
+    )
+
+    grouped: dict[tuple[int, str, str], dict[str, Any]] = {}
+    for message in messages:
+        message_type = int(message["messageType"])
+        recipient = str(message["recipient"]).lower()
+        call_key = _normalize_call_key(message["callKey"])
+        on_acceptance = bool(message["onAcceptance"])
+        key = (message_type, recipient, call_key)
+        existing = grouped.get(key)
+        if existing is not None:
+            if bool(existing["onAcceptance"]) != on_acceptance:
+                raise MessageEmissionPhaseMismatch("MessageEmissionPhaseMismatch")
+            existing["count"] += 1
+            continue
+        grouped[key] = {
+            "messageType": message_type,
+            "recipient": recipient,
+            "callKey": call_key,
+            "onAcceptance": on_acceptance,
+            "count": 1,
+        }
+
+    allocations: list[dict[str, Any]] = []
+    for item in grouped.values():
+        count = int(item.pop("count"))
+        if int(item["messageType"]) == MESSAGE_TYPE_EXTERNAL:
+            gas_limit = max(
+                int(policy.default_external_gas_limit),
+                int(policy.min_external_gas_limit),
+            )
+            max_gas_price = receipt_price_cap
+            if max_gas_price <= 0:
+                raise ExternalAllocationInvalid("ExternalExecutionPriceUnavailable")
+            fee_params = encode(
+                [EXTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE],
+                [(gas_limit, max_gas_price)],
+            )
+            budget = gas_limit * max_gas_price * count
+            on_acceptance = False
+        else:
+            internal_params = {
+                "leaderTimeunitsAllocation": leader_timeunits,
+                "validatorTimeunitsAllocation": validator_timeunits,
+                "appealRounds": 0,
+                "executionBudgetPerRound": execution_budget,
+                "rotations": rotations,
+                "maxPriceGenPerTimeUnit": max_gen_price,
+                "storageFeeMaxGasPrice": storage_price_cap,
+                "receiptFeeMaxGasPrice": receipt_price_cap,
+            }
+            fee_params = encode(
+                [INTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE],
+                [
+                    (
+                        internal_params["leaderTimeunitsAllocation"],
+                        internal_params["validatorTimeunitsAllocation"],
+                        internal_params["appealRounds"],
+                        internal_params["executionBudgetPerRound"],
+                        internal_params["rotations"],
+                        internal_params["maxPriceGenPerTimeUnit"],
+                        internal_params["storageFeeMaxGasPrice"],
+                        internal_params["receiptFeeMaxGasPrice"],
+                    )
+                ],
+            )
+            per_message_budget = min_message_primary_fees(internal_params, policy)
+            budget = per_message_budget * count
+            on_acceptance = bool(item["onAcceptance"])
+
+        allocations.append(
+            {
+                "messageType": int(item["messageType"]),
+                "onAcceptance": on_acceptance,
+                "parentIndex": NODE_ROOT_SENTINEL,
+                "recipient": item["recipient"],
+                "callKey": item["callKey"],
+                "budget": budget,
+                "feeParams": fee_params,
+            }
+        )
+
+    return allocations
+
+
+def fee_accounting_with_discovered_messages(
+    accounting: dict[str, Any],
+    receipt: Any,
+    policy: StudioFeePolicy | None = None,
+) -> dict[str, Any]:
+    """Rebuild simulation accounting around exact discovered allocations."""
+    policy = _accounting_policy(accounting, policy)
+    fees = normalize_fees_distribution(accounting.get("fees_distribution") or {})
+    allocations = discovered_message_fee_allocations(receipt, fees, policy)
+    if not allocations:
+        return accounting
+
+    fees["totalMessageFees"] = sum(
+        int(allocation["budget"])
+        for allocation in allocations
+        if int(allocation["parentIndex"]) == NODE_ROOT_SENTINEL
+    )
+    fees["executionBudgetPerRound"] = max(
+        int(fees["executionBudgetPerRound"]),
+        int(policy.message_fee_params_budget_floor())
+        + int(policy.receipt_gas_price) * DEFAULT_PARENT_MESSAGE_RECEIPT_HEADROOM,
+        int(policy.genvm_start_budget_floor()),
+    )
+    fee_value = required_fee_deposit(
+        fees,
+        int(accounting.get("num_of_initial_validators") or VALIDATORS_PER_ROUND[0]),
+        policy,
+    )
+    return create_fee_accounting(
+        fees_distribution=fees,
+        message_allocations=allocations,
+        num_of_validators=int(
+            accounting.get("num_of_initial_validators") or VALIDATORS_PER_ROUND[0]
+        ),
+        submitted_value=int(accounting.get("user_value", 0) or 0) + fee_value,
+        user_value=int(accounting.get("user_value", 0) or 0),
+        sender=accounting.get("sender"),
+        policy=policy,
+        allow_low_execution_budget=True,
+    )
 
 
 def _execution_fee_buckets(consumed: list[int]) -> list[int]:

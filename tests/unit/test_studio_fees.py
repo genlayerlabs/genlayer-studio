@@ -86,6 +86,7 @@ from backend.protocol_rpc.fees import (
     MessageNoMatchingAllocation,
     Mode1MessageFeesRequireGenVMPerEmissionSupport,
     message_effect_identities,
+    min_message_primary_fees,
     PhaseTimeoutOutOfBounds,
     SubmittedMessagesTooLarge,
     CALL_KEY_WILDCARD,
@@ -101,6 +102,7 @@ from backend.protocol_rpc.fees import (
     PROPOSE_RECEIPT_SLOTS,
     SUBMITTED_MESSAGE_ABI_TYPE,
     DEFAULT_GEN_PER_TIME_UNIT,
+    DEFAULT_EXTERNAL_MESSAGE_GAS_LIMIT,
     DEFAULT_PRICE_CAP_HEADROOM_BPS,
     DEFAULT_TIME_UNIT_OVERLAY_BPS,
     DEFAULT_RECEIPT_GAS_PRICE,
@@ -120,9 +122,13 @@ from backend.protocol_rpc.fees import (
     consume_message_fees,
     create_child_fee_accounting,
     create_fee_accounting,
+    decode_external_message_fee_params,
+    decode_internal_message_fee_params,
     cancel_fee_accounting,
     default_transaction_fees_for_policy,
     derive_external_message_call_key,
+    discovered_message_fee_allocations,
+    fee_accounting_with_discovered_messages,
     fill_message_fee_payload_from_allocation,
     mark_message_effects_delivered,
     message_novelty_mask,
@@ -737,12 +743,14 @@ def test_studio_fee_policy_env_defaults_to_fee_enabled(monkeypatch):
     monkeypatch.delenv("GENLAYER_STUDIO_GEN_PER_TIME_UNIT", raising=False)
     monkeypatch.delenv("GENLAYER_STUDIO_STORAGE_UNIT_PRICE", raising=False)
     monkeypatch.delenv("GENLAYER_STUDIO_RECEIPT_GAS_PRICE", raising=False)
+    monkeypatch.delenv("GENLAYER_STUDIO_DEFAULT_EXTERNAL_GAS_LIMIT", raising=False)
 
     policy = StudioFeePolicy.from_env()
 
     assert policy.gen_per_time_unit == DEFAULT_GEN_PER_TIME_UNIT
     assert policy.storage_unit_price == DEFAULT_STORAGE_UNIT_PRICE
     assert policy.receipt_gas_price == DEFAULT_RECEIPT_GAS_PRICE
+    assert policy.default_external_gas_limit == DEFAULT_EXTERNAL_MESSAGE_GAS_LIMIT
     assert policy.time_unit_overlay_bps == DEFAULT_TIME_UNIT_OVERLAY_BPS
     assert policy.fee_accounting_enabled() is True
 
@@ -2061,6 +2069,111 @@ def test_simulation_fee_accounting_defaults_to_required_deposit():
     assert accounting["message_fee_budget"] == 55
 
 
+def test_discovered_message_allocations_are_exact_and_consensus_valid():
+    policy = StudioFeePolicy.from_env()
+    fees_distribution = _env_fees_distribution()
+    internal_recipient = "0x2222222222222222222222222222222222222222"
+    external_recipient = "0x3333333333333333333333333333333333333333"
+    internal_call_key = "0x" + "12" * 32
+    external_calldata = bytes.fromhex("aabbccdd01")
+    receipt = {
+        "pending_transactions": [
+            {
+                "messageType": "Internal",
+                "address": internal_recipient,
+                "on": "accepted",
+                "call_key": internal_call_key,
+            },
+            {
+                "messageType": "Internal",
+                "address": internal_recipient,
+                "on": "accepted",
+                "call_key": internal_call_key,
+            },
+            {
+                "messageType": "External",
+                "address": external_recipient,
+                "on": "finalized",
+                "calldata": external_calldata,
+                "call_key": EMPTY_CALL_KEY,
+            },
+            {
+                "messageType": "Internal",
+                "address": "0x4444444444444444444444444444444444444444",
+                "on": "finalized",
+                "call_key": "0x" + "56" * 32,
+                "use_balance": True,
+            },
+        ]
+    }
+
+    allocations = discovered_message_fee_allocations(
+        receipt,
+        fees_distribution,
+        policy,
+    )
+
+    assert len(allocations) == 2
+    internal, external = allocations
+    assert internal["recipient"] == internal_recipient
+    assert internal["callKey"] == internal_call_key
+    assert internal["onAcceptance"] is True
+    internal_params = decode_internal_message_fee_params(internal["feeParams"])
+    assert internal["budget"] == 2 * min_message_primary_fees(
+        internal_params,
+        policy,
+    )
+    assert external["recipient"] == external_recipient
+    assert external["callKey"] == "0x" + "aabbccdd" + "00" * 28
+    assert external["onAcceptance"] is False
+    external_params = decode_external_message_fee_params(external["feeParams"])
+    assert external_params["gasLimit"] == policy.default_external_gas_limit
+    assert external["budget"] == (
+        external_params["gasLimit"] * external_params["maxGasPrice"]
+    )
+
+    total_message_fees = sum(allocation["budget"] for allocation in allocations)
+    validate_message_allocations(
+        allocations,
+        total_message_fees=total_message_fees,
+        policy=policy,
+    )
+
+
+def test_discovered_messages_rebuild_simulation_accounting_and_deposit():
+    policy = StudioFeePolicy.from_env()
+    fees_distribution = _env_fees_distribution()
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5, policy),
+        user_value=0,
+        sender="0x1111111111111111111111111111111111111111",
+        policy=policy,
+    )
+    receipt = {
+        "pending_transactions": [
+            {
+                "messageType": "Internal",
+                "address": "0x2222222222222222222222222222222222222222",
+                "on": "finalized",
+                "call_key": "0x" + "34" * 32,
+            }
+        ]
+    }
+
+    rebuilt = fee_accounting_with_discovered_messages(accounting, receipt, policy)
+
+    assert len(rebuilt["message_allocations"]) == 1
+    assert rebuilt["message_fee_budget"] == rebuilt["message_allocations"][0]["budget"]
+    assert rebuilt["required_fee_value"] == required_fee_deposit(
+        rebuilt["fees_distribution"],
+        5,
+        policy,
+    )
+    assert rebuilt["paid_fee_value"] == rebuilt["required_fee_value"]
+
+
 def test_simulation_fee_accounting_rejects_insufficient_sdk_fee_value():
     fees_distribution = _env_fees_distribution(total_message_fees=55)
     with pytest.raises(JSONRPCError, match="InsufficientFees"):
@@ -2172,7 +2285,9 @@ async def test_sim_estimate_transaction_fees_preserves_caller_fee_envelope(
 
     assert seen["params"]["fees"] == fees
     assert seen["params"]["_allow_low_execution_budget_for_estimate"] is True
+    assert seen["params"]["_discover_message_allocations_for_estimate"] is True
     assert "_allow_low_execution_budget_for_estimate" not in params
+    assert "_discover_message_allocations_for_estimate" not in params
     assert result["scenario"] == "mode-2-message"
     assert result["feeReport"] == {"messageFees": {"budget": 55}}
     assert result["recommendedPreset"] == {
