@@ -8,6 +8,6 @@ pytest-asyncio==1.3.0
 pytest-timeout==2.4.0
 # Immutable resolution-kernel train consumers. Replace these with the released
 # v0.19/v0.30 package versions when the coordinated prerelease is published.
-genlayer-py @ git+https://github.com/genlayerlabs/genlayer-py.git@d127609e7503fddadff016c823e7315ec329cb36
+genlayer-py @ git+https://github.com/genlayerlabs/genlayer-py.git@54cdc8501afd606412f516e228d3738d2e01c42e
 genlayer-test @ git+https://github.com/genlayerlabs/genlayer-testing-suite.git@478d939590cbdbc7c9179e0c2e0013e95059dc36
 httpx==0.28.1
