@@ -19,6 +19,7 @@ from backend.consensus.base import (
     _dispatch_messages_for_phase,
     _emit_messages,
     _get_messages_data,
+    _pending_transaction_fee_payload,
     _runtime_rotation_limit,
     _studio_child_transaction_id,
     _validators_in_frozen_selection_pool,
@@ -9901,6 +9902,41 @@ def test_internal_deployment_descriptor_stays_zero_address_and_carries_salt():
     assert internal_messages[0]["recipient"] == zero
     assert internal_messages[0]["saltNonce"] == 42
     assert pending.address == "0x"
+
+
+def test_internal_deployment_fee_payload_matches_zero_address_allocation():
+    fee_params = _encode_internal_fee_params()
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(total_message_fees=55),
+        message_allocations=[
+            _allocation(
+                recipient="0x0000000000000000000000000000000000000000",
+                call_key=EMPTY_CALL_KEY,
+                budget=55,
+                fee_params=fee_params,
+            )
+        ],
+        num_of_validators=5,
+        submitted_value=1155,
+        user_value=0,
+    )
+    pending = PendingTransaction(
+        address="0x",
+        calldata=b"\x12\x34",
+        code=b"contract source",
+        salt_nonce=42,
+        on="accepted",
+        value=0,
+        call_key=EMPTY_CALL_KEY,
+    )
+
+    payload = _pending_transaction_fee_payload(pending, "accepted")
+    matched = fill_message_fee_payload_from_allocation(accounting, payload)
+
+    assert payload["recipient"] == "0x0000000000000000000000000000000000000000"
+    assert payload["callKey"] == EMPTY_CALL_KEY
+    assert matched["declaredBudget"] == 55
+    assert matched["feeParams"] == "0x" + fee_params.hex()
 
 
 def test_flat_array_message_dispatch_ignores_bad_receipt_subtree_and_inherits_parent(

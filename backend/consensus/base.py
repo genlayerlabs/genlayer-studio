@@ -4724,6 +4724,14 @@ def _pending_transaction_fee_payload(
     on: Literal["accepted", "finalized"],
 ) -> dict[str, Any]:
     message_type = 0 if pending_transaction.is_eth_send else 1
+    # GenVM represents an internal deployment with the abbreviated ``0x``
+    # address, while the transaction envelope and Consensus allocation tree
+    # encode its recipient as address(0).  Match against that canonical form;
+    # otherwise a quote discovered by sim_estimateTransactionFees succeeds in
+    # GenVM but is rejected during reveal with MessageNoMatchingAllocation.
+    recipient = (
+        ZERO_ADDRESS if pending_transaction.is_deploy() else pending_transaction.address
+    )
     call_key = pending_transaction.call_key
     if message_type == 0:
         call_key = derive_external_message_call_key(
@@ -4732,7 +4740,7 @@ def _pending_transaction_fee_payload(
         )
     return {
         "messageType": message_type,
-        "recipient": pending_transaction.address,
+        "recipient": recipient,
         "value": pending_transaction.value,
         "data": pending_transaction.calldata,
         "onAcceptance": on == "accepted",
