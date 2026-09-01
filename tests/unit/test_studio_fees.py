@@ -12017,6 +12017,91 @@ def test_appeal_capacity_uses_frozen_pool_identities_and_live_availability():
     assert available == 2
 
 
+def _accepted_first_round_with_frozen_pool(pool_size: int):
+    accounting = _env_fee_accounting()
+    accounting["selection_pool_addresses"] = [
+        f"0x{index:040x}" for index in range(1, pool_size + 1)
+    ]
+    accounting["selection_pool_count"] = pool_size
+    tx = _fee_accounted_tx(status="ACCEPTED", accounting=accounting)
+    tx.update(
+        timestamp_awaiting_finalization=1_000,
+        appeal_processing_time=0,
+        appeal_failed=0,
+        appealed=False,
+        execution_mode="NORMAL",
+        consensus_data={
+            "leader_receipt": [
+                _history_receipt(
+                    mode="leader",
+                    address="0x0000000000000000000000000000000000000001",
+                )
+            ],
+            "validators": [
+                _history_receipt(
+                    mode="validator",
+                    address=f"0x{index:040x}",
+                )
+                for index in range(2, 6)
+            ],
+        },
+        consensus_history={
+            "consensus_results": [
+                {
+                    "consensus_round": "Accepted",
+                    "leader_result": [
+                        _history_receipt(
+                            mode="leader",
+                            address="0x0000000000000000000000000000000000000001",
+                        )
+                    ],
+                    "validator_results": [],
+                }
+            ]
+        },
+    )
+    return tx, accounting
+
+
+def test_latest_appeal_charge_rejects_when_initial_committee_exhausts_pool(
+    monkeypatch,
+):
+    """Five initial identities leave no fresh validator-appeal juror."""
+    monkeypatch.setenv("VITE_FINALITY_WINDOW", "30")
+    monkeypatch.setattr("backend.protocol_rpc.endpoints.time.time", lambda: 1_001)
+    tx, _accounting = _accepted_first_round_with_frozen_pool(5)
+
+    with pytest.raises(InvalidTransactionError, match="CanNotAppeal"):
+        estimate_latest_appeal_charge(
+            _FakeTransactionsProcessor(tx), {"txId": tx["hash"]}
+        )
+
+
+def test_latest_appeal_charge_uses_full_first_jury_with_twelve_validator_pool(
+    monkeypatch,
+):
+    """Five initial identities plus seven fresh identities fund the full jury."""
+    monkeypatch.setenv("VITE_FINALITY_WINDOW", "30")
+    monkeypatch.setattr("backend.protocol_rpc.endpoints.time.time", lambda: 1_001)
+    tx, accounting = _accepted_first_round_with_frozen_pool(12)
+    expected = calculate_appeal_charge(
+        accounting["fees_distribution"],
+        current_round=0,
+        status="ACCEPTED",
+        terminal_committee_upper_bound=11,
+        available_appeal_validators=7,
+        policy=StudioFeePolicy.from_env(),
+    )
+
+    quote = estimate_latest_appeal_charge(
+        _FakeTransactionsProcessor(tx), {"txId": tx["hash"]}
+    )
+
+    assert expected["juryCount"] == 7
+    assert int(quote["bond"]) == expected["bond"]
+    assert int(quote["funding"]) == expected["funding"]
+
+
 def test_execution_selection_rejects_post_activation_validator_additions():
     validators = [
         {"address": f"0x{index:040x}", "stake": 1} for index in (1, 2, 3, 4, 6)
