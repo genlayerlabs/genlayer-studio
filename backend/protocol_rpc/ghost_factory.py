@@ -15,7 +15,6 @@ import os
 import rlp
 from eth_utils import is_address, keccak, to_bytes, to_checksum_address
 
-
 UINT256_MAX = (1 << 256) - 1
 
 # These identify Studio's virtual v0.6 protocol deployment.  Operators that
@@ -101,6 +100,39 @@ class GhostFactoryConfig:
             salt = keccak(namespace_bytes + salt_nonce.to_bytes(32, "big"))
             digest = keccak(b"\xff" + factory + salt + self.bytecode_hash)
         return to_checksum_address("0x" + digest[-20:].hex())
+
+
+def genvm_salted_child_address(
+    contract_address: str,
+    salt_nonce: int,
+    chain_id: int,
+) -> str:
+    """Return the address exposed by GenVM for a salted child deployment.
+
+    GenVM makes the address synchronously visible to the parent contract, so
+    Studio must materialize the child under that exact identity.  This is the
+    runner's public ``create2_address(contract, salt, chain)`` formula; it is
+    intentionally separate from the EVM GhostFactory formula used to allocate
+    top-level deployments.
+    """
+
+    if not is_address(contract_address):
+        raise InvalidGhostFactoryConfiguration(
+            "salted child deployment requires a GenVM contract address"
+        )
+    salt_nonce = _coerce_uint256("salt_nonce", salt_nonce)
+    if salt_nonce == 0:
+        raise InvalidGhostFactoryConfiguration(
+            "salted child deployment requires a non-zero salt_nonce"
+        )
+    chain_id = _coerce_uint256("chain_id", chain_id)
+    digest = keccak(
+        b"\x01"
+        + to_bytes(hexstr=to_checksum_address(contract_address))
+        + salt_nonce.to_bytes(32, "big")
+        + chain_id.to_bytes(32, "big")
+    )
+    return to_checksum_address("0x" + digest[:20].hex())
 
 
 def _configured_address(name: str, default: str) -> str:

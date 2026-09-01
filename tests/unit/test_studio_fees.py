@@ -36,6 +36,7 @@ from backend.database_handler.transactions_processor import (
     get_tx_execution_hash,
 )
 from backend.protocol_rpc.exceptions import JSONRPCError, NotFoundError
+from backend.protocol_rpc.ghost_factory import genvm_salted_child_address
 from backend.protocol_rpc.endpoints import (
     _available_appeal_validator_count,
     _current_fee_round,
@@ -1890,9 +1891,10 @@ def test_local_message_authority_applies_ghost_factory_and_per_child_failures():
 
     zero = "0x" + ("00" * 32)
     assert processor.locked is True
+    expected_salted_child = genvm_salted_child_address(registered, 42, 61999)
     assert {address.lower() for address in processor.locked_recipients} == {
         registered.lower(),
-        "0x4e0065451873eaf51af1c7e00256a5db0f8a80ad",
+        expected_salted_child.lower(),
     }
     assert receipt["tx_ids_hex"] == [
         _studio_child_transaction_id(parent_hash, "accepted", first_occurrence),
@@ -1902,7 +1904,7 @@ def test_local_message_authority_applies_ghost_factory_and_per_child_failures():
     ]
     assert receipt["recipients"][0] == Web3.to_checksum_address(registered)
     assert receipt["recipients"][1] == Web3.to_checksum_address(missing)
-    assert receipt["recipients"][2] == "0x4E0065451873eaf51AF1C7E00256A5db0f8a80aD"
+    assert receipt["recipients"][2] == expected_salted_child
     assert receipt["recipients"][3] == Web3.to_checksum_address(
         "0x0000000000000000000000000000000000000000"
     )

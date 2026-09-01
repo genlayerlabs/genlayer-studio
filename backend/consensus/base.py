@@ -40,7 +40,7 @@ from backend.domain.types import (
     LLMProvider,
     Validator,
 )
-from backend.node.base import Node
+from backend.node.base import Node, get_simulator_chain_id
 from backend.node.types import (
     ExecutionMode,
     Receipt,
@@ -55,7 +55,10 @@ from backend.protocol_rpc.message_handler.types import (
     EventScope,
 )
 from backend.protocol_rpc.types import ZERO_ADDRESS
-from backend.protocol_rpc.ghost_factory import GhostFactoryConfig
+from backend.protocol_rpc.ghost_factory import (
+    GhostFactoryConfig,
+    genvm_salted_child_address,
+)
 from backend.protocol_rpc.fees import (
     FEE_ACCOUNTING_KEY,
     VALIDATORS_PER_ROUND,
@@ -4535,11 +4538,23 @@ def _author_message_phase_locally(
             and transaction_type == TransactionType.DEPLOY_CONTRACT.value
         ):
             salt_nonce = int(message_payload.get("saltNonce", 0) or 0)
-            actual_recipient = factory.address_for(
-                salt_nonce,
-                successful_deployments,
-                namespace=context.transaction.to_address,
-            )
+            if salt_nonce == 0:
+                actual_recipient = factory.address_for(
+                    salt_nonce,
+                    successful_deployments,
+                    namespace=context.transaction.to_address,
+                )
+            else:
+                # A salted deployment returns its address during the parent's
+                # GenVM execution.  Bind the accepted child to that exact
+                # contract-visible identity; independently allocating an EVM
+                # GhostFactory address leaves the parent pointing at a contract
+                # that Studio never materialized (GAP-016).
+                actual_recipient = genvm_salted_child_address(
+                    context.transaction.to_address,
+                    salt_nonce,
+                    get_simulator_chain_id(),
+                )
             normalized = actual_recipient.lower()
             if (
                 normalized in batch_deployments
