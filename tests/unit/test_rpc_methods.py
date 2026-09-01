@@ -179,12 +179,14 @@ def test_eth_transaction_receipt_reports_reverted_lifecycle_envelope():
         from_address="0x1111111111111111111111111111111111111111",
         to_address="0x2222222222222222222222222222222222222222",
         success=False,
+        error="InsufficientFees",
     )
 
     receipt = endpoints.get_transaction_receipt(transactions_processor, "0xabc")
 
     assert receipt["transactionHash"] == "0xabc"
     assert receipt["status"] == "0x0"
+    assert receipt["revertReason"] == "InsufficientFees"
     assert receipt["logs"] == []
 
 

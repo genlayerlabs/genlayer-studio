@@ -3546,7 +3546,7 @@ def get_transaction_receipt(
     if not transaction:
         if envelope is None:
             return None
-        return {
+        receipt = {
             "transactionHash": transaction_hash,
             "transactionIndex": hex(0),
             "blockHash": transaction_hash,
@@ -3562,6 +3562,13 @@ def get_transaction_receipt(
             "logsBloom": "0x" + "00" * 256,
             "status": hex(1 if envelope.success else 0),
         }
+        # Preserve the standard status-0 receipt boundary while giving SDKs a
+        # Studio-local equivalent of the revert data they normally learn from
+        # an execution-chain gas estimate.  This is additive metadata; EVM
+        # clients that only understand the standard receipt fields ignore it.
+        if not envelope.success and envelope.error:
+            receipt["revertReason"] = envelope.error
+        return receipt
 
     protocol_to_addr = envelope.to_address if envelope is not None else None
     to_addr = protocol_to_addr or transaction.get("to_address")
