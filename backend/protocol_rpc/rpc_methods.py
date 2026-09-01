@@ -124,6 +124,19 @@ async def create_validator(
     )
 
 
+@rpc.method("sim_replaceValidators")
+async def replace_validators(
+    validator_configs: list[dict],
+    session: Session = Depends(get_db_session),
+    validators_manager=Depends(get_validators_manager),
+) -> list[dict]:
+    return await impl.replace_validators(
+        session=session,
+        validators_manager=validators_manager,
+        validator_configs=validator_configs,
+    )
+
+
 @rpc.method("sim_createRandomValidator")
 async def create_random_validator(
     stake: int,

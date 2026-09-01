@@ -753,6 +753,52 @@ async def create_validator(
 
 
 @check_forbidden_method_in_hosted_studio
+async def replace_validators(
+    session: Session,
+    validators_manager: validators.Manager,
+    validator_configs: list[dict],
+) -> list[dict]:
+    """Atomically replace the simulator validator pool with one GenVM reload."""
+
+    accounts_manager = AccountsManager(session)
+    replacement_validators: list[Validator] = []
+
+    for validator_config in validator_configs:
+        stake = int(validator_config["stake"])
+        provider = str(validator_config["provider"])
+        model = str(validator_config["model"])
+        config = validator_config.get("config")
+        plugin = validator_config.get("plugin")
+        plugin_config = validator_config.get("plugin_config")
+
+        if config is None or plugin is None or plugin_config is None:
+            llm_provider = get_default_provider_for(provider, model)
+        else:
+            llm_provider = LLMProvider(
+                provider=provider,
+                model=model,
+                config=config,
+                plugin=plugin,
+                plugin_config=plugin_config,
+            )
+            validate_provider(llm_provider)
+
+        account = accounts_manager.create_new_account()
+        replacement_validators.append(
+            Validator(
+                address=account.address,
+                private_key=account.key,
+                stake=stake,
+                llmprovider=llm_provider,
+            )
+        )
+
+    return await validators_manager.registry.replace_all_validators(
+        replacement_validators
+    )
+
+
+@check_forbidden_method_in_hosted_studio
 async def create_random_validator(
     session: Session,
     validators_manager: validators.Manager,

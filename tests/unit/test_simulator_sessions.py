@@ -258,6 +258,53 @@ async def test_create_validator_uses_request_scoped_session(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_replace_validators_is_atomic_and_uses_request_session(monkeypatch):
+    session = object()
+    accounts_manager_instance = MagicMock()
+    accounts_manager_instance.create_new_account.side_effect = [
+        SimpleNamespace(address="0x1", key="k1"),
+        SimpleNamespace(address="0x2", key="k2"),
+    ]
+    registry_instance = SimpleNamespace(
+        replace_all_validators=AsyncMock(
+            return_value=[{"address": "0x1"}, {"address": "0x2"}]
+        )
+    )
+    validators_manager = SimpleNamespace(registry=registry_instance)
+
+    monkeypatch.setattr(endpoints, "validate_provider", lambda _provider: None)
+    monkeypatch.setattr(
+        endpoints,
+        "AccountsManager",
+        lambda s: accounts_manager_instance if s is session else None,
+    )
+
+    validator_config = {
+        "stake": 8,
+        "provider": "openrouter",
+        "model": "test-model",
+        "config": {"temperature": 0.75},
+        "plugin": "openai-compatible",
+        "plugin_config": {
+            "api_key_env_var": "OPENROUTERAPIKEY",
+            "api_url": "https://openrouter.ai/api",
+            "mock_response": {},
+        },
+    }
+    result = await endpoints.replace_validators(
+        session,
+        validators_manager,
+        [validator_config, validator_config],
+    )
+
+    assert result == [{"address": "0x1"}, {"address": "0x2"}]
+    registry_instance.replace_all_validators.assert_awaited_once()
+    replacements = registry_instance.replace_all_validators.await_args.args[0]
+    assert [validator.address for validator in replacements] == ["0x1", "0x2"]
+    assert [validator.stake for validator in replacements] == [8, 8]
+
+
+@pytest.mark.asyncio
 async def test_create_random_validators_use_request_session(monkeypatch):
     session = object()
     accounts_manager_instance = MagicMock()
