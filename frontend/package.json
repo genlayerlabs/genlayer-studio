@@ -39,7 +39,7 @@
     "cross-env": "^10.0.0",
     "dexie": "^4.0.4",
     "floating-vue": "^5.2.2",
-    "genlayer-js": "git+https://github.com/genlayerlabs/genlayer-js.git#b9a7bb2305f9b069d79f348d85e62a1b43d50b48",
+    "genlayer-js": "git+https://github.com/genlayerlabs/genlayer-js.git#49775304ba0b5073c97d0ac31c41e1b62324a5f1",
     "hash-sum": "^2.0.0",
     "jump.js": "^1.0.2",
     "lodash-es": "^4.17.21",
