@@ -5344,10 +5344,19 @@ def discovered_message_fee_allocations(
         validator_timeunits = DEFAULT_VALIDATOR_TIMEUNITS_ALLOCATION
 
     rotations = [int((fees.get("rotations") or [0])[0])]
-    execution_budget = max(
-        int(fees["executionBudgetPerRound"]),
-        int(policy.message_fee_params_budget_floor()),
-        int(policy.genvm_start_budget_floor()),
+    # The allocation becomes the child transaction's complete per-round
+    # execution reservoir.  Funding it at the GenVM startup floor leaves no
+    # budget for the child's first storage write (a constructor that stores one
+    # field therefore finalizes as ``out_of storage``).  Apply the same 20%
+    # execution headroom used by recommended_fee_preset so discovered children
+    # can execute beyond startup rather than merely enter the VM.
+    execution_budget = _with_padding(
+        max(
+            int(fees["executionBudgetPerRound"]),
+            int(policy.message_fee_params_budget_floor()),
+            int(policy.genvm_start_budget_floor()),
+        ),
+        DEFAULT_PRICE_CAP_HEADROOM_BPS,
     )
     max_gen_price = max(
         int(fees["maxPriceGenPerTimeUnit"]),

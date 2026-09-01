@@ -2145,6 +2145,41 @@ def test_discovered_message_allocations_are_exact_and_consensus_valid():
     )
 
 
+def test_discovered_internal_deploy_allocation_funds_child_execution_after_startup():
+    policy = StudioFeePolicy.from_env()
+    fees_distribution = _env_fees_distribution(execution_budget_per_round=0)
+    receipt = {
+        "pending_transactions": [
+            {
+                "messageType": "Internal",
+                "address": "0x",
+                "on": "accepted",
+                "salt_nonce": 1,
+                "call_key": EMPTY_CALL_KEY,
+            }
+        ]
+    }
+
+    allocation = discovered_message_fee_allocations(
+        receipt,
+        fees_distribution,
+        policy,
+    )[0]
+    internal_params = decode_internal_message_fee_params(allocation["feeParams"])
+    startup_floor = max(
+        policy.message_fee_params_budget_floor(),
+        policy.genvm_start_budget_floor(),
+    )
+
+    assert allocation["recipient"] == "0x0000000000000000000000000000000000000000"
+    assert (
+        internal_params["executionBudgetPerRound"]
+        == (startup_floor * DEFAULT_PRICE_CAP_HEADROOM_BPS + 9_999) // 10_000
+    )
+    assert internal_params["executionBudgetPerRound"] > startup_floor
+    assert allocation["budget"] == min_message_primary_fees(internal_params, policy)
+
+
 def test_discovered_messages_rebuild_simulation_accounting_and_deposit():
     policy = StudioFeePolicy.from_env()
     fees_distribution = _env_fees_distribution()
