@@ -6,6 +6,7 @@ MAX_IDLE_REPLACEMENTS = 5
 DEFAULT_EXEC_TIMEOUT_SECONDS = 600
 DEFAULT_LEADER_EXEC_TIMEOUT_SECONDS = DEFAULT_EXEC_TIMEOUT_SECONDS
 DEFAULT_VALIDATOR_EXEC_TIMEOUT_SECONDS = DEFAULT_EXEC_TIMEOUT_SECONDS
+DEFAULT_VALIDATOR_CONCURRENCY = 8
 
 import os
 import asyncio
@@ -261,6 +262,26 @@ def _slot_budget_seconds(
     if timeout <= 0:
         return float(default)
     return timeout
+
+
+def _validator_concurrency() -> int:
+    """Max number of validator nodes executed concurrently per transaction.
+
+    Bounds subprocess/DB/GenVM resource usage during COMMITTING. Defaults to
+    DEFAULT_VALIDATOR_CONCURRENCY (8), which was previously hardcoded and made
+    large validator committees run in many sequential rounds. Override with
+    CONSENSUS_VALIDATOR_CONCURRENCY for deployments with more headroom.
+    """
+    raw_value = os.getenv("CONSENSUS_VALIDATOR_CONCURRENCY")
+    if raw_value is None:
+        return DEFAULT_VALIDATOR_CONCURRENCY
+    try:
+        concurrency = int(raw_value)
+    except ValueError:
+        return DEFAULT_VALIDATOR_CONCURRENCY
+    if concurrency <= 0:
+        return DEFAULT_VALIDATOR_CONCURRENCY
+    return concurrency
 
 
 def node_factory(
@@ -2310,7 +2331,7 @@ class CommittingState(TransactionState):
         )
 
         # Execute the transaction with a semaphore to limit the number of concurrent validators
-        sem = asyncio.Semaphore(8)
+        sem = asyncio.Semaphore(_validator_concurrency())
 
         # Build replacement pool: all validators minus those already assigned
         assigned_addresses: set[str] = set()
