@@ -5,6 +5,7 @@ from tests.common.fee_defaults import (
     forward_gltest_fee_kwargs,
     gltest_fees_are_unspecified,
     install_gltest_fee_bridge,
+    install_gltest_fee_bridges,
 )
 
 
@@ -45,4 +46,20 @@ def test_gltest_fee_bridge_is_installed_and_idempotent():
     assert contract_factory._fee_kwargs(object(), {"feeValue": 1}, None) == {
         "fees": {"feeValue": 1},
         "fee_value": None,
+    }
+
+
+def test_gltest_fee_bridges_cover_deploys_and_writes():
+    def forwarded(_call, fees, fee_value):
+        return {"fees": fees, "fee_value": fee_value}
+
+    contract_factory = SimpleNamespace(_fee_kwargs=forwarded)
+    contract = SimpleNamespace(_fee_kwargs=forwarded)
+    install_gltest_fee_bridges(contract_factory, contract)
+
+    assert contract_factory._fee_kwargs(object(), None, None) == {}
+    assert contract._fee_kwargs(object(), None, None) == {}
+    assert contract._fee_kwargs(object(), None, 1) == {
+        "fees": None,
+        "fee_value": 1,
     }

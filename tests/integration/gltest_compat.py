@@ -6,11 +6,12 @@ from typing import Optional, Union
 
 import gltest.artifacts
 import gltest.artifacts.contract as contract_artifacts
+import gltest.contracts.contract as contract_module
 import gltest.contracts.contract_factory as contract_factory
 from gltest.artifacts.contract import ContractDefinition
 from gltest_cli.config.general import get_general_config
 
-from tests.common.fee_defaults import install_gltest_fee_bridge
+from tests.common.fee_defaults import install_gltest_fee_bridges
 
 
 def _is_genlayer_contract_base(base: ast.expr) -> bool:
@@ -169,7 +170,7 @@ def find_contract_definition_from_path(
 
 
 def apply() -> None:
-    install_gltest_fee_bridge(contract_factory)
+    install_gltest_fee_bridges(contract_factory, contract_module)
     contract_artifacts.search_path_by_class_name = search_path_by_class_name
     contract_artifacts.find_contract_definition_from_name = (
         find_contract_definition_from_name

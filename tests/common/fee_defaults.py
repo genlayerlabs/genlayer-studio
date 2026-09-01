@@ -31,3 +31,15 @@ def install_gltest_fee_bridge(contract_factory) -> None:
 
     fee_aware._studio_original_fee_kwargs = original
     contract_factory._fee_kwargs = fee_aware
+
+
+def install_gltest_fee_bridges(contract_factory, contract) -> None:
+    """Install the bridge on both gltest transaction entry points.
+
+    Deployments and writes have separate private ``_fee_kwargs`` helpers in
+    gltest.  Both helpers turn their public ``None`` defaults into an explicit
+    SDK ``fees=None`` argument, so both must be adapted for fee-enabled Studio
+    integration runs.
+    """
+    install_gltest_fee_bridge(contract_factory)
+    install_gltest_fee_bridge(contract)
