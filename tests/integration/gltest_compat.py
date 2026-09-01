@@ -10,6 +10,8 @@ import gltest.contracts.contract_factory as contract_factory
 from gltest.artifacts.contract import ContractDefinition
 from gltest_cli.config.general import get_general_config
 
+from tests.common.fee_defaults import install_gltest_fee_bridge
+
 
 def _is_genlayer_contract_base(base: ast.expr) -> bool:
     if not isinstance(base, ast.Attribute):
@@ -167,6 +169,7 @@ def find_contract_definition_from_path(
 
 
 def apply() -> None:
+    install_gltest_fee_bridge(contract_factory)
     contract_artifacts.search_path_by_class_name = search_path_by_class_name
     contract_artifacts.find_contract_definition_from_name = (
         find_contract_definition_from_name
