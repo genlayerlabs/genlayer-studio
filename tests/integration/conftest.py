@@ -11,6 +11,7 @@ from genlayer_py.client.genlayer_client import GenLayerClient
 from genlayer_py.contracts.utils import make_calldata_object
 from web3.constants import ADDRESS_ZERO
 
+from tests.common.fee_defaults import fees_argument_was_omitted
 from tests.integration import gltest_compat
 
 # gltest 0.24 discovers only the legacy base; remove after the gltest pin moves.
@@ -53,11 +54,6 @@ def _transaction_fees_from_estimate(estimate: dict) -> dict:
 
 def _is_expected_simulation_execution_failure(error: Exception) -> bool:
     return "execution failed" in str(error).lower()
-
-
-def _fees_argument_was_omitted(call_kwargs: dict) -> bool:
-    """Distinguish SDK omission from an intentional gasless ``fees=None``."""
-    return "fees" not in call_kwargs
 
 
 def _estimate_deploy_fees(
@@ -110,7 +106,7 @@ def use_fee_aware_sdk_defaults():
 
     @wraps(original_deploy)
     def deploy_with_default_fees(client: GenLayerClient, *args, **call_kwargs):
-        if _fees_argument_was_omitted(call_kwargs):
+        if fees_argument_was_omitted(call_kwargs):
             fees = None
             default_fees = _default_studio_fees(client)
             if default_fees is not None:
@@ -140,7 +136,7 @@ def use_fee_aware_sdk_defaults():
 
     @wraps(original_write)
     def write_with_default_fees(client: GenLayerClient, *args, **call_kwargs):
-        if _fees_argument_was_omitted(call_kwargs):
+        if fees_argument_was_omitted(call_kwargs):
             fees = None
             default_fees = _default_studio_fees(client)
             if default_fees is not None:
