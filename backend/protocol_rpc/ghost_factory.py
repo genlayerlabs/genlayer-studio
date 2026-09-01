@@ -18,10 +18,9 @@ from eth_utils import is_address, keccak, to_bytes, to_checksum_address
 UINT256_MAX = (1 << 256) - 1
 
 # These identify Studio's virtual v0.6 protocol deployment.  Operators that
-# intentionally mirror a concrete EVM deployment can override all three values
-# with that deployment's GhostFactory, CreationPhase, and bytecodeEVM values.
+# intentionally mirror a concrete EVM deployment can override the factory,
+# bytecodeEVM hash, and initial factory nonce.
 DEFAULT_GHOST_FACTORY_ADDRESS = "0x130e09c996462963A6398CA04e1011e6ef9d68a6"
-DEFAULT_CREATION_PHASE_ADDRESS = "0x6AF00387f985684f159d673b15265E651B9E29f8"
 DEFAULT_GHOST_BYTECODE_HASH = (
     "0x4249189346902cb6f0afc196d5719e1b4cbc861a700ae3b0c6dcbe51e5e566de"
 )
@@ -35,7 +34,6 @@ class InvalidGhostFactoryConfiguration(ValueError):
 @dataclass(frozen=True)
 class GhostFactoryConfig:
     factory_address: str
-    creation_phase_address: str
     bytecode_hash: bytes
     initial_nonce: int
 
@@ -44,10 +42,6 @@ class GhostFactoryConfig:
         factory_address = _configured_address(
             "GENLAYER_STUDIO_GHOST_FACTORY_ADDRESS",
             DEFAULT_GHOST_FACTORY_ADDRESS,
-        )
-        creation_phase_address = _configured_address(
-            "GENLAYER_STUDIO_CREATION_PHASE_ADDRESS",
-            DEFAULT_CREATION_PHASE_ADDRESS,
         )
         bytecode_hash = _configured_bytes32(
             "GENLAYER_STUDIO_GHOST_BYTECODE_HASH",
@@ -59,7 +53,6 @@ class GhostFactoryConfig:
         )
         return cls(
             factory_address=factory_address,
-            creation_phase_address=creation_phase_address,
             bytecode_hash=bytecode_hash,
             initial_nonce=initial_nonce,
         )

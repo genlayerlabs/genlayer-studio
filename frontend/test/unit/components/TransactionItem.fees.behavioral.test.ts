@@ -1,6 +1,7 @@
 import { mount } from '@vue/test-utils';
 import { describe, expect, it, vi } from 'vitest';
 import TransactionItem from '@/components/Simulator/TransactionItem.vue';
+import { getRuntimeConfigNumber } from '@/utils/runtimeConfig';
 
 const setTransactionAppealMock = vi.fn();
 
@@ -248,6 +249,11 @@ describe('TransactionItem fee accounting display', () => {
         },
       },
     });
+
+    expect(getRuntimeConfigNumber).toHaveBeenCalledWith(
+      'VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION',
+      0,
+    );
 
     await wrapper.trigger('click');
 

@@ -368,7 +368,8 @@ contract ConsensusMain is
 			senderWord > type(uint160).max ||
 			recipientWord > type(uint160).max ||
 			txCalldataOffset < FEE_AWARE_PARAMS_HEAD_SIZE ||
-			txCalldataOffset % 32 != 0
+			txCalldataOffset % 32 != 0 ||
+			txCalldataOffset > type(uint256).max - tupleStart
 		) revert InvalidFeeAwareTransactionEncoding();
 
 		uint256 txCalldataLengthOffset = tupleStart + txCalldataOffset;

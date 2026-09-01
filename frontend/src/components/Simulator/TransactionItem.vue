@@ -74,7 +74,7 @@ const props = defineProps<{
 }>();
 
 const finalityWindowAppealFailedReduction = ref(
-  getRuntimeConfigNumber('VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION', 0.2),
+  getRuntimeConfigNumber('VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION', 0),
 );
 
 const isDetailsModalOpen = ref(false);

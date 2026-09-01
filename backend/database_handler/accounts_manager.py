@@ -305,7 +305,7 @@ class AccountsManager:
             accounting,
             reason=reason,
         )
-        if refund <= 0 or not recipient:
+        if not recipient:
             return 0
 
         data[FEE_ACCOUNTING_KEY] = updated
@@ -320,7 +320,8 @@ class AccountsManager:
         # expiring an unflushed row would resurrect the paid appeal and make a
         # retry refund it a second time.
         self.session.flush()
-        self.credit_account_balance(str(recipient), refund)
+        if refund > 0:
+            self.credit_account_balance(str(recipient), refund)
         self.session.expire_all()
         return refund
 

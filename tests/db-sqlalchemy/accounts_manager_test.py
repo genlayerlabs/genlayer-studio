@@ -291,6 +291,66 @@ def test_abort_tx_appeal_admission_refunds_charge_and_restores_decision(
     assert restored["fees_distribution"] == accounting["fees_distribution"]
 
 
+def test_abort_zero_value_appeal_admission_still_persists_rollback(
+    accounts_manager: AccountsManager,
+    session: Session,
+):
+    sender = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
+    appealer = "0x1111111111111111111111111111111111111111"
+    tx_hash = "0x" + "a0" * 32
+    fees = _fees_distribution(
+        leader_timeunits=0,
+        validator_timeunits=0,
+        appeals=0,
+        rotations=[0],
+    )
+    accounting = create_fee_accounting(
+        fees_distribution=fees,
+        num_of_validators=5,
+        submitted_value=0,
+        user_value=0,
+        sender=sender,
+    )
+    recorded = record_appeal_bond(
+        accounting,
+        amount=0,
+        appealer=appealer,
+        current_round=0,
+        status="ACCEPTED",
+    )
+    assert recorded["appeal_bonds"][-1]["requiredCharge"] == 0
+    _insert_fee_accounted_transaction(
+        session,
+        sender=sender,
+        accounting=recorded,
+        tx_hash=tx_hash,
+    )
+    tx_model = session.query(Transactions).filter_by(hash=tx_hash).one()
+    tx_model.appealed = True
+    tx_model.timestamp_appeal = 123
+    tx_model.consensus_history = {
+        ACTIVE_APPEAL_BASIS_KEY: {"decisionId": 1, "submittedAt": 123}
+    }
+    tx_model.data = {
+        **tx_model.data,
+        APPEAL_RECOVERY_SNAPSHOT_KEY: {"status": "ACCEPTED"},
+    }
+    session.commit()
+
+    assert accounts_manager.abort_tx_appeal_admission_once(tx_hash) == 0
+    session.commit()
+    session.expire_all()
+
+    tx = session.query(Transactions).filter_by(hash=tx_hash).one()
+    restored = tx.data[FEE_ACCOUNTING_KEY]
+    assert tx.appealed is False
+    assert tx.timestamp_appeal is None
+    assert ACTIVE_APPEAL_BASIS_KEY not in tx.consensus_history
+    assert APPEAL_RECOVERY_SNAPSHOT_KEY not in tx.data
+    assert restored["appeal_bonds"] == []
+    assert restored["aborted_appeals"][-1]["refund"] == 0
+
+
 def test_appeal_admission_rechecks_pending_acceptance_effects_under_lock(
     session: Session,
 ):

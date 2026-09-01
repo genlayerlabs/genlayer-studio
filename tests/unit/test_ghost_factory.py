@@ -10,7 +10,6 @@ from backend.protocol_rpc.ghost_factory import (
 def test_default_virtual_factory_matches_frozen_create_vectors(monkeypatch):
     for name in (
         "GENLAYER_STUDIO_GHOST_FACTORY_ADDRESS",
-        "GENLAYER_STUDIO_CREATION_PHASE_ADDRESS",
         "GENLAYER_STUDIO_GHOST_BYTECODE_HASH",
         "GENLAYER_STUDIO_GHOST_FACTORY_INITIAL_NONCE",
     ):
@@ -81,7 +80,6 @@ def test_genvm_salted_child_address_rejects_invalid_salt(salt_nonce):
     ("name", "value"),
     [
         ("GENLAYER_STUDIO_GHOST_FACTORY_ADDRESS", "not-an-address"),
-        ("GENLAYER_STUDIO_CREATION_PHASE_ADDRESS", "0x12"),
         ("GENLAYER_STUDIO_GHOST_BYTECODE_HASH", "0x1234"),
         ("GENLAYER_STUDIO_GHOST_FACTORY_INITIAL_NONCE", "-1"),
     ],

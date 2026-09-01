@@ -296,6 +296,30 @@ async def test_paid_appeal_claim_honors_retry_backoff():
 
 
 @pytest.mark.asyncio
+async def test_acceptance_repair_finalization_honors_retry_backoff():
+    worker = _make_worker()
+    session = MagicMock(spec=Session)
+    worker.claim_next_appeal = AsyncMock(return_value=None)
+    worker.claim_next_finalization = AsyncMock(return_value={"hash": "0xtx"})
+    worker.claim_next_transaction = AsyncMock(return_value=None)
+    worker._generic_error_retries["0xtx"] = {
+        "count": 1,
+        "last_attempt": 100.0,
+        "last_error": "helper unavailable",
+    }
+
+    with (
+        patch("backend.consensus.worker.time.time", return_value=100.0),
+        patch.object(worker, "release_transaction") as release_transaction,
+        patch("backend.consensus.worker.asyncio.create_task") as create_task,
+    ):
+        assert await worker._try_claim_work(session) is False
+
+    release_transaction.assert_called_once_with(session, "0xtx")
+    create_task.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_generic_appeal_error_is_retryable_without_cancellation():
     worker = _make_worker()
     session = MagicMock(spec=Session)

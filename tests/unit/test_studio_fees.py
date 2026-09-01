@@ -33,6 +33,7 @@ from backend.errors.errors import InvalidTransactionError
 from backend.database_handler.accounts_manager import _infer_final_round
 from backend.database_handler.transactions_processor import (
     TransactionsProcessor,
+    get_validator_vote_hash,
     get_tx_execution_hash,
 )
 from backend.protocol_rpc.exceptions import JSONRPCError, NotFoundError
@@ -9374,6 +9375,26 @@ def test_create_child_fee_accounting_installs_child_allocation_subtree():
     assert updated["allocation_consumed"] == {"0": 55}
 
 
+def test_create_child_fee_accounting_does_not_traverse_encoded_allocation_subtree():
+    child_fees, child_accounting = create_child_fee_accounting(
+        message={
+            "messageType": 1,
+            "recipient": "0x3333333333333333333333333333333333333333",
+            "value": 0,
+            "onAcceptance": True,
+            "feeParams": _encode_internal_fee_params(),
+            "declaredBudget": 55,
+            "callKey": EMPTY_CALL_KEY,
+        },
+        parent_fees_distribution=_fees_distribution(),
+        message_allocations="0x0102ff",
+        sender="0x1111111111111111111111111111111111111111",
+    )
+
+    assert child_fees["totalMessageFees"] == 0
+    assert child_accounting["message_allocations"] == []
+
+
 def test_create_child_fee_accounting_strips_leaf_matched_root_subtree():
     fee_params = _encode_internal_fee_params()
     child_fees, child_accounting = create_child_fee_accounting(
@@ -12938,6 +12959,40 @@ def test_transaction_round_payload_uses_raw_round_index_and_ignores_rotation_eve
     assert result["num_of_rounds"] == "0"
     assert result["last_round"]["round"] == "0"
     assert result["last_round"]["validator_votes"] == [1]
+
+
+def test_transaction_round_payload_normalizes_legacy_null_nonce():
+    processor = TransactionsProcessor.__new__(TransactionsProcessor)
+    leader_address = "0x1111111111111111111111111111111111111111"
+    leader = {
+        "vote": "agree",
+        "execution_result": "SUCCESS",
+        "node_config": {"address": leader_address},
+    }
+    transaction = {
+        "consensus_history": {
+            "consensus_results": [
+                {
+                    "consensus_round": "Accepted",
+                    "leader_result": [leader, leader],
+                    "validator_results": [],
+                }
+            ]
+        },
+        "data": {},
+        "nonce": None,
+        "config_rotation_rounds": 0,
+        "rotation_count": 0,
+        "type": TransactionType.RUN_CONTRACT,
+        "status": "ACCEPTED",
+        "execution_mode": "NORMAL",
+    }
+
+    result = processor._process_round_data(transaction)
+
+    assert result["last_round"]["validator_votes_hash"] == [
+        get_validator_vote_hash(leader_address, 1, 0)
+    ]
 
 
 def test_transaction_round_payload_handles_empty_history_and_raw_appeal_gaps():

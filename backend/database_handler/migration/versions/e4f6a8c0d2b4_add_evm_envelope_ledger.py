@@ -61,7 +61,7 @@ def upgrade() -> None:
           AND from_address IS NOT NULL
           AND nonce IS NOT NULL
           AND nonce >= 0
-        ORDER BY lower(from_address), nonce, created_at DESC, hash DESC
+        ORDER BY lower(from_address), nonce, created_at DESC NULLS LAST, hash DESC
         ON CONFLICT DO NOTHING
         """
     )

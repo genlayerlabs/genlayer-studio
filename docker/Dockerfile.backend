@@ -36,6 +36,7 @@ SHELL ["/nix/var/nix/profiles/default/bin/bash", "-x", "-c"]
 # `runners-all` closure here from a sandboxed Nix.
 COPY .genvm-nix-closure/ /genvm-nix-closure/
 COPY docker/genvm-source-build.nix.conf /genvm-source-build.nix.conf
+COPY third_party/genvm/version /genvm-default-version
 
 # Source builds bind Studio to a genvm-manager branch/SHA. The flake target
 # follows TARGETARCH (amd64-linux / arm64-linux); runners are included by
@@ -49,18 +50,22 @@ COPY docker/genvm-source-build.nix.conf /genvm-source-build.nix.conf
 # nothing from the cache, and builds from source instead of failing.
 RUN --mount=type=secret,id=nix_netrc,target=/etc/nix/netrc,required=false \
     set -euo pipefail ; \
-    if [[ -n "$GENVM_TAG" && -n "$GENVM_REF" ]]; then \
+    effective_ref="$GENVM_REF" ; \
+    if [[ -z "$GENVM_TAG" && -z "$effective_ref" ]]; then \
+        effective_ref="$(< /genvm-default-version)" ; \
+    fi ; \
+    if [[ -n "$GENVM_TAG" && -n "$effective_ref" ]]; then \
         echo "ERROR: GENVM_TAG and GENVM_REF are mutually exclusive" ; exit 1 ; \
     fi ; \
     source_selected=0 ; \
-    if [[ "$GENVM_SOURCE_MODE" == "source" || ( -z "$GENVM_SOURCE_MODE" && "$GENVM_REF" =~ ^.+:[0-9a-fA-F]{7,40}$ ) ]]; then \
+    if [[ "$GENVM_SOURCE_MODE" == "source" || ( -z "$GENVM_SOURCE_MODE" && "$effective_ref" =~ ^.+:[0-9a-fA-F]{7,40}$ ) ]]; then \
         source_selected=1 ; \
     fi ; \
     if [[ "$source_selected" == "1" ]]; then \
-        if [[ -z "$GENVM_REF" ]]; then \
+        if [[ -z "$effective_ref" ]]; then \
             echo "ERROR: GENVM_SOURCE_MODE=source requires GENVM_REF" ; exit 1 ; \
         fi ; \
-        SOURCE_REF="$GENVM_REF" ; \
+        SOURCE_REF="$effective_ref" ; \
         if [[ "$SOURCE_REF" =~ ^.+:([0-9a-fA-F]{7,40})$ ]]; then \
             SOURCE_REF="${BASH_REMATCH[1]}" ; \
         fi ; \
@@ -160,7 +165,11 @@ COPY third_party/genvm/version /genvm-default-version
 COPY docker/scripts/download_genvm.sh /usr/local/bin/download-genvm
 COPY --from=genvm-runner-pin /genvm-pin/py-genlayer-pins /genvm-runner-pins
 RUN set -euo pipefail ; \
-    if [[ -n "$GENVM_TAG" && -n "$GENVM_REF" ]]; then \
+    effective_ref="$GENVM_REF" ; \
+    if [[ -z "$GENVM_TAG" && -z "$effective_ref" ]]; then \
+        effective_ref="$(< /genvm-default-version)" ; \
+    fi ; \
+    if [[ -n "$GENVM_TAG" && -n "$effective_ref" ]]; then \
         echo "ERROR: GENVM_TAG and GENVM_REF are mutually exclusive" ; exit 1 ; \
     fi ; \
     case "$GENVM_SOURCE_MODE" in \
@@ -171,7 +180,7 @@ RUN set -euo pipefail ; \
     if [[ -z "$mode" ]]; then \
         if [[ -x /genvm-prebuilt/bin/genvm-modules ]]; then \
             mode=prebuilt ; \
-        elif [[ "$GENVM_REF" =~ ^.+:[0-9a-fA-F]{7,40}$ ]]; then \
+        elif [[ "$effective_ref" =~ ^.+:[0-9a-fA-F]{7,40}$ ]]; then \
             mode=source ; \
         else \
             mode=release ; \
@@ -186,16 +195,16 @@ RUN set -euo pipefail ; \
         cp -a /genvm-prebuilt/. /genvm/ ; \
         rm -f /genvm/.gitkeep ; \
     elif [[ "$mode" == "source" ]]; then \
-        if [[ -z "$GENVM_REF" ]]; then \
+        if [[ -z "$effective_ref" ]]; then \
             echo "ERROR: source mode requires GENVM_REF (a git ref/SHA or <branch>:<commit>)" ; exit 1 ; \
         fi ; \
         if [[ ! -x /genvm/bin/genvm-modules ]]; then \
             echo "ERROR: the GenVM source stage did not produce /genvm/bin/genvm-modules" ; exit 1 ; \
         fi ; \
-        printf '%s\n' "$GENVM_REF" > /genvm/version ; \
-        echo "Using GenVM built from source at $GENVM_REF" ; \
+        printf '%s\n' "$effective_ref" > /genvm/version ; \
+        echo "Using GenVM built from source at $effective_ref" ; \
     else \
-        if [[ -n "$GENVM_REF" ]]; then \
+        if [[ -n "$effective_ref" ]]; then \
             echo "ERROR: release mode does not accept GENVM_REF; use GENVM_SOURCE_MODE=source" ; exit 1 ; \
         fi ; \
         release_version="${GENVM_TAG:-$(< /genvm-default-version)}" ; \

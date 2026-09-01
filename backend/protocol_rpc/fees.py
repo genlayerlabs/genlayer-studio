@@ -1890,7 +1890,7 @@ def create_child_fee_accounting(
     *,
     message: dict[str, Any],
     parent_fees_distribution: dict[str, Any] | None,
-    message_allocations: list[dict[str, Any]] | None = None,
+    message_allocations: list[dict[str, Any]] | str | None = None,
     sender: str | None = None,
     policy: StudioFeePolicy | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1942,9 +1942,15 @@ def create_child_fee_accounting(
         if parent_fees_distribution
         else normalize_fees_distribution({})
     )
+    # Old GenVM receipts may expose the allocation subtree as its encoded hex
+    # form. Preserve that raw value in the receipt/hash path, but never iterate
+    # its characters as FlatArrays allocation nodes here.
+    allocation_nodes = (
+        message_allocations if isinstance(message_allocations, list) else []
+    )
     child_message_allocations = _child_allocations_from_message_subtree(
         message,
-        message_allocations or [],
+        allocation_nodes,
     )
     # Mode 1 children have no allocation subtree but still receive the remainder
     # of their declared budget as a message-fee bucket for their own children.

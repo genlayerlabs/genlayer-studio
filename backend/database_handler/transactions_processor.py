@@ -716,6 +716,12 @@ class TransactionsProcessor:
     def _process_round_data(self, transaction_data: dict) -> dict:
         """Process round data and prepare transaction data."""
 
+        vote_nonce = (
+            0
+            if transaction_data.get("nonce") is None
+            else int(transaction_data["nonce"])
+        )
+
         completed_rounds = completed_consensus_rounds(
             transaction_data.get("consensus_history")
         )
@@ -754,9 +760,7 @@ class TransactionsProcessor:
                 validator_votes.append(vote_number)
                 leader_address = leader["node_config"]["address"]
                 validator_votes_hash.append(
-                    get_validator_vote_hash(
-                        leader_address, vote_number, transaction_data["nonce"]
-                    )
+                    get_validator_vote_hash(leader_address, vote_number, vote_nonce)
                 )
                 round_validators.append(leader_address)
 
@@ -768,9 +772,7 @@ class TransactionsProcessor:
                 validator_votes.append(vote_number)
                 validator_address = validator["node_config"]["address"]
                 validator_votes_hash.append(
-                    get_validator_vote_hash(
-                        validator_address, vote_number, transaction_data["nonce"]
-                    )
+                    get_validator_vote_hash(validator_address, vote_number, vote_nonce)
                 )
                 round_validators.append(validator_address)
         # Handle upgrade transactions specially - they bypass consensus

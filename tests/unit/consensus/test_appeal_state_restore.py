@@ -360,7 +360,9 @@ class TestClaimNextAppealReturnsSnapshot:
         assert "transactions.consensus_history" in returning_clause
 
     @pytest.mark.asyncio
-    async def test_claim_waits_for_any_inflight_descendant_on_same_contract(self):
+    async def test_claim_waits_for_live_or_nonterminal_descendants_on_same_contract(
+        self,
+    ):
         session = Mock()
         session.execute.return_value.first.return_value = None
 
@@ -372,8 +374,28 @@ class TestClaimNextAppealReturnsSnapshot:
             "AND pg_try_advisory", 1
         )[0]
         assert "t2.blocked_at IS NOT NULL" in blocked_guard
-        assert "t2.blocked_at >" not in blocked_guard
+        assert "t2.status NOT IN ('FINALIZED', 'CANCELED')" in blocked_guard
+        assert "t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)" in blocked_guard
         assert "t2.appealed = true" not in blocked_guard
+
+    @pytest.mark.asyncio
+    async def test_finalization_ignores_only_stale_terminal_descendant_leases(self):
+        session = Mock()
+        session.execute.return_value.first.return_value = None
+
+        worker = _make_worker()
+        worker.consensus_algorithm = SimpleNamespace(
+            finality_window_time=1800,
+            finality_window_appeal_failed_reduction=0,
+        )
+        await worker.claim_next_finalization(session)
+
+        executed_sql = str(session.execute.call_args[0][0])
+        blocked_guard = executed_sql.split("Ensure no other transaction", 1)[1].split(
+            "AND pg_try_advisory", 1
+        )[0]
+        assert "t2.status NOT IN ('FINALIZED', 'CANCELED')" in blocked_guard
+        assert "t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)" in blocked_guard
 
     @pytest.mark.asyncio
     async def test_claimed_appeal_hydrates_transaction_snapshot(self):

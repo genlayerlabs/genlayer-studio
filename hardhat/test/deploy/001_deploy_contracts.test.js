@@ -81,6 +81,30 @@ describe("Deploy Script", function () {
             expect(mainContracts.genManager).to.equal(consensusManagerAddress);
         });
 
+        it("should reject overflowing fee-aware calldata offsets with the protocol error", async function() {
+            const tupleOffset = ethers.zeroPadValue(ethers.toBeHex(32), 32).slice(2);
+            const words = Array(10).fill("0".repeat(64));
+            words[8] = "f".repeat(64);
+            const data = `0x35a251fb${tupleOffset}${words.join("")}`;
+
+            let error;
+            try {
+                await owner.call({
+                    to: await contracts.ConsensusMain.getAddress(),
+                    data,
+                });
+            } catch (caught) {
+                error = caught;
+            }
+
+            expect(error).to.not.equal(undefined);
+            expect(error.data).to.equal(
+                contracts.ConsensusMain.interface.getError(
+                    "InvalidFeeAwareTransactionEncoding"
+                ).selector
+            );
+        });
+
         it("should have initialized Transactions with all its dependencies", async function() {
             const consensusMainAddress = await contracts.ConsensusMain.getAddress();
             const contracts_ = await contracts.Transactions.contracts();

@@ -7,6 +7,7 @@ import time
 import eth_utils
 import logging
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from functools import partial, wraps
 from typing import Any, Final, NoReturn, get_args
 from backend.protocol_rpc.exceptions import (
@@ -2014,6 +2015,19 @@ _DECISION_STATUSES = {
     TransactionStatus.VALIDATORS_TIMEOUT.value,
 }
 
+
+@dataclass(frozen=True)
+class _AppealAdmissionContext:
+    status: str
+    deadline: float | None
+    fee_accounting: dict[str, Any]
+    current_round: int
+    validator_count: int
+    normal_leader_count: int
+    available_appeal_validators: int | None
+    leader_timeout_live_seats: int | None
+
+
 _PROTOCOL_TRANSACTION_STATUS_NAMES = (
     "Uninitialized",
     "Pending",
@@ -2087,6 +2101,104 @@ def _transaction_appeal_deadline(transaction: dict) -> float | None:
 
 def _transaction_decision_id(transaction: dict) -> int:
     return history_current_decision_id(transaction.get("consensus_history"))
+
+
+def _appeal_admission_context(
+    transaction: dict,
+    *,
+    session: Session | None,
+    expected_decision_id: int | None = None,
+    require_decision_binding: bool = False,
+) -> _AppealAdmissionContext:
+    """Resolve the eligibility inputs shared by appeal quote and admission."""
+    status = str(transaction.get("status") or "")
+    if (
+        status not in _DECISION_STATUSES
+        or bool(transaction.get("appealed"))
+        or has_terminal_validator_appeal(transaction.get("consensus_history"))
+    ):
+        raise InvalidTransactionError("CanNotAppeal")
+
+    deadline = _transaction_appeal_deadline(transaction)
+    if deadline is not None and time.time() >= deadline:
+        raise InvalidTransactionError("CanNotAppeal")
+    if require_decision_binding and (
+        expected_decision_id is None
+        or int(expected_decision_id) != _transaction_decision_id(transaction)
+    ):
+        raise InvalidTransactionError("CanNotAppeal")
+
+    fee_accounting = (transaction.get("data") or {}).get(FEE_ACCOUNTING_KEY)
+    if fee_accounting is None:
+        raise InvalidTransactionError("FeeAccountingMissing")
+    if acceptance_dispatch_pending(fee_accounting):
+        raise InvalidTransactionError("CanNotAppeal")
+
+    frozen_pool_addresses = fee_accounting.get("selection_pool_addresses")
+    live_pool_addresses = None
+    if session is not None and isinstance(frozen_pool_addresses, list):
+        live_pool_addresses = [
+            validator.get("address")
+            for validator in ValidatorsRegistry(session).get_all_validators(
+                include_private_key=False
+            )
+        ]
+    frozen_pool_count = fee_accounting.get("selection_pool_count")
+    validator_count = (
+        int(frozen_pool_count)
+        if frozen_pool_count is not None
+        else (
+            ValidatorsRegistry(session).count_validators()
+            if session is not None
+            else int(
+                fee_accounting.get("num_of_initial_validators")
+                or transaction.get("num_of_initial_validators")
+                or 5
+            )
+        )
+    )
+    current_round = _current_fee_round(transaction.get("consensus_history"))
+    available_appeal_validators = _available_appeal_validator_count(
+        transaction,
+        validator_count,
+        frozen_pool_addresses=frozen_pool_addresses,
+        live_pool_addresses=live_pool_addresses,
+    )
+    if (
+        status
+        in {
+            TransactionStatus.ACCEPTED.value,
+            TransactionStatus.VALIDATORS_TIMEOUT.value,
+        }
+        and available_appeal_validators == 0
+    ):
+        raise InvalidTransactionError("CanNotAppeal")
+    if (
+        status == TransactionStatus.UNDETERMINED.value
+        and available_appeal_validators is not None
+        and available_appeal_validators
+        < VALIDATORS_PER_ROUND[min(current_round + 1, len(VALIDATORS_PER_ROUND) - 1)]
+    ):
+        raise InvalidTransactionError("CanNotAppeal")
+
+    leader_timeout_live_seats = None
+    if status == TransactionStatus.LEADER_TIMEOUT.value:
+        live_validators = transaction.get("leader_timeout_validators")
+        if isinstance(live_validators, list):
+            # The removed leader changes replay membership, not the configured
+            # source committee used to price the leader-timeout bond.
+            leader_timeout_live_seats = len(live_validators) + 1
+
+    return _AppealAdmissionContext(
+        status=status,
+        deadline=deadline,
+        fee_accounting=fee_accounting,
+        current_round=current_round,
+        validator_count=validator_count,
+        normal_leader_count=_normal_leader_count(transaction.get("consensus_history")),
+        available_appeal_validators=available_appeal_validators,
+        leader_timeout_live_seats=leader_timeout_live_seats,
+    )
 
 
 def _transaction_resolution_source_code(
@@ -2217,90 +2329,22 @@ def estimate_latest_appeal_charge(
             data={"hash": transaction_hash},
         )
 
-    status = str(transaction.get("status") or "")
-    if (
-        status not in _DECISION_STATUSES
-        or bool(transaction.get("appealed"))
-        or has_terminal_validator_appeal(transaction.get("consensus_history"))
-    ):
-        raise InvalidTransactionError("CanNotAppeal")
-    deadline = _transaction_appeal_deadline(transaction)
-    if deadline is not None and time.time() >= deadline:
-        raise InvalidTransactionError("CanNotAppeal")
-
-    fee_accounting = (transaction.get("data") or {}).get(FEE_ACCOUNTING_KEY)
-    if fee_accounting is None:
-        raise InvalidTransactionError("FeeAccountingMissing")
-    if acceptance_dispatch_pending(fee_accounting):
-        raise InvalidTransactionError("CanNotAppeal")
-    session = getattr(transactions_processor, "session", None)
-    frozen_pool_addresses = fee_accounting.get("selection_pool_addresses")
-    live_pool_addresses = None
-    if session is not None and isinstance(frozen_pool_addresses, list):
-        live_pool_addresses = [
-            validator.get("address")
-            for validator in ValidatorsRegistry(session).get_all_validators(
-                include_private_key=False
-            )
-        ]
-    frozen_pool_count = fee_accounting.get("selection_pool_count")
-    validator_count = (
-        int(frozen_pool_count)
-        if frozen_pool_count is not None
-        else (
-            ValidatorsRegistry(session).count_validators()
-            if session is not None
-            else int(
-                fee_accounting.get("num_of_initial_validators")
-                or transaction.get("num_of_initial_validators")
-                or 5
-            )
-        )
-    )
-    current_round = _current_fee_round(transaction.get("consensus_history"))
-    available_appeal_validators = _available_appeal_validator_count(
+    context = _appeal_admission_context(
         transaction,
-        validator_count,
-        frozen_pool_addresses=frozen_pool_addresses,
-        live_pool_addresses=live_pool_addresses,
+        session=getattr(transactions_processor, "session", None),
     )
-    if (
-        status
-        in {
-            TransactionStatus.ACCEPTED.value,
-            TransactionStatus.VALIDATORS_TIMEOUT.value,
-        }
-        and available_appeal_validators == 0
-    ):
-        raise InvalidTransactionError("CanNotAppeal")
-    if (
-        status == TransactionStatus.UNDETERMINED.value
-        and available_appeal_validators is not None
-        and available_appeal_validators
-        < VALIDATORS_PER_ROUND[min(current_round + 1, len(VALIDATORS_PER_ROUND) - 1)]
-    ):
-        raise InvalidTransactionError("CanNotAppeal")
-    live_seats = None
-    if status == TransactionStatus.LEADER_TIMEOUT.value:
-        live_validators = transaction.get("leader_timeout_validators")
-        if isinstance(live_validators, list):
-            # Studio persists the survivors after removing the timed-out
-            # leader; Consensus applies its eligibility gate to the original
-            # committee before that removal.
-            live_seats = len(live_validators) + 1
     charge = calculate_appeal_charge(
-        fee_accounting["fees_distribution"],
-        current_round=current_round,
-        status=status,
+        context.fee_accounting["fees_distribution"],
+        current_round=context.current_round,
+        status=context.status,
         terminal_committee_upper_bound=max(
             0,
-            validator_count
-            - _normal_leader_count(transaction.get("consensus_history")),
+            context.validator_count - context.normal_leader_count,
         ),
-        available_appeal_validators=available_appeal_validators,
-        leader_timeout_live_seats=live_seats,
+        available_appeal_validators=context.available_appeal_validators,
+        leader_timeout_live_seats=context.leader_timeout_live_seats,
         policy=funding_policy_for_accounting(
-            fee_accounting,
+            context.fee_accounting,
             StudioFeePolicy.from_env(),
         ),
     )
@@ -2309,7 +2353,9 @@ def estimate_latest_appeal_charge(
         "decisionId": str(decision_id),
         "bond": str(int(charge["bond"])),
         "funding": str(int(charge["funding"])),
-        "appealDeadline": str(math.ceil(deadline)) if deadline is not None else "0",
+        "appealDeadline": (
+            str(math.ceil(context.deadline)) if context.deadline is not None else "0"
+        ),
     }
 
 
@@ -2667,122 +2713,43 @@ def _handle_appeal_or_top_up_and_submit(
     if tx is None:
         raise NotFoundError(message=TRANSACTION_NOT_FOUND_MESSAGE, data={"hash": tx_id})
 
-    status = str(tx.get("status") or "")
-    if status not in {
-        TransactionStatus.ACCEPTED.value,
-        TransactionStatus.UNDETERMINED.value,
-        TransactionStatus.LEADER_TIMEOUT.value,
-        TransactionStatus.VALIDATORS_TIMEOUT.value,
-    } or bool(tx.get("appealed")):
-        raise InvalidTransactionError("CanNotAppeal")
-    if has_terminal_validator_appeal(tx.get("consensus_history")):
-        raise InvalidTransactionError("CanNotAppeal")
-    appeal_deadline = _transaction_appeal_deadline(tx)
-    if appeal_deadline is not None:
-        # Consensus rejects at `block.timestamp >= appealDeadline`; do the
-        # same at the RPC admission boundary instead of relying on the
-        # asynchronous finalization worker to win the race first.
-        if time.time() >= appeal_deadline:
-            raise InvalidTransactionError("CanNotAppeal")
-    consensus_history = tx.get("consensus_history")
     expected_decision_id = decoded_rollup_transaction.data.expected_decision_id
-    current_round = _current_fee_round(consensus_history)
+    # v0.6 binds every appeal to one exact materialized decision. Older SDKs
+    # may still decode without this argument, but admission rejects them.
+    context = _appeal_admission_context(
+        tx,
+        session=getattr(accounts_manager, "session", None),
+        expected_decision_id=expected_decision_id,
+        require_decision_binding=True,
+    )
     # New Studio decisions persist their exact materialized ID. Legacy rows
     # derive the same monotonic ordinal from alternating normal/appeal history.
     current_decision_id = _transaction_decision_id(tx)
-    # v0.6 binds every appeal to one exact materialized decision.  Older SDKs
-    # emitted selectors without this argument; Studio may still decode those
-    # transactions to surface a canonical error, but must never admit the
-    # unbound appeal when deployed Consensus would reject it.
-    if expected_decision_id is None or int(expected_decision_id) != current_decision_id:
-        raise InvalidTransactionError("CanNotAppeal")
 
-    fee_accounting = (tx.get("data") or {}).get(FEE_ACCOUNTING_KEY)
-    if fee_accounting is None:
-        raise InvalidTransactionError("FeeAccountingMissing")
-    if acceptance_dispatch_pending(fee_accounting):
-        raise InvalidTransactionError("CanNotAppeal")
-    if fee_accounting is not None:
-        session = getattr(accounts_manager, "session", None)
-        frozen_pool_count = fee_accounting.get("selection_pool_count")
-        frozen_pool_addresses = fee_accounting.get("selection_pool_addresses")
-        live_pool_addresses = None
-        if session is not None and isinstance(frozen_pool_addresses, list):
-            live_pool_addresses = [
-                validator.get("address")
-                for validator in ValidatorsRegistry(session).get_all_validators(
-                    include_private_key=False
-                )
-            ]
-        validator_count = (
-            int(frozen_pool_count)
-            if frozen_pool_count is not None
-            else (
-                ValidatorsRegistry(session).count_validators()
-                if session is not None
-                else int(
-                    fee_accounting.get("num_of_initial_validators")
-                    or tx.get("num_of_initial_validators")
-                    or 5
-                )
-            )
-        )
-        normal_leader_count = _normal_leader_count(consensus_history)
-        available_appeal_validators = _available_appeal_validator_count(
-            tx,
-            validator_count,
-            frozen_pool_addresses=frozen_pool_addresses,
-            live_pool_addresses=live_pool_addresses,
-        )
-        if (
-            status
-            in {
-                TransactionStatus.ACCEPTED.value,
-                TransactionStatus.VALIDATORS_TIMEOUT.value,
-            }
-            and available_appeal_validators == 0
-        ):
-            raise InvalidTransactionError("CanNotAppeal")
-        if (
-            status == TransactionStatus.UNDETERMINED.value
-            and available_appeal_validators is not None
-            and available_appeal_validators
-            < VALIDATORS_PER_ROUND[
-                min(current_round + 1, len(VALIDATORS_PER_ROUND) - 1)
-            ]
-        ):
-            raise InvalidTransactionError("CanNotAppeal")
-        replacement_rotations = None
-        leader_timeout_live_seats = None
-        if status == TransactionStatus.LEADER_TIMEOUT.value:
-            live_validators = tx.get("leader_timeout_validators")
-            if isinstance(live_validators, list):
-                leader_timeout_live_seats = len(live_validators) + 1
-
-        def prepare_fee_accounting(current_fee_accounting):
-            if current_fee_accounting is None:
-                raise FeeValidationError("FeeAccountingMissing")
-            updated = record_appeal_bond(
+    def prepare_fee_accounting(current_fee_accounting):
+        if current_fee_accounting is None:
+            raise FeeValidationError("FeeAccountingMissing")
+        updated = record_appeal_bond(
+            current_fee_accounting,
+            amount=decoded_rollup_transaction.total_spend,
+            appealer=decoded_rollup_transaction.from_address,
+            current_round=context.current_round,
+            status=context.status,
+            fees_distribution=decoded_rollup_transaction.data.fees_distribution,
+            top_up_and_submit=decoded_rollup_transaction.data.top_up_and_submit,
+            terminal_committee_upper_bound=max(
+                0,
+                context.validator_count - context.normal_leader_count,
+            ),
+            available_appeal_validators=context.available_appeal_validators,
+            replacement_rotations=None,
+            leader_timeout_live_seats=context.leader_timeout_live_seats,
+            policy=funding_policy_for_accounting(
                 current_fee_accounting,
-                amount=decoded_rollup_transaction.total_spend,
-                appealer=decoded_rollup_transaction.from_address,
-                current_round=current_round,
-                status=status,
-                fees_distribution=decoded_rollup_transaction.data.fees_distribution,
-                top_up_and_submit=decoded_rollup_transaction.data.top_up_and_submit,
-                terminal_committee_upper_bound=max(
-                    0,
-                    validator_count - normal_leader_count,
-                ),
-                available_appeal_validators=available_appeal_validators,
-                replacement_rotations=replacement_rotations,
-                leader_timeout_live_seats=leader_timeout_live_seats,
-                policy=funding_policy_for_accounting(
-                    current_fee_accounting,
-                    StudioFeePolicy.from_env(),
-                ),
-            )
-            return updated, int(updated["appeal_bonds"][-1]["surplusRefund"])
+                StudioFeePolicy.from_env(),
+            ),
+        )
+        return updated, int(updated["appeal_bonds"][-1]["surplusRefund"])
 
     submitted_at = int(time.time())
     failed_reduction = float(
@@ -2796,8 +2763,8 @@ def _handle_appeal_or_top_up_and_submit(
             expected_decision_id=current_decision_id,
             submitted_at=submitted_at,
             appeal_deadline=(
-                int(appeal_deadline)
-                if appeal_deadline is not None
+                int(context.deadline)
+                if context.deadline is not None
                 else submitted_at + int(os.environ.get("VITE_FINALITY_WINDOW", "1800"))
             ),
             retention_bps=round((1.0 - failed_reduction) * 10_000),

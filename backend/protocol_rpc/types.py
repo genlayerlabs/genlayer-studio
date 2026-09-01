@@ -29,7 +29,7 @@ class EndpointResult:
 
 @dataclass
 class DecodedsubmitAppealDataArgs:
-    tx_id: str
+    tx_id: str | bytes
     expected_decision_id: int | None = None
     fees_distribution: dict | None = None
     top_up_and_submit: bool = False
@@ -37,13 +37,13 @@ class DecodedsubmitAppealDataArgs:
 
 @dataclass
 class DecodedTopUpFeesDataArgs:
-    tx_id: str
+    tx_id: str | bytes
     fees_distribution: dict
 
 
 @dataclass
 class DecodedFinalizeTransactionDataArgs:
-    tx_id: str
+    tx_id: str | bytes
     expected_decision_id: int | None = None
 
 

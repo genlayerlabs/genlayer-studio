@@ -376,6 +376,10 @@ class ConsensusWorker:
                         WHERE t2.to_address IS NOT DISTINCT FROM t.to_address
                             AND t2.blocked_at IS NOT NULL
                             AND t2.hash != t.hash
+                            AND (
+                                t2.status NOT IN ('FINALIZED', 'CANCELED')
+                                OR t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
+                            )
                     )
                     AND pg_try_advisory_xact_lock(hashtext(COALESCE(t.to_address, t.hash)))
                 ORDER BY t.queue_order ASC
@@ -457,6 +461,10 @@ class ConsensusWorker:
                         WHERE t2.to_address IS NOT DISTINCT FROM t.to_address
                             AND t2.blocked_at IS NOT NULL
                             AND t2.hash != t.hash
+                            AND (
+                                t2.status NOT IN ('FINALIZED', 'CANCELED')
+                                OR t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
+                            )
                     )
                     AND pg_try_advisory_xact_lock(hashtext(COALESCE(t.to_address, t.hash)))
                 ORDER BY t.queue_order ASC
@@ -2297,14 +2305,17 @@ class ConsensusWorker:
 
         finalization_data = await self.claim_next_finalization(session)
         if finalization_data:
-            logger.debug(
-                f"[Worker {self.worker_id}] Claimed finalization for transaction {finalization_data['hash']}"
-            )
-            task = asyncio.create_task(
-                self._process_finalization_task(finalization_data)
-            )
-            self._active_tasks.add(task)
-            return True
+            tx_hash = finalization_data["hash"]
+            if not self._is_in_backoff(finalization_data):
+                logger.debug(
+                    f"[Worker {self.worker_id}] Claimed finalization for transaction {tx_hash}"
+                )
+                task = asyncio.create_task(
+                    self._process_finalization_task(finalization_data)
+                )
+                self._active_tasks.add(task)
+                return True
+            self.release_transaction(session, tx_hash)
 
         transaction_data = await self.claim_next_transaction(session)
         if transaction_data:

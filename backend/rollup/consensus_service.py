@@ -283,7 +283,7 @@ class ConsensusService:
         from_address: str,
         retry: bool = True,
         calldata: str | HexBytes | None = None,
-    ) -> str:
+    ) -> Dict[str, Any] | None:
         """
         Forward a transaction to the consensus rollup and wait for NewTransaction event
         """
