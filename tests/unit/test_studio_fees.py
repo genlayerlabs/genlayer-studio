@@ -3788,24 +3788,24 @@ def test_simulation_fee_consumption_fills_mode2_payload_from_allocation():
     assert recorded["execution_fee_consumed_buckets"] == [0, 80]
     assert recorded["genvm_fee_consumed_buckets"] == [80, 55, 0, 0]
     assert recorded["genvm_message_fee_consumed"] == 55
-    assert recorded["message_fee_consumed"] == 75
-    assert recorded["allocation_consumed"] == {"0": 75}
+    assert recorded["message_fee_consumed"] == 55
+    assert recorded["allocation_consumed"] == {"0": 55}
     assert recorded["message_fees_recorded_from_receipt"] is True
     assert recorded["execution_fee_report"]["messageFees"] == {
         "budget": 75,
-        "declaredConsumed": 75,
+        "declaredConsumed": 55,
         "genvmMeteredConsumed": 55,
         "declaredRefunded": 0,
-        "remaining": 0,
-        "meteringDelta": 20,
+        "remaining": 20,
+        "meteringDelta": 0,
     }
     assert message["messageFeeMode"] == "mode2"
     assert message["feeParams"] == "0x" + fee_params.hex()
-    assert message["declaredBudget"] == 75
+    assert message["declaredBudget"] == 55
     assert message["allocationSubtree"] == "0x"
     assert message["allocationSubtreeBytes"] == 0
-    assert recorded_again["message_fee_consumed"] == 75
-    assert recorded_again["allocation_consumed"] == {"0": 75}
+    assert recorded_again["message_fee_consumed"] == 55
+    assert recorded_again["allocation_consumed"] == {"0": 55}
 
 
 def test_settlement_refreshes_message_fee_report_after_message_refund():
@@ -7071,6 +7071,41 @@ def test_fill_message_fee_payload_from_allocation_uses_matching_policy_and_subtr
     assert resolved[0]["budget"] == 111
     assert resolved[1]["parentIndex"] == 0
     assert resolved[1]["budget"] == 56
+
+
+def test_fill_message_fee_payload_uses_per_occurrence_budget_for_shared_allocation():
+    fee_params = _encode_internal_fee_params()
+    recipient = "0x2222222222222222222222222222222222222222"
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(total_message_fees=110),
+        message_allocations=[
+            _allocation(
+                recipient=recipient,
+                budget=110,
+                fee_params=fee_params,
+            )
+        ],
+        num_of_validators=5,
+        submitted_value=1210,
+        user_value=0,
+    )
+    raw_message = {
+        "messageType": 1,
+        "recipient": recipient,
+        "onAcceptance": True,
+        "declaredBudget": 0,
+        "callKey": "0x" + "0" * 64,
+    }
+
+    messages = [
+        fill_message_fee_payload_from_allocation(accounting, raw_message)
+        for _ in range(2)
+    ]
+    updated = consume_message_fees(accounting, messages)
+
+    assert [message["declaredBudget"] for message in messages] == [55, 55]
+    assert updated["message_fee_consumed"] == 110
+    assert updated["allocation_consumed"] == {"0": 110}
 
 
 def test_flat_array_message_fee_payload_ignores_mismatched_receipt_subtree():

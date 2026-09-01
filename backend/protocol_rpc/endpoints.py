@@ -1873,6 +1873,31 @@ def get_transaction_by_hash(
     )
 
     if transaction is None:
+        envelope = transactions_processor.get_evm_envelope(transaction_hash)
+        if envelope is not None:
+            # Lifecycle calls and post-admission execution reverts are mined
+            # EVM envelopes but do not create GenLayer transaction rows. Viem
+            # polls eth_getTransactionByHash before reading the receipt, so
+            # expose the durable envelope through the matching Ethereum
+            # endpoint instead of making a valid status-0/1 receipt
+            # undiscoverable.
+            return {
+                "blockHash": transaction_hash,
+                "blockNumber": hex(0),
+                "from": envelope.from_address,
+                "gas": hex(0),
+                "gasPrice": hex(0),
+                "hash": transaction_hash,
+                "input": "0x",
+                "nonce": hex(int(envelope.nonce)),
+                "r": "0x" + "0" * 64,
+                "s": "0x" + "0" * 64,
+                "to": envelope.to_address,
+                "transactionIndex": hex(0),
+                "type": hex(0),
+                "v": hex(0),
+                "value": hex(0),
+            }
         raise NotFoundError(
             message=f"Transaction {transaction_hash} not found",
             data={"hash": transaction_hash},

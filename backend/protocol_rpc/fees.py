@@ -2608,10 +2608,22 @@ def fill_message_fee_payload_from_allocation(
     if bool(allocation["onAcceptance"]) != bool(message.get("onAcceptance", False)):
         raise MessageEmissionPhaseMismatch("MessageEmissionPhaseMismatch")
 
-    if int(updated.get("declaredBudget", 0) or 0) == 0:
-        updated["declaredBudget"] = int(allocation["budget"])
     if not _message_has_fee_params(updated):
         updated["feeParams"] = allocation["feeParams"]
+    if int(updated.get("declaredBudget", 0) or 0) == 0:
+        # The allocation budget is a cumulative ceiling for every occurrence
+        # with this key. It is not the declared budget of each occurrence.
+        # GenVM/Consensus assigns an occurrence its minimum primary funding
+        # plus the allocation subtree it must carry into the child. Using the
+        # aggregate ceiling here overcharges the first message and makes a
+        # second same-key occurrence fail with MessageBudgetExceeded.
+        fee_params = decode_internal_message_fee_params(updated["feeParams"])
+        policy = execution_policy_for_accounting(accounting)
+        updated["declaredBudget"] = _internal_allocation_min_required(
+            allocation,
+            fee_params,
+            policy,
+        ) + _child_allocation_budget_sum(allocations, index)
     updated["callKey"] = _normalize_call_key(
         updated.get("callKey", allocation["callKey"])
     )

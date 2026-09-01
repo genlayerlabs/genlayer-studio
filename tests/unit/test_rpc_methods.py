@@ -190,6 +190,27 @@ def test_eth_transaction_receipt_reports_reverted_lifecycle_envelope():
     assert receipt["logs"] == []
 
 
+def test_eth_get_transaction_by_hash_reports_envelope_without_protocol_row():
+    transactions_processor = MagicMock()
+    transactions_processor.get_transaction_by_hash.return_value = None
+    transactions_processor.get_evm_envelope.return_value = SimpleNamespace(
+        from_address="0x1111111111111111111111111111111111111111",
+        to_address="0x2222222222222222222222222222222222222222",
+        nonce=7,
+    )
+
+    transaction = endpoints.get_transaction_by_hash(
+        transactions_processor,
+        "0x" + "ab" * 32,
+    )
+
+    assert transaction["hash"] == "0x" + "ab" * 32
+    assert transaction["from"] == "0x1111111111111111111111111111111111111111"
+    assert transaction["to"] == "0x2222222222222222222222222222222222222222"
+    assert transaction["nonce"] == "0x7"
+    assert transaction["blockNumber"] == "0x0"
+
+
 def test_eth_get_block_by_number_requests_no_contract_snapshot_for_full_tx():
     transactions_processor = MagicMock()
     transactions_processor.get_transactions_for_block.return_value = {
