@@ -283,6 +283,10 @@ class _VmErrorFee:
         return VmError("fee below_minimum")
 
     @staticmethod
+    def phase_timeout_out_of_bounds() -> "VmError":
+        return VmError("fee phase_timeout_out_of_bounds")
+
+    @staticmethod
     def too_many_rounds() -> "VmError":
         return VmError("fee too_many_rounds")
 

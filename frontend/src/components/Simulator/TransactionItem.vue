@@ -292,6 +292,7 @@ function feeBucketRows(
             'bytes',
           ],
           ['Submitted message payload', bucket.submittedMessageBytes, 'bytes'],
+          ['Submitted message count', bucket.submittedMessageCount, 'count'],
           ['Total with message', bucket.totalWithMessage, 'fee'],
         ]
       : [
@@ -318,7 +319,9 @@ function feeBucketRows(
           ? String(value)
           : kind === 'bytes'
             ? `${formatNumber(value)} bytes`
-            : formatFeeAmount(value),
+            : kind === 'count'
+              ? formatNumber(value)
+              : formatFeeAmount(value),
     }));
 }
 

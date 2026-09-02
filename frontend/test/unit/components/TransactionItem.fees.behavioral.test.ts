@@ -143,6 +143,7 @@ const feeAccounting = {
       message: '1234',
       nondeterministicOutputBytes: '2',
       submittedMessageBytes: '320',
+      submittedMessageCount: '1',
       totalExecution: '400000',
       totalWithMessage: '401234',
       executionBudgetPerRound: '500000',
@@ -274,6 +275,7 @@ describe('TransactionItem fee accounting display', () => {
     expect(text).toContain('Storage/event writes used');
     expect(text).toContain('Shared execution meter');
     expect(text).toContain('Nondeterministic output');
+    expect(text).toContain('Submitted message count');
     expect(text).toContain('Budget remaining');
     expect(text).toContain('Budget exceeded');
     expect(text).toContain('false');

@@ -97,6 +97,13 @@ async def test_run_genvm_host_skips_state_copy_on_first_attempt():
 
     assert copy_mock.await_count == 0
     assert result.state is original_state
+    assert run_mock.await_args.kwargs["bucket_totals"] == {
+        "execution_data_gas": 2**200,
+        "message_fee": 2**200,
+        "nondet_outputs": 2**200,
+        "submitted_messages": 2**200,
+        "submitted_messages_count": 2**200,
+    }
     assert run_mock.await_args.kwargs["gas_data"] == GENVM_GASLESS_GAS_DATA
 
 

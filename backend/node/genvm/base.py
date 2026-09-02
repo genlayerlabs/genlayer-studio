@@ -61,6 +61,7 @@ from .error_codes import (
 )
 
 GENVM_GASLESS_GAS_DATA: dict[str, str] = {
+    **genvmhost.DEFAULT_GAS_DATA,
     "storageUnitPrice": "0",
     "receiptGasPerByte": "0",
     "gasPerChangedSlot": "0",
@@ -68,6 +69,7 @@ GENVM_GASLESS_GAS_DATA: dict[str, str] = {
     "bootloaderOverhead": "0",
     "fixedProposeReceiptGas": "0",
     "fixedMessageRevealGas": "0",
+    "lockedReceiptGasPrice": "0",
     "genPerTimeUnit": "0",
 }
 
@@ -91,7 +93,7 @@ CALL_KEY_WILDCARD = "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045
 
 @dataclass(frozen=True)
 class GenVMFeeContext:
-    bucket_totals: list[int] | None = None
+    bucket_totals: dict[str, int] | None = None
     gas_data: dict[str, str] | None = None
     message_fee_allocation: list[dict] | None = None
 
@@ -300,8 +302,8 @@ class ExecutionResult:
     processing_time: int
     nondet_disagree: int | None
     execution_stats: dict | None = None
-    data_fee_bucket_totals: list[int] | None = None
-    data_fees_remaining: list[int] | None = None
+    data_fee_bucket_totals: dict[str, int] | None = None
+    data_fees_remaining: dict[str, int] | None = None
 
 
 def _emission_value(emission: dict, name: str):
@@ -676,10 +678,13 @@ class Host(genvmhost.IHost):
                         )
                     )
 
-        leader_public_data = LeaderPublicData.decode(res.result_leader_public_data)
-        eq_outputs = {
-            i: data for i, data in enumerate(leader_public_data.nondet_block_outputs)
-        }
+        eq_outputs = {}
+        if res.result_leader_public_data:
+            leader_public_data = LeaderPublicData.decode(res.result_leader_public_data)
+            eq_outputs = {
+                i: data
+                for i, data in enumerate(leader_public_data.nondet_block_outputs)
+            }
 
         execution_stats = dict(ctx.stats)
         llm_token_metrics = _extract_llm_token_metrics(res.metrics)
@@ -927,7 +932,7 @@ def _create_timeout_result(
         state=state_proxy,
         processing_time=processing_time,
         nondet_disagree=None,
-        data_fees_remaining=[],
+        data_fees_remaining={},
     )
 
 
@@ -978,17 +983,15 @@ async def run_genvm_host(
         )
     ctx = Context(logger=logger)
     fee_context = fee_context or GenVMFeeContext()
-    effective_bucket_totals = fee_context.bucket_totals or [
-        10_000_000,
-        10_000_000,
-        10_000_000,
-        10_000_000,
-    ]
-    effective_gas_data = (
-        dict(fee_context.gas_data)
-        if fee_context.gas_data
-        else dict(GENVM_GASLESS_GAS_DATA)
+    effective_bucket_totals = (
+        dict(fee_context.bucket_totals)
+        if fee_context.bucket_totals
+        else base_host.default_bucket_totals(3)
     )
+    effective_gas_data = dict(base_host.DEFAULT_GAS_DATA)
+    effective_gas_data.update(GENVM_GASLESS_GAS_DATA)
+    if fee_context.gas_data:
+        effective_gas_data.update(fee_context.gas_data)
     tmpdir = Path(tempfile.mkdtemp())
     try:
         base_delay = 5  # seconds

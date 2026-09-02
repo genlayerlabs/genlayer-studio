@@ -100,7 +100,6 @@ from backend.protocol_rpc.fees import (
     MESSAGE_REVEAL_LENGTH_SLOTS,
     MAX_CONTRIBUTION_SEGMENTS,
     NODE_ROOT_SENTINEL,
-    NONDET_OUTPUT_LENGTH_BYTES,
     FEE_ACCOUNTING_KEY,
     FEE_POLICY_SNAPSHOT_KEY,
     PROPOSE_RECEIPT_SLOTS,
@@ -113,6 +112,7 @@ from backend.protocol_rpc.fees import (
     DEFAULT_STORAGE_UNIT_PRICE,
     DEFAULT_TRANSACTION_EXECUTION_BUDGET_PER_ROUND,
     GENVM_UNMETERED_DATA_FEE_BUCKET,
+    GENVM_NONDET_OUTPUT_HEADER_BYTES,
     StudioFeePolicy,
     TopUpCannotExtendSchedule,
     TooManyMessages,
@@ -147,6 +147,7 @@ from backend.protocol_rpc.fees import (
     record_reveal_message_fees,
     refund_failed_external_message_fee,
     required_fee_deposit,
+    _genvm_receipt_metered_fee,
     _receipt_fee_report,
     settle_fee_accounting,
     _settlement_storage_recipient_count,
@@ -807,11 +808,8 @@ def test_studio_fee_policy_matches_consensus_deterministic_receipt_estimators():
         + policy.intrinsic_gas
         + policy.bootloader_overhead
         + (PROPOSE_RECEIPT_SLOTS * policy.gas_per_changed_slot)
-        + policy.fixed_message_reveal_gas
-        + policy.intrinsic_gas
-        + policy.bootloader_overhead
-        + (MESSAGE_REVEAL_LENGTH_SLOTS * policy.gas_per_changed_slot)
-        + (NONDET_OUTPUT_LENGTH_BYTES * policy.calldata_gas_per_byte)
+        + (policy.receipt_wrapper_bytes + GENVM_NONDET_OUTPUT_HEADER_BYTES)
+        * policy.calldata_gas_per_byte
     )
     expected_measured_receipt_gas = (
         999
@@ -822,8 +820,8 @@ def test_studio_fee_policy_matches_consensus_deterministic_receipt_estimators():
         + (99 * policy.gas_per_changed_slot)
     )
     expected_nondet_output_start_gas = (
-        NONDET_OUTPUT_LENGTH_BYTES * policy.calldata_gas_per_byte
-    )
+        policy.receipt_wrapper_bytes + GENVM_NONDET_OUTPUT_HEADER_BYTES
+    ) * policy.calldata_gas_per_byte
     expected_message_reveal_gas = (
         policy.fixed_message_reveal_gas
         + policy.intrinsic_gas
@@ -3096,15 +3094,22 @@ def test_genvm_fee_context_uses_transaction_execution_budget_and_policy():
             calldata_gas_per_byte=9,
             fixed_propose_receipt_gas=8,
             fixed_message_reveal_gas=10,
+            time_unit_overlay_bps=1_500,
+            min_propose_timeunits=2,
+            max_propose_timeunits=101,
+            min_commit_timeunits=3,
+            max_commit_timeunits=202,
+            max_messages_per_tx=12,
         ),
     )
 
-    assert bucket_totals == [
-        123,
-        0,
-        GENVM_UNMETERED_DATA_FEE_BUCKET,
-        GENVM_UNMETERED_DATA_FEE_BUCKET,
-    ]
+    assert bucket_totals == {
+        "execution_data_gas": 123,
+        "message_fee": 0,
+        "nondet_outputs": GENVM_UNMETERED_DATA_FEE_BUCKET,
+        "submitted_messages": GENVM_UNMETERED_DATA_FEE_BUCKET,
+        "submitted_messages_count": 12,
+    }
     assert gas_data == {
         "storageUnitPrice": "3",
         "receiptGasPerByte": "36",
@@ -3113,7 +3118,15 @@ def test_genvm_fee_context_uses_transaction_execution_budget_and_policy():
         "bootloaderOverhead": "24",
         "fixedProposeReceiptGas": "32",
         "fixedMessageRevealGas": "40",
+        "lockedReceiptGasPrice": "4",
+        "receiptWrapperBytes": "1024",
+        "overlaySplitBps": "1500",
+        "minProposeTimeout": "2",
+        "maxProposeTimeout": "101",
+        "minCommitTimeout": "3",
+        "maxCommitTimeout": "202",
         "genPerTimeUnit": "2",
+        "messageBudgetFloor": "18704",
     }
 
 
@@ -3137,12 +3150,66 @@ def test_genvm_fee_context_sends_price_policy_without_execution_bucket():
         ),
     )
 
-    assert bucket_totals is None
+    assert bucket_totals == {
+        "execution_data_gas": GENVM_UNMETERED_DATA_FEE_BUCKET,
+        "message_fee": GENVM_UNMETERED_DATA_FEE_BUCKET,
+        "nondet_outputs": GENVM_UNMETERED_DATA_FEE_BUCKET,
+        "submitted_messages": GENVM_UNMETERED_DATA_FEE_BUCKET,
+        "submitted_messages_count": 20,
+    }
     assert gas_data["genPerTimeUnit"] == "2"
     assert gas_data["storageUnitPrice"] == "3"
     assert gas_data["receiptGasPerByte"] == "64"
     assert gas_data["fixedProposeReceiptGas"] == "840000"
     assert gas_data["fixedMessageRevealGas"] == "400000"
+
+
+def test_genvm_fee_context_enforces_message_count_without_fee_budgets():
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(
+            leader_timeunits=0,
+            validator_timeunits=0,
+        ),
+        num_of_validators=5,
+        submitted_value=123,
+        user_value=0,
+    )
+
+    bucket_totals, _ = genvm_fee_context(
+        accounting,
+        StudioFeePolicy(max_messages_per_tx=3),
+    )
+
+    assert bucket_totals == {
+        "execution_data_gas": GENVM_UNMETERED_DATA_FEE_BUCKET,
+        "message_fee": GENVM_UNMETERED_DATA_FEE_BUCKET,
+        "nondet_outputs": GENVM_UNMETERED_DATA_FEE_BUCKET,
+        "submitted_messages": GENVM_UNMETERED_DATA_FEE_BUCKET,
+        "submitted_messages_count": 3,
+    }
+
+
+def test_genvm_fee_context_preserves_strict_zero_allocated_message_cap():
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(
+            leader_timeunits=0,
+            validator_timeunits=0,
+        ),
+        num_of_validators=5,
+        submitted_value=123,
+        user_value=0,
+    )
+
+    bucket_totals, _ = genvm_fee_context(
+        accounting,
+        StudioFeePolicy(
+            max_allocated_messages=0,
+            max_messages_per_tx=0,
+        ),
+    )
+
+    assert bucket_totals is not None
+    assert bucket_totals["submitted_messages_count"] == 0
 
 
 def test_genvm_fee_context_sets_message_bucket_independently():
@@ -3156,12 +3223,13 @@ def test_genvm_fee_context_sets_message_bucket_independently():
 
     bucket_totals, _ = genvm_fee_context(accounting)
 
-    assert bucket_totals == [
-        GENVM_UNMETERED_DATA_FEE_BUCKET,
-        55,
-        GENVM_UNMETERED_DATA_FEE_BUCKET,
-        GENVM_UNMETERED_DATA_FEE_BUCKET,
-    ]
+    assert bucket_totals == {
+        "execution_data_gas": GENVM_UNMETERED_DATA_FEE_BUCKET,
+        "message_fee": 55,
+        "nondet_outputs": GENVM_UNMETERED_DATA_FEE_BUCKET,
+        "submitted_messages": GENVM_UNMETERED_DATA_FEE_BUCKET,
+        "submitted_messages_count": 20,
+    }
 
 
 def test_genvm_message_fee_allocation_maps_studio_nodes():
@@ -3311,9 +3379,33 @@ def test_genvm_message_fee_allocation_keeps_legacy_gasless_messages_unmetered():
     ]
     assert all(node["recipient"] is None for node in allocations)
     assert all(node["call_key"] is None for node in allocations)
+    base_internal_params = {
+        "leader_timeunits_allocation": 0,
+        "validator_timeunits_allocation": 0,
+        "execution_budget_per_round": 0,
+        "rotations": [0],
+        "max_price_gen_per_time_unit": 1,
+    }
+    # the finalized node keeps the vendored GenVM default gas-price cap
+    assert [
+        node["fee_params"]["Internal"]
+        for node in allocations
+        if "Internal" in node["fee_params"]
+    ] == [
+        {
+            **base_internal_params,
+            "storage_fee_max_gas_price": 20,
+            "receipt_fee_max_gas_price": 20,
+        },
+        {
+            **base_internal_params,
+            "storage_fee_max_gas_price": 2**200,
+            "receipt_fee_max_gas_price": 2**200,
+        },
+    ]
 
 
-def test_genvm_message_fee_allocation_uses_empty_allocation_list_without_message_budget():
+def test_genvm_message_fee_allocation_keeps_zero_budget_legacy_messages_unmetered():
     accounting = create_fee_accounting(
         fees_distribution=_fees_distribution(total_message_fees=0),
         num_of_validators=5,
@@ -3321,7 +3413,13 @@ def test_genvm_message_fee_allocation_uses_empty_allocation_list_without_message
         user_value=0,
     )
 
-    assert genvm_message_fee_allocation(accounting) == []
+    allocations = genvm_message_fee_allocation(accounting)
+
+    assert [next(iter(node["fee_params"])) for node in allocations] == [
+        "External",
+        "Internal",
+        "Internal",
+    ]
 
 
 def test_genvm_message_fee_allocation_rejects_fee_bearing_mode1_until_genvm_supports_it():
@@ -3410,12 +3508,13 @@ def test_genvm_fee_context_uses_locked_fee_policy_by_default():
 
     bucket_totals, gas_data = genvm_fee_context(accounting)
 
-    assert bucket_totals == [
-        execution_budget,
-        0,
-        GENVM_UNMETERED_DATA_FEE_BUCKET,
-        GENVM_UNMETERED_DATA_FEE_BUCKET,
-    ]
+    assert bucket_totals == {
+        "execution_data_gas": execution_budget,
+        "message_fee": 0,
+        "nondet_outputs": GENVM_UNMETERED_DATA_FEE_BUCKET,
+        "submitted_messages": GENVM_UNMETERED_DATA_FEE_BUCKET,
+        "submitted_messages_count": 20,
+    }
     assert gas_data["genPerTimeUnit"] == "2"
     assert gas_data["storageUnitPrice"] == "3"
     assert gas_data["receiptGasPerByte"] == "36"
@@ -3484,6 +3583,7 @@ def test_execution_fee_consumption_derives_spend_from_genvm_bucket_remaining():
         "message": 50,
         "nondeterministicOutputBytes": 0,
         "submittedMessageBytes": 0,
+        "submittedMessageCount": 0,
         "totalExecution": 30,
         "totalWithMessage": 80,
         "executionBudgetPerRound": 100,
@@ -3511,6 +3611,77 @@ def test_execution_fee_consumption_derives_spend_from_genvm_bucket_remaining():
         recorded["execution_fee_report"]["genvmBuckets"]
         == recorded["genvm_fee_bucket_report"]
     )
+
+
+def test_execution_fee_consumption_reads_named_genvm_buckets():
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(execution_budget_per_round=100),
+        num_of_validators=5,
+        submitted_value=1200,
+        user_value=0,
+        sender="0x1111111111111111111111111111111111111111",
+    )
+    receipt = {
+        "genvm_result": {
+            "data_fee_bucket_totals": {
+                "execution_data_gas": 100,
+                "message_fee": 80,
+                "nondet_outputs": 60,
+                "submitted_messages": 40,
+                "submitted_messages_count": 20,
+            },
+            "data_fees_remaining": {
+                "execution_data_gas": 70,
+                "message_fee": 80,
+                "nondet_outputs": 10,
+                "submitted_messages": 15,
+                "submitted_messages_count": 18,
+            },
+        }
+    }
+
+    recorded = record_execution_fee_consumption(accounting, receipt)
+
+    assert recorded["genvm_fee_consumed_buckets"] == {
+        "execution_data_gas": 30,
+        "message_fee": 0,
+        "nondet_outputs": 50,
+        "submitted_messages": 25,
+        "submitted_messages_count": 2,
+    }
+    assert recorded["execution_fee_consumed"] == 30
+    assert recorded["genvm_message_fee_consumed"] == 0
+    assert recorded["genvm_fee_bucket_report"]["execution"] == 30
+    assert recorded["genvm_fee_bucket_report"]["submittedMessageCount"] == 2
+    assert recorded["genvm_fee_bucket_report"]["buckets"][-1] == {
+        "index": 4,
+        "name": "submittedMessageCount",
+        "unit": "count",
+        "consumed": 2,
+    }
+
+
+def test_execution_fee_consumption_ignores_incomplete_named_bucket_result():
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(execution_budget_per_round=100),
+        num_of_validators=5,
+        submitted_value=1200,
+        user_value=0,
+    )
+    receipt = {
+        "genvm_result": {
+            "data_fee_bucket_totals": {
+                "execution_data_gas": 100,
+                "message_fee": 80,
+            },
+            "data_fees_remaining": {"execution_data_gas": 70},
+        }
+    }
+
+    recorded = record_execution_fee_consumption(accounting, receipt)
+
+    assert recorded["execution_fee_consumed"] == 0
+    assert recorded["genvm_fee_consumed_buckets"] == []
 
 
 def test_execution_fee_report_uses_locked_receipt_price_by_default():
@@ -4378,7 +4549,7 @@ def test_execution_fee_consumption_ignores_genvm_message_reveal_precharge_withou
         receipt_wrapper_bytes=0,
     )
     proposal_fee = policy.estimate_propose_receipt_gas(0) * policy.receipt_gas_price
-    genvm_receipt_fee = policy.genvm_start_budget_floor()
+    genvm_receipt_fee = policy._legacy_genvm_start_budget_floor()
     genvm_nonchargeable_overhead = genvm_receipt_fee - proposal_fee
     storage_fee = 15
     receipt = {
@@ -4413,6 +4584,89 @@ def test_execution_fee_consumption_ignores_genvm_message_reveal_precharge_withou
     }
 
 
+def test_named_genvm_receipt_meter_matches_current_fee_layout():
+    policy = StudioFeePolicy(
+        receipt_gas_price=2,
+        intrinsic_gas=10,
+        bootloader_overhead=20,
+        gas_per_changed_slot=3,
+        calldata_gas_per_byte=4,
+        fixed_propose_receipt_gas=30,
+        fixed_message_reveal_gas=40,
+        receipt_wrapper_bytes=5,
+    )
+    consumed = {
+        "execution_data_gas": 0,
+        "message_fee": 0,
+        "nondet_outputs": GENVM_NONDET_OUTPUT_HEADER_BYTES + 5,
+        "submitted_messages": 100,
+        "submitted_messages_count": 2,
+    }
+
+    metered = _genvm_receipt_metered_fee(
+        {},
+        policy,
+        consumed,
+        message_count=2,
+    )
+
+    expected = policy.genvm_start_budget_floor()
+    expected += 5 * policy.receipt_gas_price * policy.calldata_gas_per_byte
+    expected += (
+        policy.fixed_message_reveal_gas
+        + policy.intrinsic_gas
+        + policy.bootloader_overhead
+    ) * policy.receipt_gas_price
+    expected += 100 * policy.receipt_gas_price * policy.calldata_gas_per_byte
+    expected += 2 * policy.receipt_gas_price * policy.gas_per_changed_slot
+    assert metered == expected
+
+
+def test_named_genvm_message_free_execution_preserves_storage_spend():
+    policy = StudioFeePolicy(
+        receipt_gas_price=2,
+        intrinsic_gas=10,
+        bootloader_overhead=20,
+        gas_per_changed_slot=3,
+        calldata_gas_per_byte=4,
+        fixed_propose_receipt_gas=30,
+        fixed_message_reveal_gas=40,
+        receipt_wrapper_bytes=5,
+    )
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(execution_budget_per_round=5_000),
+        num_of_validators=5,
+        submitted_value=10_000,
+        user_value=0,
+        policy=policy,
+    )
+    storage_fee = 15
+    genvm_receipt_fee = policy.genvm_start_budget_floor()
+    receipt = {
+        "genvm_result": {
+            "eqBlocksOutputsLength": 0,
+            "data_fees_consumed": {
+                "execution_data_gas": genvm_receipt_fee + storage_fee,
+                "message_fee": 0,
+                "nondet_outputs": GENVM_NONDET_OUTPUT_HEADER_BYTES,
+                "submitted_messages": 0,
+                "submitted_messages_count": 0,
+            },
+        }
+    }
+
+    recorded = record_execution_fee_consumption(accounting, receipt, policy)
+
+    proposal_fee = (
+        policy.estimate_propose_receipt_gas(policy.receipt_wrapper_bytes)
+        * policy.receipt_gas_price
+    )
+    assert recorded["execution_fee_consumed_buckets"] == [
+        proposal_fee,
+        storage_fee,
+    ]
+
+
 def test_recommended_fee_preset_funds_shared_genvm_execution_with_storage():
     policy = StudioFeePolicy(
         gen_per_time_unit=1,
@@ -4436,7 +4690,7 @@ def test_recommended_fee_preset_funds_shared_genvm_execution_with_storage():
         policy=policy,
     )
     proposal_fee = policy.estimate_propose_receipt_gas(0) * policy.receipt_gas_price
-    genvm_receipt_fee = policy.genvm_start_budget_floor()
+    genvm_receipt_fee = policy._legacy_genvm_start_budget_floor()
     storage_fee = 10_000
     genvm_execution_required = genvm_receipt_fee + storage_fee
     receipt = {

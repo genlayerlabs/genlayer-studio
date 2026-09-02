@@ -186,7 +186,7 @@ def test_provide_result_preserves_llm_token_metrics():
             }
         },
         vm_error_description=None,
-        data_fees_remaining=0,
+        data_fees_remaining={},
     )
 
     result = host.provide_result(res, SimpleNamespace(), genvm_base.Context())

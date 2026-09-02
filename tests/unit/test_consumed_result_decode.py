@@ -38,10 +38,23 @@ def test_decode_empty_bytes_is_an_internal_error_result():
 
 
 def test_decode_valid_bytes_round_trips():
-    raw = _encode_valid(host_fns.ResultCode.RETURN, {"execution_hash": b"\x01\x02"})
+    raw = _encode_valid(
+        host_fns.ResultCode.RETURN,
+        {
+            "execution_hash": b"\x01\x02",
+            "data_fees_remaining": {
+                "execution_data_gas": 7,
+                "message_fee": 3,
+            },
+        },
+    )
     result = ConsumedResult.decode(raw)
     assert result.result_kind == host_fns.ResultCode.RETURN
     assert result.execution_hash == b"\x01\x02"
+    assert result.data_fees_remaining == {
+        "execution_data_gas": 7,
+        "message_fee": 3,
+    }
 
 
 def test_decode_not_a_mapping_is_an_internal_error_result():
