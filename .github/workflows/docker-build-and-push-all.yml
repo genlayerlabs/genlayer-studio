@@ -60,6 +60,8 @@ jobs:
       ref: ${{ inputs.ref }}
       image_tag: ${{ inputs.image_tag }}
       push_latest: ${{ inputs.push_latest }}
+      build_args: |
+        VITE_APP_VERSION=${{ inputs.image_tag }}
     secrets:
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
