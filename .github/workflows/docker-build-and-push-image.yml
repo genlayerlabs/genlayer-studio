@@ -114,6 +114,11 @@ jobs:
             "${DOCKERHUB_REPO}:${IMAGE_TAG}-arm64"
           docker manifest push "${DOCKERHUB_REPO}:${IMAGE_TAG}"
 
+          if [[ "${IMAGE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+- ]]; then
+            echo "Skipping latest manifest push for prerelease ${IMAGE_TAG}"
+            exit 0
+          fi
+
           if [[ "${PUSH_LATEST}" != "true" ]]; then
             echo "Skipping latest manifest push"
             exit 0
