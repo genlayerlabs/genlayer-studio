@@ -6,6 +6,11 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 GENVM_REF=${GENVM_REF:-}
 GENVM_SOURCE_MODE=${GENVM_SOURCE_MODE:-}
+GENVM_TAG=${GENVM_TAG:-}
+
+if [[ -z "$GENVM_TAG" && -z "$GENVM_REF" ]]; then
+    GENVM_REF="$(< "$REPO_ROOT/third_party/genvm/version")"
+fi
 
 source_selected=0
 if [[ "$GENVM_SOURCE_MODE" == "source" || ( -z "$GENVM_SOURCE_MODE" && "$GENVM_REF" =~ ^.+:[0-9a-fA-F]{7,40}$ ) ]]; then

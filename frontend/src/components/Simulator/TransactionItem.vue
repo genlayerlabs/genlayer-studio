@@ -7,7 +7,7 @@ import type {
   TransactionItem,
 } from '@/types';
 import TransactionStatusBadge from '@/components/Simulator/TransactionStatusBadge.vue';
-import { useTimeAgo } from '@vueuse/core';
+import { useTimeAgo, useTimestamp } from '@vueuse/core';
 import ModalSection from '@/components/Simulator/ModalSection.vue';
 import JsonViewer from '@/components/JsonViewer/json-viewer.vue';
 import { useUIStore, useNodeStore, useTransactionsStore } from '@/stores';
@@ -74,10 +74,11 @@ const props = defineProps<{
 }>();
 
 const finalityWindowAppealFailedReduction = ref(
-  getRuntimeConfigNumber('VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION', 0.2),
+  getRuntimeConfigNumber('VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION', 0),
 );
 
 const isDetailsModalOpen = ref(false);
+const currentTimestamp = useTimestamp({ interval: 1000 });
 
 const timeThreshold = 6; // Number of hours after which the date should be displayed instead of time ago
 
@@ -136,10 +137,13 @@ const genvmBuckets = computed(() => {
   );
 });
 const chargeableBucketRows = computed(() => {
-  return feeBucketRows(feeReport.value?.chargeableExecution ?? null);
+  return feeBucketRows(
+    feeReport.value?.chargeableExecution ?? null,
+    'chargeable',
+  );
 });
 const genvmBucketRows = computed(() => {
-  return feeBucketRows(genvmBuckets.value, 'GenVM message meter');
+  return feeBucketRows(genvmBuckets.value, 'genvm');
 });
 
 const messageFees = computed(() => feeReport.value?.messageFees ?? null);
@@ -274,24 +278,47 @@ function formatFeeDistributionValue(label: unknown, value: unknown): string {
 
 function feeBucketRows(
   bucket: StudioExecutionFeeReport['genvmBuckets'] | null | undefined,
-  messageLabel = 'Message meter',
+  layout: 'chargeable' | 'genvm',
 ) {
   if (!bucket) return [];
+  const resourceRows =
+    layout === 'genvm'
+      ? [
+          ['Shared execution meter', bucket.execution, 'fee'],
+          ['GenVM message meter', bucket.message, 'fee'],
+          [
+            'Nondeterministic output',
+            bucket.nondeterministicOutputBytes,
+            'bytes',
+          ],
+          ['Submitted message payload', bucket.submittedMessageBytes, 'bytes'],
+          ['Total with message', bucket.totalWithMessage, 'fee'],
+        ]
+      : [
+          [
+            'Receipt used',
+            bucket.receipt ?? bucket.receiptAndNondetOutput,
+            'fee',
+          ],
+          ['Storage/event writes used', bucket.storage, 'fee'],
+        ];
   return [
-    ['Receipt/nondet used', bucket.receiptAndNondetOutput, 'fee'],
-    ['Storage used', bucket.storage, 'fee'],
+    ...resourceRows,
     ['Total execution', bucket.totalExecution, 'fee'],
     ['Execution budget', bucket.executionBudgetPerRound, 'fee'],
     ['Budget remaining', bucket.executionBudgetRemaining, 'fee'],
     ['Budget overrun', bucket.executionBudgetOverrun, 'fee'],
     ['Budget exceeded', bucket.executionBudgetExceeded, 'boolean'],
-    [messageLabel, bucket.message, 'fee'],
-    ['Total with message', bucket.totalWithMessage, 'fee'],
   ]
     .filter(([, value]) => value !== undefined && value !== null)
     .map(([label, value, kind]) => ({
       label: String(label),
-      value: kind === 'boolean' ? String(value) : formatFeeAmount(value),
+      value:
+        kind === 'boolean'
+          ? String(value)
+          : kind === 'bytes'
+            ? `${formatNumber(value)} bytes`
+            : formatFeeAmount(value),
     }));
 }
 
@@ -399,6 +426,7 @@ const recommendedObservedRows = computed(() => {
   if (!observed) return [];
   return [
     ['Execution fee', observed.executionFee],
+    ['GenVM execution required', observed.genvmExecutionRequired],
     ['Message fee budget', observed.messageFeeBudget],
     ['Declared message fees', observed.declaredMessageFees],
     ['External reserved', observed.externalMessageReserved],
@@ -447,6 +475,93 @@ const handleSetTransactionAppeal = async () => {
 };
 
 const isAppealed = computed(() => props.transaction.data.appealed);
+const appealableStatuses = new Set([
+  'ACCEPTED',
+  'UNDETERMINED',
+  'LEADER_TIMEOUT',
+  'VALIDATORS_TIMEOUT',
+]);
+const terminalValidatorAppealRounds = new Set([
+  'Validator Appeal Successful',
+  'Validator Timeout Appeal Successful',
+]);
+
+const canAppeal = computed(() => {
+  const transaction = props.transaction;
+  const data = asRecord(transaction.data);
+  const status = String(transaction.statusName).toUpperCase();
+  if (
+    !data ||
+    data.leader_only !== false ||
+    Boolean(data.appealed) ||
+    !appealableStatuses.has(status)
+  ) {
+    return false;
+  }
+
+  const messageGeneration = asRecord(
+    asRecord(feeAccounting.value)?.active_message_generation,
+  );
+  if (
+    messageGeneration?.acceptanceDispatchRequired === true &&
+    messageGeneration?.acceptanceDispatched !== true
+  ) {
+    return false;
+  }
+
+  const history = asRecord(data.consensus_history);
+  const results = history?.consensus_results;
+  if (
+    Array.isArray(results) &&
+    results.some((entry) => {
+      const round = asRecord(entry)?.consensus_round;
+      return terminalValidatorAppealRounds.has(String(round || ''));
+    })
+  ) {
+    return false;
+  }
+
+  // New Studio decisions carry the same immutable appeal deadline and exact
+  // decision identity as Consensus. Once this metadata exists it is the
+  // authority; falling back to the old reconstructed window would revive an
+  // expired or stale decision.
+  const latestDecision = asRecord(history?.latestDecision);
+  if (latestDecision) {
+    const decisionId = Number(latestDecision.decisionId);
+    const appealDeadline = Number(latestDecision.appealDeadline);
+    const decisionStatus = String(latestDecision.status || '').toUpperCase();
+    if (
+      !Number.isSafeInteger(decisionId) ||
+      decisionId <= 0 ||
+      !Number.isFinite(appealDeadline) ||
+      appealDeadline <= 0 ||
+      (decisionStatus && decisionStatus !== status)
+    ) {
+      return false;
+    }
+    return currentTimestamp.value / 1000 < appealDeadline;
+  }
+
+  // Legacy rows do not have DecisionRecord metadata. Preserve their previous
+  // reconstructed window, but use Consensus' strict deadline boundary.
+  const startedAt = Number(data.timestamp_awaiting_finalization);
+  const processingTime = Number(data.appeal_processing_time || 0);
+  const failedAppeals = Number(data.appeal_failed || 0);
+  if (
+    !Number.isFinite(startedAt) ||
+    !Number.isFinite(processingTime) ||
+    !Number.isInteger(failedAppeals) ||
+    failedAppeals < 0
+  ) {
+    return false;
+  }
+  const legacyDeadline =
+    startedAt +
+    processingTime +
+    props.finalityWindow *
+      (1 - finalityWindowAppealFailedReduction.value) ** failedAppeals;
+  return currentTimestamp.value / 1000 < legacyDeadline;
+});
 const isHosted = getRuntimeConfigBoolean('VITE_IS_HOSTED', false);
 const hasSenderAddress = computed(() =>
   Boolean(
@@ -654,19 +769,7 @@ const badgeColorClass = computed(() => {
 
       <div @click.stop="">
         <Btn
-          v-if="
-            transaction.data.leader_only == false &&
-            (transaction.statusName == 'ACCEPTED' ||
-              transaction.statusName == 'UNDETERMINED' ||
-              transaction.statusName == 'LEADER_TIMEOUT' ||
-              transaction.statusName == 'VALIDATORS_TIMEOUT') &&
-            Date.now() / 1000 -
-              transaction.data.timestamp_awaiting_finalization -
-              transaction.data.appeal_processing_time <=
-              finalityWindow *
-                (1 - finalityWindowAppealFailedReduction) **
-                  transaction.data.appeal_failed
-          "
+          v-if="canAppeal"
           @click="handleSetTransactionAppeal"
           tiny
           class="!h-[18px] !px-[4px] !py-[1px] !text-[9px] !font-medium"

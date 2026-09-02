@@ -27,7 +27,6 @@ from backend.protocol_rpc.dependencies import (
 from backend.protocol_rpc.rpc_decorators import rpc
 from backend.protocol_rpc.rpc_endpoint_manager import LogPolicy
 
-
 # ---------------------------------------------------------------------------
 # Simulator endpoints
 # ---------------------------------------------------------------------------
@@ -122,6 +121,19 @@ async def create_validator(
         config=config,
         plugin=plugin,
         plugin_config=plugin_config,
+    )
+
+
+@rpc.method("sim_replaceValidators")
+async def replace_validators(
+    validator_configs: list[dict],
+    session: Session = Depends(get_db_session),
+    validators_manager=Depends(get_validators_manager),
+) -> list[dict]:
+    return await impl.replace_validators(
+        session=session,
+        validators_manager=validators_manager,
+        validator_configs=validator_configs,
     )
 
 
@@ -296,6 +308,37 @@ def get_finality_window_time(
 @rpc.method("sim_getFeeConfig", log_policy=LogPolicy.debug())
 def get_fee_config() -> dict:
     return impl.get_studio_fee_config()
+
+
+@rpc.method("sim_calculateRoundFees", log_policy=LogPolicy.debug())
+def sim_calculate_round_fees(
+    fees_distribution: dict,
+    num_of_validators: int = 5,
+    round: int = 0,
+) -> str:
+    return impl.sim_calculate_round_fees(
+        fees_distribution,
+        num_of_validators,
+        round,
+    )
+
+
+@rpc.method("sim_minMessagePrimaryFees", log_policy=LogPolicy.debug())
+def sim_min_message_primary_fees(fee_params: str) -> str:
+    return impl.sim_min_message_primary_fees(fee_params)
+
+
+@rpc.method("sim_estimateProposeReceiptGas", log_policy=LogPolicy.debug())
+def sim_estimate_propose_receipt_gas(eq_outputs_length: int = 0) -> dict[str, str]:
+    return impl.sim_estimate_propose_receipt_gas(eq_outputs_length)
+
+
+@rpc.method("sim_estimateMessageRevealGas", log_policy=LogPolicy.debug())
+def sim_estimate_message_reveal_gas(
+    message_bytes: int,
+    message_count: int,
+) -> dict[str, str]:
+    return impl.sim_estimate_message_reveal_gas(message_bytes, message_count)
 
 
 @rpc.method("sim_getConsensusContract", log_policy=LogPolicy.debug())
@@ -498,9 +541,9 @@ def get_studio_transaction_by_hash(
 
 @rpc.method("gen_getTransactionStatus", log_policy=LogPolicy.debug())
 def get_transaction_status(
-    transaction_hash: str,
+    transaction_hash: str | dict,
     transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
-) -> str:
+) -> str | dict:
     return impl.get_transaction_status(
         transactions_processor=transactions_processor,
         transaction_hash=transaction_hash,
@@ -515,6 +558,28 @@ def get_transaction_status_details(
     return impl.get_transaction_status_details(
         transactions_processor=transactions_processor,
         transaction_hash=transaction_hash,
+    )
+
+
+@rpc.method("gen_getTransactionLifecycle", log_policy=LogPolicy.debug())
+def get_transaction_lifecycle(
+    params: dict,
+    transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
+) -> dict:
+    return impl.get_transaction_lifecycle(
+        transactions_processor=transactions_processor,
+        params=params,
+    )
+
+
+@rpc.method("gen_estimateLatestAppealCharge", log_policy=LogPolicy.debug())
+def estimate_latest_appeal_charge(
+    params: dict,
+    transactions_processor: TransactionsProcessor = Depends(get_transactions_processor),
+) -> dict:
+    return impl.estimate_latest_appeal_charge(
+        transactions_processor=transactions_processor,
+        params=params,
     )
 
 

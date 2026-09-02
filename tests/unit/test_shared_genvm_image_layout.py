@@ -48,6 +48,23 @@ def test_backend_services_share_one_genvm_parent():
     assert "USER worker-user" in dockerfile
 
 
+def test_default_genvm_binding_selects_source_mode_in_both_build_stages():
+    dockerfile = DOCKERFILE.read_text()
+    source_stage = _stage_body(dockerfile, "genvm-source-build")
+    runtime_stage = _stage_body(dockerfile, "genvm-runtime")
+    prepare_script = (
+        REPO_ROOT / "scripts" / "prepare-genvm-source-build.sh"
+    ).read_text()
+
+    assert (
+        dockerfile.count("COPY third_party/genvm/version /genvm-default-version") == 2
+    )
+    for stage in (source_stage, runtime_stage):
+        assert 'effective_ref="$(< /genvm-default-version)"' in stage
+        assert '"$effective_ref" =~ ^.+:[0-9a-fA-F]{7,40}$' in stage
+    assert 'GENVM_REF="$(< "$REPO_ROOT/third_party/genvm/version")"' in prepare_script
+
+
 def test_debug_target_installs_debugpy_with_the_pip_cache():
     dockerfile = DOCKERFILE.read_text()
     debug_stage = _stage_body(dockerfile, "debug")

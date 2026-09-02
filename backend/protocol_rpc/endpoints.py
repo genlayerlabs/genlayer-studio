@@ -1,13 +1,15 @@
 # rpc/endpoints.py
 import copy
+import math
 import random
 import json
 import time
 import eth_utils
 import logging
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from functools import partial, wraps
-from typing import Any, Final, get_args
+from typing import Any, Final, NoReturn, get_args
 from backend.protocol_rpc.exceptions import (
     JSONRPCError,
     NotFoundError,
@@ -49,27 +51,43 @@ from backend.node.create_nodes.create_nodes import (
 from backend.protocol_rpc.transactions_parser import TransactionParser
 from backend.protocol_rpc.fees import (
     FEE_ACCOUNTING_KEY,
+    GENVM_UNMETERED_DATA_FEE_BUCKET,
+    VALIDATORS_PER_ROUND,
     FeeValidationError,
     StudioFeePolicy,
-    apply_fee_top_up,
+    acceptance_dispatch_pending,
+    calculate_appeal_charge,
+    calculate_round_fees,
+    decode_internal_message_fee_params,
     create_fee_accounting,
+    fee_accounting_with_discovered_messages,
+    funding_policy_for_accounting,
     get_leader_rounds,
     normalize_fees_distribution,
+    min_message_primary_fees,
     record_appeal_bond,
     record_execution_fee_consumption,
     required_fee_deposit,
     studio_fee_config,
     validate_transaction_fee_deposit,
 )
-from backend.consensus.history import completed_consensus_round_index
+from backend.protocol_rpc.ghost_factory import GhostFactoryConfig
+from backend.consensus.history import (
+    actual_leader_rotations_by_round,
+    completed_consensus_round_index,
+    current_decision_id as history_current_decision_id,
+    has_terminal_validator_appeal,
+    latest_decision_metadata,
+    logical_fee_round_entries,
+)
 from backend.errors.errors import InvalidAddressError, InvalidTransactionError
 from backend.database_handler.errors import ContractNotFoundError
 
 from backend.database_handler.transactions_processor import (
+    TRANSACTION_STATUS_CODES,
     TransactionAddressFilter,
     TransactionsProcessor,
 )
-
 
 logger = logging.getLogger(__name__)
 TRANSACTION_NOT_FOUND_MESSAGE = "Transaction not found"
@@ -87,7 +105,9 @@ import secrets as secrets_module
 from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope
 from backend.protocol_rpc.types import (
     DecodedRollupTransaction,
+    DecodedRollupTransactionData,
     DecodedTopUpFeesDataArgs,
+    DecodedFinalizeTransactionDataArgs,
     DecodedsubmitAppealDataArgs,
 )
 from backend.database_handler.snapshot_manager import SnapshotManager
@@ -100,6 +120,27 @@ import asyncio
 # consensus/base.py; keep the RPC path bounded too.
 _GENVM_CONCURRENCY = int(os.environ.get("GENVM_MAX_CONCURRENT", "8"))
 _genvm_admission_semaphore = asyncio.Semaphore(_GENVM_CONCURRENCY)
+
+
+class _EvmExecutionReverted(Exception):
+    """A valid signed protocol envelope was mined but its call reverted."""
+
+    def __init__(
+        self,
+        *,
+        transaction_hash: str,
+        from_address: str,
+        to_address: str | None,
+        nonce: int,
+        reason: Exception,
+    ) -> None:
+        super().__init__(str(reason))
+        self.transaction_hash = transaction_hash
+        self.from_address = from_address
+        self.to_address = to_address
+        self.nonce = int(nonce)
+        self.reason = reason
+
 
 # ---------------------------------------------------------------------------
 # Per-address rate limiting for gen_call / sim_call
@@ -263,14 +304,10 @@ async def _run_singleflight_gen_call(
 # ---------------------------------------------------------------------------
 # Admission control on PENDING queue depth (eth_sendRawTransaction path).
 #
-# Studio Prod is a shared sandbox. Without this, a single user can submit
-# thousands of txs to one contract and starve everyone else's contracts
-# behind a 5-day backlog. We cap PENDING per (to_address) and per
-# (from_address) at submission time and return a structured error pointing
-# users at non-shared deployments for production-volume workloads.
-#
-# Both caps default to unset (unlimited) — meaningful only when explicitly
-# configured (the public studio deployment sets them; self-hosted does not).
+# Consensus Queues initializes maxPendingTxsPerRecipient to 20. Studio uses the
+# same per-recipient default; deployments may lower/raise it explicitly when
+# they apply the matching governance setting on Consensus. The Studio-only
+# sender cap remains optional.
 # ---------------------------------------------------------------------------
 def _parse_optional_positive_int(env_name: str) -> int | None:
     raw = os.environ.get(env_name)
@@ -283,18 +320,14 @@ def _parse_optional_positive_int(env_name: str) -> int | None:
     return parsed if parsed > 0 else None
 
 
-_MAX_PENDING_PER_CONTRACT = _parse_optional_positive_int(
-    "MAX_PENDING_PER_CONTRACT_DEFAULT"
+_MAX_PENDING_PER_CONTRACT = (
+    _parse_optional_positive_int("MAX_PENDING_PER_CONTRACT_DEFAULT") or 20
 )
 _MAX_PENDING_PER_SENDER = _parse_optional_positive_int("MAX_PENDING_PER_SENDER_DEFAULT")
 
 # Generic guidance text in the error response — directs heavy users to
 # non-shared deployments rather than retrying against the same instance.
-_QUEUE_DEPTH_HELP = (
-    "The public Studio is a shared sandbox with per-contract and "
-    "per-sender PENDING transaction caps. For production-volume "
-    "workloads, run a self-hosted instance."
-)
+_QUEUE_DEPTH_HELP = "The protocol limits each recipient's pending queue depth."
 
 
 def _enforce_pending_queue_caps(
@@ -304,17 +337,29 @@ def _enforce_pending_queue_caps(
 ) -> None:
     """Raise QueueDepthExceeded if the per-contract or per-sender cap is hit.
 
-    Both checks are best-effort and racy by design — two concurrent
-    submissions can both pass the COUNT(*) check before either commits,
-    so the actual depth can transiently exceed the cap by a few. That's
-    fine; the goal is to prevent unbounded growth, not to enforce an
-    exact bound.
+    Postgres admissions take deterministic advisory locks before counting so
+    two concurrent submissions cannot both claim the final queue slot. This
+    mirrors the serialized Queues insertion performed by Consensus.
     """
+    session = transactions_processor.session
+    bind = session.get_bind()
+    if bind.dialect.name == "postgresql":
+        lock_keys = []
+        if _MAX_PENDING_PER_CONTRACT is not None and to_address is not None:
+            lock_keys.append(f"pending-recipient:{str(to_address).lower()}")
+        if _MAX_PENDING_PER_SENDER is not None and from_address is not None:
+            lock_keys.append(f"pending-sender:{str(from_address).lower()}")
+        for lock_key in sorted(lock_keys):
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(" "hashtextextended(:lock_key, 0))"),
+                {"lock_key": lock_key},
+            )
     if _MAX_PENDING_PER_CONTRACT is not None and to_address is not None:
-        contract_pending = transactions_processor.session.execute(
+        contract_pending = session.execute(
             text(
                 "SELECT COUNT(*) FROM transactions "
-                "WHERE to_address = :addr AND status = 'PENDING'"
+                "WHERE to_address = :addr AND status IN "
+                "('PENDING', 'ACTIVATED', 'PROPOSING', 'COMMITTING', 'REVEALING')"
             ),
             {"addr": to_address},
         ).scalar()
@@ -337,7 +382,7 @@ def _enforce_pending_queue_caps(
             )
 
     if _MAX_PENDING_PER_SENDER is not None and from_address is not None:
-        sender_pending = transactions_processor.session.execute(
+        sender_pending = session.execute(
             text(
                 "SELECT COUNT(*) FROM transactions "
                 "WHERE from_address = :addr AND status = 'PENDING'"
@@ -360,8 +405,85 @@ def _enforce_pending_queue_caps(
             )
 
 
+def _allocate_top_level_ghost_address(
+    transactions_processor: TransactionsProcessor,
+    salt_nonce: int,
+    namespace: str,
+) -> str:
+    """Reserve the next virtual GhostFactory address until admission commits."""
+
+    transactions_processor.lock_ghost_factory()
+    deployment_count = transactions_processor.get_successful_ghost_creation_count()
+    address = GhostFactoryConfig.from_env().address_for(
+        salt_nonce,
+        deployment_count,
+        namespace=namespace,
+    )
+    if transactions_processor.is_genvm_contract_address(address):
+        # GhostFactory rejects a reused CREATE2 address and the enclosing
+        # Consensus submission reverts.  The factory nonce is unchanged.
+        raise InvalidTransactionError("GhostAlreadyDeployed")
+    return address
+
+
 def get_studio_fee_config() -> dict[str, Any]:
     return studio_fee_config(StudioFeePolicy.from_env())
+
+
+def sim_calculate_round_fees(
+    fees_distribution: dict[str, Any],
+    num_of_validators: int = 5,
+    round: int = 0,
+) -> str:
+    """Expose Studio's canonical fee quote for cross-stack conformance tests."""
+    try:
+        quote = calculate_round_fees(
+            fees_distribution,
+            int(num_of_validators),
+            int(round),
+            StudioFeePolicy.from_env(),
+        )
+    except FeeValidationError as exc:
+        raise InvalidTransactionError(str(exc)) from exc
+    return str(quote)
+
+
+def sim_min_message_primary_fees(fee_params: str) -> str:
+    """Quote the child primary-fee floor from canonical v0.6 ABI bytes."""
+    try:
+        decoded = decode_internal_message_fee_params(fee_params)
+        quote = min_message_primary_fees(decoded, StudioFeePolicy.from_env())
+    except FeeValidationError as exc:
+        raise InvalidTransactionError(str(exc)) from exc
+    return str(quote)
+
+
+def sim_estimate_propose_receipt_gas(eq_outputs_length: int = 0) -> dict[str, str]:
+    """Expose the deterministic v0.6 proposed-receipt metering formula."""
+    policy = StudioFeePolicy.from_env()
+    receipt_bytes = policy.estimate_propose_receipt_bytes(int(eq_outputs_length))
+    gas = policy.estimate_propose_receipt_gas(receipt_bytes)
+    return {
+        "receiptBytes": str(receipt_bytes),
+        "gas": str(gas),
+        "fee": str(gas * policy.receipt_gas_price),
+    }
+
+
+def sim_estimate_message_reveal_gas(
+    message_bytes: int,
+    message_count: int,
+) -> dict[str, str]:
+    """Expose the deterministic v0.6 revealed-message write formula."""
+    policy = StudioFeePolicy.from_env()
+    gas = policy.estimate_consensus_message_reveal_gas(
+        int(message_bytes),
+        int(message_count),
+    )
+    return {
+        "gas": str(gas),
+        "fee": str(gas * policy.receipt_gas_price),
+    }
 
 
 ####### ADMIN ACCESS CONTROL #######
@@ -628,6 +750,52 @@ async def create_validator(
             stake=stake,
             llmprovider=llm_provider,
         )
+    )
+
+
+@check_forbidden_method_in_hosted_studio
+async def replace_validators(
+    session: Session,
+    validators_manager: validators.Manager,
+    validator_configs: list[dict],
+) -> list[dict]:
+    """Atomically replace the simulator validator pool with one GenVM reload."""
+
+    accounts_manager = AccountsManager(session)
+    replacement_validators: list[Validator] = []
+
+    for validator_config in validator_configs:
+        stake = int(validator_config["stake"])
+        provider = str(validator_config["provider"])
+        model = str(validator_config["model"])
+        config = validator_config.get("config")
+        plugin = validator_config.get("plugin")
+        plugin_config = validator_config.get("plugin_config")
+
+        if config is None or plugin is None or plugin_config is None:
+            llm_provider = get_default_provider_for(provider, model)
+        else:
+            llm_provider = LLMProvider(
+                provider=provider,
+                model=model,
+                config=config,
+                plugin=plugin,
+                plugin_config=plugin_config,
+            )
+            validate_provider(llm_provider)
+
+        account = accounts_manager.create_new_account()
+        replacement_validators.append(
+            Validator(
+                address=account.address,
+                private_key=account.key,
+                stake=stake,
+                llmprovider=llm_provider,
+            )
+        )
+
+    return await validators_manager.registry.replace_all_validators(
+        replacement_validators
     )
 
 
@@ -1431,6 +1599,7 @@ async def sim_estimate_transaction_fees(
         estimate_params = {
             **estimate_params,
             "_allow_low_execution_budget_for_estimate": True,
+            "_discover_message_allocations_for_estimate": True,
         }
     receipt = await sim_call(
         session=session,
@@ -1521,11 +1690,27 @@ async def _gen_call_with_validator(
         sender=from_address,
         user_value=call_value,
     )
+    unmeter_execution_for_fee_estimate = bool(
+        params.get("_allow_low_execution_budget_for_estimate")
+    )
     genvm_fee_accounting = _effective_simulation_fee_accounting_for_genvm(
-        simulation_fee_accounting
+        simulation_fee_accounting,
+        unmeter_execution=unmeter_execution_for_fee_estimate,
     )
     if not accounts_manager.is_valid_address(from_address):
         raise InvalidAddressError(from_address)
+
+    if type == "deploy":
+        deployment_count = (
+            TransactionsProcessor(session).get_successful_ghost_creation_count()
+            if session is not None
+            else 0
+        )
+        to_address = GhostFactoryConfig.from_env().address_for(
+            int(params.get("salt_nonce", params.get("saltNonce", 0)) or 0),
+            deployment_count,
+            namespace=from_address,
+        )
 
     if not accounts_manager.is_valid_address(to_address):
         raise InvalidAddressError(to_address)
@@ -1544,34 +1729,46 @@ async def _gen_call_with_validator(
             message="No validators available to execute the gen_call",
         )
 
-    # Create validator node
-    try:
-        contract_snapshot = ContractSnapshot(to_address, session)
-    except ContractNotFoundError:
-        raise NotFoundError(
-            message=f"Contract {to_address} not found",
-            data={"contract_address": to_address},
-        )
-    if type in {"write", "deploy"}:
-        _stage_simulated_call_value(contract_snapshot, call_value)
-    node = Node(
-        contract_snapshot=contract_snapshot,
-        contract_snapshot_factory=partial(ContractSnapshot, session=session),
-        validator_mode=ExecutionMode.LEADER,
-        validator=validator,
-        leader_receipt=None,
-        msg_handler=msg_handler.with_client_session(get_client_session_id()),
-        validators_snapshot=validators_snapshot,
-        manager=genvm_manager,
-    )
-
     sc_raw = params.get("sim_config")
+    _validate_genvm_executor_selector(sc_raw)
+    _reject_genvm_executor_selector_unless_deploy(
+        sc_raw,
+        is_deploy=type == "deploy",
+    )
     sim_config = SimConfig.from_dict(sc_raw) if sc_raw else None
     override_transaction_datetime: bool = (
         sim_config is not None and sim_config.genvm_datetime is not None
     )
 
-    try:
+    def create_node() -> Node:
+        # A fee estimate can execute twice: first to discover exact message
+        # keys and then to meter them. Each pass must start from the same DB
+        # snapshot; _SnapshotView writes through to its ContractSnapshot.
+        if type == "deploy":
+            contract_snapshot = ContractSnapshot(None, session)
+            contract_snapshot.contract_address = to_address
+            contract_snapshot.balance = 0
+            contract_snapshot.states = {"accepted": {}, "finalized": {}}
+            contract_snapshot.genvm_executor_selector = (
+                sim_config.genvm_executor_selector if sim_config else None
+            )
+        else:
+            contract_snapshot = ContractSnapshot(to_address, session)
+        if type in {"write", "deploy"}:
+            _stage_simulated_call_value(contract_snapshot, call_value)
+        return Node(
+            contract_snapshot=contract_snapshot,
+            contract_snapshot_factory=partial(ContractSnapshot, session=session),
+            validator_mode=ExecutionMode.LEADER,
+            validator=validator,
+            leader_receipt=None,
+            msg_handler=msg_handler.with_client_session(get_client_session_id()),
+            validators_snapshot=validators_snapshot,
+            manager=genvm_manager,
+        )
+
+    async def execute(active_fee_accounting):
+        node = create_node()
         if type == "read":
             # Pre-parse timestamp override and map errors
             txn_dt = None
@@ -1585,7 +1782,7 @@ async def _gen_call_with_validator(
                         data={},
                     ) from e
             decoded_data = transactions_parser.decode_method_call_data(data)
-            receipt = await node.get_contract_data(
+            return await node.get_contract_data(
                 from_address=from_address,
                 calldata=decoded_data.calldata,
                 state_status=state_status,
@@ -1605,13 +1802,13 @@ async def _gen_call_with_validator(
                         data={},
                     ) from e
             decoded_data = transactions_parser.decode_method_send_data(data)
-            receipt = await node.run_contract(
+            return await node.run_contract(
                 from_address=from_address,
                 calldata=decoded_data.calldata,
                 transaction_created_at=txn_created_at,
                 value=call_value,
                 origin_address=origin_address,
-                fee_accounting=genvm_fee_accounting,
+                fee_accounting=active_fee_accounting,
             )
         elif type == "deploy":
             txn_created_at = None
@@ -1626,20 +1823,51 @@ async def _gen_call_with_validator(
                         data={},
                     ) from e
             decoded_data = transactions_parser.decode_deployment_data(data)
-            receipt = await node.deploy_contract(
+            return await node.deploy_contract(
                 from_address=from_address,
                 code_to_deploy=decoded_data.contract_code,
                 calldata=decoded_data.calldata,
                 transaction_created_at=txn_created_at,
                 value=call_value,
                 origin_address=origin_address,
-                fee_accounting=genvm_fee_accounting,
+                fee_accounting=active_fee_accounting,
             )
         else:
             raise JSONRPCError(
                 code=-32602,
                 message=f"Invalid type '{type}': must be 'read', 'write', or 'deploy'",
             )
+
+    policy = StudioFeePolicy.from_env()
+    discover_message_allocations = bool(
+        params.get("_discover_message_allocations_for_estimate")
+        and type in {"write", "deploy"}
+        and simulation_fee_accounting is not None
+        and not simulation_fee_accounting.get("message_allocations")
+        and policy.fee_accounting_enabled()
+    )
+
+    try:
+        # The first pass reveals concrete recipient/call-key pairs without
+        # making the transaction envelope permissive. The second pass meters
+        # the same execution under the exact discovered allocation roots.
+        receipt = await execute(
+            None if discover_message_allocations else genvm_fee_accounting
+        )
+        if (
+            discover_message_allocations
+            and receipt.execution_result == ExecutionResultStatus.SUCCESS
+        ):
+            simulation_fee_accounting = fee_accounting_with_discovered_messages(
+                simulation_fee_accounting,
+                receipt,
+                policy,
+            )
+            genvm_fee_accounting = _effective_simulation_fee_accounting_for_genvm(
+                simulation_fee_accounting,
+                unmeter_execution=unmeter_execution_for_fee_estimate,
+            )
+            receipt = await execute(genvm_fee_accounting)
     except ContractNotFoundError as e:
         raise NotFoundError(
             message=f"Contract {e.address} not found",
@@ -1692,6 +1920,31 @@ def get_transaction_by_hash(
     )
 
     if transaction is None:
+        envelope = transactions_processor.get_evm_envelope(transaction_hash)
+        if envelope is not None:
+            # Lifecycle calls and post-admission execution reverts are mined
+            # EVM envelopes but do not create GenLayer transaction rows. Viem
+            # polls eth_getTransactionByHash before reading the receipt, so
+            # expose the durable envelope through the matching Ethereum
+            # endpoint instead of making a valid status-0/1 receipt
+            # undiscoverable.
+            return {
+                "blockHash": transaction_hash,
+                "blockNumber": hex(0),
+                "from": envelope.from_address,
+                "gas": hex(0),
+                "gasPrice": hex(0),
+                "hash": transaction_hash,
+                "input": "0x",
+                "nonce": hex(int(envelope.nonce)),
+                "r": "0x" + "0" * 64,
+                "s": "0x" + "0" * 64,
+                "to": envelope.to_address,
+                "transactionIndex": hex(0),
+                "type": hex(0),
+                "v": hex(0),
+                "value": hex(0),
+            }
         raise NotFoundError(
             message=f"Transaction {transaction_hash} not found",
             data={"hash": transaction_hash},
@@ -1717,17 +1970,30 @@ def get_studio_transaction_by_hash(
 
 
 def get_transaction_status(
-    transactions_processor: TransactionsProcessor, transaction_hash: str
-) -> str:
+    transactions_processor: TransactionsProcessor, transaction_hash: str | dict
+) -> str | dict:
+    return_details = isinstance(transaction_hash, dict)
+    if return_details:
+        transaction_hash = transaction_hash.get("txId") or transaction_hash.get("tx_id")
+        if not isinstance(transaction_hash, str) or not transaction_hash:
+            raise JSONRPCError(code=-32602, message="txId is required", data={})
+    elif not isinstance(transaction_hash, str) or not transaction_hash:
+        raise JSONRPCError(
+            code=-32602,
+            message="transaction hash must be a string or an object containing txId",
+            data={},
+        )
+
     status = transactions_processor.get_transaction_status(transaction_hash)
     if status is None:
         raise NotFoundError(
             message=f"Transaction {transaction_hash} not found",
             data={"hash": transaction_hash},
         )
-    # Compatibility contract for deployed apps (Rally): this legacy RPC returns
-    # the status string only. Extensions belong in gen_getTransactionStatusDetails.
-    return status["status"]
+    # Node v0.6 uses an object request and returns the canonical status payload.
+    # Keep the original positional-string response for deployed Studio clients
+    # (notably Rally) until they migrate to the train interface.
+    return status if return_details else status["status"]
 
 
 def get_transaction_status_details(
@@ -1740,6 +2006,357 @@ def get_transaction_status_details(
             data={"hash": transaction_hash},
         )
     return status
+
+
+_DECISION_STATUSES = {
+    TransactionStatus.ACCEPTED.value,
+    TransactionStatus.UNDETERMINED.value,
+    TransactionStatus.LEADER_TIMEOUT.value,
+    TransactionStatus.VALIDATORS_TIMEOUT.value,
+}
+
+
+@dataclass(frozen=True)
+class _AppealAdmissionContext:
+    status: str
+    deadline: float | None
+    fee_accounting: dict[str, Any]
+    current_round: int
+    validator_count: int
+    normal_leader_count: int
+    available_appeal_validators: int | None
+    leader_timeout_live_seats: int | None
+
+
+_PROTOCOL_TRANSACTION_STATUS_NAMES = (
+    "Uninitialized",
+    "Pending",
+    "Proposing",
+    "Committing",
+    "Revealing",
+    "Accepted",
+    "Undetermined",
+    "Finalized",
+    "Canceled",
+    "AppealRevealing",
+    "AppealCommitting",
+    "ValidatorsTimeout",
+    "LeaderTimeout",
+    "LeaderRevealing",
+)
+_RESOLUTION_ACTION_NAMES = (
+    "NoOp",
+    "Cancel",
+    "ReplaceActor",
+    "RotateLeader",
+    "ResolveAppeal",
+    "MaterializeDecision",
+    "Finalize",
+)
+_RESOLUTION_SOURCE_NAMES = (
+    "Unspecified",
+    "ActivationInsufficientValidators",
+    "ProposalHanging",
+    "LeaderReceiptTimeout",
+    "CommitHanging",
+    "LeaderRevealHanging",
+    "FullReveal",
+    "RevealDeadline",
+    "AppealCommitHanging",
+    "AppealFullReveal",
+    "AppealRevealDeadline",
+    "SelectionDepleted",
+)
+
+
+def _transaction_appeal_deadline(transaction: dict) -> float | None:
+    started_at = transaction.get("timestamp_awaiting_finalization")
+    if started_at is not None and str(transaction.get("execution_mode") or "") in {
+        "LEADER_ONLY",
+        "LEADER_SELF_VALIDATOR",
+    }:
+        return float(started_at)
+    decision = latest_decision_metadata(transaction.get("consensus_history"))
+    if decision is not None:
+        try:
+            deadline = int(decision.get("appealDeadline") or 0)
+        except (TypeError, ValueError):
+            deadline = 0
+        if deadline > 0:
+            return float(deadline)
+    if started_at is None:
+        return None
+    finality_window = int(os.environ.get("VITE_FINALITY_WINDOW", "1800"))
+    failed_reduction = float(
+        os.environ.get("VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION", "0")
+    )
+    failed_reduction = min(1.0, max(0.0, failed_reduction))
+    return (
+        float(started_at)
+        + float(transaction.get("appeal_processing_time") or 0)
+        + finality_window
+        * ((1.0 - failed_reduction) ** int(transaction.get("appeal_failed") or 0))
+    )
+
+
+def _transaction_decision_id(transaction: dict) -> int:
+    return history_current_decision_id(transaction.get("consensus_history"))
+
+
+def _appeal_admission_context(
+    transaction: dict,
+    *,
+    session: Session | None,
+    expected_decision_id: int | None = None,
+    require_decision_binding: bool = False,
+) -> _AppealAdmissionContext:
+    """Resolve the eligibility inputs shared by appeal quote and admission."""
+    status = str(transaction.get("status") or "")
+    if (
+        status not in _DECISION_STATUSES
+        or bool(transaction.get("appealed"))
+        or has_terminal_validator_appeal(transaction.get("consensus_history"))
+    ):
+        raise InvalidTransactionError("CanNotAppeal")
+
+    deadline = _transaction_appeal_deadline(transaction)
+    if deadline is not None and time.time() >= deadline:
+        raise InvalidTransactionError("CanNotAppeal")
+    if require_decision_binding and (
+        expected_decision_id is None
+        or int(expected_decision_id) != _transaction_decision_id(transaction)
+    ):
+        raise InvalidTransactionError("CanNotAppeal")
+
+    fee_accounting = (transaction.get("data") or {}).get(FEE_ACCOUNTING_KEY)
+    if fee_accounting is None:
+        raise InvalidTransactionError("FeeAccountingMissing")
+    if acceptance_dispatch_pending(fee_accounting):
+        raise InvalidTransactionError("CanNotAppeal")
+
+    frozen_pool_addresses = fee_accounting.get("selection_pool_addresses")
+    live_pool_addresses = None
+    if session is not None and isinstance(frozen_pool_addresses, list):
+        live_pool_addresses = [
+            validator.get("address")
+            for validator in ValidatorsRegistry(session).get_all_validators(
+                include_private_key=False
+            )
+        ]
+    frozen_pool_count = fee_accounting.get("selection_pool_count")
+    validator_count = (
+        int(frozen_pool_count)
+        if frozen_pool_count is not None
+        else (
+            ValidatorsRegistry(session).count_validators()
+            if session is not None
+            else int(
+                fee_accounting.get("num_of_initial_validators")
+                or transaction.get("num_of_initial_validators")
+                or 5
+            )
+        )
+    )
+    current_round = _current_fee_round(transaction.get("consensus_history"))
+    available_appeal_validators = _available_appeal_validator_count(
+        transaction,
+        validator_count,
+        frozen_pool_addresses=frozen_pool_addresses,
+        live_pool_addresses=live_pool_addresses,
+    )
+    if (
+        status
+        in {
+            TransactionStatus.ACCEPTED.value,
+            TransactionStatus.VALIDATORS_TIMEOUT.value,
+        }
+        and available_appeal_validators == 0
+    ):
+        raise InvalidTransactionError("CanNotAppeal")
+    if (
+        status == TransactionStatus.UNDETERMINED.value
+        and available_appeal_validators is not None
+        and available_appeal_validators
+        < VALIDATORS_PER_ROUND[min(current_round + 1, len(VALIDATORS_PER_ROUND) - 1)]
+    ):
+        raise InvalidTransactionError("CanNotAppeal")
+
+    leader_timeout_live_seats = None
+    if status == TransactionStatus.LEADER_TIMEOUT.value:
+        live_validators = transaction.get("leader_timeout_validators")
+        if isinstance(live_validators, list):
+            # The removed leader changes replay membership, not the configured
+            # source committee used to price the leader-timeout bond.
+            leader_timeout_live_seats = len(live_validators) + 1
+
+    return _AppealAdmissionContext(
+        status=status,
+        deadline=deadline,
+        fee_accounting=fee_accounting,
+        current_round=current_round,
+        validator_count=validator_count,
+        normal_leader_count=_normal_leader_count(transaction.get("consensus_history")),
+        available_appeal_validators=available_appeal_validators,
+        leader_timeout_live_seats=leader_timeout_live_seats,
+    )
+
+
+def _transaction_resolution_source_code(
+    transaction: dict, *, status: str, current_round: int
+) -> int:
+    if status == TransactionStatus.LEADER_TIMEOUT.value:
+        return 3  # LeaderReceiptTimeout
+
+    logical_entries = logical_fee_round_entries(transaction.get("consensus_history"))
+    if status == TransactionStatus.UNDETERMINED.value and len(logical_entries) == 1:
+        _, entry = logical_entries[0]
+        if (
+            str(entry.get("consensus_round") or "") == "Undetermined"
+            and not entry.get("leader_result")
+            and not entry.get("validator_results")
+        ):
+            # Studio's exact-capacity activation path records the same
+            # receipt-less Pending -> Undetermined decision as Consensus's
+            # ActivationInsufficientValidators trigger.
+            return 1
+
+    appeal_attempt = current_round % 2 == 1
+    # Studio materializes these outcomes only after its RevealingState has
+    # tallied the complete receipt set. A validator execution timeout is a
+    # VoteType.Timeout ballot, not a Consensus RevealDeadline trigger.
+    return 9 if appeal_attempt else 6
+
+
+def get_transaction_lifecycle(
+    transactions_processor: TransactionsProcessor,
+    params: dict,
+) -> dict:
+    """Project Studio's stored decision state through the v0.6 lifecycle ABI."""
+    if not isinstance(params, dict):
+        raise JSONRPCError(code=-32602, message="params must be an object", data={})
+    transaction_hash = params.get("txId") or params.get("tx_id")
+    if not isinstance(transaction_hash, str) or not transaction_hash:
+        raise JSONRPCError(code=-32602, message="txId is required", data={})
+    transaction = transactions_processor.get_transaction_by_hash(transaction_hash)
+    if transaction is None:
+        raise NotFoundError(
+            message=f"Transaction {transaction_hash} not found",
+            data={"hash": transaction_hash},
+        )
+
+    requested_timestamp = params.get("timestamp")
+    try:
+        evaluated_at = (
+            int(time.time())
+            if requested_timestamp is None
+            else int(requested_timestamp)
+        )
+    except (TypeError, ValueError) as exc:
+        raise JSONRPCError(
+            code=-32602,
+            message="timestamp must be a non-negative integer",
+            data={},
+        ) from exc
+    if evaluated_at < 0:
+        raise JSONRPCError(
+            code=-32602,
+            message="timestamp must be a non-negative integer",
+            data={},
+        )
+
+    status = str(transaction.get("status") or "UNINITIALIZED").upper()
+    stored_status_code = TRANSACTION_STATUS_CODES.get(status, 0)
+    decision_active = status in _DECISION_STATUSES and not bool(
+        transaction.get("appealed")
+    )
+    effects_pending = acceptance_dispatch_pending(
+        (transaction.get("data") or {}).get(FEE_ACCOUNTING_KEY)
+    )
+    current_round = _current_fee_round(transaction.get("consensus_history"))
+    decision_id = _transaction_decision_id(transaction) if decision_active else None
+
+    if not decision_active:
+        resolution_source_code = 0
+    else:
+        resolution_source_code = _transaction_resolution_source_code(
+            transaction,
+            status=status,
+            current_round=current_round,
+        )
+
+    resolution_action_code = 0
+    deadline = _transaction_appeal_deadline(transaction)
+    if (
+        decision_active
+        and not effects_pending
+        and deadline is not None
+        and evaluated_at >= deadline
+        and transactions_processor.is_transaction_finalization_head(transaction_hash)
+    ):
+        resolution_action_code = 6  # Finalize
+
+    return {
+        "storedStatus": _PROTOCOL_TRANSACTION_STATUS_NAMES[stored_status_code],
+        "storedStatusCode": stored_status_code,
+        # ResolutionKernel leaves a decision in its stored status until the
+        # separately reported Finalize action is actually committed.
+        "projectedStatus": _PROTOCOL_TRANSACTION_STATUS_NAMES[stored_status_code],
+        "projectedStatusCode": stored_status_code,
+        "resolutionAction": _RESOLUTION_ACTION_NAMES[resolution_action_code],
+        "resolutionActionCode": resolution_action_code,
+        "resolutionSource": _RESOLUTION_SOURCE_NAMES[resolution_source_code],
+        "resolutionSourceCode": resolution_source_code,
+        "decisionId": str(decision_id) if decision_id is not None else None,
+        "decisionActive": decision_active,
+        "evaluatedAt": evaluated_at,
+    }
+
+
+def estimate_latest_appeal_charge(
+    transactions_processor: TransactionsProcessor,
+    params: dict,
+) -> dict:
+    """Return the exact decision-bound appeal quote used by Studio admission."""
+    if not isinstance(params, dict):
+        raise JSONRPCError(code=-32602, message="params must be an object", data={})
+    transaction_hash = params.get("txId") or params.get("tx_id")
+    if not isinstance(transaction_hash, str) or not transaction_hash:
+        raise JSONRPCError(code=-32602, message="txId is required", data={})
+    transaction = transactions_processor.get_transaction_by_hash(transaction_hash)
+    if transaction is None:
+        raise NotFoundError(
+            message=f"Transaction {transaction_hash} not found",
+            data={"hash": transaction_hash},
+        )
+
+    context = _appeal_admission_context(
+        transaction,
+        session=getattr(transactions_processor, "session", None),
+    )
+    charge = calculate_appeal_charge(
+        context.fee_accounting["fees_distribution"],
+        current_round=context.current_round,
+        status=context.status,
+        terminal_committee_upper_bound=max(
+            0,
+            context.validator_count - context.normal_leader_count,
+        ),
+        available_appeal_validators=context.available_appeal_validators,
+        leader_timeout_live_seats=context.leader_timeout_live_seats,
+        policy=funding_policy_for_accounting(
+            context.fee_accounting,
+            StudioFeePolicy.from_env(),
+        ),
+    )
+    decision_id = _transaction_decision_id(transaction)
+    return {
+        "decisionId": str(decision_id),
+        "bond": str(int(charge["bond"])),
+        "funding": str(int(charge["funding"])),
+        "appealDeadline": (
+            str(math.ceil(context.deadline)) if context.deadline is not None else "0"
+        ),
+    }
 
 
 async def eth_call(
@@ -1833,6 +2450,9 @@ def _fee_metadata(decoded_rollup_transaction: DecodedRollupTransaction) -> dict:
         decoded_rollup_transaction.data is None
         or isinstance(decoded_rollup_transaction.data, DecodedsubmitAppealDataArgs)
         or isinstance(decoded_rollup_transaction.data, DecodedTopUpFeesDataArgs)
+        or isinstance(
+            decoded_rollup_transaction.data, DecodedFinalizeTransactionDataArgs
+        )
         or not hasattr(decoded_rollup_transaction.data, "args")
         or decoded_rollup_transaction.data.args is None
     ):
@@ -1860,6 +2480,41 @@ def _fee_metadata(decoded_rollup_transaction: DecodedRollupTransaction) -> dict:
         policy=StudioFeePolicy.from_env(),
     )
     return metadata
+
+
+def _funded_max_rotations(
+    decoded_rollup_transaction: DecodedRollupTransaction,
+    requested_max_rotations: int,
+) -> int:
+    """Mirror Consensus' submission-time rotation-capacity clamp.
+
+    ``initialRotations`` remains the transaction-wide ceiling. Consensus
+    clamps it to the largest funded entry so later normal rounds retain their
+    paid capacity; each round is separately bounded by its own schedule entry
+    at runtime.
+    """
+
+    data = decoded_rollup_transaction.data
+    if (
+        data is None
+        or isinstance(
+            data,
+            (
+                DecodedsubmitAppealDataArgs,
+                DecodedTopUpFeesDataArgs,
+                DecodedFinalizeTransactionDataArgs,
+            ),
+        )
+        or not hasattr(data, "args")
+        or data.args is None
+        or data.args.fees_distribution is None
+    ):
+        return int(requested_max_rotations)
+
+    rotations = normalize_fees_distribution(data.args.fees_distribution)["rotations"]
+    if not rotations:
+        return int(requested_max_rotations)
+    return min(int(requested_max_rotations), max(int(value) for value in rotations))
 
 
 # `DebugMode` is ordered least- to most-permissive, and the manager gates
@@ -1959,13 +2614,24 @@ def _validate_fee_envelope(
         decoded_rollup_transaction.data is None
         or isinstance(decoded_rollup_transaction.data, DecodedsubmitAppealDataArgs)
         or isinstance(decoded_rollup_transaction.data, DecodedTopUpFeesDataArgs)
+        or isinstance(
+            decoded_rollup_transaction.data, DecodedFinalizeTransactionDataArgs
+        )
         or not hasattr(decoded_rollup_transaction.data, "args")
         or decoded_rollup_transaction.data.args is None
     ):
         return
 
     args = decoded_rollup_transaction.data.args
+    policy = StudioFeePolicy.from_env()
+    if (
+        decoded_rollup_transaction.data.function_name == "deploySalted"
+        and int(args.salt_nonce or 0) == 0
+    ):
+        raise InvalidTransactionError("InvalidDeploymentWithSalt")
     if args.fees_distribution is None:
+        if policy.fee_accounting_enabled():
+            raise InvalidTransactionError("FeesDistributionMissing")
         return
 
     try:
@@ -1975,7 +2641,7 @@ def _validate_fee_envelope(
             num_of_validators=args.num_of_initial_validators,
             submitted_value=decoded_rollup_transaction.total_spend,
             user_value=int(args.user_value or 0),
-            policy=StudioFeePolicy.from_env(),
+            policy=policy,
         )
     except FeeValidationError as exc:
         raise InvalidTransactionError(str(exc)) from exc
@@ -2000,41 +2666,36 @@ def _handle_top_up_fees(
 ) -> str:
     assert isinstance(decoded_rollup_transaction.data, DecodedTopUpFeesDataArgs)
     tx_id = _tx_id_to_hex(decoded_rollup_transaction.data.tx_id)
-    tx = transactions_processor.get_transaction_by_hash(tx_id)
-    if tx is None:
-        raise NotFoundError(message=TRANSACTION_NOT_FOUND_MESSAGE, data={"hash": tx_id})
-
-    status = tx.get("status")
-    if status in {
-        TransactionStatus.ACCEPTED.value,
-        TransactionStatus.UNDETERMINED.value,
-        TransactionStatus.FINALIZED.value,
-        TransactionStatus.CANCELED.value,
-    }:
-        raise InvalidTransactionError("InvalidTransactionStatus")
-
-    fee_accounting = (tx.get("data") or {}).get(FEE_ACCOUNTING_KEY)
-    if fee_accounting is None:
-        raise InvalidTransactionError("FeeAccountingMissing")
-
+    session = getattr(transactions_processor, "session", None)
     try:
-        updated = apply_fee_top_up(
-            fee_accounting,
+        transactions_processor.apply_transaction_fee_top_up(
+            tx_id,
             fees_distribution=decoded_rollup_transaction.data.fees_distribution,
             amount=decoded_rollup_transaction.total_spend,
             sender=decoded_rollup_transaction.from_address,
-            num_of_validators=int(tx.get("num_of_initial_validators") or 5),
             policy=StudioFeePolicy.from_env(),
         )
+        _sandbox_debit_sender(
+            accounts_manager,
+            decoded_rollup_transaction.from_address,
+            decoded_rollup_transaction.total_spend,
+        )
     except FeeValidationError as exc:
+        if session is not None:
+            session.rollback()
         raise InvalidTransactionError(str(exc)) from exc
-
-    _sandbox_debit_sender(
-        accounts_manager,
-        decoded_rollup_transaction.from_address,
-        decoded_rollup_transaction.total_spend,
-    )
-    transactions_processor.update_transaction_fee_accounting(tx_id, updated)
+    except ValueError as exc:
+        if session is not None:
+            session.rollback()
+        if str(exc) == "TransactionNotFound":
+            raise NotFoundError(
+                message=TRANSACTION_NOT_FOUND_MESSAGE, data={"hash": tx_id}
+            ) from exc
+        raise InvalidTransactionError(str(exc)) from exc
+    except Exception:
+        if session is not None:
+            session.rollback()
+        raise
     return tx_id
 
 
@@ -2044,6 +2705,7 @@ def _handle_appeal_or_top_up_and_submit(
     transactions_processor: TransactionsProcessor,
     msg_handler: IMessageHandler,
     decoded_rollup_transaction: DecodedRollupTransaction,
+    emit_event: bool = True,
 ) -> str:
     assert isinstance(decoded_rollup_transaction.data, DecodedsubmitAppealDataArgs)
     tx_id = _tx_id_to_hex(decoded_rollup_transaction.data.tx_id)
@@ -2051,40 +2713,145 @@ def _handle_appeal_or_top_up_and_submit(
     if tx is None:
         raise NotFoundError(message=TRANSACTION_NOT_FOUND_MESSAGE, data={"hash": tx_id})
 
-    fee_accounting = (tx.get("data") or {}).get(FEE_ACCOUNTING_KEY)
-    if fee_accounting is not None:
-        try:
-            updated = record_appeal_bond(
-                fee_accounting,
-                amount=decoded_rollup_transaction.total_spend,
-                appealer=decoded_rollup_transaction.from_address,
-                current_round=_current_fee_round(tx.get("consensus_history")),
-                status=str(tx.get("status") or ""),
-                fees_distribution=decoded_rollup_transaction.data.fees_distribution,
-                top_up_and_submit=decoded_rollup_transaction.data.top_up_and_submit,
-            )
-        except FeeValidationError as exc:
-            raise InvalidTransactionError(str(exc)) from exc
+    expected_decision_id = decoded_rollup_transaction.data.expected_decision_id
+    # v0.6 binds every appeal to one exact materialized decision. Older SDKs
+    # may still decode without this argument, but admission rejects them.
+    context = _appeal_admission_context(
+        tx,
+        session=getattr(accounts_manager, "session", None),
+        expected_decision_id=expected_decision_id,
+        require_decision_binding=True,
+    )
+    # New Studio decisions persist their exact materialized ID. Legacy rows
+    # derive the same monotonic ordinal from alternating normal/appeal history.
+    current_decision_id = _transaction_decision_id(tx)
+
+    def prepare_fee_accounting(current_fee_accounting):
+        if current_fee_accounting is None:
+            raise FeeValidationError("FeeAccountingMissing")
+        updated = record_appeal_bond(
+            current_fee_accounting,
+            amount=decoded_rollup_transaction.total_spend,
+            appealer=decoded_rollup_transaction.from_address,
+            current_round=context.current_round,
+            status=context.status,
+            fees_distribution=decoded_rollup_transaction.data.fees_distribution,
+            top_up_and_submit=decoded_rollup_transaction.data.top_up_and_submit,
+            terminal_committee_upper_bound=max(
+                0,
+                context.validator_count - context.normal_leader_count,
+            ),
+            available_appeal_validators=context.available_appeal_validators,
+            replacement_rotations=None,
+            leader_timeout_live_seats=context.leader_timeout_live_seats,
+            policy=funding_policy_for_accounting(
+                current_fee_accounting,
+                StudioFeePolicy.from_env(),
+            ),
+        )
+        return updated, int(updated["appeal_bonds"][-1]["surplusRefund"])
+
+    submitted_at = int(time.time())
+    failed_reduction = float(
+        os.environ.get("VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION", "0")
+    )
+    failed_reduction = min(1.0, max(0.0, failed_reduction))
+    session = getattr(transactions_processor, "session", None)
+    try:
+        surplus_refund = transactions_processor.admit_transaction_appeal(
+            tx_id,
+            expected_decision_id=current_decision_id,
+            submitted_at=submitted_at,
+            appeal_deadline=(
+                int(context.deadline)
+                if context.deadline is not None
+                else submitted_at + int(os.environ.get("VITE_FINALITY_WINDOW", "1800"))
+            ),
+            retention_bps=round((1.0 - failed_reduction) * 10_000),
+            prepare_fee_accounting=prepare_fee_accounting,
+        )
         _sandbox_debit_sender(
             accounts_manager,
             decoded_rollup_transaction.from_address,
             decoded_rollup_transaction.total_spend,
         )
-        transactions_processor.update_transaction_fee_accounting(tx_id, updated)
+        if surplus_refund > 0:
+            accounts_manager.credit_account_balance(
+                decoded_rollup_transaction.from_address,
+                surplus_refund,
+            )
+    except FeeValidationError as exc:
+        if session is not None:
+            session.rollback()
+        raise InvalidTransactionError(str(exc)) from exc
+    except ValueError as exc:
+        if session is not None:
+            session.rollback()
+        raise InvalidTransactionError("CanNotAppeal") from exc
+    except Exception:
+        if session is not None:
+            session.rollback()
+        raise
+    if emit_event:
+        msg_handler.send_message(
+            log_event=_transaction_appeal_updated_event(tx_id),
+            log_to_terminal=False,
+        )
+    return tx_id
 
-    transactions_processor.set_transaction_appeal(tx_id, True)
-    msg_handler.send_message(
-        log_event=LogEvent(
-            "transaction_appeal_updated",
-            EventType.INFO,
-            EventScope.CONSENSUS,
-            "Set transaction appealed",
-            {
-                "hash": tx_id,
-            },
-        ),
-        log_to_terminal=False,
+
+def _transaction_appeal_updated_event(tx_id: str) -> LogEvent:
+    return LogEvent(
+        "transaction_appeal_updated",
+        EventType.INFO,
+        EventScope.CONSENSUS,
+        "Set transaction appealed",
+        {"hash": tx_id},
     )
+
+
+def _handle_finalize_transaction(
+    *,
+    transactions_processor: TransactionsProcessor,
+    decoded_rollup_transaction: DecodedRollupTransaction,
+) -> str:
+    """Validate an exact-decision finalization request.
+
+    Studio's worker owns the asynchronous state/contract commit. This boundary
+    mirrors v0.6 admission: it accepts only the active decision, at or after its
+    immutable deadline, and only at the recipient's finalization head. The
+    already-eligible row is then consumed by the worker without inventing a
+    second Studio-only lifecycle transition.
+    """
+    assert isinstance(
+        decoded_rollup_transaction.data, DecodedFinalizeTransactionDataArgs
+    )
+    if int(decoded_rollup_transaction.total_spend) != 0:
+        # ConsensusMain.finalizeTransaction is nonpayable. Do not silently
+        # accept value that an EVM call would reject (or leave it undebited).
+        raise InvalidTransactionError("NonPayableCall")
+    tx_id = _tx_id_to_hex(decoded_rollup_transaction.data.tx_id)
+    transaction = transactions_processor.get_transaction_by_hash(tx_id)
+    if transaction is None:
+        raise NotFoundError(message=TRANSACTION_NOT_FOUND_MESSAGE, data={"hash": tx_id})
+
+    status = str(transaction.get("status") or "")
+    if status not in _DECISION_STATUSES or bool(transaction.get("appealed")):
+        raise InvalidTransactionError("FinalizationNotAllowed")
+    if acceptance_dispatch_pending(
+        (transaction.get("data") or {}).get(FEE_ACCOUNTING_KEY)
+    ):
+        raise InvalidTransactionError("FinalizationNotAllowed")
+    current_decision_id = _transaction_decision_id(transaction)
+    expected_decision_id = decoded_rollup_transaction.data.expected_decision_id
+    if expected_decision_id is None or int(expected_decision_id) != current_decision_id:
+        raise InvalidTransactionError("FinalizationNotAllowed")
+
+    deadline = _transaction_appeal_deadline(transaction)
+    if deadline is None or time.time() < deadline:
+        raise InvalidTransactionError("FinalizationNotAllowed")
+    if not transactions_processor.is_transaction_finalization_head(tx_id):
+        raise InvalidTransactionError("FinalizationNotAllowed")
     return tx_id
 
 
@@ -2094,6 +2861,46 @@ def _tx_id_to_hex(tx_id: str | bytes) -> str:
 
 def _current_fee_round(consensus_history: dict | None) -> int:
     return completed_consensus_round_index(consensus_history)
+
+
+def _normal_leader_count(consensus_history: dict | None) -> int:
+    # Consensus excludes every prior *normal-round* leader from the terminal
+    # replacement committee. Studio compacts a leader appeal's hidden appeal
+    # round and replay into one history entry, so raw list parity is not a safe
+    # way to identify normal rounds after the first leader appeal.
+    rotations_by_round = actual_leader_rotations_by_round(consensus_history)
+    return sum(
+        1 + int(rotations_by_round.get(logical_round, 0))
+        for logical_round, _entry in logical_fee_round_entries(consensus_history)
+        if logical_round % 2 == 0
+    )
+
+
+def _available_appeal_validator_count(
+    transaction: dict,
+    frozen_pool_count: int,
+    *,
+    frozen_pool_addresses: list[str] | None = None,
+    live_pool_addresses: list[str] | None = None,
+) -> int | None:
+    """Mirror Studio's fresh-juror pool; unknown legacy state stays conservative."""
+    used_addresses = ConsensusAlgorithm.get_consumed_validator_addresses(
+        transaction.get("consensus_history"),
+        transaction.get("consensus_data"),
+    )
+
+    if not used_addresses:
+        return None
+    if isinstance(frozen_pool_addresses, list):
+        eligible = {
+            str(address).lower() for address in frozen_pool_addresses if address
+        }
+        if isinstance(live_pool_addresses, list):
+            eligible &= {
+                str(address).lower() for address in live_pool_addresses if address
+            }
+        return len(eligible - used_addresses)
+    return max(0, int(frozen_pool_count) - len(used_addresses))
 
 
 def _simulation_fee_accounting(
@@ -2160,6 +2967,8 @@ def _simulation_fee_accounting(
 
 def _effective_simulation_fee_accounting_for_genvm(
     accounting: dict | None,
+    *,
+    unmeter_execution: bool = False,
 ) -> dict | None:
     if not accounting:
         return accounting
@@ -2172,7 +2981,19 @@ def _effective_simulation_fee_accounting_for_genvm(
     )
     fees = normalize_fees_distribution(accounting.get("fees_distribution") or {})
     execution_budget_per_round = int(fees["executionBudgetPerRound"])
-    floor = policy.message_fee_params_budget_floor()
+    # Consensus admits against the proposal-only receipt floor, while GenVM
+    # reserves proposal/reveal/nondeterministic-output start costs before user
+    # code. A fee estimate must additionally let the complete simulated write
+    # run so it can observe the required budget; capping that measurement at
+    # the startup floor makes any storage write fail exactly at the floor and
+    # prevents the estimator from returning its higher recommendation. Keep
+    # message allocations/budgets exact, but make the parent's execution bucket
+    # unmetered for this read-only measurement pass.
+    floor = (
+        GENVM_UNMETERED_DATA_FEE_BUCKET
+        if unmeter_execution
+        else policy.genvm_start_budget_floor()
+    )
     if execution_budget_per_round <= 0 or execution_budget_per_round >= floor:
         return accounting
 
@@ -2209,6 +3030,63 @@ def send_raw_transaction(
     signed_rollup_transaction: str,
     sim_config: dict | None = None,
 ) -> str:
+    """Admit one signed envelope atomically with its protocol mutation."""
+
+    try:
+        return _send_raw_transaction_impl(
+            session,
+            msg_handler,
+            transactions_parser,
+            consensus_service,
+            signed_rollup_transaction,
+            sim_config,
+        )
+    except _EvmExecutionReverted as reverted:
+        # Solidity execution reverts roll back the protocol mutation, but the
+        # execution-chain envelope is still mined and consumes the account
+        # nonce. Start a fresh DB transaction after the handler rollback and
+        # persist the status-0 receipt boundary.
+        rollback = getattr(session, "rollback", None)
+        if callable(rollback):
+            rollback()
+        transactions_processor = TransactionsProcessor(session)
+        try:
+            prior_result = transactions_processor.begin_evm_envelope(
+                reverted.transaction_hash,
+                reverted.from_address,
+                reverted.nonce,
+            )
+        except ValueError as exc:
+            raise InvalidTransactionError(str(exc)) from exc
+        if prior_result is None:
+            transactions_processor.record_evm_envelope(
+                reverted.transaction_hash,
+                reverted.from_address,
+                reverted.nonce,
+                reverted.transaction_hash,
+                to_address=reverted.to_address,
+                success=False,
+                error=str(reverted.reason),
+            )
+            commit = getattr(session, "commit", None)
+            if callable(commit):
+                commit()
+        return reverted.transaction_hash
+    except Exception:
+        rollback = getattr(session, "rollback", None)
+        if callable(rollback):
+            rollback()
+        raise
+
+
+def _send_raw_transaction_impl(
+    session: Session,
+    msg_handler: IMessageHandler,
+    transactions_parser: TransactionParser,
+    consensus_service: ConsensusService,
+    signed_rollup_transaction: str,
+    sim_config: dict | None = None,
+) -> str:
     """Persist a raw transaction using a request-scoped session."""
     _validate_genvm_executor_selector(sim_config)
 
@@ -2225,6 +3103,60 @@ def send_raw_transaction(
     if decoded_rollup_transaction is None:
         raise InvalidTransactionError("Invalid transaction data")
 
+    transaction_chain_id = getattr(decoded_rollup_transaction, "chain_id", None)
+    if (
+        transaction_chain_id is not None
+        and int(transaction_chain_id) != get_simulator_chain_id()
+    ):
+        raise InvalidTransactionError("InvalidChainId")
+
+    protocol_data_types = (
+        DecodedRollupTransactionData,
+        DecodedsubmitAppealDataArgs,
+        DecodedTopUpFeesDataArgs,
+        DecodedFinalizeTransactionDataArgs,
+    )
+    lifecycle_data_types = (
+        DecodedsubmitAppealDataArgs,
+        DecodedTopUpFeesDataArgs,
+        DecodedFinalizeTransactionDataArgs,
+    )
+    decoded_protocol_call = isinstance(
+        getattr(decoded_rollup_transaction, "data", None), protocol_data_types
+    )
+    decoded_lifecycle_call = isinstance(
+        getattr(decoded_rollup_transaction, "data", None), lifecycle_data_types
+    )
+    consensus_address = consensus_service.public_consensus_main_address()
+    envelope_destination = getattr(decoded_rollup_transaction, "to_address", None)
+    unknown_consensus_selector = False
+    if decoded_protocol_call:
+        # Calldata only has protocol meaning when the EVM envelope targets
+        # ConsensusMain. Previously Studio decoded the selector regardless of
+        # ``to``, so the same signed transaction that was a harmless transfer
+        # (or a revert) on Consensus could create/finalize/appeal in Studio.
+        if (
+            not consensus_address
+            or not envelope_destination
+            or str(envelope_destination).lower() != str(consensus_address).lower()
+        ):
+            raise InvalidTransactionError("InvalidConsensusDestination")
+    elif (
+        envelope_destination
+        and consensus_address
+        and str(envelope_destination).lower() == str(consensus_address).lower()
+        and getattr(decoded_rollup_transaction, "raw_data", None)
+    ):
+        # ConsensusMain has no catch-all protocol entry point. Do not reinterpret
+        # an unknown selector as a plain Studio value transfer. It remains a
+        # valid signed EVM envelope, though, so classify the failure after nonce
+        # admission as a mined execution revert.
+        unknown_consensus_selector = True
+    elif envelope_destination is None:
+        # Raw EVM bytecode deployment is outside Studio's transaction model;
+        # intelligent-contract deployment must use deploySalted/addTransaction.
+        raise InvalidTransactionError("UnsupportedEvmDeployment")
+
     from_address = decoded_rollup_transaction.from_address
     value = decoded_rollup_transaction.value
     total_spend = getattr(decoded_rollup_transaction, "total_spend", value)
@@ -2234,36 +3166,120 @@ def send_raw_transaction(
             from_address, f"Invalid address from_address: {from_address}"
         )
 
-    # Ensure sender account exists
-    if accounts_manager.get_account(from_address) is None:
-        accounts_manager.create_new_account_with_address(from_address)
-
     transaction_signature_valid = transactions_parser.transaction_has_valid_signature(
         signed_rollup_transaction, decoded_rollup_transaction
     )
     if not transaction_signature_valid:
         raise InvalidTransactionError("Transaction signature verification failed")
 
-    if isinstance(decoded_rollup_transaction.data, DecodedsubmitAppealDataArgs):
-        _reject_genvm_executor_selector_unless_deploy(sim_config, is_deploy=False)
-        return _handle_appeal_or_top_up_and_submit(
-            accounts_manager=accounts_manager,
-            transactions_processor=transactions_processor,
-            msg_handler=msg_handler,
-            decoded_rollup_transaction=decoded_rollup_transaction,
+    transaction_hash = consensus_service.generate_transaction_hash(
+        signed_rollup_transaction
+    )
+    try:
+        prior_result = transactions_processor.begin_evm_envelope(
+            transaction_hash,
+            from_address,
+            decoded_rollup_transaction.nonce,
         )
-    elif isinstance(decoded_rollup_transaction.data, DecodedTopUpFeesDataArgs):
-        _reject_genvm_executor_selector_unless_deploy(sim_config, is_deploy=False)
-        return _handle_top_up_fees(
-            accounts_manager=accounts_manager,
-            transactions_processor=transactions_processor,
-            decoded_rollup_transaction=decoded_rollup_transaction,
+    except ValueError as exc:
+        raise InvalidTransactionError(str(exc)) from exc
+    if prior_result is not None:
+        return prior_result
+
+    def execution_revert(reason: Exception) -> NoReturn:
+        """Classify a post-admission protocol rejection as a mined revert."""
+        raise _EvmExecutionReverted(
+            transaction_hash=transaction_hash,
+            from_address=from_address,
+            to_address=envelope_destination,
+            nonce=decoded_rollup_transaction.nonce,
+            reason=reason,
+        ) from reason
+
+    if unknown_consensus_selector:
+        execution_revert(InvalidTransactionError("UnknownConsensusSelector"))
+
+    # A rejected or invalid signed envelope must not leave a new account row.
+    if accounts_manager.get_account(from_address) is None:
+        accounts_manager.create_new_account_with_address(from_address, commit=False)
+
+    def finish_envelope(result: str) -> str:
+        transactions_processor.record_evm_envelope(
+            transaction_hash,
+            from_address,
+            decoded_rollup_transaction.nonce,
+            result,
+            to_address=envelope_destination,
         )
+        commit = getattr(session, "commit", None)
+        if callable(commit):
+            commit()
+        return result
+
+    if decoded_lifecycle_call:
+        post_commit_event = None
+        try:
+            _reject_genvm_executor_selector_unless_deploy(sim_config, is_deploy=False)
+            if isinstance(decoded_rollup_transaction.data, DecodedsubmitAppealDataArgs):
+                appealed_tx_id = _handle_appeal_or_top_up_and_submit(
+                    accounts_manager=accounts_manager,
+                    transactions_processor=transactions_processor,
+                    msg_handler=msg_handler,
+                    decoded_rollup_transaction=decoded_rollup_transaction,
+                    emit_event=False,
+                )
+                post_commit_event = _transaction_appeal_updated_event(appealed_tx_id)
+            elif isinstance(decoded_rollup_transaction.data, DecodedTopUpFeesDataArgs):
+                _handle_top_up_fees(
+                    accounts_manager=accounts_manager,
+                    transactions_processor=transactions_processor,
+                    decoded_rollup_transaction=decoded_rollup_transaction,
+                )
+            else:
+                assert isinstance(
+                    decoded_rollup_transaction.data,
+                    DecodedFinalizeTransactionDataArgs,
+                )
+                _handle_finalize_transaction(
+                    transactions_processor=transactions_processor,
+                    decoded_rollup_transaction=decoded_rollup_transaction,
+                )
+        except (InvalidTransactionError, InvalidAddressError, JSONRPCError) as exc:
+            raise _EvmExecutionReverted(
+                transaction_hash=transaction_hash,
+                from_address=from_address,
+                to_address=envelope_destination,
+                nonce=decoded_rollup_transaction.nonce,
+                reason=exc,
+            ) from exc
+        result = finish_envelope(transaction_hash)
+        if post_commit_event is not None:
+            try:
+                msg_handler.send_message(
+                    log_event=post_commit_event,
+                    log_to_terminal=False,
+                )
+            except Exception:
+                # The protocol mutation and EVM envelope are already committed.
+                # A transient websocket/log transport failure must not turn a
+                # mined transaction into an RPC error or invite a duplicate.
+                logger.exception("Failed to publish committed appeal event")
+        return result
     else:
-        _validate_fee_envelope(decoded_rollup_transaction)
-        transaction_hash = consensus_service.generate_transaction_hash(
-            signed_rollup_transaction
-        )
+        try:
+            _validate_fee_envelope(decoded_rollup_transaction)
+        except InvalidTransactionError as exc:
+            # The fee tuple, deployment salt, and submitted value are checked
+            # by ConsensusMain after the signed EVM envelope is admitted. A
+            # rejection therefore consumes the EVM nonce and has a status-0
+            # receipt; it is not an eth_sendRawTransaction preflight error.
+            execution_revert(exc)
+        # Raw transaction submission is idempotent. Resolve duplicates before
+        # reserving a virtual-factory sequence slot or touching balances.
+        transactions_processor.lock_transaction_admission(transaction_hash)
+        is_duplicate = transactions_processor.get_transaction_by_hash(transaction_hash)
+        if is_duplicate is not None:
+            return finish_envelope(transaction_hash)
         to_address = decoded_rollup_transaction.to_address
         nonce = decoded_rollup_transaction.nonce
         value = decoded_rollup_transaction.value
@@ -2271,50 +3287,95 @@ def send_raw_transaction(
         genlayer_transaction = transactions_parser.get_genlayer_transaction(
             decoded_rollup_transaction
         )
+        # CreationPhase treats an ordinary direct caller as authoritative and
+        # ignores a spoofed sender embedded in calldata. Bind Studio's durable
+        # transaction owner to the recovered signed-envelope sender as well;
+        # otherwise value debits and later refunds can name different parties.
+        genlayer_transaction.from_address = from_address
+        genlayer_transaction.max_rotations = _funded_max_rotations(
+            decoded_rollup_transaction,
+            genlayer_transaction.max_rotations,
+        )
         _reject_genvm_executor_selector_unless_deploy(
             sim_config,
             is_deploy=genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT,
         )
 
+        # Complete every discoverable admission check before reserving storage,
+        # a virtual-factory sequence slot, or sender funds.
+        storage_reservation = None
+        if genlayer_transaction.type == TransactionType.RUN_CONTRACT:
+            to_address = genlayer_transaction.to_address
+            if not accounts_manager.is_valid_address(to_address):
+                raise InvalidAddressError(
+                    to_address, f"Invalid address to_address: {to_address}"
+                )
+
+            if not transactions_processor.is_genvm_contract_address(to_address):
+                execution_revert(InvalidTransactionError("NonGenVMContract"))
+
+            # Size-only lookup: do not hydrate current_state.data (can be
+            # tens of MB) just to test existence.
+            if live_state_column_size(session, to_address) is None:
+                raise NotFoundError(
+                    message="Contract not found",
+                    data={"address": to_address},
+                )
+
+            try:
+                _enforce_pending_queue_caps(
+                    transactions_processor=transactions_processor,
+                    to_address=to_address,
+                    from_address=from_address,
+                )
+            except QueueDepthExceeded as exc:
+                execution_revert(exc)
+            storage_reservation = enforce_contract_storage_quota(
+                session, to_address, transaction_hash
+            )
+        elif genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT:
+            # A successful deployment always creates a fresh recipient (and a
+            # reused CREATE2 salt is rejected by the virtual factory), so only the
+            # sender cap can be non-zero before the authoritative address is
+            # known.
+            try:
+                _enforce_pending_queue_caps(
+                    transactions_processor=transactions_processor,
+                    to_address=None,
+                    from_address=from_address,
+                )
+            except QueueDepthExceeded as exc:
+                execution_revert(exc)
+
         transaction_data = {}
         leader_only = False
         execution_mode = "NORMAL"
-        rollup_transaction_details = None
         if genlayer_transaction.type != TransactionType.SEND:
             leader_only = genlayer_transaction.data.leader_only
             execution_mode = genlayer_transaction.data.execution_mode
-            rollup_transaction_details = consensus_service.add_transaction(
-                signed_rollup_transaction, from_address
-            )  # because hardhat accounts are not funded
-
-            if (
-                consensus_service.web3.is_connected()
-                and rollup_transaction_details is None
-            ):
-                # raise JSONRPCError(
-                #     code=-32000,
-                #     message="Failed to add transaction to consensus layer",
-                #     data={},
-                # )
-                logger.warning(
-                    "Failed to add transaction to consensus layer",
-                    extra={
-                        "from_address": from_address,
-                        "transaction_type": genlayer_transaction.type.name,
-                        "leader_only": leader_only,
-                    },
-                )
 
         if genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT:
-            if (
-                rollup_transaction_details is None
-                or not "recipient" in rollup_transaction_details
-            ):
-                new_account = accounts_manager.create_new_account()
-                new_contract_address = new_account.address
-            else:
-                new_contract_address = rollup_transaction_details["recipient"]
-                accounts_manager.create_new_account_with_address(new_contract_address)
+            try:
+                new_contract_address = _allocate_top_level_ghost_address(
+                    transactions_processor,
+                    int(decoded_rollup_transaction.data.args.salt_nonce or 0),
+                    from_address,
+                )
+                # Keep the address row in the transaction admission unit. A
+                # premature commit here would release the duplicate-admission
+                # and virtual-factory advisory locks before the raw tx exists.
+                accounts_manager.create_new_account_with_address(
+                    new_contract_address,
+                    commit=False,
+                )
+            except InvalidTransactionError as exc:
+                if storage_reservation is not None:
+                    storage_reservation.release()
+                execution_revert(exc)
+            except Exception:
+                if storage_reservation is not None:
+                    storage_reservation.release()
+                raise
 
             transaction_data = {
                 "contract_address": new_contract_address,
@@ -2327,56 +3388,17 @@ def send_raw_transaction(
         elif genlayer_transaction.type == TransactionType.RUN_CONTRACT:
             # Contract Call
             to_address = genlayer_transaction.to_address
-            if not accounts_manager.is_valid_address(to_address):
-                raise InvalidAddressError(
-                    to_address, f"Invalid address to_address: {to_address}"
-                )
-
-            # Size-only lookup: do not hydrate current_state.data (can be
-            # tens of MB) just to test existence.
-            if live_state_column_size(session, to_address) is None:
-                raise NotFoundError(
-                    message="Contract not found",
-                    data={"address": to_address},
-                )
-
             transaction_data = {"calldata": genlayer_transaction.data.calldata}
             if fee_metadata := _fee_metadata(decoded_rollup_transaction):
                 transaction_data.update(fee_metadata)
 
-        # Check for duplicate before debit+insert to avoid TOCTOU races
-        is_duplicate = transactions_processor.get_transaction_by_hash(transaction_hash)
-
-        # Queue-depth admission control: refuse new submissions when a
-        # contract or a sender already has too many txs queued. Studio Prod
-        # is a shared sandbox; without this, one heavy user (e.g. an
-        # external oracle backend running batch verifications) can pile up
-        # thousands of PENDING txs on a single contract and starve the
-        # network for everyone else.
-        #
-        # Skip duplicates (resubmission of an already-known hash is benign)
-        # and SEND txs (faucet/transfer; not subject to per-contract pile-up
-        # because to_address is a user account, not a contract).
-        storage_reservation = None
-        if is_duplicate is None and genlayer_transaction.type != TransactionType.SEND:
-            _enforce_pending_queue_caps(
-                transactions_processor=transactions_processor,
-                to_address=to_address,
-                from_address=from_address,
-            )
-            if genlayer_transaction.type == TransactionType.RUN_CONTRACT:
-                storage_reservation = enforce_contract_storage_quota(
-                    session, to_address, transaction_hash
-                )
-
         try:
             # Debit sender BEFORE insert. Mint on demand if insufficient (Studio sandbox).
-            # Skip for SEND (execute_transfer handles it) and duplicates.
+            # Skip for SEND (execute_transfer handles it).
             if (
                 total_spend > 0
                 and from_address
                 and genlayer_transaction.type != TransactionType.SEND
-                and is_duplicate is None
             ):
                 _sandbox_debit_sender(accounts_manager, from_address, total_spend)
 
@@ -2396,6 +3418,7 @@ def send_raw_transaction(
                 sim_config,
                 None,  # triggered_on
                 execution_mode,
+                commit=False,
             )
         except Exception:
             if storage_reservation is not None:
@@ -2435,7 +3458,7 @@ def send_raw_transaction(
                 log_to_terminal=False,
             )
 
-        return transaction_hash
+        return finish_envelope(transaction_hash)
 
 
 def get_transactions_for_address(
@@ -2464,8 +3487,8 @@ def set_finality_window_time(consensus: ConsensusAlgorithm, time: int) -> None:
 
 def get_finality_window_time(consensus: ConsensusAlgorithm) -> int:
     if consensus is None:
-        # Return default finality window time when consensus is not initialized
-        return os.environ.get("VITE_FINALITY_WINDOW", 1800)  # Default to 60 seconds
+        # Preserve the RPC's numeric contract even while consensus is starting.
+        return int(os.environ.get("VITE_FINALITY_WINDOW", "1800"))
     return consensus.finality_window_time
 
 
@@ -2557,41 +3580,70 @@ def get_transaction_receipt(
     transaction = transactions_processor.get_transaction_by_hash(
         transaction_hash, include_contract_snapshot=False
     )
+    envelope = transactions_processor.get_evm_envelope(transaction_hash)
     if not transaction:
-        return None
-
-    event_signature = "NewTransaction(bytes32,address,address)"
-    event_signature_hash = eth_utils.keccak(text=event_signature).hex()
-
-    to_addr = transaction.get("to_address")
-    from_addr = transaction.get("from_address")
-
-    logs = [
-        {
-            "address": to_addr,
-            "topics": [
-                f"0x{event_signature_hash}",
-                transaction_hash,
-                (
-                    "0x000000000000000000000000" + to_addr.replace("0x", "")
-                    if to_addr
-                    else None
-                ),
-                (
-                    "0x000000000000000000000000" + from_addr.replace("0x", "")
-                    if from_addr
-                    else None
-                ),
-            ],
-            "data": "0x",
-            "blockNumber": 0,
+        if envelope is None:
+            return None
+        receipt = {
             "transactionHash": transaction_hash,
-            "transactionIndex": 0,
+            "transactionIndex": hex(0),
             "blockHash": transaction_hash,
-            "logIndex": 0,
-            "removed": False,
+            "blockNumber": hex(0),
+            "from": envelope.from_address,
+            "to": envelope.to_address,
+            "cumulativeGasUsed": hex(0),
+            "gasUsed": hex(0),
+            "effectiveGasPrice": "0x0",
+            "type": "0x0",
+            "contractAddress": None,
+            "logs": [],
+            "logsBloom": "0x" + "00" * 256,
+            "status": hex(1 if envelope.success else 0),
         }
-    ]
+        # Preserve the standard status-0 receipt boundary while giving SDKs a
+        # Studio-local equivalent of the revert data they normally learn from
+        # an execution-chain gas estimate.  This is additive metadata; EVM
+        # clients that only understand the standard receipt fields ignore it.
+        if not envelope.success and envelope.error:
+            receipt["revertReason"] = envelope.error
+        return receipt
+
+    protocol_to_addr = envelope.to_address if envelope is not None else None
+    to_addr = protocol_to_addr or transaction.get("to_address")
+    from_addr = transaction.get("from_address")
+    logs = []
+    if int(transaction.get("type", TransactionType.SEND.value)) != int(
+        TransactionType.SEND.value
+    ):
+        # CreationPhase always emits CreatedTransaction for a Consensus
+        # transaction. It only additionally emits NewTransaction when this was
+        # the recipient queue head at admission. Studio does not persist that
+        # historical boolean, so expose the universal event instead of
+        # fabricating NewTransaction. Plain EVM value transfers are not created
+        # through CreationPhase and therefore emit neither event.
+        event_signature = "CreatedTransaction(bytes32,uint256)"
+        event_signature_hash = eth_utils.keccak(text=event_signature).hex()
+        try:
+            tx_slot = int(transaction.get("tx_slot", 0))
+        except (TypeError, ValueError):
+            tx_slot = 0
+
+        logs.append(
+            {
+                "address": to_addr,
+                "topics": [
+                    f"0x{event_signature_hash}",
+                    transaction_hash,
+                ],
+                "data": "0x" + tx_slot.to_bytes(32, "big").hex(),
+                "blockNumber": 0,
+                "transactionHash": transaction_hash,
+                "transactionIndex": 0,
+                "blockHash": transaction_hash,
+                "logIndex": 0,
+                "removed": False,
+            }
+        )
 
     receipt = {
         "transactionHash": transaction_hash,
@@ -2604,11 +3656,9 @@ def get_transaction_receipt(
         "gasUsed": hex(transaction.get("gas_used", 8000000)),
         "effectiveGasPrice": "0x0",
         "type": "0x0",
-        "contractAddress": (
-            transaction.get("contract_address")
-            if transaction.get("contract_address")
-            else None
-        ),
+        # The signed EVM envelope calls ConsensusMain; deploySalted authors a
+        # GenVM ghost inside that call and is not EVM contract creation.
+        "contractAddress": None,
         "logs": logs,
         "logsBloom": "0x" + "00" * 256,
         "status": hex(1 if transaction.get("status", True) else 0),
@@ -2679,7 +3729,11 @@ def get_contract(consensus_service: ConsensusService, contract_name: str) -> dic
         )
 
     return {
-        "address": contract["address"],
+        "address": (
+            consensus_service.public_consensus_main_address()
+            if contract_name == "ConsensusMain"
+            else contract["address"]
+        ),
         "abi": contract["abi"],
         "bytecode": contract["bytecode"],
     }

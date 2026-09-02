@@ -1,3 +1,5 @@
+import type { MessageFeeAllocationInput } from 'genlayer-js/types';
+
 export interface JsonRPCResponse<T> {
   id: string;
   jsonrpc: string;
@@ -64,13 +66,20 @@ export interface StudioExecutionFeeReportMessage {
 export interface StudioGenvmFeeBucket {
   index?: string | number;
   name?: string;
+  unit?: 'fee' | 'bytes' | (string & {});
   consumed?: string | number;
 }
 
 export interface StudioGenvmFeeBucketReport {
+  layout?: 'genvm-v0.3' | 'consensus-chargeable' | (string & {});
+  execution?: string | number;
+  receipt?: string | number;
+  // Legacy pre-v0.123 persisted reports may still contain this field.
   receiptAndNondetOutput?: string | number;
   storage?: string | number;
   message?: string | number;
+  nondeterministicOutputBytes?: string | number;
+  submittedMessageBytes?: string | number;
   totalExecution?: string | number;
   totalWithMessage?: string | number;
   executionBudgetPerRound?: string | number;
@@ -130,7 +139,7 @@ export interface StudioRecommendedFeePreset {
   numOfInitialValidators?: string | number;
   distribution?: StudioFeesDistribution;
   feeValue?: string | number;
-  messageAllocations?: unknown[];
+  messageAllocations?: MessageFeeAllocationInput[];
   messageBudgetMode?:
     | 'current'
     | 'observed'
@@ -138,6 +147,7 @@ export interface StudioRecommendedFeePreset {
     | (string & {});
   observed?: {
     executionFee?: string | number;
+    genvmExecutionRequired?: string | number;
     messageFeeBudget?: string | number;
     declaredMessageFees?: string | number;
     externalMessageReserved?: string | number;
@@ -173,7 +183,7 @@ export interface StudioFeeAccounting {
   appeal_bonds_total?: string | number;
   total_refunded?: string | number;
   fees_distribution?: StudioFeesDistribution;
-  message_allocations?: unknown[];
+  message_allocations?: MessageFeeAllocationInput[];
   allocation_consumed?: Record<string, string | number>;
   message_consumption_events?: unknown[];
   refunds?: unknown[];

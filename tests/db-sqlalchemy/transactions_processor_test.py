@@ -1,9 +1,12 @@
 from sqlalchemy import text
+from sqlalchemy.orm import sessionmaker
 import pytest
 from unittest.mock import patch, MagicMock
 import os
 import math
+import threading
 from datetime import datetime
+from types import SimpleNamespace
 from web3 import Web3
 from web3.providers import BaseProvider
 
@@ -12,7 +15,11 @@ from backend.database_handler.transactions_processor import (
     TransactionsProcessor,
     TransactionAddressFilter,
 )
+from backend.database_handler.models import EvmEnvelope, Transactions
 from backend.consensus.types import ConsensusRound
+from backend.consensus.base import _external_message_pending_freeze_total
+from backend.domain.types import TransactionType
+from backend.node.types import ExecutionResultStatus
 
 
 _tx_counter = 0
@@ -313,6 +320,369 @@ def test_insert_transaction_duplicate_hash_returns_existing(
     tx = transactions_processor.get_transaction_by_hash(duplicate_hash)
     assert tx is not None
     assert tx["data"] == data  # Original data, not the second attempt's data
+
+
+def test_transaction_admission_lock_serializes_duplicate_workers(engine):
+    session_factory = sessionmaker(bind=engine)
+    first_session = session_factory()
+    second_session = session_factory()
+    first = TransactionsProcessor(first_session)
+    second = TransactionsProcessor(second_session)
+    transaction_hash = "0x" + "ab" * 32
+    entered = threading.Event()
+    acquired = threading.Event()
+
+    first.lock_transaction_admission(transaction_hash)
+
+    def acquire_second():
+        entered.set()
+        second.lock_transaction_admission(transaction_hash)
+        acquired.set()
+
+    worker = threading.Thread(target=acquire_second, daemon=True)
+    worker.start()
+    assert entered.wait(1)
+    assert not acquired.wait(0.1)
+
+    first_session.commit()
+    assert acquired.wait(2)
+
+    second_session.rollback()
+    worker.join(timeout=2)
+    first_session.close()
+    second_session.close()
+
+
+def test_pending_recipient_lock_serializes_child_admission_workers(engine):
+    session_factory = sessionmaker(bind=engine)
+    first_session = session_factory()
+    second_session = session_factory()
+    first = TransactionsProcessor(first_session)
+    second = TransactionsProcessor(second_session)
+    recipient = "0xAcec3A6d871C25F591aBd4fC24054e524BBbF794"
+    entered = threading.Event()
+    acquired = threading.Event()
+
+    first.lock_pending_recipients([recipient])
+
+    def acquire_second():
+        entered.set()
+        second.lock_pending_recipients([recipient.lower()])
+        acquired.set()
+
+    worker = threading.Thread(target=acquire_second, daemon=True)
+    worker.start()
+    assert entered.wait(1)
+    assert not acquired.wait(0.1)
+
+    first_session.commit()
+    assert acquired.wait(2)
+
+    second_session.rollback()
+    worker.join(timeout=2)
+    first_session.close()
+    second_session.close()
+
+
+def test_ghost_factory_state_is_transactional_and_counts_all_admitted_deploys(engine):
+    session_factory = sessionmaker(bind=engine)
+    first_session = session_factory()
+    observer_session = session_factory()
+    first = TransactionsProcessor(first_session)
+    observer = TransactionsProcessor(observer_session)
+    ghost = "0x0aD72A9a303bDF888d3bf7d76e3568248a353199"
+
+    first.lock_ghost_factory()
+    assert first.get_successful_ghost_creation_count() == 0
+    first.insert_transaction(
+        from_address="0x9F0e84243496AcFB3Cd99D02eA59673c05901501",
+        to_address=ghost,
+        data={"contract_address": ghost},
+        value=0,
+        type=1,
+        nonce=0,
+        leader_only=False,
+        config_rotation_rounds=0,
+        transaction_hash="0x" + ("cd" * 32),
+        commit=False,
+    )
+
+    assert first.is_genvm_contract_address(ghost) is True
+    assert first.get_successful_ghost_creation_count() == 1
+    assert observer.is_genvm_contract_address(ghost) is False
+    assert observer.get_successful_ghost_creation_count() == 0
+
+    first_session.commit()
+    observer_session.expire_all()
+    assert observer.is_genvm_contract_address(ghost) is True
+    assert observer.get_successful_ghost_creation_count() == 1
+
+    observer_session.rollback()
+    first_session.close()
+    observer_session.close()
+
+
+def test_evm_envelope_ledger_enforces_nonce_and_replays_prior_result(engine):
+    session_factory = sessionmaker(bind=engine)
+    session = session_factory()
+    processor = TransactionsProcessor(session)
+    sender = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
+    first_hash = "0x" + ("e1" * 32)
+    first_result = "0x" + ("a1" * 32)
+
+    assert processor.begin_evm_envelope(first_hash, sender, 0) is None
+    processor.record_evm_envelope(first_hash, sender, 0, first_result)
+    session.commit()
+
+    assert processor.get_transaction_count(sender) == 1
+    assert processor.get_transaction_count(sender.lower()) == 1
+    assert session.get(EvmEnvelope, first_hash).from_address == sender.lower()
+    assert processor.begin_evm_envelope(first_hash, sender, 0) == first_result
+    session.rollback()
+
+    with pytest.raises(ValueError, match=r"NonceTooLow\(expected=1,actual=0\)"):
+        processor.begin_evm_envelope("0x" + ("e2" * 32), sender, 0)
+    session.rollback()
+    with pytest.raises(ValueError, match=r"NonceTooHigh\(expected=1,actual=2\)"):
+        processor.begin_evm_envelope("0x" + ("e3" * 32), sender, 2)
+    session.rollback()
+
+    second_hash = "0x" + ("e4" * 32)
+    assert processor.begin_evm_envelope(second_hash, sender, 1) is None
+    processor.record_evm_envelope(second_hash, sender, 1, second_hash)
+    session.commit()
+    assert processor.get_transaction_count(sender) == 2
+    session.close()
+
+
+def test_reverted_evm_envelope_is_durable_and_consumes_nonce(engine):
+    session_factory = sessionmaker(bind=engine)
+    with session_factory() as session:
+        processor = TransactionsProcessor(session)
+        sender = "0x8F0e84243496AcFB3Cd99D02eA59673c05901501"
+        destination = "0xb7278A61aa25c888815aFC32Ad3cC52fF24fE575"
+        envelope_hash = "0x" + ("ea" * 32)
+
+        assert processor.begin_evm_envelope(envelope_hash, sender, 0) is None
+        processor.record_evm_envelope(
+            envelope_hash,
+            sender,
+            0,
+            envelope_hash,
+            to_address=destination,
+            success=False,
+            error="NonPayableCall",
+        )
+        session.commit()
+
+        envelope = processor.get_evm_envelope(envelope_hash)
+        assert envelope is not None
+        assert envelope.success is False
+        assert envelope.to_address == destination.lower()
+        assert envelope.error == "NonPayableCall"
+        assert processor.get_transaction_count(sender) == 1
+        assert processor.begin_evm_envelope(envelope_hash, sender, 0) == envelope_hash
+
+
+def test_concurrent_identical_evm_envelope_is_recorded_once(engine):
+    from concurrent.futures import ThreadPoolExecutor
+
+    session_factory = sessionmaker(bind=engine)
+    sender = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
+    envelope_hash = "0x" + ("e5" * 32)
+    result_hash = "0x" + ("a5" * 32)
+    barrier = threading.Barrier(2)
+
+    def submit() -> str:
+        with session_factory() as session:
+            processor = TransactionsProcessor(session)
+            barrier.wait()
+            prior = processor.begin_evm_envelope(envelope_hash, sender, 0)
+            if prior is not None:
+                session.rollback()
+                return prior
+            processor.record_evm_envelope(
+                envelope_hash,
+                sender,
+                0,
+                result_hash,
+            )
+            session.commit()
+            return result_hash
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _index: submit(), range(2)))
+
+    assert results == [result_hash, result_hash]
+    with session_factory() as session:
+        assert session.query(EvmEnvelope).count() == 1
+        assert TransactionsProcessor(session).get_transaction_count(sender) == 1
+
+
+def test_same_timestamp_child_issued_slot_selects_previous_transaction(engine):
+    session_factory = sessionmaker(bind=engine)
+    with session_factory() as session:
+        processor = TransactionsProcessor(session)
+        sender = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
+        recipient = "0xAcec3A6d871C25F591aBd4fC24054e524BBbF794"
+        first_hash = "0x" + ("e6" * 32)
+        second_hash = "0x" + ("e7" * 32)
+        for tx_hash, nonce in ((first_hash, 3), (second_hash, 4)):
+            processor.insert_transaction(
+                from_address=sender,
+                to_address=recipient,
+                data={"calldata": "0x"},
+                value=0,
+                type=2,
+                nonce=nonce,
+                leader_only=False,
+                config_rotation_rounds=0,
+                transaction_hash=tx_hash,
+                commit=False,
+            )
+        session.commit()
+
+        first = session.get(Transactions, first_hash)
+        second = session.get(Transactions, second_hash)
+        assert first.created_at == second.created_at
+        previous = processor.get_previous_transaction(second_hash)
+        assert previous is not None
+        assert previous["hash"] == first_hash
+
+
+def test_same_timestamp_child_issued_slot_orders_prior_external_freeze(engine):
+    session_factory = sessionmaker(bind=engine)
+    with session_factory() as session:
+        processor = TransactionsProcessor(session)
+        sender = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
+        recipient = "0xAcec3A6d871C25F591aBd4fC24054e524BBbF794"
+        first_hash = "0x" + ("e8" * 32)
+        second_hash = "0x" + ("e9" * 32)
+        for tx_hash, nonce in ((first_hash, 3), (second_hash, 4)):
+            processor.insert_transaction(
+                from_address=sender,
+                to_address=recipient,
+                data={"calldata": "0x"},
+                value=0,
+                type=2,
+                nonce=nonce,
+                leader_only=False,
+                config_rotation_rounds=0,
+                transaction_hash=tx_hash,
+                commit=False,
+            )
+        first = session.get(Transactions, first_hash)
+        second = session.get(Transactions, second_hash)
+        first.status = TransactionStatus.ACCEPTED
+        second.status = TransactionStatus.ACCEPTED
+        first.consensus_data = {
+            "leader_receipt": [
+                {
+                    "execution_result": ExecutionResultStatus.SUCCESS.value,
+                    "pending_transactions": [
+                        {
+                            "is_eth_send": True,
+                            "on": "finalized",
+                            "value": 6,
+                        }
+                    ],
+                }
+            ]
+        }
+        second.consensus_data = {"leader_receipt": []}
+        session.commit()
+        assert first.created_at == second.created_at
+
+        def context(tx_hash):
+            return SimpleNamespace(
+                transaction=SimpleNamespace(hash=tx_hash, to_address=recipient),
+                transactions_processor=processor,
+            )
+
+        assert _external_message_pending_freeze_total(context(second_hash)) == 6
+        assert _external_message_pending_freeze_total(context(first_hash)) == 0
+
+
+def test_pending_queue_count_includes_active_head_but_not_decided_rows(
+    transactions_processor: TransactionsProcessor,
+):
+    recipient = "0xAcec3A6d871C25F591aBd4fC24054e524BBbF794"
+    pending_hash = _make_tx(transactions_processor, to_address=recipient, nonce=10)
+    active_hash = _make_tx(transactions_processor, to_address=recipient, nonce=11)
+    decided_hash = _make_tx(transactions_processor, to_address=recipient, nonce=12)
+    transactions_processor.update_transaction_status(
+        active_hash, TransactionStatus.COMMITTING
+    )
+    transactions_processor.update_transaction_status(
+        decided_hash, TransactionStatus.ACCEPTED
+    )
+
+    assert (
+        transactions_processor.get_pending_transaction_count_for_address(recipient) == 2
+    )
+    assert pending_hash is not None
+
+
+def test_ancestor_rewind_clears_descendant_attempt_state(
+    transactions_processor: TransactionsProcessor, session
+):
+    tx_hash = _make_tx(transactions_processor, nonce=13)
+    session.execute(
+        text(
+            """
+            UPDATE transactions
+            SET status = CAST('ACCEPTED' AS transaction_status),
+                consensus_data = CAST('{"votes":{"0x1":"agree"}}' AS jsonb),
+                consensus_history = CAST('{"consensus_results":[{"consensus_round":"Accepted"}]}' AS jsonb),
+                contract_snapshot = CAST('{"states":{}}' AS jsonb),
+                appealed = true,
+                appeal_failed = 2,
+                appeal_undetermined = true,
+                appeal_leader_timeout = true,
+                appeal_validators_timeout = true,
+                timestamp_appeal = 123,
+                appeal_processing_time = 5,
+                timestamp_awaiting_finalization = 456,
+                last_vote_timestamp = 789,
+                rotation_count = 3,
+                leader_timeout_validators = CAST('[]' AS jsonb),
+                blocked_at = NOW(),
+                worker_id = 'stale-worker'
+            WHERE hash = :hash
+            """
+        ),
+        {"hash": tx_hash},
+    )
+    session.commit()
+
+    replacement_data = {"fee_accounting": {"message_fee_budget": 7}}
+    transactions_processor.reset_transaction_for_recomputation(
+        tx_hash,
+        replacement_data,
+    )
+    reset = transactions_processor.get_transaction_by_hash(tx_hash)
+
+    assert reset["status"] == TransactionStatus.PENDING.value
+    assert reset["data"] == replacement_data
+    assert reset["consensus_data"] is None
+    assert reset["consensus_history"] == {}
+    assert reset["contract_snapshot"] is None
+    assert reset["appealed"] is False
+    assert reset["appeal_failed"] == 0
+    assert reset["appeal_undetermined"] is False
+    assert reset["appeal_leader_timeout"] is False
+    assert reset["appeal_validators_timeout"] is False
+    assert reset["timestamp_appeal"] is None
+    assert reset["appeal_processing_time"] == 0
+    assert reset["timestamp_awaiting_finalization"] is None
+    # The legacy public parser stringifies this nullable timestamp.
+    assert reset["last_vote_timestamp"] == "None"
+    assert reset["rotation_count"] == 0
+    assert reset["leader_timeout_validators"] is None
+    reset_row = session.get(Transactions, tx_hash)
+    assert reset_row is not None
+    assert reset_row.blocked_at is None
+    assert reset_row.worker_id is None
 
 
 def test_get_transaction_by_hash_exposes_value_credited(
@@ -634,6 +1004,20 @@ class TestGetTransactions:
     def test_get_transaction_by_hash_not_found(self, tp):
         result = tp.get_transaction_by_hash("0x" + "ff" * 32)
         assert result is None
+
+    def test_transaction_slot_is_recipient_scoped_and_excludes_send_rows(self, tp):
+        recipient = "0xAcec3A6d871C25F591aBd4fC24054e524BBbF794"
+        other_recipient = "0x1111111111111111111111111111111111111111"
+        first = _make_tx(tp, to_address=recipient, type=TransactionType.RUN_CONTRACT)
+        _make_tx(tp, to_address=recipient, type=TransactionType.SEND)
+        other = _make_tx(
+            tp, to_address=other_recipient, type=TransactionType.RUN_CONTRACT
+        )
+        second = _make_tx(tp, to_address=recipient, type=TransactionType.RUN_CONTRACT)
+
+        assert tp.get_transaction_by_hash(first)["tx_slot"] == "0"
+        assert tp.get_transaction_by_hash(other)["tx_slot"] == "0"
+        assert tp.get_transaction_by_hash(second)["tx_slot"] == "1"
 
     def test_get_transactions_for_address(self, tp):
         addr_a = "0xAcec3A6d871C25F591aBd4fC24054e524BBbF794"

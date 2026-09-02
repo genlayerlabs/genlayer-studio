@@ -16,6 +16,17 @@ import type {
   StudioFeeEstimateResult,
 } from '@/types';
 
+export class JsonRpcServiceError extends Error {
+  constructor(
+    message: string,
+    public readonly code: number,
+    public readonly data?: unknown,
+  ) {
+    super(message);
+    this.name = 'JsonRpcServiceError';
+  }
+}
+
 export class JsonRpcService implements IJsonRpcService {
   constructor(protected rpcClient: IRpcClient) {}
 
@@ -32,7 +43,7 @@ export class JsonRpcService implements IJsonRpcService {
       console.error(error.message, error.code);
       // Preserve the server's error message instead of a generic fallback
       const detail = error.message || errorMessage;
-      throw new Error(detail);
+      throw new JsonRpcServiceError(detail, error.code, error.data);
     }
     return result;
   }

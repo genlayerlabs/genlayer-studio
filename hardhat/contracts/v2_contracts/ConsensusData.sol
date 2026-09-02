@@ -277,10 +277,10 @@ contract ConsensusData is
 	/**
 	 * @notice Retrieves a paginated list of latest accepted transactions for a specific recipient
 	 * @param recipient The address of the recipient contract
-	 * @param startIndex The starting index for pagination (0-based)
-	 * @param pageSize The maximum number of transactions to return
-	 * @return TransactionData[] Array of transaction data objects, ordered by acceptance time (newest first)
-	 * @dev Returns an empty array if startIndex is out of bounds
+	 * @param startIndex The raw accepted-queue slot cursor (0-based)
+	 * @param pageSize The maximum number of raw slots to inspect
+	 * @return TransactionData[] Non-hole entries in the requested slot window
+	 * @dev Raw cursors stay stable and a page may be shorter than pageSize when its window contains holes.
 	 */
 	function getLatestAcceptedTransactions(
 		address recipient,
@@ -293,15 +293,23 @@ contract ConsensusData is
 		if (startIndex >= totalAccepted) {
 			return new TransactionData[](0);
 		}
-		uint256 endIndex = startIndex + pageSize;
-		if (endIndex > totalAccepted) {
-			endIndex = totalAccepted;
+		uint256 remaining = totalAccepted - startIndex;
+		if (pageSize > remaining) {
+			pageSize = remaining;
 		}
+		uint256 endIndex = startIndex + pageSize;
 		uint256 count = endIndex - startIndex;
 		TransactionData[] memory results = new TransactionData[](count);
+		uint256 kept;
 		for (uint256 i = startIndex; i < endIndex; i++) {
 			bytes32 txId = queues.getAcceptedTxId(recipient, i);
-			results[i - startIndex] = _getTransactionData(txId);
+			if (txId == bytes32(0)) {
+				continue;
+			}
+			results[kept++] = _getTransactionData(txId);
+		}
+		assembly ("memory-safe") {
+			mstore(results, kept)
 		}
 		return results;
 	}
@@ -309,10 +317,10 @@ contract ConsensusData is
 	/**
 	 * @notice Retrieves a paginated list of latest finalized transactions for a specific recipient
 	 * @param recipient The address of the recipient contract
-	 * @param startIndex The starting index for pagination (0-based)
-	 * @param pageSize The maximum number of transactions to return
-	 * @return TransactionData[] Array of transaction data objects, ordered by finalization time (newest first)
-	 * @dev Returns an empty array if startIndex is out of bounds
+	 * @param startIndex The raw issued-order terminal slot cursor (0-based)
+	 * @param pageSize The maximum number of raw terminal slots to inspect
+	 * @return TransactionData[] Actually-finalized entries in the requested window
+	 * @dev finalizedCount includes canceled slots, which are compacted out without shifting the raw cursor.
 	 */
 	function getLatestFinalizedTransactions(
 		address recipient,
@@ -323,15 +331,27 @@ contract ConsensusData is
 		if (startIndex >= totalFinalized) {
 			return new TransactionData[](0);
 		}
-		uint256 endIndex = startIndex + pageSize;
-		if (endIndex > totalFinalized) {
-			endIndex = totalFinalized;
+		uint256 remaining = totalFinalized - startIndex;
+		if (pageSize > remaining) {
+			pageSize = remaining;
 		}
+		uint256 endIndex = startIndex + pageSize;
 		uint256 count = endIndex - startIndex;
 		TransactionData[] memory results = new TransactionData[](count);
+		uint256 kept;
 		for (uint256 i = startIndex; i < endIndex; i++) {
 			bytes32 txId = queues.getFinalizedTxId(recipient, i);
-			results[i - startIndex] = _getTransactionData(txId);
+			if (
+				txId == bytes32(0) ||
+				transactions.getTransaction(txId).status !=
+				ITransactions.TransactionStatus.Finalized
+			) {
+				continue;
+			}
+			results[kept++] = _getTransactionData(txId);
+		}
+		assembly ("memory-safe") {
+			mstore(results, kept)
 		}
 		return results;
 	}

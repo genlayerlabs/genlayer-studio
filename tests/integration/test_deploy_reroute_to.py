@@ -36,10 +36,11 @@ from genlayer_py.contracts.actions import (
     _prepare_transaction,
 )
 from genlayer_py.contracts.utils import make_calldata_object
+from genlayer_py.transactions.fees import normalize_transaction_fees
 from genlayer_py.types.transactions import TransactionHashVariant
 from web3.constants import ADDRESS_ZERO
 
-RPC_URL = "http://localhost:4000/api"
+RPC_URL = os.environ.get("TEST_JSONRPC_URL", "http://localhost:4000/api")
 
 # Executor version directory contract B is pinned to. Must exist under the
 # GenVM manager's executors path in the image under test.
@@ -159,7 +160,7 @@ ACCOUNT = create_account()
 CLIENT.local_account = ACCOUNT
 
 
-def rpc_call(method: str, params):
+def rpc_call(method: str, params, *, allow_not_found: bool = False):
     response = requests.post(
         RPC_URL,
         json={"jsonrpc": "2.0", "method": method, "params": params, "id": 1},
@@ -167,6 +168,12 @@ def rpc_call(method: str, params):
     )
     result = response.json()
     if "error" in result:
+        error = result["error"]
+        if allow_not_found and (
+            error.get("code") == -32001
+            or "not found" in str(error.get("message", "")).lower()
+        ):
+            return None
         raise AssertionError(f"RPC error on {method}: {result['error']}")
     return result.get("result")
 
@@ -188,7 +195,7 @@ def _wait_for_tx(tx_hash: str, timeout: int = 240) -> dict:
     start = time.time()
     last = None
     while time.time() - start < timeout:
-        tx = rpc_call("eth_getTransactionByHash", [tx_hash])
+        tx = rpc_call("eth_getTransactionByHash", [tx_hash], allow_not_found=True)
         last = tx and tx.get("status")
         if last == "FINALIZED":
             return tx
@@ -214,18 +221,21 @@ def _deploy(code: str, args: list, reroute_to: str | None = None) -> str:
             False,  # leader_only
         ]
     )
+    transaction_fees = normalize_transaction_fees(CLIENT.estimate_transaction_fees())
     encoded_data = _encode_add_transaction_data(
         self=CLIENT,
         sender_account=ACCOUNT,
         recipient=ADDRESS_ZERO,
         consensus_max_rotations=CLIENT.chain.default_consensus_max_rotations,
         data=data,
+        transaction_fees=transaction_fees,
     )
     transaction = _prepare_transaction(
         self=CLIENT,
         sender=ACCOUNT.address,
         recipient=CLIENT.chain.consensus_main_contract["address"],
         data=encoded_data,
+        value=transaction_fees["fee_value"] or 0,
     )
     signed = ACCOUNT.sign_transaction(transaction)
 

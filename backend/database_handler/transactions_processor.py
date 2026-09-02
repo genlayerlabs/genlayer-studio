@@ -5,20 +5,43 @@ import rlp
 import re
 import random
 from sqlalchemy.orm import Session, defer, selectinload
-from sqlalchemy import or_, desc, and_, JSON, type_coerce, text
+from sqlalchemy import or_, desc, and_, func, JSON, type_coerce, text
 
-from backend.node.types import Vote, Receipt, ExecutionResultStatus
-from .models import Transactions, TransactionStatus
+from backend.node.types import Receipt, ExecutionResultStatus
+from .models import EvmEnvelope, Transactions, TransactionStatus
 from eth_utils import to_bytes, keccak, is_address, to_checksum_address
 import json
 import base64
 import time
+import os
+import copy
+from typing import Callable, Iterable
 from backend.domain.types import TransactionType
 from web3 import Web3
-from backend.consensus.types import ConsensusRound
-from backend.consensus.history import time_unit_consumption
+from backend.consensus.types import (
+    ConsensusResult,
+    ConsensusRound,
+    consensus_result_type_code,
+    consensus_vote_type_code,
+)
+from backend.consensus.history import (
+    APPEAL_RECOVERY_SNAPSHOT_KEY,
+    LEADER_APPEAL_REPLAY_CONTEXT,
+    VALIDATOR_APPEAL_CONTEXT,
+    completed_consensus_round_index,
+    completed_consensus_rounds,
+    materialize_decision_metadata,
+    prepare_appeal_decision_basis,
+    time_unit_consumption,
+)
 from backend.consensus.utils import determine_consensus_from_votes
-from backend.protocol_rpc.fees import FEE_ACCOUNTING_KEY, normalize_fees_distribution
+from backend.protocol_rpc.fees import (
+    FEE_ACCOUNTING_KEY,
+    acceptance_dispatch_pending,
+    apply_fee_top_up,
+    normalize_fees_distribution,
+    runtime_rotations_for_round,
+)
 from backend.database_handler.terminal_snapshot_pruner import (
     SnapshotArchiveReader,
     snapshot_archive_read_through_enabled,
@@ -27,7 +50,18 @@ from backend.rollup.web3_pool import Web3ConnectionPool
 
 MAX_JSON_SAFE_INTEGER = (2**53) - 1
 
-# Canonical v0.6 ITransactions.TransactionStatus ordinals (0-14). Studio-only
+
+def _transaction_order_tuple(model=Transactions):
+    """Durable Studio queue-slot authority."""
+
+    return model.queue_order
+
+
+def _transaction_order_value(transaction: Transactions):
+    return int(transaction.queue_order)
+
+
+# Canonical v0.6 ITransactions.TransactionStatus ordinals (0-13). Studio-only
 # states map to their on-chain equivalents (ACTIVATED -> Proposing: activation
 # transitions the on-chain tx into Proposing).
 TRANSACTION_STATUS_CODES = {
@@ -43,10 +77,9 @@ TRANSACTION_STATUS_CODES = {
     "CANCELED": 8,
     "APPEAL_REVEALING": 9,
     "APPEAL_COMMITTING": 10,
-    "READY_TO_FINALIZE": 11,
-    "VALIDATORS_TIMEOUT": 12,
-    "LEADER_TIMEOUT": 13,
-    "LEADER_REVEALING": 14,
+    "VALIDATORS_TIMEOUT": 11,
+    "LEADER_TIMEOUT": 12,
+    "LEADER_REVEALING": 13,
 }
 
 
@@ -56,38 +89,54 @@ class TransactionAddressFilter(Enum):
     FROM = "from"
 
 
-def get_validator_vote_hash(validator_address: str, vote_type: int, nonce: int) -> str:
+def get_validator_vote_hash(
+    validator_address: str,
+    vote_type: int,
+    nonce: int,
+    other_execution_fields_hash: bytes = bytes(32),
+) -> str:
     """
     Generate a hash for validator vote data using Solidity keccak.
 
     Args:
         validator_address: Address of the validator
-        vote_type: Numeric vote type (1=AGREE, 2=DISAGREE, etc.)
+        vote_type: Canonical v0.6 ``ITransactions.VoteType`` ordinal.
         nonce: Transaction nonce
 
     Returns:
         str: Hex-encoded hash with 0x prefix
     """
     vote_hash_bytes = Web3.solidity_keccak(
-        ["address", "uint8", "uint256"], [validator_address, vote_type, nonce]
+        ["address", "uint8", "bytes32", "uint256"],
+        [validator_address, vote_type, other_execution_fields_hash, nonce],
     )
     return Web3.to_hex(vote_hash_bytes)
 
 
-def get_tx_execution_hash(leader_address: str, vote_type: int) -> str:
+def get_tx_execution_hash(
+    leader_address: str,
+    vote_type: int,
+    nonce: int,
+    messages_and_other_fields_hash: bytes = bytes(32),
+) -> str:
     """
     Generate a hash for transaction execution data using Solidity keccak.
 
     Args:
         leader_address: Address of the consensus leader
-        vote_type: Numeric vote type
+        vote_type: Canonical v0.6 ``ITransactions.VoteType`` ordinal.
+        nonce: Studio's deterministic compatibility salt for this transaction.
+        messages_and_other_fields_hash: Canonical bytes32 preimage field when
+            available. Studio currently has no Solidity reveal payload, so the
+            compatibility view uses the zero sentinel consistently for leader
+            and validator hashes.
 
     Returns:
         str: Hex-encoded hash with 0x prefix
     """
     tx_execution_hash_bytes = Web3.solidity_keccak(
         ["address", "uint8", "bytes32", "uint256"],
-        [leader_address, vote_type, b"", 4444],
+        [leader_address, vote_type, messages_and_other_fields_hash, nonce],
     )
     return Web3.to_hex(tx_execution_hash_bytes)
 
@@ -104,7 +153,9 @@ class TransactionsProcessor:
             self.snapshot_archive = SnapshotArchiveReader.from_environment()
 
         # Use singleton Web3 connection pool
-        self.web3 = Web3ConnectionPool.get()
+        # Only used for checksum normalisation here, which needs no rollup —
+        # and the rollup bridge is optional (HARDHAT_URL may be empty).
+        self.web3 = Web3ConnectionPool.get_for_utilities()
 
     @staticmethod
     def _select_receipt(receipts, index: int = 0) -> dict | None:
@@ -197,6 +248,11 @@ class TransactionsProcessor:
             "triggered_transactions": [
                 transaction.hash
                 for transaction in transaction_data.triggered_transactions
+                # Consensus exposes only child consensus transactions through
+                # getTriggeredTransactionIds. Studio keeps external SEND rows
+                # as local execution effects, but they are not protocol child
+                # transactions and must not leak into that shared surface.
+                if transaction.type != TransactionType.SEND.value
             ],
             "appealed": transaction_data.appealed,
             "timestamp_awaiting_finalization": transaction_data.timestamp_awaiting_finalization,
@@ -250,12 +306,114 @@ class TransactionsProcessor:
         receipt = TransactionsProcessor._leader_receipt(consensus_data)
         if not isinstance(receipt, dict):
             return 0, "NOT_VOTED"
+        genvm_result = receipt.get("genvm_result")
+        if isinstance(genvm_result, dict) and str(
+            genvm_result.get("error_code") or ""
+        ) in {
+            "CONSENSUS_LEADER_EXEC_TIMEOUT",
+            "CONSENSUS_VALIDATOR_EXEC_TIMEOUT",
+        }:
+            return 3, "TIMEOUT"
         value = str(receipt.get("execution_result") or "").upper()
         if value == "SUCCESS":
             return 1, "FINISHED_WITH_RETURN"
         if value in {"ERROR", "FAILURE", "FINISHEDWITHERROR", "FINISHED_WITH_ERROR"}:
             return 2, "FINISHED_WITH_ERROR"
         return 0, "NOT_VOTED"
+
+    @staticmethod
+    def _result_type_code(result: ConsensusResult) -> int:
+        """Map Studio's decision enum to v0.6 ITransactions.ResultType."""
+
+        return consensus_result_type_code(result)
+
+    @staticmethod
+    def _rpc_raw_round(
+        transaction_data: dict,
+        completed_rounds: list[dict],
+    ) -> int:
+        """Return the raw round currently materialized by v0.6 Consensus."""
+
+        completed_raw = (
+            completed_consensus_round_index(transaction_data.get("consensus_history"))
+            if completed_rounds
+            else 0
+        )
+        status = str(transaction_data.get("status") or "").upper()
+        executing = status in {
+            "PENDING",
+            "ACTIVATED",
+            "PROPOSING",
+            "COMMITTING",
+            "REVEALING",
+            "LEADER_REVEALING",
+        }
+        if not executing:
+            return completed_raw
+
+        if transaction_data.get("appeal_undetermined") or transaction_data.get(
+            "appeal_leader_timeout"
+        ):
+            return completed_raw + 2
+        if transaction_data.get("appealed") or transaction_data.get(
+            "appeal_validators_timeout"
+        ):
+            return completed_raw + (1 if completed_raw % 2 == 0 else 2)
+
+        if completed_rounds:
+            last_outcome = str(completed_rounds[-1].get("consensus_round") or "")
+            if last_outcome in {
+                ConsensusRound.VALIDATOR_APPEAL_SUCCESSFUL.value,
+                ConsensusRound.VALIDATOR_TIMEOUT_APPEAL_SUCCESSFUL.value,
+            }:
+                return completed_raw + 1
+        return completed_raw
+
+    @staticmethod
+    def _appeal_bond_for_round(accounting: dict | None, raw_round: int) -> int:
+        """Project Studio appeal custody onto Consensus RoundData.appealBond."""
+
+        if not isinstance(accounting, dict):
+            return 0
+        entries = accounting.get("appeal_bonds")
+        if not isinstance(entries, list):
+            return 0
+        for entry in reversed(entries):
+            if not isinstance(entry, dict):
+                continue
+            source_round = int(entry.get("sourceRound", entry.get("round", 0)) or 0)
+            status = str(entry.get("status") or "").upper()
+            default_appeal_round = (
+                source_round + (1 if source_round % 2 == 0 else 2)
+                if status in {"ACCEPTED", "VALIDATORS_TIMEOUT"}
+                else source_round + 2
+            )
+            appeal_round = int(
+                entry.get("appealRound", default_appeal_round) or default_appeal_round
+            )
+            if status == "LEADER_TIMEOUT":
+                bond_rounds = {appeal_round - 1}
+            elif status == "UNDETERMINED":
+                bond_rounds = {appeal_round - 1, appeal_round}
+            else:
+                bond_rounds = {appeal_round}
+            if raw_round in bond_rounds:
+                return int(entry.get("amount", entry.get("minimumRequired", 0)) or 0)
+        return 0
+
+    @staticmethod
+    def _last_history_outcome(transaction_data: dict) -> str:
+        rounds = completed_consensus_rounds(transaction_data.get("consensus_history"))
+        return str(rounds[-1].get("consensus_round") or "") if rounds else ""
+
+    @staticmethod
+    def _is_timeout_outcome(outcome: str) -> bool:
+        return outcome in {
+            ConsensusRound.LEADER_TIMEOUT.value,
+            ConsensusRound.VALIDATORS_TIMEOUT.value,
+            ConsensusRound.LEADER_TIMEOUT_APPEAL_FAILED.value,
+            ConsensusRound.VALIDATORS_TIMEOUT_APPEAL_FAILED.value,
+        }
 
     @staticmethod
     def _leader_receipt(consensus_data: dict | None) -> dict | None:
@@ -271,10 +429,21 @@ class TransactionsProcessor:
     @staticmethod
     def _storage_fee_used(accounting: dict) -> int:
         report = accounting.get("execution_fee_report") or {}
+        chargeable = (
+            report.get("chargeableExecution") if isinstance(report, dict) else {}
+        )
+        if isinstance(chargeable, dict) and chargeable.get("storage") is not None:
+            return int(chargeable.get("storage", 0) or 0)
+
+        chargeable_buckets = accounting.get("execution_fee_consumed_buckets") or []
+        if len(chargeable_buckets) > 1:
+            return int(chargeable_buckets[1])
+
+        # Legacy Studio receipts exposed storage as a distinct raw GenVM
+        # bucket. Retain this final fallback for persisted pre-v0.123 data.
         genvm_buckets = report.get("genvmBuckets") if isinstance(report, dict) else {}
         if isinstance(genvm_buckets, dict):
             return int(genvm_buckets.get("storage", 0) or 0)
-
         consumed_buckets = accounting.get("genvm_fee_consumed_buckets") or []
         if len(consumed_buckets) > 1:
             return int(consumed_buckets[1])
@@ -476,10 +645,11 @@ class TransactionsProcessor:
         triggered_on: str | None = None,  # "accepted" or "finalized"
         execution_mode: str = "NORMAL",  # "NORMAL", "LEADER_ONLY", or "LEADER_SELF_VALIDATOR"
         origin_address: str | None = None,
+        commit: bool = True,
     ) -> str:
 
         if transaction_hash is None:
-            current_nonce = self.get_transaction_count(from_address)
+            current_nonce = self.get_genlayer_transaction_count(from_address)
             transaction_hash = self._generate_transaction_hash(
                 from_address, to_address, data, value, type, current_nonce
             )
@@ -538,35 +708,44 @@ class TransactionsProcessor:
         self.session.add(new_transaction)
 
         self.session.flush()  # So that `created_at` gets set
-        self.session.commit()  # Persist the transaction to the database
+        if commit:
+            self.session.commit()  # Persist the transaction to the database
 
         return transaction_hash
 
     def _process_round_data(self, transaction_data: dict) -> dict:
         """Process round data and prepare transaction data."""
 
-        if (
-            transaction_data["consensus_history"] is not None
-            and "consensus_results" in transaction_data["consensus_history"]
-        ):
-            transaction_data["num_of_rounds"] = str(
-                len(transaction_data["consensus_history"]["consensus_results"])
-            )
-        else:
-            transaction_data["num_of_rounds"] = "0"
+        vote_nonce = (
+            0
+            if transaction_data.get("nonce") is None
+            else int(transaction_data["nonce"])
+        )
+
+        completed_rounds = completed_consensus_rounds(
+            transaction_data.get("consensus_history")
+        )
+        # Despite its historical name, ConsensusData.numOfRounds exposes the
+        # current raw round index, not a cardinality (round 0 -> 0, round 3 -> 3).
+        raw_round = self._rpc_raw_round(transaction_data, completed_rounds)
+        transaction_data["num_of_rounds"] = str(raw_round)
 
         validator_votes_name = []
         validator_votes = []
         validator_votes_hash = []
         round_validators = []
-        if (
-            transaction_data["consensus_history"] is not None
-            and "consensus_results" in transaction_data["consensus_history"]
-        ):
-            round_number = str(
-                len(transaction_data["consensus_history"]["consensus_results"]) - 1
-            )
-            last_round = transaction_data["consensus_history"]["consensus_results"][-1]
+        round_number = str(raw_round)
+        last_round_outcome = ""
+        completed_raw = (
+            completed_consensus_round_index(transaction_data["consensus_history"])
+            if completed_rounds
+            else 0
+        )
+        if completed_rounds and raw_round == completed_raw:
+            # Ignore trailing in-round UI events such as Leader Rotation. They
+            # do not create a Solidity round and cannot be the lastRound view.
+            last_round = completed_rounds[-1]
+            last_round_outcome = str(last_round.get("consensus_round") or "")
             leader = self._select_receipt(last_round.get("leader_result"), index=1)
             if (
                 leader is not None
@@ -575,43 +754,44 @@ class TransactionsProcessor:
                 and leader["node_config"].get("address") is not None
             ):
                 validator_votes_name.append(leader["vote"].upper())
-                vote_number = int(Vote.from_string(leader["vote"]))
+                vote_number = consensus_vote_type_code(
+                    leader["vote"], leader.get("execution_result")
+                )
                 validator_votes.append(vote_number)
                 leader_address = leader["node_config"]["address"]
                 validator_votes_hash.append(
-                    get_validator_vote_hash(
-                        leader_address, vote_number, transaction_data["nonce"]
-                    )
+                    get_validator_vote_hash(leader_address, vote_number, vote_nonce)
                 )
                 round_validators.append(leader_address)
 
-            for validator in last_round["validator_results"]:
+            for validator in last_round.get("validator_results") or []:
                 validator_votes_name.append(validator["vote"].upper())
-                vote_number = int(Vote.from_string(validator["vote"]))
+                vote_number = consensus_vote_type_code(
+                    validator["vote"], validator.get("execution_result")
+                )
                 validator_votes.append(vote_number)
                 validator_address = validator["node_config"]["address"]
                 validator_votes_hash.append(
-                    get_validator_vote_hash(
-                        validator_address, vote_number, transaction_data["nonce"]
-                    )
+                    get_validator_vote_hash(validator_address, vote_number, vote_nonce)
                 )
                 round_validators.append(validator_address)
-        else:
-            round_number = "0"
-
         # Handle upgrade transactions specially - they bypass consensus
         # and have upgrade_result instead of votes
-        if (
+        if self._is_timeout_outcome(last_round_outcome):
+            last_round_result = self._result_type_code(ConsensusResult.TIMEOUT)
+        elif (
             transaction_data.get("type") == TransactionType.UPGRADE_CONTRACT
             and transaction_data.get("consensus_data") is not None
             and "upgrade_result" in transaction_data["consensus_data"]
         ):
-            from backend.consensus.types import ConsensusResult
-
             if transaction_data["consensus_data"]["upgrade_result"] == "success":
-                last_round_result = int(ConsensusResult.MAJORITY_AGREE)
+                last_round_result = self._result_type_code(
+                    ConsensusResult.MAJORITY_AGREE
+                )
             else:
-                last_round_result = int(ConsensusResult.MAJORITY_DISAGREE)
+                last_round_result = self._result_type_code(
+                    ConsensusResult.MAJORITY_DISAGREE
+                )
         elif (
             # Handle LEADER_ONLY mode specially - no validators, so no votes to count
             # If the transaction is ACCEPTED or FINALIZED, the leader execution was successful
@@ -619,14 +799,29 @@ class TransactionsProcessor:
             and transaction_data.get("status")
             in [TransactionStatus.ACCEPTED.value, TransactionStatus.FINALIZED.value]
         ):
-            from backend.consensus.types import ConsensusResult
-
-            last_round_result = int(ConsensusResult.MAJORITY_AGREE)
+            last_round_result = self._result_type_code(ConsensusResult.MAJORITY_AGREE)
         else:
-            last_round_result = int(
+            last_round_result = self._result_type_code(
                 determine_consensus_from_votes(
                     [vote.lower() for vote in validator_votes_name]
                 )
+            )
+
+        fee_accounting = (transaction_data.get("data") or {}).get(FEE_ACCOUNTING_KEY)
+        fees_distribution = (
+            fee_accounting.get("fees_distribution")
+            if isinstance(fee_accounting, dict)
+            else None
+        )
+        if isinstance(fees_distribution, dict):
+            rotation_limit = runtime_rotations_for_round(
+                fees_distribution,
+                transaction_data.get("config_rotation_rounds"),
+                int(round_number),
+            )
+        else:
+            rotation_limit = max(
+                0, int(transaction_data.get("config_rotation_rounds") or 0)
             )
 
         transaction_data["last_round"] = {
@@ -634,10 +829,12 @@ class TransactionsProcessor:
             "leader_index": "0",
             "votes_committed": str(len(validator_votes_name)),
             "votes_revealed": str(len(validator_votes_name)),
-            "appeal_bond": "0",
+            "appeal_bond": str(self._appeal_bond_for_round(fee_accounting, raw_round)),
             "rotations_left": str(
-                (transaction_data.get("config_rotation_rounds") or 0)
-                - (transaction_data.get("rotation_count") or 0)
+                max(
+                    0,
+                    rotation_limit - int(transaction_data.get("rotation_count") or 0),
+                )
             ),
             "result": last_round_result,
             "round_validators": round_validators,
@@ -653,7 +850,6 @@ class TransactionsProcessor:
         transaction_data["current_timestamp"] = str(round(time.time()))
         transaction_data["sender"] = transaction_data["from_address"]
         transaction_data["recipient"] = transaction_data["to_address"]
-        transaction_data["tx_slot"] = "0"
         transaction_data["created_timestamp"] = str(
             int(datetime.fromisoformat(transaction_data["created_at"]).timestamp())
         )
@@ -668,11 +864,11 @@ class TransactionsProcessor:
             "processing_block": "0",
             "proposal_block": "0",
         }
-        if (
-            transaction_data["consensus_history"] is not None
-            and "consensus_results" in transaction_data["consensus_history"]
-        ):
-            first_round = transaction_data["consensus_history"]["consensus_results"][0]
+        history_rounds = completed_consensus_rounds(
+            transaction_data.get("consensus_history")
+        )
+        if history_rounds:
+            first_round = history_rounds[0]
             leader = self._select_receipt(first_round.get("leader_result"), index=0)
             if (
                 leader is not None
@@ -705,6 +901,32 @@ class TransactionsProcessor:
             transaction_data["last_leader"] = ""
         return transaction_data
 
+    def _transaction_issued_slot(self, transaction: Transactions) -> int:
+        """Return Consensus' recipient-scoped, zero-based issuance slot.
+
+        ``Queues.enqueueNewPending`` assigns ``txSlot`` from the recipient's
+        monotonically increasing ``issuedTxCount``. Studio's durable
+        ``queue_order`` gives us the same serialization boundary. Local SEND
+        rows are execution effects rather than Consensus transactions, so they
+        must not advance the protocol slot.
+        """
+
+        if transaction.type == TransactionType.SEND.value:
+            return 0
+        if transaction.to_address is None:
+            return 0
+        return int(
+            self.session.query(func.count(Transactions.hash))
+            .filter(
+                func.lower(Transactions.to_address)
+                == str(transaction.to_address).lower(),
+                Transactions.type != TransactionType.SEND.value,
+                Transactions.queue_order < transaction.queue_order,
+            )
+            .scalar()
+            or 0
+        )
+
     def _encode_transaction_data(self, transaction_data: dict) -> dict:
         to_encode = []
         if transaction_data["data"] is not None:
@@ -732,7 +954,7 @@ class TransactionsProcessor:
             and "leader_receipt" in transaction_data["consensus_data"]
         ):
             leader_receipt = self._select_receipt(
-                transaction_data["consensus_data"]["leader_receipt"], index=1
+                transaction_data["consensus_data"]["leader_receipt"], index=0
             )
 
         if (
@@ -741,9 +963,17 @@ class TransactionsProcessor:
             and leader_receipt["node_config"].get("address") is not None
             and leader_receipt.get("vote") is not None
         ):
+            vote_type = self._execution_result_fields(
+                {"leader_receipt": leader_receipt}
+            )[0]
+            if vote_type == 0:
+                vote_type = consensus_vote_type_code(
+                    leader_receipt["vote"], leader_receipt.get("execution_result")
+                )
             transaction_data["tx_execution_hash"] = get_tx_execution_hash(
                 leader_receipt["node_config"]["address"],
-                int(Vote.from_string(leader_receipt["vote"])),
+                vote_type,
+                int(transaction_data.get("nonce") or 0),
             )
         else:
             transaction_data["tx_execution_hash"] = ""
@@ -837,7 +1067,15 @@ class TransactionsProcessor:
         status_to_queue_type = {
             TransactionStatus.PENDING.value: "1",
             TransactionStatus.ACTIVATED.value: "1",
+            TransactionStatus.PROPOSING.value: "1",
+            TransactionStatus.COMMITTING.value: "1",
+            TransactionStatus.REVEALING.value: "1",
+            "LEADER_REVEALING": "1",
+            "APPEAL_COMMITTING": "1",
+            "APPEAL_REVEALING": "1",
             TransactionStatus.ACCEPTED.value: "2",
+            TransactionStatus.LEADER_TIMEOUT.value: "2",
+            TransactionStatus.VALIDATORS_TIMEOUT.value: "2",
             TransactionStatus.UNDETERMINED.value: "3",
         }
         transaction_data["queue_type"] = status_to_queue_type.get(
@@ -848,6 +1086,12 @@ class TransactionsProcessor:
         return transaction_data
 
     def _process_result(self, transaction_data: dict) -> dict:
+        if self._is_timeout_outcome(self._last_history_outcome(transaction_data)):
+            consensus_result = ConsensusResult.TIMEOUT
+            transaction_data["result"] = self._result_type_code(consensus_result)
+            transaction_data["result_name"] = consensus_result.value
+            return transaction_data
+
         # Handle upgrade transactions specially - they bypass consensus
         # and have upgrade_result instead of votes
         if (
@@ -855,13 +1099,11 @@ class TransactionsProcessor:
             and transaction_data.get("consensus_data") is not None
             and "upgrade_result" in transaction_data["consensus_data"]
         ):
-            from backend.consensus.types import ConsensusResult
-
             if transaction_data["consensus_data"]["upgrade_result"] == "success":
                 consensus_result = ConsensusResult.MAJORITY_AGREE
             else:
                 consensus_result = ConsensusResult.MAJORITY_DISAGREE
-            transaction_data["result"] = int(consensus_result)
+            transaction_data["result"] = self._result_type_code(consensus_result)
             transaction_data["result_name"] = consensus_result.value
             return transaction_data
 
@@ -873,10 +1115,8 @@ class TransactionsProcessor:
             TransactionStatus.ACCEPTED.value,
             TransactionStatus.FINALIZED.value,
         ]:
-            from backend.consensus.types import ConsensusResult
-
             consensus_result = ConsensusResult.MAJORITY_AGREE
-            transaction_data["result"] = int(consensus_result)
+            transaction_data["result"] = self._result_type_code(consensus_result)
             transaction_data["result_name"] = consensus_result.value
             return transaction_data
 
@@ -887,7 +1127,7 @@ class TransactionsProcessor:
         else:
             votes_temp = []
         consensus_result = determine_consensus_from_votes(votes_temp)
-        transaction_data["result"] = int(consensus_result)
+        transaction_data["result"] = self._result_type_code(consensus_result)
         transaction_data["result_name"] = consensus_result.value
         return transaction_data
 
@@ -939,6 +1179,7 @@ class TransactionsProcessor:
 
         # Process for testnet
         transaction_data = self._prepare_basic_transaction_data(transaction_data)
+        transaction_data["tx_slot"] = str(self._transaction_issued_slot(transaction))
         transaction_data = self._process_result(transaction_data)
         transaction_data = self._encode_transaction_data(transaction_data)
         transaction_data = self._process_execution_hash(transaction_data)
@@ -1204,6 +1445,110 @@ class TransactionsProcessor:
         data["fee_accounting"] = fee_accounting
         self.update_transaction_data(transaction_hash, data)
 
+    def mutate_transaction_fee_accounting(
+        self,
+        transaction_hash: str,
+        mutator: Callable[[dict], dict],
+        *,
+        commit: bool = True,
+    ) -> dict:
+        """Mutate the latest fee accounting while holding the transaction row.
+
+        Consensus workers run asynchronously, while RPC top-ups can arrive at
+        any in-flight status. Every worker-side accounting transition must
+        therefore derive from the post-lock JSON value; writing a snapshot
+        captured before a concurrent top-up would erase paid budget.
+        """
+
+        row = (
+            self.session.execute(
+                text("SELECT data FROM transactions WHERE hash = :hash FOR UPDATE"),
+                {"hash": transaction_hash},
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            raise ValueError("TransactionNotFound")
+        data = dict(row["data"] or {})
+        current = data.get(FEE_ACCOUNTING_KEY)
+        if not isinstance(current, dict):
+            raise ValueError("FeeAccountingMissing")
+        updated = mutator(current)
+        data[FEE_ACCOUNTING_KEY] = updated
+        self.session.execute(
+            text(
+                "UPDATE transactions SET data = CAST(:data AS jsonb)"
+                " WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash, "data": json.dumps(data)},
+        )
+        if commit:
+            self.session.commit()
+        return updated
+
+    def apply_transaction_fee_top_up(
+        self,
+        transaction_hash: str,
+        *,
+        fees_distribution: dict,
+        amount: int,
+        sender: str,
+        policy,
+    ) -> dict:
+        """Apply one top-up to the latest accounting snapshot under a row lock.
+
+        The caller commits only after debiting the sender on this same session.
+        This gives Studio the serial execution semantics of FeeManager.topUpFees:
+        concurrent top-ups compose instead of both charging against one stale
+        read and allowing the last JSON write to erase the other contribution.
+        """
+
+        row = (
+            self.session.execute(
+                text(
+                    "SELECT status, data, num_of_initial_validators"
+                    " FROM transactions WHERE hash = :hash FOR UPDATE"
+                ),
+                {"hash": transaction_hash},
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            raise ValueError("TransactionNotFound")
+        if row["status"] in {
+            TransactionStatus.ACCEPTED.value,
+            TransactionStatus.UNDETERMINED.value,
+            TransactionStatus.LEADER_TIMEOUT.value,
+            TransactionStatus.VALIDATORS_TIMEOUT.value,
+            TransactionStatus.FINALIZED.value,
+            TransactionStatus.CANCELED.value,
+        }:
+            raise ValueError("InvalidTransactionStatus")
+
+        data = dict(row["data"] or {})
+        current = data.get(FEE_ACCOUNTING_KEY)
+        if current is None:
+            raise ValueError("FeeAccountingMissing")
+        updated = apply_fee_top_up(
+            current,
+            fees_distribution=fees_distribution,
+            amount=amount,
+            sender=sender,
+            num_of_validators=int(row["num_of_initial_validators"] or 5),
+            policy=policy,
+        )
+        data[FEE_ACCOUNTING_KEY] = updated
+        self.session.execute(
+            text(
+                "UPDATE transactions SET data = CAST(:data AS jsonb)"
+                " WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash, "data": json.dumps(data)},
+        )
+        return updated
+
     def get_transaction_count(self, address: str) -> int:
         # Normalize address to checksum format
         try:
@@ -1211,14 +1556,201 @@ class TransactionsProcessor:
         except:
             checksum_address = address
 
-        # Always use database count as source of truth
-        # Our transactions are stored in PostgreSQL, not on Hardhat blockchain
-        count = (
+        if address is not None:
+            ledger_address = str(checksum_address).lower()
+            highest_nonce = (
+                self.session.query(func.max(EvmEnvelope.nonce))
+                .filter(EvmEnvelope.from_address == ledger_address)
+                .scalar()
+            )
+            return 0 if highest_nonce is None else int(highest_nonce) + 1
+
+        # Studio-only system transactions (funding) are not signed EVM
+        # envelopes and retain their historical database-count nonce.
+        return int(
             self.session.query(Transactions)
-            .filter(Transactions.from_address == checksum_address)
+            .filter(Transactions.from_address.is_(None))
             .count()
         )
-        return count
+
+    def get_genlayer_transaction_count(self, address: str | None) -> int:
+        """Count Studio transaction rows authored by one logical sender.
+
+        This is deliberately separate from ``eth_getTransactionCount``. Ghost
+        contracts do not submit signed EVM envelopes when MessagePayments
+        creates children, but Studio still needs a stable monotonically
+        increasing child metadata nonce and fallback-hash input.
+        """
+
+        if address is None:
+            return int(
+                self.session.query(Transactions)
+                .filter(Transactions.from_address.is_(None))
+                .count()
+            )
+        try:
+            address = self.web3.to_checksum_address(address)
+        except Exception:
+            pass
+        return int(
+            self.session.query(Transactions)
+            .filter(Transactions.from_address == address)
+            .count()
+        )
+
+    def begin_evm_envelope(
+        self,
+        transaction_hash: str,
+        from_address: str,
+        nonce: int,
+    ) -> str | None:
+        """Lock one sender and validate exact EVM nonce/replay semantics.
+
+        Returns the prior successful response for an identical raw envelope.
+        The caller records a new success only after all protocol mutations have
+        completed, in the same DB transaction.
+        """
+
+        from_address = to_checksum_address(from_address).lower()
+        nonce = int(nonce)
+        if nonce < 0:
+            raise ValueError("InvalidNonce")
+
+        bind = self.session.get_bind()
+        if bind.dialect.name == "postgresql":
+            self.session.execute(
+                text(
+                    "SELECT pg_advisory_xact_lock(" "hashtextextended(:sender_key, 0))"
+                ),
+                {"sender_key": f"evm-sender:{from_address.lower()}"},
+            )
+
+        existing = self.session.get(EvmEnvelope, transaction_hash)
+        if existing is not None:
+            return existing.result
+
+        expected = self.get_transaction_count(from_address)
+        if nonce < expected:
+            raise ValueError(f"NonceTooLow(expected={expected},actual={nonce})")
+        if nonce > expected:
+            raise ValueError(f"NonceTooHigh(expected={expected},actual={nonce})")
+        return None
+
+    def record_evm_envelope(
+        self,
+        transaction_hash: str,
+        from_address: str,
+        nonce: int,
+        result: str,
+        *,
+        to_address: str | None = None,
+        success: bool = True,
+        error: str | None = None,
+    ) -> None:
+        self.session.add(
+            EvmEnvelope(
+                hash=transaction_hash,
+                from_address=to_checksum_address(from_address).lower(),
+                nonce=int(nonce),
+                result=result,
+                to_address=(str(to_address).lower() if to_address else None),
+                success=bool(success),
+                error=(str(error)[:1024] if error else None),
+            )
+        )
+        self.session.flush()
+
+    def get_evm_envelope(self, transaction_hash: str) -> EvmEnvelope | None:
+        return self.session.get(EvmEnvelope, transaction_hash)
+
+    def lock_transaction_admission(self, transaction_hash: str) -> None:
+        """Serialize one raw transaction's admission across RPC workers.
+
+        The lock is held by the request transaction until insert_transaction
+        commits. This keeps duplicate submissions from both authoring shadow
+        helper state before either worker can observe the canonical DB row.
+        """
+
+        bind = self.session.get_bind()
+        if bind.dialect.name != "postgresql":
+            return
+        self.session.execute(
+            text(
+                "SELECT pg_advisory_xact_lock("
+                "hashtextextended(:transaction_hash, 0))"
+            ),
+            {"transaction_hash": transaction_hash},
+        )
+
+    def lock_ghost_factory(self) -> None:
+        """Serialize Studio's virtual GhostFactory for this DB transaction."""
+
+        bind = self.session.get_bind()
+        if bind.dialect.name != "postgresql":
+            return
+        self.session.execute(
+            text(
+                "SELECT pg_advisory_xact_lock("
+                "hashtextextended('studio-v0.6-ghost-factory', 0))"
+            )
+        )
+
+    def lock_pending_recipients(self, addresses: Iterable[str]) -> None:
+        """Serialize child admission for every touched recipient queue.
+
+        One Consensus EVM transaction processes a message batch serially.  A
+        Studio worker can process unrelated parents concurrently, so acquire
+        the same recipient-scoped locks used by top-level RPC admission before
+        reading queue depth.  Sorting the complete set keeps overlapping
+        multi-recipient batches deadlock-free.
+        """
+
+        bind = self.session.get_bind()
+        if bind.dialect.name != "postgresql":
+            return
+        for address in sorted(
+            {
+                str(address).lower()
+                for address in addresses
+                if isinstance(address, str) and address
+            }
+        ):
+            self.session.execute(
+                text("SELECT pg_advisory_xact_lock(" "hashtextextended(:lock_key, 0))"),
+                {"lock_key": f"pending-recipient:{address}"},
+            )
+
+    def get_successful_ghost_creation_count(self) -> int:
+        """Return the virtual factory nonce offset.
+
+        GhostFactory creates and registers the proxy during transaction
+        admission, before GenVM executes.  A later failed or canceled deploy
+        therefore still consumed one successful CREATE/CREATE2 and remains a
+        registered ghost, so every admitted deployment row is counted.
+        """
+
+        return int(
+            self.session.query(Transactions)
+            .filter(Transactions.type == TransactionType.DEPLOY_CONTRACT.value)
+            .count()
+        )
+
+    def is_genvm_contract_address(self, address: str) -> bool:
+        """Whether Consensus would have registered ``address`` as a ghost."""
+
+        try:
+            address = to_checksum_address(address)
+        except (TypeError, ValueError):
+            return False
+        return (
+            self.session.query(Transactions.hash)
+            .filter(
+                Transactions.type == TransactionType.DEPLOY_CONTRACT.value,
+                Transactions.to_address == address,
+            )
+            .first()
+            is not None
+        )
 
     def get_transactions_for_address(
         self,
@@ -1245,7 +1777,11 @@ class TransactionsProcessor:
                 )
             )
 
-        transactions = query.order_by(Transactions.created_at.desc()).all()
+        transactions = query.order_by(
+            Transactions.created_at.desc(),
+            Transactions.nonce.desc().nullslast(),
+            Transactions.hash.desc(),
+        ).all()
 
         return [
             self._parse_transaction_data(transaction) for transaction in transactions
@@ -1274,6 +1810,181 @@ class TransactionsProcessor:
             )
             if result.rowcount > 0:
                 self.session.commit()
+
+    def admit_transaction_appeal(
+        self,
+        transaction_hash: str,
+        *,
+        expected_decision_id: int,
+        submitted_at: int,
+        appeal_deadline: int,
+        retention_bps: int,
+        prepare_fee_accounting: Callable[[dict | None], tuple[dict | None, int]],
+    ) -> int:
+        """Atomically reserve one exact-decision appeal.
+
+        The caller deliberately commits only after applying the matching
+        account debit/refund on this same session. This keeps Studio's appeal
+        admission equivalent to one payable Solidity transaction and makes a
+        concurrent second submission lose at the ``appealed = false`` gate.
+        """
+
+        row = (
+            self.session.execute(
+                text(
+                    "SELECT status, appealed, consensus_history, consensus_data,"
+                    " contract_snapshot, appeal_failed, appeal_undetermined,"
+                    " appeal_leader_timeout, appeal_validators_timeout,"
+                    " appeal_processing_time, rotation_count,"
+                    " leader_timeout_validators, timestamp_awaiting_finalization, data"
+                    " FROM transactions"
+                    " WHERE hash = :hash FOR UPDATE"
+                ),
+                {"hash": transaction_hash},
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            raise ValueError("TransactionNotFound")
+        if row["status"] not in {
+            TransactionStatus.ACCEPTED.value,
+            TransactionStatus.UNDETERMINED.value,
+            TransactionStatus.LEADER_TIMEOUT.value,
+            TransactionStatus.VALIDATORS_TIMEOUT.value,
+        } or bool(row["appealed"]):
+            raise ValueError("CanNotAppeal")
+        if acceptance_dispatch_pending((row["data"] or {}).get(FEE_ACCOUNTING_KEY)):
+            raise ValueError("CanNotAppeal")
+        # The RPC may have waited for this row lock. Consensus evaluates the
+        # deadline at transaction execution, not when the caller began
+        # submitting it, so re-sample after lock acquisition and reject an
+        # appeal whose window expired while queued.
+        admitted_at = max(int(submitted_at), int(time.time()))
+        updated = prepare_appeal_decision_basis(
+            row["consensus_history"],
+            expected_decision_id=expected_decision_id,
+            submitted_at=admitted_at,
+            appeal_deadline=appeal_deadline,
+            retention_bps=retention_bps,
+            appeal_context=(
+                LEADER_APPEAL_REPLAY_CONTEXT
+                if row["status"]
+                in {
+                    TransactionStatus.UNDETERMINED.value,
+                    TransactionStatus.LEADER_TIMEOUT.value,
+                }
+                else VALIDATOR_APPEAL_CONTEXT
+            ),
+        )
+        data = dict(row["data"] or {})
+        fee_accounting, surplus_refund = prepare_fee_accounting(
+            data.get(FEE_ACCOUNTING_KEY)
+        )
+        if fee_accounting is not None:
+            data[FEE_ACCOUNTING_KEY] = fee_accounting
+        status_value = (
+            row["status"].value
+            if hasattr(row["status"], "value")
+            else str(row["status"])
+        )
+        data[APPEAL_RECOVERY_SNAPSHOT_KEY] = {
+            "status": status_value,
+            "consensusHistory": copy.deepcopy(updated),
+            "consensusData": copy.deepcopy(row["consensus_data"]),
+            "contractSnapshot": copy.deepcopy(row["contract_snapshot"]),
+            "appealFailed": int(row["appeal_failed"] or 0),
+            "appealUndetermined": bool(row["appeal_undetermined"]),
+            "appealLeaderTimeout": bool(row["appeal_leader_timeout"]),
+            "appealValidatorsTimeout": bool(row["appeal_validators_timeout"]),
+            "appealProcessingTime": int(row["appeal_processing_time"] or 0),
+            "rotationCount": int(row["rotation_count"] or 0),
+            "leaderTimeoutValidators": copy.deepcopy(row["leader_timeout_validators"]),
+            "timestampAwaitingFinalization": row["timestamp_awaiting_finalization"],
+            "timestampAppeal": admitted_at,
+        }
+        self.session.execute(
+            text(
+                "UPDATE transactions"
+                " SET appealed = true,"
+                " timestamp_appeal = :submitted_at,"
+                " consensus_history = CAST(:history AS jsonb),"
+                " data = CAST(:data AS jsonb)"
+                " WHERE hash = :hash"
+            ),
+            {
+                "hash": transaction_hash,
+                "submitted_at": admitted_at,
+                "history": json.dumps(updated),
+                "data": json.dumps(data),
+            },
+        )
+        return int(surplus_refund)
+
+    def restore_transaction_appeal_for_retry(self, transaction_hash: str) -> bool:
+        """Restore the exact admitted state after interrupted appeal work."""
+
+        transaction = (
+            self.session.query(Transactions)
+            .filter_by(hash=transaction_hash)
+            .populate_existing()
+            .with_for_update()
+            .one_or_none()
+        )
+        if transaction is None or not isinstance(transaction.data, dict):
+            return False
+        snapshot = transaction.data.get(APPEAL_RECOVERY_SNAPSHOT_KEY)
+        if not isinstance(snapshot, dict):
+            return False
+        try:
+            transaction.status = TransactionStatus(str(snapshot["status"]))
+        except (KeyError, TypeError, ValueError):
+            return False
+
+        transaction.consensus_history = copy.deepcopy(snapshot.get("consensusHistory"))
+        transaction.consensus_data = copy.deepcopy(snapshot.get("consensusData"))
+        transaction.contract_snapshot = copy.deepcopy(snapshot.get("contractSnapshot"))
+        transaction.appealed = True
+        transaction.appeal_failed = int(snapshot.get("appealFailed", 0) or 0)
+        transaction.appeal_undetermined = bool(
+            snapshot.get("appealUndetermined", False)
+        )
+        transaction.appeal_leader_timeout = bool(
+            snapshot.get("appealLeaderTimeout", False)
+        )
+        transaction.appeal_validators_timeout = bool(
+            snapshot.get("appealValidatorsTimeout", False)
+        )
+        transaction.appeal_processing_time = int(
+            snapshot.get("appealProcessingTime", 0) or 0
+        )
+        transaction.rotation_count = int(snapshot.get("rotationCount", 0) or 0)
+        transaction.leader_timeout_validators = copy.deepcopy(
+            snapshot.get("leaderTimeoutValidators")
+        )
+        transaction.timestamp_awaiting_finalization = snapshot.get(
+            "timestampAwaitingFinalization"
+        )
+        transaction.timestamp_appeal = int(snapshot.get("timestampAppeal", 0) or 0)
+        self.session.flush()
+        return True
+
+    def clear_transaction_appeal_recovery_snapshot(
+        self, transaction_hash: str, *, include_pending: bool = True
+    ) -> None:
+        """Drop the transient snapshot once an appeal has completed."""
+
+        pending_guard = "" if include_pending else " AND status != 'PENDING'"
+        self.session.execute(
+            text(
+                "UPDATE transactions SET data = data - :snapshot_key"
+                " WHERE hash = :hash AND data ? :snapshot_key" + pending_guard
+            ),
+            {
+                "hash": transaction_hash,
+                "snapshot_key": APPEAL_RECOVERY_SNAPSHOT_KEY,
+            },
+        )
 
     def set_transaction_timestamp_awaiting_finalization(
         self, transaction_hash: str, timestamp_awaiting_finalization: int = None
@@ -1402,10 +2113,10 @@ class TransactionsProcessor:
             self.session.query(Transactions)
             .options(selectinload(Transactions.triggered_transactions))
             .filter(
-                Transactions.created_at > transaction.created_at,
+                _transaction_order_tuple() > _transaction_order_value(transaction),
                 Transactions.to_address == transaction.to_address,
             )
-            .order_by(Transactions.created_at)
+            .order_by(Transactions.queue_order)
             .all()
         )
         return [
@@ -1464,6 +2175,20 @@ class TransactionsProcessor:
             "current_status_changes": [],
             "current_monitoring": {},
         }
+        if extra_status_change in {
+            TransactionStatus.ACCEPTED,
+            TransactionStatus.UNDETERMINED,
+            TransactionStatus.LEADER_TIMEOUT,
+            TransactionStatus.VALIDATORS_TIMEOUT,
+        }:
+            new_history = materialize_decision_metadata(
+                new_history,
+                status=extra_status_change.value,
+                materialized_at=int(time.time()),
+                default_appeal_window=int(
+                    os.environ.get("VITE_FINALITY_WINDOW", "1800")
+                ),
+            )
 
         self.session.execute(
             text(
@@ -1482,6 +2207,52 @@ class TransactionsProcessor:
             ),
             {"hash": transaction_hash},
         )
+        self.session.commit()
+
+    def reset_transaction_for_recomputation(
+        self,
+        transaction_hash: str,
+        data: dict | None,
+    ) -> None:
+        """Invalidate every attempt-local field before an ancestor rewind.
+
+        The transaction identity, escrow, queue order, and credited user value
+        remain durable. Consensus evidence and worker ownership belong to the
+        invalidated descendant attempt and must not survive into recomputation.
+        """
+
+        result = self.session.execute(
+            text(
+                """
+                UPDATE transactions
+                SET status = 'PENDING'::transaction_status,
+                    data = CAST(:data AS jsonb),
+                    consensus_data = NULL,
+                    consensus_history = '{}'::jsonb,
+                    contract_snapshot = NULL,
+                    appealed = false,
+                    appeal_failed = 0,
+                    appeal_undetermined = false,
+                    appeal_leader_timeout = false,
+                    appeal_validators_timeout = false,
+                    timestamp_appeal = NULL,
+                    appeal_processing_time = 0,
+                    timestamp_awaiting_finalization = NULL,
+                    last_vote_timestamp = NULL,
+                    rotation_count = 0,
+                    leader_timeout_validators = NULL,
+                    blocked_at = NULL,
+                    worker_id = NULL
+                WHERE hash = :hash
+                """
+            ),
+            {
+                "hash": transaction_hash,
+                "data": json.dumps(data) if data is not None else None,
+            },
+        )
+        if result.rowcount == 0:
+            raise ValueError("TransactionNotFound")
         self.session.commit()
 
     def set_transaction_timestamp_appeal(
@@ -1551,7 +2322,10 @@ class TransactionsProcessor:
                 ),
             )
             .distinct(Transactions.to_address)
-            .order_by(Transactions.to_address, Transactions.created_at.asc())
+            .order_by(
+                Transactions.to_address,
+                Transactions.queue_order.asc(),
+            )
             .all()
         )
 
@@ -1575,7 +2349,7 @@ class TransactionsProcessor:
             return None
 
         filters = [
-            Transactions.created_at < transaction.created_at,
+            _transaction_order_tuple() < _transaction_order_value(transaction),
             Transactions.to_address == transaction.to_address,
         ]
         if status is not None:
@@ -1606,7 +2380,7 @@ class TransactionsProcessor:
         closest_transaction = (
             self.session.query(Transactions)
             .filter(*filters)
-            .order_by(desc(Transactions.created_at))
+            .order_by(Transactions.queue_order.desc())
             .first()
         )
 
@@ -1693,7 +2467,10 @@ class TransactionsProcessor:
 
     def get_pending_transaction_count_for_address(self, address: str) -> int:
         """
-        Get the count of pending transactions for a given recipient address.
+        Get Consensus pending-queue membership for a recipient.
+
+        The activated head remains in Queues.pending until it reaches a
+        decision, so all pre-decision processing states consume one slot.
 
         Args:
             address: The recipient address to count pending transactions for
@@ -1703,8 +2480,8 @@ class TransactionsProcessor:
         """
         try:
             # Normalize address to checksum format
-            checksum_address = self.web3.to_checksum_address(address)
-        except ValueError:
+            checksum_address = to_checksum_address(address)
+        except (TypeError, ValueError):
             # If address normalization fails, use as-is
             checksum_address = address
 
@@ -1712,7 +2489,15 @@ class TransactionsProcessor:
             self.session.query(Transactions)
             .filter(
                 Transactions.to_address == checksum_address,
-                Transactions.status == TransactionStatus.PENDING,
+                Transactions.status.in_(
+                    [
+                        TransactionStatus.PENDING,
+                        TransactionStatus.ACTIVATED,
+                        TransactionStatus.PROPOSING,
+                        TransactionStatus.COMMITTING,
+                        TransactionStatus.REVEALING,
+                    ]
+                ),
             )
             .count()
         )
@@ -1726,6 +2511,31 @@ class TransactionsProcessor:
             return None
         transaction_status = transaction.status
         return self._status_payload(transaction_status.value)
+
+    def is_transaction_finalization_head(self, transaction_hash: str) -> bool:
+        """Return whether no older non-terminal transaction blocks this decision.
+
+        This mirrors the per-recipient ordering gate used by
+        ``claim_next_finalization`` so lifecycle projection never advertises a
+        Finalize action that the worker is not allowed to execute.
+        """
+        transaction = (
+            self.session.query(Transactions).filter_by(hash=transaction_hash).first()
+        )
+        if transaction is None:
+            return False
+        return (
+            not self.session.query(Transactions.hash)
+            .filter(
+                Transactions.to_address == transaction.to_address,
+                _transaction_order_tuple() < _transaction_order_value(transaction),
+                Transactions.hash != transaction.hash,
+                Transactions.status.notin_(
+                    [TransactionStatus.FINALIZED, TransactionStatus.CANCELED]
+                ),
+            )
+            .first()
+        )
 
     def get_processing_transaction_for_contract(
         self, contract_address: str
@@ -1781,7 +2591,7 @@ class TransactionsProcessor:
                 Transactions.to_address == contract_address,
                 Transactions.status == TransactionStatus.PENDING,
             )
-            .order_by(Transactions.created_at)
+            .order_by(Transactions.queue_order)
             .first()
         )
 

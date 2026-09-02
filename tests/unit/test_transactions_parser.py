@@ -7,11 +7,23 @@ from backend.protocol_rpc.transactions_parser import (
     DecodedMethodSendData,
     DecodedDeploymentData,
 )
+from backend.protocol_rpc.types import (
+    DecodedRollupTransaction,
+    DecodedRollupTransactionData,
+    DecodedRollupTransactionDataArgs,
+    ZERO_ADDRESS,
+)
+from backend.domain.types import TransactionType
 import re
 from typing import Optional, List, Any
 from rlp import encode
 from web3 import Web3
 import backend.node.genvm.origin.calldata as calldata
+from backend.domain.types import TransactionType
+from backend.rollup.default_contracts.consensus_main import (
+    _abi_function_signature,
+    get_default_consensus_main_contract,
+)
 
 
 @pytest.fixture
@@ -22,6 +34,88 @@ def transaction_parser():
     # Ensure no ABI is returned so function decoding is skipped
     consensus_service.load_contract = Mock(return_value=None)
     return TransactionParser(consensus_service)
+
+
+def test_default_consensus_abi_exports_exact_decision_guarded_actions():
+    default_contract = get_default_consensus_main_contract()
+    assert default_contract["address"] == "0xb7278A61aa25c888815aFC32Ad3cC52fF24fE575"
+    abi = default_contract["abi"]
+    functions = {
+        entry["name"]: entry for entry in abi if entry.get("type") == "function"
+    }
+
+    assert [item["type"] for item in functions["submitAppeal"]["inputs"]] == [
+        "bytes32",
+        "uint256",
+    ]
+    assert [item["type"] for item in functions["topUpAndSubmitAppeal"]["inputs"]] == [
+        "bytes32",
+        "uint256",
+        "tuple",
+    ]
+    assert [item["type"] for item in functions["finalizeTransaction"]["inputs"]] == [
+        "bytes32",
+        "uint256",
+    ]
+    assert [item["type"] for item in functions["deploySalted"]["inputs"]] == ["tuple"]
+    assert functions["deploySalted"]["stateMutability"] == "payable"
+    # addTransaction is deliberately served at its pre-fee signature; the
+    # fee-aware overload stays on the decode surface only. See
+    # _SERVED_PRE_FEE_FUNCTION_NAMES.
+    assert [item["type"] for item in functions["addTransaction"]["inputs"]] == [
+        "address",
+        "address",
+        "uint256",
+        "uint256",
+        "bytes",
+    ]
+    assert [item["type"] for item in functions["topUpFees"]["inputs"]] == [
+        "bytes32",
+        "tuple",
+    ]
+    add_params = functions["deploySalted"]["inputs"][0]["components"]
+    assert [item["type"] for item in add_params] == [
+        "address",
+        "address",
+        "uint256",
+        "uint256",
+        "uint256",
+        "uint256",
+        "uint256",
+        "tuple",
+        "bytes",
+        "tuple[]",
+    ]
+    assert [item["type"] for item in add_params[7]["components"]] == [
+        "uint256",
+        "uint256",
+        "uint256",
+        "uint256",
+        "uint256",
+        "uint256",
+        "uint256[]",
+        "uint256",
+        "uint256",
+        "uint256",
+    ]
+    assert [item["type"] for item in add_params[9]["components"]] == [
+        "uint8",
+        "bool",
+        "uint256",
+        "address",
+        "bytes32",
+        "uint256",
+        "bytes",
+    ]
+    created = next(
+        entry
+        for entry in abi
+        if entry.get("type") == "event" and entry.get("name") == "CreatedTransaction"
+    )
+    assert [(item["type"], item["indexed"]) for item in created["inputs"]] == [
+        ("bytes32", True),
+        ("uint256", False),
+    ]
 
 
 def test_transaction_rpc_payload_stringifies_unsafe_fee_integers():
@@ -359,11 +453,19 @@ def _fee_aware_call_data(parser, function_name: str, params: tuple) -> bytes:
     return selector + parser.web3.codec.encode([input_type], [params])
 
 
-def _contract_call_data(parser, function_name: str, params: list) -> bytes:
+def _contract_call_data(
+    parser,
+    function_name: str,
+    params: list,
+    *,
+    input_count: int | None = None,
+) -> bytes:
     abi_entry = next(
         entry
         for entry in parser._get_contract_abi()
-        if entry["type"] == "function" and entry["name"] == function_name
+        if entry["type"] == "function"
+        and entry["name"] == function_name
+        and (input_count is None or len(entry["inputs"]) == input_count)
     )
     input_types = [
         parser._canonical_abi_type(abi_input) for abi_input in abi_entry["inputs"]
@@ -426,11 +528,12 @@ def test_decode_signed_transaction_fee_aware_v06(function_name, monkeypatch):
         message_allocations,
     )
 
+    fee_aware_data = _fee_aware_call_data(parser, function_name, params)
     raw = _build_eip1559_raw(
         nonce=8,
         to=bytes.fromhex("0000000000000000000000000000000000000000"),
         value=70,
-        data=_fee_aware_call_data(parser, function_name, params),
+        data=fee_aware_data,
     )
 
     decoded = parser.decode_signed_transaction(raw)
@@ -440,6 +543,8 @@ def test_decode_signed_transaction_fee_aware_v06(function_name, monkeypatch):
     assert decoded.fee_value == 58
     assert decoded.submitted_value == 70
     assert decoded.total_spend == 70
+    assert decoded.raw_data == "0x" + fee_aware_data.hex()
+    assert decoded.chain_id == 1
     assert decoded.data.function_name == function_name
     assert decoded.data.args.sender == "0x3333333333333333333333333333333333333333"
     assert decoded.data.args.recipient == Web3.to_checksum_address(recipient)
@@ -473,6 +578,35 @@ def test_decode_signed_transaction_fee_aware_v06(function_name, monkeypatch):
         "storageFeeMaxGasPrice": 77,
         "receiptFeeMaxGasPrice": 88,
     }
+
+
+def test_deploy_salted_selector_ignores_spoofed_nonzero_recipient(
+    transaction_parser,
+):
+    deployment_payload = encode([b"class Contract: pass", b"init"])
+    decoded = DecodedRollupTransaction(
+        from_address="0x1111111111111111111111111111111111111111",
+        to_address=ZERO_ADDRESS,
+        data=DecodedRollupTransactionData(
+            function_name="deploySalted",
+            args=DecodedRollupTransactionDataArgs(
+                sender="0x1111111111111111111111111111111111111111",
+                recipient="0x2222222222222222222222222222222222222222",
+                num_of_initial_validators=5,
+                max_rotations=0,
+                salt_nonce=7,
+                data="0x" + deployment_payload.hex(),
+            ),
+        ),
+        type="2",
+        nonce=0,
+        value=0,
+    )
+
+    parsed = transaction_parser.get_genlayer_transaction(decoded)
+
+    assert parsed.type == TransactionType.DEPLOY_CONTRACT
+    assert parsed.to_address == ZERO_ADDRESS
 
 
 @pytest.mark.parametrize(
@@ -512,7 +646,12 @@ def test_decode_signed_transaction_fee_top_up_calls(
         nonce=8,
         to=bytes.fromhex("0000000000000000000000000000000000000000"),
         value=1400,
-        data=_contract_call_data(parser, function_name, [tx_id, fees_distribution]),
+        data=_contract_call_data(
+            parser,
+            function_name,
+            [tx_id, fees_distribution],
+            input_count=2,
+        ),
     )
 
     decoded = parser.decode_signed_transaction(raw)
@@ -579,3 +718,355 @@ def test_decode_signed_transaction_submit_appeal_uses_value_as_bond(monkeypatch)
     assert decoded.data.tx_id == tx_id
     assert decoded.data.fees_distribution is None
     assert decoded.data.top_up_and_submit is False
+
+
+# --- decode_method_call_data -------------------------------------------------
+# Wire format produced by genlayer-js readContract / eth_call is
+# rlp([calldata, leader_only]); see genlayer-js src/contracts/actions.ts.
+
+
+def _call_wire(calldata_bytes: bytes, leader_only: bool = False) -> str:
+    payload = encode([calldata_bytes, b"\x01" if leader_only else b"\x00"])
+    return "0x" + payload.hex()
+
+
+def _opaque_calldata(size: int) -> bytes:
+    return bytes([(3 << 3) | 6]) + b"\x41" * (size - 1)
+
+
+@pytest.mark.parametrize("size", [1, 5, 100, 252, 253, 300, 1000, 70000])
+def test_decode_method_call_data_roundtrip(transaction_parser, size):
+    calldata_bytes = _opaque_calldata(size)
+    decoded = transaction_parser.decode_method_call_data(_call_wire(calldata_bytes))
+    assert decoded.calldata == calldata_bytes
+
+
+@pytest.mark.parametrize("size", [5, 253, 1000])
+def test_decode_method_call_data_leader_only(transaction_parser, size):
+    calldata_bytes = _opaque_calldata(size)
+    decoded = transaction_parser.decode_method_call_data(
+        _call_wire(calldata_bytes, leader_only=True)
+    )
+    assert decoded.calldata == calldata_bytes
+
+
+def test_decode_method_call_data_long_list_header_boundary(transaction_parser):
+    # RLP switches from a 2-byte to a 3-byte list header at 256 payload bytes,
+    # which lands between these two calldata sizes.
+    for size in (252, 253):
+        calldata_bytes = _opaque_calldata(size)
+        decoded = transaction_parser.decode_method_call_data(_call_wire(calldata_bytes))
+        assert decoded.calldata == calldata_bytes
+
+
+@pytest.mark.parametrize("data", ["0x", "0x00", "0x01"])
+def test_decode_method_call_data_degenerate_input(transaction_parser, data):
+    # Too short to be a wrapped payload; must not raise.
+    transaction_parser.decode_method_call_data(data)
+
+
+def test_decode_latest_submit_appeal_preserves_expected_decision_id(monkeypatch):
+    monkeypatch.setattr(
+        "backend.protocol_rpc.transactions_parser.Account.recover_transaction",
+        lambda raw: "0x3333333333333333333333333333333333333333",
+    )
+    consensus_service = Mock()
+    consensus_service.web3 = Web3()
+    consensus_service.load_contract = Mock(return_value={"abi": []})
+    parser = TransactionParser(consensus_service)
+    tx_id = b"\x56" * 32
+
+    raw = _build_eip1559_raw(
+        nonce=10,
+        to=bytes.fromhex("0000000000000000000000000000000000000000"),
+        value=1400,
+        data=_contract_call_data(
+            parser,
+            "submitAppeal",
+            [tx_id, 7],
+            input_count=2,
+        ),
+    )
+
+    decoded = parser.decode_signed_transaction(raw)
+
+    assert decoded is not None
+    assert decoded.data.tx_id == tx_id
+    assert decoded.data.expected_decision_id == 7
+    assert decoded.data.top_up_and_submit is False
+
+
+def test_decode_latest_top_up_and_submit_appeal_preserves_decision_id(monkeypatch):
+    monkeypatch.setattr(
+        "backend.protocol_rpc.transactions_parser.Account.recover_transaction",
+        lambda raw: "0x3333333333333333333333333333333333333333",
+    )
+    consensus_service = Mock()
+    consensus_service.web3 = Web3()
+    consensus_service.load_contract = Mock(return_value={"abi": []})
+    parser = TransactionParser(consensus_service)
+    tx_id = b"\x78" * 32
+    fees_distribution = (11, 22, 2, 333, 44, 55, [3, 4, 5], 66, 77, 88)
+
+    raw = _build_eip1559_raw(
+        nonce=11,
+        to=bytes.fromhex("0000000000000000000000000000000000000000"),
+        value=2800,
+        data=_contract_call_data(
+            parser,
+            "topUpAndSubmitAppeal",
+            [tx_id, 9, fees_distribution],
+            input_count=3,
+        ),
+    )
+
+    decoded = parser.decode_signed_transaction(raw)
+
+    assert decoded is not None
+    assert decoded.fee_value == 2800
+    assert decoded.data.expected_decision_id == 9
+    assert decoded.data.top_up_and_submit is True
+    assert decoded.data.fees_distribution["rotations"] == [3, 4, 5]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "input_count", "expected_decision_id"),
+    [
+        ([b"\x9a" * 32, 17], 2, 17),
+        ([b"\x9a" * 32], 1, None),
+    ],
+)
+def test_decode_finalize_transaction_preserves_optional_decision_guard(
+    monkeypatch, arguments, input_count, expected_decision_id
+):
+    monkeypatch.setattr(
+        "backend.protocol_rpc.transactions_parser.Account.recover_transaction",
+        lambda raw: "0x3333333333333333333333333333333333333333",
+    )
+    consensus_service = Mock()
+    consensus_service.web3 = Web3()
+    consensus_service.load_contract = Mock(return_value={"abi": []})
+    parser = TransactionParser(consensus_service)
+
+    raw = _build_eip1559_raw(
+        nonce=12,
+        to=bytes.fromhex("0000000000000000000000000000000000000000"),
+        value=0,
+        data=_contract_call_data(
+            parser,
+            "finalizeTransaction",
+            arguments,
+            input_count=input_count,
+        ),
+    )
+
+    decoded = parser.decode_signed_transaction(raw)
+
+    assert decoded is not None
+    assert decoded.data.tx_id == b"\x9a" * 32
+    assert decoded.data.expected_decision_id == expected_decision_id
+
+
+def _served_abi_functions() -> list:
+    return [
+        entry
+        for entry in get_default_consensus_main_contract()["abi"]
+        if entry.get("type") == "function"
+    ]
+
+
+def _decode_abi_signatures() -> set[str]:
+    consensus_service = Mock()
+    consensus_service.web3 = Web3()
+    consensus_service.load_contract = Mock(
+        return_value=get_default_consensus_main_contract()
+    )
+    parser = TransactionParser(consensus_service)
+    return {
+        _abi_function_signature(entry)
+        for entry in parser._get_contract_abi()
+        if entry.get("type") == "function"
+    }
+
+
+def test_decode_surface_keeps_pre_fee_entrypoints_alongside_v06():
+    """Decoding must accept every generation of every entrypoint.
+
+    This is the union TransactionParser matches selectors against. Losing the
+    pre-fee addTransaction made every deploy and method call undecodable, so
+    it was stored as a plain SEND.
+    """
+    signatures = _decode_abi_signatures()
+
+    assert "addTransaction(address,address,uint256,uint256,bytes)" in signatures
+    assert "submitAppeal(bytes32)" in signatures
+    assert "finalizeTransaction(bytes32)" in signatures
+
+    assert "submitAppeal(bytes32,uint256)" in signatures
+    assert "finalizeTransaction(bytes32,uint256)" in signatures
+    assert any(
+        signature.startswith("addTransaction((") for signature in signatures
+    ), signatures
+
+
+def test_served_abi_function_names_are_unique():
+    """The served ABI must be name-unique.
+
+    Clients build a web3 contract from sim_getConsensusContract and resolve
+    entrypoints with get_function_by_name(), which raises Web3ValueError as
+    soon as a name is overloaded.
+    """
+    names = [entry["name"] for entry in _served_abi_functions()]
+
+    assert len(names) == len(set(names)), sorted(
+        name for name in names if names.count(name) > 1
+    )
+
+
+def test_served_abi_resolves_the_entrypoints_clients_look_up_by_name():
+    """Mirrors genlayer_py._encode_add_transaction_data's exact lookup."""
+    contract = Web3().eth.contract(abi=get_default_consensus_main_contract()["abi"])
+
+    add_transaction = contract.get_function_by_name("addTransaction")
+    assert add_transaction.signature == (
+        "addTransaction(address,address,uint256,uint256,bytes)"
+    )
+    # Released and train genlayer-py both build five positional arguments and
+    # encode them against argument_types; the fee-aware tuple form would make
+    # that raise.
+    assert len(add_transaction.argument_types) == 5
+
+    # No Studio client encodes these from the served ABI, so they keep the
+    # v0.6 decision-bound form the train genlayer-py requires.
+    assert (
+        contract.get_function_by_name("submitAppeal").signature
+        == "submitAppeal(bytes32,uint256)"
+    )
+    assert (
+        contract.get_function_by_name("finalizeTransaction").signature
+        == "finalizeTransaction(bytes32,uint256)"
+    )
+
+
+def test_pre_fee_deploy_decodes_when_deployment_artifacts_are_missing(monkeypatch):
+    """A pre-fee deploy must stay a DEPLOY_CONTRACT, never degrade to a SEND.
+
+    ``ConsensusService.load_contract`` returns the default contract when
+    ``hardhat/deployments/genlayer_network/ConsensusMain.json`` is absent. When
+    the default ABI lost the pre-fee ``addTransaction`` overload, no selector
+    matched, ``decode_signed_transaction`` produced ``data=None``, and
+    ``get_genlayer_transaction`` fell back to a value transfer addressed to
+    ConsensusMain — finalized immediately with no consensus_data.
+    """
+    sender = "0x715A17BA32a50bC11DADC257cb7c360FcaeE9dFA"
+    monkeypatch.setattr(
+        "backend.protocol_rpc.transactions_parser.Account.recover_transaction",
+        lambda raw: sender,
+    )
+
+    consensus_service = Mock()
+    consensus_service.web3 = Web3()
+    consensus_service.load_contract = Mock(
+        return_value=get_default_consensus_main_contract()
+    )
+    parser = TransactionParser(consensus_service)
+
+    contract_code = b"class Storage: pass"
+    calldata = b"\xc3\x01"
+    raw = _build_eip1559_raw(
+        nonce=0,
+        to=bytes.fromhex("b7278a61aa25c888815afc32ad3cc52ff24fe575"),
+        value=0,
+        data=_contract_call_data(
+            parser,
+            "addTransaction",
+            [
+                sender,
+                "0x0000000000000000000000000000000000000000",
+                5,
+                3,
+                encode([contract_code, calldata]),
+            ],
+            input_count=5,
+        ),
+    )
+
+    decoded = parser.decode_signed_transaction(raw)
+    assert decoded is not None
+    assert decoded.data is not None
+
+    genlayer_transaction = parser.get_genlayer_transaction(decoded)
+
+    assert genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT
+    assert (
+        genlayer_transaction.to_address == "0x0000000000000000000000000000000000000000"
+    )
+    assert genlayer_transaction.num_of_initial_validators == 5
+    assert genlayer_transaction.data.contract_code == contract_code
+    assert genlayer_transaction.data.calldata == calldata
+
+
+def test_utilities_web3_available_without_a_rollup(monkeypatch):
+    """HARDHAT_URL is optional, so the pool legitimately yields None."""
+    from backend.rollup.web3_pool import Web3ConnectionPool
+
+    monkeypatch.setattr(Web3ConnectionPool, "get", classmethod(lambda cls: None))
+    assert isinstance(Web3ConnectionPool.get_for_utilities(), Web3)
+
+    connected = Web3()
+    monkeypatch.setattr(Web3ConnectionPool, "get", classmethod(lambda cls: connected))
+    assert Web3ConnectionPool.get_for_utilities() is connected
+
+
+def test_pre_fee_submission_decodes_without_a_rollup_connection(monkeypatch):
+    """Regression: every submission was rejected as 'Invalid transaction data'.
+
+    With HARDHAT_URL empty, ConsensusService.web3 is None. The parser used it
+    for keccak and the ABI codec, so decode_signed_transaction raised
+    AttributeError, returned None, and _send_raw_transaction_impl rejected
+    every transaction at the RPC boundary with -32602.
+    """
+    sender = "0x715A17BA32a50bC11DADC257cb7c360FcaeE9dFA"
+    monkeypatch.setattr(
+        "backend.protocol_rpc.transactions_parser.Account.recover_transaction",
+        lambda raw: sender,
+    )
+
+    consensus_service = Mock()
+    consensus_service.web3 = None  # HARDHAT_URL='' -> Web3ConnectionPool.get() is None
+    consensus_service.load_contract = Mock(
+        return_value=get_default_consensus_main_contract()
+    )
+    parser = TransactionParser(consensus_service)
+    assert parser.web3 is not None
+
+    contract_code = b"class Storage: pass"
+    calldata = b"\xc3\x01"
+    raw = _build_eip1559_raw(
+        nonce=0,
+        to=bytes.fromhex("b7278a61aa25c888815afc32ad3cc52ff24fe575"),
+        value=0,
+        data=_contract_call_data(
+            parser,
+            "addTransaction",
+            [
+                sender,
+                "0x0000000000000000000000000000000000000000",
+                5,
+                3,
+                encode([contract_code, calldata]),
+            ],
+            input_count=5,
+        ),
+    )
+
+    decoded = parser.decode_signed_transaction(raw)
+
+    # This is the exact gate _send_raw_transaction_impl applies before raising
+    # InvalidTransactionError("Invalid transaction data").
+    assert decoded is not None
+    assert decoded.data is not None
+
+    genlayer_transaction = parser.get_genlayer_transaction(decoded)
+    assert genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT
+    assert genlayer_transaction.data.contract_code == contract_code

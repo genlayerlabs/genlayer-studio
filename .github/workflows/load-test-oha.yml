@@ -352,7 +352,7 @@ jobs:
           sleep 15
 
           # Install required Python packages
-          pip install genlayer-py requests
+          pip install -r ../../requirements.test.txt
 
           # Deploy contracts one by one with delays
           echo "=== Contract Deployment Test ==="
@@ -612,7 +612,7 @@ jobs:
       - name: Run State Integrity Test (lost update detection)
         run: |
           cd tests/load
-          pip install genlayer-py requests
+          pip install -r ../../requirements.test.txt
           python3 test_state_integrity.py http://localhost:4000/api --txs 20
 
       - name: Dump Docker Compose logs

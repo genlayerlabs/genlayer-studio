@@ -63,7 +63,10 @@ CLAIM_MANIFESTS = {
 # from_dict defaults are correct for every claim path:
 _COMMON_OMISSIONS = {
     "appeal_processing_time",  # accounting value, only read for finality math from DB
-    "config_rotation_rounds",  # config, re-read from DB where consumed
+    # config_rotation_rounds is NOT omitted: the message-emission path clamps
+    # every triggered child to its parent's funded schedule, reading the value
+    # straight off the claimed transaction rather than from the DB. The
+    # from_dict default (None) is therefore wrong for all three claims.
     "num_of_initial_validators",  # config, re-read from DB where consumed
     "last_vote_timestamp",  # monitoring bookkeeping, rewritten during processing
     "rotation_count",  # reset on PENDING entry, tracked in-context afterwards
@@ -184,6 +187,15 @@ class TestIncidentPins:
         keys = _manifest_keys(CLAIM_MANIFESTS["claim_next_appeal"])
         assert "contract_snapshot" in keys
         assert "consensus_history" in keys
+
+    def test_every_claim_provides_config_rotation_rounds(self):
+        # The message-emission path clamps each triggered child to its
+        # parent's funded schedule, reading config_rotation_rounds off the
+        # claimed transaction. When the claims omitted it, from_dict defaulted
+        # it to None and every child insert raised TypeError, retrying until
+        # the parent was cancelled.
+        for claim_name, groups in CLAIM_MANIFESTS.items():
+            assert "config_rotation_rounds" in _manifest_keys(groups), claim_name
 
     def test_triggered_by_alias_preserved(self):
         # Transaction.from_dict consumes "triggered_by", not the SQL column

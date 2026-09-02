@@ -5,11 +5,13 @@ from rlp.sedes import binary, big_endian_int
 from rlp.exceptions import DeserializationError, SerializationError
 from eth_account import Account
 from eth_account._utils.legacy_transactions import Transaction
+from eth_account._utils.signing import extract_chain_id
 import eth_utils
 from eth_utils import to_checksum_address
 from hexbytes import HexBytes
 import os
 from backend.rollup.consensus_service import ConsensusService
+from backend.rollup.web3_pool import Web3ConnectionPool
 from backend.domain.types import TransactionType
 
 from backend.protocol_rpc.types import (
@@ -23,6 +25,7 @@ from backend.protocol_rpc.types import (
     DecodedGenlayerTransactionData,
     DecodedsubmitAppealDataArgs,
     DecodedTopUpFeesDataArgs,
+    DecodedFinalizeTransactionDataArgs,
     ZERO_ADDRESS,
 )
 
@@ -166,9 +169,64 @@ FEE_AWARE_TOP_UP_FEES_ABI = {
     "type": "function",
 }
 
+FEE_AWARE_SUBMIT_APPEAL_ABI = {
+    "inputs": [
+        {"internalType": "bytes32", "name": "_txId", "type": "bytes32"},
+        {
+            "internalType": "uint256",
+            "name": "_expectedDecisionId",
+            "type": "uint256",
+        },
+    ],
+    "name": "submitAppeal",
+    "outputs": [],
+    "stateMutability": "payable",
+    "type": "function",
+}
+
+FEE_AWARE_LEGACY_SUBMIT_APPEAL_ABI = {
+    **FEE_AWARE_SUBMIT_APPEAL_ABI,
+    "inputs": [FEE_AWARE_SUBMIT_APPEAL_ABI["inputs"][0]],
+}
+
 FEE_AWARE_TOP_UP_AND_SUBMIT_APPEAL_ABI = {
     **FEE_AWARE_TOP_UP_FEES_ABI,
+    "inputs": [
+        FEE_AWARE_TOP_UP_FEES_ABI["inputs"][0],
+        FEE_AWARE_SUBMIT_APPEAL_ABI["inputs"][1],
+        FEE_AWARE_TOP_UP_FEES_ABI["inputs"][1],
+    ],
     "name": "topUpAndSubmitAppeal",
+}
+
+# Decode transactions produced by older SDKs so the RPC boundary can return
+# the canonical CanNotAppeal error. Admission still requires the exact
+# DecisionId, matching v0.6 Consensus.
+FEE_AWARE_LEGACY_TOP_UP_AND_SUBMIT_APPEAL_ABI = {
+    **FEE_AWARE_TOP_UP_FEES_ABI,
+    "name": "topUpAndSubmitAppeal",
+}
+
+FEE_AWARE_FINALIZE_TRANSACTION_ABI = {
+    "inputs": [
+        {"internalType": "bytes32", "name": "_txId", "type": "bytes32"},
+        {
+            "internalType": "uint256",
+            "name": "_expectedDecisionId",
+            "type": "uint256",
+        },
+    ],
+    "name": "finalizeTransaction",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function",
+}
+
+# Decode old SDK calls only so Studio returns the canonical guarded failure;
+# admission below still requires the exact active DecisionId.
+FEE_AWARE_LEGACY_FINALIZE_TRANSACTION_ABI = {
+    **FEE_AWARE_FINALIZE_TRANSACTION_ABI,
+    "inputs": [FEE_AWARE_FINALIZE_TRANSACTION_ABI["inputs"][0]],
 }
 
 FEES_DISTRIBUTION_FIELDS = [
@@ -244,7 +302,11 @@ EXECUTION_MODE_STR_TO_INT = {v: k for k, v in EXECUTION_MODE_INT_TO_STR.items()}
 class TransactionParser:
     def __init__(self, consensus_service: ConsensusService):
         self.consensus_service = consensus_service
-        self.web3 = consensus_service.web3
+        # Decoding a signed envelope is pure keccak + ABI codec work. The
+        # rollup bridge is optional (HARDHAT_URL may be empty), so the
+        # service's Web3 can be None; falling back keeps every submission
+        # decodable instead of failing the whole RPC boundary.
+        self.web3 = consensus_service.web3 or Web3ConnectionPool.get_for_utilities()
 
     def decode_signed_transaction(
         self, raw_transaction: str
@@ -335,6 +397,12 @@ class TransactionParser:
             else:
                 to_address = None
             nonce = signed_transaction_as_dict["nonce"]
+            chain_id = signed_transaction_as_dict.get("chainId")
+            if chain_id is None and signed_transaction_as_dict.get("v") is not None:
+                raw_v = signed_transaction_as_dict["v"]
+                if isinstance(raw_v, (bytes, bytearray, HexBytes)):
+                    raw_v = int.from_bytes(raw_v, byteorder="big")
+                chain_id, _ = extract_chain_id(int(raw_v))
             value = signed_transaction_as_dict["value"]
             submitted_value = int(value)
             fee_value = 0
@@ -352,6 +420,7 @@ class TransactionParser:
                 data = input_raw
             else:
                 data = None
+            raw_data = f"0x{data.removeprefix('0x')}" if data else None
             decoded_data = None
             contract_abi = self._get_contract_abi()
             if data and contract_abi:
@@ -408,6 +477,9 @@ class TransactionParser:
                                 params = decoded_data["params"]
                                 decoded_data = DecodedsubmitAppealDataArgs(
                                     tx_id=params["_txId"],
+                                    expected_decision_id=params.get(
+                                        "_expectedDecisionId"
+                                    ),
                                 )
                             elif decoded_data["function"] == "topUpFees":
                                 params = decoded_data["params"]
@@ -423,6 +495,9 @@ class TransactionParser:
                                 params = decoded_data["params"]
                                 decoded_data = DecodedsubmitAppealDataArgs(
                                     tx_id=params["_txId"],
+                                    expected_decision_id=params.get(
+                                        "_expectedDecisionId"
+                                    ),
                                     fees_distribution=self._fees_distribution_to_dict(
                                         params["_feesDistribution"]
                                     ),
@@ -430,6 +505,14 @@ class TransactionParser:
                                 )
                                 fee_value = int(value)
                                 value = 0
+                            elif decoded_data["function"] == "finalizeTransaction":
+                                params = decoded_data["params"]
+                                decoded_data = DecodedFinalizeTransactionDataArgs(
+                                    tx_id=params["_txId"],
+                                    expected_decision_id=params.get(
+                                        "_expectedDecisionId"
+                                    ),
+                                )
 
             return DecodedRollupTransaction(
                 from_address=sender,
@@ -440,6 +523,8 @@ class TransactionParser:
                 value=value,
                 fee_value=fee_value,
                 submitted_value=submitted_value,
+                raw_data=raw_data,
+                chain_id=int(chain_id) if chain_id is not None else None,
             )
 
         except Exception as e:
@@ -512,7 +597,15 @@ class TransactionParser:
             )
 
         sender = rollup_transaction.data.args.sender
-        recipient = rollup_transaction.data.args.recipient
+        # The v0.6 deploySalted selector is authoritative: Consensus ignores
+        # the tuple recipient and always passes address(0) into CreationPhase.
+        # Inferring only from the user-controlled recipient let a salted deploy
+        # be misclassified as a normal contract call in Studio.
+        recipient = (
+            ZERO_ADDRESS
+            if rollup_transaction.data.function_name == "deploySalted"
+            else rollup_transaction.data.args.recipient
+        )
         max_rotations = rollup_transaction.data.args.max_rotations
         type = self._get_genlayer_transaction_type(recipient)
         data = self._get_genlayer_transaction_data(type, rollup_transaction.data.args)
@@ -604,17 +697,21 @@ class TransactionParser:
     def decode_method_call_data(self, data: str) -> DecodedMethodCallData:
         raw_bytes = eth_utils.hexadecimal.decode_hex(data)
 
-        # Remove the null byte
-        if raw_bytes[-1] == 0:
+        # Newer clients send rlp([calldata, leader_only]). The boolean is a
+        # single literal byte in this encoding, for both false and true.
+        if len(raw_bytes) > 1 and raw_bytes[-1] in (0, 1):
             raw_bytes = raw_bytes[:-1]
 
-            # Try to decode the outer list first
-            if raw_bytes[0] >= 0xF8:  # Long list
-                raw_bytes = raw_bytes[2:]  # Skip list prefix and length
-            elif raw_bytes[0] >= 0xC0:  # Short list
+            # Strip the complete outer list header. For a long list the prefix
+            # encodes the number of following length bytes; the header grows
+            # from two to three bytes once the payload reaches 256 bytes.
+            prefix = raw_bytes[0]
+            if prefix >= 0xF8:
+                raw_bytes = raw_bytes[1 + (prefix - 0xF7) :]
+            elif prefix >= 0xC0:  # Short list
                 raw_bytes = raw_bytes[1:]  # Skip list prefix
 
-            # Now try to decode the inner string
+            # Now decode the inner calldata string.
             raw_bytes = rlp.decode(raw_bytes)
 
         return DecodedMethodCallData(raw_bytes)
@@ -681,8 +778,13 @@ class TransactionParser:
             [
                 FEE_AWARE_ADD_TRANSACTION_ABI,
                 FEE_AWARE_DEPLOY_SALTED_ABI,
+                FEE_AWARE_SUBMIT_APPEAL_ABI,
+                FEE_AWARE_LEGACY_SUBMIT_APPEAL_ABI,
                 FEE_AWARE_TOP_UP_FEES_ABI,
                 FEE_AWARE_TOP_UP_AND_SUBMIT_APPEAL_ABI,
+                FEE_AWARE_LEGACY_TOP_UP_AND_SUBMIT_APPEAL_ABI,
+                FEE_AWARE_FINALIZE_TRANSACTION_ABI,
+                FEE_AWARE_LEGACY_FINALIZE_TRANSACTION_ABI,
             ]
         )
         return contract_abi

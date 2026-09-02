@@ -32,8 +32,11 @@ from backend.consensus.effects import (
     SetTimestampLastVoteEffect,
     Effect,
 )
-from backend.consensus.types import ConsensusResult, ConsensusRound
-
+from backend.consensus.types import (
+    ConsensusResult,
+    ConsensusRound,
+    consensus_result_type_code,
+)
 
 # ── UndeterminedState ──────────────────────────────────────────────
 
@@ -480,7 +483,7 @@ def decide_finalizing(
     tx_hash: str,
     tx_status_accepted: bool,
     execution_result_success: bool,
-    leader_node_config: dict,
+    leader_node_config: dict | None,
 ) -> tuple[list[Effect], list[Effect], bool]:
     """Decide effects for FinalizingState.
 
@@ -503,7 +506,7 @@ def decide_finalizing(
 
     should_finalize_contract = tx_status_accepted and execution_result_success
 
-    if not should_finalize_contract:
+    if not should_finalize_contract and leader_node_config:
         # Emit rollup event with empty messages
         pre_effects.append(
             EmitRollupEventEffect(
@@ -530,23 +533,18 @@ def merge_appeal_validators(
     current_validation_results: list,
     appeal_failed: int,
 ) -> tuple[dict, list]:
-    """Pure merge of appeal vote/validator data.
+    """Retain the transaction-wide consumed set after a fresh appeal jury.
 
     Returns:
         (merged_votes, merged_validators)
     """
     merged_votes = existing_votes | current_votes
 
-    if appeal_failed == 0:
-        merged_validators = existing_validators + current_validation_results
-    elif appeal_failed == 1:
-        n = (len(existing_validators) - 1) // 2
-        merged_validators = existing_validators[: n - 1] + current_validation_results
-    else:
-        n = len(current_validation_results) - (len(existing_validators) + 1)
-        merged_validators = existing_validators[: n - 1] + current_validation_results
-
-    return merged_votes, merged_validators
+    # Consensus's selection authority permanently excludes every registry
+    # index consumed by earlier rounds. Studio stores the equivalent address
+    # set in consensus_data; never slice old validators back out after a failed
+    # appeal or a later jury could select them again.
+    return merged_votes, existing_validators + current_validation_results
 
 
 def decide_revealing(
@@ -605,7 +603,7 @@ def decide_revealing(
                     node_config["address"],
                     chain_vote_int,
                     is_last,
-                    int(consensus_result) if is_last else int(ConsensusResult.IDLE),
+                    consensus_result_type_code(consensus_result) if is_last else 0,
                 ),
             )
         )
@@ -658,6 +656,7 @@ def decide_revealing(
         elif consensus_result in (
             ConsensusResult.MAJORITY_DISAGREE,
             ConsensusResult.NO_MAJORITY,
+            ConsensusResult.DETERMINISTIC_VIOLATION,
         ):
             if rotation_count >= config_rotation_rounds:
                 return "undetermined", effects

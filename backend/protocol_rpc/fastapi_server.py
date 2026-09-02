@@ -1,5 +1,6 @@
 # backend/protocol_rpc/fastapi_server.py
 
+import logging
 import os
 from contextlib import asynccontextmanager
 from typing import Any
@@ -31,6 +32,7 @@ from backend.protocol_rpc.websocket import GLOBAL_CHANNEL, websocket_handler
 
 
 install_log_redaction()
+logger = logging.getLogger(__name__)
 
 SENTRY_DSN = os.getenv("SENTRY_DSN", None)
 if SENTRY_DSN:
@@ -134,12 +136,14 @@ async def jsonrpc_endpoint(
         return await rpc_router.handle_http_request(request)
     except ClientDisconnect:
         return Response(status_code=204)
-    except Exception as exc:
-        # Ensure JSON-RPC compliant error response instead of framework HTML pages
+    except Exception:
+        # Preserve the unexpected exception server-side without disclosing
+        # database, provider, or infrastructure details to an RPC caller.
+        logger.exception("Unhandled JSON-RPC request failure")
         error = {
             "code": -32603,
             "message": "Internal error",
-            "data": {"detail": str(exc)},
+            "data": {"detail": "An unexpected server error occurred."},
         }
         return JSONResponse(content={"jsonrpc": "2.0", "error": error, "id": None})
 

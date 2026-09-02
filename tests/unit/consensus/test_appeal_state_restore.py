@@ -22,11 +22,13 @@ import pytest
 
 import backend.consensus.base as consensus_base
 from backend.consensus.base import ConsensusAlgorithm
+from backend.consensus.history import APPEAL_RECOVERY_SNAPSHOT_KEY
 from backend.consensus.types import ConsensusRound
 from backend.consensus.worker import ConsensusWorker
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.database_handler.transactions_processor import TransactionStatus
 from backend.domain.types import Transaction, TransactionType
+from backend.protocol_rpc.fees import FEE_ACCOUNTING_KEY
 
 TX_HASH = "0xtxhash"
 CONTRACT_ADDRESS = "0xcontract"
@@ -135,6 +137,7 @@ class TestValidatorAppealStateRestore:
         contract_processor.update_contract_state.assert_called_once_with(
             CONTRACT_ADDRESS, accepted_state=stored_accepted
         )
+        transactions_processor.set_transaction_appeal.assert_called_with(TX_HASH, False)
 
     @pytest.mark.asyncio
     async def test_missing_snapshot_non_deploy_unfetchable_skips_restore(
@@ -226,6 +229,57 @@ class TestValidatorAppealStateRestore:
         )
         transactions_processor.get_transaction_by_hash.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_validator_appeal_filters_live_registry_through_frozen_pool(
+        self, monkeypatch
+    ):
+        """A validator registered after activation cannot join an old appeal."""
+        frozen = ["0x0000000000000000000000000000000000000001"]
+        added_later = "0x0000000000000000000000000000000000000002"
+        transaction = _make_transaction(contract_snapshot=None)
+        transaction.data = {FEE_ACCOUNTING_KEY: {"selection_pool_addresses": frozen}}
+
+        captured = {}
+
+        def capture_eligible(validators, *_args, **_kwargs):
+            captured["validators"] = validators
+            raise ValueError("stop after selection authority check")
+
+        monkeypatch.setattr(
+            ConsensusAlgorithm,
+            "get_extra_validators",
+            staticmethod(capture_eligible),
+        )
+
+        validators_snapshot = Mock()
+        validators_snapshot.nodes = [
+            SimpleNamespace(
+                validator=SimpleNamespace(
+                    to_dict=lambda address=address: {"address": address}
+                )
+            )
+            for address in [*frozen, added_later]
+        ]
+        transactions_processor = Mock()
+        accounts_manager = Mock()
+
+        await _make_algorithm().process_validator_appeal(
+            transaction=transaction,
+            transactions_processor=transactions_processor,
+            chain_snapshot=None,
+            accounts_manager=accounts_manager,
+            contract_snapshot_factory=Mock(),
+            contract_processor=Mock(),
+            node_factory=Mock(),
+            validators_snapshot=validators_snapshot,
+        )
+
+        assert captured["validators"] == [{"address": frozen[0]}]
+        accounts_manager.abort_tx_appeal_admission_once.assert_called_once_with(
+            TX_HASH,
+            "appeal_committee_unavailable",
+        )
+
 
 def _make_worker():
     """ConsensusWorker without __init__ (which spins up polling infrastructure)."""
@@ -252,6 +306,7 @@ def _make_appeal_row(contract_snapshot, consensus_history):
         v=None,
         leader_only=False,
         execution_mode="NORMAL",
+        config_rotation_rounds=3,
         sim_config=None,
         status=TransactionStatus.ACCEPTED.value,
         consensus_data=None,
@@ -305,6 +360,44 @@ class TestClaimNextAppealReturnsSnapshot:
         assert "transactions.consensus_history" in returning_clause
 
     @pytest.mark.asyncio
+    async def test_claim_waits_for_live_or_nonterminal_descendants_on_same_contract(
+        self,
+    ):
+        session = Mock()
+        session.execute.return_value.first.return_value = None
+
+        worker = _make_worker()
+        await worker.claim_next_appeal(session)
+
+        executed_sql = str(session.execute.call_args[0][0])
+        blocked_guard = executed_sql.split("An ancestor appeal", 1)[1].split(
+            "AND pg_try_advisory", 1
+        )[0]
+        assert "t2.blocked_at IS NOT NULL" in blocked_guard
+        assert "t2.status NOT IN ('FINALIZED', 'CANCELED')" in blocked_guard
+        assert "t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)" in blocked_guard
+        assert "t2.appealed = true" not in blocked_guard
+
+    @pytest.mark.asyncio
+    async def test_finalization_ignores_only_stale_terminal_descendant_leases(self):
+        session = Mock()
+        session.execute.return_value.first.return_value = None
+
+        worker = _make_worker()
+        worker.consensus_algorithm = SimpleNamespace(
+            finality_window_time=1800,
+            finality_window_appeal_failed_reduction=0,
+        )
+        await worker.claim_next_finalization(session)
+
+        executed_sql = str(session.execute.call_args[0][0])
+        blocked_guard = executed_sql.split("Ensure no other transaction", 1)[1].split(
+            "AND pg_try_advisory", 1
+        )[0]
+        assert "t2.status NOT IN ('FINALIZED', 'CANCELED')" in blocked_guard
+        assert "t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)" in blocked_guard
+
+    @pytest.mark.asyncio
     async def test_claimed_appeal_hydrates_transaction_snapshot(self):
         """End-to-end over the claimed dict: Transaction.from_dict must produce
         a non-None contract_snapshot and the stored consensus_history — the
@@ -324,3 +417,62 @@ class TestClaimNextAppealReturnsSnapshot:
         assert transaction.contract_snapshot is not None
         assert transaction.contract_snapshot.states["accepted"] == stored_accepted
         assert transaction.consensus_history == stored_history
+
+
+@pytest.mark.asyncio
+async def test_ancestor_rewind_refunds_active_descendant_appeal_before_reset(
+    monkeypatch,
+):
+    future_hash = "0xfuture"
+    stale_data = {
+        FEE_ACCOUNTING_KEY: {"active_message_generation": {"generation": 1}},
+        APPEAL_RECOVERY_SNAPSHOT_KEY: {"status": "ACCEPTED"},
+    }
+    refunded_data = {
+        FEE_ACCOUNTING_KEY: {
+            "aborted_appeals": [{"reason": "ancestor_rewind", "refund": 123}],
+            "active_message_generation": {"generation": 1},
+        }
+    }
+    transactions_processor = Mock()
+    transactions_processor.get_newer_transactions.return_value = [
+        {"hash": future_hash, "appealed": True, "data": stale_data}
+    ]
+    transactions_processor.get_transaction_by_hash.return_value = {
+        "hash": future_hash,
+        "data": refunded_data,
+    }
+    accounts_manager = Mock()
+    context = SimpleNamespace(
+        transaction=SimpleNamespace(hash=TX_HASH),
+        transactions_processor=transactions_processor,
+        accounts_manager=accounts_manager,
+        msg_handler=Mock(),
+    )
+    status_update = AsyncMock()
+    monkeypatch.setattr(
+        ConsensusAlgorithm,
+        "dispatch_transaction_status_update",
+        staticmethod(status_update),
+    )
+
+    await ConsensusAlgorithm.__new__(ConsensusAlgorithm).rollback_transactions(context)
+
+    accounts_manager.abort_tx_appeal_admission_once.assert_called_once_with(
+        future_hash,
+        "ancestor_rewind",
+    )
+    reset_data = transactions_processor.reset_transaction_for_recomputation.call_args[
+        0
+    ][1]
+    assert APPEAL_RECOVERY_SNAPSHOT_KEY not in reset_data
+    assert reset_data[FEE_ACCOUNTING_KEY]["aborted_appeals"] == [
+        {"reason": "ancestor_rewind", "refund": 123}
+    ]
+    assert "active_message_generation" not in reset_data[FEE_ACCOUNTING_KEY]
+    status_update.assert_awaited_once_with(
+        transactions_processor,
+        future_hash,
+        TransactionStatus.PENDING,
+        context.msg_handler,
+    )

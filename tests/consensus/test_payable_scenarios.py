@@ -184,11 +184,14 @@ def _encode_internal_fee_params(
     appeals=0,
     execution_budget_per_round=0,
     rotations=None,
+    max_price_gen_per_time_unit=1,
+    storage_fee_max_gas_price=2**200,
+    receipt_fee_max_gas_price=2**200,
 ):
     if rotations is None:
         rotations = [0] * (appeals + 1)
     return encode(
-        ["(uint256,uint256,uint256,uint256,uint256[])"],
+        ["(uint256,uint256,uint256,uint256,uint256[],uint256,uint256,uint256)"],
         [
             (
                 leader_timeunits,
@@ -196,6 +199,9 @@ def _encode_internal_fee_params(
                 appeals,
                 execution_budget_per_round,
                 rotations,
+                max_price_gen_per_time_unit,
+                storage_fee_max_gas_price,
+                receipt_fee_max_gas_price,
             )
         ],
     )

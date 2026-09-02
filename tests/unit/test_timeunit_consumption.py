@@ -156,6 +156,26 @@ def test_time_unit_consumption_multi_round_totals():
     ]
 
 
+def test_time_unit_consumption_reports_compacted_leader_replay_at_logical_round_two():
+    history = _history(
+        _entry(
+            ConsensusRound.UNDETERMINED.value,
+            leader_result=[_receipt("leader", 1000)],
+        ),
+        _entry(
+            ConsensusRound.LEADER_APPEAL_SUCCESSFUL.value,
+            leader_result=[_receipt("leader", 2000)],
+            validator_results=[_receipt("validator", 1000)],
+        ),
+    )
+
+    consumption = time_unit_consumption(history, None)
+
+    assert [entry["round"] for entry in consumption["per_round"]] == [0, 2]
+    assert consumption["per_round"][1]["leader_timeunits"] == 2
+    assert consumption["per_round"][1]["validator_timeunits"] == 1
+
+
 def test_time_unit_consumption_trailing_rotation_emits_final_entry():
     history = _history(
         _entry(

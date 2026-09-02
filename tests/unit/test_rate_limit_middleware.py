@@ -1,6 +1,7 @@
 """Unit tests for RateLimitMiddleware."""
 
 import json
+import logging
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
@@ -115,6 +116,27 @@ def test_rpc_app_cors_wraps_rate_limiting_without_credentials():
     assert cors_options["allow_origins"] == ["*"]
     assert cors_options["allow_credentials"] is False
     assert rate_limit_class is RateLimitMiddleware
+
+
+@pytest.mark.asyncio
+async def test_rpc_app_hides_unhandled_exception_details(caplog):
+    from backend.protocol_rpc.fastapi_server import jsonrpc_endpoint
+
+    leaked_detail = "postgresql://admin:secret@database/internal"
+    rpc_router = AsyncMock()
+    rpc_router.handle_http_request.side_effect = RuntimeError(leaked_detail)
+
+    with caplog.at_level(logging.ERROR, logger="backend.protocol_rpc.fastapi_server"):
+        response = await jsonrpc_endpoint(MagicMock(), rpc_router=rpc_router)
+
+    payload = json.loads(response.body.decode())
+    assert payload["error"] == {
+        "code": -32603,
+        "message": "Internal error",
+        "data": {"detail": "An unexpected server error occurred."},
+    }
+    assert leaked_detail not in response.body.decode()
+    assert "Unhandled JSON-RPC request failure" in caplog.text
 
 
 class TestMiddlewareRateLimiting:

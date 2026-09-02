@@ -26,7 +26,6 @@ from backend.consensus.effects import (
 )
 from backend.consensus.types import ConsensusRound
 
-
 # ── Helpers ────────────────────────────────────────────────────────
 
 
@@ -465,6 +464,17 @@ class TestDecideFinalizingNotAccepted:
         e = _find_effect(post, StatusUpdateEffect)
         assert e is not None
         assert e.new_status == "FINALIZED"
+
+    def test_receiptless_decision_skips_unattributable_rollup_event(self):
+        pre, _, should = decide_finalizing(
+            **_base_finalizing_kwargs(
+                tx_status_accepted=False,
+                leader_node_config=None,
+            )
+        )
+
+        assert should is False
+        assert _find_effect(pre, EmitRollupEventEffect) is None
 
 
 class TestDecideFinalizingNotAcceptedWithSuccess:
