@@ -108,3 +108,65 @@ def test_log_indexer(setup_validators):
     assert float(closest_vector_log_2["similarity"]) > 0.99
     assert closest_vector_log_2["id"] == 3
     assert closest_vector_log_2["text"] == "This is the third log"
+
+    # ########################################
+    # ### Removed log_id becomes visible again
+    # ###         after being re-added
+    # ########################################
+    transaction_response_remove_log_2 = contract.remove_log(args=[3]).transact()
+    assert tx_execution_succeeded(transaction_response_remove_log_2)
+
+    # tombstoned: must not be found anymore
+    closest_vector_after_remove = contract.get_closest_vector(
+        args=["This is the third log"]
+    ).call()
+    assert (
+        closest_vector_after_remove is None
+        or closest_vector_after_remove["id"] != 3
+    )
+
+    # re-add the same log_id via add_log (takes the "already indexed"
+    # in-place-update branch, since log_id 3 is still in log_vector_ids)
+    transaction_response_readd_log_2 = contract.add_log(
+        args=["This is the third log, again", 3]
+    ).transact()
+    assert tx_execution_succeeded(transaction_response_readd_log_2)
+
+    # must be visible again — the tombstone from remove_log must have
+    # been cleared, not left permanently set
+    closest_vector_after_readd = contract.get_closest_vector(
+        args=["This is the third log, again"]
+    ).call()
+    assert closest_vector_after_readd is not None
+    assert closest_vector_after_readd["id"] == 3
+    assert closest_vector_after_readd["text"] == "This is the third log, again"
+
+    # ########################################
+    # ### Updating an existing log_id must
+    # ###   re-embed, not just re-label
+    # ########################################
+    # log_id 3 currently holds "This is the third log, again" — an
+    # unrelated topic. If add_log's "already indexed" branch only updated
+    # .value (the old bug: VecDBElement.key, the stored vector, is
+    # read-only and can't be changed in place) instead of removing and
+    # re-inserting with a fresh embedding, this log would still be found
+    # by queries about its OLD topic and missed by queries about its new
+    # one, despite .text correctly reporting the new content.
+    transaction_response_retopic_log_2 = contract.add_log(
+        args=["Quantum computers use superconducting qubits", 3]
+    ).transact()
+    assert tx_execution_succeeded(transaction_response_retopic_log_2)
+
+    # found by a query about the NEW topic — this alone proves re-embedding
+    # happened: the OLD embedding ("This is the third log, again") has
+    # nothing in common with quantum computing, so this could only match
+    # if a fresh embedding was actually computed and stored.
+    closest_vector_new_topic = contract.get_closest_vector(
+        args=["How do quantum computers work"]
+    ).call()
+    assert closest_vector_new_topic is not None
+    assert closest_vector_new_topic["id"] == 3
+    assert (
+        closest_vector_new_topic["text"]
+        == "Quantum computers use superconducting qubits"
+    )
