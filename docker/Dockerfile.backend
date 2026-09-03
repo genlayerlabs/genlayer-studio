@@ -21,10 +21,10 @@ RUN --mount=type=bind,source=backend,target=/studio/backend,ro \
 FROM nixos/nix:2.30.2 AS genvm-source-build
 
 ARG TARGETARCH
-ARG GENVM_SOURCE_MODE
-ARG GENVM_TAG
-ARG GENVM_REF
-ARG GENVM_EXECUTOR_VERSION_NAME
+ARG GENVM_SOURCE_MODE=""
+ARG GENVM_TAG=""
+ARG GENVM_REF=""
+ARG GENVM_EXECUTOR_VERSION_NAME=""
 # Nix `cores` for the GenVM build (0 = all). Cap on memory-constrained or
 # emulated builders where a full-parallel Rust build can OOM.
 ARG GENVM_BUILD_CORES=0
@@ -110,10 +110,10 @@ RUN --mount=type=secret,id=nix_netrc,target=/etc/nix/netrc,required=false \
 FROM ubuntu:24.04 AS genvm-runtime
 
 ARG TARGETARCH
-ARG GENVM_TAG
-ARG GENVM_REF
-ARG GENVM_SOURCE_MODE
-ARG GENVM_EXECUTOR_VERSION_NAME
+ARG GENVM_TAG=""
+ARG GENVM_REF=""
+ARG GENVM_SOURCE_MODE=""
+ARG GENVM_EXECUTOR_VERSION_NAME=""
 
 ENV GENVM_TAG=$GENVM_TAG
 ENV GENVM_REF=$GENVM_REF
