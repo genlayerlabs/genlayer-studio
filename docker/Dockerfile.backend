@@ -166,10 +166,16 @@ COPY docker/scripts/download_genvm.sh /usr/local/bin/download-genvm
 COPY --from=genvm-runner-pin /genvm-pin/py-genlayer-pins /genvm-runner-pins
 RUN set -euo pipefail ; \
     effective_ref="$GENVM_REF" ; \
-    if [[ -z "$GENVM_TAG" && -z "$effective_ref" ]]; then \
-        effective_ref="$(< /genvm-default-version)" ; \
+    release_version="$GENVM_TAG" ; \
+    default_binding="$(< /genvm-default-version)" ; \
+    if [[ -z "$release_version" && -z "$effective_ref" ]]; then \
+        if [[ "$default_binding" =~ ^.+:[0-9a-fA-F]{7,40}$ ]]; then \
+            effective_ref="$default_binding" ; \
+        else \
+            release_version="$default_binding" ; \
+        fi ; \
     fi ; \
-    if [[ -n "$GENVM_TAG" && -n "$effective_ref" ]]; then \
+    if [[ -n "$release_version" && -n "$effective_ref" ]]; then \
         echo "ERROR: GENVM_TAG and GENVM_REF are mutually exclusive" ; exit 1 ; \
     fi ; \
     case "$GENVM_SOURCE_MODE" in \
@@ -207,7 +213,9 @@ RUN set -euo pipefail ; \
         if [[ -n "$effective_ref" ]]; then \
             echo "ERROR: release mode does not accept GENVM_REF; use GENVM_SOURCE_MODE=source" ; exit 1 ; \
         fi ; \
-        release_version="${GENVM_TAG:-$(< /genvm-default-version)}" ; \
+        if [[ -z "$release_version" ]]; then \
+            echo "ERROR: release mode requires GENVM_TAG or a release tag in third_party/genvm/version" ; exit 1 ; \
+        fi ; \
         release_arch="${TARGETARCH:-amd64}" ; \
         /usr/local/bin/download-genvm linux "$release_arch" "$release_version" \
             --out-dir /genvm --download-dir /tmp/genvm-download \
