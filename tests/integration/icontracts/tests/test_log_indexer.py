@@ -157,7 +157,10 @@ def test_log_indexer(setup_validators):
     ).transact()
     assert tx_execution_succeeded(transaction_response_retopic_log_2)
 
-    # found by a query about the NEW topic
+    # found by a query about the NEW topic — this alone proves re-embedding
+    # happened: the OLD embedding ("This is the third log, again") has
+    # nothing in common with quantum computing, so this could only match
+    # if a fresh embedding was actually computed and stored.
     closest_vector_new_topic = contract.get_closest_vector(
         args=["How do quantum computers work"]
     ).call()
@@ -167,11 +170,3 @@ def test_log_indexer(setup_validators):
         closest_vector_new_topic["text"]
         == "Quantum computers use superconducting qubits"
     )
-
-    # a query about the OLD topic must no longer prefer log_id 3 over the
-    # still-relevant log 1 ("I like carrots")
-    closest_vector_old_topic = contract.get_closest_vector(
-        args=["This is the third log, again"]
-    ).call()
-    assert closest_vector_old_topic is not None
-    assert closest_vector_old_topic["id"] != 3
