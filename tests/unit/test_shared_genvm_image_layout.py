@@ -3,7 +3,6 @@ from pathlib import Path
 
 import yaml
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile.backend"
 
@@ -57,7 +56,7 @@ def test_backend_services_share_one_genvm_parent():
     assert "USER worker-user" in dockerfile
 
 
-def test_default_genvm_binding_selects_source_mode_in_both_build_stages():
+def test_default_genvm_binding_is_loaded_in_both_build_stages():
     dockerfile = DOCKERFILE.read_text()
     source_stage = _stage_body(dockerfile, "genvm-source-build")
     runtime_stage = _stage_body(dockerfile, "genvm-runtime")
@@ -72,6 +71,31 @@ def test_default_genvm_binding_selects_source_mode_in_both_build_stages():
         assert 'effective_ref="$(< /genvm-default-version)"' in stage
         assert '"$effective_ref" =~ ^.+:[0-9a-fA-F]{7,40}$' in stage
     assert 'GENVM_REF="$(< "$REPO_ROOT/third_party/genvm/version")"' in prepare_script
+
+
+def test_release_backend_builds_use_an_immutable_genvm_release():
+    workflow = yaml.safe_load(
+        (
+            REPO_ROOT / ".github" / "workflows" / "docker-build-and-push-all.yml"
+        ).read_text()
+    )
+    default_binding = (
+        (REPO_ROOT / "third_party" / "genvm" / "version").read_text().strip()
+    )
+
+    # The distributed release jobs do not prepare or transfer the sandboxed
+    # Nix closure required by a branch:SHA source binding. With no build args,
+    # Docker falls back to the checked-in binding, so it must name a published,
+    # immutable GenVM release. This catches release-image failures before E2E.
+    for job_name in ("jsonrpc", "consensus-worker"):
+        assert "build_args" not in workflow["jobs"][job_name]["with"]
+    assert re.fullmatch(
+        r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.]+)?",
+        default_binding,
+    ), (
+        "release backend jobs provide no GenVM override; "
+        "third_party/genvm/version must be an immutable release tag, not a source ref"
+    )
 
 
 def test_release_builds_define_optional_genvm_args_before_nounset_shells():
