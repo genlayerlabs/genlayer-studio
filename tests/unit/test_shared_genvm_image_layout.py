@@ -28,6 +28,15 @@ def _stage_body(dockerfile: str, stage: str) -> str:
     return re.split(r"^FROM\s+", body, maxsplit=1, flags=re.MULTILINE)[0]
 
 
+def _arg_defaults(stage: str) -> dict[str, str | None]:
+    return {
+        name: default
+        for name, default in re.findall(
+            r"^ARG\s+([A-Z][A-Z0-9_]*)(?:=(.*))?$", stage, re.MULTILINE
+        )
+    }
+
+
 def test_backend_services_share_one_genvm_parent():
     dockerfile = DOCKERFILE.read_text()
     stages = _stages(dockerfile)
@@ -63,6 +72,32 @@ def test_default_genvm_binding_selects_source_mode_in_both_build_stages():
         assert 'effective_ref="$(< /genvm-default-version)"' in stage
         assert '"$effective_ref" =~ ^.+:[0-9a-fA-F]{7,40}$' in stage
     assert 'GENVM_REF="$(< "$REPO_ROOT/third_party/genvm/version")"' in prepare_script
+
+
+def test_release_builds_define_optional_genvm_args_before_nounset_shells():
+    dockerfile = DOCKERFILE.read_text()
+    workflow = yaml.safe_load(
+        (
+            REPO_ROOT / ".github" / "workflows" / "docker-build-and-push-all.yml"
+        ).read_text()
+    )
+    optional_args = {
+        "GENVM_SOURCE_MODE",
+        "GENVM_TAG",
+        "GENVM_REF",
+        "GENVM_EXECUTOR_VERSION_NAME",
+    }
+
+    # The release workflow intentionally provides no GenVM build args. Every
+    # optional value read by a `set -u` RUN must therefore have a Dockerfile
+    # default, or a clean release build fails before selecting its pinned GenVM.
+    for job_name in ("jsonrpc", "consensus-worker"):
+        assert "build_args" not in workflow["jobs"][job_name]["with"]
+
+    for stage_name in ("genvm-source-build", "genvm-runtime"):
+        defaults = _arg_defaults(_stage_body(dockerfile, stage_name))
+        assert optional_args <= defaults.keys()
+        assert {defaults[name] for name in optional_args} == {'""'}
 
 
 def test_debug_target_installs_debugpy_with_the_pip_cache():
