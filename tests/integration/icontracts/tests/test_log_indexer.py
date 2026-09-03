@@ -140,3 +140,38 @@ def test_log_indexer(setup_validators):
     assert closest_vector_after_readd is not None
     assert closest_vector_after_readd["id"] == 3
     assert closest_vector_after_readd["text"] == "This is the third log, again"
+
+    # ########################################
+    # ### Updating an existing log_id must
+    # ###   re-embed, not just re-label
+    # ########################################
+    # log_id 3 currently holds "This is the third log, again" — an
+    # unrelated topic. If add_log's "already indexed" branch only updated
+    # .value (the old bug: VecDBElement.key, the stored vector, is
+    # read-only and can't be changed in place) instead of removing and
+    # re-inserting with a fresh embedding, this log would still be found
+    # by queries about its OLD topic and missed by queries about its new
+    # one, despite .text correctly reporting the new content.
+    transaction_response_retopic_log_2 = contract.add_log(
+        args=["Quantum computers use superconducting qubits", 3]
+    ).transact()
+    assert tx_execution_succeeded(transaction_response_retopic_log_2)
+
+    # found by a query about the NEW topic
+    closest_vector_new_topic = contract.get_closest_vector(
+        args=["How do quantum computers work"]
+    ).call()
+    assert closest_vector_new_topic is not None
+    assert closest_vector_new_topic["id"] == 3
+    assert (
+        closest_vector_new_topic["text"]
+        == "Quantum computers use superconducting qubits"
+    )
+
+    # a query about the OLD topic must no longer prefer log_id 3 over the
+    # still-relevant log 1 ("I like carrots")
+    closest_vector_old_topic = contract.get_closest_vector(
+        args=["This is the third log, again"]
+    ).call()
+    assert closest_vector_old_topic is not None
+    assert closest_vector_old_topic["id"] != 3

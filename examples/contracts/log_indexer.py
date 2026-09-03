@@ -66,29 +66,29 @@ class LogIndexer(gl.contract.Contract):
     def add_log(self, log: str, log_id: int) -> None:
         key = log_id
         if key in self.log_vector_ids:
-            self.vector_store.get_by_id(self.log_vector_ids[key]).value = StoreValue(
-                text=log, log_id=key
-            )
-            self.removed_log_ids[key] = False
-            return
+            # VecDBElement.key (the stored vector used by knn()) is
+            # read-only - only .value can be updated in place. Re-embedding
+            # requires removing the stale entry and inserting a fresh one,
+            # otherwise a changed log stays ranked by its old embedding.
+            self.vector_store.get_by_id(self.log_vector_ids[key]).remove()
 
         emb = self.get_embedding(log)
         vector_id = self.vector_store.insert(emb, StoreValue(text=log, log_id=key))
         self.log_vector_ids[key] = vector_id
+        self.removed_log_ids[key] = False
 
     @gl.public.write
     def update_log(self, log_id: int, log: str) -> None:
         key = log_id
         if key in self.log_vector_ids:
-            self.vector_store.get_by_id(self.log_vector_ids[key]).value = StoreValue(
-                text=log, log_id=key
-            )
-            self.removed_log_ids[key] = False
-            return
+            # See add_log: .key is read-only, must remove+reinsert to
+            # actually re-embed rather than leaving the stale vector.
+            self.vector_store.get_by_id(self.log_vector_ids[key]).remove()
 
         emb = self.get_embedding(log)
         vector_id = self.vector_store.insert(emb, StoreValue(text=log, log_id=key))
         self.log_vector_ids[key] = vector_id
+        self.removed_log_ids[key] = False
 
     @gl.public.write
     def remove_log(self, id: int) -> None:
