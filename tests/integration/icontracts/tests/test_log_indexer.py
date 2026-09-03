@@ -108,3 +108,35 @@ def test_log_indexer(setup_validators):
     assert float(closest_vector_log_2["similarity"]) > 0.99
     assert closest_vector_log_2["id"] == 3
     assert closest_vector_log_2["text"] == "This is the third log"
+
+    # ########################################
+    # ### Removed log_id becomes visible again
+    # ###         after being re-added
+    # ########################################
+    transaction_response_remove_log_2 = contract.remove_log(args=[3]).transact()
+    assert tx_execution_succeeded(transaction_response_remove_log_2)
+
+    # tombstoned: must not be found anymore
+    closest_vector_after_remove = contract.get_closest_vector(
+        args=["This is the third log"]
+    ).call()
+    assert (
+        closest_vector_after_remove is None
+        or closest_vector_after_remove["id"] != 3
+    )
+
+    # re-add the same log_id via add_log (takes the "already indexed"
+    # in-place-update branch, since log_id 3 is still in log_vector_ids)
+    transaction_response_readd_log_2 = contract.add_log(
+        args=["This is the third log, again", 3]
+    ).transact()
+    assert tx_execution_succeeded(transaction_response_readd_log_2)
+
+    # must be visible again — the tombstone from remove_log must have
+    # been cleared, not left permanently set
+    closest_vector_after_readd = contract.get_closest_vector(
+        args=["This is the third log, again"]
+    ).call()
+    assert closest_vector_after_readd is not None
+    assert closest_vector_after_readd["id"] == 3
+    assert closest_vector_after_readd["text"] == "This is the third log, again"

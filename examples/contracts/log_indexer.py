@@ -69,6 +69,7 @@ class LogIndexer(gl.contract.Contract):
             self.vector_store.get_by_id(self.log_vector_ids[key]).value = StoreValue(
                 text=log, log_id=key
             )
+            self.removed_log_ids[key] = False
             return
 
         emb = self.get_embedding(log)
@@ -82,6 +83,7 @@ class LogIndexer(gl.contract.Contract):
             self.vector_store.get_by_id(self.log_vector_ids[key]).value = StoreValue(
                 text=log, log_id=key
             )
+            self.removed_log_ids[key] = False
             return
 
         emb = self.get_embedding(log)
