@@ -67,9 +67,10 @@ def test_default_genvm_binding_is_loaded_in_both_build_stages():
     assert (
         dockerfile.count("COPY third_party/genvm/version /genvm-default-version") == 2
     )
-    for stage in (source_stage, runtime_stage):
-        assert 'effective_ref="$(< /genvm-default-version)"' in stage
-        assert '"$effective_ref" =~ ^.+:[0-9a-fA-F]{7,40}$' in stage
+    assert 'effective_ref="$(< /genvm-default-version)"' in source_stage
+    assert '"$effective_ref" =~ ^.+:[0-9a-fA-F]{7,40}$' in source_stage
+    assert 'default_binding="$(< /genvm-default-version)"' in runtime_stage
+    assert '"$default_binding" =~ ^.+:[0-9a-fA-F]{7,40}$' in runtime_stage
     assert 'GENVM_REF="$(< "$REPO_ROOT/third_party/genvm/version")"' in prepare_script
 
 
@@ -96,6 +97,16 @@ def test_release_backend_builds_use_an_immutable_genvm_release():
         "release backend jobs provide no GenVM override; "
         "third_party/genvm/version must be an immutable release tag, not a source ref"
     )
+
+    runtime_stage = _stage_body(DOCKERFILE.read_text(), "genvm-runtime")
+    assert 'release_version="$GENVM_TAG"' in runtime_stage
+    assert 'release_version="$default_binding"' in runtime_stage
+    assert 'effective_ref="$default_binding"' in runtime_stage
+    assert (
+        'release_version="${GENVM_TAG:-$(< /genvm-default-version)}"'
+        not in runtime_stage
+    )
+    assert 'download-genvm linux "$release_arch" "$release_version"' in runtime_stage
 
 
 def test_release_builds_define_optional_genvm_args_before_nounset_shells():
