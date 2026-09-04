@@ -1823,7 +1823,14 @@ def test_non_ghost_internal_message_is_skipped_and_refunded_once(
     assert record["skippedRefundAmount"] == expected_account_refund
 
 
-def test_local_message_authority_applies_ghost_factory_and_per_child_failures():
+def test_local_message_authority_applies_ghost_factory_and_per_child_failures(
+    monkeypatch,
+):
+    simulator_chain_id = 61128
+    monkeypatch.setattr(
+        "backend.consensus.base.get_simulator_chain_id",
+        lambda: simulator_chain_id,
+    )
     registered = "0x2222222222222222222222222222222222222222"
     missing = "0x3333333333333333333333333333333333333333"
     parent_hash = "0x" + ("11" * 32)
@@ -1892,7 +1899,9 @@ def test_local_message_authority_applies_ghost_factory_and_per_child_failures():
 
     zero = "0x" + ("00" * 32)
     assert processor.locked is True
-    expected_salted_child = genvm_salted_child_address(registered, 42, 61999)
+    expected_salted_child = genvm_salted_child_address(
+        registered, 42, simulator_chain_id
+    )
     assert {address.lower() for address in processor.locked_recipients} == {
         registered.lower(),
         expected_salted_child.lower(),

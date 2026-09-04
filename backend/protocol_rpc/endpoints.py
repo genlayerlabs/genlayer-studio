@@ -3,6 +3,7 @@ import copy
 import math
 import random
 import json
+import re
 import time
 import eth_utils
 import logging
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 from functools import partial, wraps
 from typing import Any, Final, NoReturn, get_args
 from backend.protocol_rpc.exceptions import (
+    InvalidParams,
     JSONRPCError,
     NotFoundError,
     QueueDepthExceeded,
@@ -550,7 +552,7 @@ def clear_db_tables(session: Session, tables: list) -> None:
 def fund_account(
     session: Session,
     account_address: str,
-    amount: int,
+    amount: int | str,
 ) -> str:
     """Fund an account within a request-scoped database session."""
     accounts_manager = AccountsManager(session)
@@ -559,14 +561,39 @@ def fund_account(
     if not accounts_manager.is_valid_address(account_address):
         raise InvalidAddressError(account_address)
 
+    if isinstance(amount, bool) or not isinstance(amount, (int, str)):
+        raise InvalidParams(message="amount must be a positive integer")
+    if isinstance(amount, str):
+        if re.fullmatch(r"[0-9]+", amount):
+            normalized_amount = int(amount, 10)
+        elif re.fullmatch(r"0[xX][0-9a-fA-F]+", amount):
+            normalized_amount = int(amount, 16)
+        else:
+            raise InvalidParams(message="amount must be a positive integer")
+    else:
+        normalized_amount = amount
+    if normalized_amount <= 0:
+        raise InvalidParams(message="amount must be a positive integer")
+
     import secrets
 
     nonce = transactions_processor.get_transaction_count(None)
     transaction_hash = "0x" + secrets.token_hex(32)
     transactions_processor.insert_transaction(
-        None, account_address, None, amount, 0, nonce, False, 0, None, transaction_hash
+        None,
+        account_address,
+        None,
+        normalized_amount,
+        0,
+        nonce,
+        False,
+        0,
+        None,
+        transaction_hash,
     )
-    accounts_manager.credit_tx_value_once(transaction_hash, account_address, amount)
+    accounts_manager.credit_tx_value_once(
+        transaction_hash, account_address, normalized_amount
+    )
     return transaction_hash
 
 

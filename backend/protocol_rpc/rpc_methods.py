@@ -48,7 +48,7 @@ def clear_db_tables(
 @rpc.method("sim_fundAccount")
 def fund_account(
     account_address: str,
-    amount: int,
+    amount: int | str,
     session: Session = Depends(get_db_session),
 ) -> str:
     return impl.fund_account(

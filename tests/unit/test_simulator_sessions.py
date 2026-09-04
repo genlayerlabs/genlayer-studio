@@ -5,6 +5,7 @@ import pytest
 
 from backend.protocol_rpc import endpoints
 from backend.errors.errors import InvalidAddressError
+from backend.protocol_rpc.exceptions import InvalidParams
 from backend.domain.types import LLMProvider, TransactionType
 from backend.database_handler.models import TransactionStatus
 from backend.protocol_rpc.types import (
@@ -81,6 +82,83 @@ def test_fund_account_uses_request_scoped_session(monkeypatch):
     transactions_processor_instance.insert_transaction.assert_called_once_with(
         None, "0x" + "1" * 40, None, 25, 0, 12, False, 0, None, "0xabc"
     )
+    accounts_manager_instance.credit_tx_value_once.assert_called_once_with(
+        "0xabc", "0x" + "1" * 40, 25
+    )
+
+
+@pytest.mark.parametrize(
+    ("wire_amount", "expected_amount"),
+    [("10000000000000000000", 10_000_000_000_000_000_000), ("0x2a", 42)],
+)
+def test_fund_account_normalizes_string_amounts(
+    monkeypatch, wire_amount, expected_amount
+):
+    session = object()
+    accounts_manager_instance = MagicMock()
+    accounts_manager_instance.is_valid_address.return_value = True
+    transactions_processor_instance = MagicMock()
+    transactions_processor_instance.get_transaction_count.return_value = 3
+
+    monkeypatch.setattr("secrets.token_hex", lambda _size: "abc")
+    monkeypatch.setattr(
+        endpoints, "AccountsManager", lambda _session: accounts_manager_instance
+    )
+    monkeypatch.setattr(
+        endpoints,
+        "TransactionsProcessor",
+        lambda _session: transactions_processor_instance,
+    )
+
+    address = "0x" + "5" * 40
+    result = endpoints.fund_account(session, address, wire_amount)
+
+    assert result == "0xabc"
+    transactions_processor_instance.insert_transaction.assert_called_once_with(
+        None, address, None, expected_amount, 0, 3, False, 0, None, "0xabc"
+    )
+    accounts_manager_instance.credit_tx_value_once.assert_called_once_with(
+        "0xabc", address, expected_amount
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid_amount",
+    [
+        "",
+        " 1",
+        "+1",
+        "1_000",
+        "1.5",
+        "0x",
+        "0xgg",
+        "not-a-number",
+        0,
+        -1,
+        True,
+        1.5,
+        None,
+    ],
+)
+def test_fund_account_rejects_non_positive_integer_amounts(monkeypatch, invalid_amount):
+    accounts_manager_instance = MagicMock()
+    accounts_manager_instance.is_valid_address.return_value = True
+    transactions_processor_instance = MagicMock()
+
+    monkeypatch.setattr(
+        endpoints, "AccountsManager", lambda _session: accounts_manager_instance
+    )
+    monkeypatch.setattr(
+        endpoints,
+        "TransactionsProcessor",
+        lambda _session: transactions_processor_instance,
+    )
+
+    with pytest.raises(InvalidParams, match="amount must be a positive integer"):
+        endpoints.fund_account(object(), "0x" + "6" * 40, invalid_amount)
+
+    transactions_processor_instance.insert_transaction.assert_not_called()
+    accounts_manager_instance.credit_tx_value_once.assert_not_called()
 
 
 def test_fund_account_raises_for_invalid_address(monkeypatch):
