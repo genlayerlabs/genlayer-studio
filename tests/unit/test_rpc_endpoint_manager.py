@@ -1,7 +1,10 @@
 import pytest
 from fastapi import Depends, FastAPI
 from starlette.requests import Request
+from unittest.mock import MagicMock
 
+from backend.protocol_rpc import endpoints, rpc_methods
+from backend.protocol_rpc.dependencies import get_db_session
 from backend.protocol_rpc.exceptions import JSONRPCError, MethodNotFound
 from backend.protocol_rpc.rpc_endpoint_manager import (
     JSONRPCRequest,
@@ -58,6 +61,71 @@ async def test_manager_invokes_endpoint_with_dependencies():
         "endpoint_call",
         "endpoint_success",
     ]
+
+
+@pytest.mark.asyncio
+async def test_fund_account_normalizes_frontend_decimal_string_through_rpc(
+    monkeypatch,
+):
+    session = object()
+    accounts_manager = MagicMock()
+    accounts_manager.is_valid_address.return_value = True
+    transactions_processor = MagicMock()
+    transactions_processor.get_transaction_count.return_value = 9
+
+    monkeypatch.setattr("secrets.token_hex", lambda _size: "abc")
+    monkeypatch.setattr(endpoints, "AccountsManager", lambda _session: accounts_manager)
+    monkeypatch.setattr(
+        endpoints,
+        "TransactionsProcessor",
+        lambda _session: transactions_processor,
+    )
+
+    stub_logger = StubMessageHandler()
+    app = FastAPI()
+    app.dependency_overrides[get_db_session] = lambda: session
+    manager = RPCEndpointManager(stub_logger, dependency_overrides_provider=app)
+    manager.register(
+        RPCEndpointDefinition(name="sim_fundAccount", handler=rpc_methods.fund_account)
+    )
+
+    address = "0x" + "7" * 40
+    amount = "10000000000000000000"
+    request_payload = JSONRPCRequest(
+        method="sim_fundAccount", params=[address, amount], id=2
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "headers": [],
+            "app": app,
+            "query_string": b"",
+            "path": "/api",
+            "root_path": "",
+            "scheme": "http",
+            "server": ("localhost", 4000),
+        }
+    )
+
+    response = await manager.invoke(request_payload, request)
+
+    assert response.result == "0xabc"
+    transactions_processor.insert_transaction.assert_called_once_with(
+        None,
+        address,
+        None,
+        10_000_000_000_000_000_000,
+        0,
+        9,
+        False,
+        0,
+        None,
+        "0xabc",
+    )
+    accounts_manager.credit_tx_value_once.assert_called_once_with(
+        "0xabc", address, 10_000_000_000_000_000_000
+    )
 
 
 @pytest.mark.asyncio
