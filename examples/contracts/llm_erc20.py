@@ -1,16 +1,17 @@
-# v0.2.16
-# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+# v0.3.0
+# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
 
 import json
 
-from genlayer import *
+import genlayer as gl
+from genlayer.types import *
 
 
-class LlmErc20(gl.Contract):
-    balances: TreeMap[Address, u256]
+class LlmErc20(gl.contract.Contract):
+    balances: gl.storage.TreeMap[Address, u256]
 
     def __init__(self, total_supply: int) -> None:
-        self.balances[gl.message.sender_address] = u256(total_supply)
+        self.balances[gl.message.sender_address] = total_supply
 
     @gl.public.write
     def transfer(self, amount: int, to_address: str) -> None:

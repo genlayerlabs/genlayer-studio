@@ -10,12 +10,14 @@ __all__ = (
     "ExecutionResult",
     "apply_storage_changes",
     "GenVMInternalError",
+    "GenVMFeeContext",
     "Context",
     "set_genvm_callbacks",
 )
 
 import math
 import os
+import re
 import typing
 import tempfile
 from pathlib import Path
@@ -23,6 +25,7 @@ import shutil
 import json
 import base64
 import asyncio
+import contextlib
 import socket
 import backend.node.genvm.origin.base_host as genvmhost
 import collections.abc
@@ -30,6 +33,8 @@ import functools
 import abc
 import time
 import copy
+
+from eth_abi import decode, encode
 
 from backend.node.types import (
     PendingTransaction,
@@ -40,7 +45,13 @@ from dataclasses import dataclass
 
 from .origin.public_abi import *
 from .origin import base_host
+from .origin import host_fns
+
+# The wire result code lives in `host_fns`; `public_abi` only carries the
+# subset the SDK exposes, so import it last to win over the star import.
+from .origin.host_fns import ResultCode
 from .origin import logger as genvm_logger
+from .origin.leader_public_data import LeaderPublicData
 from .error_codes import (
     extract_error_code,
     extract_error_code_from_timeout,
@@ -48,6 +59,41 @@ from .error_codes import (
     parse_ctx_from_module_error_string,
     GenVMInternalError,
 )
+
+GENVM_GASLESS_GAS_DATA: dict[str, str] = {
+    "storageUnitPrice": "0",
+    "receiptGasPerByte": "0",
+    "gasPerChangedSlot": "0",
+    "intrinsicGas": "0",
+    "bootloaderOverhead": "0",
+    "fixedProposeReceiptGas": "0",
+    "fixedMessageRevealGas": "0",
+    "genPerTimeUnit": "0",
+}
+
+INTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE = (
+    "(uint256,uint256,uint256,uint256,uint256[],uint256,uint256,uint256)"
+)
+INTERNAL_MESSAGE_FEE_PARAMS_WITH_CAPS_ABI_TYPE = (
+    "(uint256,uint256,uint256,uint256,uint256[],uint256,uint256,uint256)"
+)
+EXTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE = "(uint256,uint256)"
+MESSAGE_ALLOCATION_NODE_ABI_TYPE = (
+    "(uint8,bool,uint256,address,bytes32,uint256,bytes)[]"
+)
+MESSAGE_TYPE_EXTERNAL = 0
+MESSAGE_TYPE_INTERNAL = 1
+NODE_ROOT_SENTINEL = (1 << 256) - 1
+# Consensus reserves keccak256("") as the wildcard. bytes32(0) is the real
+# call key for deploys and unnamed calls, so the two must never be aliased.
+CALL_KEY_WILDCARD = "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"
+
+
+@dataclass(frozen=True)
+class GenVMFeeContext:
+    bucket_totals: list[int] | None = None
+    gas_data: dict[str, str] | None = None
+    message_fee_allocation: list[dict] | None = None
 
 
 @dataclass
@@ -95,6 +141,17 @@ class StateProxy(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def get_balance(self, addr: Address) -> int: ...
 
+    def genvm_executor_selector_for(self, addr: Address) -> str | None:
+        """Executor selector this contract is pinned to, or None if unpinned.
+
+        Backs the nested cross-major `resolve_call_contract_executor` hook: the
+        genvm asks which executor a call target runs on, and a pinned contract
+        answers with its stored `genvm_executor_selector`. Proxies without a
+        contract store (e.g. deploy-time `_StateProxyNone`) inherit this None
+        default.
+        """
+        return None
+
 
 class StateProxyWritable(StateProxy, metaclass=abc.ABCMeta):
     @abc.abstractmethod
@@ -111,6 +168,53 @@ class StateProxyWritable(StateProxy, metaclass=abc.ABCMeta):
     ) -> None: ...
     @abc.abstractmethod
     def get_balance(self, addr: Address) -> int: ...
+
+
+EXECUTOR_VERSION_RE: typing.Final = re.compile(r"v?\d+(\.\d+)*(-[0-9A-Za-z.]+)?")
+"""
+Shape of an exact executor pin.
+
+The manager uses a pin verbatim as the executor directory name, so anything not
+shaped like a version must never reach it as a path component. Checked both at
+submit time and again where a stored pin is read back.
+"""
+
+_CLOSE_CONNECTIONS_TIMEOUT_S: typing.Final = 10.0
+"""
+Cap on how long `Host.close_connections` waits for a cancelled task to
+actually finish.
+
+Cancellation only requests a `CancelledError` at the next await point; a
+nested connection task stuck outside the event loop (e.g. in blocking I/O)
+would otherwise hang shutdown indefinitely instead of just losing that one
+task's cleanup.
+"""
+
+EXECUTOR_SELECTOR_REGEX_PREFIX: typing.Final = "re:"
+"""Prefix marking a selector as a regex pattern, matching the manager's
+`VERSION_REGEX_PREFIX` (genvm-manager crates/modules-interfaces/src/nested.rs)."""
+
+
+def is_valid_executor_selector(value: str) -> bool:
+    """
+    Same selector grammar the manager accepts for `reroute_to`: either an exact
+    executor version (see `EXECUTOR_VERSION_RE`), or a `re:`-prefixed pattern
+    matched by the manager against the directory names in its manifest.
+
+    Both submit-time validation
+    (`protocol_rpc.endpoints._validate_genvm_executor_selector`) and
+    nested-call resolution (`Host.resolve_call_contract_executor`) must use
+    this same grammar so a value that is accepted (or backfilled) on one
+    boundary never gets rejected at the other.
+    """
+    if value.startswith(EXECUTOR_SELECTOR_REGEX_PREFIX):
+        pattern = value[len(EXECUTOR_SELECTOR_REGEX_PREFIX) :]
+        try:
+            re.compile(pattern)
+        except re.error:
+            return False
+        return True
+    return bool(EXECUTOR_VERSION_RE.fullmatch(value))
 
 
 def apply_storage_changes(
@@ -176,50 +280,12 @@ class Context(base_host.Context):
     def add_stat(self, key: str, value: typing.Any, /):
         self.stats[key] = value
 
-    def get_timeout(
-        self,
-        action: base_host.TimeoutAction,
-        type: base_host.TimeoutType,
-        /,
-    ) -> float | None:
-        TA = base_host.TimeoutAction
-        TT = base_host.TimeoutType
-
-        if action == TA.GenVMRun:
-            total = _get_env_float("GENVM_MANAGER_RUN_HTTP_TIMEOUT_SECONDS", 10.0)
-            if type == TT.TOTAL_S:
-                return total
-            if type == TT.CONNECT_S:
-                return min(5.0, total)
-            if type == TT.SOCK_READ_S:
-                return total
-        elif action == TA.GenVMGet:
-            total = _get_env_float("GENVM_MANAGER_STATUS_HTTP_TIMEOUT_SECONDS", 10.0)
-            if type == TT.TOTAL_S:
-                return total
-            if type == TT.CONNECT_S:
-                return min(3.0, total)
-            if type == TT.SOCK_READ_S:
-                return total
-        elif action == TA.GenVMDelete:
-            if type == TT.TOTAL_S:
-                return _get_env_float("GENVM_MANAGER_DELETE_HTTP_TIMEOUT_SECONDS", 3.0)
-            if type == TT.CONNECT_S:
-                return 1.5
-            if type == TT.SOCK_READ_S:
-                return 1.5
-            if type == TT.DELETE_HTTP_GRACEFUL_TIMEOUT_MS:
-                return 20.0
-        return None
-
-    def retry_delay(
-        self, action: base_host.TimeoutAction, attempt_no: int, /
-    ) -> float | None:
-        max_retries = _get_int("GENVM_MANAGER_RUN_RETRIES", 3)
-        if attempt_no >= max_retries - 1:
-            return None
-        base_delay = _get_env_float("GENVM_MANAGER_RUN_RETRY_DELAY_SECONDS", 1.0)
-        return base_delay * (2**attempt_no)
+    def get_manager_connect_timeout(self) -> float | None:
+        # The manager socket is a local websocket; bound only the connect phase
+        # so a dead manager fails fast instead of hanging the run. Mirrors the
+        # old GenVMRun connect budget (min(5, run-timeout)).
+        total = _get_env_float("GENVM_MANAGER_RUN_HTTP_TIMEOUT_SECONDS", 10.0)
+        return min(5.0, total)
 
 
 @dataclass
@@ -234,6 +300,194 @@ class ExecutionResult:
     processing_time: int
     nondet_disagree: int | None
     execution_stats: dict | None = None
+    data_fee_bucket_totals: list[int] | None = None
+    data_fees_remaining: list[int] | None = None
+
+
+def _emission_value(emission: dict, name: str):
+    snake = "".join(f"_{char.lower()}" if char.isupper() else char for char in name)
+    return emission.get(name, emission.get(snake))
+
+
+def _emission_bytes(emission: dict, name: str) -> bytes:
+    value = _emission_value(emission, name)
+    return _bytes_from_emission_value(value)
+
+
+def _bytes_from_emission_value(value) -> bytes:
+    if value is None:
+        return b""
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        raw = value.removeprefix("0x")
+        try:
+            return bytes.fromhex(raw)
+        except ValueError:
+            return base64.b64decode(value)
+    return bytes(value)
+
+
+def _emission_internal_fee_params(emission: dict) -> bytes:
+    value = _emission_value(emission, "feeParams")
+    if isinstance(value, dict):
+        rotations = [int(rotation) for rotation in value.get("rotations", [])]
+        appeal_rounds = max(len(rotations) - 1, 0)
+        return encode(
+            [INTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE],
+            [
+                (
+                    int(value.get("leader_timeunits_allocation", 0)),
+                    int(value.get("validator_timeunits_allocation", 0)),
+                    appeal_rounds,
+                    int(value.get("execution_budget_per_round", 0)),
+                    rotations,
+                    int(value.get("max_price_gen_per_time_unit", 0)),
+                    int(value.get("storage_fee_max_gas_price", 0)),
+                    int(value.get("receipt_fee_max_gas_price", 0)),
+                )
+            ],
+        )
+    return _bytes_from_emission_value(value)
+
+
+def _emission_external_fee_params(emission: dict) -> bytes:
+    value = _emission_value(emission, "feeParams")
+    if isinstance(value, dict):
+        return encode(
+            [EXTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE],
+            [
+                (
+                    int(value.get("gas_limit", 0)),
+                    int(value.get("max_gas_price", 0)),
+                )
+            ],
+        )
+    return _bytes_from_emission_value(value)
+
+
+def _emission_allocation_subtree(emission: dict) -> list[dict] | str:
+    value = _emission_value(emission, "allocationSubtree")
+    if isinstance(value, list):
+        return value
+
+    subtree = value if value is not None else _emission_value(emission, "subtree")
+    if subtree is None:
+        return []
+
+    raw = _bytes_from_emission_value(subtree)
+    if not raw:
+        return []
+
+    try:
+        decoded = decode([MESSAGE_ALLOCATION_NODE_ABI_TYPE], raw)[0]
+    except Exception:
+        # Consensus hashes the raw SubmittedMessage field even when later
+        # inheritance decoding is contained as a restricted child. Preserve
+        # those bytes instead of aliasing every malformed payload to empty.
+        return "0x" + raw.hex()
+
+    allocation_subtree = []
+    for node in decoded:
+        message_type = int(node[0])
+        fee_params = bytes(node[6])
+        if message_type == MESSAGE_TYPE_INTERNAL:
+            fee_params = _canonical_internal_fee_params_from_genvm(fee_params)
+        allocation_subtree.append(
+            {
+                "messageType": message_type,
+                "onAcceptance": bool(node[1]),
+                "parentIndex": int(node[2]),
+                "recipient": str(node[3]).lower(),
+                "callKey": "0x" + bytes(node[4]).hex(),
+                "budget": int(node[5]),
+                "feeParams": "0x" + fee_params.hex(),
+            }
+        )
+    return allocation_subtree
+
+
+def _canonical_internal_fee_params_from_genvm(fee_params: bytes) -> bytes:
+    try:
+        decoded = decode([INTERNAL_MESSAGE_FEE_PARAMS_WITH_CAPS_ABI_TYPE], fee_params)[
+            0
+        ]
+    except Exception:
+        return fee_params
+    return encode(
+        [INTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE],
+        [
+            (
+                int(decoded[0]),
+                int(decoded[1]),
+                int(decoded[2]),
+                int(decoded[3]),
+                [int(rotation) for rotation in decoded[4]],
+                int(decoded[5]),
+                int(decoded[6]),
+                int(decoded[7]),
+            )
+        ],
+    )
+
+
+def _emission_int(emission: dict, name: str) -> int:
+    return int(_emission_value(emission, name) or 0)
+
+
+def _emission_on(emission: dict) -> typing.Literal["accepted", "finalized"]:
+    """GenVM calls the pre-finalization lifecycle `decided`; Studio calls it `accepted`.
+
+    Both executor lines normalize to `decided` at the host boundary, so `accepted`
+    never arrives on the wire — this maps one way, GenVM → Studio.
+    """
+    return "finalized" if emission["on"] == "finalized" else "accepted"
+
+
+def _emission_hex(emission: dict, name: str) -> str:
+    value = _emission_value(emission, name)
+    if value is None:
+        return "0x" + ("0" * 64)
+    if isinstance(value, bytes):
+        return "0x" + value.hex().rjust(64, "0")[-64:]
+    return "0x" + str(value).removeprefix("0x").lower().rjust(64, "0")[-64:]
+
+
+def _emission_list(emission: dict, name: str) -> list:
+    value = _emission_value(emission, name)
+    return value if isinstance(value, list) else []
+
+
+def _extract_llm_token_metrics(
+    metrics: dict[str, typing.Any] | None,
+) -> dict[str, typing.Any] | None:
+    if not isinstance(metrics, dict):
+        return None
+
+    llm_metrics = metrics.get("llm")
+    if not isinstance(llm_metrics, dict):
+        return None
+
+    token_metrics = llm_metrics.get("tokens")
+    if not isinstance(token_metrics, dict) or not token_metrics:
+        return None
+
+    return token_metrics
+
+
+def _close_watched(sock: socket.socket) -> None:
+    """
+    Closes a socket that an asyncio task may still be reading from.
+
+    `Task.cancel` only takes effect on the next loop iteration, so a task blocked
+    in `sock_recv` deregisters its reader *after* a synchronous `close` has freed
+    the file descriptor -- by which point the number may already belong to
+    someone else's socket, whose reader it then silently removes.
+    """
+    with contextlib.suppress(Exception):
+        asyncio.get_event_loop().remove_reader(sock.fileno())
+    with contextlib.suppress(OSError):
+        sock.close()
 
 
 class Host(genvmhost.IHost):
@@ -261,6 +515,22 @@ class Host(genvmhost.IHost):
         self._state_proxy = state_proxy
         self.calldata_bytes = calldata_bytes
         self._leader_results = leader_results
+        # A run that delegates across a major boundary spawns nested executors,
+        # and each of them dials the same listener, so the first connection is
+        # not necessarily the only one.
+        self._ctx: Context | None = None
+        self._accept_task: asyncio.Task | None = None
+        self._connection_tasks: list[asyncio.Task] = []
+        self._accepted_sockets: list[socket.socket] = []
+
+    def bind_context(self, ctx: Context) -> None:
+        """
+        Gives the host the context its nested connections are served with.
+
+        `loop_enter` is the only seam the host protocol offers and it carries no
+        context, so the caller that owns both hands it over before the run.
+        """
+        self._ctx = ctx
 
     def provide_result(
         self,
@@ -340,13 +610,19 @@ class Host(genvmhost.IHost):
         else:
             raise Exception(f"invalid result {res.result_kind}")
 
-        apply_storage_changes(res.result_storage_changes, state)
+        # Readonly (view) executions can still report storage changes on GenVM
+        # main — e.g. lazy data-structure initialization on first access
+        # (genlayer-embeddings VecDB._do_init inside a view knn). Those writes
+        # are ephemeral VM-side effects: discard them instead of tripping the
+        # storage_write readonly assertion.
+        if not getattr(state, "readonly", False):
+            apply_storage_changes(res.result_storage_deltas, state)
 
         # Extract pending_transactions from result_emissions
         pending_transactions = []
         for emission in res.result_emissions:
             match emission["type"]:
-                case "PostMessage":
+                case "InternalMessage":
                     pending_transactions.append(
                         PendingTransaction(
                             emission["address"].as_hex,
@@ -354,10 +630,17 @@ class Host(genvmhost.IHost):
                             code=None,
                             salt_nonce=0,
                             value=emission["value"],
-                            on=emission["on"],
+                            on=_emission_on(emission),
+                            fee_params=_emission_internal_fee_params(emission),
+                            declared_budget=_emission_int(emission, "declaredBudget"),
+                            call_key=_emission_hex(emission, "callKey"),
+                            allocation_subtree=_emission_allocation_subtree(emission),
+                            use_balance=bool(
+                                _emission_value(emission, "useBalance") or False
+                            ),
                         )
                     )
-                case "DeployContract":
+                case "InternalDeployMessage":
                     pending_transactions.append(
                         PendingTransaction(
                             address="0x",
@@ -365,10 +648,17 @@ class Host(genvmhost.IHost):
                             code=emission["code"],
                             salt_nonce=emission["salt_nonce"],
                             value=emission["value"],
-                            on=emission["on"],
+                            on=_emission_on(emission),
+                            fee_params=_emission_internal_fee_params(emission),
+                            declared_budget=_emission_int(emission, "declaredBudget"),
+                            call_key=_emission_hex(emission, "callKey"),
+                            allocation_subtree=_emission_allocation_subtree(emission),
+                            use_balance=bool(
+                                _emission_value(emission, "useBalance") or False
+                            ),
                         )
                     )
-                case "EthSend":
+                case "ExternalMessage":
                     pending_transactions.append(
                         PendingTransaction(
                             address=emission["address"].as_hex,
@@ -378,11 +668,23 @@ class Host(genvmhost.IHost):
                             value=emission["value"],
                             on="finalized",
                             is_eth_send=True,
+                            fee_params=_emission_external_fee_params(emission),
+                            declared_budget=_emission_int(emission, "declaredBudget"),
+                            call_key=_emission_hex(emission, "callKey"),
+                            allocation_subtree=_emission_allocation_subtree(emission),
+                            gas_used=_emission_int(emission, "gasUsed"),
                         )
                     )
 
-        # Extract eq_outputs from result_nondet_results
-        eq_outputs = {i: data for i, data in enumerate(res.result_nondet_results)}
+        leader_public_data = LeaderPublicData.decode(res.result_leader_public_data)
+        eq_outputs = {
+            i: data for i, data in enumerate(leader_public_data.nondet_block_outputs)
+        }
+
+        execution_stats = dict(ctx.stats)
+        llm_token_metrics = _extract_llm_token_metrics(res.metrics)
+        if llm_token_metrics is not None:
+            execution_stats["llm"] = {"tokens": llm_token_metrics}
 
         return ExecutionResult(
             eq_outputs=eq_outputs,
@@ -394,51 +696,177 @@ class Host(genvmhost.IHost):
             state=state,
             processing_time=0,
             nondet_disagree=self._nondet_disagreement,
-            execution_stats=ctx.stats,
+            execution_stats=execution_stats,
+            data_fees_remaining=res.data_fees_remaining,
         )
 
     async def loop_enter(self, cancellation) -> socket.socket:
+        sock = await self._accept(cancellation)
+        if sock is None:
+            raise Exception("Program failed")
+        self.sock = sock
+        assert self._ctx is not None, "bind_context must run before the genvm connects"
+        if self._accept_task is None:
+            # Serve every later connection ourselves: accepting stops when the
+            # run ends, which is when `run_genvm` sets the cancellation event.
+            self._accept_task = asyncio.create_task(
+                self._accept_connections(cancellation)
+            )
+        return sock
+
+    async def _accept(self, cancellation) -> socket.socket | None:
+        """
+        Accepts one connection, or returns `None` once the run is over.
+        """
         async_loop = asyncio.get_event_loop()
         assert self.sock_listener is not None
 
-        interesting = asyncio.ensure_future(async_loop.sock_accept(self.sock_listener))
+        accepting = asyncio.ensure_future(async_loop.sock_accept(self.sock_listener))
         canc = asyncio.ensure_future(cancellation.wait())
 
-        done, pending = await asyncio.wait(
-            [canc, interesting], return_when=asyncio.FIRST_COMPLETED
-        )
-        if canc in done:
-            raise Exception("Program failed")
-        canc.cancel()
+        accepted: socket.socket | None = None
+        try:
+            await asyncio.wait([canc, accepting], return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            # Also runs when this task is cancelled mid-accept, which is the
+            # normal way the background acceptor ends. The accept is awaited out
+            # even then: until it is gone the event loop still watches the
+            # listener, which the caller is about to close.
+            canc.cancel()
+            if not accepting.done():
+                accepting.cancel()
+            result = None
+            with contextlib.suppress(BaseException):
+                result = await accepting
+            if result is not None:
+                # Recorded here rather than after the `finally`, because this
+                # block also runs while a CancelledError is propagating: a
+                # connection that arrived just as we were cancelled is still
+                # ours to close, and nothing else knows about it.
+                accepted, _addr = result
+                accepted.setblocking(False)
+                self._accepted_sockets.append(accepted)
 
-        self.sock, _addr = interesting.result()
-        self.sock.setblocking(False)
-        self.sock_listener.close()
-        self.sock_listener = None
-        return self.sock
+        return accepted
+
+    async def _accept_connections(self, cancellation) -> None:
+        assert self._ctx is not None
+        while True:
+            sock = await self._accept(cancellation)
+            if sock is None:
+                return
+            self._connection_tasks.append(
+                asyncio.create_task(genvmhost.host_loop_on(self, sock, ctx=self._ctx))
+            )
+
+    async def close_connections(self) -> None:
+        """
+        Winds down the nested-connection loops and drops every accepted socket.
+
+        A nested loop that died on its own is reported rather than dropped: the
+        run's own result comes from the manager and stays authoritative, but a
+        nested executor that lost its host is why it looks the way it does.
+
+        The listener is not closed here: it belongs to whoever created it.
+
+        Every drain below is capped at `_CLOSE_CONNECTIONS_TIMEOUT_S` via
+        `asyncio.wait` (not `wait_for`, which -- if the cancelled task keeps
+        swallowing `CancelledError` -- keeps re-awaiting it past its own
+        timeout instead of returning): a task that never actually stops must
+        not be able to hang shutdown forever.
+        """
+        if self._accept_task is not None:
+            task = self._accept_task
+            task.cancel()
+            done, pending = await asyncio.wait(
+                [task], timeout=_CLOSE_CONNECTIONS_TIMEOUT_S
+            )
+            if pending and self._ctx is not None:
+                self._ctx.logger.error(
+                    "accept task did not stop within close_connections timeout"
+                )
+            elif done and not task.cancelled():
+                exc = task.exception()
+                if exc is not None and self._ctx is not None:
+                    self._ctx.logger.error("accept task failed", error=exc)
+            self._accept_task = None
+        for task in self._connection_tasks:
+            if not task.done():
+                task.cancel()
+        if self._connection_tasks:
+            done, pending = await asyncio.wait(
+                self._connection_tasks, timeout=_CLOSE_CONNECTIONS_TIMEOUT_S
+            )
+            if pending and self._ctx is not None:
+                self._ctx.logger.error(
+                    f"{len(pending)} nested host connection(s) did not stop "
+                    "within close_connections timeout"
+                )
+            for task in done:
+                if task.cancelled():
+                    continue
+                exc = task.exception()
+                if exc is not None and self._ctx is not None:
+                    self._ctx.logger.error("nested host connection failed", error=exc)
+        self._connection_tasks.clear()
+        for accepted in self._accepted_sockets:
+            _close_watched(accepted)
+        self._accepted_sockets.clear()
+        self.sock = None
 
     async def storage_read(
-        self, type: StorageType, account: bytes, slot: bytes, index: int, le: int, /
+        self, type: StorageView, address: bytes, slot: bytes, offset: int, le: int, /
     ) -> bytes:
-        assert type != StorageType.LATEST_FINAL
+        assert type != StorageView.LATEST_FINALIZED
         return await asyncio.to_thread(
-            self._state_proxy.storage_read, Address(account), slot, index, le
+            self._state_proxy.storage_read, Address(address), slot, offset, le
         )
 
-    async def consume_gas(self, gas: int, /) -> None:
+    async def resolve_call_contract_executor(
+        self,
+        contract_address: Address,
+        state_mode: StorageView,
+        advisory_major: int,
+        /,
+    ) -> bytes | None:
+        # Cross-major nested calls: the genvm asks which executor a call target
+        # runs on. Answer with the target's own pin (genvm_executor_selector)
+        # so a contract deployed against an older line keeps executing there
+        # even when called from a newer one. Unpinned targets return None ->
+        # the caller's runner keeps advising the major (same-major behavior).
+        #
+        # The pin names the line outright rather than deriving a major from it:
+        # every line released so far is semver major 0, so a major resolves to
+        # the newest one whichever line the pin meant.
+        reroute = self._state_proxy.genvm_executor_selector_for(contract_address)
+        if not reroute:
+            return None
+        # A pin that is not a version is rejected at submit time, so reaching
+        # here means a stored one went bad. Fail this call as a host error:
+        # anything else escapes `host_loop_on`, kills the host task and turns a
+        # permanently broken callee into retries that only end when the
+        # transaction's time budget does.
+        if not is_valid_executor_selector(reroute):
+            raise base_host.HostException(
+                host_fns.Errors.FORBIDDEN,
+                f"contract {contract_address.as_hex} is pinned to an unusable executor version: {reroute!r}",
+            )
+        return gvm_calldata.encode({"kind": "version", "version": reroute})
+
+    async def consume_time_fee_gen_wei(self, time_fee_gen_wei: int, /) -> None:
         pass
 
-    async def eth_call(self, account: bytes, calldata: bytes, /) -> bytes:
+    async def external_call(self, address: bytes, calldata: bytes, /) -> bytes:
         # FIXME(core-team): #748
         assert False
 
-    async def get_balance(self, account: bytes, /) -> int:
-        return await asyncio.to_thread(self._state_proxy.get_balance, Address(account))
+    async def get_balance_gen_wei(self, address: bytes, /) -> int:
+        return await asyncio.to_thread(self._state_proxy.get_balance, Address(address))
 
     async def notify_nondet_disagreement(self, call_no: int, /) -> None:
         self._nondet_disagreement = call_no
 
-    async def remaining_fuel_as_gen(self, /) -> int:
+    async def get_remaining_time_fee_gen_wei(self, /) -> int:
         return 2**60
 
 
@@ -499,38 +927,68 @@ def _create_timeout_result(
         state=state_proxy,
         processing_time=processing_time,
         nondet_disagree=None,
+        data_fees_remaining=[],
     )
 
 
-def _leader_results_to_list(
+def _encode_leader_public_data(
     leader_results: dict[int, bytes] | None,
-) -> list[bytes] | None:
-    """Convert dict[int, bytes] keyed by call_no to ordered list[bytes]."""
+) -> bytes | None:
     if leader_results is None:
         return None
-    if not leader_results:
-        return []
-    max_key = max(leader_results.keys())
-    return [leader_results.get(i, b"") for i in range(max_key + 1)]
+    outputs = []
+    if leader_results:
+        max_key = max(leader_results.keys())
+        outputs = [leader_results.get(i, b"") for i in range(max_key + 1)]
+    return LeaderPublicData(outputs).encode()
 
 
 async def run_genvm_host(
     host_supplier: typing.Callable[[socket.socket], Host],
     *,
-    timeout: float,
+    timeout: float,  # noqa: ASYNC109 - retry budget spans multiple awaits
     manager_uri: str = "http://127.0.0.1:3999",
     logger: genvm_logger.Logger | None = None,
     is_sync: bool,
     capture_output: bool = True,
+    debug_mode: str | None = None,
     message: typing.Any,
     host_data: str = "",
     extra_args: list[str] = [],
     permissions: str = "rwscn",
     code: bytes | None = None,
+    fee_context: GenVMFeeContext | None = None,
+    genvm_executor_selector: str | None = None,
 ) -> ExecutionResult:
     if logger is None:
         logger = genvm_logger.NoLogger()
+    # base_host.run_genvm no longer derives the level from capture_output, so
+    # resolve it here: capture_output implies safe-unbounded (host reads
+    # stdout/stderr artifacts), otherwise disabled.
+    effective_debug_mode: base_host.DebugMode = debug_mode or (
+        "safe-unbounded" if capture_output else "disabled"
+    )
+    if genvm_executor_selector and effective_debug_mode == "disabled":
+        # The manager honors the executor override only under debug_mode >= safe
+        # and ignores it silently otherwise, which would run the contract on the
+        # manifest-resolved executor instead of the requested one.
+        raise ValueError(
+            f"genvm_executor_selector={genvm_executor_selector!r} requires "
+            "debug_mode >= safe, got 'disabled'"
+        )
     ctx = Context(logger=logger)
+    fee_context = fee_context or GenVMFeeContext()
+    effective_bucket_totals = fee_context.bucket_totals or [
+        10_000_000,
+        10_000_000,
+        10_000_000,
+        10_000_000,
+    ]
+    effective_gas_data = (
+        dict(fee_context.gas_data)
+        if fee_context.gas_data
+        else dict(GENVM_GASLESS_GAS_DATA)
+    )
     tmpdir = Path(tempfile.mkdtemp())
     try:
         base_delay = 5  # seconds
@@ -546,7 +1004,16 @@ async def run_genvm_host(
         )
         fresh_args = {}
 
+        # Backoff owed to a failed attempt. It is served after that attempt's
+        # listener, sockets and nested connection tasks are gone, so a dead
+        # attempt cannot keep serving executors for the length of the sleep.
+        retry_delay = 0.0
+
         while True:
+            if retry_delay:
+                await asyncio.sleep(retry_delay)
+                retry_delay = 0.0
+
             remaining_time = timeout - (time.time() - start_time)
             if remaining_time <= 0:
                 # When the genvm keeps crashing we send a timeout error
@@ -572,7 +1039,9 @@ async def run_genvm_host(
                 sock_listener.setblocking(False)
                 sock_path = tmpdir.joinpath(f"sock_{retry_count}")
                 sock_listener.bind(str(sock_path))
-                sock_listener.listen(1)
+                # A run that delegates across a major boundary spawns nested
+                # executors, and each dials this same listener.
+                sock_listener.listen(8)
 
                 fresh_host_supplier = functools.partial(
                     (
@@ -583,36 +1052,60 @@ async def run_genvm_host(
                     **fresh_args,
                 )
                 host: Host = fresh_host_supplier(sock_listener)
+                host.bind_context(ctx)
 
                 leader_results = fresh_args.get(
                     "leader_results", host_args.get("leader_results")
                 )
-                leader_nondet_results = _leader_results_to_list(leader_results)
+                leader_public_data = _encode_leader_public_data(leader_results)
 
                 try:
-                    res = await base_host.run_genvm(
-                        host,
-                        manager_uri=manager_uri,
-                        message=message,
-                        timeout=timeout,
-                        capture_output=capture_output,
-                        is_sync=is_sync,
-                        host_data=host_data,
-                        ctx=ctx,
-                        host=f"unix://{sock_path}",
-                        extra_args=extra_args,
-                        code=code,
-                        calldata=fresh_args.get(
-                            "calldata_bytes", host_args.get("calldata_bytes", b"")
-                        ),
-                        leader_nondet_results=leader_nondet_results,
-                    )
+                    # Fresh manager websocket per attempt: run_genvm never owns
+                    # the client's lifecycle, and a retry after a bounce wants a
+                    # clean connection rather than a poisoned one.
+                    async with base_host.ManagerClient(
+                        manager_uri,
+                        connect_timeout=ctx.get_manager_connect_timeout(),
+                    ) as manager_client:
+                        res = await base_host.run_genvm(
+                            host,
+                            manager_uri=manager_uri,
+                            manager_client=manager_client,
+                            message=message,
+                            timeout=timeout,
+                            debug_mode=effective_debug_mode,
+                            is_sync=is_sync,
+                            host_data=host_data,
+                            ctx=ctx,
+                            host=f"unix://{sock_path}",
+                            extra_args=extra_args,
+                            code=code,
+                            bucket_totals=effective_bucket_totals,
+                            gas_data=effective_gas_data,
+                            message_fee_allocation=fee_context.message_fee_allocation
+                            or [],
+                            calldata=fresh_args.get(
+                                "calldata_bytes", host_args.get("calldata_bytes", b"")
+                            ),
+                            leader_public_data=leader_public_data,
+                            unsafe_overrides=base_host.UnsafeOverrides(
+                                reroute_to=genvm_executor_selector or ""
+                            ),
+                            # Ask to be consulted on where a CallContract runs.
+                            # Opting out makes the manager answer the resolve
+                            # query itself with "stay in-process", which silently
+                            # runs a pinned callee's code on the caller's
+                            # executor -- the very thing the pin exists to stop.
+                            # A nested run inherits this from its parent.
+                            request_extra={"hook_cross_contract_calls": True},
+                        )
 
                     execution_result = host.provide_result(
                         res,
                         fresh_args.get("state_proxy", host_args.get("state_proxy")),
                         ctx,
                     )
+                    execution_result.data_fee_bucket_totals = effective_bucket_totals
 
                     execution_result.processing_time = math.ceil(
                         (time.time() - start_time) * 1000
@@ -623,9 +1116,35 @@ async def run_genvm_host(
                     # Re-raise GenVMInternalError to propagate to worker for proper handling
                     # (stop worker, release transaction, report unhealthy)
                     raise
+                except base_host.TerminalResultUnavailable:
+                    # The genvm already executed exactly once and reached a
+                    # terminal state; only fetching/decoding its result failed.
+                    # Falling into the generic `except Exception` below would
+                    # start a brand new run here, executing the contract a
+                    # second time for a result that already exists -- so this
+                    # propagates as a permanent failure instead of retrying.
+                    raise
+                except base_host.ManagerRunNotStarted as e:
+                    # The genvm never executed. base_host already classified the
+                    # refusal, so no transport knowledge or string matching here:
+                    # a permanent refusal (bad request/runner) fails fast; a
+                    # transient one (manager still starting modules) retries
+                    # until the deadline budget runs out (top-of-loop check).
+                    if not e.retryable:
+                        raise
+                    logger.warning(
+                        "genvm run not started, retrying",
+                        reason=e.reason,
+                        retry_count=retry_count,
+                    )
+                    last_error = e
+                    retry_count += 1
+                    retry_delay = min(
+                        base_delay * (2 ** (retry_count - 1)), remaining_time
+                    )
                 except Exception as e:
                     logger.error(
-                        f"GenVM execution attempt failed",
+                        "GenVM execution attempt failed",
                         error=e,
                         retry_count=retry_count,
                     )
@@ -640,13 +1159,14 @@ async def run_genvm_host(
                         )
 
                     retry_count += 1
-                    # Sleep for a longer time than the previous attempt to avoid executing it too many times
-                    delay = min(base_delay * (2 ** (retry_count - 1)), remaining_time)
-                    await asyncio.sleep(delay)
+                    # Back off longer than the previous attempt to avoid
+                    # executing it too many times.
+                    retry_delay = min(
+                        base_delay * (2 ** (retry_count - 1)), remaining_time
+                    )
 
                 finally:
-                    if host.sock is not None:
-                        host.sock.close()
+                    await host.close_connections()
                     sock_path.unlink(missing_ok=True)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

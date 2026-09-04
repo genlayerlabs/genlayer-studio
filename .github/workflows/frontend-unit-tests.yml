@@ -32,5 +32,5 @@ jobs:
         with:
           verbose: true
           token: ${{ secrets.codecov_token }}
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           directory: frontend/coverage

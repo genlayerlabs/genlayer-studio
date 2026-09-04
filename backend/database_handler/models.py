@@ -76,11 +76,51 @@ class CurrentState(Base):
     id: Mapped[str] = mapped_column(String(255), primary_key=True)
     data: Mapped[dict] = mapped_column(JSONB)
     balance: Mapped[int] = mapped_column(IntNumeric(), default=0, nullable=False)
+    # Executor version or `re:` selector this contract is pinned to, forwarded
+    # to the GenVM manager as `reroute_to`. NULL means "no override, resolve
+    # from the manifest".
+    genvm_executor_selector: Mapped[Optional[str]] = mapped_column(
+        String(255), default=None, nullable=True
+    )
     updated_at: Mapped[Optional[datetime.datetime]] = mapped_column(
         DateTime(True),
         init=False,
         server_default=func.current_timestamp(),
         onupdate=func.current_timestamp(),
+    )
+
+
+transactions_queue_order_seq = Sequence("transactions_queue_order_seq")
+
+
+class EvmEnvelope(Base):
+    """Mined signed EVM envelopes, including execution reverts.
+
+    Consensus relies on the execution-chain account nonce and transaction hash
+    for replay protection. Studio records the same boundary explicitly because
+    lifecycle calls do not create GenLayer ``transactions`` rows.
+    """
+
+    __tablename__ = "evm_envelopes"
+    __table_args__ = (
+        PrimaryKeyConstraint("hash", name="evm_envelopes_pkey"),
+        UniqueConstraint(
+            "from_address",
+            "nonce",
+            name="evm_envelopes_from_address_nonce_key",
+        ),
+        CheckConstraint("nonce >= 0", name="evm_envelopes_nonce_unsigned"),
+    )
+
+    hash: Mapped[str] = mapped_column(String(66), primary_key=True)
+    from_address: Mapped[str] = mapped_column(String(255), nullable=False)
+    nonce: Mapped[int] = mapped_column(IntNumeric(), nullable=False)
+    result: Mapped[str] = mapped_column(String(66), nullable=False)
+    to_address: Mapped[Optional[str]] = mapped_column(String(255), default=None)
+    success: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    error: Mapped[Optional[str]] = mapped_column(String(1024), default=None)
+    created_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), server_default=func.current_timestamp(), init=False
     )
 
 
@@ -114,6 +154,16 @@ class Transactions(Base):
     gaslimit: Mapped[Optional[int]] = mapped_column(BigInteger)
     created_at: Mapped[Optional[datetime.datetime]] = mapped_column(
         DateTime(True), server_default=func.current_timestamp(), init=False
+    )
+    # Durable issuance order. Consensus queues are slot-ordered; timestamps are
+    # only metadata and PostgreSQL CURRENT_TIMESTAMP is fixed at transaction
+    # start, so it cannot safely order concurrent admissions.
+    queue_order: Mapped[int] = mapped_column(
+        BigInteger,
+        transactions_queue_order_seq,
+        server_default=transactions_queue_order_seq.next_value(),
+        nullable=False,
+        init=False,
     )
     leader_only: Mapped[bool] = mapped_column(Boolean)
     r: Mapped[Optional[int]] = mapped_column(Integer)
@@ -178,6 +228,60 @@ class Transactions(Base):
     )
     recovery_count: Mapped[int] = mapped_column(
         Integer, server_default="0", nullable=False, default=0
+    )
+
+
+class TransactionSnapshotArchive(Base):
+    __tablename__ = "transaction_snapshot_archives"
+    __table_args__ = (
+        CheckConstraint(
+            "backend IN ('file', 'gcs', 's3')",
+            name="transaction_snapshot_archives_backend_check",
+        ),
+        CheckConstraint(
+            "archive_status IN ('archived', 'pruned')",
+            name="transaction_snapshot_archives_status_check",
+        ),
+    )
+
+    tx_hash: Mapped[str] = mapped_column(
+        String(66),
+        ForeignKey("transactions.hash", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    backend: Mapped[str] = mapped_column(String(20), nullable=False)
+    object_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    uri: Mapped[str] = mapped_column(String(2048), nullable=False)
+    snapshot_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    compressed_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    snapshot_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    compressed_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    bucket: Mapped[Optional[str]] = mapped_column(String(255), default=None)
+    format: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        server_default="full-json-gzip-v1",
+        default="full-json-gzip-v1",
+    )
+    archive_status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default="archived",
+        default="archived",
+    )
+    archived_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(True),
+        server_default=func.current_timestamp(),
+        init=False,
+    )
+    pruned_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), nullable=True, default=None
+    )
+    verified_at: Mapped[Optional[datetime.datetime]] = mapped_column(
+        DateTime(True), nullable=True, default=None
+    )
+    object_metadata: Mapped[Optional[dict]] = mapped_column(
+        JSONB, nullable=True, default=None
     )
 
 

@@ -1,6 +1,5 @@
 # backend/consensus/base.py
 
-DEFAULT_VALIDATORS_COUNT = 5
 ACTIVATED_TRANSACTION_TIMEOUT = 900
 MAX_IDLE_REPLACEMENTS = 5
 DEFAULT_EXEC_TIMEOUT_SECONDS = 600
@@ -9,7 +8,7 @@ DEFAULT_VALIDATOR_EXEC_TIMEOUT_SECONDS = DEFAULT_EXEC_TIMEOUT_SECONDS
 
 import os
 import asyncio
-from typing import Callable, List, Iterable, Literal
+from typing import Any, Callable, List, Iterable, Literal
 import time
 from abc import ABC, abstractmethod
 import random
@@ -17,9 +16,11 @@ from copy import deepcopy
 import json
 import base64
 
-from eth_utils import to_checksum_address
+from eth_utils import is_address, keccak, to_bytes, to_checksum_address
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from backend.consensus.constants import DEFAULT_VALIDATORS_COUNT
+from backend.consensus.errors import NoValidatorsAvailableError
 from backend.consensus.vrf import get_validators_for_transaction
 from backend.database_handler.chain_snapshot import ChainSnapshot
 from backend.database_handler.contract_snapshot import ContractSnapshot
@@ -29,6 +30,7 @@ from backend.database_handler.transactions_processor import (
     TransactionsProcessor,
     TransactionStatus,
 )
+from backend.database_handler.models import Transactions
 from backend.database_handler.accounts_manager import AccountsManager
 from backend.database_handler.types import ConsensusData
 from backend.domain.types import (
@@ -38,7 +40,7 @@ from backend.domain.types import (
     LLMProvider,
     Validator,
 )
-from backend.node.base import Node
+from backend.node.base import Node, get_simulator_chain_id
 from backend.node.types import (
     ExecutionMode,
     Receipt,
@@ -52,11 +54,49 @@ from backend.protocol_rpc.message_handler.types import (
     EventType,
     EventScope,
 )
+from backend.protocol_rpc.types import ZERO_ADDRESS
+from backend.protocol_rpc.ghost_factory import (
+    GhostFactoryConfig,
+    genvm_salted_child_address,
+)
+from backend.protocol_rpc.fees import (
+    FEE_ACCOUNTING_KEY,
+    VALIDATORS_PER_ROUND,
+    FeeValidationError,
+    StudioFeePolicy,
+    activate_fee_accounting,
+    consume_message_fees,
+    create_child_fee_accounting,
+    derive_external_message_call_key,
+    discard_active_message_generation,
+    execution_policy_for_accounting,
+    fill_message_fee_payload_from_allocation,
+    mark_message_effects_delivered,
+    message_effect_identities,
+    message_novelty_mask,
+    prepare_reveal_message_generation,
+    record_external_message_execution_fees,
+    refund_failed_internal_message_fee,
+    runtime_rotations_for_round,
+    stamp_receipt_execution_policy,
+    unwind_reveal_message_fees,
+    validate_receipt_admission_caps,
+)
 from backend.rollup.consensus_service import ConsensusService
 
 import backend.validators as validators
-from backend.node.genvm.origin.public_abi import ResultCode
-from backend.consensus.types import ConsensusResult, ConsensusRound
+from backend.node.genvm.origin.host_fns import ResultCode
+from backend.consensus.types import (
+    ConsensusResult,
+    ConsensusRound,
+    consensus_vote_type_code,
+)
+from backend.consensus.history import (
+    APPEAL_RECOVERY_SNAPSHOT_KEY,
+    TERMINAL_VALIDATOR_APPEAL_ROUNDS,
+    latest_decision_metadata,
+    logical_fee_round_entries,
+)
 from backend.consensus.utils import determine_consensus_from_votes
 from backend.consensus.decisions import (
     decide_undetermined,
@@ -73,12 +113,40 @@ from backend.consensus.decisions import (
     prepare_committing,
     decide_post_committing,
     should_rollback_after_accepted,
-    has_appeal_capacity,
 )
 from backend.consensus.effect_executor import EffectExecutor
 from backend.node.genvm import get_code_slot
 from backend.node.genvm.error_codes import GenVMInternalError, GenVMErrorCode
 from backend.node.base import Manager as GenVMManager
+
+
+def _validators_in_frozen_selection_pool(
+    all_validators: list[dict],
+    fee_accounting: dict | None,
+) -> list[dict]:
+    """Apply Consensus's activation-pinned selection-pool identity gate."""
+
+    frozen_pool = (
+        fee_accounting.get("selection_pool_addresses")
+        if isinstance(fee_accounting, dict)
+        else None
+    )
+    if not isinstance(frozen_pool, list) or not frozen_pool:
+        return list(all_validators)
+    frozen_addresses = {str(address).lower() for address in frozen_pool if address}
+    return [
+        validator
+        for validator in all_validators
+        if str(validator.get("address") or "").lower() in frozen_addresses
+    ]
+
+
+# Cap on concurrently executing validators per transaction. Bounds GenVM
+# subprocess memory, fd, and DB-session usage; larger committees run through
+# this window. See issue #1721.
+VALIDATOR_MAX_CONCURRENT = max(
+    1, int(os.environ.get("CONSENSUS_VALIDATOR_MAX_CONCURRENT", "8"))
+)
 
 type NodeFactory = Callable[
     [
@@ -98,8 +166,8 @@ type NodeFactory = Callable[
 ]
 
 
-class NoValidatorsAvailableError(Exception):
-    """Raised when no validators are available to process a transaction."""
+class InternalMessageEmissionError(RuntimeError):
+    """Raised when the helper EVM did not durably accept a message phase."""
 
 
 def _redact_consensus_data_for_log(consensus_data_dict: dict) -> dict:
@@ -306,6 +374,15 @@ def node_factory(
     )
 
 
+def transaction_genvm_executor_selector(transaction: Transaction) -> str | None:
+    """Studio-only GenVM executor override carried by the transaction."""
+    return (
+        transaction.sim_config.genvm_executor_selector
+        if transaction.sim_config
+        else None
+    )
+
+
 def contract_snapshot_factory(
     contract_address: str,
     session: Session,
@@ -339,6 +416,9 @@ def contract_snapshot_factory(
         ret.contract_code = transaction.data["contract_code"]
         ret.balance = transaction.value or 0
         ret.states = {"accepted": {}, "finalized": {}}
+        # The contract row is still empty at deploy time, so the executor
+        # override can only come from the deploy transaction itself.
+        ret.genvm_executor_selector = transaction_genvm_executor_selector(transaction)
         return ret
 
     # Return a ContractSnapshot instance for an existing contract
@@ -460,6 +540,7 @@ class TransactionContext:
         self.validator_nodes: list = []
         self.validation_results: list = []
         self.rotation_count: int = 0
+        self.active_fee_round: int | None = None
         self.consensus_service = consensus_service
         self.leader: dict = {}
         # Shared for the lifetime of this transaction context (leader + validators).
@@ -701,13 +782,14 @@ class ConsensusAlgorithm:
         is_triggered = transaction.triggered_by_hash is not None
 
         if not is_triggered and transaction.from_address is not None:
-            # Get the balance of the sender account
-            from_balance = accounts_manager.get_account_balance(
-                transaction.from_address
+            # The finalization workers use independent database sessions. A
+            # read/check/write balance update lets concurrent transfers spend
+            # the same stale balance. Keep the sufficiency check and debit in
+            # one conditional SQL update instead.
+            debited = accounts_manager.debit_account_balance(
+                transaction.from_address, transaction.value
             )
-
-            # Check if the sender has enough balance
-            if from_balance < transaction.value:
+            if not debited:
                 # UNDETERMINED is finalization-eligible: claim_next_finalization
                 # filters on timestamp_awaiting_finalization IS NOT NULL.
                 # Without this stamp the row strands forever (16 such rows
@@ -724,18 +806,11 @@ class ConsensusAlgorithm:
 
                 return
 
-            # Update the balance of the sender account
-            accounts_manager.update_account_balance(
-                transaction.from_address, from_balance - transaction.value
-            )
-
         if transaction.to_address is not None:
-            # Get the balance of the recipient account
-            to_balance = accounts_manager.get_account_balance(transaction.to_address)
-
-            # Update the balance of the recipient account
-            accounts_manager.update_account_balance(
-                transaction.to_address, to_balance + transaction.value
+            # Atomic increment prevents concurrent credits from overwriting
+            # each other when they target the same recipient.
+            accounts_manager.credit_account_balance(
+                transaction.to_address, transaction.value
             )
 
         # Mark the tx as credited so a later retry (or duplicate sync path)
@@ -793,13 +868,28 @@ class ConsensusAlgorithm:
         ]
 
         # Check if finalization criteria are met
+        decision = latest_decision_metadata(
+            getattr(transaction, "consensus_history", None)
+        )
+        exact_deadline = None
+        if decision is not None:
+            try:
+                exact_deadline = int(decision.get("appealDeadline") or 0)
+            except (TypeError, ValueError):
+                exact_deadline = None
         time_based_finalization = (
-            time.time()
-            - transaction.timestamp_awaiting_finalization
-            - transaction.appeal_processing_time
-        ) > self.finality_window_time * (
-            (1 - self.finality_window_appeal_failed_reduction)
-            ** transaction.appeal_failed
+            time.time() >= exact_deadline
+            if exact_deadline
+            else (
+                time.time()
+                - transaction.timestamp_awaiting_finalization
+                - transaction.appeal_processing_time
+            )
+            >= self.finality_window_time
+            * (
+                (1 - self.finality_window_appeal_failed_reduction)
+                ** transaction.appeal_failed
+            )
         )
 
         if immediate_finalization or time_based_finalization:
@@ -818,6 +908,41 @@ class ConsensusAlgorithm:
                     return False
         else:
             return False
+
+    async def repair_accepted_message_delivery(
+        self,
+        transaction: Transaction,
+        transactions_processor: TransactionsProcessor,
+        accounts_manager: AccountsManager,
+        contract_snapshot_factory: Callable[[str], ContractSnapshot],
+        contract_processor: ContractProcessor,
+        node_factory: NodeFactory,
+    ) -> None:
+        """Replay an agreed acceptance phase without finalizing the tx."""
+
+        context = TransactionContext(
+            transaction=transaction,
+            transactions_processor=transactions_processor,
+            chain_snapshot=None,
+            accounts_manager=accounts_manager,
+            contract_snapshot_factory=contract_snapshot_factory,
+            contract_processor=contract_processor,
+            node_factory=node_factory,
+            msg_handler=self.msg_handler,
+            consensus_service=self.consensus_service,
+            validators_snapshot=None,
+            genvm_manager=self.genvm_manager,
+        )
+        leader_receipt = transaction.consensus_data.leader_receipt[0]
+        delivered = _dispatch_messages_for_phase(context, leader_receipt, "accepted")
+        if delivered:
+            await self.dispatch_transaction_status_update(
+                transactions_processor,
+                transaction.hash,
+                TransactionStatus.ACCEPTED,
+                self.msg_handler,
+                update_current_status_changes=False,
+            )
 
     async def process_finalization(
         self,
@@ -896,22 +1021,41 @@ class ConsensusAlgorithm:
             genvm_manager=self.genvm_manager,
         )
 
-        transactions_processor.set_transaction_appeal(transaction.hash, False)
-        transaction.appealed = False
-
-        used_leader_addresses = (
-            ConsensusAlgorithm.get_used_leader_addresses_from_consensus_history(
-                context.transactions_processor.get_transaction_by_hash(
-                    context.transaction.hash
-                )["consensus_history"]
+        consumed_addresses = ConsensusAlgorithm.get_consumed_validator_addresses(
+            context.transactions_processor.get_transaction_by_hash(
+                context.transaction.hash
+            )["consensus_history"],
+            transaction.consensus_data,
+        )
+        fee_accounting = (transaction.data or {}).get(FEE_ACCOUNTING_KEY) or {}
+        live_validators = [
+            node.validator.to_dict() for node in validators_snapshot.nodes
+        ]
+        selection_pool = {
+            str(validator.get("address") or "").lower()
+            for validator in _validators_in_frozen_selection_pool(
+                live_validators,
+                fee_accounting,
             )
+            if validator.get("address")
+        }
+
+        logical_entries = logical_fee_round_entries(transaction.consensus_history)
+        current_round = logical_entries[-1][0] if logical_entries else 0
+        required_fresh = VALIDATORS_PER_ROUND[
+            min(current_round + 1, len(VALIDATORS_PER_ROUND) - 1)
+        ]
+        available_fresh = max(
+            0,
+            len(selection_pool - consumed_addresses),
         )
 
-        if not has_appeal_capacity(
-            num_involved_validators=len(transaction.consensus_data.validators),
-            num_used_leader_addresses=len(used_leader_addresses),
-            num_total_validators=len(validators_snapshot.nodes),
-        ):
+        if available_fresh < required_fresh:
+            accounts_manager.abort_tx_appeal_admission_once(
+                transaction.hash,
+                "appeal_committee_unavailable",
+            )
+            transaction.appealed = False
             self.msg_handler.send_message(
                 LogEvent(
                     "consensus_event",
@@ -938,6 +1082,8 @@ class ConsensusAlgorithm:
             )
 
         else:
+            transactions_processor.set_transaction_appeal(transaction.hash, False)
+            transaction.appealed = False
             # Appeal data member is used in the frontend for all types of appeals
             # Here the type is refined based on the status
             transactions_processor.set_transaction_appeal_undetermined(
@@ -995,28 +1141,18 @@ class ConsensusAlgorithm:
             genvm_manager=self.genvm_manager,
         )
 
-        transactions_processor.set_transaction_appeal(transaction.hash, False)
-        transaction.appealed = False
-
         if context.transaction.appeal_undetermined:
             context.transactions_processor.set_transaction_appeal_undetermined(
                 context.transaction.hash, False
             )
             context.transaction.appeal_undetermined = False
 
-        used_leader_addresses = (
-            ConsensusAlgorithm.get_used_leader_addresses_from_consensus_history(
-                context.transactions_processor.get_transaction_by_hash(
-                    context.transaction.hash
-                )["consensus_history"]
+        if not transaction.leader_timeout_validators:
+            accounts_manager.abort_tx_appeal_admission_once(
+                transaction.hash,
+                "appeal_committee_unavailable",
             )
-        )
-
-        if not has_appeal_capacity(
-            num_involved_validators=len(transaction.leader_timeout_validators),
-            num_used_leader_addresses=len(used_leader_addresses),
-            num_total_validators=len(validators_snapshot.nodes),
-        ):
+            transaction.appealed = False
             self.msg_handler.send_message(
                 LogEvent(
                     "consensus_event",
@@ -1043,6 +1179,8 @@ class ConsensusAlgorithm:
             )
 
         else:
+            transactions_processor.set_transaction_appeal(transaction.hash, False)
+            transaction.appealed = False
             # Appeal data member is used in the frontend for all types of appeals
             # Here the type is refined based on the status
             transaction.appeal_leader_timeout = (
@@ -1103,13 +1241,27 @@ class ConsensusAlgorithm:
         context.consensus_data.leader_receipt = (
             transaction.consensus_data.leader_receipt
         )
+        logical_entries = logical_fee_round_entries(transaction.consensus_history)
+        current_round = logical_entries[-1][0] if logical_entries else 0
+        fee_accounting = (transaction.data or {}).get(FEE_ACCOUNTING_KEY) or {}
+        eligible_validators = _validators_in_frozen_selection_pool(
+            [x.validator.to_dict() for x in validators_snapshot.nodes],
+            fee_accounting,
+        )
         try:
             # Attempt to get extra validators for the appeal process
             _, context.remaining_validators = ConsensusAlgorithm.get_extra_validators(
-                [x.validator.to_dict() for x in validators_snapshot.nodes],
+                eligible_validators,
                 transaction.consensus_history,
                 transaction.consensus_data,
                 transaction.appeal_failed,
+                required_extra_validators=VALIDATORS_PER_ROUND[
+                    min(
+                        current_round + 1,
+                        len(VALIDATORS_PER_ROUND) - 1,
+                    )
+                ],
+                allow_short=True,
             )
         except ValueError as e:
             # When no validators are found, then the appeal failed
@@ -1121,12 +1273,14 @@ class ConsensusAlgorithm:
                     "Appeal failed, no validators found to process the appeal",
                     {
                         "transaction_hash": context.transaction.hash,
+                        "error": str(e),
                     },
                     transaction_hash=context.transaction.hash,
                 )
             )
-            context.transactions_processor.set_transaction_appeal(
-                context.transaction.hash, False
+            accounts_manager.abort_tx_appeal_admission_once(
+                context.transaction.hash,
+                "appeal_committee_unavailable",
             )
             context.transaction.appealed = False
             self.msg_handler.send_message(
@@ -1183,24 +1337,83 @@ class ConsensusAlgorithm:
                         await self.rollback_transactions(context)
 
                         # Get the previous state of the contract
+                        previous_contract_state = None
                         if context.transaction.contract_snapshot:
-                            previous_contact_state = (
+                            previous_contract_state = (
                                 context.transaction.contract_snapshot.states["accepted"]
                             )
+                        elif (
+                            context.transaction.type == TransactionType.DEPLOY_CONTRACT
+                        ):
+                            # Rolling back a deploy: clear the contract state
+                            previous_contract_state = {}
                         else:
-                            previous_contact_state = {}
+                            # Defense in depth: the in-memory transaction may have
+                            # been built without the stored contract_snapshot.
+                            # Re-fetch it instead of clobbering the contract state
+                            # with {} (which would wipe the code slot).
+                            refetched = (
+                                context.transactions_processor.get_transaction_by_hash(
+                                    context.transaction.hash
+                                )
+                            )
+                            refetched_snapshot = ContractSnapshot.from_dict(
+                                (refetched or {}).get("contract_snapshot")
+                            )
+                            if refetched_snapshot:
+                                previous_contract_state = refetched_snapshot.states[
+                                    "accepted"
+                                ]
+                            else:
+                                from loguru import logger
+
+                                logger.error(
+                                    f"Missing contract_snapshot for appealed "
+                                    f"transaction {context.transaction.hash}; "
+                                    f"skipping contract state restore"
+                                )
+                                # Surface to monitoring: the appeal succeeded but
+                                # the contract kept the appealed transaction's
+                                # state — recoverable, but needs operator eyes.
+                                context.msg_handler.send_message(
+                                    LogEvent(
+                                        "consensus_event",
+                                        EventType.ERROR,
+                                        EventScope.CONSENSUS,
+                                        "Missing contract_snapshot on successful "
+                                        "validator appeal; contract state restore "
+                                        "skipped",
+                                        {
+                                            "transaction_hash": context.transaction.hash,
+                                            "contract_address": context.transaction.to_address,
+                                        },
+                                        transaction_hash=context.transaction.hash,
+                                    )
+                                )
 
                         # Restore the contract state
-                        context.contract_processor.update_contract_state(
-                            context.transaction.to_address,
-                            accepted_state=previous_contact_state,
-                        )
+                        if previous_contract_state is not None:
+                            context.contract_processor.update_contract_state(
+                                context.transaction.to_address,
+                                accepted_state=previous_contract_state,
+                            )
 
                     # Always clear snapshot on successful appeal (including timeout appeals)
                     # so re-execution loads fresh state from DB
                     context.transactions_processor.set_transaction_contract_snapshot(
                         context.transaction.hash, None
                     )
+
+                    # The successful review is followed by one terminal normal
+                    # recomputation, not another validator-appeal pass.
+                    context.transactions_processor.set_transaction_appeal(
+                        context.transaction.hash, False
+                    )
+                    context.transaction.appealed = False
+                    context.transactions_processor.set_transaction_appeal_validators_timeout(
+                        context.transaction.hash, False
+                    )
+                    context.transaction.appeal_validators_timeout = False
 
                     await ConsensusAlgorithm.dispatch_transaction_status_update(
                         context.transactions_processor,
@@ -1222,16 +1435,38 @@ class ConsensusAlgorithm:
             context.transaction.hash
         )
         for future_transaction in future_transactions:
+            future_hash = future_transaction["hash"]
+            future_data = deepcopy(future_transaction.get("data") or {})
+            if bool(future_transaction.get("appealed")) or (
+                APPEAL_RECOVERY_SNAPSHOT_KEY in future_data
+            ):
+                # The ancestor invalidates the descendant decision that this
+                # paid appeal targets. Refund its still-active admission before
+                # dropping the stale decision/worker state, then reload the
+                # accounting so the reset cannot resurrect the charged bond.
+                context.accounts_manager.abort_tx_appeal_admission_once(
+                    future_hash,
+                    "ancestor_rewind",
+                )
+                refreshed = context.transactions_processor.get_transaction_by_hash(
+                    future_hash
+                )
+                future_data = deepcopy((refreshed or {}).get("data") or {})
+            future_data.pop(APPEAL_RECOVERY_SNAPSHOT_KEY, None)
+            future_fee_accounting = future_data.get(FEE_ACCOUNTING_KEY)
+            if isinstance(future_fee_accounting, dict):
+                future_data[FEE_ACCOUNTING_KEY] = discard_active_message_generation(
+                    future_fee_accounting
+                )
+            context.transactions_processor.reset_transaction_for_recomputation(
+                future_hash,
+                future_data,
+            )
             await ConsensusAlgorithm.dispatch_transaction_status_update(
                 context.transactions_processor,
-                future_transaction["hash"],
+                future_hash,
                 TransactionStatus.PENDING,
                 context.msg_handler,
-            )
-
-            # Reset the contract snapshot for the transaction
-            context.transactions_processor.set_transaction_contract_snapshot(
-                future_transaction["hash"], None
             )
 
     @staticmethod
@@ -1240,39 +1475,25 @@ class ConsensusAlgorithm:
         consensus_history: dict,
         consensus_data: ConsensusData,
         appeal_failed: int,
+        required_extra_validators: int | None = None,
+        allow_short: bool = False,
     ):
         """
-        Get extra validators for the appeal process according to the following formula:
-        - when appeal_failed = 0, add n + 2 validators
-        - when appeal_failed > 0, add (2 * appeal_failed * n + 1) + 2 validators
-        Note that for appeal_failed > 0, the returned set contains the old validators
-        from the previous appeal round and new validators.
+        Select validators not already consumed by the transaction.
 
-        Selection of the extra validators:
-        appeal_failed | PendingState | Reused validators | Extra selected     | Total
-                      | validators   | from the previous | validators for the | validators
-                      |              | appeal round      | appeal             |
-        ----------------------------------------------------------------------------------
-               0      |       n      |          0        |        n+2         |    2n+2
-               1      |       n      |        n+2        |        n+1         |    3n+3
-               2      |       n      |       2n+3        |         2n         |    5n+3
-               3      |       n      |       4n+3        |         2n         |    7n+3
-                              └───────┬──────┘  └─────────┬────────┘
-                                      │                   |
-        Validators after the ◄────────┘                   └──► Validators during the appeal
-        appeal. This equals                                    for appeal_failed > 0
-        the Total validators                                   = (2*appeal_failed*n+1)+2
-        of the row above,                                      This is the formula from
-        and are in consensus_data.                             above and it is what is
-        For appeal_failed > 0                                  returned by this function
-        = (2*appeal_failed-1)*n+3
-        This is used to calculate n
+        Train callers pass ``required_extra_validators`` from the canonical
+        round schedule. Validator appeals also pass ``allow_short=True`` so a
+        pool with 1..K-1 fresh validators seats all of them; leader appeals
+        retain the exact-size rule. The historical ``appeal_failed`` formulas
+        remain only as a fallback for callers outside the train path.
 
         Args:
             all_validators (List[dict]): List of all validators.
             consensus_history (dict): Dictionary of consensus rounds results and status changes.
             consensus_data (ConsensusData): Data related to the consensus process.
             appeal_failed (int): Number of times the appeal has failed.
+            required_extra_validators: Exact scheduled fresh jury/committee size.
+            allow_short: Whether a non-empty capacity-limited selection is valid.
 
         Returns:
             list: List of current validators.
@@ -1285,15 +1506,16 @@ class ConsensusAlgorithm:
             )
         )
 
-        # Remove used leaders from validator_map
-        used_leader_addresses = (
-            ConsensusAlgorithm.get_used_leader_addresses_from_consensus_history(
-                consensus_history
-            )
+        # Consensus excludes every consumed registry index from a fresh appeal
+        # selection. Do not rely on consensus_data retaining every prior jury:
+        # legacy rows and chained failures can leave receipts only in history.
+        consumed_addresses = ConsensusAlgorithm.get_consumed_validator_addresses(
+            consensus_history,
+            consensus_data,
         )
-        for used_leader_address in used_leader_addresses:
-            if used_leader_address in validator_map:
-                validator_map.pop(used_leader_address)
+        for address in list(validator_map):
+            if address.lower() in consumed_addresses:
+                validator_map.pop(address)
 
         # Set not_used_validators to the remaining validators in validator_map
         not_used_validators = list(validator_map.values())
@@ -1302,8 +1524,23 @@ class ConsensusAlgorithm:
             raise ValueError("No validators found")
 
         nb_current_validators = len(current_validators) + 1  # including the leader
-        if appeal_failed == 0:
-            # Calculate extra validators when no appeal has failed
+        if required_extra_validators is not None:
+            # v0.6 appeal juries are independent fresh selections. Every
+            # address retained in consensus_data was consumed by an earlier
+            # round; history leaders are excluded above. A validator appeal
+            # may seat every remaining 1..K-1 validator, while a leader appeal
+            # passes allow_short=False and therefore retains its exact K rule.
+            requested = max(0, int(required_extra_validators))
+            extra_validators = get_validators_for_transaction(
+                not_used_validators, requested
+            )
+            if not allow_short and len(extra_validators) != requested:
+                raise ValueError(
+                    f"Not enough fresh validators: required {requested}, "
+                    f"available {len(extra_validators)}"
+                )
+        elif appeal_failed == 0:
+            # Legacy caller fallback; train callers pass the explicit schedule.
             extra_validators = get_validators_for_transaction(
                 not_used_validators, nb_current_validators + 2
             )
@@ -1325,6 +1562,42 @@ class ConsensusAlgorithm:
         return current_validators, extra_validators
 
     @staticmethod
+    def get_leader_replay_validators(
+        all_validators: List[dict],
+        consensus_history: dict,
+        consensus_data: ConsensusData,
+        target_committee_size: int,
+    ) -> list[dict]:
+        """Build an exact fee-plan-sized leader replay committee.
+
+        The initial committee is caller-selectable, while later raw rounds use
+        the protocol's absolute committee ladder. Reusing every survivor and
+        then adding a fixed ladder increment over-seats a replay whenever the
+        initial committee was not five. Retain at most the target number of
+        survivors, then fill only the remaining seats with fresh validators.
+        """
+
+        current_validators, _ = ConsensusAlgorithm.get_validators_from_consensus_data(
+            all_validators,
+            consensus_data,
+            False,
+        )
+        target = max(0, int(target_committee_size))
+        retained = current_validators[:target]
+        required_fresh = target - len(retained)
+        if required_fresh == 0:
+            return retained
+
+        _, fresh = ConsensusAlgorithm.get_extra_validators(
+            all_validators,
+            consensus_history,
+            consensus_data,
+            0,
+            required_extra_validators=required_fresh,
+        )
+        return retained + fresh
+
+    @staticmethod
     def get_validators_from_consensus_data(
         all_validators: List[dict], consensus_data: ConsensusData, include_leader: bool
     ):
@@ -1344,8 +1617,12 @@ class ConsensusAlgorithm:
             return [], {}
 
         # Create a dictionary to map addresses to a validator
+        # Solidity addresses are values, not case-sensitive strings. Studio's
+        # registry and serialized receipts can legitimately disagree only in
+        # checksum casing, so every identity comparison uses one normalized
+        # key.
         validator_map = {
-            validator["address"]: validator for validator in all_validators
+            str(validator["address"]).lower(): validator for validator in all_validators
         }
 
         # Extract address of the leader from consensus data
@@ -1363,9 +1640,9 @@ class ConsensusAlgorithm:
 
         # Return validators whose addresses are in the receipt addresses
         validators = [
-            validator_map.pop(receipt_address)
+            validator_map.pop(str(receipt_address).lower())
             for receipt_address in receipt_addresses
-            if receipt_address in validator_map
+            if str(receipt_address).lower() in validator_map
         ]
 
         return validators, validator_map
@@ -1390,20 +1667,36 @@ class ConsensusAlgorithm:
             raise ValueError("No more validators found to add a new validator")
 
         # Extract a set of addresses of validators and leaders
-        addresses = {validator["address"] for validator in validators}
-        addresses.update(leader_addresses)
+        addresses = {str(validator["address"]).lower() for validator in validators}
+        addresses.update(str(address).lower() for address in leader_addresses)
 
         # Get not used validators
         not_used_validators = [
             validator
             for validator in all_validators
-            if validator["address"] not in addresses
+            if str(validator["address"]).lower() not in addresses
         ]
 
         # Get new validator
         new_validator = get_validators_for_transaction(not_used_validators, 1)
 
         return new_validator + validators
+
+    @staticmethod
+    def get_terminal_replacement_validators(
+        all_validators: List[dict], consensus_history: dict
+    ) -> list[dict]:
+        """Return the full terminal electorate minus prior normal leaders."""
+        used_leaders = (
+            ConsensusAlgorithm.get_used_leader_addresses_from_consensus_history(
+                consensus_history
+            )
+        )
+        return [
+            validator
+            for validator in all_validators
+            if str(validator["address"]).lower() not in used_leaders
+        ]
 
     @staticmethod
     def get_used_leader_addresses_from_consensus_history(
@@ -1422,19 +1715,70 @@ class ConsensusAlgorithm:
         used_leader_addresses = set()
         if consensus_history is not None and "consensus_results" in consensus_history:
             for consensus_round in consensus_history["consensus_results"]:
-                leader_receipt = consensus_round["leader_result"]
-                if leader_receipt:
-                    used_leader_addresses.update(
-                        [leader_receipt[0]["node_config"]["address"]]
-                    )
+                leader_receipt = consensus_round.get("leader_result") or []
+                if not leader_receipt:
+                    continue
+                address = (
+                    (leader_receipt[0].get("node_config") or {}).get("address")
+                    if isinstance(leader_receipt[0], dict)
+                    else None
+                )
+                if address:
+                    used_leader_addresses.add(str(address).lower())
 
         # consensus_history does not contain the latest consensus_data
         if current_leader_receipt:
             used_leader_addresses.update(
-                [current_leader_receipt.node_config["address"]]
+                [str(current_leader_receipt.node_config["address"]).lower()]
             )
 
         return used_leader_addresses
+
+    @staticmethod
+    def get_consumed_validator_addresses(
+        consensus_history: dict | None,
+        current_consensus_data: ConsensusData | dict | None = None,
+    ) -> set[str]:
+        """Return every address consumed by the transaction's fresh pool."""
+
+        consumed: set[str] = set()
+
+        def add_receipts(value) -> None:
+            receipts = value if isinstance(value, list) else [value]
+            for receipt in receipts:
+                if receipt is None:
+                    continue
+                node_config = (
+                    receipt.get("node_config")
+                    if isinstance(receipt, dict)
+                    else getattr(receipt, "node_config", None)
+                )
+                if not isinstance(node_config, dict):
+                    continue
+                address = node_config.get("address")
+                if address:
+                    consumed.add(str(address).lower())
+
+        results = (
+            consensus_history.get("consensus_results")
+            if isinstance(consensus_history, dict)
+            else None
+        )
+        if isinstance(results, list):
+            for entry in results:
+                if not isinstance(entry, dict):
+                    continue
+                add_receipts(entry.get("leader_result"))
+                add_receipts(entry.get("validator_results"))
+
+        if isinstance(current_consensus_data, dict):
+            add_receipts(current_consensus_data.get("leader_receipt"))
+            add_receipts(current_consensus_data.get("validators"))
+        elif current_consensus_data is not None:
+            add_receipts(getattr(current_consensus_data, "leader_receipt", None))
+            add_receipts(getattr(current_consensus_data, "validators", None))
+
+        return consumed
 
     def set_finality_window_time(self, time: int):
         """
@@ -1475,12 +1819,789 @@ class TransactionState(ABC):
         """
 
 
+def _external_message_value_total(
+    pending_transactions: Iterable[PendingTransaction],
+) -> int:
+    return sum(
+        int(pending_transaction.value or 0)
+        for pending_transaction in pending_transactions
+        if pending_transaction.is_eth_send and int(pending_transaction.value or 0) > 0
+    )
+
+
+def _external_message_value_for_phase(
+    pending_transactions: Iterable[PendingTransaction],
+    on: Literal["accepted", "finalized"],
+) -> int:
+    return sum(
+        int(pending_transaction.value or 0)
+        for pending_transaction in pending_transactions
+        if pending_transaction.is_eth_send
+        and pending_transaction.on == on
+        and int(pending_transaction.value or 0) > 0
+    )
+
+
+def _use_balance_obligation_total(
+    pending_transactions: Iterable[PendingTransaction],
+) -> tuple[int, int]:
+    fee_budget = 0
+    value = 0
+    for pending_transaction in pending_transactions:
+        if pending_transaction.is_eth_send or not pending_transaction.use_balance:
+            continue
+        fee_budget += max(0, int(pending_transaction.declared_budget or 0))
+        value += max(0, int(pending_transaction.value or 0))
+    return fee_budget, value
+
+
+def _use_balance_obligation_for_phase(
+    pending_transactions: Iterable[PendingTransaction],
+    on: Literal["accepted", "finalized"],
+) -> int:
+    return sum(
+        max(0, int(pending_transaction.declared_budget or 0))
+        + max(0, int(pending_transaction.value or 0))
+        for pending_transaction in pending_transactions
+        if not pending_transaction.is_eth_send
+        and pending_transaction.use_balance
+        and pending_transaction.on == on
+    )
+
+
+def _apply_external_message_freeze_check(
+    context: TransactionContext,
+    leader_receipt: Receipt,
+) -> None:
+    if leader_receipt.execution_result != ExecutionResultStatus.SUCCESS:
+        return
+
+    pending_transactions = _novel_pending_transactions(
+        context,
+        leader_receipt.pending_transactions,
+    )
+    external_value = _external_message_value_total(pending_transactions)
+    use_balance_fee, use_balance_value = _use_balance_obligation_total(
+        pending_transactions
+    )
+    declared_value = external_value + use_balance_fee + use_balance_value
+    if declared_value <= 0:
+        return
+
+    other_reserved = _external_message_pending_freeze_total(context)
+    balance = context.accounts_manager.get_account_balance(
+        context.transaction.to_address
+    )
+    available = max(balance - other_reserved, 0)
+    if declared_value <= available:
+        return
+
+    error_name = (
+        "ExternalMessageFreezeExceeded"
+        if use_balance_fee + use_balance_value == 0
+        else "ContractMessageFreezeExceeded"
+    )
+    error_message = (
+        f"{error_name}: declaredValue={declared_value}, availableLimit={available}"
+    )
+    leader_receipt.execution_result = ExecutionResultStatus.ERROR
+    leader_receipt.result = bytes([ResultCode.VM_ERROR]) + error_message.encode("utf-8")
+    leader_receipt.contract_state = {}
+    leader_receipt.contract_state_hash = None
+    leader_receipt.pending_transactions = []
+    leader_receipt.genvm_result = {
+        **(leader_receipt.genvm_result or {}),
+        "error_code": (
+            "EXTERNAL_MESSAGE_FREEZE_EXCEEDED"
+            if use_balance_fee + use_balance_value == 0
+            else "CONTRACT_MESSAGE_FREEZE_EXCEEDED"
+        ),
+        "error_description": error_message,
+        "external_message_freeze": {
+            "declaredValue": declared_value,
+            "availableLimit": available,
+            "balance": balance,
+            "reservedExternal": other_reserved,
+            **(
+                {
+                    "externalValue": external_value,
+                    "useBalanceFee": use_balance_fee,
+                    "useBalanceValue": use_balance_value,
+                }
+                if use_balance_fee + use_balance_value > 0
+                else {}
+            ),
+        },
+    }
+
+
+def _internal_message_value_for_phase(
+    pending_transactions: Iterable[PendingTransaction],
+    on: Literal["accepted", "finalized"],
+) -> int:
+    return sum(
+        int(pending_transaction.value or 0)
+        for pending_transaction in pending_transactions
+        if not pending_transaction.is_eth_send
+        and pending_transaction.on == on
+        and int(pending_transaction.value or 0) > 0
+    )
+
+
+def _remaining_external_freeze_after_phase(
+    context: TransactionContext,
+    pending_transactions: Iterable[PendingTransaction],
+    on: Literal["accepted", "finalized"],
+) -> int:
+    pending_freeze = _external_message_pending_freeze_total(context)
+    if on == "finalized":
+        return pending_freeze
+
+    return (
+        pending_freeze
+        + _external_message_value_for_phase(pending_transactions, "finalized")
+        + _use_balance_obligation_for_phase(pending_transactions, "finalized")
+    )
+
+
+def _external_message_pending_freeze_total(context: TransactionContext) -> int:
+    contract_address = context.transaction.to_address
+    if not contract_address or not hasattr(context.transactions_processor, "session"):
+        return 0
+
+    current_queue_order = (
+        context.transactions_processor.session.query(
+            Transactions.queue_order,
+        )
+        .filter(Transactions.hash == context.transaction.hash)
+        .scalar()
+    )
+    filters = [
+        Transactions.to_address == contract_address,
+        Transactions.status == TransactionStatus.ACCEPTED,
+        Transactions.hash != context.transaction.hash,
+        Transactions.consensus_data.isnot(None),
+    ]
+    if current_queue_order is not None:
+        filters.append(Transactions.queue_order < int(current_queue_order))
+
+    rows = (
+        context.transactions_processor.session.query(
+            Transactions.hash,
+            Transactions.consensus_data,
+        )
+        .filter(*filters)
+        .all()
+    )
+
+    total = 0
+    for row in rows:
+        for receipt in _leader_receipts_from_consensus_data(row.consensus_data):
+            if (
+                _receipt_execution_result(receipt)
+                != ExecutionResultStatus.SUCCESS.value
+            ):
+                continue
+            total += _external_message_value_for_phase_from_raw(
+                _receipt_pending_transactions(receipt),
+                "finalized",
+            )
+            total += _use_balance_obligation_for_phase_from_raw(
+                _receipt_pending_transactions(receipt),
+                "finalized",
+            )
+    return total
+
+
+def _leader_receipts_from_consensus_data(consensus_data: Any) -> list[Any]:
+    if isinstance(consensus_data, ConsensusData):
+        leader_receipt = consensus_data.leader_receipt
+        if isinstance(leader_receipt, list):
+            return leader_receipt[:1]
+        if leader_receipt:
+            return [leader_receipt]
+        return []
+
+    if not isinstance(consensus_data, dict):
+        return []
+
+    leader_receipt = consensus_data.get("leader_receipt")
+    if isinstance(leader_receipt, list):
+        return leader_receipt[:1]
+    if isinstance(leader_receipt, dict):
+        return [leader_receipt]
+    return []
+
+
+def _receipt_execution_result(receipt: Any) -> str | None:
+    if isinstance(receipt, Receipt):
+        return receipt.execution_result.value
+    if isinstance(receipt, dict):
+        return receipt.get("execution_result")
+    return None
+
+
+def _receipt_pending_transactions(receipt: Any) -> Iterable[Any]:
+    if isinstance(receipt, Receipt):
+        return receipt.pending_transactions
+    if isinstance(receipt, dict):
+        return receipt.get("pending_transactions") or []
+    return []
+
+
+def _external_message_value_for_phase_from_raw(
+    pending_transactions: Iterable[Any],
+    on: Literal["accepted", "finalized"],
+) -> int:
+    return sum(
+        _pending_transaction_external_value(pending_transaction, on)
+        for pending_transaction in pending_transactions
+    )
+
+
+def _pending_transaction_external_value(
+    pending_transaction: Any,
+    on: Literal["accepted", "finalized"],
+) -> int:
+    if isinstance(pending_transaction, PendingTransaction):
+        if not pending_transaction.is_eth_send or pending_transaction.on != on:
+            return 0
+        return int(pending_transaction.value or 0)
+
+    if not isinstance(pending_transaction, dict):
+        return 0
+
+    is_external = bool(
+        pending_transaction.get("is_eth_send")
+        or pending_transaction.get("isEthSend")
+        or pending_transaction.get("messageType") in {0, "0", "External", "external"}
+    )
+    if not is_external:
+        return 0
+
+    pending_on = pending_transaction.get("on")
+    if pending_on is None and "onAcceptance" in pending_transaction:
+        pending_on = (
+            "accepted" if pending_transaction.get("onAcceptance") else "finalized"
+        )
+    if pending_on != on:
+        return 0
+
+    return int(pending_transaction.get("value", 0) or 0)
+
+
+def _use_balance_obligation_for_phase_from_raw(
+    pending_transactions: Iterable[Any],
+    on: Literal["accepted", "finalized"],
+) -> int:
+    total = 0
+    for pending_transaction in pending_transactions:
+        if isinstance(pending_transaction, PendingTransaction):
+            if (
+                pending_transaction.is_eth_send
+                or not pending_transaction.use_balance
+                or pending_transaction.on != on
+            ):
+                continue
+            total += max(0, int(pending_transaction.declared_budget or 0))
+            total += max(0, int(pending_transaction.value or 0))
+            continue
+
+        if not isinstance(pending_transaction, dict):
+            continue
+        message_type = pending_transaction.get(
+            "message_type", pending_transaction.get("messageType")
+        )
+        if message_type in {0, "0", "External", "external"}:
+            continue
+        if not bool(
+            pending_transaction.get(
+                "use_balance", pending_transaction.get("useBalance", False)
+            )
+        ):
+            continue
+        pending_on = pending_transaction.get("on")
+        if pending_on is None and "onAcceptance" in pending_transaction:
+            pending_on = (
+                "accepted" if pending_transaction.get("onAcceptance") else "finalized"
+            )
+        if pending_on != on:
+            continue
+        total += max(
+            0,
+            int(
+                pending_transaction.get(
+                    "declared_budget",
+                    pending_transaction.get("declaredBudget", 0),
+                )
+                or 0
+            ),
+        )
+        total += max(0, int(pending_transaction.get("value", 0) or 0))
+    return total
+
+
+def _pending_transaction_with_value(
+    pending_transaction: PendingTransaction,
+    value: int,
+) -> PendingTransaction:
+    adjusted = deepcopy(pending_transaction)
+    adjusted.value = value
+    return adjusted
+
+
+def _debit_external_message_value_for_phase(
+    context: TransactionContext,
+    pending_transactions: list[PendingTransaction],
+    on: Literal["accepted", "finalized"],
+) -> bool:
+    external_value = _external_message_value_for_phase(pending_transactions, on)
+    if external_value <= 0:
+        return True
+
+    debited = context.accounts_manager.debit_account_balance(
+        context.transaction.to_address, external_value
+    )
+    if not debited:
+        _log_message_value_debit_failure(
+            context,
+            on,
+            external_value,
+            "external",
+            "Skipping value-bearing external child emission.",
+        )
+    return debited
+
+
+def _debit_internal_message_value_for_phase(
+    context: TransactionContext,
+    pending_transactions: list[PendingTransaction],
+    on: Literal["accepted", "finalized"],
+) -> bool:
+    internal_value = sum(
+        int(pending_transaction.value or 0)
+        for pending_transaction in pending_transactions
+        if not pending_transaction.is_eth_send
+        and not pending_transaction.use_balance
+        and pending_transaction.on == on
+        and int(pending_transaction.value or 0) > 0
+    )
+    if internal_value <= 0:
+        return True
+
+    internal_cap = _internal_message_value_cap(context, pending_transactions, on)
+    if internal_value > internal_cap:
+        _log_internal_message_value_cap_failure(
+            context,
+            on,
+            internal_value,
+            internal_cap,
+            pending_transactions,
+        )
+        return False
+
+    debited = context.accounts_manager.debit_account_balance(
+        context.transaction.to_address, internal_value
+    )
+    if not debited:
+        _log_message_value_debit_failure(
+            context,
+            on,
+            internal_value,
+            "internal",
+            "Emitting internal children with value=0.",
+        )
+    return debited
+
+
+def _debit_use_balance_funding_for_phase(
+    context: TransactionContext,
+    pending_transactions: list[PendingTransaction],
+    on: Literal["accepted", "finalized"],
+) -> bool:
+    obligation = _use_balance_obligation_for_phase(pending_transactions, on)
+    if obligation <= 0:
+        return True
+
+    available = _internal_message_value_cap(context, pending_transactions, on)
+    if obligation > available:
+        _log_message_value_debit_failure(
+            context,
+            on,
+            obligation,
+            "useBalance internal",
+            "Emitting the child without contract-funded value or fees.",
+        )
+        return False
+
+    debited = context.accounts_manager.debit_account_balance(
+        context.transaction.to_address, obligation
+    )
+    if not debited:
+        _log_message_value_debit_failure(
+            context,
+            on,
+            obligation,
+            "useBalance internal",
+            "Emitting the child without contract-funded value or fees.",
+        )
+    return debited
+
+
+def _internal_message_value_cap(
+    context: TransactionContext,
+    pending_transactions: list[PendingTransaction],
+    on: Literal["accepted", "finalized"],
+) -> int:
+    frozen_after_phase = _remaining_external_freeze_after_phase(
+        context, pending_transactions, on
+    )
+    balance_after_external = context.accounts_manager.get_account_balance(
+        context.transaction.to_address
+    )
+    return max(balance_after_external - frozen_after_phase, 0)
+
+
+def _log_internal_message_value_cap_failure(
+    context: TransactionContext,
+    on: Literal["accepted", "finalized"],
+    amount: int,
+    available: int,
+    pending_transactions: list[PendingTransaction],
+) -> None:
+    from loguru import logger
+
+    reserved_external = _remaining_external_freeze_after_phase(
+        context, pending_transactions, on
+    )
+    logger.error(
+        f"Contract internal message value is not backed for {context.transaction.to_address}, "
+        f"phase={on}, amount={amount}, available={available}, "
+        f"reserved_external={reserved_external}, tx={context.transaction.hash}. "
+        f"Emitting internal children with value=0."
+    )
+
+
+def _log_message_value_debit_failure(
+    context: TransactionContext,
+    on: Literal["accepted", "finalized"],
+    amount: int,
+    message_kind: str,
+    consequence: str,
+) -> None:
+    from loguru import logger
+
+    logger.error(
+        f"Contract {message_kind} message debit failed for {context.transaction.to_address}, "
+        f"phase={on}, amount={amount}, tx={context.transaction.hash}. {consequence}"
+    )
+
+
+def _adjust_unbacked_message_values(
+    pending_transactions: list[PendingTransaction],
+    on: Literal["accepted", "finalized"],
+    *,
+    external_value_backed: bool,
+    internal_value_backed: bool,
+    use_balance_funding_backed: bool,
+) -> list[PendingTransaction]:
+    adjusted_pending_transactions = []
+    for pending_transaction in pending_transactions:
+        if (
+            pending_transaction.on == on
+            and pending_transaction.use_balance
+            and not use_balance_funding_backed
+        ):
+            # MessagePayments must not turn a failed contract-funded debit
+            # into an executable zero-fee child transaction.
+            continue
+        value = int(pending_transaction.value or 0)
+        if pending_transaction.on == on and value > 0:
+            if pending_transaction.is_eth_send and not external_value_backed:
+                continue
+            if not pending_transaction.is_eth_send and not internal_value_backed:
+                adjusted_pending_transactions.append(
+                    _pending_transaction_with_value(pending_transaction, 0)
+                )
+                continue
+
+        adjusted_pending_transactions.append(pending_transaction)
+
+    return adjusted_pending_transactions
+
+
+def _apply_untracked_message_value_withdrawals_for_phase(
+    context: TransactionContext,
+    pending_transactions: Iterable[PendingTransaction],
+    on: Literal["accepted", "finalized"],
+) -> list[PendingTransaction]:
+    pending_list = list(pending_transactions)
+    external_value_backed = _debit_external_message_value_for_phase(
+        context, pending_list, on
+    )
+    use_balance_funding_backed = _debit_use_balance_funding_for_phase(
+        context, pending_list, on
+    )
+    internal_value_backed = _debit_internal_message_value_for_phase(
+        context, pending_list, on
+    )
+
+    if external_value_backed and internal_value_backed and use_balance_funding_backed:
+        return pending_list
+
+    return _adjust_unbacked_message_values(
+        pending_list,
+        on,
+        external_value_backed=external_value_backed,
+        internal_value_backed=internal_value_backed,
+        use_balance_funding_backed=use_balance_funding_backed,
+    )
+
+
+def _message_value_effect_record(
+    pending_transaction: PendingTransaction,
+    descriptor: str,
+    on: Literal["accepted", "finalized"],
+    *,
+    external_value_backed: bool,
+    internal_value_backed: bool,
+    use_balance_funding_backed: bool,
+) -> dict[str, Any]:
+    value = int(pending_transaction.value or 0)
+    include = True
+    adjusted_value = value
+    adjusted_budget = int(pending_transaction.declared_budget or 0)
+
+    if pending_transaction.use_balance and not use_balance_funding_backed:
+        include = False
+    elif value > 0 and pending_transaction.is_eth_send and not external_value_backed:
+        include = False
+    elif (
+        value > 0 and not pending_transaction.is_eth_send and not internal_value_backed
+    ):
+        adjusted_value = 0
+
+    return {
+        "descriptor": descriptor,
+        "phase": on,
+        "include": include,
+        "value": adjusted_value,
+        "declaredBudget": adjusted_budget,
+    }
+
+
+def _apply_recorded_message_value_effects(
+    pending_transactions: list[PendingTransaction],
+    identities: list[tuple[str, str]],
+    records: dict[str, Any],
+    on: Literal["accepted", "finalized"],
+) -> list[PendingTransaction]:
+    adjusted: list[PendingTransaction] = []
+    for pending_transaction, (occurrence, descriptor) in zip(
+        pending_transactions, identities
+    ):
+        if pending_transaction.on != on:
+            adjusted.append(pending_transaction)
+            continue
+
+        record = records.get(occurrence)
+        if not isinstance(record, dict):
+            raise RuntimeError(f"MessageValueEffectMissing({occurrence})")
+        if record.get("descriptor") != descriptor or record.get("phase") != on:
+            raise RuntimeError(
+                "MessageValueEffectDescriptorMismatch"
+                f"({occurrence},{record.get('descriptor')},{descriptor})"
+            )
+        if not bool(record.get("include", False)):
+            continue
+
+        value = int(record.get("value", 0) or 0)
+        declared_budget = int(record.get("declaredBudget", 0) or 0)
+        if value == int(pending_transaction.value or 0) and declared_budget == int(
+            pending_transaction.declared_budget or 0
+        ):
+            adjusted.append(pending_transaction)
+            continue
+
+        replayed = _pending_transaction_with_value(pending_transaction, value)
+        replayed.declared_budget = declared_budget
+        adjusted.append(replayed)
+    return adjusted
+
+
+def _apply_message_value_withdrawals_for_phase(
+    context: TransactionContext,
+    pending_transactions: Iterable[PendingTransaction],
+    on: Literal["accepted", "finalized"],
+) -> list[PendingTransaction]:
+    """Reserve message value once and replay the exact result after a crash.
+
+    Studio's account database and helper EVM cannot share one atomic
+    transaction. The reservation therefore lives in the parent's locked fee
+    accounting row: a worker may retry the helper call, but it cannot debit the
+    contract a second time or change an earlier insufficient-balance outcome.
+    """
+
+    pending_list = list(pending_transactions)
+    parent_fee_accounting = (getattr(context.transaction, "data", None) or {}).get(
+        FEE_ACCOUNTING_KEY
+    )
+    mutate_accounting = getattr(
+        context.transactions_processor,
+        "mutate_transaction_fee_accounting",
+        None,
+    )
+    if not isinstance(parent_fee_accounting, dict) or not callable(mutate_accounting):
+        return _apply_untracked_message_value_withdrawals_for_phase(
+            context, pending_list, on
+        )
+
+    def reserve_latest(current_fee_accounting: dict[str, Any]) -> dict[str, Any]:
+        updated = deepcopy(current_fee_accounting)
+        payloads = _reveal_message_fee_payloads(updated, pending_list)
+        identities = message_effect_identities(context.transaction.hash, payloads)
+        records = updated.setdefault("message_value_effects", {})
+
+        unrecorded_indexes: set[int] = set()
+        for index, (pending_transaction, (occurrence, descriptor)) in enumerate(
+            zip(pending_list, identities)
+        ):
+            if pending_transaction.on != on:
+                continue
+            record = records.get(occurrence)
+            if record is None:
+                unrecorded_indexes.add(index)
+                continue
+            if (
+                not isinstance(record, dict)
+                or record.get("descriptor") != descriptor
+                or record.get("phase") != on
+            ):
+                raise RuntimeError(
+                    "MessageValueEffectDescriptorMismatch"
+                    f"({occurrence},"
+                    f"{record.get('descriptor') if isinstance(record, dict) else None},"
+                    f"{descriptor})"
+                )
+
+        if unrecorded_indexes:
+            debit_candidates = [
+                pending_transaction
+                for index, pending_transaction in enumerate(pending_list)
+                if pending_transaction.on != on or index in unrecorded_indexes
+            ]
+            external_value_backed = _debit_external_message_value_for_phase(
+                context, debit_candidates, on
+            )
+            use_balance_funding_backed = _debit_use_balance_funding_for_phase(
+                context, debit_candidates, on
+            )
+            internal_value_backed = _debit_internal_message_value_for_phase(
+                context, debit_candidates, on
+            )
+
+            for index in unrecorded_indexes:
+                pending_transaction = pending_list[index]
+                occurrence, descriptor = identities[index]
+                records[occurrence] = _message_value_effect_record(
+                    pending_transaction,
+                    descriptor,
+                    on,
+                    external_value_backed=external_value_backed,
+                    internal_value_backed=internal_value_backed,
+                    use_balance_funding_backed=use_balance_funding_backed,
+                )
+
+        return updated
+
+    updated_accounting = mutate_accounting(
+        context.transaction.hash,
+        reserve_latest,
+        commit=False,
+    )
+    context.transaction.data = dict(context.transaction.data or {})
+    context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
+    payloads = _reveal_message_fee_payloads(updated_accounting, pending_list)
+    identities = message_effect_identities(context.transaction.hash, payloads)
+    return _apply_recorded_message_value_effects(
+        pending_list,
+        identities,
+        updated_accounting.get("message_value_effects") or {},
+        on,
+    )
+
+
+def _pending_valid_until_expired(
+    transaction: Transaction,
+    *,
+    now: float | None = None,
+) -> bool:
+    # Appeals/recomputation reuse Studio's PENDING state after the transaction
+    # has already activated. Consensus deliberately ignores validUntil on that
+    # re-entry path (the original activation deadline is not a lifetime cap).
+    if (
+        bool(getattr(transaction, "consensus_history", None))
+        or bool(getattr(transaction, "appealed", False))
+        or bool(getattr(transaction, "appeal_undetermined", False))
+        or bool(getattr(transaction, "appeal_leader_timeout", False))
+        or bool(getattr(transaction, "appeal_validators_timeout", False))
+    ):
+        return False
+    valid_until = int((transaction.data or {}).get("valid_until", 0) or 0)
+    # EVM block timestamps are integer seconds; equality remains valid.
+    return valid_until > 0 and int(time.time() if now is None else now) > valid_until
+
+
 class PendingState(TransactionState):
     """
     Class representing the pending state of a transaction.
     """
 
     async def handle(self, context):
+        # Refresh transaction from DB FIRST. The claim-path dict that built
+        # context.transaction omits columns whose Transaction.from_dict
+        # defaults are silently wrong for re-processed appeals (e.g.
+        # appeal_undetermined/appeal_leader_timeout default to False) — the
+        # same drift class as the PR #1724 state wipe. Nothing in this state
+        # may read claim-built appeal fields before this refresh.
+        context.transaction = Transaction.from_dict(
+            context.transactions_processor.get_transaction_by_hash(
+                context.transaction.hash
+            )
+        )
+        context.active_fee_round = _active_execution_fee_round(context.transaction)
+
+        # v0.6 validUntil is an activation deadline. Consensus leaves an
+        # expired transaction queued until it reaches the pending head, then
+        # terminalizes it without activating or executing it. Studio used to
+        # decode and persist this field but ignored it entirely.
+        if _pending_valid_until_expired(context.transaction):
+            value_sender = context.transaction.from_address
+            if value_sender:
+                context.accounts_manager.refund_tx_value(
+                    context.transaction.hash,
+                    value_sender,
+                )
+            fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
+            fee_sender = (
+                fee_accounting.get("sender")
+                if isinstance(fee_accounting, dict)
+                else None
+            ) or value_sender
+            if fee_sender:
+                context.accounts_manager.cancel_tx_fee_accounting_once(
+                    context.transaction.hash,
+                    fee_sender,
+                    "valid_until_expired",
+                )
+            await ConsensusAlgorithm.dispatch_transaction_status_update(
+                context.transactions_processor,
+                context.transaction.hash,
+                TransactionStatus.CANCELED,
+                context.msg_handler,
+            )
+            return None
+
         # Pre-effects: timestamp + reset rotation count
         pre_effects = decide_pending_pre(
             tx_hash=context.transaction.hash,
@@ -1489,12 +2610,70 @@ class PendingState(TransactionState):
         )
         await EffectExecutor(context).execute(pre_effects)
 
-        # Refresh transaction from DB
-        context.transaction = Transaction.from_dict(
-            context.transactions_processor.get_transaction_by_hash(
-                context.transaction.hash
+        # Consensus reserves time-unit work at the submitted ceiling, then
+        # validates all three signed price caps and the live execution floor
+        # when the queued transaction activates. The complete activation-time
+        # execution policy is then immutable for this transaction.
+        fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
+        if fee_accounting:
+            activation_result: dict[str, bool] = {}
+
+            def activate_latest(current_fee_accounting):
+                updated, should_cancel = activate_fee_accounting(
+                    current_fee_accounting,
+                    StudioFeePolicy.from_env(),
+                    selection_pool_count=(
+                        len(context.validators_snapshot.nodes)
+                        if context.validators_snapshot is not None
+                        else None
+                    ),
+                    selection_pool_addresses=(
+                        [
+                            node.validator.address
+                            for node in context.validators_snapshot.nodes
+                        ]
+                        if context.validators_snapshot is not None
+                        else None
+                    ),
+                )
+                activation_result["should_cancel"] = should_cancel
+                return updated
+
+            activated_accounting = (
+                context.transactions_processor.mutate_transaction_fee_accounting(
+                    context.transaction.hash,
+                    activate_latest,
+                )
             )
-        )
+            should_cancel = activation_result["should_cancel"]
+            context.transaction.data = {
+                **(context.transaction.data or {}),
+                FEE_ACCOUNTING_KEY: activated_accounting,
+            }
+            if should_cancel:
+                value_sender = context.transaction.from_address
+                if value_sender:
+                    context.accounts_manager.refund_tx_value(
+                        context.transaction.hash,
+                        value_sender,
+                    )
+                fee_sender = activated_accounting.get("sender") or value_sender
+                if fee_sender:
+                    context.accounts_manager.cancel_tx_fee_accounting_once(
+                        context.transaction.hash,
+                        fee_sender,
+                        str(
+                            activated_accounting.get("activation_cancel_reason")
+                            or "activation_fee_policy_rejected"
+                        ),
+                    )
+                await ConsensusAlgorithm.dispatch_transaction_status_update(
+                    context.transactions_processor,
+                    context.transaction.hash,
+                    TransactionStatus.CANCELED,
+                    context.msg_handler,
+                )
+                return None
 
         # Log executing message (unless appeal)
         if (
@@ -1535,6 +2714,51 @@ class PendingState(TransactionState):
             all_validators = [
                 n.validator.to_dict() for n in context.validators_snapshot.nodes
             ]
+
+        # Consensus executes every later round against the activation-pinned
+        # selection pool. Validators added afterwards are not eligible; a
+        # removed validator is simply unavailable and can reduce capacity.
+        fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
+        if all_validators:
+            all_validators = _validators_in_frozen_selection_pool(
+                all_validators,
+                fee_accounting,
+            )
+
+        is_initial_activation = not (
+            bool(context.transaction.consensus_data)
+            or bool(context.transaction.consensus_history)
+            or bool(context.transaction.appealed)
+            or bool(context.transaction.appeal_undetermined)
+            or bool(context.transaction.appeal_leader_timeout)
+            or bool(context.transaction.appeal_validators_timeout)
+        )
+        requested_initial_validators = int(
+            context.transaction.num_of_initial_validators or DEFAULT_VALIDATORS_COUNT
+        )
+        if (
+            is_initial_activation
+            and len(all_validators or []) < requested_initial_validators
+        ):
+            # Consensus admission prices the exact caller-selected committee.
+            # Activation must not silently execute a cheaper/smaller round when
+            # that many frozen-pool validators are unavailable. Its canonical
+            # no-capacity outcome is Undetermined (Pending -> Undetermined).
+            context.msg_handler.send_message(
+                LogEvent(
+                    "consensus_event",
+                    EventType.WARNING,
+                    EventScope.CONSENSUS,
+                    "Requested initial validator committee is unavailable",
+                    {
+                        "transaction_hash": context.transaction.hash,
+                        "requested_validators": requested_initial_validators,
+                        "available_validators": len(all_validators or []),
+                    },
+                    transaction_hash=context.transaction.hash,
+                )
+            )
+            return UndeterminedState()
 
         if not all_validators:
             context.msg_handler.send_message(
@@ -1585,15 +2809,19 @@ class PendingState(TransactionState):
                     all_validators, context.transaction.num_of_initial_validators
                 )
             else:
-                current_validators, extra_validators = (
-                    ConsensusAlgorithm.get_extra_validators(
+                context.involved_validators = (
+                    ConsensusAlgorithm.get_leader_replay_validators(
                         all_validators,
                         context.transaction.consensus_history,
                         context.transaction.consensus_data,
-                        0,
+                        VALIDATORS_PER_ROUND[
+                            min(
+                                max(0, context.active_fee_round),
+                                len(VALIDATORS_PER_ROUND) - 1,
+                            )
+                        ],
                     )
                 )
-                context.involved_validators = current_validators + extra_validators
 
                 context.consensus_service.emit_transaction_event(
                     "emitAppealStarted",
@@ -1605,28 +2833,40 @@ class PendingState(TransactionState):
                 )
 
         elif context.transaction.appeal_leader_timeout:
-            used_leader_addresses = (
-                ConsensusAlgorithm.get_used_leader_addresses_from_consensus_history(
-                    context.transaction.consensus_history
-                )
-            )
-            assert context.validators_snapshot is not None
-            old_validators = [
-                x.validator.to_dict() for x in context.validators_snapshot.nodes
-            ]
-            context.involved_validators = ConsensusAlgorithm.add_new_validator(
-                old_validators,
-                context.transaction.leader_timeout_validators,
-                used_leader_addresses,
+            # Consensus removes the timed-out leader and replays with the
+            # surviving committee; it does not select a replacement seat.
+            context.involved_validators = list(
+                context.transaction.leader_timeout_validators
             )
 
         else:
             if context.transaction.consensus_data:
-                context.involved_validators, _ = (
-                    ConsensusAlgorithm.get_validators_from_consensus_data(
-                        all_validators, context.transaction.consensus_data, True
-                    )
+                history_entries = logical_fee_round_entries(
+                    context.transaction.consensus_history
                 )
+                last_outcome = (
+                    str(history_entries[-1][1].get("consensus_round") or "")
+                    if history_entries
+                    else ""
+                )
+                if last_outcome in TERMINAL_VALIDATOR_APPEAL_ROUNDS:
+                    # A successful validator review is followed by one
+                    # terminal normal recomputation over the full frozen
+                    # electorate, excluding only prior normal-round leaders.
+                    # Prior validators and jurors are deliberately eligible
+                    # again; this is not another fresh-jury selection.
+                    context.involved_validators = (
+                        ConsensusAlgorithm.get_terminal_replacement_validators(
+                            all_validators,
+                            context.transaction.consensus_history,
+                        )
+                    )
+                else:
+                    context.involved_validators, _ = (
+                        ConsensusAlgorithm.get_validators_from_consensus_data(
+                            all_validators, context.transaction.consensus_data, True
+                        )
+                    )
                 if not context.involved_validators:
                     context.msg_handler.send_message(
                         LogEvent(
@@ -1651,7 +2891,7 @@ class PendingState(TransactionState):
         # Credit target contract on activation (value from transaction)
         # Placed AFTER validator check — if no validators, tx gets canceled
         # and refund_tx_value must be able to refund (requires value_credited=false)
-        tx_value = context.transaction.value or 0
+        tx_value = int(context.transaction.value or 0)
         if tx_value > 0:
             credited = context.accounts_manager.credit_tx_value_once(
                 context.transaction.hash,
@@ -1725,7 +2965,11 @@ class ProposingState(TransactionState):
         leader_budget_seconds = _slot_budget_seconds(context.transaction, "leader")
         leader_deadline = asyncio.get_running_loop().time() + leader_budget_seconds
 
-        def _build_leader_timeout_receipt(leader_dict: dict) -> Receipt:
+        def _build_leader_timeout_receipt(
+            leader_dict: dict,
+            *,
+            detail: str | None = None,
+        ) -> Receipt:
             timeout_ms = int(leader_budget_seconds * 1000)
             return Receipt(
                 result=bytes([ResultCode.VM_ERROR]) + b"timeout",
@@ -1738,7 +2982,8 @@ class ProposingState(TransactionState):
                 vote=None,
                 genvm_result={
                     "stdout": "",
-                    "stderr": f"Leader execution exceeded {leader_budget_seconds:.3f}s",
+                    "stderr": detail
+                    or f"Leader execution exceeded {leader_budget_seconds:.3f}s",
                     "error_code": "CONSENSUS_LEADER_EXEC_TIMEOUT",
                     "raw_error": {
                         "causes": ["LEADER_EXEC_TIMEOUT"],
@@ -1835,6 +3080,28 @@ class ProposingState(TransactionState):
             context.consensus_data.leader_receipt[0].result[0] == ResultCode.VM_ERROR
             and context.consensus_data.leader_receipt[0].result[1:] == b"timeout"
         )
+        if not leader_receipt_timed_out:
+            try:
+                proposal_policy = stamp_receipt_execution_policy(
+                    context.consensus_data.leader_receipt[0],
+                    (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY),
+                    StudioFeePolicy.from_env(),
+                )
+                validate_receipt_admission_caps(
+                    context.consensus_data.leader_receipt[0],
+                    proposal_policy,
+                )
+            except FeeValidationError as exc:
+                # The on-chain proposal/reveal call reverts on these caps.
+                # Studio advances to the equivalent leader-timeout path
+                # instead of accepting a receipt Consensus would never store.
+                context.consensus_data.leader_receipt = [
+                    _build_leader_timeout_receipt(
+                        context.leader,
+                        detail=str(exc),
+                    )
+                ]
+                leader_receipt_timed_out = True
 
         # Post-execution decision
         next_state, post_effects = decide_post_proposal(
@@ -1922,7 +3189,7 @@ class CommittingState(TransactionState):
         )
 
         # Execute the transaction with a semaphore to limit the number of concurrent validators
-        sem = asyncio.Semaphore(8)
+        sem = asyncio.Semaphore(VALIDATOR_MAX_CONCURRENT)
 
         # Build replacement pool: all validators minus those already assigned
         assigned_addresses: set[str] = set()
@@ -2116,10 +3383,14 @@ class CommittingState(TransactionState):
                 Vote.AGREE.value,
                 Vote.DISAGREE.value,
                 Vote.TIMEOUT.value,
+                Vote.DETERMINISTIC_VIOLATION.value,
                 Vote.IDLE.value,
             )
             outcomes = {
-                determine_consensus_from_votes(votes_so_far + [pending_vote] * pending)
+                determine_consensus_from_votes(
+                    votes_so_far + [pending_vote] * pending,
+                    _terminal_decision_electorate_size(context),
+                )
                 for pending_vote in possible_pending_votes
             }
             if len(outcomes) != 1:
@@ -2260,17 +3531,23 @@ class RevealingState(TransactionState):
             )
 
         # Determine consensus result
-        consensus_result = determine_consensus_from_votes(list(context.votes.values()))
+        consensus_result = determine_consensus_from_votes(
+            list(context.votes.values()),
+            _terminal_decision_electorate_size(context),
+        )
 
-        # Build vote reveal entries (IDLE→TIMEOUT for on-chain events)
+        # Build vote reveal entries with canonical v0.6 VoteType ordinals.
         vote_reveal_entries = []
         for validation_result in context.validation_results:
-            chain_vote = (
-                Vote.TIMEOUT
-                if validation_result.vote == Vote.IDLE
-                else validation_result.vote
+            vote_reveal_entries.append(
+                (
+                    validation_result.node_config,
+                    consensus_vote_type_code(
+                        validation_result.vote,
+                        validation_result.execution_result,
+                    ),
+                )
             )
-            vote_reveal_entries.append((validation_result.node_config, int(chain_vote)))
 
         # Leader receipt split
         if (
@@ -2306,7 +3583,10 @@ class RevealingState(TransactionState):
             appeal_validators_timeout=context.transaction.appeal_validators_timeout,
             appeal_undetermined=context.transaction.appeal_undetermined,
             rotation_count=context.rotation_count,
-            config_rotation_rounds=context.transaction.config_rotation_rounds,
+            config_rotation_rounds=_runtime_rotation_limit(
+                context.transaction,
+                context.active_fee_round,
+            ),
             vote_reveal_entries=vote_reveal_entries,
             consensus_data_dict=context.consensus_data.to_dict(
                 strip_contract_state=True
@@ -2404,6 +3684,8 @@ class AcceptedState(TransactionState):
 
     async def handle(self, context):
         leader_receipt = context.consensus_data.leader_receipt[0]
+        _apply_external_message_freeze_check(context, leader_receipt)
+        _sync_reveal_message_fee_accounting(context, leader_receipt)
         accepted_contract_state = leader_receipt.contract_state
         execution_success = (
             leader_receipt.execution_result == ExecutionResultStatus.SUCCESS
@@ -2441,60 +3723,26 @@ class AcceptedState(TransactionState):
             ),
             to_address=context.transaction.to_address,
             leader_node_config=leader_receipt.node_config,
+            genvm_executor_selector=(
+                transaction_genvm_executor_selector(context.transaction)
+                if is_deploy
+                else None
+            ),
         )
 
         # Execute pre-effects (includes contract registration/update via executor)
         executor = EffectExecutor(context)
         await executor.execute(pre_effects)
 
-        # Impure: triggered transaction processing (needs DB reads for nonce/accounts)
-        # Cumulative: child emission happens on every acceptance round (including appeal re-acceptance)
+        # Consensus tombstones each tx-scoped logical message occurrence. The
+        # Studio bridge additionally makes the helper call, value reservation,
+        # and local child insertion replay-safe across worker/process failure.
         if execution_success:
-            # Balance debit for on_accepted messages BEFORE child emission
-            total_msg_debit = sum(
-                pt.value
-                for pt in leader_receipt.pending_transactions
-                if pt.on == "accepted" and pt.value > 0
-            )
-            debit_ok = True
-            if total_msg_debit > 0:
-                debit_ok = context.accounts_manager.debit_account_balance(
-                    context.transaction.to_address, total_msg_debit
-                )
-                if not debit_ok:
-                    from loguru import logger
-
-                    logger.error(
-                        f"Contract balance debit failed for {context.transaction.to_address}, "
-                        f"amount={total_msg_debit}, tx={context.transaction.hash}. "
-                        f"Skipping value-bearing child emission."
-                    )
-
-            # Emit child messages — filter out value-bearing children if debit failed
-            if debit_ok:
-                pending_to_emit = leader_receipt.pending_transactions
-            else:
-                pending_to_emit = [
-                    pt
-                    for pt in leader_receipt.pending_transactions
-                    if pt.on != "accepted" or pt.value <= 0
-                ]
-
-            internal_messages_data, insert_transactions_data = _get_messages_data(
+            _dispatch_messages_for_phase(
                 context,
-                pending_to_emit,
+                leader_receipt,
                 "accepted",
-            )
-
-            rollup_receipt = context.consensus_service.emit_transaction_event(
-                "emitTransactionAccepted",
-                leader_receipt.node_config,
-                context.transaction.hash,
-                internal_messages_data,
-            )
-
-            _emit_messages(
-                context, insert_transactions_data, rollup_receipt, "accepted"
+                force_phase_event=True,
             )
 
         # Execute post-effects (status update + appeal cleanup)
@@ -2614,7 +3862,19 @@ class FinalizingState(TransactionState):
     """
 
     async def handle(self, context):
-        leader_receipt = context.transaction.consensus_data.leader_receipt[0]
+        consensus_data = context.transaction.consensus_data
+        leader_receipts = (
+            consensus_data.leader_receipt
+            if consensus_data is not None and consensus_data.leader_receipt
+            else []
+        )
+        leader_receipt = leader_receipts[0] if leader_receipts else None
+
+        # Acceptance is a separate message lifecycle phase. If the helper EVM
+        # or worker died after the agreed decision was committed, repair that
+        # phase before allowing finalization to overtake it.
+        if leader_receipt is not None:
+            _dispatch_messages_for_phase(context, leader_receipt, "accepted")
 
         pre_effects, post_effects, should_finalize_contract = decide_finalizing(
             tx_hash=context.transaction.hash,
@@ -2622,13 +3882,32 @@ class FinalizingState(TransactionState):
                 context.transaction.status == TransactionStatus.ACCEPTED
             ),
             execution_result_success=(
-                leader_receipt.execution_result == ExecutionResultStatus.SUCCESS
+                leader_receipt is not None
+                and leader_receipt.execution_result == ExecutionResultStatus.SUCCESS
             ),
-            leader_node_config=leader_receipt.node_config,
+            leader_node_config=(
+                leader_receipt.node_config if leader_receipt is not None else None
+            ),
         )
 
         executor = EffectExecutor(context)
         await executor.execute(pre_effects)
+
+        if not should_finalize_contract and int(context.transaction.value or 0) > 0:
+            value_beneficiary = context.transaction.from_address
+            if value_beneficiary:
+                refunded_activated = (
+                    context.accounts_manager.refund_activated_tx_value_once(
+                        context.transaction.hash,
+                        context.transaction.to_address,
+                        value_beneficiary,
+                    )
+                )
+                if not refunded_activated:
+                    context.accounts_manager.refund_tx_value(
+                        context.transaction.hash,
+                        value_beneficiary,
+                    )
 
         # Impure: contract finalization + triggered transactions (needs DB reads)
         if should_finalize_contract:
@@ -2649,53 +3928,26 @@ class FinalizingState(TransactionState):
                 finalized_state=accepted_state,
             )
 
-            # Balance debit BEFORE child emission
-            total_finalized_debit = sum(
-                pt.value
-                for pt in leader_receipt.pending_transactions
-                if pt.on == "finalized" and pt.value > 0
-            )
-            finalize_debit_ok = True
-            if total_finalized_debit > 0:
-                finalize_debit_ok = context.accounts_manager.debit_account_balance(
-                    context.transaction.to_address, total_finalized_debit
-                )
-                if not finalize_debit_ok:
-                    from loguru import logger
-
-                    logger.error(
-                        f"Contract finalization debit failed for {context.transaction.to_address}, "
-                        f"amount={total_finalized_debit}, tx={context.transaction.hash}"
-                    )
-
-            # Filter out value-bearing children if debit failed
-            if finalize_debit_ok:
-                pending_to_finalize = leader_receipt.pending_transactions
-            else:
-                pending_to_finalize = [
-                    pt
-                    for pt in leader_receipt.pending_transactions
-                    if pt.on != "finalized" or pt.value <= 0
-                ]
-
-            internal_messages_data, insert_transactions_data = _get_messages_data(
+            _dispatch_messages_for_phase(
                 context,
-                pending_to_finalize,
+                leader_receipt,
                 "finalized",
-            )
-
-            rollup_receipt = context.consensus_service.emit_transaction_event(
-                "emitTransactionFinalized",
-                leader_receipt.node_config,
-                context.transaction.hash,
-                internal_messages_data,
-            )
-
-            _emit_messages(
-                context, insert_transactions_data, rollup_receipt, "finalized"
+                force_phase_event=True,
             )
 
         await executor.execute(post_effects)
+
+        refund_recipient = (
+            context.transaction.origin_address or context.transaction.from_address
+        )
+        if refund_recipient:
+            context.accounts_manager.settle_tx_fee_accounting_once(
+                context.transaction.hash,
+                refund_recipient,
+                receipt=leader_receipt,
+                reason="finalized",
+            )
+            context.accounts_manager.session.commit()
 
 
 def _get_messages_data(
@@ -2705,84 +3957,980 @@ def _get_messages_data(
 ):
     insert_transactions_data = []
     internal_messages_data = []
-    base_nonce = context.transactions_processor.get_transaction_count(
+    message_fee_payloads = []
+    parent_fee_accounting = (getattr(context.transaction, "data", None) or {}).get(
+        FEE_ACCOUNTING_KEY
+    )
+    reveal_recorded = bool(
+        parent_fee_accounting
+        and parent_fee_accounting.get("message_fees_recorded_at_reveal")
+    )
+    base_nonce = context.transactions_processor.get_genlayer_transaction_count(
         context.transaction.to_address
     )
-    nonce_offset = 0
-    for pending_transaction in filter(lambda t: t.on == on, pending_transactions):
+    phase_pending_transactions = list(
+        _pending_transactions_for_phase(pending_transactions, on)
+    )
+    identity_payloads = (
+        _reveal_message_fee_payloads(parent_fee_accounting, phase_pending_transactions)
+        if parent_fee_accounting
+        else [
+            _pending_transaction_fee_payload(pending_transaction, on)
+            for pending_transaction in phase_pending_transactions
+        ]
+    )
+    effect_identities = message_effect_identities(
+        context.transaction.hash,
+        identity_payloads,
+    )
+    for nonce_offset, pending_transaction in enumerate(phase_pending_transactions):
         nonce = base_nonce + nonce_offset
-        nonce_offset += 1
-        data: dict
-        transaction_type: TransactionType
-        if pending_transaction.is_eth_send:
-            transaction_type = TransactionType.SEND
-            data = {}
-        elif pending_transaction.is_deploy():
-            transaction_type = TransactionType.DEPLOY_CONTRACT
-            new_contract_address: str
-            if pending_transaction.salt_nonce == 0:
-                # NOTE: this address is random, which doesn't 100% align with consensus spec
-                new_contract_address = (
-                    context.accounts_manager.create_new_account().address
-                )
-            else:
-                from eth_utils.crypto import keccak
-                from backend.node.types import Address
-                from backend.node.base import get_simulator_chain_id
+        transaction_type, data = _child_transaction_payload(
+            context, pending_transaction
+        )
 
-                arr = bytearray()
-                arr.append(1)
-                arr.extend(Address(context.transaction.to_address).as_bytes)
-                arr.extend(
-                    pending_transaction.salt_nonce.to_bytes(32, "big", signed=False)
-                )
-                arr.extend(get_simulator_chain_id().to_bytes(32, "big", signed=False))
-                new_contract_address = Address(keccak(arr)[:20]).as_hex
-                context.accounts_manager.create_new_account_with_address(
-                    new_contract_address
-                )
-            pending_transaction.address = new_contract_address
-            data = {
-                "contract_address": new_contract_address,
-                "contract_code": pending_transaction.code,
-                "calldata": pending_transaction.calldata,
-            }
-        else:
-            transaction_type = TransactionType.RUN_CONTRACT
-            data = {
-                "calldata": pending_transaction.calldata,
-            }
+        _append_message_fee_payload(
+            context,
+            pending_transaction,
+            parent_fee_accounting,
+            message_fee_payloads,
+            data,
+            on,
+        )
 
         insert_transactions_data.append(
             [
-                pending_transaction.address,
+                (
+                    ZERO_ADDRESS
+                    if pending_transaction.is_deploy()
+                    else pending_transaction.address
+                ),
                 data,
                 transaction_type.value,
                 nonce,
                 pending_transaction.value,
+                effect_identities[nonce_offset][0],
+                identity_payloads[nonce_offset],
             ]
         )
 
-        serializable_data = data.copy()
-        if "contract_code" in serializable_data:
-            serializable_data["contract_code"] = serializable_data[
-                "contract_code"
-            ].decode()
-        if "calldata" in serializable_data:
-            # Encode binary calldata as base64 instead of trying to decode as UTF-8
-            serializable_data["calldata"] = base64.b64encode(
-                serializable_data["calldata"]
-            ).decode("utf-8")
+        if not pending_transaction.is_eth_send:
+            internal_messages_data.append(
+                _internal_message_event_data(context, pending_transaction, data)
+            )
 
-        internal_messages_data.append(
-            {
-                "sender": context.transaction.to_address,
-                "recipient": pending_transaction.address,
-                "data": json.dumps(serializable_data).encode(),
-            }
-        )
+    _record_parent_message_fee_consumption(
+        context,
+        parent_fee_accounting,
+        message_fee_payloads,
+        reveal_recorded,
+    )
 
     return internal_messages_data, insert_transactions_data
+
+
+def _pending_transactions_for_phase(
+    pending_transactions: Iterable[PendingTransaction],
+    on: Literal["accepted", "finalized"],
+) -> Iterable[PendingTransaction]:
+    return (
+        pending_transaction
+        for pending_transaction in pending_transactions
+        if pending_transaction.on == on
+    )
+
+
+def _child_transaction_payload(
+    context: TransactionContext,
+    pending_transaction: PendingTransaction,
+) -> tuple[TransactionType, dict]:
+    if pending_transaction.is_eth_send:
+        return TransactionType.SEND, {}
+    if pending_transaction.is_deploy():
+        return _deploy_child_transaction_payload(context, pending_transaction)
+    return TransactionType.RUN_CONTRACT, {"calldata": pending_transaction.calldata}
+
+
+def _deploy_child_transaction_payload(
+    context: TransactionContext,
+    pending_transaction: PendingTransaction,
+) -> tuple[TransactionType, dict]:
+    return (
+        TransactionType.DEPLOY_CONTRACT,
+        {
+            # Consensus is the address authority for internal deployments.
+            # Keep the payload stable across retries and bind the local child
+            # to the returned CREATE/CREATE2 recipient after helper delivery.
+            "contract_address": ZERO_ADDRESS,
+            "contract_code": pending_transaction.code,
+            "calldata": pending_transaction.calldata,
+        },
+    )
+
+
+def _append_message_fee_payload(
+    context: TransactionContext,
+    pending_transaction: PendingTransaction,
+    parent_fee_accounting: dict[str, Any] | None,
+    message_fee_payloads: list[dict[str, Any]],
+    data: dict,
+    on: Literal["accepted", "finalized"],
+) -> None:
+    if not parent_fee_accounting:
+        return
+
+    message_payload = _parent_message_fee_payload(
+        parent_fee_accounting,
+        pending_transaction,
+        on,
+    )
+    message_fee_payloads.append(message_payload)
+    if pending_transaction.is_eth_send:
+        return
+
+    _attach_child_fee_accounting(
+        context,
+        parent_fee_accounting,
+        message_payload,
+        pending_transaction,
+        data,
+    )
+
+
+def _parent_message_fee_payload(
+    parent_fee_accounting: dict[str, Any],
+    pending_transaction: PendingTransaction,
+    on: Literal["accepted", "finalized"],
+) -> dict[str, Any]:
+    payload = _pending_transaction_fee_payload(pending_transaction, on)
+    if pending_transaction.is_eth_send or pending_transaction.use_balance:
+        return payload
+
+    try:
+        return fill_message_fee_payload_from_allocation(parent_fee_accounting, payload)
+    except FeeValidationError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
+def _attach_child_fee_accounting(
+    context: TransactionContext,
+    parent_fee_accounting: dict[str, Any],
+    message_payload: dict[str, Any],
+    pending_transaction: PendingTransaction,
+    data: dict,
+) -> None:
+    if int(message_payload.get("declaredBudget", 0) or 0) <= 0:
+        return
+
+    try:
+        child_fees, child_fee_accounting = create_child_fee_accounting(
+            message=message_payload,
+            parent_fees_distribution=parent_fee_accounting.get("fees_distribution"),
+            message_allocations=(
+                message_payload.get("_studioResolvedAllocationSubtree")
+                or message_payload.get("allocationSubtree")
+                or []
+            ),
+            sender=(
+                context.transaction.to_address
+                if pending_transaction.use_balance
+                else context.transaction.origin_address
+                or context.transaction.from_address
+            ),
+            policy=execution_policy_for_accounting(
+                parent_fee_accounting,
+                StudioFeePolicy.from_env(),
+            ),
+        )
+    except FeeValidationError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    data.update(
+        {
+            "fee_value": int(message_payload["declaredBudget"]),
+            "user_value": pending_transaction.value,
+            "fees_distribution": child_fees,
+            "message_allocations_count": len(
+                child_fee_accounting.get("message_allocations") or []
+            ),
+            FEE_ACCOUNTING_KEY: child_fee_accounting,
+        }
+    )
+
+
+def _internal_message_event_data(
+    context: TransactionContext,
+    pending_transaction: PendingTransaction,
+    data: dict,
+) -> dict[str, Any]:
+    return {
+        "sender": context.transaction.to_address,
+        "recipient": (
+            ZERO_ADDRESS
+            if pending_transaction.is_deploy()
+            else pending_transaction.address
+        ),
+        "saltNonce": pending_transaction.salt_nonce,
+        "data": json.dumps(_serializable_message_data(data)).encode(),
+    }
+
+
+def _serializable_message_data(data: dict) -> dict:
+    serializable_data = data.copy()
+    if "contract_code" in serializable_data:
+        serializable_data["contract_code"] = serializable_data["contract_code"].decode()
+    if "calldata" in serializable_data:
+        serializable_data["calldata"] = base64.b64encode(
+            serializable_data["calldata"]
+        ).decode("utf-8")
+    return serializable_data
+
+
+def _record_parent_message_fee_consumption(
+    context: TransactionContext,
+    parent_fee_accounting: dict[str, Any] | None,
+    message_fee_payloads: list[dict[str, Any]],
+    reveal_recorded: bool,
+) -> None:
+    if not parent_fee_accounting or not message_fee_payloads:
+        return
+
+    updated_accounting = (
+        context.transactions_processor.mutate_transaction_fee_accounting(
+            context.transaction.hash,
+            lambda current: _consume_parent_message_fee_payloads(
+                current,
+                message_fee_payloads,
+                reveal_recorded,
+                _message_execution_fee_recipient(context),
+            ),
+            commit=False,
+        )
+    )
+    context.transaction.data = dict(context.transaction.data or {})
+    context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
+
+
+def _message_execution_fee_recipient(context: TransactionContext) -> str | None:
+    """Best Studio analogue of Consensus' tx.origin execution recipient.
+
+    Acceptance processing happens inside the leader's reveal transaction on
+    chain. Studio does not expose a separate public external-message flush EOA,
+    so finalization uses the leader attached to the accepted receipt as the
+    observable executor instead of incorrectly reimbursing the transaction
+    sender.
+    """
+
+    receipt_sources = [
+        getattr(context, "consensus_data", None),
+        getattr(context.transaction, "consensus_data", None),
+    ]
+    for source in receipt_sources:
+        if source is None:
+            continue
+        leader_receipts = (
+            source.get("leader_receipt", [])
+            if isinstance(source, dict)
+            else getattr(source, "leader_receipt", [])
+        )
+        if isinstance(leader_receipts, dict):
+            leader_receipts = [leader_receipts]
+        if not leader_receipts:
+            continue
+        receipt = leader_receipts[0]
+        node_config = (
+            receipt.get("node_config", {})
+            if isinstance(receipt, dict)
+            else getattr(receipt, "node_config", {})
+        )
+        address = (
+            node_config.get("address")
+            if isinstance(node_config, dict)
+            else getattr(node_config, "address", None)
+        )
+        if address:
+            return str(address)
+    return None
+
+
+def _consume_parent_message_fee_payloads(
+    parent_fee_accounting: dict[str, Any],
+    message_fee_payloads: list[dict[str, Any]],
+    reveal_recorded: bool,
+    executor: str | None = None,
+) -> dict[str, Any]:
+    try:
+        if reveal_recorded:
+            return record_external_message_execution_fees(
+                parent_fee_accounting,
+                message_fee_payloads,
+                executor=executor,
+            )
+        return consume_message_fees(
+            parent_fee_accounting,
+            message_fee_payloads,
+            external_executor=executor,
+        )
+    except FeeValidationError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
+def _sync_reveal_message_fee_accounting(
+    context: TransactionContext,
+    leader_receipt: Receipt,
+) -> None:
+    if leader_receipt.execution_result != ExecutionResultStatus.SUCCESS:
+        _unwind_discarded_reveal_message_fee_accounting(context)
+        return
+
+    parent_fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
+    if not parent_fee_accounting:
+        return
+
+    def prepare_latest(current_fee_accounting):
+        message_fee_payloads = _reveal_message_fee_payloads(
+            current_fee_accounting,
+            leader_receipt.pending_transactions,
+        )
+        try:
+            return prepare_reveal_message_generation(
+                current_fee_accounting,
+                context.transaction.hash,
+                message_fee_payloads,
+            )
+        except FeeValidationError as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    updated_accounting = (
+        context.transactions_processor.mutate_transaction_fee_accounting(
+            context.transaction.hash,
+            prepare_latest,
+            commit=False,
+        )
+    )
+
+    context.transaction.data = dict(context.transaction.data or {})
+    context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
+
+
+def _reveal_message_fee_payloads(
+    parent_fee_accounting: dict[str, Any],
+    pending_transactions: Iterable[Any],
+) -> list[dict[str, Any]]:
+    message_fee_payloads = []
+    for raw_pending_transaction in pending_transactions:
+        pending_transaction = _coerce_pending_transaction(raw_pending_transaction)
+        message_payload = _pending_transaction_fee_payload(
+            pending_transaction,
+            pending_transaction.on,
+        )
+        if not pending_transaction.is_eth_send and not pending_transaction.use_balance:
+            message_payload = fill_message_fee_payload_from_allocation(
+                parent_fee_accounting,
+                message_payload,
+            )
+        message_fee_payloads.append(message_payload)
+    return message_fee_payloads
+
+
+def _novel_pending_transactions(
+    context: TransactionContext,
+    pending_transactions: Iterable[Any],
+) -> list[PendingTransaction]:
+    pending_list = [
+        _coerce_pending_transaction(pending_transaction)
+        for pending_transaction in pending_transactions
+    ]
+    parent_fee_accounting = (getattr(context.transaction, "data", None) or {}).get(
+        FEE_ACCOUNTING_KEY
+    )
+    if not parent_fee_accounting or not pending_list:
+        return pending_list
+
+    payloads = _reveal_message_fee_payloads(parent_fee_accounting, pending_list)
+    try:
+        novelty = message_novelty_mask(
+            parent_fee_accounting,
+            context.transaction.hash,
+            payloads,
+        )
+    except FeeValidationError as exc:
+        raise RuntimeError(str(exc)) from exc
+    return [
+        pending_transaction
+        for pending_transaction, is_novel in zip(pending_list, novelty)
+        if is_novel
+    ]
+
+
+def _mark_message_phase_delivered(
+    context: TransactionContext,
+    pending_transactions: Iterable[Any],
+    on: Literal["accepted", "finalized"],
+) -> None:
+    parent_fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
+    if not parent_fee_accounting:
+        return
+    pending_list = list(pending_transactions)
+
+    def mark_latest(current_fee_accounting):
+        payloads = _reveal_message_fee_payloads(
+            current_fee_accounting,
+            pending_list,
+        )
+        try:
+            return mark_message_effects_delivered(
+                current_fee_accounting,
+                context.transaction.hash,
+                payloads,
+                on,
+            )
+        except FeeValidationError as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    updated_accounting = (
+        context.transactions_processor.mutate_transaction_fee_accounting(
+            context.transaction.hash,
+            mark_latest,
+            commit=False,
+        )
+    )
+    context.transaction.data = dict(context.transaction.data or {})
+    context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
+
+
+def _message_phase_delivery_required(
+    context: TransactionContext,
+    pending_transactions: Iterable[Any],
+    on: Literal["accepted", "finalized"],
+    *,
+    force_phase_event: bool = False,
+) -> bool:
+    if force_phase_event:
+        return True
+
+    parent_fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
+    if not isinstance(parent_fee_accounting, dict):
+        return False
+
+    pending_list = [
+        _coerce_pending_transaction(pending_transaction)
+        for pending_transaction in pending_transactions
+    ]
+    if pending_list:
+        payloads = _reveal_message_fee_payloads(parent_fee_accounting, pending_list)
+        novelty = message_novelty_mask(
+            parent_fee_accounting,
+            context.transaction.hash,
+            payloads,
+        )
+        if any(
+            is_novel and pending_transaction.on == on
+            for pending_transaction, is_novel in zip(pending_list, novelty)
+        ):
+            return True
+
+    if on == "accepted":
+        generation = parent_fee_accounting.get("active_message_generation")
+        if isinstance(generation, dict):
+            pending_generation = bool(
+                generation.get("acceptanceDispatchRequired", False)
+            ) and not bool(generation.get("acceptanceDispatched", False))
+            if pending_generation:
+                return True
+    if bool((parent_fee_accounting.get("message_phase_emitted") or {}).get(on, False)):
+        return False
+    return False
+
+
+def _dispatch_messages_for_phase(
+    context: TransactionContext,
+    leader_receipt: Receipt,
+    on: Literal["accepted", "finalized"],
+    *,
+    force_phase_event: bool = False,
+) -> bool:
+    if leader_receipt.execution_result != ExecutionResultStatus.SUCCESS:
+        return False
+    if not _message_phase_delivery_required(
+        context,
+        leader_receipt.pending_transactions,
+        on,
+        force_phase_event=force_phase_event,
+    ):
+        return False
+
+    novel_pending_transactions = _novel_pending_transactions(
+        context,
+        leader_receipt.pending_transactions,
+    )
+    _internal_messages_data, insert_transactions_data = _get_messages_data(
+        context,
+        _apply_message_value_withdrawals_for_phase(
+            context,
+            novel_pending_transactions,
+            on,
+        ),
+        on,
+    )
+    # Studio's normal topology intentionally has no Hardhat node.  Make the DB
+    # transaction the sole authority for child ids, CREATE/CREATE2 recipients,
+    # and per-child admission failure instead of allowing an optional, older
+    # shadow deployment to decide protocol state differently across replicas.
+    rollup_receipt = _author_message_phase_locally(
+        context,
+        insert_transactions_data,
+        on,
+    )
+    _emit_messages(
+        context,
+        insert_transactions_data,
+        rollup_receipt,
+        on,
+    )
+    _mark_message_phase_delivered(
+        context,
+        leader_receipt.pending_transactions,
+        on,
+    )
+    return True
+
+
+def _author_message_phase_locally(
+    context: TransactionContext,
+    insert_transactions_data: list,
+    on: Literal["accepted", "finalized"],
+) -> dict[str, list[str]]:
+    """Mirror MessagePayments + CreationPhase in the request DB transaction."""
+
+    context.transactions_processor.lock_ghost_factory()
+    factory = GhostFactoryConfig.from_env()
+    successful_deployments = (
+        context.transactions_processor.get_successful_ghost_creation_count()
+    )
+    batch_deployments: set[str] = set()
+    tx_ids: list[str] = []
+    recipients: list[str] = []
+    zero_tx_id = "0x" + ("00" * 32)
+    prepared_children: list[tuple[list, int, str, bool]] = []
+
+    try:
+        pending_cap = int(os.environ.get("MAX_PENDING_PER_CONTRACT_DEFAULT", "20"))
+    except (TypeError, ValueError):
+        pending_cap = 20
+    if pending_cap <= 0:
+        pending_cap = 20
+
+    for insert_transaction_data in insert_transactions_data:
+        transaction_type = insert_transaction_data[2]
+        if transaction_type == TransactionType.SEND.value:
+            continue
+
+        actual_recipient = insert_transaction_data[0]
+        message_payload = insert_transaction_data[6]
+        # MessagePayments rejects an empty internal message before calling
+        # CreationPhase. Keep it a per-child contained failure: no ghost,
+        # queue slot, child id, or factory nonce is consumed.
+        payload_data = message_payload.get("data")
+        creation_failed = payload_data in {b"", "", "0x", None}
+        if (
+            not creation_failed
+            and transaction_type == TransactionType.DEPLOY_CONTRACT.value
+        ):
+            salt_nonce = int(message_payload.get("saltNonce", 0) or 0)
+            if salt_nonce == 0:
+                actual_recipient = factory.address_for(
+                    salt_nonce,
+                    successful_deployments,
+                    namespace=context.transaction.to_address,
+                )
+            else:
+                # A salted deployment returns its address during the parent's
+                # GenVM execution.  Bind the accepted child to that exact
+                # contract-visible identity; independently allocating an EVM
+                # GhostFactory address leaves the parent pointing at a contract
+                # that Studio never materialized (GAP-016).
+                actual_recipient = genvm_salted_child_address(
+                    context.transaction.to_address,
+                    salt_nonce,
+                    get_simulator_chain_id(),
+                )
+            normalized = actual_recipient.lower()
+            if (
+                normalized in batch_deployments
+                or context.transactions_processor.is_genvm_contract_address(
+                    actual_recipient
+                )
+            ):
+                creation_failed = True
+            else:
+                batch_deployments.add(normalized)
+                successful_deployments += 1
+        elif (
+            not creation_failed
+            and not context.transactions_processor.is_genvm_contract_address(
+                actual_recipient
+            )
+        ):
+            creation_failed = True
+
+        prepared_children.append(
+            (
+                insert_transaction_data,
+                transaction_type,
+                actual_recipient,
+                creation_failed,
+            )
+        )
+
+    # A single Consensus transaction serializes every Queues.enqueueNewPending
+    # call. Studio workers processing unrelated parents do not, so lock all
+    # recipient queues in deterministic order before observing their depths.
+    context.transactions_processor.lock_pending_recipients(
+        actual_recipient
+        for _data, _type, actual_recipient, creation_failed in prepared_children
+        if not creation_failed
+    )
+
+    batch_pending: dict[str, int] = {}
+    for (
+        insert_transaction_data,
+        transaction_type,
+        actual_recipient,
+        creation_failed,
+    ) in prepared_children:
+
+        normalized_recipient = str(actual_recipient).lower()
+        if not creation_failed:
+            pending = context.transactions_processor.get_pending_transaction_count_for_address(
+                actual_recipient
+            ) + batch_pending.get(
+                normalized_recipient, 0
+            )
+            if pending >= pending_cap:
+                creation_failed = True
+
+        if creation_failed:
+            tx_ids.append(zero_tx_id)
+            recipients.append(
+                ZERO_ADDRESS
+                if transaction_type == TransactionType.DEPLOY_CONTRACT.value
+                else to_checksum_address(actual_recipient)
+            )
+            continue
+
+        batch_pending[normalized_recipient] = (
+            batch_pending.get(normalized_recipient, 0) + 1
+        )
+        occurrence = insert_transaction_data[5]
+        tx_ids.append(
+            _studio_child_transaction_id(
+                context.transaction.hash,
+                on,
+                occurrence,
+            )
+        )
+        recipients.append(to_checksum_address(actual_recipient))
+
+    return {"tx_ids_hex": tx_ids, "recipients": recipients}
+
+
+def _studio_child_transaction_id(
+    parent_tx_id: str,
+    on: Literal["accepted", "finalized"],
+    occurrence: str,
+) -> str:
+    """Stable Studio tx id for one Consensus message occurrence."""
+
+    domain = keccak(text="GenLayer/Studio/child-tx/v1")
+    phase = b"\x01" if on == "accepted" else b"\x00"
+    return (
+        "0x"
+        + keccak(
+            domain
+            + to_bytes(hexstr=parent_tx_id).rjust(32, b"\x00")
+            + phase
+            + to_bytes(hexstr=occurrence).rjust(32, b"\x00")
+        ).hex()
+    )
+
+
+def _unwind_discarded_reveal_message_fee_accounting(
+    context: TransactionContext,
+) -> None:
+    parent_fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
+    if not parent_fee_accounting:
+        return
+
+    prior_receipts = _leader_receipts_from_consensus_data(
+        context.transaction.consensus_data
+    )
+    if not prior_receipts:
+        prior_receipts = _leader_receipts_from_consensus_history(
+            context.transaction.consensus_history
+        )
+    if (
+        not isinstance(parent_fee_accounting.get("active_message_generation"), dict)
+        and not prior_receipts
+    ):
+        return
+
+    def unwind_latest(current_fee_accounting):
+        if isinstance(current_fee_accounting.get("active_message_generation"), dict):
+            return discard_active_message_generation(current_fee_accounting)
+        if not prior_receipts:
+            return current_fee_accounting
+        message_fee_payloads = _reveal_message_fee_payloads(
+            current_fee_accounting,
+            _receipt_pending_transactions(prior_receipts[0]),
+        )
+        if not message_fee_payloads:
+            return current_fee_accounting
+        updated = unwind_reveal_message_fees(
+            current_fee_accounting,
+            message_fee_payloads,
+            acceptance_dispatched=(
+                context.transaction.status == TransactionStatus.ACCEPTED
+            ),
+        )
+        updated["message_fees_recorded_at_reveal"] = True
+        return updated
+
+    updated_accounting = (
+        context.transactions_processor.mutate_transaction_fee_accounting(
+            context.transaction.hash,
+            unwind_latest,
+            commit=False,
+        )
+    )
+    context.transaction.data = dict(context.transaction.data or {})
+    context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
+
+
+def _coerce_pending_transaction(raw: Any) -> PendingTransaction:
+    if isinstance(raw, PendingTransaction):
+        return raw
+    if isinstance(raw, dict):
+        return PendingTransaction.from_dict(raw)
+    raise TypeError(f"Unsupported pending transaction type: {type(raw).__name__}")
+
+
+def _leader_receipts_from_consensus_history(consensus_history: Any) -> list[Any]:
+    if not isinstance(consensus_history, dict):
+        return []
+
+    consensus_results = consensus_history.get("consensus_results")
+    if not isinstance(consensus_results, list):
+        return []
+
+    for consensus_round in reversed(consensus_results):
+        if not isinstance(consensus_round, dict):
+            continue
+        leader_result = consensus_round.get("leader_result")
+        if isinstance(leader_result, list):
+            return leader_result[:1]
+        if isinstance(leader_result, dict):
+            return [leader_result]
+    return []
+
+
+def _pending_transaction_fee_payload(
+    pending_transaction: PendingTransaction,
+    on: Literal["accepted", "finalized"],
+) -> dict[str, Any]:
+    message_type = 0 if pending_transaction.is_eth_send else 1
+    # GenVM represents an internal deployment with the abbreviated ``0x``
+    # address, while the transaction envelope and Consensus allocation tree
+    # encode its recipient as address(0).  Match against that canonical form;
+    # otherwise a quote discovered by sim_estimateTransactionFees succeeds in
+    # GenVM but is rejected during reveal with MessageNoMatchingAllocation.
+    recipient = (
+        ZERO_ADDRESS if pending_transaction.is_deploy() else pending_transaction.address
+    )
+    call_key = pending_transaction.call_key
+    if message_type == 0:
+        call_key = derive_external_message_call_key(
+            call_key,
+            pending_transaction.calldata,
+        )
+    return {
+        "messageType": message_type,
+        "recipient": recipient,
+        "value": pending_transaction.value,
+        "data": pending_transaction.calldata,
+        "onAcceptance": on == "accepted",
+        "saltNonce": pending_transaction.salt_nonce,
+        "feeParams": pending_transaction.fee_params,
+        "declaredBudget": pending_transaction.declared_budget,
+        "allocationSubtree": pending_transaction.allocation_subtree,
+        "callKey": call_key,
+        "useBalance": pending_transaction.use_balance,
+        "gasUsed": pending_transaction.gas_used,
+    }
+
+
+def _child_config_rotation_rounds(
+    parent_rotations: int | None, data: dict[str, Any]
+) -> int:
+    """Clamp a triggered child's runtime rotations to its funded schedule.
+
+    ``transactions.config_rotation_rounds`` is nullable, so a parent may carry
+    no explicit schedule at all — rows written before the column was claimed,
+    or any row that legitimately stored NULL. Resolve that to the same default
+    Transaction itself uses rather than raising, which would fail every child
+    insert and retry the parent until it was cancelled.
+    """
+
+    if parent_rotations is None:
+        parent_rotations = int(os.getenv("VITE_MAX_ROTATIONS", 3))
+    fees = data.get("fees_distribution")
+    if not isinstance(fees, dict):
+        return max(0, int(parent_rotations))
+    rotations = fees.get("rotations")
+    if not isinstance(rotations, list):
+        rotations = fees.get("rotationsList")
+    if not isinstance(rotations, list):
+        return max(0, int(parent_rotations))
+    if not rotations:
+        return 0
+    return min(max(0, int(parent_rotations)), max(max(0, int(v)) for v in rotations))
+
+
+def _active_execution_fee_round(transaction: Transaction) -> int:
+    """Resolve the raw round once, before appeal flags mutate during retries."""
+
+    entries = logical_fee_round_entries(transaction.consensus_history)
+    last_round = entries[-1][0] if entries else 0
+    if transaction.appeal_undetermined or transaction.appeal_leader_timeout:
+        return last_round + 2
+    if entries and last_round % 2 == 1:
+        # Successful validator review is followed by one terminal normal round.
+        return last_round + 1
+    return last_round
+
+
+def _terminal_decision_electorate_size(context: TransactionContext) -> int | None:
+    """Frozen threshold authority for a terminal normal recomputation."""
+
+    entries = logical_fee_round_entries(
+        getattr(context.transaction, "consensus_history", None)
+    )
+    if not entries:
+        return None
+    last_outcome = str(entries[-1][1].get("consensus_round") or "")
+    if last_outcome not in TERMINAL_VALIDATOR_APPEAL_ROUNDS:
+        return None
+
+    accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY) or {}
+    frozen_count = accounting.get("selection_pool_count")
+    if frozen_count is not None:
+        return max(0, int(frozen_count))
+    if context.validators_snapshot is not None:
+        return len(context.validators_snapshot.nodes)
+    return None
+
+
+def _runtime_rotation_limit(
+    transaction: Transaction,
+    raw_round: int | None = None,
+) -> int:
+    """Mirror Consensus' per-normal-round funded rotation allowance."""
+
+    if transaction.appealed or transaction.appeal_validators_timeout:
+        return 0
+    if raw_round is None:
+        raw_round = _active_execution_fee_round(transaction)
+
+    accounting = (transaction.data or {}).get(FEE_ACCOUNTING_KEY) or {}
+    fees_distribution = accounting.get("fees_distribution")
+    if not isinstance(fees_distribution, dict):
+        return max(0, int(transaction.config_rotation_rounds or 0))
+    return runtime_rotations_for_round(
+        fees_distribution,
+        transaction.config_rotation_rounds,
+        raw_round,
+    )
+
+
+def _is_zero_transaction_hash(transaction_hash: Any) -> bool:
+    if not isinstance(transaction_hash, str):
+        return False
+    try:
+        return int(transaction_hash, 16) == 0
+    except ValueError:
+        return False
+
+
+def _refund_skipped_internal_message(
+    context: TransactionContext,
+    insert_transaction_data: list,
+    triggered_on: Literal["accepted", "finalized"],
+) -> None:
+    occurrence = insert_transaction_data[5]
+    message_payload = insert_transaction_data[6]
+    refund_amount = int(insert_transaction_data[4] or 0)
+    if bool(message_payload.get("useBalance", False)):
+        refund_amount += int(message_payload.get("declaredBudget", 0) or 0)
+
+    parent_fee_accounting = (context.transaction.data or {}).get(FEE_ACCOUNTING_KEY)
+    mutate_accounting = getattr(
+        context.transactions_processor,
+        "mutate_transaction_fee_accounting",
+        None,
+    )
+    if not isinstance(parent_fee_accounting, dict) or not callable(mutate_accounting):
+        if refund_amount > 0:
+            context.accounts_manager.credit_account_balance(
+                context.transaction.to_address,
+                refund_amount,
+            )
+        return
+
+    expected_descriptor = message_effect_identities(
+        context.transaction.hash,
+        [message_payload],
+    )[0][1]
+
+    def refund_latest(current_fee_accounting: dict[str, Any]) -> dict[str, Any]:
+        current_record = (
+            current_fee_accounting.get("message_value_effects") or {}
+        ).get(occurrence)
+        if not isinstance(current_record, dict):
+            raise RuntimeError(f"MessageValueEffectMissing({occurrence})")
+        if (
+            current_record.get("descriptor") != expected_descriptor
+            or current_record.get("phase") != triggered_on
+        ):
+            raise RuntimeError(
+                "MessageValueEffectDescriptorMismatch"
+                f"({occurrence},{current_record.get('descriptor')},"
+                f"{expected_descriptor})"
+            )
+        if bool(current_record.get("skippedRefunded", False)):
+            return current_fee_accounting
+
+        updated = refund_failed_internal_message_fee(
+            current_fee_accounting,
+            message_payload,
+        )
+        updated_record = updated.setdefault("message_value_effects", {})[occurrence]
+        updated_record["skipped"] = True
+        updated_record["skippedRefunded"] = True
+        updated_record["skippedRefundAmount"] = refund_amount
+        if refund_amount > 0:
+            context.accounts_manager.credit_account_balance(
+                context.transaction.to_address,
+                refund_amount,
+            )
+        return updated
+
+    updated_accounting = mutate_accounting(
+        context.transaction.hash,
+        refund_latest,
+        commit=False,
+    )
+    context.transaction.data = dict(context.transaction.data or {})
+    context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
 
 
 def _emit_messages(
@@ -2790,11 +4938,97 @@ def _emit_messages(
     insert_transactions_data: list,
     receipt: dict,
     triggered_on: Literal["accepted", "finalized"],
+    *,
+    rollup_skipped: bool = False,
 ):
+    helper_transaction_count = sum(
+        insert_transaction_data[2] != TransactionType.SEND.value
+        for insert_transaction_data in insert_transactions_data
+    )
+    if rollup_skipped:
+        # No helper chain exists to mint child ids or deployment recipients.
+        # Preserve the pre-rollup fallback: the local insertion layer derives
+        # both, while external effects keep their durable occurrence id.
+        tx_ids = [None] * helper_transaction_count
+        recipients = [
+            insert_transaction_data[0]
+            for insert_transaction_data in insert_transactions_data
+            if insert_transaction_data[2] != TransactionType.SEND.value
+        ]
+    else:
+        if not isinstance(receipt, dict):
+            raise InternalMessageEmissionError(
+                f"InternalMessageEmissionFailed({context.transaction.hash},{triggered_on})"
+            )
+        tx_ids = receipt.get("tx_ids_hex")
+        if not isinstance(tx_ids, list) or len(tx_ids) != helper_transaction_count:
+            raise InternalMessageEmissionError(
+                "InternalMessageEmissionCountMismatch"
+                f"({context.transaction.hash},{triggered_on},"
+                f"{helper_transaction_count},"
+                f"{len(tx_ids) if isinstance(tx_ids, list) else 'missing'})"
+            )
+        recipients = receipt.get("recipients")
+        if (
+            not isinstance(recipients, list)
+            or len(recipients) != helper_transaction_count
+        ):
+            raise InternalMessageEmissionError(
+                "InternalMessageEmissionRecipientCountMismatch"
+                f"({context.transaction.hash},{triggered_on},"
+                f"{helper_transaction_count},"
+                f"{len(recipients) if isinstance(recipients, list) else 'missing'})"
+            )
+
+    helper_index = 0
     for i, insert_transaction_data in enumerate(insert_transactions_data):
-        transaction_hash = (
-            receipt["tx_ids_hex"][i] if receipt and "tx_ids_hex" in receipt else None
-        )
+        is_external = insert_transaction_data[2] == TransactionType.SEND.value
+        if is_external:
+            # Consensus external messages are effects, not child consensus
+            # transactions. The logical occurrence is their durable local id.
+            transaction_hash = insert_transaction_data[5]
+            actual_recipient = insert_transaction_data[0]
+        else:
+            transaction_hash = tx_ids[helper_index]
+            actual_recipient = recipients[helper_index]
+            helper_index += 1
+        is_deploy = insert_transaction_data[2] == TransactionType.DEPLOY_CONTRACT.value
+        if not (rollup_skipped and is_deploy) and (
+            not isinstance(actual_recipient, str) or not is_address(actual_recipient)
+        ):
+            raise InternalMessageEmissionError(
+                "InternalMessageEmissionInvalidRecipient"
+                f"({context.transaction.hash},{triggered_on},{i})"
+            )
+        if not (rollup_skipped and is_deploy):
+            actual_recipient = to_checksum_address(actual_recipient)
+        if not is_external and _is_zero_transaction_hash(transaction_hash):
+            _refund_skipped_internal_message(
+                context,
+                insert_transaction_data,
+                triggered_on,
+            )
+            continue
+        if is_deploy and not rollup_skipped:
+            if actual_recipient == to_checksum_address(ZERO_ADDRESS):
+                raise InternalMessageEmissionError(
+                    "InternalMessageEmissionZeroDeploymentRecipient"
+                    f"({context.transaction.hash},{triggered_on},{i})"
+                )
+            insert_transaction_data[1]["contract_address"] = actual_recipient
+            context.accounts_manager.create_new_account_with_address(
+                actual_recipient,
+                commit=False,
+            )
+        elif (
+            not is_deploy
+            and actual_recipient.lower() != str(insert_transaction_data[0]).lower()
+        ):
+            raise InternalMessageEmissionError(
+                "InternalMessageEmissionRecipientMismatch"
+                f"({context.transaction.hash},{triggered_on},{i},"
+                f"{insert_transaction_data[0]},{actual_recipient})"
+            )
         # Determine execution_mode to cascade from parent transaction
         execution_mode_str = (
             context.transaction.execution_mode.value
@@ -2806,16 +5040,22 @@ def _emit_messages(
 
         context.transactions_processor.insert_transaction(
             context.transaction.to_address,  # new calls are done by the contract
-            insert_transaction_data[0],
+            actual_recipient,
             insert_transaction_data[1],
             value=insert_transaction_data[4],
             type=insert_transaction_data[2],
             nonce=insert_transaction_data[3],
             leader_only=leader_only,  # Backward compat
-            num_of_initial_validators=context.transaction.num_of_initial_validators,
+            # Consensus creates every internal child at the protocol's
+            # round-0 committee size. The child's minimum fee floor is priced
+            # on the same basis, independent of the parent's current size.
+            num_of_initial_validators=VALIDATORS_PER_ROUND[0],
             triggered_by_hash=context.transaction.hash,
             transaction_hash=transaction_hash,
-            config_rotation_rounds=context.transaction.config_rotation_rounds,
+            config_rotation_rounds=_child_config_rotation_rounds(
+                context.transaction.config_rotation_rounds,
+                insert_transaction_data[1],
+            ),
             sim_config=(
                 context.transaction.sim_config.to_dict()
                 if context.transaction.sim_config
@@ -2824,4 +5064,8 @@ def _emit_messages(
             triggered_on=triggered_on,
             execution_mode=execution_mode_str,  # Cascade execution mode
             origin_address=context.transaction.origin_address,
+            # MessagePayments creates the whole batch in one EVM transaction.
+            # Do not commit each Studio child independently; the worker commits
+            # the parent phase, child rows, accounts, values, and fees together.
+            commit=False,
         )

@@ -1,11 +1,12 @@
-# v0.1.0
-# { "Depends": "py-genlayer:test" }
+# v0.3.0
+# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
 
-from genlayer import *
+import genlayer as gl
+from genlayer.types import *
 
 
-class multi_read_erc20(gl.Contract):
-    balances: TreeMap[Address, TreeMap[Address, u256]]
+class multi_read_erc20(gl.contract.Contract):
+    balances: gl.storage.TreeMap[Address, gl.storage.TreeMap[Address, u256]]
 
     def __init__(self):
         pass
@@ -15,7 +16,7 @@ class multi_read_erc20(gl.Contract):
         self, account_address: str, token_contracts: list[str]
     ) -> None:
         for token_contract in token_contracts:
-            contract = gl.get_contract_at(Address(token_contract))
+            contract = gl.contract.get_at(Address(token_contract))
             balance = contract.view().get_balance_of(account_address)
             self.balances.get_or_insert_default(Address(account_address))[
                 Address(token_contract)

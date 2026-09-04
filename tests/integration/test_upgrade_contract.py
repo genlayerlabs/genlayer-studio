@@ -20,7 +20,7 @@ import pytest
 from genlayer_py import create_client, create_account, localnet
 
 
-RPC_URL = "http://localhost:4000/api"
+RPC_URL = os.environ.get("TEST_JSONRPC_URL", "http://localhost:4000/api")
 
 # Upgrade tests rely on the global validator registry for deploy/read/upgrade.
 # Keep them on the same xdist worker as icontract tests that temporarily wipe
@@ -161,17 +161,18 @@ def write_contract_method(
 # Test Contracts
 # =============================================================================
 
-CONTRACT_V1 = """# v0.1.0
-# { "Depends": "py-genlayer:latest" }
+CONTRACT_V1 = """# v0.3.0
+# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
 
-from genlayer import *
+import genlayer as gl
+from genlayer.types import *
 
-class UpgradeTest(gl.Contract):
+class UpgradeTest(gl.contract.Contract):
     counter: u64
     name: str
 
     def __init__(self):
-        self.counter = u64(0)
+        self.counter = 0
         self.name = "initial"
 
     @gl.public.view
@@ -188,24 +189,25 @@ class UpgradeTest(gl.Contract):
 
     @gl.public.write
     def increment(self) -> None:
-        self.counter = u64(int(self.counter) + 1)
+        self.counter = int(self.counter) + 1
 
     @gl.public.write
     def set_name(self, new_name: str) -> None:
         self.name = new_name
 """
 
-CONTRACT_V2 = """# v0.1.0
-# { "Depends": "py-genlayer:latest" }
+CONTRACT_V2 = """# v0.3.0
+# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
 
-from genlayer import *
+import genlayer as gl
+from genlayer.types import *
 
-class UpgradeTest(gl.Contract):
+class UpgradeTest(gl.contract.Contract):
     counter: u64
     name: str
 
     def __init__(self):
-        self.counter = u64(0)
+        self.counter = 0
         self.name = "initial"
 
     @gl.public.view
@@ -222,7 +224,7 @@ class UpgradeTest(gl.Contract):
 
     @gl.public.write
     def increment(self) -> None:
-        self.counter = u64(int(self.counter) + 2)  # CHANGED: now increments by 2
+        self.counter = int(self.counter) + 2  # CHANGED: now increments by 2
 
     @gl.public.write
     def set_name(self, new_name: str) -> None:
@@ -233,18 +235,19 @@ class UpgradeTest(gl.Contract):
         return "new in v2"  # NEW METHOD
 """
 
-CONTRACT_V3_WITH_NEW_STATE = """# v0.1.0
-# { "Depends": "py-genlayer:latest" }
+CONTRACT_V3_WITH_NEW_STATE = """# v0.3.0
+# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
 
-from genlayer import *
+import genlayer as gl
+from genlayer.types import *
 
-class UpgradeTest(gl.Contract):
+class UpgradeTest(gl.contract.Contract):
     counter: u64
     name: str
     extra_field: str  # NEW FIELD
 
     def __init__(self):
-        self.counter = u64(0)
+        self.counter = 0
         self.name = "initial"
         self.extra_field = "default"
 
@@ -266,33 +269,35 @@ class UpgradeTest(gl.Contract):
 
     @gl.public.write
     def increment(self) -> None:
-        self.counter = u64(int(self.counter) + 1)
+        self.counter = int(self.counter) + 1
 
     @gl.public.write
     def set_name(self, new_name: str) -> None:
         self.name = new_name
 """
 
-INVALID_CONTRACT = """# v0.1.0
-# { "Depends": "py-genlayer:latest" }
+INVALID_CONTRACT = """# v0.3.0
+# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
 
-from genlayer import *
+import genlayer as gl
+from genlayer.types import *
 
-class BrokenContract(gl.Contract):
+class BrokenContract(gl.contract.Contract):
     def __init__(self):
         this is not valid python syntax!!!
 """
 
-SIMPLE_CONTRACT = """# v0.1.0
-# { "Depends": "py-genlayer:latest" }
+SIMPLE_CONTRACT = """# v0.3.0
+# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
 
-from genlayer import *
+import genlayer as gl
+from genlayer.types import *
 
-class SimpleContract(gl.Contract):
+class SimpleContract(gl.contract.Contract):
     value: u64
 
     def __init__(self):
-        self.value = u64(42)
+        self.value = 42
 
     @gl.public.view
     def get_value(self) -> u64:

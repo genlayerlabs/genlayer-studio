@@ -5,8 +5,47 @@ import pytest
 
 from backend.protocol_rpc import endpoints
 from backend.errors.errors import InvalidAddressError
+from backend.protocol_rpc.exceptions import InvalidParams
 from backend.domain.types import LLMProvider, TransactionType
 from backend.database_handler.models import TransactionStatus
+from backend.protocol_rpc.types import (
+    DecodedRollupTransaction,
+    DecodedRollupTransactionData,
+    DecodedRollupTransactionDataArgs,
+    DecodedFinalizeTransactionDataArgs,
+    DecodedsubmitAppealDataArgs,
+    DecodedTopUpFeesDataArgs,
+)
+
+
+def test_top_level_deploy_uses_transactional_virtual_ghost_factory():
+    processor = MagicMock()
+    processor.get_successful_ghost_creation_count.return_value = 0
+    processor.is_genvm_contract_address.return_value = False
+
+    address = endpoints._allocate_top_level_ghost_address(
+        processor,
+        42,
+        "0x1111111111111111111111111111111111111111",
+    )
+
+    assert address == "0x25A58acd32f777db380EA378cCE191972aa62c5e"
+    processor.lock_ghost_factory.assert_called_once_with()
+    processor.get_successful_ghost_creation_count.assert_called_once_with()
+    processor.is_genvm_contract_address.assert_called_once_with(address)
+
+
+def test_top_level_deploy_rejects_reused_create2_address():
+    processor = MagicMock()
+    processor.get_successful_ghost_creation_count.return_value = 4
+    processor.is_genvm_contract_address.return_value = True
+
+    with pytest.raises(endpoints.InvalidTransactionError, match="GhostAlreadyDeployed"):
+        endpoints._allocate_top_level_ghost_address(
+            processor,
+            42,
+            "0x1111111111111111111111111111111111111111",
+        )
 
 
 def test_fund_account_uses_request_scoped_session(monkeypatch):
@@ -43,6 +82,83 @@ def test_fund_account_uses_request_scoped_session(monkeypatch):
     transactions_processor_instance.insert_transaction.assert_called_once_with(
         None, "0x" + "1" * 40, None, 25, 0, 12, False, 0, None, "0xabc"
     )
+    accounts_manager_instance.credit_tx_value_once.assert_called_once_with(
+        "0xabc", "0x" + "1" * 40, 25
+    )
+
+
+@pytest.mark.parametrize(
+    ("wire_amount", "expected_amount"),
+    [("10000000000000000000", 10_000_000_000_000_000_000), ("0x2a", 42)],
+)
+def test_fund_account_normalizes_string_amounts(
+    monkeypatch, wire_amount, expected_amount
+):
+    session = object()
+    accounts_manager_instance = MagicMock()
+    accounts_manager_instance.is_valid_address.return_value = True
+    transactions_processor_instance = MagicMock()
+    transactions_processor_instance.get_transaction_count.return_value = 3
+
+    monkeypatch.setattr("secrets.token_hex", lambda _size: "abc")
+    monkeypatch.setattr(
+        endpoints, "AccountsManager", lambda _session: accounts_manager_instance
+    )
+    monkeypatch.setattr(
+        endpoints,
+        "TransactionsProcessor",
+        lambda _session: transactions_processor_instance,
+    )
+
+    address = "0x" + "5" * 40
+    result = endpoints.fund_account(session, address, wire_amount)
+
+    assert result == "0xabc"
+    transactions_processor_instance.insert_transaction.assert_called_once_with(
+        None, address, None, expected_amount, 0, 3, False, 0, None, "0xabc"
+    )
+    accounts_manager_instance.credit_tx_value_once.assert_called_once_with(
+        "0xabc", address, expected_amount
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid_amount",
+    [
+        "",
+        " 1",
+        "+1",
+        "1_000",
+        "1.5",
+        "0x",
+        "0xgg",
+        "not-a-number",
+        0,
+        -1,
+        True,
+        1.5,
+        None,
+    ],
+)
+def test_fund_account_rejects_non_positive_integer_amounts(monkeypatch, invalid_amount):
+    accounts_manager_instance = MagicMock()
+    accounts_manager_instance.is_valid_address.return_value = True
+    transactions_processor_instance = MagicMock()
+
+    monkeypatch.setattr(
+        endpoints, "AccountsManager", lambda _session: accounts_manager_instance
+    )
+    monkeypatch.setattr(
+        endpoints,
+        "TransactionsProcessor",
+        lambda _session: transactions_processor_instance,
+    )
+
+    with pytest.raises(InvalidParams, match="amount must be a positive integer"):
+        endpoints.fund_account(object(), "0x" + "6" * 40, invalid_amount)
+
+    transactions_processor_instance.insert_transaction.assert_not_called()
+    accounts_manager_instance.credit_tx_value_once.assert_not_called()
 
 
 def test_fund_account_raises_for_invalid_address(monkeypatch):
@@ -220,6 +336,53 @@ async def test_create_validator_uses_request_scoped_session(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_replace_validators_is_atomic_and_uses_request_session(monkeypatch):
+    session = object()
+    accounts_manager_instance = MagicMock()
+    accounts_manager_instance.create_new_account.side_effect = [
+        SimpleNamespace(address="0x1", key="k1"),
+        SimpleNamespace(address="0x2", key="k2"),
+    ]
+    registry_instance = SimpleNamespace(
+        replace_all_validators=AsyncMock(
+            return_value=[{"address": "0x1"}, {"address": "0x2"}]
+        )
+    )
+    validators_manager = SimpleNamespace(registry=registry_instance)
+
+    monkeypatch.setattr(endpoints, "validate_provider", lambda _provider: None)
+    monkeypatch.setattr(
+        endpoints,
+        "AccountsManager",
+        lambda s: accounts_manager_instance if s is session else None,
+    )
+
+    validator_config = {
+        "stake": 8,
+        "provider": "openrouter",
+        "model": "test-model",
+        "config": {"temperature": 0.75},
+        "plugin": "openai-compatible",
+        "plugin_config": {
+            "api_key_env_var": "OPENROUTERAPIKEY",
+            "api_url": "https://openrouter.ai/api",
+            "mock_response": {},
+        },
+    }
+    result = await endpoints.replace_validators(
+        session,
+        validators_manager,
+        [validator_config, validator_config],
+    )
+
+    assert result == [{"address": "0x1"}, {"address": "0x2"}]
+    registry_instance.replace_all_validators.assert_awaited_once()
+    replacements = registry_instance.replace_all_validators.await_args.args[0]
+    assert [validator.address for validator in replacements] == ["0x1", "0x2"]
+    assert [validator.stake for validator in replacements] == [8, 8]
+
+
+@pytest.mark.asyncio
 async def test_create_random_validators_use_request_session(monkeypatch):
     session = object()
     accounts_manager_instance = MagicMock()
@@ -371,7 +534,9 @@ def test_send_raw_transaction_uses_request_session(monkeypatch):
     accounts_manager = MagicMock()
     accounts_manager.is_valid_address.return_value = True
     transactions_processor = MagicMock()
+    transactions_processor.get_transaction_by_hash.return_value = None
     transactions_processor.insert_transaction.return_value = None
+    transactions_processor.begin_evm_envelope.return_value = None
 
     constructed = []
 
@@ -426,6 +591,495 @@ def test_send_raw_transaction_uses_request_session(monkeypatch):
     assert constructed == ["accounts_manager", "transactions_processor"]
     transactions_processor.insert_transaction.assert_called_once()
     consensus_service.generate_transaction_hash.assert_called_once_with("0xdead")
+
+
+def test_send_raw_transaction_rejects_foreign_chain_signature(monkeypatch):
+    accounts_manager = MagicMock()
+    decoded = SimpleNamespace(
+        chain_id=1,
+        from_address="0x" + "1" * 40,
+        value=0,
+    )
+    transactions_parser = MagicMock()
+    transactions_parser.decode_signed_transaction.return_value = decoded
+    monkeypatch.setattr(endpoints, "AccountsManager", lambda _session: accounts_manager)
+    monkeypatch.setattr(
+        endpoints, "TransactionsProcessor", lambda _session: MagicMock()
+    )
+    monkeypatch.setattr(endpoints, "get_simulator_chain_id", lambda: 61127)
+
+    with pytest.raises(endpoints.InvalidTransactionError, match="InvalidChainId"):
+        endpoints.send_raw_transaction(
+            object(),
+            MagicMock(),
+            transactions_parser,
+            MagicMock(),
+            signed_rollup_transaction="0xdead",
+        )
+
+    transactions_parser.transaction_has_valid_signature.assert_not_called()
+
+
+def test_send_raw_transaction_rejects_protocol_calldata_to_wrong_destination(
+    monkeypatch,
+):
+    main = "0xb7278A61aa25c888815aFC32Ad3cC52fF24fE575"
+    decoded = DecodedRollupTransaction(
+        from_address="0x" + "1" * 40,
+        to_address="0x" + "9" * 40,
+        data=DecodedRollupTransactionData(
+            function_name="addTransaction",
+            args=DecodedRollupTransactionDataArgs(
+                sender="0x" + "1" * 40,
+                recipient="0x" + "2" * 40,
+                num_of_initial_validators=5,
+                max_rotations=0,
+                data="0x",
+            ),
+        ),
+        type="2",
+        nonce=0,
+        value=0,
+        raw_data="0x35a251fb",
+    )
+    parser = MagicMock()
+    parser.decode_signed_transaction.return_value = decoded
+    consensus_service = MagicMock()
+    consensus_service.public_consensus_main_address.return_value = main
+    monkeypatch.setattr(endpoints, "AccountsManager", lambda _session: MagicMock())
+    monkeypatch.setattr(
+        endpoints, "TransactionsProcessor", lambda _session: MagicMock()
+    )
+
+    with pytest.raises(
+        endpoints.InvalidTransactionError, match="InvalidConsensusDestination"
+    ):
+        endpoints.send_raw_transaction(
+            object(),
+            MagicMock(),
+            parser,
+            consensus_service,
+            signed_rollup_transaction="0xdead",
+        )
+
+
+def test_send_raw_transaction_mines_unknown_consensus_selector_as_revert(monkeypatch):
+    main = "0xb7278A61aa25c888815aFC32Ad3cC52fF24fE575"
+    decoded = DecodedRollupTransaction(
+        from_address="0x" + "1" * 40,
+        to_address=main,
+        data=None,
+        type="2",
+        nonce=0,
+        value=0,
+        raw_data="0xdeadbeef",
+    )
+    parser = MagicMock()
+    parser.decode_signed_transaction.return_value = decoded
+    parser.transaction_has_valid_signature.return_value = True
+    consensus_service = MagicMock()
+    consensus_service.public_consensus_main_address.return_value = main
+    consensus_service.generate_transaction_hash.return_value = "0x" + "ab" * 32
+    accounts_manager = MagicMock()
+    accounts_manager.is_valid_address.return_value = True
+    processor = MagicMock()
+    processor.begin_evm_envelope.side_effect = [None, None]
+    session = MagicMock()
+    monkeypatch.setattr(endpoints, "AccountsManager", lambda _session: accounts_manager)
+    monkeypatch.setattr(endpoints, "TransactionsProcessor", lambda _session: processor)
+
+    result = endpoints.send_raw_transaction(
+        session,
+        MagicMock(),
+        parser,
+        consensus_service,
+        signed_rollup_transaction="0xdead",
+    )
+
+    assert result == "0x" + "ab" * 32
+    processor.record_evm_envelope.assert_called_once_with(
+        result,
+        decoded.from_address,
+        0,
+        result,
+        to_address=main,
+        success=False,
+        error="UnknownConsensusSelector",
+    )
+
+
+def test_send_raw_transaction_mines_fee_rejection_as_revert(monkeypatch):
+    main = "0xb7278A61aa25c888815aFC32Ad3cC52fF24fE575"
+    sender = "0x" + "1" * 40
+    envelope_hash = "0x" + "ab" * 32
+    decoded = DecodedRollupTransaction(
+        from_address=sender,
+        to_address=main,
+        data=DecodedRollupTransactionData(
+            function_name="addTransaction",
+            args=DecodedRollupTransactionDataArgs(
+                sender=sender,
+                recipient="0x" + "2" * 40,
+                num_of_initial_validators=5,
+                max_rotations=0,
+                data="0x",
+                fees_distribution={},
+            ),
+        ),
+        type="2",
+        nonce=0,
+        value=0,
+        raw_data="0x35a251fb",
+    )
+    parser = MagicMock()
+    parser.decode_signed_transaction.return_value = decoded
+    parser.transaction_has_valid_signature.return_value = True
+    consensus_service = MagicMock()
+    consensus_service.public_consensus_main_address.return_value = main
+    consensus_service.generate_transaction_hash.return_value = envelope_hash
+    accounts_manager = MagicMock()
+    accounts_manager.is_valid_address.return_value = True
+    accounts_manager.get_account.return_value = object()
+    processor = MagicMock()
+    processor.begin_evm_envelope.side_effect = [None, None]
+    session = MagicMock()
+    monkeypatch.setattr(endpoints, "AccountsManager", lambda _session: accounts_manager)
+    monkeypatch.setattr(endpoints, "TransactionsProcessor", lambda _session: processor)
+
+    def reject_fee_envelope(_decoded):
+        raise endpoints.InvalidTransactionError("InsufficientFees")
+
+    monkeypatch.setattr(
+        endpoints,
+        "_validate_fee_envelope",
+        reject_fee_envelope,
+    )
+
+    result = endpoints.send_raw_transaction(
+        session,
+        MagicMock(),
+        parser,
+        consensus_service,
+        signed_rollup_transaction="0xdead",
+    )
+
+    assert result == envelope_hash
+    parser.get_genlayer_transaction.assert_not_called()
+    assert processor.begin_evm_envelope.call_count == 2
+    processor.record_evm_envelope.assert_called_once_with(
+        envelope_hash,
+        sender,
+        0,
+        envelope_hash,
+        to_address=main,
+        success=False,
+        error="InsufficientFees",
+    )
+    session.rollback.assert_called_once()
+    session.commit.assert_called_once()
+
+
+def test_send_raw_lifecycle_call_returns_signed_envelope_hash(monkeypatch):
+    main = "0xb7278A61aa25c888815aFC32Ad3cC52fF24fE575"
+    sender = "0x" + "1" * 40
+    envelope_hash = "0x" + "ab" * 32
+    target_tx_id = "0x" + "cd" * 32
+    decoded = DecodedRollupTransaction(
+        from_address=sender,
+        to_address=main,
+        data=DecodedTopUpFeesDataArgs(
+            tx_id=target_tx_id,
+            fees_distribution={},
+        ),
+        type="2",
+        nonce=0,
+        value=1,
+        fee_value=1,
+        raw_data="0xdeadbeef",
+    )
+    session = MagicMock()
+    accounts_manager = MagicMock()
+    accounts_manager.get_account.return_value = object()
+    transactions_processor = MagicMock()
+    transactions_processor.begin_evm_envelope.return_value = None
+    parser = MagicMock()
+    parser.decode_signed_transaction.return_value = decoded
+    parser.transaction_has_valid_signature.return_value = True
+    consensus_service = MagicMock()
+    consensus_service.public_consensus_main_address.return_value = main
+    consensus_service.generate_transaction_hash.return_value = envelope_hash
+    monkeypatch.setattr(endpoints, "AccountsManager", lambda _session: accounts_manager)
+    monkeypatch.setattr(
+        endpoints, "TransactionsProcessor", lambda _session: transactions_processor
+    )
+    handler = MagicMock(return_value=target_tx_id)
+    monkeypatch.setattr(endpoints, "_handle_top_up_fees", handler)
+
+    result = endpoints.send_raw_transaction(
+        session,
+        MagicMock(),
+        parser,
+        consensus_service,
+        signed_rollup_transaction="0xdead",
+    )
+
+    assert result == envelope_hash
+    handler.assert_called_once()
+    transactions_processor.record_evm_envelope.assert_called_once_with(
+        envelope_hash,
+        sender,
+        0,
+        envelope_hash,
+        to_address=main,
+    )
+    session.commit.assert_called_once()
+
+
+def test_send_raw_appeal_publishes_event_only_after_envelope_commit(monkeypatch):
+    main = "0xb7278A61aa25c888815aFC32Ad3cC52fF24fE575"
+    sender = "0x" + "1" * 40
+    envelope_hash = "0x" + "ab" * 32
+    target_tx_id = "0x" + "cd" * 32
+    decoded = DecodedRollupTransaction(
+        from_address=sender,
+        to_address=main,
+        data=DecodedsubmitAppealDataArgs(
+            tx_id=target_tx_id,
+            expected_decision_id=1,
+        ),
+        type="2",
+        nonce=0,
+        value=1,
+        raw_data="0xdeadbeef",
+    )
+    session = MagicMock()
+    accounts_manager = MagicMock()
+    accounts_manager.get_account.return_value = object()
+    transactions_processor = MagicMock()
+    transactions_processor.begin_evm_envelope.return_value = None
+    parser = MagicMock()
+    parser.decode_signed_transaction.return_value = decoded
+    parser.transaction_has_valid_signature.return_value = True
+    consensus_service = MagicMock()
+    consensus_service.public_consensus_main_address.return_value = main
+    consensus_service.generate_transaction_hash.return_value = envelope_hash
+    monkeypatch.setattr(endpoints, "AccountsManager", lambda _session: accounts_manager)
+    monkeypatch.setattr(
+        endpoints, "TransactionsProcessor", lambda _session: transactions_processor
+    )
+    handler = MagicMock(return_value=target_tx_id)
+    monkeypatch.setattr(endpoints, "_handle_appeal_or_top_up_and_submit", handler)
+    publish_commit_states = []
+    msg_handler = MagicMock()
+    msg_handler.send_message.side_effect = (
+        lambda **_kwargs: publish_commit_states.append(session.commit.called)
+    )
+
+    result = endpoints.send_raw_transaction(
+        session,
+        msg_handler,
+        parser,
+        consensus_service,
+        signed_rollup_transaction="0xdead",
+    )
+
+    assert result == envelope_hash
+    assert handler.call_args.kwargs["emit_event"] is False
+    assert publish_commit_states == [True]
+    session.commit.assert_called_once()
+
+
+def test_reverted_raw_lifecycle_call_consumes_nonce_and_returns_envelope_hash(
+    monkeypatch,
+):
+    main = "0xb7278A61aa25c888815aFC32Ad3cC52fF24fE575"
+    sender = "0x" + "1" * 40
+    envelope_hash = "0x" + "ab" * 32
+    decoded = DecodedRollupTransaction(
+        from_address=sender,
+        to_address=main,
+        data=DecodedFinalizeTransactionDataArgs(
+            tx_id="0x" + "cd" * 32,
+            expected_decision_id=1,
+        ),
+        type="2",
+        nonce=0,
+        value=1,
+        raw_data="0xdeadbeef",
+    )
+    session = MagicMock()
+    accounts_manager = MagicMock()
+    accounts_manager.is_valid_address.return_value = True
+    accounts_manager.get_account.return_value = object()
+    transactions_processor = MagicMock()
+    transactions_processor.begin_evm_envelope.side_effect = [None, None]
+    parser = MagicMock()
+    parser.decode_signed_transaction.return_value = decoded
+    parser.transaction_has_valid_signature.return_value = True
+    consensus_service = MagicMock()
+    consensus_service.public_consensus_main_address.return_value = main
+    consensus_service.generate_transaction_hash.return_value = envelope_hash
+    monkeypatch.setattr(endpoints, "AccountsManager", lambda _session: accounts_manager)
+    monkeypatch.setattr(
+        endpoints, "TransactionsProcessor", lambda _session: transactions_processor
+    )
+
+    result = endpoints.send_raw_transaction(
+        session,
+        MagicMock(),
+        parser,
+        consensus_service,
+        signed_rollup_transaction="0xdead",
+    )
+
+    assert result == envelope_hash
+    assert transactions_processor.begin_evm_envelope.call_count == 2
+    transactions_processor.record_evm_envelope.assert_called_once_with(
+        envelope_hash,
+        sender,
+        0,
+        envelope_hash,
+        to_address=main,
+        success=False,
+        error="NonPayableCall",
+    )
+    session.rollback.assert_called_once()
+    session.commit.assert_called_once()
+
+
+def test_send_raw_transaction_rejects_missing_contract_before_shadow_mutation(
+    monkeypatch,
+):
+    session = object()
+    sender = "0x" + "1" * 40
+    recipient = "0x" + "2" * 40
+    accounts_manager = MagicMock()
+    accounts_manager.is_valid_address.return_value = True
+    accounts_manager.get_account.return_value = object()
+    transactions_processor = MagicMock()
+    transactions_processor.get_transaction_by_hash.return_value = None
+    transactions_processor.begin_evm_envelope.return_value = None
+
+    monkeypatch.setattr(endpoints, "AccountsManager", lambda _session: accounts_manager)
+    monkeypatch.setattr(
+        endpoints,
+        "TransactionsProcessor",
+        lambda _session: transactions_processor,
+    )
+    monkeypatch.setattr(endpoints, "live_state_column_size", lambda *_args: None)
+
+    decoded = SimpleNamespace(
+        from_address=sender,
+        value=0,
+        total_spend=0,
+        data=object(),
+        raw_data="0x35a251fb",
+        to_address=recipient,
+        nonce=1,
+    )
+    genlayer_tx = SimpleNamespace(
+        type=TransactionType.RUN_CONTRACT,
+        from_address=sender,
+        to_address=recipient,
+        max_rotations=0,
+        num_of_initial_validators=5,
+        data=SimpleNamespace(
+            leader_only=False,
+            execution_mode="NORMAL",
+            calldata=b"payload",
+        ),
+    )
+    transactions_parser = MagicMock()
+    transactions_parser.decode_signed_transaction.return_value = decoded
+    transactions_parser.transaction_has_valid_signature.return_value = True
+    transactions_parser.get_genlayer_transaction.return_value = genlayer_tx
+    consensus_service = MagicMock()
+    consensus_service.generate_transaction_hash.return_value = "0xhash"
+
+    with pytest.raises(endpoints.NotFoundError, match="Contract not found"):
+        endpoints.send_raw_transaction(
+            session,
+            MagicMock(),
+            transactions_parser,
+            consensus_service,
+            signed_rollup_transaction="0xdead",
+        )
+
+    consensus_service.add_transaction.assert_not_called()
+    transactions_processor.insert_transaction.assert_not_called()
+
+
+def test_send_raw_transaction_uses_recovered_signer_without_shadow_mutation(
+    monkeypatch,
+):
+    session = object()
+    signer = "0x" + "1" * 40
+    claimed_sender = "0x" + "9" * 40
+    recipient = "0x" + "2" * 40
+    accounts_manager = MagicMock()
+    accounts_manager.is_valid_address.return_value = True
+    accounts_manager.get_account.return_value = object()
+    transactions_processor = MagicMock()
+    transactions_processor.get_transaction_by_hash.return_value = None
+    transactions_processor.get_transaction_status.return_value = "PENDING"
+    transactions_processor.begin_evm_envelope.return_value = None
+
+    monkeypatch.setattr(endpoints, "AccountsManager", lambda _session: accounts_manager)
+    monkeypatch.setattr(
+        endpoints,
+        "TransactionsProcessor",
+        lambda _session: transactions_processor,
+    )
+    monkeypatch.setattr(endpoints, "live_state_column_size", lambda *_args: 1)
+    monkeypatch.setattr(
+        endpoints, "_enforce_pending_queue_caps", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(
+        endpoints,
+        "enforce_contract_storage_quota",
+        lambda *_args: None,
+    )
+
+    decoded = SimpleNamespace(
+        from_address=signer,
+        value=0,
+        total_spend=0,
+        data=object(),
+        raw_data="0x35a251fb",
+        to_address=recipient,
+        nonce=1,
+    )
+    genlayer_tx = SimpleNamespace(
+        type=TransactionType.RUN_CONTRACT,
+        from_address=claimed_sender,
+        to_address=recipient,
+        max_rotations=0,
+        num_of_initial_validators=5,
+        data=SimpleNamespace(
+            leader_only=False,
+            execution_mode="NORMAL",
+            calldata=b"payload",
+        ),
+    )
+    transactions_parser = MagicMock()
+    transactions_parser.decode_signed_transaction.return_value = decoded
+    transactions_parser.transaction_has_valid_signature.return_value = True
+    transactions_parser.get_genlayer_transaction.return_value = genlayer_tx
+    consensus_service = MagicMock()
+    consensus_service.generate_transaction_hash.return_value = "0xhash"
+
+    result = endpoints.send_raw_transaction(
+        session,
+        MagicMock(),
+        transactions_parser,
+        consensus_service,
+        signed_rollup_transaction="0xdead",
+    )
+
+    assert result == "0xhash"
+    assert genlayer_tx.from_address == signer
+    consensus_service.add_transaction.assert_not_called()
+    assert transactions_processor.insert_transaction.call_args.args[0] == signer
 
 
 def test_update_transaction_status_uses_request_session(monkeypatch):
