@@ -378,6 +378,16 @@ class TestBackgroundHealthGenVMOrdering:
         assert health_module._health_cache.genvm_available_permits == 4
         assert health_module._health_cache.genvm_active_executions == 1
 
+    def test_health_metrics_reporting_uses_wall_clock_interval(self, monkeypatch):
+        monkeypatch.setenv("HEALTH_METRICS_SEND_INTERVAL_SECONDS", "60")
+        health_module._metrics_last_send_monotonic = None
+
+        assert health_module._should_send_health_metrics(100.0) is True
+
+        health_module._metrics_last_send_monotonic = 100.0
+        assert health_module._should_send_health_metrics(159.9) is False
+        assert health_module._should_send_health_metrics(160.0) is True
+
     @pytest.mark.asyncio
     async def test_consensus_health_includes_max_recovery_exhaustion_events(
         self, monkeypatch
