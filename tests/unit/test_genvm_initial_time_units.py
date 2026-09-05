@@ -75,7 +75,7 @@ async def test_run_genvm_scales_initial_time_units_allocation(
             message={"is_init": True},
             host="unix://test",
             calldata=b"",
-            bucket_totals=[10_000_000, 10_000_000, 10_000_000, 10_000_000],
+            bucket_totals=base_host.default_bucket_totals(3),
         )
 
     # Upstream now scales the allocation with the run timeout (ceil), falling

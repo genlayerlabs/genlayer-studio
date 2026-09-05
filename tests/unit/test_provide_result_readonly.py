@@ -19,7 +19,7 @@ def _result_with_storage_change():
         result_storage_deltas=[(b"\x11" * 32 + (0).to_bytes(4, "big"), b"\xaa")],
         result_emissions=[],
         result_leader_public_data=LeaderPublicData([]).encode(),
-        data_fees_remaining=[],
+        data_fees_remaining={},
     )
 
 
@@ -52,3 +52,20 @@ def test_provide_result_applies_storage_changes_for_writable_state():
     host.provide_result(_result_with_storage_change(), state, Context())
 
     state.storage_write.assert_called_once_with(b"\x11" * 32, 0, b"\xaa")
+
+
+def test_provide_result_accepts_omitted_leader_public_data():
+    host = Host(
+        MagicMock(),
+        calldata_bytes=b"",
+        state_proxy=MagicMock(),
+        leader_results=None,
+    )
+    state = MagicMock()
+    state.readonly = True
+    result = _result_with_storage_change()
+    result.result_leader_public_data = b""
+
+    execution = host.provide_result(result, state, Context())
+
+    assert execution.eq_outputs == {}
