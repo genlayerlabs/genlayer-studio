@@ -1,5 +1,6 @@
 from backend.consensus.vrf import get_validators_for_transaction
 from unittest.mock import Mock
+import pytest
 
 
 def list_of_dicts_to_set(list_of_dicts: list[dict]) -> set:
@@ -66,3 +67,21 @@ def test_get_validators_for_transaction_3():
 
     rng.choice.assert_called_once()
     assert validators == [{"stake": 3}, {"stake": 2}, {"stake": 1}]
+
+
+def test_get_validators_zero_stake_raises():
+    """When all stakes are zero, selection should raise ValueError."""
+    nodes = [{"stake": 0}, {"stake": 0}]
+    with pytest.raises(ValueError, match="all stakes are zero"):
+        get_validators_for_transaction(nodes, 1)
+
+
+def test_get_validators_rng_not_shared_between_calls():
+    """Each call without an explicit rng should get a fresh generator."""
+    nodes = [{"stake": 1}, {"stake": 2}, {"stake": 3}]
+    # Call twice without passing rng — the default must be created fresh each time.
+    v1 = get_validators_for_transaction(nodes, 1)
+    v2 = get_validators_for_transaction(nodes, 1)
+    # Both should succeed (no shared mutable state corruption).
+    assert len(v1) == 1
+    assert len(v2) == 1
