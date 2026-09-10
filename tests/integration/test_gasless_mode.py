@@ -54,9 +54,10 @@ def _sender_address(contract) -> str:
 
 def _estimate_params(contract, method: str, args: list) -> dict:
     # Write-call payloads are RLP-wrapped genvm calldata (see
-    # TransactionParser.decode_method_send_data).
+    # TransactionParser.decode_method_send_data). The method name lives under the
+    # empty key; GenVM rejects anything else with `malformed_entry`.
     encoded_data = eth_utils.hexadecimal.encode_hex(
-        rlp.encode([calldata.encode({"method": method, "args": args}), False])
+        rlp.encode([calldata.encode({"": method, "args": args}), False])
     )
     return {
         "scenarioName": method,

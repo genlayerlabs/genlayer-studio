@@ -1137,13 +1137,13 @@ class Node:
         if (
             result.data_fee_bucket_totals is not None
             and result.data_fees_remaining is not None
+            and result.data_fee_bucket_totals.keys()
+            == result.data_fees_remaining.keys()
         ):
-            data_fees_consumed = [
-                max(0, int(total) - int(remaining))
-                for total, remaining in zip(
-                    result.data_fee_bucket_totals, result.data_fees_remaining
-                )
-            ]
+            data_fees_consumed = {
+                name: max(0, int(total) - int(result.data_fees_remaining[name]))
+                for name, total in result.data_fee_bucket_totals.items()
+            }
 
         result = Receipt(
             result=genvmbase.encode_result_to_bytes(result.result),

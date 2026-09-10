@@ -197,7 +197,7 @@ async def _run_with_ack_error(monkeypatch, error: BaseException):
         is_sync=True,
         message={},
         host="unix:///dev/null",
-        bucket_totals=[0, 0, 0, 0],
+        bucket_totals=base_host.default_bucket_totals(3),
         calldata=b"",
         major=0,
     )
