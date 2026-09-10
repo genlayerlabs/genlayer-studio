@@ -67,7 +67,7 @@ async def test_manager_invokes_endpoint_with_dependencies():
 async def test_fund_account_normalizes_frontend_decimal_string_through_rpc(
     monkeypatch,
 ):
-    session = object()
+    session = MagicMock()
     accounts_manager = MagicMock()
     accounts_manager.is_valid_address.return_value = True
     transactions_processor = MagicMock()

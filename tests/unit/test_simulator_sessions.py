@@ -49,7 +49,7 @@ def test_top_level_deploy_rejects_reused_create2_address():
 
 
 def test_fund_account_uses_request_scoped_session(monkeypatch):
-    session = object()
+    session = MagicMock()
     accounts_manager_instance = MagicMock()
     accounts_manager_instance.is_valid_address.return_value = True
 
@@ -94,7 +94,7 @@ def test_fund_account_uses_request_scoped_session(monkeypatch):
 def test_fund_account_normalizes_string_amounts(
     monkeypatch, wire_amount, expected_amount
 ):
-    session = object()
+    session = MagicMock()
     accounts_manager_instance = MagicMock()
     accounts_manager_instance.is_valid_address.return_value = True
     transactions_processor_instance = MagicMock()
@@ -198,8 +198,8 @@ def test_fund_account_instantiates_managers_per_session(monkeypatch):
     monkeypatch.setattr(endpoints, "AccountsManager", fake_accounts_manager)
     monkeypatch.setattr(endpoints, "TransactionsProcessor", fake_transactions_processor)
 
-    session_one = object()
-    session_two = object()
+    session_one = MagicMock()
+    session_two = MagicMock()
 
     endpoints.fund_account(session_one, "0x" + "3" * 40, 5)
     endpoints.fund_account(session_two, "0x" + "4" * 40, 7)
