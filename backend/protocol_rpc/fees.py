@@ -45,6 +45,7 @@ PROPOSE_RECEIPT_SLOTS = 7
 MESSAGE_REVEAL_LENGTH_SLOTS = 32
 MAX_ALLOCATED_MESSAGES_CAP = 20
 NONDET_OUTPUT_LENGTH_BYTES = 32
+GENVM_NONDET_OUTPUT_HEADER_BYTES = 64
 NODE_ROOT_SENTINEL = (1 << 256) - 1
 UINT256_MAX = (1 << 256) - 1
 MAX_CONTRIBUTION_SEGMENTS = 64
@@ -107,16 +108,28 @@ DEFAULT_MIN_COMMIT_TIMEUNITS = 30
 DEFAULT_MAX_COMMIT_TIMEUNITS = 600
 GENVM_UNMETERED_DATA_FEE_BUCKET = (1 << 256) - 1
 # GenVM v0.3's fee config deliberately shares one reservoir for all execution
-# costs. The remaining fee bucket and two metadata counters are stable parts of
+# costs. The remaining fee bucket and metadata counters are stable parts of
 # the manager API pinned in third_party/genvm/version:
 #   0: storage + receipt + nondeterministic output + event costs
 #   1: outbound-message fee reservations
 #   2: raw nondeterministic-output bytes (metadata, not a fee)
 #   3: canonical SubmittedMessage payload bytes (metadata, not a fee)
+#   4: canonical SubmittedMessage count (metadata, not a fee)
 GENVM_EXECUTION_FEE_BUCKET = 0
 GENVM_MESSAGE_FEE_BUCKET = 1
 GENVM_NONDET_OUTPUT_BYTES_BUCKET = 2
 GENVM_SUBMITTED_MESSAGE_BYTES_BUCKET = 3
+GENVM_SUBMITTED_MESSAGE_COUNT_BUCKET = 4
+# GenVM addresses the same buckets by name once the manager API supports it.
+GENVM_FEE_BUCKET_NAMES: tuple[str, ...] = (
+    "execution_data_gas",
+    "message_fee",
+    "nondet_outputs",
+    "submitted_messages",
+    "submitted_messages_count",
+)
+
+type FeeBucketConsumption = dict[str, int] | list[int]
 
 
 class FeeValidationError(ValueError):
@@ -457,7 +470,9 @@ class StudioFeePolicy:
         )
 
     def estimate_nondet_output_start_gas(self) -> int:
-        return NONDET_OUTPUT_LENGTH_BYTES * self.calldata_gas_per_byte
+        return (
+            self.receipt_wrapper_bytes + GENVM_NONDET_OUTPUT_HEADER_BYTES
+        ) * self.calldata_gas_per_byte
 
     def message_fee_params_budget_floor(self) -> int:
         return self.minimum_execution_budget_per_round()
@@ -482,11 +497,23 @@ class StudioFeePolicy:
             + self.intrinsic_gas
             + self.bootloader_overhead
             + (PROPOSE_RECEIPT_SLOTS * self.gas_per_changed_slot)
+            + self.estimate_nondet_output_start_gas()
+        )
+        return start_gas * self.receipt_gas_price
+
+    def _legacy_genvm_start_budget_floor(self) -> int:
+        if self.receipt_gas_price <= 0:
+            return 0
+        start_gas = (
+            self.fixed_propose_receipt_gas
+            + self.intrinsic_gas
+            + self.bootloader_overhead
+            + (PROPOSE_RECEIPT_SLOTS * self.gas_per_changed_slot)
             + self.fixed_message_reveal_gas
             + self.intrinsic_gas
             + self.bootloader_overhead
             + (MESSAGE_REVEAL_LENGTH_SLOTS * self.gas_per_changed_slot)
-            + self.estimate_nondet_output_start_gas()
+            + (NONDET_OUTPUT_LENGTH_BYTES * self.calldata_gas_per_byte)
         )
         return start_gas * self.receipt_gas_price
 
@@ -1983,7 +2010,7 @@ def create_child_fee_accounting(
 def genvm_fee_context(
     accounting: dict[str, Any] | None,
     policy: StudioFeePolicy | None = None,
-) -> tuple[list[int] | None, dict[str, str] | None]:
+) -> tuple[dict[str, int] | None, dict[str, str] | None]:
     if not accounting:
         return None, None
 
@@ -2009,21 +2036,30 @@ def genvm_fee_context(
         "fixedMessageRevealGas": str(
             policy.receipt_gas_price * policy.fixed_message_reveal_gas
         ),
+        "lockedReceiptGasPrice": str(policy.receipt_gas_price),
+        "receiptWrapperBytes": str(policy.receipt_wrapper_bytes),
+        "overlaySplitBps": str(policy.time_unit_overlay_bps),
+        "minProposeTimeout": str(policy.min_propose_timeunits),
+        "maxProposeTimeout": str(policy.max_propose_timeunits),
+        "minCommitTimeout": str(policy.min_commit_timeunits),
+        "maxCommitTimeout": str(policy.max_commit_timeunits),
         "genPerTimeUnit": str(policy.gen_per_time_unit),
+        "messageBudgetFloor": str(policy.message_fee_params_budget_floor()),
     }
     message_bucket_total = int(accounting.get("message_fee_budget", 0) or 0)
-    if bucket_total > 0 or message_bucket_total > 0:
-        data_bucket_total = (
-            bucket_total if bucket_total > 0 else GENVM_UNMETERED_DATA_FEE_BUCKET
-        )
-        bucket_totals = [
-            data_bucket_total,
-            message_bucket_total,
-            GENVM_UNMETERED_DATA_FEE_BUCKET,
-            GENVM_UNMETERED_DATA_FEE_BUCKET,
-        ]
-    else:
-        bucket_totals = None
+    has_fee_budgets = bucket_total > 0 or message_bucket_total > 0
+    data_bucket_total = (
+        bucket_total if bucket_total > 0 else GENVM_UNMETERED_DATA_FEE_BUCKET
+    )
+    bucket_totals = {
+        "execution_data_gas": data_bucket_total,
+        "message_fee": (
+            message_bucket_total if has_fee_budgets else GENVM_UNMETERED_DATA_FEE_BUCKET
+        ),
+        "nondet_outputs": GENVM_UNMETERED_DATA_FEE_BUCKET,
+        "submitted_messages": GENVM_UNMETERED_DATA_FEE_BUCKET,
+        "submitted_messages_count": _message_count_cap(policy),
+    }
     return bucket_totals, gas_data
 
 
@@ -2041,7 +2077,7 @@ def genvm_message_fee_allocation(
                 "Mode1MessageFeesRequireGenVMPerEmissionSupport: fee-bearing "
                 "GenVM messages require a message allocation tree"
             )
-        return []
+        return _genvm_unmetered_message_fee_allocation()
 
     fees_distribution = normalize_fees_distribution(
         accounting.get("fees_distribution") or {}
@@ -3132,8 +3168,10 @@ def record_execution_fee_consumption(
         updated["execution_fee_report"][
             "budgetExhaustionReason"
         ] = budget_exhaustion_reason
-    if len(consumed) > GENVM_MESSAGE_FEE_BUCKET:
-        updated["genvm_message_fee_consumed"] = int(consumed[GENVM_MESSAGE_FEE_BUCKET])
+    if _has_bucket(consumed, GENVM_MESSAGE_FEE_BUCKET):
+        updated["genvm_message_fee_consumed"] = _bucket_value(
+            consumed, GENVM_MESSAGE_FEE_BUCKET
+        )
     _attach_message_fee_accounting_report(updated)
     _attach_recommended_fee_preset(updated, policy)
     return updated
@@ -4640,11 +4678,11 @@ def _genvm_unmetered_message_fee_allocation() -> list[dict[str, Any]]:
     budget = 2**200
     internal_fee_params = {
         "Internal": {
-            "leader_timeunits_allocation": 5,
-            "validator_timeunits_allocation": 5,
-            "execution_budget_per_round": 2**10,
-            "rotations": [4, 4, 4, 4, 4],
-            "max_price_gen_per_time_unit": 2**200,
+            "leader_timeunits_allocation": 0,
+            "validator_timeunits_allocation": 0,
+            "execution_budget_per_round": 0,
+            "rotations": [0],
+            "max_price_gen_per_time_unit": 1,
             "storage_fee_max_gas_price": 2**200,
             "receipt_fee_max_gas_price": 2**200,
         },
@@ -5514,12 +5552,12 @@ def fee_accounting_with_discovered_messages(
     )
 
 
-def _execution_fee_buckets(consumed: list[int]) -> list[int]:
+def _execution_fee_buckets(consumed: FeeBucketConsumption) -> list[int]:
     return [_bucket_value(consumed, GENVM_EXECUTION_FEE_BUCKET)]
 
 
 def _chargeable_execution_fee_buckets(
-    consumed: list[int],
+    consumed: FeeBucketConsumption,
     fee_report: dict[str, Any] | None,
     policy: StudioFeePolicy,
     receipt: Any | None = None,
@@ -5538,7 +5576,7 @@ def _chargeable_execution_fee_buckets(
 
 def _chargeable_storage_fee(
     receipt: Any | None,
-    consumed: list[int],
+    consumed: FeeBucketConsumption,
     fee_report: dict[str, Any] | None = None,
 ) -> int:
     if receipt is not None and not _receipt_execution_allows_messages(receipt):
@@ -5566,8 +5604,20 @@ def _receipt_report_chargeable_fee(fee_report: dict[str, Any]) -> int:
     return max(0, proposal_fee + message_fee)
 
 
-def _bucket_value(consumed: list[int], index: int) -> int:
+def _bucket_value(consumed: FeeBucketConsumption, index: int) -> int:
+    if isinstance(consumed, dict):
+        return int(consumed.get(_bucket_name(index), 0) or 0)
     return int(consumed[index]) if len(consumed) > index else 0
+
+
+def _has_bucket(consumed: FeeBucketConsumption, index: int) -> bool:
+    if isinstance(consumed, dict):
+        return _bucket_name(index) in consumed
+    return len(consumed) > index
+
+
+def _bucket_name(index: int) -> str:
+    return GENVM_FEE_BUCKET_NAMES[index] if index < len(GENVM_FEE_BUCKET_NAMES) else ""
 
 
 def _execution_budget_per_round(accounting: dict[str, Any]) -> int:
@@ -5579,7 +5629,7 @@ def _execution_budget_per_round(accounting: dict[str, Any]) -> int:
 
 
 def _genvm_fee_bucket_report(
-    consumed: list[int],
+    consumed: FeeBucketConsumption,
     *,
     execution_budget_per_round: int = 0,
 ) -> dict[str, Any]:
@@ -5588,6 +5638,9 @@ def _genvm_fee_bucket_report(
     nondet_output_bytes = _bucket_value(consumed, GENVM_NONDET_OUTPUT_BYTES_BUCKET)
     submitted_message_bytes = _bucket_value(
         consumed, GENVM_SUBMITTED_MESSAGE_BYTES_BUCKET
+    )
+    submitted_message_count = _bucket_value(
+        consumed, GENVM_SUBMITTED_MESSAGE_COUNT_BUCKET
     )
     buckets = []
     bucket_definitions = (
@@ -5603,9 +5656,14 @@ def _genvm_fee_bucket_report(
             "submittedMessageBytes",
             "bytes",
         ),
+        (
+            GENVM_SUBMITTED_MESSAGE_COUNT_BUCKET,
+            "submittedMessageCount",
+            "count",
+        ),
     )
     for index, name, unit in bucket_definitions:
-        if len(consumed) > index:
+        if _has_bucket(consumed, index):
             buckets.append(
                 {
                     "index": index,
@@ -5620,6 +5678,7 @@ def _genvm_fee_bucket_report(
         "message": message,
         "nondeterministicOutputBytes": nondet_output_bytes,
         "submittedMessageBytes": submitted_message_bytes,
+        "submittedMessageCount": submitted_message_count,
         "totalExecution": execution,
         "totalWithMessage": execution + message,
         "buckets": buckets,
@@ -5873,7 +5932,9 @@ def _refresh_message_fee_accounting_report_if_present(
         _attach_recommended_fee_preset(accounting, policy)
 
 
-def _receipt_data_fees_consumed(receipt: Any | None) -> list[int] | None:
+def _receipt_data_fees_consumed(
+    receipt: Any | None,
+) -> FeeBucketConsumption | None:
     if receipt is None:
         return None
     genvm_result = (
@@ -5885,11 +5946,22 @@ def _receipt_data_fees_consumed(receipt: Any | None) -> list[int] | None:
         return None
     consumed = genvm_result.get("data_fees_consumed")
     if consumed is not None:
+        if isinstance(consumed, dict):
+            return {str(name): int(value) for name, value in consumed.items()}
         return [int(value) for value in consumed]
     totals = genvm_result.get("data_fee_bucket_totals")
     remaining = genvm_result.get("data_fees_remaining")
     if totals is None or remaining is None:
         return None
+    if isinstance(totals, dict) != isinstance(remaining, dict):
+        return None
+    if isinstance(totals, dict):
+        if totals.keys() != remaining.keys():
+            return None
+        return {
+            str(name): max(0, int(total) - int(remaining[name]))
+            for name, total in totals.items()
+        }
     return [max(0, int(total) - int(rest)) for total, rest in zip(totals, remaining)]
 
 
@@ -5999,12 +6071,19 @@ def _receipt_fee_report(
         report["totalStudioMeteredFee"] = proposal_fee + message_fee
 
     consumed = _receipt_data_fees_consumed(receipt)
-    if consumed is not None and len(consumed) > GENVM_SUBMITTED_MESSAGE_BYTES_BUCKET:
+    if consumed is not None and _has_bucket(
+        consumed, GENVM_SUBMITTED_MESSAGE_BYTES_BUCKET
+    ):
+        message_count = (
+            _bucket_value(consumed, GENVM_SUBMITTED_MESSAGE_COUNT_BUCKET)
+            if _has_bucket(consumed, GENVM_SUBMITTED_MESSAGE_COUNT_BUCKET)
+            else len(submitted_messages)
+        )
         report["totalStudioMeteredFee"] = _genvm_receipt_metered_fee(
             receipt,
             policy,
             consumed,
-            message_count=len(submitted_messages),
+            message_count=message_count,
         )
 
     return report
@@ -6013,7 +6092,7 @@ def _receipt_fee_report(
 def _genvm_receipt_metered_fee(
     receipt: Any,
     policy: StudioFeePolicy,
-    consumed: list[int],
+    consumed: FeeBucketConsumption,
     *,
     message_count: int,
 ) -> int:
@@ -6029,20 +6108,35 @@ def _genvm_receipt_metered_fee(
         policy.calldata_gas_per_byte
     )
     changed_slot_fee = int(policy.receipt_gas_price) * int(policy.gas_per_changed_slot)
-    total = int(policy.genvm_start_budget_floor())
+    if isinstance(consumed, list):
+        # Positional receipts retain the pre-named-bucket startup layout.
+        total = int(policy._legacy_genvm_start_budget_floor())
 
-    eq_outputs = _receipt_eq_outputs(receipt)
-    if eq_outputs:
-        total += sum(
-            (64 + ((len(output) + 31) // 32) * 32) * receipt_fee_per_byte
-            for output in eq_outputs
-        )
+        eq_outputs = _receipt_eq_outputs(receipt)
+        if eq_outputs:
+            total += sum(
+                (64 + ((len(output) + 31) // 32) * 32) * receipt_fee_per_byte
+                for output in eq_outputs
+            )
+        else:
+            raw_output_bytes = _bucket_value(consumed, GENVM_NONDET_OUTPUT_BYTES_BUCKET)
+            if raw_output_bytes > 0:
+                total += (
+                    64 + ((raw_output_bytes + 31) // 32) * 32
+                ) * receipt_fee_per_byte
     else:
-        # Actual v0.3 receipts expose the output values. Keep the byte counter
-        # as a deterministic fallback for imported or synthetic receipts.
-        raw_output_bytes = _bucket_value(consumed, GENVM_NONDET_OUTPUT_BYTES_BUCKET)
-        if raw_output_bytes > 0:
-            total += (64 + ((raw_output_bytes + 31) // 32) * 32) * receipt_fee_per_byte
+        total = int(policy.genvm_start_budget_floor())
+        nondet_output_bytes = _bucket_value(consumed, GENVM_NONDET_OUTPUT_BYTES_BUCKET)
+        total += (
+            max(0, nondet_output_bytes - GENVM_NONDET_OUTPUT_HEADER_BYTES)
+            * receipt_fee_per_byte
+        )
+        if message_count > 0:
+            total += (
+                policy.fixed_message_reveal_gas
+                + policy.intrinsic_gas
+                + policy.bootloader_overhead
+            ) * policy.receipt_gas_price
 
     submitted_message_bytes = _bucket_value(
         consumed, GENVM_SUBMITTED_MESSAGE_BYTES_BUCKET
