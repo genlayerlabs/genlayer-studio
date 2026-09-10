@@ -445,6 +445,8 @@ class TransactionsProcessor:
         if isinstance(genvm_buckets, dict):
             return int(genvm_buckets.get("storage", 0) or 0)
         consumed_buckets = accounting.get("genvm_fee_consumed_buckets") or []
+        if isinstance(consumed_buckets, dict):
+            return 0
         if len(consumed_buckets) > 1:
             return int(consumed_buckets[1])
         return 0

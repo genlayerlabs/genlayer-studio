@@ -305,7 +305,7 @@ class TestRetryBehavior:
                 message={"is_init": True},
                 host="unix://test",
                 calldata=b"",
-                bucket_totals=[10_000_000, 10_000_000, 10_000_000, 10_000_000],
+                bucket_totals=origin_base_host.default_bucket_totals(3),
             )
 
         assert exc_info.value.retryable is True
@@ -338,7 +338,7 @@ class TestRetryBehavior:
                 message={"is_init": True},
                 host="unix://test",
                 calldata=b"",
-                bucket_totals=[10_000_000, 10_000_000, 10_000_000, 10_000_000],
+                bucket_totals=origin_base_host.default_bucket_totals(3),
             )
 
         assert exc_info.value.retryable is False
@@ -366,7 +366,7 @@ class TestRetryBehavior:
                 message={"is_init": True},
                 host="unix://test",
                 calldata=b"",
-                bucket_totals=[10_000_000, 10_000_000, 10_000_000, 10_000_000],
+                bucket_totals=origin_base_host.default_bucket_totals(3),
             )
 
         assert exc_info.value.genvm_id == 42
@@ -529,7 +529,7 @@ class TestRetryBehavior:
                 message={"is_init": True},
                 host="unix://test",
                 calldata=b"",
-                bucket_totals=[10_000_000, 10_000_000, 10_000_000, 10_000_000],
+                bucket_totals=origin_base_host.default_bucket_totals(3),
             )
 
         assert exc_info.value.retryable is expected_retryable
