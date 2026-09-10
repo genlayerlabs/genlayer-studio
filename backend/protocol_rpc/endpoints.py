@@ -594,6 +594,10 @@ def fund_account(
     accounts_manager.credit_tx_value_once(
         transaction_hash, account_address, normalized_amount
     )
+    # Release the current_state row lock before returning: sync handlers run on
+    # the event loop, so a concurrent caller blocking on this row would freeze
+    # the loop and prevent the request-scoped session from ever committing.
+    session.commit()
     return transaction_hash
 
 
