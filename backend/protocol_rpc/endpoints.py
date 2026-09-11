@@ -1338,7 +1338,10 @@ async def get_contract_schema(
         contract_snapshot_factory=None,
         manager=genvm_manager,
     )
-    schema = await node.get_contract_schema(base64.b64decode(code_b64))
+    schema = await node.get_contract_schema(
+        base64.b64decode(code_b64),
+        genvm_executor_selector=contract_snapshot.genvm_executor_selector,
+    )
     return json.loads(schema)
 
 
