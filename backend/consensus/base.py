@@ -337,8 +337,8 @@ def contract_snapshot_factory(
     """
     try:
         contract_address = to_checksum_address(contract_address)
-    except Exception:
-        pass
+    except (ValueError, TypeError):
+        return None
     # Check if the transaction is a contract deployment and the contract address matches the transaction's to address
     if (
         transaction.type == TransactionType.DEPLOY_CONTRACT
