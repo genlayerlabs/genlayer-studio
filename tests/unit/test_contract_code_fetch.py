@@ -10,6 +10,7 @@ from backend.database_handler.contract_snapshot import (
     _decode_code_payload,
     fetch_deployed_code_b64,
 )
+from backend.node.genvm.executor_selection import LEGACY_EXECUTOR_SELECTOR
 from backend.database_handler.errors import ContractNotFoundError
 
 ADDRESS = "0xabc"
@@ -111,6 +112,13 @@ class TestCodeSlotHelpers:
         assert _code_slot_b64() == _code_slot_b64()
         assert len(base64.b64decode(_code_slot_b64())) == 32
 
+    def test_legacy_code_slot_uses_retained_abi_offset(self):
+        import hashlib
+
+        legacy = hashlib.sha3_256(b"\x00" * 32 + (1).to_bytes(4, "little")).digest()
+        assert base64.b64decode(_code_slot_b64(legacy=True)) == legacy
+        assert _code_slot_b64(legacy=True) != _code_slot_b64()
+
     def test_decode_respects_length_prefix(self):
         """Trailing bytes past the declared length must not leak into the code."""
         blob = base64.b64encode((3).to_bytes(4, "little") + b"abc" + b"PADDING")
@@ -118,6 +126,23 @@ class TestCodeSlotHelpers:
 
 
 class TestGeneratedSQL:
+    def test_real_query_selects_code_slot_from_executor_metadata(self):
+        from sqlalchemy.dialects import postgresql
+
+        session = _make_session(_make_row())
+        assert fetch_deployed_code_b64(session, ADDRESS) is None
+        statement = session.execute.call_args.args[0]
+        compiled = statement.compile(dialect=postgresql.dialect())
+        sql = str(compiled)
+        values = compiled.params.values()
+        assert "CASE WHEN" in sql
+        assert "genvm_executor_selector" in sql
+        assert LEGACY_EXECUTOR_SELECTOR in values
+        assert "v0.2." in values
+        assert _code_slot_b64(legacy=True) in values
+        assert _code_slot_b64() in values
+        assert "current_state.data \n" not in sql
+
     def test_statement_compiles_against_postgres(self):
         """Guards the JSONB path expression, which mocks cannot validate."""
         from sqlalchemy import func, select
