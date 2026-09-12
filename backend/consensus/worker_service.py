@@ -588,7 +588,7 @@ def health_check():
             "cpu_percent": round(process.cpu_percent(), 2),
             "memory_percent": round(process.memory_percent(), 2),
         }
-    except:
+    except Exception:
         pass
 
     # Probe local GenVM manager responsiveness.

@@ -45,7 +45,7 @@ class AccountsManager:
         try:
             address = to_checksum_address(address)
         except Exception:
-            pass
+            raise ValueError(f"Failed to checksum address: {address}")
 
         existing_account = (
             self.session.query(CurrentState).filter(CurrentState.id == address).first()
@@ -67,7 +67,7 @@ class AccountsManager:
         try:
             normalized = to_checksum_address(account_address)
         except Exception:
-            normalized = account_address
+            raise ValueError(f"Failed to checksum address: {account_address}")
         account = (
             self.session.query(CurrentState)
             .filter(CurrentState.id == normalized)
