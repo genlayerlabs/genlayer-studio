@@ -1,9 +1,10 @@
+import asyncio
+import json
 from contextlib import contextmanager
 from unittest.mock import Mock
 
 import pytest
 from fastapi import FastAPI, HTTPException
-from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.pool import QueuePool
 
@@ -11,6 +12,53 @@ from backend.database_handler.session_factory import DatabaseSessionManager
 from backend.protocol_rpc.explorer import queries, query_runner
 from backend.protocol_rpc.explorer.query_runner import ExplorerQueryRunner
 from backend.protocol_rpc.explorer.router import explorer_router
+
+
+async def asgi_get(app, url):
+    """Exercise the app without an optional HTTP test-client dependency."""
+    path, _, query = url.partition("?")
+    messages = []
+    request_sent = False
+    response_done = asyncio.Event()
+
+    async def receive():
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await response_done.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        messages.append(message)
+        if message["type"] == "http.response.body" and not message.get("more_body"):
+            response_done.set()
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": query.encode(),
+        "root_path": "",
+        "headers": [],
+        "server": ("test", 80),
+        "client": ("test", 1234),
+    }
+    await asyncio.wait_for(app(scope, receive, send), timeout=5)
+    start = next(
+        message for message in messages if message["type"] == "http.response.start"
+    )
+    body = b"".join(
+        message.get("body", b"")
+        for message in messages
+        if message["type"] == "http.response.body"
+    )
+    headers = {key.decode(): value.decode() for key, value in start["headers"]}
+    return start["status"], headers, json.loads(body)
 
 
 class DatabaseStub:
@@ -171,6 +219,7 @@ def test_failed_counts_refresh_can_retry(monkeypatch):
     assert db.opened == db.closed == 2
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "path, query_name, args, kwargs",
     [
@@ -199,7 +248,7 @@ def test_failed_counts_refresh_can_retry(monkeypatch):
         ("/providers", "get_all_providers", (), {}),
     ],
 )
-def test_routes_use_bounded_worker_sessions(
+async def test_routes_use_bounded_worker_sessions(
     monkeypatch, path, query_name, args, kwargs
 ):
     import threading
@@ -226,14 +275,14 @@ def test_routes_use_bounded_worker_sessions(
         return {"result": "ok"}
 
     monkeypatch.setattr(queries, query_name, query)
-    with TestClient(app) as client:
-        response = client.get("/api/explorer" + path)
-    assert response.status_code == 200
-    assert response.json() == {"result": "ok"}
+    status, _, body = await asgi_get(app, "/api/explorer" + path)
+    assert status == 200
+    assert body == {"result": "ok"}
     assert query_threads[0] != loop_threads[0]
 
 
-def test_routes_preserve_not_found_validation_and_busy_responses(monkeypatch):
+@pytest.mark.asyncio
+async def test_routes_preserve_not_found_validation_and_busy_responses(monkeypatch):
     db = DatabaseStub()
     app = FastAPI()
     runner = ExplorerQueryRunner(db, max_concurrent=1)
@@ -241,22 +290,21 @@ def test_routes_preserve_not_found_validation_and_busy_responses(monkeypatch):
     app.include_router(explorer_router)
     monkeypatch.setattr(queries, "get_transaction_with_relations", lambda *args: None)
     monkeypatch.setattr(queries, "get_address_info", lambda *args: None)
-    with TestClient(app) as client:
-        for path in ("/transactions/missing", "/address/missing"):
-            assert client.get("/api/explorer" + path).status_code == 404
-        assert db.opened == db.closed == 2
-        for path in ("/transactions?limit=101", "/contracts?sort_by=invalid"):
-            assert client.get("/api/explorer" + path).status_code == 422
-        assert db.opened == 2
-        with runner._slots:
-            response = client.get("/api/explorer/stats")
-            assert response.status_code == 503
-            assert response.headers["Retry-After"] == "1"
-        assert db.opened == 2
+    for path in ("/transactions/missing", "/address/missing"):
+        assert (await asgi_get(app, "/api/explorer" + path))[0] == 404
+    assert db.opened == db.closed == 2
+    for path in ("/transactions?limit=101", "/contracts?sort_by=invalid"):
+        assert (await asgi_get(app, "/api/explorer" + path))[0] == 422
+    assert db.opened == 2
+    with runner._slots:
+        status, headers, _ = await asgi_get(app, "/api/explorer/stats")
+        assert status == 503
+        assert headers["retry-after"] == "1"
+    assert db.opened == 2
 
 
-def test_uninitialized_explorer_returns_503():
+@pytest.mark.asyncio
+async def test_uninitialized_explorer_returns_503():
     app = FastAPI()
     app.include_router(explorer_router)
-    with TestClient(app) as client:
-        assert client.get("/api/explorer/stats").status_code == 503
+    assert (await asgi_get(app, "/api/explorer/stats"))[0] == 503
