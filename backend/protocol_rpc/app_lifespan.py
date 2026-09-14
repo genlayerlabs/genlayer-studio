@@ -26,6 +26,7 @@ from backend.database_handler.terminal_snapshot_pruner import (
 )
 from backend.protocol_rpc.transactions_parser import TransactionParser
 from backend.protocol_rpc.configuration import GlobalConfiguration
+from backend.protocol_rpc.explorer.query_runner import ExplorerQueryRunner
 from backend.protocol_rpc.fastapi_rpc_router import FastAPIRPCRouter
 from backend.protocol_rpc.message_handler.fastapi_handler import (
     MessageHandler,
@@ -234,6 +235,7 @@ async def rpc_app_lifespan(app, settings: RPCAppSettings) -> AsyncIterator[RPCAp
     )
     db_manager = DatabaseSessionManager(settings.database_url)
     set_database_manager(db_manager)
+    app.state.explorer_query_runner = ExplorerQueryRunner(db_manager)
 
     logger.info("[STARTUP] Verifying database readiness and migrations")
     _verify_database_ready(db_manager)
