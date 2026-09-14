@@ -30,10 +30,15 @@ class MessageHandler(IMessageHandler):
         self.broadcast = broadcast
         self.config = config
         self.client_session_id = None
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
 
     def with_client_session(self, client_session_id: str):
         new_msg_handler = MessageHandler(self.broadcast, self.config)
         new_msg_handler.client_session_id = client_session_id
+        new_msg_handler._loop = self._loop
         return new_msg_handler
 
     def log_endpoint_info(self, func):
@@ -76,14 +81,27 @@ class MessageHandler(IMessageHandler):
 
         message = json.dumps(payload)
         try:
-            loop = asyncio.get_running_loop()
+            running_loop = asyncio.get_running_loop()
         except RuntimeError:
-            return
+            running_loop = None
 
-        if not loop.is_running():
+        loop = self._loop or running_loop
+        if loop is None or not loop.is_running():
             return
+        self._loop = loop
 
-        loop.create_task(self.broadcast.publish(channel=channel, message=message))
+        def publish():
+            loop.create_task(self.broadcast.publish(channel=channel, message=message))
+
+        if running_loop is loop:
+            publish()
+        else:
+            # Sync RPC handlers run in workers; Broadcast belongs to the app loop.
+            try:
+                loop.call_soon_threadsafe(publish)
+            except RuntimeError:
+                # The application may have shut down while a worker finished.
+                pass
 
     def _socket_emit(self, log_event: LogEvent) -> None:
         """Emit a log event via broadcast channels.

@@ -70,6 +70,7 @@ from backend.protocol_rpc.types import DecodedsubmitAppealDataArgs
 from backend.database_handler.snapshot_manager import SnapshotManager
 from backend.node.base import Manager as GenVMManager
 import asyncio
+from starlette.concurrency import run_in_threadpool
 
 # Limit concurrent GenVM executions on the jsonrpc path to prevent uvloop fd
 # conflicts and DB pool exhaustion while calls hold request-scoped sessions.
@@ -1076,7 +1077,9 @@ async def get_contract_schema(
     contract_address: str,
 ) -> dict:
     try:
-        contract_snapshot = ContractSnapshot(contract_address, session)
+        contract_snapshot = await run_in_threadpool(
+            ContractSnapshot, contract_address, session
+        )
     except ContractNotFoundError:
         raise NotFoundError(
             message=f"Contract {contract_address} not found",
@@ -1424,7 +1427,9 @@ async def _gen_call_with_validator(
 
     # Create validator node
     try:
-        contract_snapshot = ContractSnapshot(to_address, session)
+        contract_snapshot = await run_in_threadpool(
+            ContractSnapshot, to_address, session
+        )
     except ContractNotFoundError:
         raise NotFoundError(
             message=f"Contract {to_address} not found",
@@ -1630,8 +1635,8 @@ async def eth_call(
 
     # Check if this is a ConsensusData contract call that we should handle locally
     # This should happen before early return to allow interception even without 'from'
-    consensus_data_result = handle_consensus_data_call(
-        transactions_processor, to_address, data
+    consensus_data_result = await run_in_threadpool(
+        handle_consensus_data_call, transactions_processor, to_address, data
     )
     if consensus_data_result is not None:
         return consensus_data_result
@@ -1657,7 +1662,9 @@ async def eth_call(
                 )
             as_validator = snapshot.nodes[0].validator
             try:
-                target_contract_snapshot = ContractSnapshot(to_address, session)
+                target_contract_snapshot = await run_in_threadpool(
+                    ContractSnapshot, to_address, session
+                )
             except ContractNotFoundError:
                 raise NotFoundError(
                     message=f"Contract {to_address} not found",
