@@ -11,6 +11,7 @@ from hexbytes import HexBytes
 import os
 from backend.rollup.consensus_service import ConsensusService
 from backend.domain.types import TransactionType
+from backend.errors.errors import InvalidTransactionError
 
 from backend.protocol_rpc.types import (
     DecodedDeploymentData,
@@ -512,6 +513,21 @@ class TransactionParser:
             )
 
         sender = rollup_transaction.data.args.sender
+        # `sender` above is an attacker-controlled argument decoded from the
+        # transaction's calldata, not the party that actually authorized the
+        # transaction. Only `rollup_transaction.from_address` is verified,
+        # by `transaction_has_valid_signature`, to be the recovered signer
+        # of the raw transaction. Without this check, a caller can sign a
+        # valid transaction from their own address while setting `sender`
+        # to any other address, which becomes the Intelligent Contract
+        # caller (see GenVM's `gl.message.sender_address`) while the real
+        # signer merely pays the gas.
+        if to_checksum_address(sender) != to_checksum_address(
+            rollup_transaction.from_address
+        ):
+            raise InvalidTransactionError(
+                "Transaction sender argument does not match the recovered signer"
+            )
         recipient = rollup_transaction.data.args.recipient
         max_rotations = rollup_transaction.data.args.max_rotations
         type = self._get_genlayer_transaction_type(recipient)
