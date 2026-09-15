@@ -6,6 +6,11 @@
 
 This Studio is an interactive sandbox designed for developers to explore the potential of the [GenLayer Protocol](https://genlayer.com/). It replicates the GenLayer network's execution environment and consensus algorithm, but offers a controlled and local environment to test different ideas and behaviors.
 
+## Branching
+
+See [docs/BRANCHING.md](docs/BRANCHING.md) for the release-train model used by
+this repo.
+
 ## Prerequisites
 Before installing the GenLayer CLI, ensure you have the following prerequisites installed:
 
@@ -26,27 +31,11 @@ $ genlayer up
 ```
 After executing those commands a new tab will open in your browser with the GenLayer Studio. Additional installation instructions can be found [here](https://docs.genlayer.com/simulator/installation)
 
-### Enabling Hardhat Node
-If you need to interact with a local Hardhat node for transaction processing, make sure to add the following to your `.env` file:
+### Hardhat protocol tests
 
-```
-HARDHAT_URL=http://hardhat
-HARDHAT_PORT=8545
-COMPOSE_PROFILES=hardhat
-```
-
-This will enable the Hardhat service when running `genlayer up`.
-
-### Disabling Hardhat Node
-If you need to disable the Hardhat node, make sure to remove the following from your `.env` file:
-
-```
-HARDHAT_URL=
-HARDHAT_PORT=
-COMPOSE_PROFILES=
-```
-
-This will disable the Hardhat service when running `genlayer up`.
+Studio transaction processing no longer depends on a separate Hardhat node.
+The contracts under `hardhat/` remain a protocol-parity test harness and can
+be tested directly from that directory.
 
 ## 🚀 Key Features
 * 🖥️ **Test Locally:** Developers can test Intelligent Contracts in a local environment, replicating the GenLayer network without the need for deployment. This speeds up the development cycle and reduces the risk of errors in the live environment.

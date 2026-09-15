@@ -16,6 +16,14 @@ describe('useNetworkStore', () => {
     vi.unstubAllEnvs();
   });
 
+  it('uses the canonical local Studio chain by default', () => {
+    const store = useNetworkStore();
+
+    expect(store.currentNetwork).toBe('localnet');
+    expect(store.chainId).toBe(61127);
+    expect(store.isStudio).toBe(true);
+  });
+
   it('keeps the deployment-configured Studio network selectable after switching to Bradbury', () => {
     window.__RUNTIME_CONFIG__ = {
       VITE_GENLAYER_NETWORK: 'studionet',

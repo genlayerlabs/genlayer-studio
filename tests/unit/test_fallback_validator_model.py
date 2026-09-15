@@ -1,5 +1,14 @@
 import backend.domain.types as domain
+import backend.validators as validators
 from backend.validators import select_random_different_validator
+
+
+def test_all_exports_exist():
+    namespace = {}
+
+    exec("from backend.validators import *", namespace)
+
+    assert set(validators.__all__).issubset(namespace)
 
 
 def create_test_validator(

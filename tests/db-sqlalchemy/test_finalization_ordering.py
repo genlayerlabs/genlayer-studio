@@ -160,6 +160,39 @@ async def test_ordering_blocks_younger_when_older_still_in_consensus(
 
 
 @pytest.mark.asyncio
+async def test_ordering_uses_issued_slot_for_same_timestamp_siblings(
+    worker: ConsensusWorker, session: Session
+):
+    """One parent message batch gives every child the same DB timestamp.
+
+    The durable issued slot is the recipient-queue authority, so child N+1
+    cannot finalize while child N is still in consensus.
+    """
+
+    created_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+    _insert_tx(
+        session,
+        tx_hash="0x" + "12" * 32,
+        status="COMMITTING",
+        nonce=7,
+        created_at=created_at,
+    )
+    _insert_tx(
+        session,
+        tx_hash="0x" + "13" * 32,
+        status="ACCEPTED",
+        nonce=8,
+        created_at=created_at,
+        timestamp_awaiting_finalization=int(time.time()) - 600,
+    )
+
+    with worker.get_session() as claimed_session:
+        result = await worker.claim_next_finalization(claimed_session)
+
+    assert result is None
+
+
+@pytest.mark.asyncio
 async def test_ordering_allows_younger_after_older_finalized(
     worker: ConsensusWorker, session: Session
 ):

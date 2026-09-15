@@ -57,6 +57,16 @@ def get_contract_address(api_url: str, tx_hash: str) -> str:
     raise RuntimeError(f"No contract address found in tx {tx_hash}")
 
 
+def default_transaction_fees(client) -> dict | None:
+    estimate = client.estimate_transaction_fees()
+    if not estimate.get("policy", {}).get("enabled", True):
+        return None
+    return {
+        "distribution": estimate["distribution"],
+        "feeValue": estimate["feeValue"],
+    }
+
+
 def wait_for_tx_finalized(api_url: str, tx_hash: str, timeout: int = 300) -> bool:
     """Wait for a transaction to reach FINALIZED status via RPC polling."""
     terminal_failures = {
@@ -134,8 +144,11 @@ def main():
     account = create_account()
     client.local_account = account
     print(f"  Account: {account.address}")
+    transaction_fees = default_transaction_fees(client)
 
-    deploy_hash = client.deploy_contract(code=contract_code, args=[])
+    deploy_hash = client.deploy_contract(
+        code=contract_code, args=[], fees=transaction_fees
+    )
     print(f"  Deploy tx: {deploy_hash}")
 
     # Wait for FINALIZED status — contract state is only committed to DB
@@ -192,6 +205,7 @@ def main():
                 address=contract_address,
                 function_name="increment",
                 args=[],
+                fees=transaction_fees,
             )
             tx_hashes.append(tx_hash)
             if (i + 1) % 5 == 0:

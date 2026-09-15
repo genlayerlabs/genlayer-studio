@@ -78,4 +78,6 @@ interface IQueues {
 		address recipient,
 		uint256 slot
 	) external view returns (bytes32);
+
+	function getIssuedTxCount(address recipient) external view returns (uint256);
 }

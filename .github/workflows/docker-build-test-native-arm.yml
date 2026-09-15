@@ -23,7 +23,8 @@ permissions:
   contents: read
 
 env:
-  DOCKERFILE_MAP: '{"jsonrpc":"docker/Dockerfile.backend","frontend":"docker/Dockerfile.frontend","consensus-worker":"docker/Dockerfile.consensus-worker","database-migration":"docker/Dockerfile.database-migration"}'
+  DOCKERFILE_MAP: '{"jsonrpc":"docker/Dockerfile.backend","frontend":"docker/Dockerfile.frontend","consensus-worker":"docker/Dockerfile.backend","database-migration":"docker/Dockerfile.database-migration"}'
+  TARGET_MAP: '{"jsonrpc":"prod","frontend":"","consensus-worker":"consensus-worker","database-migration":""}'
   REPO_MAP: '{"jsonrpc":"yeagerai/simulator-jsonrpc","frontend":"yeagerai/simulator-frontend","consensus-worker":"yeagerai/simulator-consensus-worker","database-migration":"yeagerai/simulator-database-migration"}'
 
 jobs:
@@ -45,8 +46,11 @@ jobs:
       - name: Set image config
         id: config
         run: |
-          echo "dockerfile=${{ fromJson(env.DOCKERFILE_MAP)[inputs.image] }}" >> $GITHUB_OUTPUT
-          echo "repo=${{ fromJson(env.REPO_MAP)[inputs.image] }}" >> $GITHUB_OUTPUT
+          {
+            echo "dockerfile=${{ fromJson(env.DOCKERFILE_MAP)[inputs.image] }}"
+            echo "repo=${{ fromJson(env.REPO_MAP)[inputs.image] }}"
+            echo "target=${{ fromJson(env.TARGET_MAP)[inputs.image] }}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Login to Docker Hub
         if: ${{ inputs.push }}
@@ -66,6 +70,7 @@ jobs:
         with:
           context: .
           file: ${{ steps.config.outputs.dockerfile }}
+          target: ${{ steps.config.outputs.target }}
           platforms: ${{ matrix.platform }}
           push: ${{ inputs.push }}
           tags: ${{ steps.config.outputs.repo }}:test-${{ matrix.arch }}
@@ -74,10 +79,12 @@ jobs:
 
       - name: Report build time
         run: |
-          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- **Image:** ${{ inputs.image }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Platform:** ${{ matrix.platform }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Runner:** ${{ matrix.runner }}" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Build Summary"
+            echo "- **Image:** ${{ inputs.image }}"
+            echo "- **Platform:** ${{ matrix.platform }}"
+            echo "- **Runner:** ${{ matrix.runner }}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   create-manifest:
     name: Create multi-arch manifest
@@ -88,7 +95,7 @@ jobs:
       - name: Set image config
         id: config
         run: |
-          echo "repo=${{ fromJson(env.REPO_MAP)[inputs.image] }}" >> $GITHUB_OUTPUT
+          echo "repo=${{ fromJson(env.REPO_MAP)[inputs.image] }}" >> "$GITHUB_OUTPUT"
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -98,7 +105,7 @@ jobs:
 
       - name: Create and push manifest
         run: |
-          docker manifest create ${{ steps.config.outputs.repo }}:test-multiarch \
-            ${{ steps.config.outputs.repo }}:test-amd64 \
-            ${{ steps.config.outputs.repo }}:test-arm64
-          docker manifest push ${{ steps.config.outputs.repo }}:test-multiarch
+          docker manifest create "${{ steps.config.outputs.repo }}:test-multiarch" \
+            "${{ steps.config.outputs.repo }}:test-amd64" \
+            "${{ steps.config.outputs.repo }}:test-arm64"
+          docker manifest push "${{ steps.config.outputs.repo }}:test-multiarch"

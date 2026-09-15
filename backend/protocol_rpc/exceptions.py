@@ -120,3 +120,17 @@ class QueueDepthExceeded(JSONRPCError):
         self, message: str = "Queue depth exceeded", data: Optional[Any] = None
     ):
         super().__init__(code=-32030, message=message, data=data)
+
+
+class StorageQuotaExceeded(JSONRPCError):
+    """Per-contract daily snapshot-byte budget reached.
+
+    Distinct from RateLimitExceeded (RPC frequency) and QueueDepthExceeded
+    (in-flight PENDING count). This one meters estimated contract_snapshot
+    bytes a single contract can persist per UTC day.
+    """
+
+    def __init__(
+        self, message: str = "Storage quota exceeded", data: Optional[Any] = None
+    ):
+        super().__init__(code=-32031, message=message, data=data)

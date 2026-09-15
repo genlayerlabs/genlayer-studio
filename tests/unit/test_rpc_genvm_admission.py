@@ -3,9 +3,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from backend.node.types import ExecutionResultStatus
 from backend.protocol_rpc import endpoints
 from backend.protocol_rpc.exceptions import JSONRPCError
-from backend.node.types import ExecutionResultStatus
 
 
 class _AsyncSnapshot:
@@ -98,6 +98,191 @@ async def test_gen_call_rejects_before_validator_snapshot_when_genvm_full(monkey
 
     assert exc_info.value.code == -32006
     validators_manager.snapshot.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_gen_call_coalesces_identical_read_calls_before_admission(monkeypatch):
+    semaphore = asyncio.Semaphore(1)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    execute_calls = 0
+
+    monkeypatch.setattr(endpoints, "_GEN_CALL_SINGLEFLIGHT_ENABLED", True)
+    monkeypatch.setattr(endpoints, "_gen_call_singleflight_tasks", {})
+    monkeypatch.setattr(endpoints, "_gen_call_singleflight_lock", asyncio.Lock())
+    monkeypatch.setattr(endpoints, "_genvm_admission_semaphore", semaphore)
+
+    async def fake_execute_call_with_snapshot(*args, **kwargs):
+        nonlocal execute_calls
+        execute_calls += 1
+        started.set()
+        await release.wait()
+        return MagicMock(result=b"\x00\x12\x34")
+
+    monkeypatch.setattr(
+        endpoints, "_execute_call_with_snapshot", fake_execute_call_with_snapshot
+    )
+
+    params = {
+        "type": "read",
+        "to": "0x" + "ab" * 20,
+        "from": "0x" + "cd" * 20,
+        "data": "0x1234",
+        "transaction_hash_variant": "latest-nonfinal",
+    }
+
+    first = asyncio.create_task(
+        endpoints.gen_call(
+            session=MagicMock(),
+            accounts_manager=MagicMock(),
+            msg_handler=MagicMock(),
+            transactions_parser=MagicMock(),
+            validators_manager=MagicMock(),
+            genvm_manager=MagicMock(),
+            params=params,
+        )
+    )
+    await started.wait()
+
+    second = asyncio.create_task(
+        endpoints.gen_call(
+            session=MagicMock(),
+            accounts_manager=MagicMock(),
+            msg_handler=MagicMock(),
+            transactions_parser=MagicMock(),
+            validators_manager=MagicMock(),
+            genvm_manager=MagicMock(),
+            params=dict(params),
+        )
+    )
+
+    release.set()
+    assert await asyncio.gather(first, second) == ["1234", "1234"]
+    assert execute_calls == 1
+    assert semaphore._value == 1
+    assert endpoints._gen_call_singleflight_tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_gen_call_keeps_different_callers_separate(monkeypatch):
+    semaphore = asyncio.Semaphore(2)
+    both_started = asyncio.Event()
+    release = asyncio.Event()
+    execute_calls = 0
+
+    monkeypatch.setattr(endpoints, "_GEN_CALL_SINGLEFLIGHT_ENABLED", True)
+    monkeypatch.setattr(endpoints, "_gen_call_singleflight_tasks", {})
+    monkeypatch.setattr(endpoints, "_gen_call_singleflight_lock", asyncio.Lock())
+    monkeypatch.setattr(endpoints, "_genvm_admission_semaphore", semaphore)
+
+    async def fake_execute_call_with_snapshot(*args, **kwargs):
+        nonlocal execute_calls
+        execute_calls += 1
+        if execute_calls == 2:
+            both_started.set()
+        await release.wait()
+        return MagicMock(result=b"\x00\x12\x34")
+
+    monkeypatch.setattr(
+        endpoints, "_execute_call_with_snapshot", fake_execute_call_with_snapshot
+    )
+
+    base_params = {
+        "type": "read",
+        "to": "0x" + "ab" * 20,
+        "data": "0x1234",
+        "transaction_hash_variant": "latest-nonfinal",
+    }
+
+    first = asyncio.create_task(
+        endpoints.gen_call(
+            session=MagicMock(),
+            accounts_manager=MagicMock(),
+            msg_handler=MagicMock(),
+            transactions_parser=MagicMock(),
+            validators_manager=MagicMock(),
+            genvm_manager=MagicMock(),
+            params={**base_params, "from": "0x" + "cd" * 20},
+        )
+    )
+    second = asyncio.create_task(
+        endpoints.gen_call(
+            session=MagicMock(),
+            accounts_manager=MagicMock(),
+            msg_handler=MagicMock(),
+            transactions_parser=MagicMock(),
+            validators_manager=MagicMock(),
+            genvm_manager=MagicMock(),
+            params={**base_params, "from": "0x" + "ef" * 20},
+        )
+    )
+
+    await both_started.wait()
+    release.set()
+    assert await asyncio.gather(first, second) == ["1234", "1234"]
+    assert execute_calls == 2
+    assert semaphore._value == 2
+
+
+@pytest.mark.asyncio
+async def test_gen_call_does_not_coalesce_write_calls(monkeypatch):
+    semaphore = asyncio.Semaphore(2)
+    both_started = asyncio.Event()
+    release = asyncio.Event()
+    execute_calls = 0
+
+    monkeypatch.setattr(endpoints, "_GEN_CALL_SINGLEFLIGHT_ENABLED", True)
+    monkeypatch.setattr(endpoints, "_gen_call_singleflight_tasks", {})
+    monkeypatch.setattr(endpoints, "_gen_call_singleflight_lock", asyncio.Lock())
+    monkeypatch.setattr(endpoints, "_genvm_admission_semaphore", semaphore)
+
+    async def fake_execute_call_with_snapshot(*args, **kwargs):
+        nonlocal execute_calls
+        execute_calls += 1
+        if execute_calls == 2:
+            both_started.set()
+        await release.wait()
+        return MagicMock(result=b"\x00\x12\x34")
+
+    monkeypatch.setattr(
+        endpoints, "_execute_call_with_snapshot", fake_execute_call_with_snapshot
+    )
+
+    params = {
+        "type": "write",
+        "to": "0x" + "ab" * 20,
+        "from": "0x" + "cd" * 20,
+        "data": "0x1234",
+    }
+
+    first = asyncio.create_task(
+        endpoints.gen_call(
+            session=MagicMock(),
+            accounts_manager=MagicMock(),
+            msg_handler=MagicMock(),
+            transactions_parser=MagicMock(),
+            validators_manager=MagicMock(),
+            genvm_manager=MagicMock(),
+            params=params,
+        )
+    )
+    second = asyncio.create_task(
+        endpoints.gen_call(
+            session=MagicMock(),
+            accounts_manager=MagicMock(),
+            msg_handler=MagicMock(),
+            transactions_parser=MagicMock(),
+            validators_manager=MagicMock(),
+            genvm_manager=MagicMock(),
+            params=dict(params),
+        )
+    )
+
+    await both_started.wait()
+    release.set()
+    assert await asyncio.gather(first, second) == ["1234", "1234"]
+    assert execute_calls == 2
+    assert endpoints._gen_call_singleflight_tasks == {}
 
 
 @pytest.mark.asyncio

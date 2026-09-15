@@ -7,13 +7,18 @@ import { ArrowLeft } from 'lucide-react';
 
 export default async function AddressPage({ params }: { params: Promise<{ addr: string }> }) {
   const { addr } = await params;
+  let data: AddressInfo | null = null;
+  let error: unknown = null;
 
   try {
-    const data = await fetchBackend<AddressInfo>(
+    data = await fetchBackend<AddressInfo>(
       `/address/${encodeURIComponent(addr)}`,
     );
-    return <AddressContent addr={addr} data={data} />;
   } catch (err) {
+    error = err;
+  }
+
+  if (error || !data) {
     return (
       <div className="space-y-4">
         <Button variant="ghost" size="sm" asChild>
@@ -26,11 +31,13 @@ export default async function AddressPage({ params }: { params: Promise<{ addr: 
           <CardContent className="p-6">
             <h2 className="font-bold mb-2 text-destructive">Error</h2>
             <p className="text-destructive/80">
-              {err instanceof Error ? err.message : 'Unknown error'}
+              {error instanceof Error ? error.message : 'Unknown error'}
             </p>
           </CardContent>
         </Card>
       </div>
     );
   }
+
+  return <AddressContent addr={addr} data={data} />;
 }

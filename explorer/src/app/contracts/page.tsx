@@ -68,7 +68,7 @@ function StateContent() {
     }
   };
 
-  const SortIcon = ({ column }: { column: string }) => {
+  const renderSortIcon = (column: string) => {
     if (sortBy !== column) return <ArrowUpDown className="w-3.5 h-3.5 text-muted-foreground/50" />;
     return sortOrder === 'asc'
       ? <ArrowUp className="w-3.5 h-3.5 text-foreground" />
@@ -103,17 +103,17 @@ function StateContent() {
                   <TableHead>Balance</TableHead>
                   <TableHead>
                     <button onClick={() => toggleSort('tx_count')} className="flex items-center gap-1 hover:text-foreground transition-colors cursor-pointer">
-                      Transactions <SortIcon column="tx_count" />
+                      Transactions {renderSortIcon('tx_count')}
                     </button>
                   </TableHead>
                   <TableHead>
                     <button onClick={() => toggleSort('created_at')} className="flex items-center gap-1 hover:text-foreground transition-colors cursor-pointer">
-                      Created <SortIcon column="created_at" />
+                      Created {renderSortIcon('created_at')}
                     </button>
                   </TableHead>
                   <TableHead>
                     <button onClick={() => toggleSort('updated_at')} className="flex items-center gap-1 hover:text-foreground transition-colors cursor-pointer">
-                      Last Updated <SortIcon column="updated_at" />
+                      Last Updated {renderSortIcon('updated_at')}
                     </button>
                   </TableHead>
                 </TableRow>

@@ -46,6 +46,11 @@ class SimValidatorConfig:
 class SimConfig:
     validators: list[SimValidatorConfig]
     genvm_datetime: str | None = None
+    # Studio-only: GenVM executor version or `re:` selector to run instead of
+    # the manifest-resolved one. On a deploy it is used for the deployment
+    # execution itself and stored on the contract, so every later execution
+    # of that contract keeps using it.
+    genvm_executor_selector: str | None = None
 
     @property
     def genvm_datetime_as_datetime(self) -> datetime.datetime | None:
@@ -65,6 +70,7 @@ class SimConfig:
         return cls(
             validators=validators,
             genvm_datetime=d.get("genvm_datetime"),
+            genvm_executor_selector=d.get("genvm_executor_selector"),
         )
 
     def to_dict(self) -> dict:
@@ -73,6 +79,7 @@ class SimConfig:
                 v.to_dict() if hasattr(v, "to_dict") else v for v in self.validators
             ],
             "genvm_datetime": self.genvm_datetime,
+            "genvm_executor_selector": self.genvm_executor_selector,
         }
 
 
@@ -162,6 +169,12 @@ class TransactionExecutionMode(Enum):
     LEADER_ONLY = "LEADER_ONLY"
     LEADER_SELF_VALIDATOR = "LEADER_SELF_VALIDATOR"
     NORMAL = "NORMAL"
+
+
+def _int_from_serialized(value, default: int | None = 0) -> int | None:
+    if value is None or value == "":
+        return default
+    return int(value)
 
 
 @dataclass
@@ -259,7 +272,7 @@ class Transaction:
             data=input.get("data"),
             consensus_data=ConsensusData.from_dict(input.get("consensus_data")),
             nonce=input.get("nonce"),
-            value=input.get("value"),
+            value=_int_from_serialized(input.get("value"), None),
             gaslimit=input.get("gaslimit"),
             r=input.get("r"),
             s=input.get("s"),
