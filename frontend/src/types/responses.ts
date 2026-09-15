@@ -80,6 +80,7 @@ export interface StudioGenvmFeeBucketReport {
   message?: string | number;
   nondeterministicOutputBytes?: string | number;
   submittedMessageBytes?: string | number;
+  submittedMessageCount?: string | number;
   totalExecution?: string | number;
   totalWithMessage?: string | number;
   executionBudgetPerRound?: string | number;
@@ -169,7 +170,9 @@ export interface StudioFeeAccounting {
   execution_budget_total?: string | number;
   execution_fee_consumed?: string | number;
   execution_fee_consumed_buckets?: Array<string | number>;
-  genvm_fee_consumed_buckets?: Array<string | number>;
+  genvm_fee_consumed_buckets?:
+    | Array<string | number>
+    | Record<string, string | number>;
   genvm_fee_bucket_report?: StudioGenvmFeeBucketReport;
   genvm_message_fee_consumed?: string | number;
   execution_fee_report?: StudioExecutionFeeReport;
