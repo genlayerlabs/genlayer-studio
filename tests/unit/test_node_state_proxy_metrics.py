@@ -199,7 +199,11 @@ def test_host_provide_result_preserves_fee_metadata_from_genvm_emissions():
             },
         ],
         result_leader_public_data=LeaderPublicData([]).encode(),
-        data_fees_remaining=[100, 90, 80],
+        data_fees_remaining={
+            "execution_data_gas": 100,
+            "message_fee": 90,
+            "nondet_outputs": 80,
+        },
     )
 
     execution = host.provide_result(res, state, Context())
@@ -235,7 +239,11 @@ def test_host_provide_result_preserves_fee_metadata_from_genvm_emissions():
     assert eth_send.declared_budget == 0
     assert eth_send.call_key == "0x" + "56" * 32
     assert eth_send.gas_used == 123
-    assert execution.data_fees_remaining == [100, 90, 80]
+    assert execution.data_fees_remaining == {
+        "execution_data_gas": 100,
+        "message_fee": 90,
+        "nondet_outputs": 80,
+    }
 
 
 def test_malformed_allocation_subtree_preserves_exact_receipt_bytes():
@@ -335,12 +343,13 @@ async def test_run_genvm_receives_fee_context_from_transaction_accounting():
         )
 
     fee_context = run_genvm_host.await_args.kwargs["fee_context"]
-    assert fee_context.bucket_totals == [
-        fees_distribution["executionBudgetPerRound"],
-        0,
-        GENVM_UNMETERED_DATA_FEE_BUCKET,
-        GENVM_UNMETERED_DATA_FEE_BUCKET,
-    ]
+    assert fee_context.bucket_totals == {
+        "execution_data_gas": fees_distribution["executionBudgetPerRound"],
+        "message_fee": 0,
+        "nondet_outputs": GENVM_UNMETERED_DATA_FEE_BUCKET,
+        "submitted_messages": GENVM_UNMETERED_DATA_FEE_BUCKET,
+        "submitted_messages_count": 20,
+    }
     assert fee_context.gas_data["intrinsicGas"] == "21000"
 
 
@@ -519,8 +528,16 @@ async def test_run_genvm_receipt_reports_data_fee_consumption():
         processing_time=5,
         nondet_disagree=None,
         execution_stats={},
-        data_fee_bucket_totals=[100, 80, 60],
-        data_fees_remaining=[70, 80, 10],
+        data_fee_bucket_totals={
+            "execution_data_gas": 100,
+            "message_fee": 80,
+            "nondet_outputs": 60,
+        },
+        data_fees_remaining={
+            "execution_data_gas": 70,
+            "message_fee": 80,
+            "nondet_outputs": 10,
+        },
     )
 
     with patch(
@@ -537,9 +554,21 @@ async def test_run_genvm_receipt_reports_data_fee_consumption():
             transaction_datetime=None,
         )
 
-    assert receipt.genvm_result["data_fee_bucket_totals"] == [100, 80, 60]
-    assert receipt.genvm_result["data_fees_remaining"] == [70, 80, 10]
-    assert receipt.genvm_result["data_fees_consumed"] == [30, 0, 50]
+    assert receipt.genvm_result["data_fee_bucket_totals"] == {
+        "execution_data_gas": 100,
+        "message_fee": 80,
+        "nondet_outputs": 60,
+    }
+    assert receipt.genvm_result["data_fees_remaining"] == {
+        "execution_data_gas": 70,
+        "message_fee": 80,
+        "nondet_outputs": 10,
+    }
+    assert receipt.genvm_result["data_fees_consumed"] == {
+        "execution_data_gas": 30,
+        "message_fee": 0,
+        "nondet_outputs": 50,
+    }
 
 
 def test_snapshot_view_shared_decode_cache_reused_across_executions():

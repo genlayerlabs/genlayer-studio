@@ -68,12 +68,33 @@ DEFAULT_GAS_DATA: dict[str, str] = {
     "bootloaderOverhead": "0",
     "fixedProposeReceiptGas": "0",
     "fixedMessageRevealGas": "0",
+    "lockedReceiptGasPrice": "1",
+    # 0 disables the overlay unless a fee test opts into a specific chain split
+    "overlaySplitBps": "0",
+    "receiptWrapperBytes": "1024",
+    "minProposeTimeout": "1",
+    "maxProposeTimeout": "340282366920938463463374607431768211455",
+    "minCommitTimeout": "1",
+    "maxCommitTimeout": "340282366920938463463374607431768211455",
     "genPerTimeUnit": "0",
-    # 0 = no per-phase timeunit floor, so default-allocation tests are unaffected.
-    "minTimeUnitsPerPhase": "0",
     # 0 = no per-round execution-budget floor for balance-funded messages.
     "messageBudgetFloor": "0",
 }
+
+_DEFAULT_BUCKET_TOTALS: dict[str, int] = {
+    "execution_data_gas": 2**200,
+    "message_fee": 2**200,
+    "nondet_outputs": 2**200,
+    "submitted_messages": 2**200,
+    "submitted_messages_count": 2**200,
+}
+
+
+def default_bucket_totals(executor_major: int) -> dict[str, int]:
+    totals = _DEFAULT_BUCKET_TOTALS.copy()
+    if executor_major >= 3:
+        totals["submitted_messages_count"] = 2**200
+    return totals
 
 
 class Context(typing.Protocol):
@@ -507,7 +528,7 @@ class ConsumedResult:
     result_storage_deltas: list[tuple[bytes, bytes]] = field(default_factory=list)
     result_emissions: list[ResultEmission] = field(default_factory=list)
     result_leader_public_data: bytes = b""
-    data_fees_remaining: list[int] = field(default_factory=list)
+    data_fees_remaining: dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def internal_error(cls, message: str) -> "ConsumedResult":
@@ -560,7 +581,7 @@ class ConsumedResult:
             result_storage_deltas=decoded.get("storage_deltas", []),
             result_emissions=decoded.get("emissions", []),
             result_leader_public_data=decoded.get("leader_public_data", b""),
-            data_fees_remaining=decoded.get("data_fees_remaining", []),
+            data_fees_remaining=decoded.get("data_fees_remaining", {}),
         )
 
 
@@ -580,7 +601,7 @@ class RunHostAndProgramRes:
     result_storage_deltas: list[tuple[bytes, bytes]]
     result_emissions: list[ResultEmission]
     result_leader_public_data: bytes
-    data_fees_remaining: list[int]
+    data_fees_remaining: dict[str, int]
     metrics: dict[str, typing.Any] | None = None
     vm_error_description: str | None = None
 
@@ -1173,8 +1194,7 @@ async def run_genvm(
     gas_data: dict[str, str] | None = None,
     host: str,
     extra_args: collections.abc.Sequence[str] = (),
-    # default config fee buckets use bucket_no 0 and 1
-    bucket_totals: list[int],
+    bucket_totals: dict[str, int],
     code: bytes | None = None,
     calldata: bytes,
     leader_public_data: bytes | None = None,
