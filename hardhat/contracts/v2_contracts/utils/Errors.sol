@@ -85,4 +85,5 @@ library Errors {
 	error CallerNotModule();
 	error CallerNotOwner();
 	error InvalidProcessingBlock();
+	error UnauthorizedSender();
 }
