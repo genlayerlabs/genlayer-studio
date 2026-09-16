@@ -76,7 +76,7 @@ async def _run(monkeypatch, host: Host, message, **kwargs) -> _FakeManagerClient
             message=message,
             host="unix://test",
             calldata=b"",
-            bucket_totals=[10_000_000] * 4,
+            bucket_totals=base_host.default_bucket_totals(3),
             **kwargs,
         )
     assert len(client.payloads) == 1

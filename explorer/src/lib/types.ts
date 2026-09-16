@@ -180,7 +180,9 @@ export interface StudioFeeAccounting {
   execution_budget_total?: string | number;
   execution_fee_consumed?: string | number;
   execution_fee_consumed_buckets?: Array<string | number>;
-  genvm_fee_consumed_buckets?: Array<string | number>;
+  genvm_fee_consumed_buckets?:
+    | Array<string | number>
+    | Record<string, string | number>;
   genvm_fee_bucket_report?: StudioGenvmFeeBucketReport;
   genvm_message_fee_consumed?: string | number;
   execution_fee_report?: StudioExecutionFeeReport;
