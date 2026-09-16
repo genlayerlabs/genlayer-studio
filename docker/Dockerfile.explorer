@@ -1,8 +1,9 @@
 FROM node:24.1.0-alpine3.20 AS base
 
+RUN apk add --no-cache git openssh-client
 WORKDIR /app
 COPY ./explorer/package*.json .
-RUN --mount=type=cache,target=/root/.npm npm install
+RUN --mount=type=cache,target=/root/.npm npm ci
 COPY ./explorer .
 
 FROM base AS dev

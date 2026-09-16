@@ -6,7 +6,7 @@ is not the base of this change. No open PR inspected on 16 September 2026
 changes `frontend/src/stores/transactions.ts`.
 
 Both frontend and explorer now pin SDK #220 at
-`e19f45310a83048ce95ca23013894bf7375492b8`, with regenerated npm lockfiles.
+`2bc5e60052d4a5ef2fef4d9f6931014ca15f20b1`, with regenerated npm lockfiles.
 That SDK was audited against Consensus #1634 at
 `c4749a42095bcfb9de69bef4f4fd5e9a6a2f86f2` (above #1628). This is an exact
 pre-release build, not a tagged npm release or production compatibility claim.
@@ -27,18 +27,26 @@ its SDK does not turn that backend into the Node/Consensus stack. Likewise,
 parent Finalized does not certify that all child messages or refund/payout
 obligations are complete.
 
+Explorer CI must allow npm's prepare step for the Git-pinned SDK; using
+`--ignore-scripts` omitted its dist exports and failed the previous CI build.
+Both Docker build stages install Git/SSH for the pinned Git dependency, and
+both use `npm ci` to honor the reviewed lockfiles. Container execution still
+requires runtime qualification; local application builds are not image tests.
+
 ## Next implementation and qualification
 
 The [cross-repository plan](https://github.com/genlayerlabs/genlayer-dev-env/blob/fix/consume-inflation-and-votewindow-parity/docs/integration/jm-claus-kiril-consumer-plan-2026-09-16.md)
 records PR ownership, inspected heads, exclusions and the remaining work:
 
-- Synchronize the implemented Node stack before selecting final runtime pins.
+- Node changes are explicitly excluded from this consumer follow-up. Final
+  runtime qualification remains separate.
 - Use authoritative `executionGeneration` for attempt-specific receipt-cache
   invalidation. SDK #220 exposes it; older simulator responses may omit it.
   Do not infer generation from a retained decision.
-- Establish authoritative child enumeration and delivery-completion APIs;
-  the SDK's existing parent-decision receipt scan does not cover deferred
-  terminal delivery. Do not introduce a guessed completion indicator.
+- SDK child enumeration now reads canonical parent-linked Messages events,
+  including deferred delivery, with bounded history queries and deduplication.
+  Local SDK tests cover this behavior. Delivery-completion APIs and integrated
+  child journeys remain pending; creation does not establish completion.
 - Qualify deploy/write/read, details, appeal/recompute, nested child delivery
   and any affected staking/governance journey against the actual backend.
 - Freeze the exact Node-led dependency closure and inspect the resolved E2E

@@ -34,7 +34,8 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 24
-      - run: npm ci --ignore-scripts
+      # The pinned Git SDK builds its dist exports in prepare.
+      - run: npm ci
       - run: npm run test:fee-accounting
       - run: npm run lint
       - run: npm run build
