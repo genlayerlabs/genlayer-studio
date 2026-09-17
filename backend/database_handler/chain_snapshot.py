@@ -32,7 +32,7 @@ class ChainSnapshot:
                     Transactions.hash
                 )
             )
-            .order_by(Transactions.created_at)
+            .order_by(Transactions.queue_order)
             .all()
         )
         return [
@@ -61,7 +61,7 @@ class ChainSnapshot:
                     Transactions.hash
                 )
             )
-            .order_by(Transactions.created_at)
+            .order_by(Transactions.queue_order)
             .all()
         )
 

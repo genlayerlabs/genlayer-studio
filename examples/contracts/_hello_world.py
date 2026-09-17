@@ -1,16 +1,16 @@
-# v0.2.16
-# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+# v0.3.0
+# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
 
 # Always put above lines as first in the contract file
-# v0.1.2 is genvm ABI version, lower versions may restrict some calls that were introduced in newer version (i.e. events)
 # In actual genlayer network `:latest` is not allowed and hash must be specified
 
-# this imports all types into globals and `genlayer.std` as `gl` (will be imported lazily on first access)
-from genlayer import *
+# `gl` gives access to submodules and decorators, `genlayer.types` brings type aliases into scope
+import genlayer as gl
+from genlayer.types import *
 
 
-# extend `gl.Contract` to mark class as a contract. There can be only one class that extends `gl.Contract`
-class Storage(gl.Contract):
+# extend `gl.contract.Contract` to mark class as a contract. There can be only one class that extends it
+class Storage(gl.contract.Contract):
     # below you must declare all class fields that you are going to use
     # this fields persist between contract calls
     storage_str: str

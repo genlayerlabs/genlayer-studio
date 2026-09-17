@@ -51,6 +51,16 @@ class SlowGenVMManager:
         return [{"response": "ok"}]
 
 
+class CapturingGenVMManager:
+    def __init__(self):
+        self.logger = MagicMock()
+        self.prompt = None
+
+    async def try_llms(self, providers, prompt):
+        self.prompt = prompt
+        return [{"response": "ok"}]
+
+
 @pytest.mark.asyncio
 async def test_get_providers_and_models_marks_failed_checks_unavailable():
     providers = await endpoints.get_providers_and_models(
@@ -83,3 +93,41 @@ async def test_provider_availability_timeout_returns_unavailable(monkeypatch):
 
     assert available is False
     manager.logger.error.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_provider_availability_forwards_extra_config():
+    manager = CapturingGenVMManager()
+    policy_ir = [
+        "policy",
+        ["and", ["meets_req"], ["not", ["is", "disabled"]]],
+        ["zero"],
+        ["argmax"],
+        ["id"],
+        ["always", {"action": "next_candidate"}],
+    ]
+
+    available = await endpoints.check_provider_is_available(
+        manager,
+        {
+            "provider": "llm-router",
+            "model": "policy:auto",
+            "config": {
+                "temperature": 0.5,
+                "max_tokens": 250,
+                "use_max_completion_tokens": True,
+                "policy_ir": policy_ir,
+            },
+            "plugin": "openai-compatible",
+            "plugin_config": {
+                "api_key_env_var": "LLM_ROUTER_API_KEY",
+                "api_url": "https://internal-router.genlayer.com",
+            },
+        },
+    )
+
+    assert available is True
+    assert manager.prompt["temperature"] == 0.5
+    assert manager.prompt["max_tokens"] == 250
+    assert manager.prompt["use_max_completion_tokens"] is True
+    assert manager.prompt["extra"] == {"policy_ir": policy_ir}

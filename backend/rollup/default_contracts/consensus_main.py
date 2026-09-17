@@ -2,7 +2,7 @@ import os
 import json
 
 DEFAULT_CONSENSUS_MAIN_ADDRESS = os.environ.get(
-    "DEFAULT_CONSENSUS_MAIN_ADDRESS", "0x0000000000000000000000000000000000000000"
+    "DEFAULT_CONSENSUS_MAIN_ADDRESS", "0xb7278A61aa25c888815aFC32Ad3cC52fF24fE575"
 )
 DEFAULT_CONSENSUS_MAIN_ABI = """[
     {
@@ -1332,9 +1332,230 @@ DEFAULT_CONSENSUS_MAIN_ABI = """[
 ]"""
 
 
+_FEES_DISTRIBUTION_COMPONENTS = [
+    {"internalType": "uint256", "name": "leaderTimeunitsAllocation", "type": "uint256"},
+    {
+        "internalType": "uint256",
+        "name": "validatorTimeunitsAllocation",
+        "type": "uint256",
+    },
+    {"internalType": "uint256", "name": "appealRounds", "type": "uint256"},
+    {"internalType": "uint256", "name": "executionBudgetPerRound", "type": "uint256"},
+    {"internalType": "uint256", "name": "executionConsumed", "type": "uint256"},
+    {"internalType": "uint256", "name": "totalMessageFees", "type": "uint256"},
+    {"internalType": "uint256[]", "name": "rotations", "type": "uint256[]"},
+    {"internalType": "uint256", "name": "maxPriceGenPerTimeUnit", "type": "uint256"},
+    {"internalType": "uint256", "name": "storageFeeMaxGasPrice", "type": "uint256"},
+    {"internalType": "uint256", "name": "receiptFeeMaxGasPrice", "type": "uint256"},
+]
+
+_MESSAGE_ALLOCATION_COMPONENTS = [
+    {
+        "internalType": "enum IMessages.MessageType",
+        "name": "messageType",
+        "type": "uint8",
+    },
+    {"internalType": "bool", "name": "onAcceptance", "type": "bool"},
+    {"internalType": "uint256", "name": "parentIndex", "type": "uint256"},
+    {"internalType": "address", "name": "recipient", "type": "address"},
+    {"internalType": "bytes32", "name": "callKey", "type": "bytes32"},
+    {"internalType": "uint256", "name": "budget", "type": "uint256"},
+    {"internalType": "bytes", "name": "feeParams", "type": "bytes"},
+]
+
+_ADD_TRANSACTION_PARAMS_COMPONENTS = [
+    {"internalType": "address", "name": "sender", "type": "address"},
+    {"internalType": "address", "name": "recipient", "type": "address"},
+    {"internalType": "uint256", "name": "numOfInitialValidators", "type": "uint256"},
+    {"internalType": "uint256", "name": "maxRotations", "type": "uint256"},
+    {"internalType": "uint256", "name": "validUntil", "type": "uint256"},
+    {"internalType": "uint256", "name": "saltNonce", "type": "uint256"},
+    {"internalType": "uint256", "name": "userValue", "type": "uint256"},
+    {
+        "components": _FEES_DISTRIBUTION_COMPONENTS,
+        "internalType": "struct IFeeManager.FeesDistribution",
+        "name": "feesDistribution",
+        "type": "tuple",
+    },
+    {"internalType": "bytes", "name": "txCalldata", "type": "bytes"},
+    {
+        "components": _MESSAGE_ALLOCATION_COMPONENTS,
+        "internalType": "struct IMessages.MessageFeeAllocationNode[]",
+        "name": "messageAllocations",
+        "type": "tuple[]",
+    },
+]
+
+_STUDIO_TRAIN_TRANSACTION_ABI = [
+    {
+        "inputs": [
+            {
+                "components": _ADD_TRANSACTION_PARAMS_COMPONENTS,
+                "internalType": "struct IConsensusMainWithFees.AddTransactionParams",
+                "name": "_params",
+                "type": "tuple",
+            }
+        ],
+        "name": function_name,
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function",
+    }
+    for function_name in ("addTransaction", "deploySalted")
+] + [
+    {
+        "inputs": [
+            {"internalType": "bytes32", "name": "_txId", "type": "bytes32"},
+            {
+                "components": _FEES_DISTRIBUTION_COMPONENTS,
+                "internalType": "struct IFeeManager.FeesDistribution",
+                "name": "_feesDistribution",
+                "type": "tuple",
+            },
+        ],
+        "name": "topUpFees",
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "bytes32", "name": "_txId", "type": "bytes32"},
+            {
+                "internalType": "uint256",
+                "name": "_expectedDecisionId",
+                "type": "uint256",
+            },
+            {
+                "components": _FEES_DISTRIBUTION_COMPONENTS,
+                "internalType": "struct IFeeManager.FeesDistribution",
+                "name": "_feesDistribution",
+                "type": "tuple",
+            },
+        ],
+        "name": "topUpAndSubmitAppeal",
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "bytes32", "name": "_txId", "type": "bytes32"},
+            {
+                "internalType": "uint256",
+                "name": "_expectedDecisionId",
+                "type": "uint256",
+            },
+        ],
+        "name": "submitAppeal",
+        "outputs": [],
+        "stateMutability": "payable",
+        "type": "function",
+    },
+    {
+        "inputs": [
+            {"internalType": "bytes32", "name": "_txId", "type": "bytes32"},
+            {
+                "internalType": "uint256",
+                "name": "_expectedDecisionId",
+                "type": "uint256",
+            },
+        ],
+        "name": "finalizeTransaction",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+]
+
+_STUDIO_TRAIN_EVENT_ABI = [
+    {
+        "anonymous": False,
+        "inputs": [
+            {
+                "indexed": True,
+                "internalType": "bytes32",
+                "name": "txId",
+                "type": "bytes32",
+            },
+            {
+                "indexed": False,
+                "internalType": "uint256",
+                "name": "txSlot",
+                "type": "uint256",
+            },
+        ],
+        "name": "CreatedTransaction",
+        "type": "event",
+    }
+]
+
+
+def _abi_function_signature(entry: dict) -> str:
+    """Canonical ``name(type,...)`` signature, i.e. the 4-byte selector identity."""
+
+    def canonical(component: dict) -> str:
+        component_type = component["type"]
+        if not component_type.startswith("tuple"):
+            return component_type
+        inner = ",".join(
+            canonical(nested) for nested in component.get("components", [])
+        )
+        return f"({inner}){component_type[len('tuple'):]}"
+
+    inputs = ",".join(canonical(entry_input) for entry_input in entry.get("inputs", []))
+    return f"{entry['name']}({inputs})"
+
+
+# Names kept at their pre-fee signature on the *served* surface.
+#
+# This ABI has two consumers with opposite requirements:
+#
+#   * Decoding. TransactionParser matches an incoming selector against
+#     this ABI plus the FEE_AWARE_* overloads it appends itself, so it wants
+#     every generation of every entrypoint. That union lives in
+#     TransactionParser._get_contract_abi, not here.
+#   * Serving. sim_getConsensusContract hands this ABI to clients, and
+#     genlayer-py resolves entrypoints with web3's get_function_by_name(),
+#     which raises Web3ValueError on an overloaded name. The served surface
+#     must therefore be name-unique, and each shared name must carry the
+#     generation its callers actually encode.
+#
+# addTransaction is the one name where those callers disagree. Every client
+# that reaches Studio through sim_getConsensusContract — released genlayer-py
+# (so gltest and the load tests) and the train genlayer-py alike — builds five
+# positional arguments and encodes them against contract_fn.argument_types.
+# The single-tuple fee-aware form makes that raise, and it is also not a
+# function Studio's deployed ConsensusMain.sol exposes. Train clients detect
+# the pre-fee shape and fall back to the same five-argument path, so serving
+# it satisfies both generations; the fee-aware form stays decodable through
+# FEE_AWARE_ADD_TRANSACTION_ABI.
+#
+# submitAppeal and finalizeTransaction keep their v0.6 decision-bound form:
+# no Studio client encodes them from the served ABI (genlayer-js embeds its
+# own train ABI, and released genlayer-py's appeal path is unreachable here),
+# while the train genlayer-py requires the DecisionId argument.
+_SERVED_PRE_FEE_FUNCTION_NAMES = frozenset({"addTransaction"})
+
+
 def get_default_consensus_main_contract():
+    abi = json.loads(DEFAULT_CONSENSUS_MAIN_ABI)
+    served_train_abi = [
+        entry
+        for entry in _STUDIO_TRAIN_TRANSACTION_ABI
+        if entry["name"] not in _SERVED_PRE_FEE_FUNCTION_NAMES
+    ]
+    served_train_names = {entry["name"] for entry in served_train_abi}
+    abi = [
+        entry
+        for entry in abi
+        if entry.get("type") != "function"
+        or entry.get("name") not in served_train_names
+    ]
+    abi.extend(served_train_abi)
+    abi.extend(_STUDIO_TRAIN_EVENT_ABI)
     return {
         "address": DEFAULT_CONSENSUS_MAIN_ADDRESS,
-        "abi": json.loads(DEFAULT_CONSENSUS_MAIN_ABI),
+        "abi": abi,
         "bytecode": "0x",
     }

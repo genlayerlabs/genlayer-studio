@@ -14,16 +14,20 @@ These tests cover:
 1. claim_next_transaction defers when an eligible finalization exists.
 2. claim_next_transaction proceeds when finalization for the contract is
    already in flight (preserves liveness — no infinite defer loop).
-3. recover_stuck_transactions preserves consensus_data for finalization-
+3. claim_next_transaction does not defer older queue heads to younger
+   finalizations that cannot legally finalize yet.
+4. recover_stuck_transactions preserves consensus_data for finalization-
    eligible statuses (ACCEPTED/UNDETERMINED/*_TIMEOUT).
-4. Safety-net log fires when an ACCEPTED tx's wait exceeds N×finality_window.
-5. Recovered PENDING txs are deprioritized across contracts so other
+5. Safety-net log fires when an ACCEPTED tx's wait exceeds N×finality_window.
+6. Recovered PENDING txs are deprioritized across contracts so other
    contracts keep making progress.
 """
 
 import time
 import os
+import json
 import pytest
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import sessionmaker, Session
@@ -36,7 +40,11 @@ os.environ.setdefault("VITE_FINALITY_WINDOW", "30")
 os.environ.setdefault("VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION", "0.2")
 
 from backend.database_handler.models import CurrentState, TransactionStatus
+from backend.database_handler.accounts_manager import AccountsManager
+from backend.database_handler.transactions_processor import TransactionsProcessor
+from backend.consensus.base import _apply_message_value_withdrawals_for_phase
 from backend.consensus.worker import ConsensusWorker
+from backend.node.types import PendingTransaction
 
 
 CONTRACT_ADDRESS = "0xfinalization_starvation_test_contract"
@@ -74,6 +82,7 @@ def _insert_tx(
     created_at_offset_seconds: int | None = None,  # negative = past
     worker_id: str | None = None,
     recovery_count: int = 0,
+    data: dict | None = None,
 ):
     """Insert a transaction directly, bypassing TransactionsProcessor's
     PENDING-default and other defaults — we want full control over the row
@@ -117,7 +126,7 @@ def _insert_tx(
             "status": status,
             "from_addr": SENDER,
             "to_addr": to_address,
-            "data": '{"calldata": "test"}',
+            "data": json.dumps(data or {"calldata": "test"}),
             "nonce": nonce,
             "timestamp_awaiting_finalization": timestamp_awaiting_finalization,
             "consensus_data": (
@@ -205,6 +214,42 @@ async def test_claim_next_transaction_defers_to_eligible_finalization(
 
 
 @pytest.mark.asyncio
+async def test_older_activated_head_is_not_blocked_by_younger_finalization(
+    engine: Engine, worker: ConsensusWorker, session: Session
+):
+    """A younger finalization cannot complete while an older ACTIVATED head is
+    non-terminal. claim_next_transaction must claim the older head instead of
+    deferring forever to a finalization that claim_next_finalization rejects."""
+    _setup_contract(engine)
+    activated_hash = "0x" + "2a" * 32
+    finalization_hash = "0x" + "2b" * 32
+
+    _insert_tx(
+        session,
+        tx_hash=activated_hash,
+        status="ACTIVATED",
+        nonce=0,
+        created_at_offset_seconds=-1200,
+    )
+    _insert_tx(
+        session,
+        tx_hash=finalization_hash,
+        status="ACCEPTED",
+        nonce=1,
+        timestamp_awaiting_finalization=int(time.time()) - 600,
+        consensus_data={"leader_receipt": [{}], "votes": {}, "validators": []},
+        created_at_offset_seconds=-600,
+    )
+
+    blocked_finalization = await worker.claim_next_finalization(session)
+    claimed = await worker.claim_next_transaction(session)
+
+    assert blocked_finalization is None
+    assert claimed is not None
+    assert claimed["hash"] == activated_hash
+
+
+@pytest.mark.asyncio
 async def test_claim_next_transaction_proceeds_when_no_eligible_finalization(
     engine: Engine, worker: ConsensusWorker, session: Session
 ):
@@ -242,6 +287,99 @@ async def test_claim_next_transaction_proceeds_when_finalization_window_not_yet_
 
     assert claimed is not None
     assert claimed["hash"] == "0x" + "55" * 32
+
+
+@pytest.mark.asyncio
+async def test_pending_acceptance_delivery_is_repaired_before_deadline(
+    engine: Engine, worker: ConsensusWorker, session: Session
+):
+    """A helper failure is repair work now, not delayed until finalization."""
+
+    _setup_contract(engine)
+    accepted_hash = "0x" + "45" * 32
+    _insert_tx(
+        session,
+        tx_hash=accepted_hash,
+        status="ACCEPTED",
+        nonce=0,
+        timestamp_awaiting_finalization=int(time.time()) - 1,
+        consensus_data={"leader_receipt": [{}], "votes": {}, "validators": []},
+        data={
+            "fee_accounting": {
+                "active_message_generation": {
+                    "acceptanceDispatchRequired": True,
+                    "acceptanceDispatched": False,
+                }
+            }
+        },
+    )
+    _insert_tx(session, tx_hash="0x" + "46" * 32, status="PENDING", nonce=1)
+
+    assert await worker.claim_next_transaction(session) is None
+    repair = await worker.claim_next_finalization(session)
+
+    assert repair is not None
+    assert repair["hash"] == accepted_hash
+
+
+def test_message_value_reservation_and_retry_marker_commit_atomically(
+    engine: Engine, session: Session
+):
+    """The contract debit and its retry tombstone share one DB commit."""
+
+    _setup_contract(engine)
+    tx_hash = "0x" + "47" * 32
+    accounting = {"paid_fee_value": 0}
+    _insert_tx(
+        session,
+        tx_hash=tx_hash,
+        status="ACCEPTED",
+        nonce=0,
+        data={"fee_accounting": accounting},
+    )
+    session.execute(
+        text("UPDATE current_state SET balance = 9 WHERE id = :address"),
+        {"address": CONTRACT_ADDRESS},
+    )
+    session.commit()
+
+    transaction = SimpleNamespace(
+        hash=tx_hash,
+        to_address=CONTRACT_ADDRESS,
+        data={"fee_accounting": accounting},
+    )
+    context = SimpleNamespace(
+        transaction=transaction,
+        transactions_processor=TransactionsProcessor(session),
+        accounts_manager=AccountsManager(session),
+    )
+    message = PendingTransaction(
+        address="0x" + "48" * 20,
+        calldata=b"",
+        code=None,
+        salt_nonce=0,
+        on="accepted",
+        value=5,
+        is_eth_send=True,
+    )
+
+    assert _apply_message_value_withdrawals_for_phase(
+        context, [message], "accepted"
+    ) == [message]
+    assert _apply_message_value_withdrawals_for_phase(
+        context, [message], "accepted"
+    ) == [message]
+
+    balance = session.execute(
+        text("SELECT balance FROM current_state WHERE id = :address"),
+        {"address": CONTRACT_ADDRESS},
+    ).scalar_one()
+    stored_data = session.execute(
+        text("SELECT data FROM transactions WHERE hash = :hash"),
+        {"hash": tx_hash},
+    ).scalar_one()
+    assert balance == 4
+    assert len(stored_data["fee_accounting"]["message_value_effects"]) == 1
 
 
 @pytest.mark.asyncio
@@ -407,6 +545,97 @@ async def test_recover_still_resets_stuck_consensus_txs(
     assert row.recovery_count == 1
     assert row.consensus_data is None
     assert row.consensus_history is None
+
+
+@pytest.mark.asyncio
+async def test_recover_restores_interrupted_paid_appeal_instead_of_resetting_it(
+    engine: Engine, worker: ConsensusWorker, session: Session
+):
+    _setup_contract(engine)
+    tx_hash = "0x" + "78" * 32
+    admitted_history = {
+        "latestDecision": {"decisionId": 1, "status": "ACCEPTED"},
+        "activeAppealBasis": {
+            "decisionId": 1,
+            "submittedAt": 123,
+            "nextAppealWindow": 10,
+        },
+        "consensus_results": [{"consensus_round": "ACCEPTED"}],
+    }
+    original_consensus_data = {"leader_receipt": [{"result": "original"}]}
+    original_contract_snapshot = {"states": {"accepted": {"slot": "original"}}}
+    snapshot = {
+        "status": "ACCEPTED",
+        "consensusHistory": admitted_history,
+        "consensusData": original_consensus_data,
+        "contractSnapshot": original_contract_snapshot,
+        "appealFailed": 2,
+        "appealUndetermined": False,
+        "appealLeaderTimeout": False,
+        "appealValidatorsTimeout": False,
+        "appealProcessingTime": 7,
+        "rotationCount": 1,
+        "leaderTimeoutValidators": None,
+        "timestampAwaitingFinalization": 99,
+        "timestampAppeal": 123,
+    }
+    _insert_tx(
+        session,
+        tx_hash=tx_hash,
+        status="COMMITTING",
+        nonce=0,
+        consensus_data={"partial": True},
+        consensus_history={"current_monitoring": {"COMMITTING": 1}},
+        blocked_at_offset_seconds=-25 * 60,
+        worker_id="dead-appeal-worker",
+    )
+    session.execute(
+        text(
+            "UPDATE transactions SET data = CAST(:data AS jsonb),"
+            " contract_snapshot = CAST(:snapshot AS jsonb), appealed = false,"
+            " appeal_failed = 99, appeal_undetermined = true,"
+            " appeal_leader_timeout = true, appeal_validators_timeout = true,"
+            " appeal_processing_time = 999, rotation_count = 999"
+            " WHERE hash = :hash"
+        ),
+        {
+            "hash": tx_hash,
+            "data": json.dumps({"appealRecoverySnapshot": snapshot}),
+            "snapshot": json.dumps({"states": {"accepted": {"slot": "partial"}}}),
+        },
+    )
+    session.commit()
+
+    recovered = await worker.recover_stuck_transactions(session)
+
+    row = session.execute(
+        text(
+            "SELECT status, blocked_at, worker_id, recovery_count, appealed,"
+            " appeal_failed, appeal_undetermined, appeal_leader_timeout,"
+            " appeal_validators_timeout, appeal_processing_time, rotation_count,"
+            " timestamp_appeal, timestamp_awaiting_finalization,"
+            " consensus_data, consensus_history, contract_snapshot"
+            " FROM transactions WHERE hash = :hash"
+        ),
+        {"hash": tx_hash},
+    ).one()
+    assert recovered == 1
+    assert row.status == TransactionStatus.ACCEPTED.value
+    assert row.blocked_at is None
+    assert row.worker_id is None
+    assert row.recovery_count == 0
+    assert row.appealed is True
+    assert row.appeal_failed == 2
+    assert row.appeal_undetermined is False
+    assert row.appeal_leader_timeout is False
+    assert row.appeal_validators_timeout is False
+    assert row.appeal_processing_time == 7
+    assert row.rotation_count == 1
+    assert row.timestamp_appeal == 123
+    assert row.timestamp_awaiting_finalization == 99
+    assert row.consensus_data == original_consensus_data
+    assert row.consensus_history == admitted_history
+    assert row.contract_snapshot == original_contract_snapshot
 
 
 def test_direct_genvm_reset_increments_recovery_count(

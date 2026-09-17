@@ -22,7 +22,6 @@ from backend.database_handler.transactions_processor import (
 )
 from backend.domain.types import Transaction, TransactionType, TransactionExecutionMode
 
-
 SENDER = "0x" + "ab" * 20
 RECIPIENT = "0x" + "cd" * 20
 
@@ -146,3 +145,21 @@ async def test_sufficient_balance_send_finalizes_without_undetermined(
         {"h": tx_hash},
     ).one()
     assert row.status == "FINALIZED"
+    assert am.get_account_balance(SENDER) == 4000
+    assert am.get_account_balance(RECIPIENT) == 1000
+
+
+def test_atomic_balance_helpers_normalize_addresses_and_accumulate(session: Session):
+    am = AccountsManager(session)
+
+    am.update_account_balance(SENDER, 1000)
+    session.commit()
+
+    assert am.debit_account_balance(SENDER.lower(), 400) is True
+    assert am.debit_account_balance(SENDER.lower(), 700) is False
+    am.credit_account_balance(RECIPIENT.lower(), 250)
+    am.credit_account_balance(RECIPIENT.lower(), 350)
+    session.commit()
+
+    assert am.get_account_balance(SENDER) == 600
+    assert am.get_account_balance(RECIPIENT) == 600

@@ -1,10 +1,10 @@
-# v0.1.0
-# { "Depends": "py-genlayer:test" }
+# v0.3.0
+# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
 
-from genlayer import *
+import genlayer as gl
 
 
-class Utf8RoundtripContract(gl.Contract):
+class Utf8RoundtripContract(gl.contract.Contract):
     value: str
 
     def __init__(self):

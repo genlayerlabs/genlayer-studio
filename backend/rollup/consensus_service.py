@@ -10,6 +10,14 @@ from backend.rollup.default_contracts.consensus_main import (
 )
 from backend.rollup.web3_pool import Web3ConnectionPool
 
+FEE_AWARE_SHADOW_SELECTORS = {
+    bytes.fromhex("35a251fb"),
+    bytes.fromhex("98863702"),
+}
+LEGACY_ADD_TRANSACTION_SELECTOR = keccak(
+    text="addTransaction(address,address,uint256,uint256,bytes)"
+)[:4]
+
 
 class ConsensusService:
     def __init__(self):
@@ -18,6 +26,17 @@ class ConsensusService:
         """
         # Use singleton Web3 connection pool
         self.web3 = Web3ConnectionPool.get()
+
+    @staticmethod
+    def public_consensus_main_address() -> str:
+        """Return Studio's user-facing virtual ConsensusMain address.
+
+        A connected Hardhat helper may be deployed at a different ephemeral
+        address. That helper is an internal shadow only; signed client
+        envelopes continue to target the stable address exported by the SDK.
+        """
+
+        return str(get_default_consensus_main_contract()["address"])
 
     def _get_contract(self, contract_name: str):
         """
@@ -152,6 +171,81 @@ class ConsensusService:
         receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash)
         return receipt
 
+    @staticmethod
+    def _bind_shadow_sender_calldata(
+        calldata: str | HexBytes,
+        authoritative_sender: str | None,
+    ) -> str | HexBytes:
+        """Replace the user-controlled sender word with the recovered signer.
+
+        Consensus' CreationPhase ignores a spoofed ``params.sender`` on an
+        ordinary EOA submission and attributes the transaction to the direct
+        caller. Studio relays through a funded Hardhat account, so the shadow
+        helper cannot derive that caller itself and must receive the already-
+        verified signer from the RPC boundary.
+        """
+
+        if authoritative_sender is None:
+            return calldata
+        payload = bytes(HexBytes(calldata))
+        if len(payload) < 4:
+            return calldata
+        selector = payload[:4]
+        if selector in FEE_AWARE_SHADOW_SELECTORS:
+            sender_offset = 4 + 32  # selector + dynamic tuple offset word
+        elif selector == LEGACY_ADD_TRANSACTION_SELECTOR:
+            sender_offset = 4
+        else:
+            return calldata
+        if len(payload) < sender_offset + 32:
+            raise RuntimeError("InvalidShadowTransactionEncoding")
+        sender = to_bytes(hexstr=authoritative_sender)
+        if len(sender) != 20:
+            raise RuntimeError("InvalidShadowTransactionSender")
+        bound = (
+            payload[:sender_offset]
+            + (b"\x00" * 12)
+            + sender
+            + payload[sender_offset + 32 :]
+        )
+        return to_hex(bound)
+
+    def forward_shadow_transaction(
+        self,
+        calldata: str | HexBytes,
+        authoritative_sender: str | None = None,
+    ) -> dict:
+        """Submit verified user calldata through Hardhat's funded system account.
+
+        Studio account balances and nonces live in Postgres, not in the helper
+        EVM. Replaying the user's raw signed envelope against Hardhat therefore
+        fails for ordinary Studio accounts and previously caused deployments
+        to fall back to an unrelated random address. The RPC layer has already
+        recovered the signer and validated the complete fee envelope; this
+        shadow call exists only to let the protocol helper author the child id
+        and CREATE/CREATE2 recipient.
+        """
+
+        consensus_main = self._get_contract("ConsensusMain")
+        if consensus_main is None:
+            raise RuntimeError("ConsensusMainUnavailable")
+        accounts = self.web3.eth.accounts
+        if not accounts:
+            raise RuntimeError("ConsensusShadowAccountUnavailable")
+        bound_calldata = self._bind_shadow_sender_calldata(
+            calldata,
+            authoritative_sender,
+        )
+        tx_hash = self.web3.eth.send_transaction(
+            {
+                "from": accounts[0],
+                "to": consensus_main.address,
+                "data": bound_calldata,
+                "value": 0,
+            }
+        )
+        return self.web3.eth.wait_for_transaction_receipt(tx_hash)
+
     def wait_new_transaction_event(self, receipt: dict) -> dict:
         """
         Wait for NewTransaction event from receipt
@@ -184,20 +278,31 @@ class ConsensusService:
             return receipt
 
     def add_transaction(
-        self, transaction: dict, from_address: str, retry: bool = True
-    ) -> str:
+        self,
+        transaction: dict,
+        from_address: str,
+        retry: bool = True,
+        calldata: str | HexBytes | None = None,
+    ) -> Dict[str, Any] | None:
         """
         Forward a transaction to the consensus rollup and wait for NewTransaction event
         """
-        if not self.web3.is_connected():
+        if self.web3 is None or not self.web3.is_connected():
             # print(
             #     "[CONSENSUS_SERVICE]: Not connected to Hardhat node, skipping transaction forwarding"
             # )
             return None
 
         try:
-            receipt = self.forward_transaction(transaction)
-            return self.wait_new_transaction_event(receipt)
+            receipt = (
+                self.forward_shadow_transaction(calldata, from_address)
+                if calldata is not None
+                else self.forward_transaction(transaction)
+            )
+            details = self.wait_new_transaction_event(receipt)
+            if not isinstance(details, dict) or "tx_id" not in details:
+                raise RuntimeError("NewTransactionEventMissing")
+            return details
 
         except Exception as e:
             error_str = str(e)
@@ -224,7 +329,10 @@ class ConsensusService:
 
                     if retry:
                         return self.add_transaction(
-                            transaction, from_address, retry=False
+                            transaction,
+                            from_address,
+                            retry=False,
+                            calldata=calldata,
                         )
                 else:
                     print(
@@ -233,6 +341,19 @@ class ConsensusService:
 
             print(f"[CONSENSUS_SERVICE]: Error forwarding transaction: {error_str}")
             return None
+
+    def transaction_forwarding_skipped(self, account: dict) -> bool:
+        """Reports whether emit_transaction_event is a deliberate no-op.
+
+        Studio runs in deployments that have no rollup at all — the load-test
+        compose brings up only jsonrpc + consensus-worker, and hosted Studio
+        may hold an account with no private key. In both modes
+        emit_transaction_event returns None *by design*, which callers must
+        not confuse with a forwarding failure (which also returns None).
+        """
+        if self.web3 is None or not self.web3.is_connected():
+            return True
+        return account.get("private_key") is None
 
     def emit_transaction_event(self, event_name: str, account: dict, *args):
         """
@@ -243,20 +364,15 @@ class ConsensusService:
             account (dict): Account object containing address and private key
             *args: Arguments to pass to the event function
         """
-        if not self.web3.is_connected():
-            # print(
-            #     "[CONSENSUS_SERVICE]: Not connected to Hardhat node, skipping transaction forwarding"
-            # )
+        if self.transaction_forwarding_skipped(account):
+            if self.web3 is not None and self.web3.is_connected():
+                print(
+                    f"[CONSENSUS_SERVICE]: Error emitting {event_name}: Account object must contain private_key"
+                )
             return None
 
-        if account.get("private_key") is not None:
-            account_address = account["address"]
-            account_private_key = account["private_key"]
-        else:
-            print(
-                f"[CONSENSUS_SERVICE]: Error emitting {event_name}: Account object must contain private_key"
-            )
-            return None
+        account_address = account["address"]
+        account_private_key = account["private_key"]
 
         consensus_main_contract = self._get_contract("ConsensusMain")
 
@@ -292,15 +408,53 @@ class ConsensusService:
                 )
 
                 tx_ids_hex = []
+                recipients = []
                 for new_tx_event in new_tx_events:
                     tx_id = new_tx_event["args"]["txId"]
                     tx_ids_hex.append(
                         "0x" + tx_id.hex() if isinstance(tx_id, bytes) else tx_id
                     )
+                    recipients.append(new_tx_event["args"]["recipient"])
+
+                # The Studio helper bridge makes each parent/phase/payload
+                # emission one-shot. A worker retry emits no new events, but
+                # it can recover the exact child ids stored by the first call.
+                # Always prefer that durable view when the deployed helper
+                # exposes it; the event-derived list remains compatible with
+                # older local deployments.
+                try:
+                    stored_tx_ids = (
+                        consensus_main_contract.functions.getInternalMessageTxIds(
+                            args[0],
+                            event_name == "emitTransactionAccepted",
+                            args[1],
+                        ).call()
+                    )
+                    tx_ids_hex = [
+                        "0x" + tx_id.hex() if isinstance(tx_id, bytes) else tx_id
+                        for tx_id in stored_tx_ids
+                    ]
+                except Exception:
+                    pass
+
+                # Deploy messages intentionally submit recipient zero. The
+                # helper returns the actual CREATE/CREATE2 ghost address, and
+                # retries recover that same address from durable storage.
+                try:
+                    recipients = list(
+                        consensus_main_contract.functions.getInternalMessageRecipients(
+                            args[0],
+                            event_name == "emitTransactionAccepted",
+                            args[1],
+                        ).call()
+                    )
+                except Exception:
+                    pass
 
                 return {
                     "receipt": receipt,
                     "tx_ids_hex": tx_ids_hex,
+                    "recipients": recipients,
                 }
 
             return receipt
