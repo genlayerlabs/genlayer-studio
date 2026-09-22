@@ -62,12 +62,19 @@ class AccountsManager:
     def is_valid_address(self, address: str) -> bool:
         return is_address(address)
 
+    @staticmethod
+    def _normalize_address(account_address: str) -> str:
+        """Normalize to the checksum form used as the primary key, matching
+        get_account()/create_new_account_with_address(). Falls back to the
+        original value if checksumming fails."""
+        try:
+            return to_checksum_address(account_address)
+        except Exception:
+            return account_address
+
     def get_account(self, account_address: str) -> CurrentState | None:
         """Private method to retrieve an account from the data base"""
-        try:
-            normalized = to_checksum_address(account_address)
-        except Exception:
-            normalized = account_address
+        normalized = self._normalize_address(account_address)
         account = (
             self.session.query(CurrentState)
             .filter(CurrentState.id == normalized)
@@ -106,7 +113,7 @@ class AccountsManager:
                 "UPDATE current_state SET balance = balance - :amount "
                 "WHERE id = :addr AND balance >= :amount"
             ),
-            {"amount": amount, "addr": account_address},
+            {"amount": amount, "addr": self._normalize_address(account_address)},
         )
         return result.rowcount > 0
 
@@ -114,6 +121,7 @@ class AccountsManager:
         """Atomic credit. Creates account if it doesn't exist."""
         if amount <= 0:
             return
+        account_address = self._normalize_address(account_address)
         self.session.execute(
             text(
                 "INSERT INTO current_state (id, data, balance) "
@@ -137,6 +145,7 @@ class AccountsManager:
         Sets value_credited=true atomically. Returns True if credit was applied."""
         if amount <= 0:
             return False
+        target_address = self._normalize_address(target_address)
         # Ensure target account exists
         self.session.execute(
             text(
