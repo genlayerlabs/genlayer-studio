@@ -108,7 +108,7 @@ _health_cache = HealthCache()
 _background_task: Optional[asyncio.Task] = None
 _rpc_router_ref: Optional[FastAPIRPCRouter] = None
 _usage_metrics_service_ref: Optional[Any] = None
-_metrics_send_counter: int = 0
+_metrics_last_send_monotonic: Optional[float] = None
 
 # =============================================================================
 # Permit-aware readiness state (in-process)
@@ -214,8 +214,6 @@ def _evaluate_permit_readiness(
     return True, "permits_recovering"
 
 
-# Send system health metrics every 6 health checks (6 × 10s = 60s = 1 minute)
-METRICS_SEND_INTERVAL = 6
 _no_progress_scan_suppressed_until: float = 0.0
 
 # Statuses where the consensus state machine is actively working.
@@ -242,6 +240,20 @@ PRE_CONSENSUS_BACKLOG_STATUSES_SQL = (
 def get_health_check_interval() -> float:
     """Get health check interval from env (default 10s)."""
     return float(os.getenv("HEALTH_CHECK_INTERVAL_SECONDS", "10"))
+
+
+def get_metrics_send_interval_seconds() -> float:
+    """Get wall-clock interval for external health metrics sends."""
+    return float(os.getenv("HEALTH_METRICS_SEND_INTERVAL_SECONDS", "60"))
+
+
+def _should_send_health_metrics(now_monotonic: float) -> bool:
+    if _metrics_last_send_monotonic is None:
+        return True
+    return (
+        now_monotonic - _metrics_last_send_monotonic
+        >= get_metrics_send_interval_seconds()
+    )
 
 
 def get_no_progress_scan_error_cooldown_seconds() -> float:
@@ -464,7 +476,7 @@ async def _run_health_checks() -> None:
 
 async def _background_health_loop() -> None:
     """Background loop that periodically runs health checks."""
-    global _metrics_send_counter
+    global _metrics_last_send_monotonic
 
     interval = get_health_check_interval()
     logger.info(f"Starting background health checker (interval={interval}s)")
@@ -473,17 +485,20 @@ async def _background_health_loop() -> None:
         try:
             await _run_health_checks()
 
-            # Send system health metrics every 1 minute (every 6th iteration)
-            _metrics_send_counter += 1
-            if _metrics_send_counter >= METRICS_SEND_INTERVAL:
-                _metrics_send_counter = 0
-                if _usage_metrics_service_ref and _usage_metrics_service_ref.enabled:
-                    try:
-                        await _usage_metrics_service_ref.send_system_health_metrics(
-                            _health_cache
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to send system health metrics: {e}")
+            now_monotonic = time.monotonic()
+            if (
+                _usage_metrics_service_ref
+                and _usage_metrics_service_ref.enabled
+                and _should_send_health_metrics(now_monotonic)
+            ):
+                try:
+                    await _usage_metrics_service_ref.send_system_health_metrics(
+                        _health_cache
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to send system health metrics: {e}")
+                finally:
+                    _metrics_last_send_monotonic = now_monotonic
 
         except asyncio.CancelledError:
             logger.info("Background health checker cancelled")
