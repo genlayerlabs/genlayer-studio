@@ -1,8 +1,8 @@
 """
-Message-fee allocation tree types.
+Message-fee allocation types.
 
-Mirrors the executor's `genvm_common::domain::fees` module: the fee parameters
-and the nested `MessageAllocationNode` tree that is passed alongside an
+Mirrors the shared `genvm_modules_interfaces::fees` module: the fee parameters
+and the flat allocations that are passed alongside an
 execution and matched against emitted messages.
 """
 
@@ -43,13 +43,12 @@ MessageAllocationNodeParams = typing.Union[_InternalParams, _ExternalParams]
 class MessageAllocationNode(typing.TypedDict):
     recipient: Address | None
     call_key: bytes | None
-    budget: int
+    budget: int | None
     # Lifecycle the node matches against (only meaningful for internal messages).
     on: typing.Literal["finalized", "decided"]
     fee_params: MessageAllocationNodeParams
-    # Nested allocation subtree; the chain receives this flattened to
-    # parent-pointer form.
-    children: list["MessageAllocationNode"]
+    children_budget: int
+    subtree: bytes
 
 
 DEFAULT_EXTERNAL_MESSAGE_ALLOC: MessageAllocationNode = {
@@ -64,7 +63,8 @@ DEFAULT_EXTERNAL_MESSAGE_ALLOC: MessageAllocationNode = {
             "max_gas_price": 0,
         },
     },
-    "children": [],
+    "children_budget": 0,
+    "subtree": b"",
 }
 
 DEFAULT_INTERNAL_DEC_MESSAGE_ALLOC: MessageAllocationNode = {
@@ -83,7 +83,8 @@ DEFAULT_INTERNAL_DEC_MESSAGE_ALLOC: MessageAllocationNode = {
             "receipt_fee_max_gas_price": 2**200,
         },
     },
-    "children": [],
+    "children_budget": 0,
+    "subtree": b"",
 }
 
 DEFAULT_INTERNAL_FIN_MESSAGE_ALLOC: MessageAllocationNode = {
@@ -102,5 +103,6 @@ DEFAULT_INTERNAL_FIN_MESSAGE_ALLOC: MessageAllocationNode = {
             "receipt_fee_max_gas_price": 20,
         },
     },
-    "children": [],
+    "children_budget": 0,
+    "subtree": b"",
 }
