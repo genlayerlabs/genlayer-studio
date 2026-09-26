@@ -805,7 +805,7 @@ class Node:
 
         transaction_datetime = self._date_from_str(transaction_created_at)
         if transaction_datetime is None:
-            transaction_datetime = datetime.datetime.now()
+            transaction_datetime = datetime.datetime.now(tz=datetime.timezone.utc)
 
         return await self._run_genvm(
             from_address,
