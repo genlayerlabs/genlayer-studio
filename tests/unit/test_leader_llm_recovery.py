@@ -1,5 +1,6 @@
 """Unit tests for leader/validator fatal error handling in Node._run_genvm()."""
 
+import asyncio
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 
@@ -198,3 +199,38 @@ async def test_validator_fatal_error_returns_receipt():
     assert receipt.vote == Vote.DETERMINISTIC_VIOLATION
     assert receipt.genvm_result["raw_error"]["fatal"] is True
     assert receipt.genvm_result["error_code"] == GenVMErrorCode.LLM_NO_PROVIDER
+
+
+def test_deploy_contract_fallback_is_timezone_aware():
+    """When transaction_created_at is None, deploy_contract must fall back to
+    a timezone-aware datetime so _run_genvm's assert on tzinfo does not fire."""
+    import datetime as _dt
+    from unittest.mock import AsyncMock, patch
+    from backend.node.base import Node
+    from backend.node.types import Receipt
+
+    node = Node(
+        contract_snapshot=_make_snapshot(),
+        validator_mode=ExecutionMode.LEADER,
+        validator=_make_validator(),
+        leader_receipt=None,
+        msg_handler=MagicMock(),
+        contract_snapshot_factory=None,
+        manager=MagicMock(),
+    )
+    mock_genvm = AsyncMock(return_value=MagicMock(spec=Receipt))
+    with patch.object(node, "_run_genvm", mock_genvm):
+        with patch("backend.node.base.datetime") as mock_dt:
+            mock_dt.datetime.now.return_value = _dt.datetime(2024, 1, 1, 12, 0, 0, tzinfo=_dt.timezone.utc)
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(node.deploy_contract(
+                    from_address="0x00000000000000000000000000000001234",
+                    code_to_deploy=b"",
+                    calldata=b"",
+                    transaction_created_at=None,
+                ))
+            finally:
+                loop.close()
+    td = mock_genvm.call_args.kwargs["transaction_datetime"]
+    assert td.tzinfo is not None
