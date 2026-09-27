@@ -1005,9 +1005,9 @@ class TransactionsProcessor:
         Returns:
             List of transaction data dictionaries for stuck transactions
         """
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
 
-        cutoff_time = datetime.now() - timedelta(seconds=seconds)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=seconds)
         stuck_transactions = (
             self.session.query(Transactions)
             .options(selectinload(Transactions.triggered_transactions))

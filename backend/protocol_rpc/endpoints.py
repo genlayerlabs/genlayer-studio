@@ -2654,13 +2654,13 @@ def dev_get_pool_status(sqlalchemy_db) -> dict:
     Returns:
         dict: Pool status information including timestamp and metrics
     """
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     engine = sqlalchemy_db.engine
     pool = engine.pool
 
     return {
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "pool": {
             "size": pool.size(),
             "checked_out": pool.checkedout(),
