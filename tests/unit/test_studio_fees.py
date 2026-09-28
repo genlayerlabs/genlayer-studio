@@ -97,6 +97,7 @@ from backend.protocol_rpc.fees import (
     EMPTY_CALL_KEY,
     MESSAGE_ALLOCATION_NODE_ABI_TYPE,
     MIN_RECEIPT_BYTES,
+    MIN_TERMINAL_OUTPUT_BYTES,
     MESSAGE_REVEAL_LENGTH_SLOTS,
     MAX_CONTRIBUTION_SEGMENTS,
     NODE_ROOT_SENTINEL,
@@ -793,14 +794,22 @@ def test_studio_fee_policy_matches_consensus_deterministic_receipt_estimators():
         + (receipt_bytes * policy.calldata_gas_per_byte)
         + (PROPOSE_RECEIPT_SLOTS * policy.gas_per_changed_slot)
     )
-    expected_receipt_floor_gas = (
+    expected_min_receipt_gas = (
         policy.fixed_propose_receipt_gas
         + policy.intrinsic_gas
         + policy.bootloader_overhead
         + (MIN_RECEIPT_BYTES * policy.calldata_gas_per_byte)
         + (PROPOSE_RECEIPT_SLOTS * policy.gas_per_changed_slot)
     )
-    expected_legacy_receipt_gas = expected_receipt_floor_gas - (
+    expected_budget_floor_gas = (
+        policy.fixed_propose_receipt_gas
+        + policy.intrinsic_gas
+        + policy.bootloader_overhead
+        + (policy.receipt_wrapper_bytes + MIN_TERMINAL_OUTPUT_BYTES)
+        * policy.calldata_gas_per_byte
+        + (PROPOSE_RECEIPT_SLOTS * policy.gas_per_changed_slot)
+    )
+    expected_legacy_receipt_gas = expected_min_receipt_gas - (
         policy.fixed_propose_receipt_gas
     )
     expected_genvm_start_gas = (
@@ -863,10 +872,29 @@ def test_studio_fee_policy_matches_consensus_deterministic_receipt_estimators():
     assert policy.estimate_nondet_output_start_gas() == expected_nondet_output_start_gas
     assert (
         policy.estimate_propose_receipt_gas(MIN_RECEIPT_BYTES)
-        == expected_receipt_floor_gas
+        == expected_min_receipt_gas
     )
-    assert policy.message_fee_params_budget_floor() == expected_receipt_floor_gas * 3
+    assert policy.message_fee_params_budget_floor() == expected_budget_floor_gas * 3
     assert policy.genvm_start_budget_floor() == expected_genvm_start_gas * 3
+
+
+@pytest.mark.parametrize(
+    ("receipt_wrapper_bytes", "expected_floor_gas"),
+    [(1_024, 315_408), (1_536, 323_600)],
+)
+def test_studio_fee_config_matches_consensus_execution_budget_floor(
+    receipt_wrapper_bytes, expected_floor_gas
+):
+    policy = StudioFeePolicy(
+        receipt_gas_price=250_000_000,
+        receipt_wrapper_bytes=receipt_wrapper_bytes,
+    )
+    expected_floor = expected_floor_gas * policy.receipt_gas_price
+
+    assert policy.message_fee_params_budget_floor() == expected_floor
+    assert studio_fee_config(policy)["policy"]["messageFeeParamsBudgetFloor"] == str(
+        expected_floor
+    )
 
 
 def test_studio_fee_config_exposes_default_nonzero_fee_policy():
@@ -969,6 +997,40 @@ def test_validate_transaction_fee_deposit_rejects_execution_budget_below_floor()
             user_value=0,
             policy=policy,
         )
+
+
+@pytest.mark.parametrize("receipt_wrapper_bytes", [1_024, 1_536])
+def test_validate_transaction_fee_deposit_accepts_exact_execution_budget_floor(
+    receipt_wrapper_bytes,
+):
+    policy = StudioFeePolicy(
+        receipt_gas_price=1,
+        receipt_wrapper_bytes=receipt_wrapper_bytes,
+    )
+    floor = policy.message_fee_params_budget_floor()
+    at_floor = _fees_distribution(execution_budget_per_round=floor)
+    below_floor = _fees_distribution(execution_budget_per_round=floor - 1)
+
+    with pytest.raises(BudgetTooLow):
+        validate_transaction_fee_deposit(
+            fees_distribution=below_floor,
+            num_of_validators=5,
+            submitted_value=required_fee_deposit(below_floor, 5, policy),
+            user_value=0,
+            policy=policy,
+        )
+
+    required = required_fee_deposit(at_floor, 5, policy)
+    assert (
+        validate_transaction_fee_deposit(
+            fees_distribution=at_floor,
+            num_of_validators=5,
+            submitted_value=required,
+            user_value=0,
+            policy=policy,
+        )
+        == required
+    )
 
 
 @pytest.mark.parametrize(
@@ -3135,7 +3197,7 @@ def test_genvm_fee_context_uses_transaction_execution_budget_and_policy():
         "minCommitTimeout": "3",
         "maxCommitTimeout": "202",
         "genPerTimeUnit": "2",
-        "messageBudgetFloor": "18704",
+        "messageBudgetFloor": "39440",
     }
 
 
@@ -10910,11 +10972,13 @@ def test_post_activation_top_up_uses_locked_formula_and_floor():
         intrinsic_gas=0,
         bootloader_overhead=0,
         gas_per_changed_slot=0,
-        calldata_gas_per_byte=0,
+        calldata_gas_per_byte=1,
         fixed_propose_receipt_gas=10,
     )
+    floor = activation_policy.message_fee_params_budget_floor()
+    assert floor == 10 + 1_024 + MIN_TERMINAL_OUTPUT_BYTES
     fees_distribution = _fees_distribution(
-        execution_budget_per_round=10,
+        execution_budget_per_round=floor,
         receipt_fee_max_gas_price=2,
     )
     accounting = create_fee_accounting(
@@ -10942,10 +11006,11 @@ def test_post_activation_top_up_uses_locked_formula_and_floor():
             activation_policy,
             receipt_gas_price=2,
             fixed_propose_receipt_gas=100,
+            receipt_wrapper_bytes=2_048,
         ),
     )
 
-    assert topped_up["fees_distribution"]["executionBudgetPerRound"] == 11
+    assert topped_up["fees_distribution"]["executionBudgetPerRound"] == floor + 1
 
 
 def test_apply_fee_top_up_only_raises_existing_price_caps():
