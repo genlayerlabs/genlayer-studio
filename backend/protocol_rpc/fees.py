@@ -41,6 +41,7 @@ VALIDATORS_PER_ROUND = (
 )
 
 MIN_RECEIPT_BYTES = 512
+MIN_TERMINAL_OUTPUT_BYTES = 64
 PROPOSE_RECEIPT_SLOTS = 7
 MESSAGE_REVEAL_LENGTH_SLOTS = 32
 MAX_ALLOCATED_MESSAGES_CAP = 20
@@ -480,11 +481,13 @@ class StudioFeePolicy:
     def minimum_execution_budget_per_round(self) -> int:
         if self.receipt_gas_price <= 0:
             return 0
-        # FeeManager.messageFeeParamsBudgetFloor() prices only a minimum-size
-        # proposed receipt. Message reveal and nondeterministic-output charges
-        # remain ordinary per-round consumption, not admission requirements.
+        # FeeManager.messageFeeParamsBudgetFloor() reserves the receipt wrapper
+        # plus the smallest terminal output. Other per-round charges are not
+        # part of admission.
         return (
-            self.estimate_propose_receipt_gas(MIN_RECEIPT_BYTES)
+            self.estimate_propose_receipt_gas(
+                self.estimate_propose_receipt_bytes(MIN_TERMINAL_OUTPUT_BYTES)
+            )
             * self.receipt_gas_price
         )
 
