@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
 import { notify } from '@kyvg/vue3-notification';
-import PageSection from '@/components/Simulator/PageSection.vue';
+import PageSection from '@/components/simulator/PageSection.vue';
 import { KeyIcon } from 'lucide-vue-next';
 
 const API_KEY_STORAGE_KEY = 'settingsStore.apiKey';

@@ -4,7 +4,7 @@ import { useContractsStore, useTransactionsStore } from '@/stores';
 import { TrashIcon } from '@heroicons/vue/24/solid';
 import TransactionItem from './TransactionItem.vue';
 import PageSection from './PageSection.vue';
-import EmptyListPlaceholder from '@/components/Simulator/EmptyListPlaceholder.vue';
+import EmptyListPlaceholder from '@/components/simulator/EmptyListPlaceholder.vue';
 
 const contractsStore = useContractsStore();
 const transactionsStore = useTransactionsStore();
