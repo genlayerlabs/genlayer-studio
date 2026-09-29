@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from eth_abi import encode
+from eth_abi import decode, encode
 
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.domain.types import LLMProvider, Validator
@@ -22,6 +22,7 @@ from backend.node.genvm.origin.leader_public_data import LeaderPublicData
 from backend.node.types import Address, ExecutionMode, ExecutionResultStatus
 from backend.protocol_rpc.fees import (
     GENVM_UNMETERED_DATA_FEE_BUCKET,
+    MESSAGE_ALLOCATION_NODE_ABI_TYPE,
     StudioFeePolicy,
     create_fee_accounting,
     required_fee_deposit,
@@ -445,9 +446,15 @@ async def test_run_genvm_passes_mode2_message_fee_allocations_to_genvm():
             "receipt_fee_max_gas_price": 2**200,
         },
     }
-    assert allocation["children"][0]["recipient"].as_hex.lower() == child_recipient
-    assert allocation["children"][0]["call_key"] == bytes.fromhex("56" * 32)
-    assert allocation["children"][0]["budget"] == 60
+    assert allocation["children_budget"] == 60
+    subtree = decode([MESSAGE_ALLOCATION_NODE_ABI_TYPE], allocation["subtree"])[0]
+    assert subtree[0][2] == (1 << 256) - 1
+    assert subtree[0][3] == recipient
+    assert subtree[1][2] == 0
+    assert subtree[1][3] == child_recipient
+    assert subtree[1][4] == bytes.fromhex("56" * 32)
+    assert subtree[1][5] == 60
+    assert subtree[1][6] == child_fee_params
 
 
 @pytest.mark.asyncio

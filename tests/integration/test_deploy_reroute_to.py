@@ -60,7 +60,7 @@ LEGACY_EXECUTOR = os.environ.get("TEST_REROUTE_EXECUTOR", "v0.2.17")
 # every 0.x line and so cannot name a directory. Until something exposes it,
 # this constant has to be updated whenever the image's current line moves;
 # override the env var when it does.
-CURRENT_EXECUTOR = os.environ.get("TEST_CURRENT_EXECUTOR", "v0.3.0-rc7")
+CURRENT_EXECUTOR = os.environ.get("TEST_CURRENT_EXECUTOR", "v0.3.0-rc9")
 
 # Shares the validator registry with the other integration suites, which wipe
 # validators while seeding mock responses.
