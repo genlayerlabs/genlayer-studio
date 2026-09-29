@@ -1788,6 +1788,7 @@ def validate_transaction_fee_deposit(
     validate_message_allocations(
         message_allocations or [],
         total_message_fees=int(fees["totalMessageFees"]),
+        root_appeal_rounds=int(fees["appealRounds"]),
         policy=policy,
     )
 
@@ -1993,6 +1994,7 @@ def create_child_fee_accounting(
     validate_message_allocations(
         child_message_allocations,
         total_message_fees=int(child_fees["totalMessageFees"]),
+        root_appeal_rounds=int(child_fees["appealRounds"]),
         policy=policy,
     )
     user_value = int(message.get("value", 0) or 0)
@@ -2670,11 +2672,10 @@ def fill_message_fee_payload_from_allocation(
         # second same-key occurrence fail with MessageBudgetExceeded.
         fee_params = decode_internal_message_fee_params(updated["feeParams"])
         policy = execution_policy_for_accounting(accounting)
-        updated["declaredBudget"] = _internal_allocation_min_required(
-            allocation,
-            fee_params,
-            policy,
-        ) + _child_allocation_budget_sum(allocations, index)
+        updated["declaredBudget"] = _u256_add(
+            min_message_primary_fees(fee_params, policy),
+            _child_allocation_budget_sum(allocations, index),
+        )
     updated["callKey"] = _normalize_call_key(
         updated.get("callKey", allocation["callKey"])
     )
@@ -3669,16 +3670,20 @@ def validate_message_allocations(
     message_allocations: list[dict[str, Any]],
     *,
     total_message_fees: int,
+    root_appeal_rounds: int,
     policy: StudioFeePolicy | None = None,
 ) -> None:
     if not message_allocations:
         return
 
     policy = policy or StudioFeePolicy()
+    root_appeal_rounds = _require_uint256(root_appeal_rounds)
     root_sum = 0
     root_keys: set[tuple[int, str, str]] = set()
     external_keys: set[tuple[str, str]] = set()
     min_required_by_index: dict[int, int] = {}
+    appeal_rounds_by_index: dict[int, int] = {}
+    emission_factors_by_index: dict[int, int] = {}
 
     for index, raw_node in enumerate(message_allocations):
         root_sum += _validate_message_allocation_node(
@@ -3688,13 +3693,18 @@ def validate_message_allocations(
             root_keys,
             external_keys,
             min_required_by_index,
+            appeal_rounds_by_index,
+            emission_factors_by_index,
+            root_appeal_rounds,
             policy,
         )
 
     if root_sum != total_message_fees:
         raise MessageAllocationsNotEqualBudget("MessageAllocationsNotEqualBudget")
 
-    _validate_child_budget_consistency(message_allocations, min_required_by_index)
+    _validate_child_budget_consistency(
+        message_allocations, min_required_by_index, emission_factors_by_index
+    )
     _validate_allocation_tree_depth(message_allocations, policy)
     _validate_sibling_duplicates(message_allocations)
 
@@ -3706,6 +3716,9 @@ def _validate_message_allocation_node(
     root_keys: set[tuple[int, str, str]],
     external_keys: set[tuple[str, str]],
     min_required_by_index: dict[int, int],
+    appeal_rounds_by_index: dict[int, int],
+    emission_factors_by_index: dict[int, int],
+    root_appeal_rounds: int,
     policy: StudioFeePolicy,
 ) -> int:
     node = _normalize_message_allocation(raw_node)
@@ -3718,8 +3731,24 @@ def _validate_message_allocation_node(
     if int(node["messageType"]) != MESSAGE_TYPE_INTERNAL:
         raise AllocationTreeMalformed("AllocationTreeMalformed")
 
-    min_required = _validate_internal_allocation_budget(node, policy)
+    parent_index = int(node["parentIndex"])
+    parent_appeal_rounds = (
+        root_appeal_rounds
+        if parent_index == NODE_ROOT_SENTINEL
+        else appeal_rounds_by_index[parent_index]
+    )
+    emission_factor = _internal_allocation_emission_factor(
+        bool(node["onAcceptance"]), parent_appeal_rounds
+    )
+    internal_fee_params = decode_internal_message_fee_params(node["feeParams"])
+    min_required = _validate_internal_allocation_budget(
+        node, internal_fee_params, emission_factor, policy
+    )
     min_required_by_index[index] = min_required
+    appeal_rounds_by_index[index] = _require_uint256(
+        internal_fee_params["appealRounds"]
+    )
+    emission_factors_by_index[index] = emission_factor
     return _root_allocation_budget(node, root_keys)
 
 
@@ -3741,16 +3770,19 @@ def _validate_allocation_parent(
 
 def _validate_internal_allocation_budget(
     node: dict[str, Any],
+    internal_fee_params: dict[str, Any],
+    emission_factor: int,
     policy: StudioFeePolicy,
 ) -> int:
-    internal_fee_params = decode_internal_message_fee_params(node["feeParams"])
     _validate_phase_timeout_bounds(
         int(internal_fee_params["leaderTimeunitsAllocation"]),
         int(internal_fee_params["validatorTimeunitsAllocation"]),
         policy,
         allow_zero=True,
     )
-    min_required = _internal_allocation_min_required(node, internal_fee_params, policy)
+    min_required = _internal_allocation_min_required(
+        internal_fee_params, emission_factor, policy
+    )
     if int(node["budget"]) < min_required:
         raise AllocationLifecycleBudgetInsufficient(
             "AllocationLifecycleBudgetInsufficient"
@@ -3775,18 +3807,19 @@ def _validate_internal_message_price_caps(
             raise FeeValueMustBeNonZero(f"FeeValueMustBeNonZero({field_index})")
 
 
+def _internal_allocation_emission_factor(
+    on_acceptance: bool, parent_appeal_rounds: int
+) -> int:
+    return _u256_add(parent_appeal_rounds, 1) if on_acceptance else 1
+
+
 def _internal_allocation_min_required(
-    node: dict[str, Any],
     internal_fee_params: dict[str, Any],
+    emission_factor: int,
     policy: StudioFeePolicy,
 ) -> int:
     min_primary = min_message_primary_fees(internal_fee_params, policy)
-    lifecycle_multiplier = (
-        int(internal_fee_params["appealRounds"]) + 1
-        if bool(node["onAcceptance"])
-        else 1
-    )
-    return min_primary * lifecycle_multiplier
+    return _u256_mul(min_primary, emission_factor)
 
 
 def _root_allocation_budget(
@@ -3806,13 +3839,18 @@ def _root_allocation_budget(
 def _validate_child_budget_consistency(
     message_allocations: list[dict[str, Any]],
     min_required_by_index: dict[int, int],
+    emission_factors_by_index: dict[int, int],
 ) -> None:
     for index, raw_node in enumerate(message_allocations):
         node = _normalize_message_allocation(raw_node)
         if int(node["messageType"]) == MESSAGE_TYPE_EXTERNAL:
             continue
         child_sum = _child_allocation_budget_sum(message_allocations, index)
-        if int(node["budget"]) < min_required_by_index[index] + child_sum:
+        required = _u256_add(
+            min_required_by_index[index],
+            _u256_mul(child_sum, emission_factors_by_index[index]),
+        )
+        if int(node["budget"]) < required:
             raise AllocationTreeBudgetInconsistent("AllocationTreeBudgetInconsistent")
 
 
@@ -5506,8 +5544,11 @@ def discovered_message_fee_allocations(
                 ],
             )
             per_message_budget = min_message_primary_fees(internal_params, policy)
-            budget = per_message_budget * count
             on_acceptance = bool(item["onAcceptance"])
+            emission_factor = _internal_allocation_emission_factor(
+                on_acceptance, int(fees["appealRounds"])
+            )
+            budget = _u256_mul(per_message_budget, count, emission_factor)
 
         allocations.append(
             {

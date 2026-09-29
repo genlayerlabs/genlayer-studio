@@ -2212,7 +2212,56 @@ def test_discovered_message_allocations_are_exact_and_consensus_valid():
         allocations,
         total_message_fees=total_message_fees,
         policy=policy,
+        root_appeal_rounds=0,
     )
+
+
+def test_discovered_acceptance_allocations_reserve_each_parent_appeal():
+    policy = StudioFeePolicy.from_env()
+    fees_distribution = _env_fees_distribution(appeals=2, rotations=[0, 0, 0])
+    receipt = {
+        "pending_transactions": [
+            {
+                "messageType": "Internal",
+                "address": "0x2222222222222222222222222222222222222222",
+                "on": "accepted",
+            },
+            {
+                "messageType": "Internal",
+                "address": "0x2222222222222222222222222222222222222222",
+                "on": "accepted",
+            },
+            {
+                "messageType": "Internal",
+                "address": "0x3333333333333333333333333333333333333333",
+                "on": "finalized",
+            },
+        ]
+    }
+
+    allocations = discovered_message_fee_allocations(receipt, fees_distribution, policy)
+    accepted, finalized = allocations
+    accepted_primary = min_message_primary_fees(
+        decode_internal_message_fee_params(accepted["feeParams"]), policy
+    )
+    finalized_primary = min_message_primary_fees(
+        decode_internal_message_fee_params(finalized["feeParams"]), policy
+    )
+    assert accepted["budget"] == accepted_primary * 2 * 3
+    assert finalized["budget"] == finalized_primary
+
+    fees_distribution["totalMessageFees"] = sum(
+        allocation["budget"] for allocation in allocations
+    )
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        message_allocations=allocations,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5, policy),
+        user_value=0,
+        policy=policy,
+    )
+    assert accounting["message_fee_budget"] == fees_distribution["totalMessageFees"]
 
 
 def test_discovered_internal_deploy_allocation_funds_child_execution_after_startup():
@@ -2790,63 +2839,62 @@ async def test_sim_estimate_transaction_fees_returns_external_message_fee_report
 def test_message_allocations_accept_root_internal_budget_matching_total():
     allocation = _allocation(budget=55)
 
-    validate_message_allocations([allocation], total_message_fees=55)
+    validate_message_allocations(
+        [allocation], total_message_fees=55, root_appeal_rounds=0
+    )
 
 
 def test_message_allocations_reject_root_budget_mismatch():
     allocation = _allocation(budget=55)
 
     with pytest.raises(MessageAllocationsNotEqualBudget):
-        validate_message_allocations([allocation], total_message_fees=56)
+        validate_message_allocations(
+            [allocation], total_message_fees=56, root_appeal_rounds=0
+        )
 
 
 def test_message_allocations_reject_parent_that_does_not_precede_child():
     allocation = _allocation(parent_index=0, budget=55)
 
     with pytest.raises(AllocationTreeMalformed):
-        validate_message_allocations([allocation], total_message_fees=0)
+        validate_message_allocations(
+            [allocation], total_message_fees=0, root_appeal_rounds=0
+        )
 
 
 def test_message_allocations_reject_lifecycle_budget_below_minimum():
     allocation = _allocation(budget=54)
 
     with pytest.raises(AllocationLifecycleBudgetInsufficient):
-        validate_message_allocations([allocation], total_message_fees=54)
+        validate_message_allocations(
+            [allocation], total_message_fees=54, root_appeal_rounds=0
+        )
 
 
-def test_message_allocations_enforce_on_acceptance_lifecycle_multiplier():
-    fee_params = _encode_internal_fee_params(appeals=1, rotations=[0, 0])
-    min_primary = calculate_round_fees(
-        _fees_distribution(
-            leader_timeunits=5,
-            validator_timeunits=10,
-            appeals=1,
-            rotations=[0, 0],
-        ),
-        5,
+@pytest.mark.parametrize(
+    "parent_appeals,child_appeals,emission_factor",
+    [(3, 0, 4), (0, 3, 1)],
+)
+def test_message_allocations_use_emitting_parent_appeal_count(
+    parent_appeals, child_appeals, emission_factor
+):
+    fee_params = _encode_internal_fee_params(appeals=child_appeals)
+    min_primary = min_message_primary_fees(
+        decode_internal_message_fee_params(fee_params)
     )
+    required = min_primary * emission_factor
 
     with pytest.raises(AllocationLifecycleBudgetInsufficient):
         validate_message_allocations(
-            [
-                _allocation(
-                    on_acceptance=True,
-                    budget=(min_primary * 2) - 1,
-                    fee_params=fee_params,
-                )
-            ],
-            total_message_fees=(min_primary * 2) - 1,
+            [_allocation(budget=required - 1, fee_params=fee_params)],
+            total_message_fees=required - 1,
+            root_appeal_rounds=parent_appeals,
         )
 
     validate_message_allocations(
-        [
-            _allocation(
-                on_acceptance=True,
-                budget=min_primary * 2,
-                fee_params=fee_params,
-            )
-        ],
-        total_message_fees=min_primary * 2,
+        [_allocation(budget=required, fee_params=fee_params)],
+        total_message_fees=required,
+        root_appeal_rounds=parent_appeals,
     )
 
 
@@ -2871,6 +2919,7 @@ def test_message_allocations_do_not_multiply_on_finalization_budget():
             )
         ],
         total_message_fees=min_primary,
+        root_appeal_rounds=3,
     )
 
 
@@ -2881,7 +2930,74 @@ def test_message_allocations_reject_parent_budget_below_child_sum_plus_minimum()
     ]
 
     with pytest.raises(AllocationTreeBudgetInconsistent):
-        validate_message_allocations(allocations, total_message_fees=100)
+        validate_message_allocations(
+            allocations, total_message_fees=100, root_appeal_rounds=0
+        )
+
+
+@pytest.mark.parametrize(
+    "underfunded_budget,expected_error",
+    [
+        (360, AllocationLifecycleBudgetInsufficient),
+        (1_439, AllocationTreeBudgetInconsistent),
+    ],
+)
+def test_message_allocations_multiply_direct_child_budget_by_parent_appeals(
+    underfunded_budget, expected_error
+):
+    fee_params = _encode_internal_fee_params(
+        leader_timeunits=30, validator_timeunits=30
+    )
+    primary = min_message_primary_fees(decode_internal_message_fee_params(fee_params))
+    assert primary == 180
+    child_budget = 180
+    one_emission = primary + child_budget
+    allocations = [
+        _allocation(budget=underfunded_budget, fee_params=fee_params),
+        _allocation(parent_index=0, budget=child_budget, fee_params=fee_params),
+    ]
+
+    with pytest.raises(expected_error):
+        validate_message_allocations(
+            allocations,
+            total_message_fees=underfunded_budget,
+            root_appeal_rounds=3,
+        )
+
+    allocations[0]["budget"] = one_emission * 4
+    validate_message_allocations(
+        allocations,
+        total_message_fees=one_emission * 4,
+        root_appeal_rounds=3,
+    )
+
+
+def test_message_allocations_nested_parent_appeals_price_grandchild():
+    parent_fee_params = _encode_internal_fee_params(appeals=2)
+    parent_primary = min_message_primary_fees(
+        decode_internal_message_fee_params(parent_fee_params)
+    )
+    grandchild_budget = 55 * 3
+    allocations = [
+        _allocation(
+            budget=parent_primary + grandchild_budget, fee_params=parent_fee_params
+        ),
+        _allocation(parent_index=0, budget=grandchild_budget),
+    ]
+
+    validate_message_allocations(
+        allocations,
+        total_message_fees=parent_primary + grandchild_budget,
+        root_appeal_rounds=0,
+    )
+
+    allocations[1]["budget"] -= 1
+    with pytest.raises(AllocationLifecycleBudgetInsufficient):
+        validate_message_allocations(
+            allocations,
+            total_message_fees=parent_primary + grandchild_budget,
+            root_appeal_rounds=0,
+        )
 
 
 def test_message_allocations_reject_duplicate_root_internal_keys():
@@ -2891,7 +3007,9 @@ def test_message_allocations_reject_duplicate_root_internal_keys():
     ]
 
     with pytest.raises(AllocationDuplicateKey):
-        validate_message_allocations(allocations, total_message_fees=110)
+        validate_message_allocations(
+            allocations, total_message_fees=110, root_appeal_rounds=0
+        )
 
 
 def test_message_allocations_reject_duplicate_normalized_root_internal_keys():
@@ -2901,7 +3019,9 @@ def test_message_allocations_reject_duplicate_normalized_root_internal_keys():
     ]
 
     with pytest.raises(AllocationDuplicateKey):
-        validate_message_allocations(allocations, total_message_fees=110)
+        validate_message_allocations(
+            allocations, total_message_fees=110, root_appeal_rounds=0
+        )
 
 
 def test_message_allocations_reject_duplicate_sibling_keys():
@@ -2912,7 +3032,9 @@ def test_message_allocations_reject_duplicate_sibling_keys():
     ]
 
     with pytest.raises(AllocationDuplicateKey):
-        validate_message_allocations(allocations, total_message_fees=200)
+        validate_message_allocations(
+            allocations, total_message_fees=200, root_appeal_rounds=0
+        )
 
 
 def test_message_allocations_reject_depth_above_default_cap():
@@ -2926,7 +3048,9 @@ def test_message_allocations_reject_depth_above_default_cap():
     ]
 
     with pytest.raises(AllocationTreeTooDeep):
-        validate_message_allocations(allocations, total_message_fees=330)
+        validate_message_allocations(
+            allocations, total_message_fees=330, root_appeal_rounds=0
+        )
 
 
 def test_internal_allocation_defers_zero_price_cap_rejection_until_reveal():
@@ -2937,7 +3061,9 @@ def test_internal_allocation_defers_zero_price_cap_rejection_until_reveal():
     )
     allocation = _allocation(budget=55, fee_params=fee_params)
 
-    validate_message_allocations([allocation], total_message_fees=55)
+    validate_message_allocations(
+        [allocation], total_message_fees=55, root_appeal_rounds=0
+    )
     accounting = create_fee_accounting(
         fees_distribution=_fees_distribution(total_message_fees=55),
         message_allocations=[allocation],
@@ -2970,7 +3096,9 @@ def test_message_allocations_accept_valid_external_allocation():
         fee_params=_encode_external_fee_params(gas_limit=21_000, max_gas_price=10),
     )
 
-    validate_message_allocations([allocation], total_message_fees=210_000)
+    validate_message_allocations(
+        [allocation], total_message_fees=210_000, root_appeal_rounds=0
+    )
 
 
 def test_message_allocations_reject_invalid_external_allocation():
@@ -2982,7 +3110,9 @@ def test_message_allocations_reject_invalid_external_allocation():
     )
 
     with pytest.raises(ExternalAllocationInvalid):
-        validate_message_allocations([allocation], total_message_fees=210_001)
+        validate_message_allocations(
+            [allocation], total_message_fees=210_001, root_appeal_rounds=0
+        )
 
 
 def test_message_allocations_reject_external_allocation_invariants():
@@ -2999,6 +3129,7 @@ def test_message_allocations_reject_external_allocation_invariants():
                 )
             ],
             total_message_fees=210_000,
+            root_appeal_rounds=0,
         )
 
     with pytest.raises(ExternalAllocationInvalid):
@@ -3014,6 +3145,7 @@ def test_message_allocations_reject_external_allocation_invariants():
                 )
             ],
             total_message_fees=210_000,
+            root_appeal_rounds=0,
         )
 
     with pytest.raises(ExternalAllocationInvalid):
@@ -3026,12 +3158,14 @@ def test_message_allocations_reject_external_allocation_invariants():
                 )
             ],
             total_message_fees=0,
+            root_appeal_rounds=0,
         )
 
     with pytest.raises(InvalidFeeParams):
         validate_message_allocations(
             [_allocation(message_type=0, budget=210_000, fee_params=b"\x01")],
             total_message_fees=210_000,
+            root_appeal_rounds=0,
         )
 
     with pytest.raises(ExternalAllocationInvalid):
@@ -3049,6 +3183,7 @@ def test_message_allocations_reject_external_allocation_invariants():
                 ),
             ],
             total_message_fees=420_000,
+            root_appeal_rounds=0,
         )
 
     with pytest.raises(ExternalAllocationInvalid):
@@ -3068,6 +3203,7 @@ def test_message_allocations_reject_external_allocation_invariants():
                 ),
             ],
             total_message_fees=420_000,
+            root_appeal_rounds=0,
         )
 
     with pytest.raises(AllocationTreeMalformed):
@@ -3081,6 +3217,7 @@ def test_message_allocations_reject_external_allocation_invariants():
                 )
             ],
             total_message_fees=210_000,
+            root_appeal_rounds=0,
         )
 
     with pytest.raises(AllocationTreeMalformed):
@@ -3099,6 +3236,7 @@ def test_message_allocations_reject_external_allocation_invariants():
                 ),
             ],
             total_message_fees=210_000,
+            root_appeal_rounds=0,
         )
 
 
@@ -3113,7 +3251,9 @@ def test_message_allocations_reject_external_on_acceptance():
     with pytest.raises(
         ExternalAllocationInvalid, match="ExternalOnAcceptanceNotSupported"
     ):
-        validate_message_allocations([allocation], total_message_fees=210_000)
+        validate_message_allocations(
+            [allocation], total_message_fees=210_000, root_appeal_rounds=0
+        )
 
 
 def test_message_allocations_enforce_external_gas_limit_floor():
@@ -3129,6 +3269,7 @@ def test_message_allocations_enforce_external_gas_limit_floor():
             [allocation],
             total_message_fees=209_990,
             policy=StudioFeePolicy(min_external_gas_limit=21_000),
+            root_appeal_rounds=0,
         )
 
 
@@ -3141,6 +3282,21 @@ def test_transaction_fee_validation_runs_message_allocation_checks():
             message_allocations=[_allocation(budget=55)],
             num_of_validators=5,
             submitted_value=1156,
+            user_value=0,
+        )
+
+
+def test_transaction_fee_validation_uses_root_parent_appeals():
+    fees_distribution = _fees_distribution(
+        appeals=3, rotations=[0, 0, 0, 0], total_message_fees=55
+    )
+
+    with pytest.raises(AllocationLifecycleBudgetInsufficient):
+        validate_transaction_fee_deposit(
+            fees_distribution=fees_distribution,
+            message_allocations=[_allocation(budget=55)],
+            num_of_validators=5,
+            submitted_value=required_fee_deposit(fees_distribution, 5),
             user_value=0,
         )
 
@@ -7504,6 +7660,38 @@ def test_fill_message_fee_payload_uses_per_occurrence_budget_for_shared_allocati
     assert updated["allocation_consumed"] == {"0": 110}
 
 
+def test_fill_message_fee_payload_uses_one_child_primary_with_child_appeals():
+    fee_params = _encode_internal_fee_params(appeals=2)
+    child_primary = min_message_primary_fees(
+        decode_internal_message_fee_params(fee_params)
+    )
+    recipient = "0x2222222222222222222222222222222222222222"
+    fees_distribution = _fees_distribution(total_message_fees=child_primary)
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        message_allocations=[
+            _allocation(
+                recipient=recipient, budget=child_primary, fee_params=fee_params
+            )
+        ],
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5),
+        user_value=0,
+    )
+
+    message = fill_message_fee_payload_from_allocation(
+        accounting,
+        {
+            "messageType": 1,
+            "recipient": recipient,
+            "onAcceptance": True,
+            "declaredBudget": 0,
+            "callKey": CALL_KEY_WILDCARD,
+        },
+    )
+    assert message["declaredBudget"] == child_primary
+
+
 def test_flat_array_message_fee_payload_ignores_mismatched_receipt_subtree():
     fee_params = _encode_internal_fee_params()
     child_fee_params = _encode_internal_fee_params(leader_timeunits=6)
@@ -9768,6 +9956,54 @@ def test_create_child_fee_accounting_installs_child_allocation_subtree():
 
     assert updated["message_fee_consumed"] == 55
     assert updated["allocation_consumed"] == {"0": 55}
+
+
+def test_create_child_fee_accounting_uses_child_appeals_for_its_root_subtree():
+    child_fee_params = _encode_internal_fee_params(appeals=2)
+    child_primary = min_message_primary_fees(
+        decode_internal_message_fee_params(child_fee_params)
+    )
+    recipient = "0x3333333333333333333333333333333333333333"
+    message = {
+        "messageType": 1,
+        "recipient": recipient,
+        "value": 0,
+        "onAcceptance": True,
+        "feeParams": child_fee_params,
+        "declaredBudget": child_primary + 55,
+        "callKey": EMPTY_CALL_KEY,
+    }
+    allocations = [
+        _allocation(
+            recipient=recipient,
+            call_key=EMPTY_CALL_KEY,
+            budget=child_primary + 55,
+            fee_params=child_fee_params,
+        ),
+        _allocation(parent_index=0, budget=55),
+    ]
+    sender = "0x1111111111111111111111111111111111111111"
+
+    with pytest.raises(AllocationLifecycleBudgetInsufficient):
+        create_child_fee_accounting(
+            message=message,
+            parent_fees_distribution=_fees_distribution(),
+            message_allocations=allocations,
+            sender=sender,
+        )
+
+    grandchild_budget = 55 * 3
+    message["declaredBudget"] = child_primary + grandchild_budget
+    allocations[0]["budget"] = child_primary + grandchild_budget
+    allocations[1]["budget"] = grandchild_budget
+    child_fees, child_accounting = create_child_fee_accounting(
+        message=message,
+        parent_fees_distribution=_fees_distribution(),
+        message_allocations=allocations,
+        sender=sender,
+    )
+    assert child_fees["totalMessageFees"] == grandchild_budget
+    assert child_accounting["message_fee_budget"] == grandchild_budget
 
 
 def test_create_child_fee_accounting_does_not_traverse_encoded_allocation_subtree():
