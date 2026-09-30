@@ -1,8 +1,6 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { deployments, ethers } = require("hardhat");
 const { ZeroAddress } = ethers;
-const fs = require("fs-extra");
-const path = require("path");
 
 describe("Deploy Script", function () {
     let contracts = {};
@@ -29,26 +27,12 @@ describe("Deploy Script", function () {
     ];
 
     before(async function () {
+        await deployments.fixture();
         [owner, validator1, validator2, validator3, validator4, validator5] = await ethers.getSigners();
 
-        // Load contracts from deployment files
-        console.log("Loading contracts from deployment files...");
-        const deployPath = path.join('./deployments/localhost');
-
-        // Verify that directory exists
-        if (!await fs.pathExists(deployPath)) {
-            throw new Error(`Deployment directory not found: ${deployPath}. Run deploy.js script first.`);
-        }
-
-        // Load each contract from its deployment file
+        console.log("Loading contracts from the deployment fixture...");
         for (const contractName of expectedContracts) {
-            const deployFilePath = path.join(deployPath, `${contractName}.json`);
-
-            if (!await fs.pathExists(deployFilePath)) {
-                throw new Error(`Deployment file not found for ${contractName}: ${deployFilePath}`);
-            }
-
-            const deployData = await fs.readJson(deployFilePath);
+            const deployData = await deployments.get(contractName);
 
             // Create contract instance using address and ABI
             contracts[contractName] = await ethers.getContractAt(
@@ -56,29 +40,17 @@ describe("Deploy Script", function () {
                 deployData.address
             );
 
-            console.log(`Loaded ${contractName} from ${deployFilePath}`);
+            console.log(`Loaded ${contractName} from the deployment registry`);
         }
     });
 
-    describe("Deployment Files Verification", function() {
-        it("should have all contracts in directories", async function() {
-            console.log("\n[Test] Verifying contract files in directories...");
-
-            const deployPath = path.join('./deployments/localhost');
-
+    describe("Deployment Registry Verification", function() {
+        it("should register every deployed contract", async function() {
+            console.log("\n[Test] Verifying deployment registry entries...");
             for (const contractName of expectedContracts) {
-                // Verify in deployments
-                const deployContractPath = path.join(deployPath, `${contractName}.json`);
-                expect(
-                    await fs.pathExists(deployContractPath),
-                    `${contractName} should exist in deployments directory`
-                ).to.be.true;
-
-                // Verify that the files are valid and match
-                const deployData = JSON.parse(await fs.readFile(deployContractPath, 'utf8'));
-
+                const deployData = await deployments.get(contractName);
                 const contractAddress = await contracts[contractName].getAddress();
-                expect(deployData.address, `${contractName} should have valid address in deployments`)
+                expect(deployData.address, `${contractName} should have a registered deployment`)
                     .to.equal(contractAddress);
 
                 console.log(`[Test] ✓ ${contractName} verified`);
@@ -107,6 +79,30 @@ describe("Deploy Script", function () {
             const consensusManagerAddress = await contracts.ConsensusManager.getAddress();
             const mainContracts = await contracts.ConsensusMain.contracts();
             expect(mainContracts.genManager).to.equal(consensusManagerAddress);
+        });
+
+        it("should reject overflowing fee-aware calldata offsets with the protocol error", async function() {
+            const tupleOffset = ethers.zeroPadValue(ethers.toBeHex(32), 32).slice(2);
+            const words = Array(10).fill("0".repeat(64));
+            words[8] = "f".repeat(64);
+            const data = `0x35a251fb${tupleOffset}${words.join("")}`;
+
+            let error;
+            try {
+                await owner.call({
+                    to: await contracts.ConsensusMain.getAddress(),
+                    data,
+                });
+            } catch (caught) {
+                error = caught;
+            }
+
+            expect(error).to.not.equal(undefined);
+            expect(error.data).to.equal(
+                contracts.ConsensusMain.interface.getError(
+                    "InvalidFeeAwareTransactionEncoding"
+                ).selector
+            );
         });
 
         it("should have initialized Transactions with all its dependencies", async function() {

@@ -1,10 +1,11 @@
-# v0.1.0
-# { "Depends": "py-genlayer:test" }
+# v0.3.0
+# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
 
-from genlayer import *
+import genlayer as gl
+from genlayer.types import *
 
 
-class MultiTentantStorage(gl.Contract):
+class MultiTentantStorage(gl.contract.Contract):
     """
     Same functionality as UserStorage, but implemented with multiple storage contracts.
     Each user is assigned to a storage contract, and all storage contracts are managed by this same contract.
@@ -12,9 +13,9 @@ class MultiTentantStorage(gl.Contract):
     This is done to test contract calls between different contracts.
     """
 
-    all_storage_contracts: DynArray[Address]
-    available_storage_contracts: DynArray[Address]
-    mappings: TreeMap[
+    all_storage_contracts: gl.storage.DynArray[Address]
+    available_storage_contracts: gl.storage.DynArray[Address]
+    mappings: gl.storage.TreeMap[
         Address, Address
     ]  # mapping of user address to storage contract address
 
@@ -30,7 +31,7 @@ class MultiTentantStorage(gl.Contract):
     @gl.public.view
     def get_all_storages(self) -> dict[str, str]:
         return {
-            storage_contract.as_hex: gl.get_contract_at(storage_contract)
+            storage_contract.as_hex: gl.contract.get_at(storage_contract)
             .view()
             .get_storage()
             for storage_contract in self.all_storage_contracts
@@ -46,4 +47,4 @@ class MultiTentantStorage(gl.Contract):
             self.available_storage_contracts.pop()
 
         contract_to_use = self.mappings[gl.message.sender_address]
-        gl.get_contract_at(contract_to_use).emit().update_storage(new_storage)
+        gl.contract.get_at(contract_to_use).emit().update_storage(new_storage)

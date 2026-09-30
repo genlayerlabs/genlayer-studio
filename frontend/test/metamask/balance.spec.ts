@@ -42,7 +42,7 @@ async function rpcFundAccount(
     body: JSON.stringify({
       jsonrpc: '2.0',
       method: 'sim_fundAccount',
-      params: { account_address: address, amount: Number(amountWei) },
+      params: { account_address: address, amount: amountWei.toString() },
       id: 1,
     }),
   });

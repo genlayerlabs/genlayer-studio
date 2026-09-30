@@ -1,5 +1,9 @@
-from backend.consensus.vrf import get_validators_for_transaction
 from unittest.mock import Mock
+
+import pytest
+
+from backend.consensus.errors import NoValidatorsAvailableError
+from backend.consensus.vrf import get_validators_for_transaction
 
 
 def list_of_dicts_to_set(list_of_dicts: list[dict]) -> set:
@@ -66,3 +70,27 @@ def test_get_validators_for_transaction_3():
 
     rng.choice.assert_called_once()
     assert validators == [{"stake": 3}, {"stake": 2}, {"stake": 1}]
+
+
+def test_get_validators_for_transaction_rejects_non_positive_total_stake():
+    nodes = [{"stake": 0}, {"stake": 0}, {"stake": 0}]
+
+    with pytest.raises(NoValidatorsAvailableError, match="must be positive"):
+        get_validators_for_transaction(nodes, 2)
+
+
+def test_get_validators_for_transaction_creates_rng_per_call(monkeypatch):
+    nodes = [{"stake": 1}, {"stake": 2}]
+    first_rng = Mock()
+    second_rng = Mock()
+    first_rng.choice.return_value = [nodes[0]]
+    second_rng.choice.return_value = [nodes[1]]
+    default_rng = Mock(side_effect=[first_rng, second_rng])
+    monkeypatch.setattr("backend.consensus.vrf.np.random.default_rng", default_rng)
+
+    assert get_validators_for_transaction(nodes, 1) == [nodes[0]]
+    assert get_validators_for_transaction(nodes, 1) == [nodes[1]]
+
+    assert default_rng.call_count == 2
+    first_rng.choice.assert_called_once()
+    second_rng.choice.assert_called_once()

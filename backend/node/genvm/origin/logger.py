@@ -1,4 +1,5 @@
 import abc
+import collections.abc
 import json
 import sys
 import traceback
@@ -27,9 +28,6 @@ class Logger(metaclass=abc.ABCMeta):
         return _WithKeysLogger(self, keys)
 
 
-import collections.abc
-
-
 def _log_unwrap(x, seen: set[int]):
     if isinstance(x, bytes):
         return x.hex()
@@ -38,13 +36,12 @@ def _log_unwrap(x, seen: set[int]):
     if isinstance(x, (str, int, float, bool)):
         return x
     if isinstance(x, BaseException):
-        tb = traceback.format_exception(x)
         return _log_unwrap(
             {
                 "message": x.args[0] if len(x.args) == 1 else x.args,
                 "type": x.__class__.__name__,
                 "notes": getattr(x, "__notes__", []),
-                "traceback": tb,
+                "traceback": traceback.format_exception(x),
             },
             seen,
         )
@@ -53,11 +50,13 @@ def _log_unwrap(x, seen: set[int]):
         return f"<{x_id}>"
     seen.add(x_id)
     if isinstance(x, dict):
-        return {k: _log_unwrap(v, seen) for k, v in x.items()}
-    if isinstance(x, collections.abc.Sequence):
-        return [_log_unwrap(v, seen) for v in x]
+        res = {k: _log_unwrap(v, seen) for k, v in x.items()}
+    elif isinstance(x, collections.abc.Sequence):
+        res = [_log_unwrap(v, seen) for v in x]
+    else:
+        res = repr(x)
     seen.remove(x_id)
-    return repr(x)
+    return res
 
 
 class _WithKeysLogger(Logger):

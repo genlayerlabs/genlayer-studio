@@ -1,4 +1,4 @@
-import { JsonRpcService } from '@/services/JsonRpcService';
+import { JsonRpcService, JsonRpcServiceError } from '@/services/JsonRpcService';
 import type { IJsonRpcService } from '@/services/IJsonRpcService';
 import type { IRpcClient } from '@/clients/rpc';
 import type { GetContractStateResult, JsonRPCResponse } from '@/types';
@@ -111,6 +111,28 @@ describe('JsonRprService', () => {
       await expect(jsonRpcService.cancelTransaction(txHash)).rejects.toThrow(
         'Cannot cancel',
       );
+    });
+
+    it('should preserve the JSON-RPC code and data on errors', async () => {
+      vi.spyOn(rpcClient, 'call').mockImplementationOnce(() =>
+        Promise.resolve({
+          result: null,
+          error: {
+            code: -32000,
+            message: 'execution failed',
+            data: { receipt: { status: 'ERROR' } },
+          },
+        }),
+      );
+
+      const error = await jsonRpcService
+        .cancelTransaction(txHash)
+        .catch((value) => value);
+      expect(error).toBeInstanceOf(JsonRpcServiceError);
+      expect(error).toMatchObject({
+        code: -32000,
+        data: { receipt: { status: 'ERROR' } },
+      });
     });
   });
 });

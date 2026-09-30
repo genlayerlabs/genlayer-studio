@@ -1,0 +1,10 @@
+{
+  "provider": "llm-router",
+  "plugin": "openai-compatible",
+  "model": "policy:auto",
+  "config": {},
+  "plugin_config": {
+    "api_key_env_var": "LLM_ROUTER_API_KEY",
+    "api_url": "https://internal-router.genlayer.com"
+  }
+}

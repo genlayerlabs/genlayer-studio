@@ -1,10 +1,11 @@
-# v0.1.0
-# { "Depends": "py-genlayer:test" }
+# v0.3.0
+# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
 
-from genlayer import *
+import genlayer as gl
+from genlayer.types import *
 
 
-class read_erc20(gl.Contract):
+class read_erc20(gl.contract.Contract):
     token_contract: Address
 
     def __init__(self, token_contract: str):
@@ -13,7 +14,7 @@ class read_erc20(gl.Contract):
     @gl.public.view
     def get_balance_of(self, account_address: str) -> int:
         return (
-            gl.get_contract_at(self.token_contract)
+            gl.contract.get_at(self.token_contract)
             .view()
             .get_balance_of(account_address)
         )

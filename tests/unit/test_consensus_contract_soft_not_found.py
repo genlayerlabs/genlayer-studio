@@ -39,6 +39,22 @@ def test_get_contract_raises_NotFoundError_when_load_contract_returns_None():
     consensus_service.load_contract.assert_called_once_with("Queues")
 
 
+def test_get_contract_keeps_shadow_consensus_main_address_private():
+    consensus_service = MagicMock()
+    consensus_service.load_contract.return_value = {
+        "address": "0x" + "3" * 40,
+        "abi": [],
+        "bytecode": "0x",
+    }
+    consensus_service.public_consensus_main_address.return_value = (
+        "0xb7278A61aa25c888815aFC32Ad3cC52fF24fE575"
+    )
+
+    result = endpoints.get_contract(consensus_service, "ConsensusMain")
+
+    assert result["address"] == "0xb7278A61aa25c888815aFC32Ad3cC52fF24fE575"
+
+
 def test_consensus_service_load_contract_returns_None_when_deployment_missing(
     monkeypatch,
 ):

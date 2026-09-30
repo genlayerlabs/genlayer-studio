@@ -1,27 +1,140 @@
-FROM ubuntu:24.04 AS base
+FROM ubuntu:24.04 AS genvm-runner-pin
 
-ARG TARGETPLATFORM
+SHELL ["/bin/bash", "-c"]
+
+# Collapse all contract/test inputs to the unique py-genlayer pin list. The
+# acquisition stage copies only this normalized output, so unrelated source
+# changes do not invalidate the large GenVM layer.
+RUN set -euo pipefail ; \
+    mkdir -p /studio/backend /studio/examples /studio/tests /genvm-pin ; \
+    touch -d '@0' /studio/backend /studio/examples /studio/tests /studio /genvm-pin
+RUN --mount=type=bind,source=backend,target=/studio/backend,ro \
+    --mount=type=bind,source=examples,target=/studio/examples,ro \
+    --mount=type=bind,source=tests,target=/studio/tests,ro \
+    set -euo pipefail ; \
+    { grep -rhoE 'py-genlayer:[a-z0-9]+' \
+        /studio/backend /studio/examples /studio/tests 2>/dev/null \
+        | sed 's/^py-genlayer://' | sort -u || true ; \
+    } > /genvm-pin/py-genlayer-pins ; \
+    touch -d '@0' /genvm-pin /genvm-pin/py-genlayer-pins
+
+FROM nixos/nix:2.30.2 AS genvm-source-build
+
 ARG TARGETARCH
+ARG GENVM_SOURCE_MODE=""
+ARG GENVM_TAG=""
+ARG GENVM_REF=""
+ARG GENVM_EXECUTOR_VERSION_NAME=""
+# Nix `cores` for the GenVM build (0 = all). Cap on memory-constrained or
+# emulated builders where a full-parallel Rust build can OOM.
+ARG GENVM_BUILD_CORES=0
 
-ARG GENVM_TAG=v0.2.16
+# nixos/nix ships bash only inside the default nix profile (no /bin/bash).
+SHELL ["/nix/var/nix/profiles/default/bin/bash", "-x", "-c"]
+
+# CI or scripts/prepare-genvm-source-build.sh exports genvm-manager's
+# `runners-all` closure here from a sandboxed Nix.
+COPY .genvm-nix-closure/ /genvm-nix-closure/
+COPY docker/genvm-source-build.nix.conf /genvm-source-build.nix.conf
+COPY third_party/genvm/version /genvm-default-version
+
+# Source builds bind Studio to a genvm-manager branch/SHA. The flake target
+# follows TARGETARCH (amd64-linux / arm64-linux); runners are included by
+# genvm-manager's combined genvm package.
+#
+# The cache this build substitutes from is private, so the fetch needs a
+# credential. `/etc/nix/netrc` is nix's default netrc-file, so mounting there
+# means nothing has to point at it. The mount is torn down when the RUN ends and
+# never reaches a layer — which is why it is a secret and not an ARG or a COPY.
+# `required=false`: a build without the secret gets no credential, fetches
+# nothing from the cache, and builds from source instead of failing.
+RUN --mount=type=secret,id=nix_netrc,target=/etc/nix/netrc,required=false \
+    set -euo pipefail ; \
+    effective_ref="$GENVM_REF" ; \
+    if [[ -z "$GENVM_TAG" && -z "$effective_ref" ]]; then \
+        effective_ref="$(< /genvm-default-version)" ; \
+    fi ; \
+    if [[ -n "$GENVM_TAG" && -n "$effective_ref" ]]; then \
+        echo "ERROR: GENVM_TAG and GENVM_REF are mutually exclusive" ; exit 1 ; \
+    fi ; \
+    source_selected=0 ; \
+    if [[ "$GENVM_SOURCE_MODE" == "source" || ( -z "$GENVM_SOURCE_MODE" && "$effective_ref" =~ ^.+:[0-9a-fA-F]{7,40}$ ) ]]; then \
+        source_selected=1 ; \
+    fi ; \
+    if [[ "$source_selected" == "1" ]]; then \
+        if [[ -z "$effective_ref" ]]; then \
+            echo "ERROR: GENVM_SOURCE_MODE=source requires GENVM_REF" ; exit 1 ; \
+        fi ; \
+        SOURCE_REF="$effective_ref" ; \
+        if [[ "$SOURCE_REF" =~ ^.+:([0-9a-fA-F]{7,40})$ ]]; then \
+            SOURCE_REF="${BASH_REMATCH[1]}" ; \
+        fi ; \
+        # The runner tree is built from fixed-output derivations that compile C
+        # to wasm; without a sandbox they pick up host state and miss their
+        # pinned hashes. Import the closure built under a real sandbox so they
+        # are not rebuilt here.
+        CLOSURE_FILE="/genvm-nix-closure/runners-all-$SOURCE_REF.nar.gz" ; \
+        if [[ ! -f "$CLOSURE_FILE" ]]; then \
+            echo "ERROR: GenVM source builds require the sandboxed runners closure; run ./scripts/prepare-genvm-source-build.sh before building" ; exit 1 ; \
+        fi ; \
+        gzip -dc "$CLOSURE_FILE" | nix-store --import > /dev/null ; \
+        cat /genvm-source-build.nix.conf >> /etc/nix/nix.conf ; \
+        printf 'cores = %s\n' "$GENVM_BUILD_CORES" >> /etc/nix/nix.conf ; \
+        git clone --recurse-submodules https://github.com/genlayerlabs/genvm-manager /src/genvm ; \
+        cd /src/genvm ; \
+        git checkout "$SOURCE_REF" ; \
+        git submodule update --init --recursive ; \
+        if [[ "$TARGETARCH" == "amd64" ]] || [[ -z "$TARGETARCH" ]]; then \
+            GT="amd64-linux" ; \
+        elif [[ "$TARGETARCH" == "arm64" ]]; then \
+            GT="arm64-linux" ; \
+        else \
+            echo "ERROR: Unsupported TARGETARCH $TARGETARCH" ; exit 1 ; \
+        fi ; \
+        nix build -o /out-genvm ".?submodules=1#genvm-$GT" ; \
+        mkdir -p /genvm-out ; \
+        cp -rL --no-preserve=ownership /out-genvm/. /genvm-out/ ; \
+        # Preserve executable modes while allowing post-install finalization.
+        chmod -R u+w /genvm-out ; \
+        # Keep source and Nix build artifacts out of the exported runtime layer.
+        rm -f /out-genvm ; \
+        rm -rf /src/genvm ; \
+        nix-collect-garbage -d || true ; \
+    else \
+        mkdir -p /genvm-out ; \
+    fi
+
+# jsonrpc and consensus-worker intentionally share this exact parent. In E2E,
+# Compose builds both targets in one BuildKit graph, so GenVM is acquired once.
+# Their ECR manifests then reference the same large content-addressed layers.
+FROM ubuntu:24.04 AS genvm-runtime
+
+ARG TARGETARCH
+ARG GENVM_TAG=""
+ARG GENVM_REF=""
+ARG GENVM_SOURCE_MODE=""
+ARG GENVM_EXECUTOR_VERSION_NAME=""
 
 ENV GENVM_TAG=$GENVM_TAG
+ENV GENVM_REF=$GENVM_REF
+ENV GENVM_EXECUTOR_VERSION_NAME=$GENVM_EXECUTOR_VERSION_NAME
 
 ARG path=/app
+ARG STUDIO_UID=999
+ARG STUDIO_GID=999
 WORKDIR $path
 
 SHELL ["/bin/bash", "-x", "-c"]
-# Retry apt-get update — Ubuntu mirrors occasionally serve out-of-sync
-# Packages.gz files mid-rotation, which causes "File has unexpected size"
-# errors that persist for a few minutes. Retrying smooths over these.
+# Ubuntu mirrors occasionally rotate indexes mid-request. Retry the index fetch
+# before treating a transient mirror mismatch as a failed image build.
 RUN for i in 1 2 3 4 5; do \
         apt-get update -y && break; \
         echo "apt-get update failed (attempt $i/5), retrying in 15s..."; \
         sleep 15; \
     done \
     && DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install -y --no-install-recommends \
-        curl unzip xz-utils ca-certificates python3.12 python3.12-venv python3-dev gcc libssl3 \
-        musl musl-dev \
+        curl unzip xz-utils ca-certificates python3.12 python3.12-venv python3.12-dev \
+        gcc libssl3 musl musl-dev \
     && mkdir -p "$HOME/.config/pip/" \
     && printf "[global]\nbreak-system-packages = true\n" >> "$HOME/.config/pip/pip.conf" \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 2 \
@@ -30,77 +143,187 @@ RUN for i in 1 2 3 4 5; do \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# Both old images used the first system UID/GID allocated on the same Ubuntu
+# base (999). Make that contract explicit so existing cache-volume ownership is
+# preserved while both final targets can consume the same GenVM layer.
+RUN groupadd --system --gid "$STUDIO_GID" studio-group \
+    && useradd --system --uid "$STUDIO_UID" --gid studio-group \
+        --home-dir /home/studio-user --create-home --shell /bin/bash studio-user \
+    && mkdir -p /home/studio-user/.cache/huggingface /genvm /genvm-cache \
+    && chown -R studio-user:studio-group /home/studio-user /genvm /genvm-cache
+
+ENV PYTHONPATH=$path
+ENV HUGGINGFACE_HUB_CACHE=/home/studio-user/.cache/huggingface
+ENV RUST_BACKTRACE=1
+
+# Acquire GenVM from an E2E prebuilt tree, a source build, or (by default) a
+# genvm-manager release. This is the only acquisition/finalization path used by
+# either backend service.
+COPY --from=genvm-source-build /genvm-out/ /genvm/
+COPY .e2e-genvm-prebuilt/ /genvm-prebuilt/
+COPY third_party/genvm/version /genvm-default-version
+COPY docker/scripts/download_genvm.sh /usr/local/bin/download-genvm
+COPY --from=genvm-runner-pin /genvm-pin/py-genlayer-pins /genvm-runner-pins
+RUN set -euo pipefail ; \
+    effective_ref="$GENVM_REF" ; \
+    release_version="$GENVM_TAG" ; \
+    default_binding="$(< /genvm-default-version)" ; \
+    if [[ -z "$release_version" && -z "$effective_ref" ]]; then \
+        if [[ "$default_binding" =~ ^.+:[0-9a-fA-F]{7,40}$ ]]; then \
+            effective_ref="$default_binding" ; \
+        else \
+            release_version="$default_binding" ; \
+        fi ; \
+    fi ; \
+    if [[ -n "$release_version" && -n "$effective_ref" ]]; then \
+        echo "ERROR: GENVM_TAG and GENVM_REF are mutually exclusive" ; exit 1 ; \
+    fi ; \
+    case "$GENVM_SOURCE_MODE" in \
+        ""|prebuilt|release|source) ;; \
+        *) echo "ERROR: GENVM_SOURCE_MODE must be prebuilt, release, source, or empty (auto)" ; exit 1 ;; \
+    esac ; \
+    mode="$GENVM_SOURCE_MODE" ; \
+    if [[ -z "$mode" ]]; then \
+        if [[ -x /genvm-prebuilt/bin/genvm-modules ]]; then \
+            mode=prebuilt ; \
+        elif [[ "$effective_ref" =~ ^.+:[0-9a-fA-F]{7,40}$ ]]; then \
+            mode=source ; \
+        else \
+            mode=release ; \
+        fi ; \
+    fi ; \
+    if [[ "$mode" == "prebuilt" ]]; then \
+        if [[ ! -x /genvm-prebuilt/bin/genvm-modules ]]; then \
+            echo "ERROR: GENVM_SOURCE_MODE=prebuilt requires an executable /genvm-prebuilt/bin/genvm-modules; rebuild the E2E GenVM tree and include it in .e2e-genvm-prebuilt/" ; exit 1 ; \
+        fi ; \
+        echo "Using prebuilt GenVM runtime from build context" ; \
+        find /genvm -mindepth 1 -maxdepth 1 -exec rm -rf {} + ; \
+        cp -a /genvm-prebuilt/. /genvm/ ; \
+        rm -f /genvm/.gitkeep ; \
+    elif [[ "$mode" == "source" ]]; then \
+        if [[ -z "$effective_ref" ]]; then \
+            echo "ERROR: source mode requires GENVM_REF (a git ref/SHA or <branch>:<commit>)" ; exit 1 ; \
+        fi ; \
+        if [[ ! -x /genvm/bin/genvm-modules ]]; then \
+            echo "ERROR: the GenVM source stage did not produce /genvm/bin/genvm-modules" ; exit 1 ; \
+        fi ; \
+        printf '%s\n' "$effective_ref" > /genvm/version ; \
+        echo "Using GenVM built from source at $effective_ref" ; \
+    else \
+        if [[ -n "$effective_ref" ]]; then \
+            echo "ERROR: release mode does not accept GENVM_REF; use GENVM_SOURCE_MODE=source" ; exit 1 ; \
+        fi ; \
+        if [[ -z "$release_version" ]]; then \
+            echo "ERROR: release mode requires GENVM_TAG or a release tag in third_party/genvm/version" ; exit 1 ; \
+        fi ; \
+        release_arch="${TARGETARCH:-amd64}" ; \
+        /usr/local/bin/download-genvm linux "$release_arch" "$release_version" \
+            --out-dir /genvm --download-dir /tmp/genvm-download \
+            --runner-pins-file /genvm-runner-pins --precompile false ; \
+    fi ; \
+    chown -R studio-user:studio-group /genvm ; \
+    chmod -R u+w /genvm ; \
+    if [[ "$mode" != "release" ]]; then \
+        if [[ -x /genvm/bin/genvm-post-install ]]; then \
+            post_install=/genvm/bin/genvm-post-install ; \
+        elif [[ -f /genvm/bin/post-install.py ]]; then \
+            post_install=/genvm/bin/post-install.py ; \
+        else \
+            echo "ERROR: GenVM has neither bin/genvm-post-install nor bin/post-install.py" ; exit 1 ; \
+        fi ; \
+        post_install_args="--precompile false --default-download false" ; \
+        if [[ "$mode" == "source" ]]; then \
+            post_install_args="$post_install_args --bin-patch false" ; \
+        fi ; \
+        su - studio-user -c "$post_install $post_install_args" ; \
+    fi ; \
+    find /genvm -name genvm.yaml -exec sed -i 's|cache_dir:.*|cache_dir: /genvm-cache/|' {} + ; \
+    chown studio-user:studio-group /genvm-cache
+
+ENV GENVMROOT=/genvm
+ENV PATH="/genvm/bin:${PATH}"
+
+FROM genvm-runtime AS service-base
+
+ARG path=/app
+WORKDIR $path
+
 ADD backend/requirements.txt backend/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --cache-dir=/root/.cache/pip -r backend/requirements.txt
 
-RUN groupadd -r backend-group \
-    && useradd -r -g backend-group backend-user \
-    && mkdir -p /home/backend-user/.cache/huggingface \
-    && chown -R backend-user:backend-group /home/backend-user \
-    && chown -R backend-user:backend-group $path \
-    && mkdir -p /genvm
-
-ENV PYTHONPATH "${PYTHONPATH}:/${path}"
-ENV HUGGINGFACE_HUB_CACHE /home/backend-user/.cache/huggingface
-
-ENV RUST_BACKTRACE=1
-
-ADD \
-   https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-linux-amd64.tar.xz \
-   /genvm/genvm-linux-amd64.tar.xz
-
-ADD \
-   https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-linux-arm64.tar.xz \
-   /genvm/genvm-linux-arm64.tar.xz
-
-ADD \
-   https://github.com/genlayerlabs/genvm/releases/download/$GENVM_TAG/genvm-universal.tar.xz \
-   /genvm/genvm-universal.tar.xz
-
-# Extract and prepare GenVM binaries
-RUN cd /genvm \
-    && if [[ "$TARGETPLATFORM" == "linux/amd64" ]] ; \
-        then \
-            tar -xf genvm-linux-amd64.tar.xz ; \
-        elif [[ "$TARGETPLATFORM" == "linux/arm64" ]] ; \
-        then \
-            tar -xf genvm-linux-arm64.tar.xz ; \
-        else \
-            echo "Sorry, $TARGETPLATFORM is not supported yet" ; exit 1 ; \
-        fi \
-    && tar -xf genvm-universal.tar.xz \
-    && rm *.tar.xz \
-    && ls -R . \
-    && chown -R backend-user:backend-group /genvm \
-    && su - backend-user -c "/genvm/bin/post-install.py --precompile false" \
-    && find /genvm -name genvm.yaml -exec sed -i 's|cache_dir:.*|cache_dir: /genvm-cache/|' {} + \
-    && mkdir -p /genvm-cache && chown backend-user:backend-group /genvm-cache \
-    && cd "$path" \
-    && true
-
-# Set GenVM environment variables (GENVM_TAG is already set as ENV earlier)
-ENV GENVMROOT=/genvm
-ENV PATH="/genvm/bin:${PATH}"
-
 COPY backend $path/backend
+RUN chown -R studio-user:studio-group $path
+
+FROM service-base AS consensus-worker
+
+# The worker is the only service that needs the high-throughput manager tuning.
+RUN set -euo pipefail ; \
+    config_file=/genvm/config/genvm-manager.yaml ; \
+    if [[ -f "$config_file" ]]; then \
+        sed -i 's/^threads:.*/threads: 8/' "$config_file" ; \
+        sed -i 's/^blocking_threads:.*/blocking_threads: 48/' "$config_file" ; \
+        cat "$config_file" ; \
+    else \
+        echo "WARNING: $config_file not found; skipping GenVM manager thread configuration." ; \
+    fi ; \
+    groupmod --new-name worker-group studio-group ; \
+    usermod --login worker-user --home /home/worker-user --move-home studio-user
+
+COPY docker/entrypoint-consensus-worker.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh \
+    && chown 999:999 /entrypoint.sh
+
+ENV HUGGINGFACE_HUB_CACHE=/home/worker-user/.cache/huggingface
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=120s \
+    CMD curl -f http://localhost:${WORKER_PORT:-4001}/health || exit 1
+
+USER worker-user
+WORKDIR /app
+ENTRYPOINT ["/entrypoint.sh"]
+
+# Backwards-compatible alias for explicit CONSENSUS_BUILD_TARGET=base overrides.
+FROM consensus-worker AS base
+
+FROM service-base AS debug
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --cache-dir=/root/.cache/pip debugpy
+
+RUN groupmod --new-name backend-group studio-group \
+    && usermod --login backend-user --home /home/backend-user --move-home studio-user
+
 COPY asgi.py $path/asgi.py
 COPY uvicorn_config.py $path/uvicorn_config.py
 COPY docker/entrypoint-backend.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN chmod +x /entrypoint.sh \
+    && chown 999:999 "$path/asgi.py" "$path/uvicorn_config.py" /entrypoint.sh
 
-HEALTHCHECK --interval=1s --timeout=1s --retries=30 --start-period=120s CMD python3 backend/healthcheck.py --port ${RPCPORT:-4000}
+ENV HUGGINGFACE_HUB_CACHE=/home/backend-user/.cache/huggingface
 
-###########START NEW IMAGE : DEBUGGER ###################
-FROM base AS debug
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --cache-dir=/root/.cache/pip debugpy
 USER backend-user
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["python3", "-m", "debugpy", "--listen", "0.0.0.0:${RPCDEBUGPORT}", "-m", "uvicorn", "asgi:application", "--host", "0.0.0.0", "--port", "${RPCPORT:-4000}", "--reload", "--reload-dir", "/app/backend"]
 
-###########START NEW IMAGE: PRODUCTION ###################
-FROM base AS prod
+# Keep the JSON-RPC production target last so a direct build without --target
+# retains Dockerfile.backend's historical default image.
+FROM service-base AS prod
+
+RUN groupmod --new-name backend-group studio-group \
+    && usermod --login backend-user --home /home/backend-user --move-home studio-user
+
+COPY asgi.py $path/asgi.py
+COPY uvicorn_config.py $path/uvicorn_config.py
+COPY docker/entrypoint-backend.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh \
+    && chown 999:999 "$path/asgi.py" "$path/uvicorn_config.py" /entrypoint.sh
+
+ENV HUGGINGFACE_HUB_CACHE=/home/backend-user/.cache/huggingface
+
+HEALTHCHECK --interval=1s --timeout=1s --retries=30 --start-period=120s \
+    CMD python3 backend/healthcheck.py --port ${RPCPORT:-4000}
+
 USER backend-user
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["python3", "-m", "backend.protocol_rpc.run_server"]

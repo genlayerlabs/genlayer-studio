@@ -15,8 +15,8 @@ within normal consensus time.
 from gltest import get_contract_factory
 from gltest.assertions import tx_execution_failed
 from gltest.clients import get_gl_client
+from gltest.types import TransactionStatus
 from gltest.utils import extract_contract_address
-from genlayer_py.types import TransactionStatus
 from backend.node.types import ExecutionResultStatus
 import pytest
 

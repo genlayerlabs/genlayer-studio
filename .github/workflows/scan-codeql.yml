@@ -9,6 +9,9 @@ on:
       - opened
       - ready_for_review
       - reopened
+      # Without synchronize, pushes to an open PR are never rescanned: the
+      # last green result keeps showing while the code underneath changes.
+      - synchronize
   pull_request_review:
     types:
       - submitted

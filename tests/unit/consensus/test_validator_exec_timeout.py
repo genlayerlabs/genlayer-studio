@@ -7,7 +7,7 @@ import pytest
 from backend.consensus.base import CommittingState
 from backend.database_handler.types import ConsensusData
 from backend.node.genvm.error_codes import GenVMInternalError, GenVMErrorCode
-from backend.node.genvm.origin.public_abi import ResultCode
+from backend.node.genvm.origin.host_fns import ResultCode
 from backend.node.types import ExecutionMode, ExecutionResultStatus, Receipt, Vote
 
 

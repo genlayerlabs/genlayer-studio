@@ -1,5 +1,7 @@
 from enum import Enum
 
+from backend.node.types import ExecutionResultStatus, Vote
+
 
 class ConsensusResult(Enum):
     IDLE = "IDLE"
@@ -30,6 +32,46 @@ class ConsensusResult(Enum):
             ConsensusResult.MAJORITY_DISAGREE: 7,
         }
         return values[self]
+
+
+def consensus_result_type_code(result: ConsensusResult) -> int:
+    """Return the canonical v0.6 ITransactions.ResultType ordinal."""
+
+    return {
+        ConsensusResult.IDLE: 0,
+        ConsensusResult.AGREE: 1,
+        ConsensusResult.MAJORITY_AGREE: 1,
+        ConsensusResult.DISAGREE: 2,
+        ConsensusResult.MAJORITY_DISAGREE: 2,
+        ConsensusResult.TIMEOUT: 3,
+        ConsensusResult.DETERMINISTIC_VIOLATION: 4,
+        ConsensusResult.NO_MAJORITY: 5,
+    }[result]
+
+
+def consensus_vote_type_code(
+    vote: Vote | str,
+    execution_result: ExecutionResultStatus | str | None = None,
+) -> int:
+    """Translate a Studio ballot to the canonical v0.6 VoteType ordinal."""
+
+    local_vote = Vote.from_string(vote) if isinstance(vote, str) else vote
+    if local_vote == Vote.NOT_VOTED:
+        return 0
+    if local_vote == Vote.AGREE:
+        status = (
+            execution_result.value
+            if isinstance(execution_result, ExecutionResultStatus)
+            else str(execution_result or "").upper()
+        )
+        return 2 if status == ExecutionResultStatus.ERROR.value else 1
+    if local_vote in {Vote.TIMEOUT, Vote.IDLE}:
+        return 3
+    if local_vote == Vote.DISAGREE:
+        return 4
+    if local_vote == Vote.DETERMINISTIC_VIOLATION:
+        return 5
+    raise ValueError(f"Unsupported vote: {local_vote}")
 
 
 class ConsensusRound(Enum):

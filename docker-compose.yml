@@ -111,6 +111,13 @@ services:
       context: ./
       dockerfile: ./docker/Dockerfile.backend
       target: prod
+      secrets:
+        - nix_netrc
+      args:
+        GENVM_TAG: ${GENVM_TAG:-}
+        GENVM_REF: ${GENVM_REF:-}
+        GENVM_SOURCE_MODE: ${GENVM_SOURCE_MODE:-}
+        GENVM_EXECUTOR_VERSION_NAME: ${GENVM_EXECUTOR_VERSION_NAME:-}
     environment:
       - PYTHONUNBUFFERED=1
       - WEBDRIVERHOST=${WEBDRIVERHOST}
@@ -125,18 +132,40 @@ services:
       - RATE_LIMIT_ANON_PER_MINUTE=${RATE_LIMIT_ANON_PER_MINUTE:-30}
       - RATE_LIMIT_ANON_PER_HOUR=${RATE_LIMIT_ANON_PER_HOUR:-500}
       - RATE_LIMIT_ANON_PER_DAY=${RATE_LIMIT_ANON_PER_DAY:-5000}
-      # Per-contract / per-sender PENDING tx caps (admission control on
-      # eth_sendRawTransaction). Empty/unset = no cap. Set in shared
-      # deployments to keep one heavy user from filling the queue.
-      - MAX_PENDING_PER_CONTRACT_DEFAULT=${MAX_PENDING_PER_CONTRACT_DEFAULT:-}
+      - RATE_LIMIT_READ_MULTIPLIER=${RATE_LIMIT_READ_MULTIPLIER:-10}
+      - GENLAYER_STUDIO_GEN_PER_TIME_UNIT=${GENLAYER_STUDIO_GEN_PER_TIME_UNIT:-1}
+      - GENLAYER_STUDIO_STORAGE_UNIT_PRICE=${GENLAYER_STUDIO_STORAGE_UNIT_PRICE:-250000000}
+      - GENLAYER_STUDIO_RECEIPT_GAS_PRICE=${GENLAYER_STUDIO_RECEIPT_GAS_PRICE:-250000000}
+      - GENLAYER_STUDIO_TIME_UNIT_OVERLAY_BPS=${GENLAYER_STUDIO_TIME_UNIT_OVERLAY_BPS:-1500}
+      - GENLAYER_STUDIO_MIN_PROPOSE_TIMEUNITS=${GENLAYER_STUDIO_MIN_PROPOSE_TIMEUNITS:-30}
+      - GENLAYER_STUDIO_MAX_PROPOSE_TIMEUNITS=${GENLAYER_STUDIO_MAX_PROPOSE_TIMEUNITS:-600}
+      - GENLAYER_STUDIO_MIN_COMMIT_TIMEUNITS=${GENLAYER_STUDIO_MIN_COMMIT_TIMEUNITS:-30}
+      - GENLAYER_STUDIO_MAX_COMMIT_TIMEUNITS=${GENLAYER_STUDIO_MAX_COMMIT_TIMEUNITS:-600}
+      - GENLAYER_STUDIO_MIN_EXTERNAL_GAS_LIMIT=${GENLAYER_STUDIO_MIN_EXTERNAL_GAS_LIMIT:-0}
+      - GENLAYER_STUDIO_DEFAULT_EXTERNAL_GAS_LIMIT=${GENLAYER_STUDIO_DEFAULT_EXTERNAL_GAS_LIMIT:-500000}
+      - GENLAYER_STUDIO_MAX_ALLOCATED_MESSAGES=${GENLAYER_STUDIO_MAX_ALLOCATED_MESSAGES:-20}
+      - GENLAYER_STUDIO_MAX_MESSAGES_PER_TX=${GENLAYER_STUDIO_MAX_MESSAGES_PER_TX:-0}
+      - GENLAYER_STUDIO_MAX_EQ_OUTPUTS_BYTES=${GENLAYER_STUDIO_MAX_EQ_OUTPUTS_BYTES:-0}
+      - GENLAYER_STUDIO_MAX_SUBMITTED_MESSAGES_BYTES=${GENLAYER_STUDIO_MAX_SUBMITTED_MESSAGES_BYTES:-0}
+      - GENLAYER_STUDIO_FIXED_PROPOSE_RECEIPT_GAS=${GENLAYER_STUDIO_FIXED_PROPOSE_RECEIPT_GAS:-210000}
+      - GENLAYER_STUDIO_FIXED_MESSAGE_REVEAL_GAS=${GENLAYER_STUDIO_FIXED_MESSAGE_REVEAL_GAS:-100000}
+      - GENLAYER_STUDIO_RECEIPT_WRAPPER_BYTES=${GENLAYER_STUDIO_RECEIPT_WRAPPER_BYTES:-1024}
+      - GENLAYER_STUDIO_GHOST_FACTORY_ADDRESS=${GENLAYER_STUDIO_GHOST_FACTORY_ADDRESS:-0x130e09c996462963A6398CA04e1011e6ef9d68a6}
+      - GENLAYER_STUDIO_GHOST_BYTECODE_HASH=${GENLAYER_STUDIO_GHOST_BYTECODE_HASH:-0x4249189346902cb6f0afc196d5719e1b4cbc861a700ae3b0c6dcbe51e5e566de}
+      - GENLAYER_STUDIO_GHOST_FACTORY_INITIAL_NONCE=${GENLAYER_STUDIO_GHOST_FACTORY_INITIAL_NONCE:-2}
+      # Per-recipient defaults to Consensus Queues.maxPendingTxsPerRecipient
+      # (20). The Studio-only per-sender guard remains optional.
+      - MAX_PENDING_PER_CONTRACT_DEFAULT=${MAX_PENDING_PER_CONTRACT_DEFAULT:-20}
       - MAX_PENDING_PER_SENDER_DEFAULT=${MAX_PENDING_PER_SENDER_DEFAULT:-}
+      - MAX_CONTRACT_SNAPSHOT_BYTES_PER_DAY=${MAX_CONTRACT_SNAPSHOT_BYTES_PER_DAY:-}
     ports:
-      - "${RPCPORT}:${RPCPORT}"
+      - "${RPCHOSTPORT:-4000}:${RPCPORT:-4000}"
     expose:
       - "${RPCPORT}"
     volumes:
       - ./.env:/app/.env
       - ./backend:/app/backend
+      - ${GENVM_CACHE_DIR:-genvm_cache}:/genvm-cache
       # - hardhat_artifacts:/app/hardhat/artifacts
       # - hardhat_deployments:/app/hardhat/deployments
     depends_on:
@@ -246,7 +275,7 @@ services:
     image: postgres:16-alpine
     command: sh -c "if [ \"$REMOTE_DATABASE\" = \"true\" ]; then echo 'Postgres disabled in hosted environment' && exec tail -f /dev/null; else exec docker-entrypoint.sh postgres; fi"
     ports:
-      - "${DBPORT}:5432"
+      - "${DBHOSTPORT:-5432}:5432"
     environment:
       - POSTGRES_USER=${DBUSER}
       - POSTGRES_PASSWORD=${DBPASSWORD}
@@ -287,8 +316,15 @@ services:
   consensus-worker:
     build:
       context: ./
-      dockerfile: ./docker/Dockerfile.consensus-worker
-      target: ${CONSENSUS_BUILD_TARGET:-base}
+      dockerfile: ./docker/Dockerfile.backend
+      target: ${CONSENSUS_BUILD_TARGET:-consensus-worker}
+      secrets:
+        - nix_netrc
+      args:
+        GENVM_TAG: ${GENVM_TAG:-}
+        GENVM_REF: ${GENVM_REF:-}
+        GENVM_SOURCE_MODE: ${GENVM_SOURCE_MODE:-}
+        GENVM_EXECUTOR_VERSION_NAME: ${GENVM_EXECUTOR_VERSION_NAME:-}
     environment:
       - DBUSER=${DBUSER}
       - DBPASSWORD=${DBPASSWORD}
@@ -301,9 +337,27 @@ services:
       - WEBDRIVERHOST=${WEBDRIVERHOST}
       - WEBDRIVERPORT=${WEBDRIVERPORT}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - GENLAYER_STUDIO_GEN_PER_TIME_UNIT=${GENLAYER_STUDIO_GEN_PER_TIME_UNIT:-1}
+      - GENLAYER_STUDIO_STORAGE_UNIT_PRICE=${GENLAYER_STUDIO_STORAGE_UNIT_PRICE:-250000000}
+      - GENLAYER_STUDIO_RECEIPT_GAS_PRICE=${GENLAYER_STUDIO_RECEIPT_GAS_PRICE:-250000000}
+      - GENLAYER_STUDIO_TIME_UNIT_OVERLAY_BPS=${GENLAYER_STUDIO_TIME_UNIT_OVERLAY_BPS:-1500}
+      - GENLAYER_STUDIO_MIN_PROPOSE_TIMEUNITS=${GENLAYER_STUDIO_MIN_PROPOSE_TIMEUNITS:-30}
+      - GENLAYER_STUDIO_MAX_PROPOSE_TIMEUNITS=${GENLAYER_STUDIO_MAX_PROPOSE_TIMEUNITS:-600}
+      - GENLAYER_STUDIO_MIN_COMMIT_TIMEUNITS=${GENLAYER_STUDIO_MIN_COMMIT_TIMEUNITS:-30}
+      - GENLAYER_STUDIO_MAX_COMMIT_TIMEUNITS=${GENLAYER_STUDIO_MAX_COMMIT_TIMEUNITS:-600}
+      - GENLAYER_STUDIO_MIN_EXTERNAL_GAS_LIMIT=${GENLAYER_STUDIO_MIN_EXTERNAL_GAS_LIMIT:-0}
+      - GENLAYER_STUDIO_DEFAULT_EXTERNAL_GAS_LIMIT=${GENLAYER_STUDIO_DEFAULT_EXTERNAL_GAS_LIMIT:-500000}
+      - GENLAYER_STUDIO_MAX_ALLOCATED_MESSAGES=${GENLAYER_STUDIO_MAX_ALLOCATED_MESSAGES:-20}
+      - GENLAYER_STUDIO_MAX_MESSAGES_PER_TX=${GENLAYER_STUDIO_MAX_MESSAGES_PER_TX:-0}
+      - GENLAYER_STUDIO_MAX_EQ_OUTPUTS_BYTES=${GENLAYER_STUDIO_MAX_EQ_OUTPUTS_BYTES:-0}
+      - GENLAYER_STUDIO_MAX_SUBMITTED_MESSAGES_BYTES=${GENLAYER_STUDIO_MAX_SUBMITTED_MESSAGES_BYTES:-0}
+      - GENLAYER_STUDIO_FIXED_PROPOSE_RECEIPT_GAS=${GENLAYER_STUDIO_FIXED_PROPOSE_RECEIPT_GAS:-210000}
+      - GENLAYER_STUDIO_FIXED_MESSAGE_REVEAL_GAS=${GENLAYER_STUDIO_FIXED_MESSAGE_REVEAL_GAS:-100000}
+      - GENLAYER_STUDIO_RECEIPT_WRAPPER_BYTES=${GENLAYER_STUDIO_RECEIPT_WRAPPER_BYTES:-1024}
     volumes:
       - ./.env:/app/.env
       - ./backend:/app/backend
+      - ${GENVM_CACHE_DIR:-genvm_cache}:/genvm-cache
     depends_on:
       database-migration:
         condition: service_completed_successfully
@@ -375,7 +429,7 @@ services:
   redis:
     image: redis:8-alpine
     ports:
-      - "6379:6379"
+      - "${REDISPORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -422,5 +476,14 @@ volumes:
   # hardhat_deployments:
   ignition_deployments:
   # hardhat_snapshots:
+  genvm_cache:
   postgres_data:
   redis_data:
+
+# Credential for the private nix cache, consumed only by the GenVM source build
+# in Dockerfile.backend. Defaults to /dev/null — an empty netrc — so a checkout
+# without a token still builds, just without cache hits. CI points it at the
+# netrc `nix-setup` wrote.
+secrets:
+  nix_netrc:
+    file: ${NIX_NETRC_FILE:-/dev/null}
