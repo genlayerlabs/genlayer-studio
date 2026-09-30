@@ -14,7 +14,7 @@ import {
 import TextInput from '@/components/global/inputs/TextInput.vue';
 import SelectInput from '@/components/global/inputs/SelectInput.vue';
 import FieldLabel from '@/components/global/fields/FieldLabel.vue';
-import ConfigField from '@/components/Simulator/ConfigField.vue';
+import ConfigField from '@/components/simulator/ConfigField.vue';
 import { Eye, EyeOff } from 'lucide-vue-next';
 
 const nodeStore = useNodeStore();

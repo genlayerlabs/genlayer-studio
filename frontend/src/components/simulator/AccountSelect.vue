@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useAccountsStore, useNetworkStore } from '@/stores';
-import AccountItem from '@/components/Simulator/AccountItem.vue';
+import AccountItem from '@/components/simulator/AccountItem.vue';
 import { Dropdown } from 'floating-vue';
 import { Wallet, Droplets } from 'lucide-vue-next';
 import { PlusIcon } from '@heroicons/vue/16/solid';
