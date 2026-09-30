@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import rlp
-from eth_abi import encode
+from eth_abi import decode, encode
 from web3 import Web3
 
 from backend.consensus.base import (
@@ -3344,12 +3344,28 @@ def test_genvm_message_fee_allocation_maps_studio_nodes():
                 "receipt_fee_max_gas_price": 2**200,
             },
         },
-        "children": [],
+        "children_budget": 0,
+        "subtree": encode(
+            [MESSAGE_ALLOCATION_NODE_ABI_TYPE],
+            [
+                [
+                    (
+                        1,
+                        True,
+                        NODE_ROOT_SENTINEL,
+                        "0x" + "22" * 20,
+                        bytes.fromhex("12" * 32),
+                        60,
+                        fee_params,
+                    )
+                ]
+            ],
+        ),
     }
     assert len(allocations) == 1
 
 
-def test_genvm_message_fee_allocation_nests_descendants_under_roots():
+def test_genvm_message_fee_allocation_encodes_descendants_under_roots():
     root_fee_params = _encode_internal_fee_params(leader_timeunits=6)
     child_fee_params = _encode_internal_fee_params(leader_timeunits=7)
     root = _allocation(
@@ -3379,26 +3395,76 @@ def test_genvm_message_fee_allocation_nests_descendants_under_roots():
     assert allocations[0]["recipient"] == root["recipient"]
     assert allocations[0]["call_key"] == bytes.fromhex("12" * 32)
     assert allocations[0]["budget"] == 120
-    assert allocations[0]["children"] == [
-        {
-            "recipient": descendant["recipient"],
-            "call_key": bytes.fromhex("34" * 32),
-            "budget": 60,
-            "on": "decided",
-            "fee_params": {
-                "Internal": {
-                    "leader_timeunits_allocation": 7,
-                    "validator_timeunits_allocation": 10,
-                    "execution_budget_per_round": 0,
-                    "rotations": [0],
-                    "max_price_gen_per_time_unit": 1,
-                    "storage_fee_max_gas_price": 2**200,
-                    "receipt_fee_max_gas_price": 2**200,
-                },
-            },
-            "children": [],
-        }
+    assert allocations[0]["children_budget"] == 60
+    assert "children" not in allocations[0]
+    assert decode([MESSAGE_ALLOCATION_NODE_ABI_TYPE], allocations[0]["subtree"])[0] == (
+        (
+            1,
+            True,
+            NODE_ROOT_SENTINEL,
+            root["recipient"],
+            bytes.fromhex("12" * 32),
+            120,
+            root_fee_params,
+        ),
+        (
+            1,
+            True,
+            0,
+            descendant["recipient"],
+            bytes.fromhex("34" * 32),
+            60,
+            child_fee_params,
+        ),
+    )
+
+
+def test_genvm_message_fee_allocation_preserves_subtree_order_and_direct_budget():
+    fee_params = _encode_internal_fee_params()
+    nodes = [
+        _allocation(budget=250, fee_params=fee_params),
+        _allocation(budget=150, fee_params=fee_params, recipient="0x" + "33" * 20),
+        _allocation(parent_index=0, budget=120, fee_params=fee_params),
+        _allocation(parent_index=1, budget=70, fee_params=fee_params),
+        _allocation(parent_index=2, budget=55, fee_params=fee_params),
+        _allocation(
+            parent_index=0, budget=60, fee_params=fee_params, recipient="0x" + "44" * 20
+        ),
     ]
+    accounting = {"message_allocations": nodes, "allocation_consumed": {"0": 250}}
+
+    allocations = genvm_message_fee_allocation(accounting)
+
+    assert [node["budget"] for node in allocations] == [250, 150]
+    assert [node["children_budget"] for node in allocations] == [180, 70]
+    first = decode([MESSAGE_ALLOCATION_NODE_ABI_TYPE], allocations[0]["subtree"])[0]
+    second = decode([MESSAGE_ALLOCATION_NODE_ABI_TYPE], allocations[1]["subtree"])[0]
+    assert [node[2] for node in first] == [NODE_ROOT_SENTINEL, 0, 1, 0]
+    assert [node[5] for node in first] == [250, 120, 55, 60]
+    assert [node[2] for node in second] == [NODE_ROOT_SENTINEL, 0]
+    assert [node[5] for node in second] == [150, 70]
+    assert all(node[6] == fee_params for node in (*first, *second))
+    assert nodes[3]["parentIndex"] == 1
+    assert nodes[4]["parentIndex"] == 2
+
+
+def test_genvm_message_fee_allocation_rejects_children_budget_overflow():
+    nodes = [
+        _allocation(budget=NODE_ROOT_SENTINEL),
+        _allocation(parent_index=0, budget=NODE_ROOT_SENTINEL),
+        _allocation(parent_index=0, budget=1),
+    ]
+
+    with pytest.raises(ArithmeticOverflow):
+        genvm_message_fee_allocation({"message_allocations": nodes})
+
+
+@pytest.mark.parametrize("parent_index", [-1, 0, 1])
+def test_genvm_message_fee_allocation_rejects_invalid_parent(parent_index):
+    with pytest.raises(AllocationTreeMalformed):
+        genvm_message_fee_allocation(
+            {"message_allocations": [_allocation(parent_index=parent_index)]}
+        )
 
 
 def test_genvm_message_fee_allocation_does_not_add_uncommitted_fallback():
@@ -3426,6 +3492,8 @@ def test_genvm_message_fee_allocation_does_not_add_uncommitted_fallback():
     )
     assert allocations[0]["budget"] == 210_000
     assert allocations[0]["on"] == "finalized"
+    assert allocations[0]["children_budget"] == 0
+    assert allocations[0]["subtree"] == b""
     assert allocations[0]["fee_params"] == {
         "External": {
             "gas_limit": 21_000,
@@ -3450,6 +3518,8 @@ def test_genvm_message_fee_allocation_keeps_legacy_gasless_messages_unmetered():
     ]
     assert all(node["recipient"] is None for node in allocations)
     assert all(node["call_key"] is None for node in allocations)
+    assert all(node["children_budget"] == 0 for node in allocations)
+    assert all(node["subtree"] == b"" for node in allocations)
     base_internal_params = {
         "leader_timeunits_allocation": 0,
         "validator_timeunits_allocation": 0,

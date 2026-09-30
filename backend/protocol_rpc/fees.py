@@ -2089,22 +2089,28 @@ def genvm_message_fee_allocation(
         _serializable_message_allocation(raw_node)
         for raw_node in accounting.get("message_allocations") or []
     ]
-    genvm_nodes = [
-        _genvm_message_allocation_node(
-            node,
-            address_factory,
-            fees_distribution,
-        )
-        for node in studio_nodes
-    ]
+    children_budgets = [0] * len(studio_nodes)
+    for index, node in enumerate(studio_nodes):
+        _validate_allocation_parent(index, node, studio_nodes)
+        parent_index = int(node["parentIndex"])
+        if parent_index != NODE_ROOT_SENTINEL:
+            children_budgets[parent_index] = _u256_add(
+                children_budgets[parent_index], int(node["budget"])
+            )
+
     roots: list[dict[str, Any]] = []
     for index, node in enumerate(studio_nodes):
-        parent_index = int(node["parentIndex"])
-        if parent_index == NODE_ROOT_SENTINEL:
-            roots.append(genvm_nodes[index])
+        if int(node["parentIndex"]) != NODE_ROOT_SENTINEL:
             continue
-        if 0 <= parent_index < len(genvm_nodes):
-            genvm_nodes[parent_index]["children"].append(genvm_nodes[index])
+        allocation = _genvm_message_allocation_node(
+            node, address_factory, fees_distribution
+        )
+        allocation["children_budget"] = children_budgets[index]
+        if int(node["messageType"]) == MESSAGE_TYPE_INTERNAL:
+            allocation["subtree"] = _allocation_subtree_bytes(
+                _allocation_subtree(studio_nodes, index)
+            )
+        roots.append(allocation)
 
     return roots
 
@@ -3725,7 +3731,7 @@ def _validate_allocation_parent(
     parent_index = int(node["parentIndex"])
     if parent_index == NODE_ROOT_SENTINEL:
         return
-    if parent_index >= index:
+    if parent_index < 0 or parent_index >= index:
         raise AllocationTreeMalformed("AllocationTreeMalformed")
 
     parent_node = _normalize_message_allocation(message_allocations[parent_index])
@@ -4649,7 +4655,8 @@ def _genvm_message_allocation_node(
         "budget": int(node["budget"]),
         "on": _genvm_message_on(node),
         "fee_params": _genvm_message_fee_params(node, fees_distribution),
-        "children": [],
+        "children_budget": 0,
+        "subtree": b"",
     }
 
 
@@ -4702,7 +4709,8 @@ def _genvm_unmetered_message_fee_allocation() -> list[dict[str, Any]]:
                     "max_gas_price": 0,
                 },
             },
-            "children": [],
+            "children_budget": 0,
+            "subtree": b"",
         },
         {
             "recipient": None,
@@ -4716,7 +4724,8 @@ def _genvm_unmetered_message_fee_allocation() -> list[dict[str, Any]]:
                     "receipt_fee_max_gas_price": 20,
                 },
             },
-            "children": [],
+            "children_budget": 0,
+            "subtree": b"",
         },
         {
             "recipient": None,
@@ -4724,7 +4733,8 @@ def _genvm_unmetered_message_fee_allocation() -> list[dict[str, Any]]:
             "budget": budget,
             "on": "decided",
             "fee_params": internal_fee_params,
-            "children": [],
+            "children_budget": 0,
+            "subtree": b"",
         },
     ]
 
@@ -4741,7 +4751,8 @@ def _genvm_external_legacy_fallback_message_fee_allocation() -> dict[str, Any]:
                 "max_gas_price": 0,
             },
         },
-        "children": [],
+        "children_budget": 0,
+        "subtree": b"",
     }
 
 
