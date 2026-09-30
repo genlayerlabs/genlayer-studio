@@ -2,6 +2,8 @@ import pytest
 from unittest.mock import Mock, MagicMock
 from backend.database_handler.transactions_processor import TransactionsProcessor
 from backend.database_handler.models import TransactionStatus
+from backend.domain.types import TransactionType
+from backend.errors.errors import InvalidTransactionError
 from backend.protocol_rpc.transactions_parser import (
     TransactionParser,
     DecodedMethodSendData,
@@ -13,7 +15,6 @@ from backend.protocol_rpc.types import (
     DecodedRollupTransactionDataArgs,
     ZERO_ADDRESS,
 )
-from backend.domain.types import TransactionType
 import re
 from typing import Optional, List, Any
 from rlp import encode
@@ -1070,3 +1071,61 @@ def test_pre_fee_submission_decodes_without_a_rollup_connection(monkeypatch):
     genlayer_transaction = parser.get_genlayer_transaction(decoded)
     assert genlayer_transaction.type == TransactionType.DEPLOY_CONTRACT
     assert genlayer_transaction.data.contract_code == contract_code
+
+
+def _rollup_transaction_with_sender(
+    *, from_address: str, args_sender: str
+) -> DecodedRollupTransaction:
+    return DecodedRollupTransaction(
+        from_address=from_address,
+        to_address="0x6666666666666666666666666666666666666666",
+        data=DecodedRollupTransactionData(
+            function_name="addTransaction",
+            args=DecodedRollupTransactionDataArgs(
+                sender=args_sender,
+                recipient="0x6666666666666666666666666666666666666666",
+                num_of_initial_validators=5,
+                max_rotations=3,
+                data=encode([b"\x00"]),
+            ),
+        ),
+        type=2,
+        nonce=1,
+        value=0,
+    )
+
+
+def test_get_genlayer_transaction_uses_recovered_signer_when_sender_matches(
+    transaction_parser,
+):
+    # Legitimate case: the caller signed for themselves, so the `sender`
+    # argument and the recovered signer agree.
+    rollup_transaction = _rollup_transaction_with_sender(
+        from_address="0x7777777777777777777777777777777777777777",
+        args_sender="0x7777777777777777777777777777777777777777",
+    )
+
+    genlayer_transaction = transaction_parser.get_genlayer_transaction(
+        rollup_transaction
+    )
+
+    assert (
+        genlayer_transaction.from_address
+        == "0x7777777777777777777777777777777777777777"
+    )
+    assert genlayer_transaction.type == TransactionType.RUN_CONTRACT
+
+
+def test_get_genlayer_transaction_rejects_sender_spoofing(transaction_parser):
+    # Attacker signs the transaction from their own address (from_address)
+    # but sets the `sender` calldata argument to a victim address. Trusting
+    # `sender` here would let the attacker impersonate the victim as the
+    # Intelligent Contract caller while the victim never authorized
+    # anything - the real signer merely pays the gas.
+    rollup_transaction = _rollup_transaction_with_sender(
+        from_address="0x8888888888888888888888888888888888888888",  # attacker
+        args_sender="0x9999999999999999999999999999999999999999",  # victim
+    )
+
+    with pytest.raises(InvalidTransactionError):
+        transaction_parser.get_genlayer_transaction(rollup_transaction)
