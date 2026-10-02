@@ -4,7 +4,7 @@ import asyncio
 import math
 import os
 from typing import Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import aiohttp
 from loguru import logger
 
@@ -466,7 +466,7 @@ class UsageMetricsService:
     def _format_created_at(self, created_at) -> str:
         """Format created_at to ISO8601 string."""
         if created_at is None:
-            return datetime.utcnow().isoformat()
+            return datetime.now(timezone.utc).isoformat()
 
         if isinstance(created_at, datetime):
             return created_at.isoformat()
