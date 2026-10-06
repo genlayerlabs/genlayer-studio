@@ -18,6 +18,7 @@ from backend.consensus.history import (
     logical_fee_round_entries,
 )
 from backend.consensus.types import ConsensusRound
+from backend.node.genvm.origin.fees import UNMATCHED_EXTERNAL_GUARD_ALLOC
 
 VALIDATORS_PER_ROUND = (
     5,
@@ -2050,14 +2051,15 @@ def genvm_fee_context(
         "messageBudgetFloor": str(policy.message_fee_params_budget_floor()),
     }
     message_bucket_total = int(accounting.get("message_fee_budget", 0) or 0)
-    has_fee_budgets = bucket_total > 0 or message_bucket_total > 0
     data_bucket_total = (
         bucket_total if bucket_total > 0 else GENVM_UNMETERED_DATA_FEE_BUCKET
     )
     bucket_totals = {
         "execution_data_gas": data_bucket_total,
         "message_fee": (
-            message_bucket_total if has_fee_budgets else GENVM_UNMETERED_DATA_FEE_BUCKET
+            GENVM_UNMETERED_DATA_FEE_BUCKET
+            if uses_unmetered_message_fee_pool(accounting)
+            else message_bucket_total
         ),
         "nondet_outputs": GENVM_UNMETERED_DATA_FEE_BUCKET,
         "submitted_messages": GENVM_UNMETERED_DATA_FEE_BUCKET,
@@ -2070,9 +2072,10 @@ def genvm_message_fee_allocation(
     accounting: dict[str, Any] | None,
     *,
     address_factory: Callable[[str], Any] | None = None,
+    policy: StudioFeePolicy | None = None,
 ) -> list[dict[str, Any]]:
     if not accounting:
-        return _genvm_unmetered_message_fee_allocation()
+        return _genvm_unmetered_message_fee_allocation(None, policy)
 
     if not accounting.get("message_allocations"):
         if int(accounting.get("message_fee_budget", 0) or 0) > 0:
@@ -2080,7 +2083,7 @@ def genvm_message_fee_allocation(
                 "Mode1MessageFeesRequireGenVMPerEmissionSupport: fee-bearing "
                 "GenVM messages require a message allocation tree"
             )
-        return _genvm_unmetered_message_fee_allocation()
+        return _genvm_unmetered_message_fee_allocation(accounting, policy)
 
     fees_distribution = normalize_fees_distribution(
         accounting.get("fees_distribution") or {}
@@ -2112,7 +2115,20 @@ def genvm_message_fee_allocation(
             )
         roots.append(allocation)
 
+    roots.append(UNMATCHED_EXTERNAL_GUARD_ALLOC)
     return roots
+
+
+def uses_unmetered_message_fee_pool(accounting: dict[str, Any] | None) -> bool:
+    if not accounting:
+        return True
+    if int(accounting.get("message_fee_budget", 0) or 0) > 0:
+        return False
+    if accounting.get("message_allocations"):
+        return False
+    if accounting.get("message_allocations_restricted"):
+        return False
+    return accounting.get("message_allocation_policy") in {None, "open"}
 
 
 def apply_fee_top_up(
@@ -2837,6 +2853,22 @@ def _consume_internal_message_fee(
         # outside the sender-funded message bucket and allocation tree.
         return 0
 
+    if uses_unmetered_message_fee_pool(accounting):
+        expected = _genvm_unmetered_internal_fee_params(accounting, policy)
+        expected_decoded = {
+            "leaderTimeunitsAllocation": expected["leader_timeunits_allocation"],
+            "validatorTimeunitsAllocation": expected["validator_timeunits_allocation"],
+            "appealRounds": len(expected["rotations"]) - 1,
+            "executionBudgetPerRound": expected["execution_budget_per_round"],
+            "rotations": expected["rotations"],
+            "maxPriceGenPerTimeUnit": expected["max_price_gen_per_time_unit"],
+            "storageFeeMaxGasPrice": expected["storage_fee_max_gas_price"],
+            "receiptFeeMaxGasPrice": expected["receipt_fee_max_gas_price"],
+        }
+        if fee_params != expected_decoded or declared_budget != min_required:
+            raise MessageBudgetExceeded("MessageBudgetExceeded")
+        return 0
+
     _consume_against_allocation(accounting, message, declared_budget)
     return declared_budget
 
@@ -3008,6 +3040,8 @@ def refund_failed_internal_message_fee(
         return updated
     if bool(message.get("useBalance", False)):
         return updated
+    if uses_unmetered_message_fee_pool(accounting):
+        return updated
 
     declared_budget = int(message.get("declaredBudget", 0) or 0)
     if declared_budget <= 0:
@@ -3039,6 +3073,7 @@ def unwind_reveal_message_fees(
     external_unreserved = 0
     external_reimbursement_rolled_back = 0
     external_remainder_rolled_back = 0
+    unmetered_internal = uses_unmetered_message_fee_pool(accounting)
 
     for message in messages:
         if (
@@ -3061,6 +3096,8 @@ def unwind_reveal_message_fees(
         ):
             continue
         if bool(message.get("useBalance", False)):
+            continue
+        if unmetered_internal:
             continue
         if acceptance_dispatched and bool(message.get("onAcceptance", False)):
             continue
@@ -4684,18 +4721,75 @@ def _genvm_call_key(node: dict[str, Any]) -> bytes | None:
     return bytes.fromhex(call_key.removeprefix("0x"))
 
 
-def _genvm_unmetered_message_fee_allocation() -> list[dict[str, Any]]:
+def _genvm_unmetered_internal_fee_params(
+    accounting: dict[str, Any] | None,
+    policy: StudioFeePolicy | None,
+) -> dict[str, Any]:
+    if policy is None and not accounting:
+        policy = StudioFeePolicy.from_env()
+    policy = execution_policy_for_accounting(accounting, policy)
+    fees = normalize_fees_distribution(
+        (accounting or {}).get("fees_distribution") or {}
+    )
+
+    leader_timeunits = int(fees["leaderTimeunitsAllocation"])
+    if not (
+        int(policy.min_propose_timeunits)
+        <= leader_timeunits
+        <= int(policy.max_propose_timeunits)
+    ):
+        leader_timeunits = min(
+            max(DEFAULT_LEADER_TIMEUNITS_ALLOCATION, policy.min_propose_timeunits),
+            policy.max_propose_timeunits,
+        )
+    validator_timeunits = int(fees["validatorTimeunitsAllocation"])
+    if not (
+        int(policy.min_commit_timeunits)
+        <= validator_timeunits
+        <= int(policy.max_commit_timeunits)
+    ):
+        validator_timeunits = min(
+            max(
+                DEFAULT_VALIDATOR_TIMEUNITS_ALLOCATION,
+                policy.min_commit_timeunits,
+            ),
+            policy.max_commit_timeunits,
+        )
+
+    return {
+        "leader_timeunits_allocation": leader_timeunits,
+        "validator_timeunits_allocation": validator_timeunits,
+        "execution_budget_per_round": max(
+            int(fees["executionBudgetPerRound"]),
+            int(policy.message_fee_params_budget_floor()),
+            DEFAULT_TRANSACTION_EXECUTION_BUDGET_PER_ROUND,
+        ),
+        "rotations": [0],
+        "max_price_gen_per_time_unit": max(
+            int(fees["maxPriceGenPerTimeUnit"]),
+            _with_cap_headroom(policy.gen_per_time_unit),
+            1,
+        ),
+        "storage_fee_max_gas_price": max(
+            int(fees["storageFeeMaxGasPrice"]),
+            _with_cap_headroom(policy.storage_unit_price),
+            1,
+        ),
+        "receipt_fee_max_gas_price": max(
+            int(fees["receiptFeeMaxGasPrice"]),
+            _with_cap_headroom(policy.receipt_gas_price),
+            1,
+        ),
+    }
+
+
+def _genvm_unmetered_message_fee_allocation(
+    accounting: dict[str, Any] | None,
+    policy: StudioFeePolicy | None,
+) -> list[dict[str, Any]]:
     budget = 2**200
     internal_fee_params = {
-        "Internal": {
-            "leader_timeunits_allocation": 0,
-            "validator_timeunits_allocation": 0,
-            "execution_budget_per_round": 0,
-            "rotations": [0],
-            "max_price_gen_per_time_unit": 1,
-            "storage_fee_max_gas_price": 2**200,
-            "receipt_fee_max_gas_price": 2**200,
-        },
+        "Internal": _genvm_unmetered_internal_fee_params(accounting, policy)
     }
     return [
         {
@@ -4717,13 +4811,7 @@ def _genvm_unmetered_message_fee_allocation() -> list[dict[str, Any]]:
             "call_key": None,
             "budget": budget,
             "on": "finalized",
-            "fee_params": {
-                "Internal": {
-                    **internal_fee_params["Internal"],
-                    "storage_fee_max_gas_price": 20,
-                    "receipt_fee_max_gas_price": 20,
-                },
-            },
+            "fee_params": internal_fee_params,
             "children_budget": 0,
             "subtree": b"",
         },

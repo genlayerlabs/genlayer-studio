@@ -17,6 +17,7 @@ from backend.node.genvm.base import (
 from backend.node.genvm.base import Host as GenVMHost
 import backend.node.genvm.origin.calldata as gvm_calldata
 from backend.node.genvm.origin.base_host import RunHostAndProgramRes
+from backend.node.genvm.origin.fees import UNMATCHED_EXTERNAL_GUARD_ALLOC
 from backend.node.genvm.origin.host_fns import ResultCode
 from backend.node.genvm.origin.leader_public_data import LeaderPublicData
 from backend.node.types import Address, ExecutionMode, ExecutionResultStatus
@@ -346,7 +347,7 @@ async def test_run_genvm_receives_fee_context_from_transaction_accounting():
     fee_context = run_genvm_host.await_args.kwargs["fee_context"]
     assert fee_context.bucket_totals == {
         "execution_data_gas": fees_distribution["executionBudgetPerRound"],
-        "message_fee": 0,
+        "message_fee": GENVM_UNMETERED_DATA_FEE_BUCKET,
         "nondet_outputs": GENVM_UNMETERED_DATA_FEE_BUCKET,
         "submitted_messages": GENVM_UNMETERED_DATA_FEE_BUCKET,
         "submitted_messages_count": 20,
@@ -429,7 +430,8 @@ async def test_run_genvm_passes_mode2_message_fee_allocations_to_genvm():
         )
 
     allocations = run_genvm_host.await_args.kwargs["fee_context"].message_fee_allocation
-    assert len(allocations) == 1
+    assert allocations[1] == UNMATCHED_EXTERNAL_GUARD_ALLOC
+    assert len(allocations) == 2
     allocation = allocations[0]
     assert allocation["recipient"].as_hex.lower() == recipient
     assert allocation["call_key"] == bytes.fromhex("34" * 32)
