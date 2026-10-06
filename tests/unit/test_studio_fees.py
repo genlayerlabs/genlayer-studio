@@ -88,7 +88,6 @@ from backend.protocol_rpc.fees import (
     MessageAllocationsRestricted,
     MessageFeesReportMismatch,
     MessageNoMatchingAllocation,
-    Mode1MessageFeesRequireGenVMPerEmissionSupport,
     message_effect_identities,
     min_message_primary_fees,
     PhaseTimeoutOutOfBounds,
@@ -3472,7 +3471,7 @@ def test_genvm_message_fee_allocation_rejects_invalid_parent(parent_index):
         )
 
 
-def test_genvm_message_fee_allocation_does_not_add_uncommitted_fallback():
+def test_genvm_message_fee_allocation_preserves_only_pinned_external_keys():
     external = _allocation(
         message_type=0,
         on_acceptance=False,
@@ -3630,7 +3629,7 @@ def test_zero_message_bucket_unmetered_params_report_zero_message_fee():
     )
 
 
-def test_genvm_message_fee_allocation_rejects_fee_bearing_mode1_until_genvm_supports_it():
+def test_genvm_message_fee_allocation_materializes_fee_bearing_open_mode():
     accounting = create_fee_accounting(
         fees_distribution=_fees_distribution(total_message_fees=55),
         num_of_validators=5,
@@ -3638,8 +3637,18 @@ def test_genvm_message_fee_allocation_rejects_fee_bearing_mode1_until_genvm_supp
         user_value=0,
     )
 
-    with pytest.raises(Mode1MessageFeesRequireGenVMPerEmissionSupport):
-        genvm_message_fee_allocation(accounting)
+    allocations = genvm_message_fee_allocation(accounting)
+
+    assert [next(iter(node["fee_params"])) for node in allocations] == [
+        "External",
+        "Internal",
+        "Internal",
+    ]
+    assert all(node["budget"] == 55 for node in allocations)
+    assert all(node["children_budget"] == 0 for node in allocations)
+    assert all(node["subtree"] == b"" for node in allocations)
+    assert all("children" not in node for node in allocations)
+    assert UNMATCHED_EXTERNAL_GUARD_ALLOC not in allocations
 
 
 def test_create_fee_accounting_records_user_side_budgets():
@@ -7422,7 +7431,10 @@ def test_use_balance_message_validates_floor_without_consuming_sender_bucket():
                 "messageType": 1,
                 "recipient": "0x2222222222222222222222222222222222222222",
                 "onAcceptance": True,
-                "feeParams": _encode_internal_fee_params(),
+                "feeParams": _encode_internal_fee_params(
+                    storage_fee_max_gas_price=2**96 - 1,
+                    receipt_fee_max_gas_price=2**96 - 1,
+                ),
                 "declaredBudget": 55,
                 "callKey": EMPTY_CALL_KEY,
                 "useBalance": True,
@@ -7679,7 +7691,7 @@ def test_mode2_message_fees_reject_missing_allocation_and_phase_mismatch():
         )
 
 
-def test_mode2_external_message_fees_require_matching_committed_allocation():
+def test_mode2_unmatched_external_message_rejects_at_consensus_freeze():
     accounting = create_fee_accounting(
         fees_distribution=_fees_distribution(total_message_fees=55),
         message_allocations=[
@@ -9884,6 +9896,11 @@ def test_create_child_fee_accounting_strips_leaf_matched_root_subtree():
     assert child_fees["totalMessageFees"] == 0
     assert child_accounting["message_fee_budget"] == 0
     assert child_accounting["message_allocations"] == []
+    assert child_accounting["message_allocation_policy"] == "closed"
+    assert child_accounting["message_allocations_restricted"] is True
+    assert genvm_message_fee_allocation(child_accounting) == [
+        UNMATCHED_EXTERNAL_GUARD_ALLOC
+    ]
 
 
 def test_create_child_fee_accounting_rejects_phase_mismatched_root_subtree():
