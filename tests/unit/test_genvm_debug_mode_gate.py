@@ -42,7 +42,7 @@ def test_debug_mode_enabled_when_true(monkeypatch, base_module):
 
 def test_debug_mode_disabled_when_false(monkeypatch, base_module):
     """Prd setting: GENVM_DEBUG_MODE=false → 'safe' so the executor rejects
-    `py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng` / `:test` runner aliases.
+    `py-genlayer:4zpkevgdn5yds0bnh0kdsjg7ak15c4jg3bdh8qk6cd7qj1wwty5g` / `:test` runner aliases.
     """
     for value in ("false", "FALSE", "0", "no", "off", "anything-else"):
         monkeypatch.setenv("GENVM_DEBUG_MODE", value)

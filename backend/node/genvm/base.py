@@ -437,6 +437,13 @@ def _emission_int(emission: dict, name: str) -> int:
     return int(_emission_value(emission, name) or 0)
 
 
+def _emission_declared_budget(emission: dict) -> int:
+    value = _emission_value(emission, "messageFee")
+    if value is None:
+        value = _emission_value(emission, "declaredBudget")
+    return int(value or 0)
+
+
 def _emission_on(emission: dict) -> typing.Literal["accepted", "finalized"]:
     """GenVM calls the pre-finalization lifecycle `decided`; Studio calls it `accepted`.
 
@@ -634,7 +641,7 @@ class Host(genvmhost.IHost):
                             value=emission["value"],
                             on=_emission_on(emission),
                             fee_params=_emission_internal_fee_params(emission),
-                            declared_budget=_emission_int(emission, "declaredBudget"),
+                            declared_budget=_emission_declared_budget(emission),
                             call_key=_emission_hex(emission, "callKey"),
                             allocation_subtree=_emission_allocation_subtree(emission),
                             use_balance=bool(
@@ -652,7 +659,7 @@ class Host(genvmhost.IHost):
                             value=emission["value"],
                             on=_emission_on(emission),
                             fee_params=_emission_internal_fee_params(emission),
-                            declared_budget=_emission_int(emission, "declaredBudget"),
+                            declared_budget=_emission_declared_budget(emission),
                             call_key=_emission_hex(emission, "callKey"),
                             allocation_subtree=_emission_allocation_subtree(emission),
                             use_balance=bool(
@@ -671,7 +678,7 @@ class Host(genvmhost.IHost):
                             on="finalized",
                             is_eth_send=True,
                             fee_params=_emission_external_fee_params(emission),
-                            declared_budget=_emission_int(emission, "declaredBudget"),
+                            declared_budget=_emission_declared_budget(emission),
                             call_key=_emission_hex(emission, "callKey"),
                             allocation_subtree=_emission_allocation_subtree(emission),
                             gas_used=_emission_int(emission, "gasUsed"),
