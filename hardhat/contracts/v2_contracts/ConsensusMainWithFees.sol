@@ -75,6 +75,18 @@ contract ConsensusMainWithFees is
 		if (_txData.length == 0) {
 			revert Errors.EmptyTransaction();
 		}
+		// A caller may only submit a transaction on behalf of another
+		// address if it is a registered ghost contract relaying a call for
+		// its own caller (see GhostBlueprint.addTransaction). Otherwise
+		// `_sender` must be the caller itself, or left unset (address(0),
+		// defaulted to msg.sender below).
+		if (
+			_sender != address(0) &&
+			_sender != msg.sender &&
+			!ghostContracts[msg.sender]
+		) {
+			revert Errors.UnauthorizedSender();
+		}
 		uint totalFeesToPay = feeManager.calculateRoundFees(
 			bytes32(0),
 			_feesDistribution,
