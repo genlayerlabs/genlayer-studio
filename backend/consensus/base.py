@@ -85,6 +85,7 @@ from backend.protocol_rpc.fees import (
     runtime_rotations_for_round,
     stamp_receipt_execution_policy,
     unwind_reveal_message_fees,
+    uses_unmetered_message_fee_pool,
     validate_receipt_admission_caps,
 )
 from backend.rollup.consensus_service import ConsensusService
@@ -4146,6 +4147,10 @@ def _attach_child_fee_accounting(
     data: dict,
 ) -> None:
     if int(message_payload.get("declaredBudget", 0) or 0) <= 0:
+        return
+    if not pending_transaction.use_balance and uses_unmetered_message_fee_pool(
+        parent_fee_accounting
+    ):
         return
 
     try:
