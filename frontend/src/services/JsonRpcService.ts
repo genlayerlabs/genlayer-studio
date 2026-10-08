@@ -12,7 +12,20 @@ import type {
   DeleteProviderRequest,
   TransactionItem,
   GetTransactionCountRequest,
+  StudioFeeConfig,
+  StudioFeeEstimateResult,
 } from '@/types';
+
+export class JsonRpcServiceError extends Error {
+  constructor(
+    message: string,
+    public readonly code: number,
+    public readonly data?: unknown,
+  ) {
+    super(message);
+    this.name = 'JsonRpcServiceError';
+  }
+}
 
 export class JsonRpcService implements IJsonRpcService {
   constructor(protected rpcClient: IRpcClient) {}
@@ -30,7 +43,7 @@ export class JsonRpcService implements IJsonRpcService {
       console.error(error.message, error.code);
       // Preserve the server's error message instead of a generic fallback
       const detail = error.message || errorMessage;
-      throw new Error(detail);
+      throw new JsonRpcServiceError(detail, error.code, error.data);
     }
     return result;
   }
@@ -45,6 +58,26 @@ export class JsonRpcService implements IJsonRpcService {
       [{ to, from, data }],
       'Error getting contract state',
     );
+  }
+
+  async simulateCall(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.callRpcMethod<Record<string, unknown>>(
+      'sim_call',
+      [params],
+      'Error simulating contract call',
+    ) as Promise<Record<string, unknown>>;
+  }
+
+  async estimateTransactionFees(
+    params: Record<string, unknown>,
+  ): Promise<StudioFeeEstimateResult> {
+    return this.callRpcMethod<StudioFeeEstimateResult>(
+      'sim_estimateTransactionFees',
+      [params],
+      'Error estimating transaction fees',
+    ) as Promise<StudioFeeEstimateResult>;
   }
 
   async sendTransaction(signedTransaction: string): Promise<any> {
@@ -71,7 +104,7 @@ export class JsonRpcService implements IJsonRpcService {
     ) as Promise<string>;
   }
 
-  async fundAccount(address: string, amount: number): Promise<any> {
+  async fundAccount(address: string, amount: string): Promise<any> {
     return this.callRpcMethod<any>(
       'sim_fundAccount',
       [address, amount],
@@ -148,6 +181,14 @@ export class JsonRpcService implements IJsonRpcService {
       [],
       'Error getting providers and models',
     );
+  }
+
+  async getFeeConfig(): Promise<StudioFeeConfig> {
+    return this.callRpcMethod<StudioFeeConfig>(
+      'sim_getFeeConfig',
+      [],
+      'Error getting fee config',
+    ) as Promise<StudioFeeConfig>;
   }
 
   async resetDefaultsLlmProviders(): Promise<any> {

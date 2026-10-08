@@ -19,6 +19,10 @@ class ContractProcessor:
             self.session.query(CurrentState).filter_by(id=contract["id"]).one()
         )
         current_contract.data = contract["data"]
+        if "genvm_executor_selector" in contract:
+            current_contract.genvm_executor_selector = contract[
+                "genvm_executor_selector"
+            ]
         self.session.commit()
 
     def update_contract_state(

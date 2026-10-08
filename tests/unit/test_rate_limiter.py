@@ -6,12 +6,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from backend.protocol_rpc.rate_limiter import RateLimiterService
 from backend.protocol_rpc.exceptions import RateLimitExceeded
 
+# [allowed, window, limit, count, reset] — the shape the Lua script returns.
+_ALLOWED = [0, b"minute", 5, 1, 60]
+
 
 def _make_redis_mock():
     """Create a mock Redis client with Lua script support."""
     redis = AsyncMock()
     redis.script_load = AsyncMock(return_value="fake_sha")
-    redis.evalsha = AsyncMock(return_value=[0])  # default: allow
+    redis.evalsha = AsyncMock(return_value=_ALLOWED)  # default: allow
     redis.hgetall = AsyncMock(return_value={})
     redis.hset = AsyncMock()
     redis.expire = AsyncMock()
@@ -55,7 +58,7 @@ class TestAnonymousRateLimiting:
     @pytest.mark.asyncio
     async def test_allowed_when_under_limit(self):
         redis = _make_redis_mock()
-        redis.evalsha = AsyncMock(return_value=[0])
+        redis.evalsha = AsyncMock(return_value=_ALLOWED)
         service, _ = _make_service(redis=redis)
         # Should not raise
         await service.check_rate_limit(None, "1.2.3.4")
@@ -93,7 +96,7 @@ class TestAnonymousRateLimiting:
     @pytest.mark.asyncio
     async def test_identity_uses_ip(self):
         redis = _make_redis_mock()
-        redis.evalsha = AsyncMock(return_value=[0])
+        redis.evalsha = AsyncMock(return_value=_ALLOWED)
         service, _ = _make_service(redis=redis)
         await service.check_rate_limit(None, "10.0.0.1")
         # Verify keys passed to evalsha contain the IP
@@ -104,7 +107,7 @@ class TestAnonymousRateLimiting:
     @pytest.mark.asyncio
     async def test_lua_script_loaded_once(self):
         redis = _make_redis_mock()
-        redis.evalsha = AsyncMock(return_value=[0])
+        redis.evalsha = AsyncMock(return_value=_ALLOWED)
         service, _ = _make_service(redis=redis)
         await service.check_rate_limit(None, "1.2.3.4")
         await service.check_rate_limit(None, "1.2.3.4")
@@ -116,7 +119,9 @@ class TestAnonymousRateLimiting:
         from redis.exceptions import NoScriptError
 
         redis_mock = _make_redis_mock()
-        redis_mock.evalsha = AsyncMock(side_effect=[NoScriptError("NOSCRIPT"), [0]])
+        redis_mock.evalsha = AsyncMock(
+            side_effect=[NoScriptError("NOSCRIPT"), _ALLOWED]
+        )
         redis_mock.script_load = AsyncMock(return_value="new_sha")
         service, _ = _make_service(redis=redis_mock)
         # Should not raise — recovers by reloading the script
@@ -126,7 +131,7 @@ class TestAnonymousRateLimiting:
     @pytest.mark.asyncio
     async def test_passes_correct_limits_as_args(self):
         redis = _make_redis_mock()
-        redis.evalsha = AsyncMock(return_value=[0])
+        redis.evalsha = AsyncMock(return_value=_ALLOWED)
         service, _ = _make_service(redis=redis)
         await service.check_rate_limit(None, "1.2.3.4")
         call_args = redis.evalsha.call_args[0]
@@ -164,7 +169,7 @@ class TestApiKeyResolution:
                 "rpd": "50000",
             }
         )
-        redis.evalsha = AsyncMock(return_value=[0])
+        redis.evalsha = AsyncMock(return_value=_ALLOWED)
         service, _ = _make_service(redis=redis)
         await service.check_rate_limit("glk_test1234", "1.2.3.4")
         # Verify it used the cached limits (didn't query DB)
@@ -175,7 +180,7 @@ class TestApiKeyResolution:
         redis = _make_redis_mock()
         # Cache miss
         redis.hgetall = AsyncMock(return_value={})
-        redis.evalsha = AsyncMock(return_value=[0])
+        redis.evalsha = AsyncMock(return_value=_ALLOWED)
 
         # Mock DB session
         mock_session = MagicMock()
@@ -278,3 +283,128 @@ class TestFromEnvironment:
         assert service._anon_limits.rate_limit_minute == 30
         assert service._anon_limits.rate_limit_hour == 500
         assert service._anon_limits.rate_limit_day == 5000
+
+
+class TestReadBucket:
+    """Cheap reads are metered separately from GenVM-bound calls."""
+
+    @pytest.mark.asyncio
+    async def test_read_bucket_uses_separate_keys(self):
+        service, redis = _make_service()
+        await service.check_rate_limit(None, "1.2.3.4", is_cheap_read=True)
+
+        keys = redis.evalsha.call_args[0][2:5]
+        assert keys == (
+            "ratelimit:ip:1.2.3.4:read:minute",
+            "ratelimit:ip:1.2.3.4:read:hour",
+            "ratelimit:ip:1.2.3.4:read:day",
+        )
+
+    @pytest.mark.asyncio
+    async def test_standard_bucket_keeps_original_keys(self):
+        """Key shape must not change, or limits in flight silently reset."""
+        service, redis = _make_service()
+        await service.check_rate_limit(None, "1.2.3.4")
+
+        keys = redis.evalsha.call_args[0][2:5]
+        assert keys == (
+            "ratelimit:ip:1.2.3.4:minute",
+            "ratelimit:ip:1.2.3.4:hour",
+            "ratelimit:ip:1.2.3.4:day",
+        )
+
+    @pytest.mark.asyncio
+    async def test_read_limits_are_scaled_by_multiplier(self):
+        redis = _make_redis_mock()
+        service = RateLimiterService(
+            redis_client=redis,
+            get_session=MagicMock(),
+            enabled=True,
+            anon_per_minute=5,
+            anon_per_hour=50,
+            anon_per_day=500,
+            read_multiplier=10,
+        )
+        await service.check_rate_limit(None, "1.2.3.4", is_cheap_read=True)
+
+        args = redis.evalsha.call_args[0][5:]
+        # [now, member, 60, rpm, 3600, rph, 86400, rpd]
+        assert args[3] == "50"
+        assert args[5] == "500"
+        assert args[7] == "5000"
+
+    @pytest.mark.asyncio
+    async def test_standard_limits_are_not_scaled(self):
+        service, redis = _make_service()
+        await service.check_rate_limit(None, "1.2.3.4")
+
+        args = redis.evalsha.call_args[0][5:]
+        assert args[3] == "5"
+        assert args[5] == "50"
+        assert args[7] == "500"
+
+    @pytest.mark.asyncio
+    async def test_multiplier_below_one_is_clamped(self):
+        """A misconfigured multiplier must never make reads stricter."""
+        redis = _make_redis_mock()
+        service = RateLimiterService(
+            redis_client=redis,
+            get_session=MagicMock(),
+            enabled=True,
+            anon_per_minute=5,
+            anon_per_hour=50,
+            anon_per_day=500,
+            read_multiplier=0,
+        )
+        await service.check_rate_limit(None, "1.2.3.4", is_cheap_read=True)
+
+        assert redis.evalsha.call_args[0][8] == "5"
+
+
+class TestUsageReporting:
+    @pytest.mark.asyncio
+    async def test_returns_usage_for_tightest_window(self):
+        redis = _make_redis_mock()
+        redis.evalsha = AsyncMock(return_value=[0, b"day", 500, 498, 3600])
+        service, _ = _make_service(redis=redis)
+
+        usage = await service.check_rate_limit(None, "1.2.3.4")
+
+        assert usage.bucket == "standard"
+        assert usage.window == "day"
+        assert usage.limit == 500
+        assert usage.remaining == 2
+        assert usage.reset_seconds == 3600
+
+    @pytest.mark.asyncio
+    async def test_usage_reports_read_bucket(self):
+        service, _ = _make_service()
+        usage = await service.check_rate_limit(None, "1.2.3.4", is_cheap_read=True)
+        assert usage.bucket == "read"
+
+    @pytest.mark.asyncio
+    async def test_remaining_never_goes_negative(self):
+        redis = _make_redis_mock()
+        redis.evalsha = AsyncMock(return_value=[0, b"minute", 5, 9, 60])
+        service, _ = _make_service(redis=redis)
+
+        usage = await service.check_rate_limit(None, "1.2.3.4")
+
+        assert usage.remaining == 0
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_disabled(self):
+        service, _ = _make_service(enabled=False)
+        assert await service.check_rate_limit(None, "1.2.3.4") is None
+
+    @pytest.mark.asyncio
+    async def test_denial_carries_bucket_for_headers(self):
+        redis = _make_redis_mock()
+        redis.evalsha = AsyncMock(return_value=[1, b"minute", 50, 50, 12])
+        service, _ = _make_service(redis=redis)
+
+        with pytest.raises(RateLimitExceeded) as exc_info:
+            await service.check_rate_limit(None, "1.2.3.4", is_cheap_read=True)
+
+        assert exc_info.value.data["bucket"] == "read"
+        assert exc_info.value.data["retry_after_seconds"] == 12

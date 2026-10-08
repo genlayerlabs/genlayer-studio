@@ -30,9 +30,25 @@ class MessageHandler(IMessageHandler):
         self.broadcast = broadcast
         self.config = config
         self.client_session_id = None
+        self._pending_tasks: set[asyncio.Task] = set()
+
+    def _track_background_task(self, task: asyncio.Task) -> None:
+        """Retain a background task and report failures until it completes."""
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._background_task_done)
+
+    def _background_task_done(self, task: asyncio.Task) -> None:
+        self._pending_tasks.discard(task)
+        if task.cancelled():
+            return
+
+        exception = task.exception()
+        if exception is not None:
+            logger.opt(exception=exception).error("Background broadcast publish failed")
 
     def with_client_session(self, client_session_id: str):
         new_msg_handler = MessageHandler(self.broadcast, self.config)
+        new_msg_handler._pending_tasks = self._pending_tasks
         new_msg_handler.client_session_id = client_session_id
         return new_msg_handler
 
@@ -83,7 +99,10 @@ class MessageHandler(IMessageHandler):
         if not loop.is_running():
             return
 
-        loop.create_task(self.broadcast.publish(channel=channel, message=message))
+        task = loop.create_task(
+            self.broadcast.publish(channel=channel, message=message)
+        )
+        self._track_background_task(task)
 
     def _socket_emit(self, log_event: LogEvent) -> None:
         """Emit a log event via broadcast channels.

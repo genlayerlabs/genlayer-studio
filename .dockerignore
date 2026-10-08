@@ -8,6 +8,8 @@ README.md
 
 docker/
 !docker/entrypoint-*.sh
+!docker/scripts/
+!docker/genvm-source-build.nix.conf
 .venv/
 .vscode/
 .ollama/

@@ -6,8 +6,7 @@ Without this cap, a single user can pile up thousands of PENDING txs on
 one contract (observed in Studio Prod: one oracle backend backlogged
 ~2000 verifications on a single contract for 5 days, starving other
 contracts behind it). The cap rejects new submissions at admission time
-with a structured QueueDepthExceeded error, pointing heavy users toward
-non-shared deployments.
+with a structured QueueDepthExceeded error.
 
 These tests exercise `_enforce_pending_queue_caps` directly against a
 real Postgres session so the COUNT(*) query and the raise paths are
@@ -15,6 +14,8 @@ both covered.
 """
 
 import importlib
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import pytest
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import sessionmaker
@@ -58,6 +59,33 @@ def _seed_pending(session, n: int, *, to_address: str, from_address: str) -> Non
     session.commit()
 
 
+def _insert_pending(session, *, tx_hash: str, nonce: int) -> None:
+    session.execute(
+        text(
+            """
+            INSERT INTO transactions (
+                hash, status, from_address, to_address, data, value, type,
+                nonce, leader_only, execution_mode, appealed, appeal_failed,
+                appeal_undetermined, appeal_leader_timeout,
+                appeal_validators_timeout, appeal_processing_time,
+                recovery_count, value_credited
+            ) VALUES (
+                :hash, CAST('PENDING' AS transaction_status),
+                :from_addr, :to_addr, CAST('{}' AS jsonb), 0, 2,
+                :nonce, false, 'NORMAL', false, 0,
+                false, false, false, 0, 0, false
+            )
+            """
+        ),
+        {
+            "hash": tx_hash,
+            "from_addr": SENDER,
+            "to_addr": CONTRACT,
+            "nonce": nonce,
+        },
+    )
+
+
 def _reload_endpoints_module(monkeypatch, **env_overrides):
     """Re-import endpoints with patched env so module-level cap vars are
     re-read. The caps are parsed at import time, so each test that wants
@@ -72,8 +100,8 @@ def _reload_endpoints_module(monkeypatch, **env_overrides):
     return importlib.reload(endpoints)
 
 
-def test_no_caps_set_allows_unlimited(engine: Engine, monkeypatch):
-    """Self-hosted default: both caps unset → never raises."""
+def test_unset_recipient_cap_uses_consensus_default_20(engine: Engine, monkeypatch):
+    """Studio defaults to Queues.maxPendingTxsPerRecipient."""
     Session_ = sessionmaker(bind=engine, expire_on_commit=False)
     with Session_() as session:
         _seed_pending(session, 100, to_address=CONTRACT, from_address=SENDER)
@@ -83,12 +111,13 @@ def test_no_caps_set_allows_unlimited(engine: Engine, monkeypatch):
             MAX_PENDING_PER_SENDER_DEFAULT=None,
         )
         tp = TransactionsProcessor(session)
-        # Should not raise even with 100 PENDING already.
-        endpoints._enforce_pending_queue_caps(
-            transactions_processor=tp,
-            to_address=CONTRACT,
-            from_address=SENDER,
-        )
+        with pytest.raises(QueueDepthExceeded) as exc_info:
+            endpoints._enforce_pending_queue_caps(
+                transactions_processor=tp,
+                to_address=CONTRACT,
+                from_address=SENDER,
+            )
+        assert exc_info.value.data["limit"] == 20
 
 
 def test_per_contract_cap_rejects_when_at_limit(engine: Engine, monkeypatch):
@@ -110,8 +139,7 @@ def test_per_contract_cap_rejects_when_at_limit(engine: Engine, monkeypatch):
         assert exc_info.value.data["scope"] == "contract"
         assert exc_info.value.data["limit"] == 50
         assert exc_info.value.data["pending"] == 50
-        # Error message should point users at alternatives.
-        assert "self-hosted" in exc_info.value.message.lower()
+        assert "protocol limits" in exc_info.value.message.lower()
 
 
 def test_per_contract_cap_allows_under_limit(engine: Engine, monkeypatch):
@@ -130,6 +158,85 @@ def test_per_contract_cap_allows_under_limit(engine: Engine, monkeypatch):
             to_address=CONTRACT,
             from_address="0x" + "ee" * 20,
         )
+
+
+def test_active_head_still_occupies_consensus_pending_queue_slot(
+    engine: Engine, monkeypatch
+):
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    with Session_() as session:
+        _seed_pending(session, 20, to_address=CONTRACT, from_address=SENDER)
+        session.execute(
+            text(
+                "UPDATE transactions SET status = CAST('COMMITTING' AS transaction_status) "
+                "WHERE hash = :hash"
+            ),
+            {"hash": f"0x{0:064x}"},
+        )
+        session.commit()
+        endpoints = _reload_endpoints_module(
+            monkeypatch,
+            MAX_PENDING_PER_CONTRACT_DEFAULT="20",
+            MAX_PENDING_PER_SENDER_DEFAULT=None,
+        )
+
+        with pytest.raises(QueueDepthExceeded) as exc_info:
+            endpoints._enforce_pending_queue_caps(
+                transactions_processor=TransactionsProcessor(session),
+                to_address=CONTRACT,
+                from_address="0x" + "ee" * 20,
+            )
+
+        assert exc_info.value.data["pending"] == 20
+
+
+def test_concurrent_admissions_cannot_both_claim_last_recipient_slot(
+    engine: Engine, monkeypatch
+):
+    Session_ = sessionmaker(bind=engine, expire_on_commit=False)
+    with Session_() as session:
+        _seed_pending(session, 19, to_address=CONTRACT, from_address=SENDER)
+    endpoints = _reload_endpoints_module(
+        monkeypatch,
+        MAX_PENDING_PER_CONTRACT_DEFAULT="20",
+        MAX_PENDING_PER_SENDER_DEFAULT=None,
+    )
+    barrier = threading.Barrier(2)
+
+    def admit(index: int) -> str:
+        with Session_() as session:
+            tp = TransactionsProcessor(session)
+            barrier.wait()
+            try:
+                endpoints._enforce_pending_queue_caps(
+                    transactions_processor=tp,
+                    to_address=CONTRACT,
+                    from_address="0x" + f"{index + 1:02x}" * 20,
+                )
+            except QueueDepthExceeded:
+                session.rollback()
+                return "rejected"
+            _insert_pending(
+                session,
+                tx_hash=f"0x{100 + index:064x}",
+                nonce=100 + index,
+            )
+            session.commit()
+            return "accepted"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(admit, range(2)))
+
+    assert sorted(outcomes) == ["accepted", "rejected"]
+    with Session_() as session:
+        count = session.execute(
+            text(
+                "SELECT COUNT(*) FROM transactions "
+                "WHERE to_address = :addr AND status = 'PENDING'"
+            ),
+            {"addr": CONTRACT},
+        ).scalar_one()
+    assert count == 20
 
 
 def test_per_sender_cap_rejects_when_at_limit(engine: Engine, monkeypatch):
@@ -154,8 +261,10 @@ def test_per_sender_cap_rejects_when_at_limit(engine: Engine, monkeypatch):
         assert exc_info.value.data["pending"] == 20
 
 
-def test_invalid_cap_env_value_falls_back_to_unlimited(engine: Engine, monkeypatch):
-    """Garbage values in env shouldn't break submissions — fall back to no cap."""
+def test_invalid_recipient_cap_env_falls_back_to_consensus_default(
+    engine: Engine, monkeypatch
+):
+    """Garbage values do not silently disable the protocol recipient cap."""
     Session_ = sessionmaker(bind=engine, expire_on_commit=False)
     with Session_() as session:
         _seed_pending(session, 100, to_address=CONTRACT, from_address=SENDER)
@@ -165,11 +274,13 @@ def test_invalid_cap_env_value_falls_back_to_unlimited(engine: Engine, monkeypat
             MAX_PENDING_PER_SENDER_DEFAULT="-5",  # negative → ignored
         )
         tp = TransactionsProcessor(session)
-        endpoints._enforce_pending_queue_caps(
-            transactions_processor=tp,
-            to_address=CONTRACT,
-            from_address=SENDER,
-        )
+        with pytest.raises(QueueDepthExceeded) as exc_info:
+            endpoints._enforce_pending_queue_caps(
+                transactions_processor=tp,
+                to_address=CONTRACT,
+                from_address=SENDER,
+            )
+        assert exc_info.value.data["limit"] == 20
 
 
 def test_null_to_address_is_skipped(engine: Engine, monkeypatch):

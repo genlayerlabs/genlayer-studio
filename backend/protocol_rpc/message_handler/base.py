@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import copy
@@ -47,7 +48,22 @@ class MessageHandler(IMessageHandler):
         self.socketio = socketio
         self.config = config
         self.client_session_id = None
+        self._pending_tasks: set[asyncio.Task] = set()
         # Logging is configured at app startup
+
+    def _track_background_task(self, task: asyncio.Task) -> None:
+        """Retain a background task and report failures until it completes."""
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._background_task_done)
+
+    def _background_task_done(self, task: asyncio.Task) -> None:
+        self._pending_tasks.discard(task)
+        if task.cancelled():
+            return
+
+        exception = task.exception()
+        if exception is not None:
+            logger.opt(exception=exception).error("Background message delivery failed")
 
     def with_client_session(self, client_session_id: str):
         new_msg_handler = MessageHandler(self.socketio, self.config)
@@ -317,7 +333,6 @@ def setup_loguru_config():
 
     # Get log level from environment
     log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
-    logging_env = os.environ.get("LOGCONFIG", "dev")
 
     # Console handler with colors
     logger.add(
