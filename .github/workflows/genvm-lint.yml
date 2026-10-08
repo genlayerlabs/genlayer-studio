@@ -35,7 +35,7 @@ jobs:
       # Contracts pinned to runners newer than the released linter's bundled
       # SDK cannot be loaded by genvm-linter (<= 0.11.0): the genvm-main
       # runner (1zr6nqk...) fails with "No module named 'genlayer.py'", and
-      # the v0.3 runners (5jycge4q... and 4zpkevgd...) fail because their
+      # the v0.3 runners (5jycge4q... and babwp9t3...) fail because their
       # archives are not bundled. Skip them
       # until a linter release bundles them (genvm-linter dxp-694), then
       # drop this filter.
@@ -44,7 +44,7 @@ jobs:
           failed=0
           for f in examples/contracts/*.py; do
             echo "::group::$f"
-            if grep -qE "py-genlayer:(1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh|5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng|4zpkevgdn5yds0bnh0kdsjg7ak15c4jg3bdh8qk6cd7qj1wwty5g)" "$f"; then
+            if grep -qE "py-genlayer:(1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh|5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng|babwp9t37jw9g4j2bccgn14g6x7x9s1f7dsmh7emvz735pz4zxa0)" "$f"; then
               echo "SKIP: pinned to a runner unsupported by released genvm-linter"
             elif ! genvm-lint check "$f"; then
               failed=1
@@ -59,7 +59,7 @@ jobs:
           for f in tests/load/contracts/*.py tests/direct/contracts/*.py; do
             [ -f "$f" ] || continue
             echo "::group::$f"
-            if grep -qE "py-genlayer:(1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh|5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng|4zpkevgdn5yds0bnh0kdsjg7ak15c4jg3bdh8qk6cd7qj1wwty5g)" "$f"; then
+            if grep -qE "py-genlayer:(1zr6nqk597d97kg0dyxg0shhrykx5v02zjgnyrajapy4wlqvfvwh|5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng|babwp9t37jw9g4j2bccgn14g6x7x9s1f7dsmh7emvz735pz4zxa0)" "$f"; then
               echo "SKIP: pinned to a runner unsupported by released genvm-linter"
             elif ! genvm-lint check "$f"; then
               failed=1
