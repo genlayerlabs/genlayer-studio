@@ -51,6 +51,22 @@ class MessageAllocationNode(typing.TypedDict):
     subtree: bytes
 
 
+UNMATCHED_EXTERNAL_GUARD_ALLOC: MessageAllocationNode = {
+    "recipient": None,
+    "call_key": None,
+    "budget": 0,
+    "on": "finalized",
+    "fee_params": {
+        "External": {
+            "gas_limit": 1,
+            "max_gas_price": 2**256 - 1,
+        },
+    },
+    "children_budget": 0,
+    "subtree": b"",
+}
+
+
 DEFAULT_EXTERNAL_MESSAGE_ALLOC: MessageAllocationNode = {
     "budget": 2**200,
     "recipient": None,

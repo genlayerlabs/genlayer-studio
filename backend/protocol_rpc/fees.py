@@ -4,6 +4,7 @@ import base64
 import copy
 import os
 from dataclasses import dataclass, fields, replace
+from enum import Enum
 from typing import Any, Callable
 
 import rlp
@@ -18,6 +19,7 @@ from backend.consensus.history import (
     logical_fee_round_entries,
 )
 from backend.consensus.types import ConsensusRound
+from backend.node.genvm.origin.fees import UNMATCHED_EXTERNAL_GUARD_ALLOC
 
 VALIDATORS_PER_ROUND = (
     5,
@@ -82,9 +84,17 @@ EXTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE = "(uint256,uint256)"
 MESSAGE_ALLOCATION_NODE_ABI_TYPE = (
     "(uint8,bool,uint256,address,bytes32,uint256,bytes)[]"
 )
+CONTRACT_DESCENDANT_GRANT_ABI_TYPE = (
+    "(uint8,uint8,uint256,(uint8,bool,uint256,address,bytes32,uint256,bytes)[])"
+)
 SUBMITTED_MESSAGE_ABI_TYPE = (
     "(uint8,address,uint256,bytes,bool,uint256,bytes,uint256,bytes,bytes32,bool)[]"
 )
+CONTRACT_DESCENDANT_GRANT_DOMAIN = keccak(b"genlayer.contract-descendant-grant")
+CONTRACT_DESCENDANT_GRANT_VERSION = 1
+MAX_CONTRACT_DESCENDANT_GRANT_NODES = 24
+MAX_CONTRACT_DESCENDANT_FEE_PARAMS_BYTES = 1_024
+MAX_CONTRACT_DESCENDANT_GRANT_BYTES = 31_712
 
 WEI_PER_GEN = 10**18
 # Keep the standalone Studio policy identical to the v0.6 deployment defaults.
@@ -205,8 +215,8 @@ class InvalidFeeParams(FeeValidationError):
     pass
 
 
-class Mode1MessageFeesRequireGenVMPerEmissionSupport(FeeValidationError):
-    """GenVM must expose per-emission feeParams/declaredBudget before Mode 1 is safe."""
+class InvalidContractDescendantGrant(FeeValidationError):
+    pass
 
 
 class InvalidAppealBond(FeeValidationError):
@@ -277,6 +287,20 @@ class SubmittedMessagesTooLarge(FeeValidationError):
 
 class MessageEffectDescriptorMismatch(FeeValidationError):
     pass
+
+
+class MessageAllocationPolicy(str, Enum):
+    OPEN = "open"
+    PINNED = "pinned"
+    CLOSED = "closed"
+
+
+@dataclass(frozen=True)
+class ContractDescendantGrant:
+    policy: MessageAllocationPolicy
+    budget: int
+    allocations: list[dict[str, Any]]
+    legacy: bool = False
 
 
 @dataclass(frozen=True)
@@ -1545,12 +1569,17 @@ def calculate_round_fees(
     policy: StudioFeePolicy | None = None,
     *,
     enforce_gen_price_cap: bool = False,
+    allow_incomplete_rotations: bool = False,
 ) -> int:
     fees = normalize_fees_distribution(fees_distribution)
     policy = policy or StudioFeePolicy()
 
     if round == 0:
-        time_unit_work = _calculate_initial_round_total(fees, num_of_validators)
+        time_unit_work = _calculate_initial_round_total(
+            fees,
+            num_of_validators,
+            allow_incomplete_rotations=allow_incomplete_rotations,
+        )
         appeal_profit_reserve = _calculate_appeal_profit_reserve(
             fees,
             gen_per_time_unit=int(fees["maxPriceGenPerTimeUnit"]),
@@ -1916,6 +1945,274 @@ def activate_fee_accounting(
     return updated, False
 
 
+def decode_contract_descendant_grant(value: Any) -> ContractDescendantGrant:
+    if isinstance(value, str) and value.startswith("0x"):
+        try:
+            bytes.fromhex(value[2:])
+        except ValueError as exc:
+            raise InvalidContractDescendantGrant(
+                "InvalidContractDescendantGrant"
+            ) from exc
+    try:
+        raw = _allocation_subtree_bytes(value)
+    except Exception as exc:
+        raise InvalidContractDescendantGrant("InvalidContractDescendantGrant") from exc
+    if not raw:
+        return ContractDescendantGrant(
+            policy=MessageAllocationPolicy.CLOSED,
+            budget=0,
+            allocations=[],
+            legacy=True,
+        )
+    if len(raw) > MAX_CONTRACT_DESCENDANT_GRANT_BYTES:
+        raise InvalidContractDescendantGrant("InvalidContractDescendantGrant")
+
+    try:
+        domain, decoded = decode(["bytes32", CONTRACT_DESCENDANT_GRANT_ABI_TYPE], raw)
+        canonical = encode(
+            ["bytes32", CONTRACT_DESCENDANT_GRANT_ABI_TYPE],
+            [domain, decoded],
+        )
+    except Exception as exc:
+        raise InvalidContractDescendantGrant("InvalidContractDescendantGrant") from exc
+
+    version, wire_policy, budget, decoded_nodes = decoded
+    policies = {
+        0: MessageAllocationPolicy.CLOSED,
+        1: MessageAllocationPolicy.OPEN,
+        2: MessageAllocationPolicy.PINNED,
+    }
+    grant_policy = policies.get(int(wire_policy))
+    if (
+        bytes(domain) != CONTRACT_DESCENDANT_GRANT_DOMAIN
+        or int(version) != CONTRACT_DESCENDANT_GRANT_VERSION
+        or grant_policy is None
+        or canonical != raw
+    ):
+        raise InvalidContractDescendantGrant("InvalidContractDescendantGrant")
+
+    allocations = [
+        {
+            "messageType": int(node[0]),
+            "onAcceptance": bool(node[1]),
+            "parentIndex": int(node[2]),
+            "recipient": str(node[3]).lower(),
+            "callKey": "0x" + bytes(node[4]).hex(),
+            "budget": int(node[5]),
+            "feeParams": "0x" + bytes(node[6]).hex(),
+        }
+        for node in decoded_nodes
+    ]
+    budget = int(budget)
+    valid_shape = (
+        (
+            grant_policy is MessageAllocationPolicy.CLOSED
+            and budget == 0
+            and not allocations
+        )
+        or (
+            grant_policy is MessageAllocationPolicy.OPEN
+            and budget > 0
+            and not allocations
+        )
+        or (
+            grant_policy is MessageAllocationPolicy.PINNED
+            and budget > 0
+            and bool(allocations)
+        )
+    )
+    if not valid_shape:
+        raise InvalidContractDescendantGrant("InvalidContractDescendantGrant")
+    return ContractDescendantGrant(grant_policy, budget, allocations)
+
+
+def _is_contract_descendant_grant(value: Any) -> bool:
+    try:
+        raw = _allocation_subtree_bytes(value)
+    except Exception:
+        return False
+    return len(raw) >= 32 and raw[:32] == CONTRACT_DESCENDANT_GRANT_DOMAIN
+
+
+def _validate_contract_descendant_grant(
+    grant: ContractDescendantGrant,
+    *,
+    child_fee_params: dict[str, Any],
+    policy: StudioFeePolicy,
+) -> None:
+    if grant.policy is not MessageAllocationPolicy.PINNED:
+        return
+
+    allocations = grant.allocations
+    if len(allocations) > MAX_CONTRACT_DESCENDANT_GRANT_NODES:
+        raise AllocationTreeMalformed("AllocationTreeMalformed")
+
+    children_budgets = [0] * len(allocations)
+    depths = [0] * len(allocations)
+    internal_params: list[dict[str, Any] | None] = [None] * len(allocations)
+    sibling_keys: set[tuple[int, int, str, str]] = set()
+    root_sum = 0
+
+    for index, raw_node in enumerate(allocations):
+        node = _normalize_message_allocation(raw_node)
+        message_type = int(node["messageType"])
+        parent_index = int(node["parentIndex"])
+        budget = _require_uint256(int(node["budget"]))
+        if budget == 0:
+            raise AllocationTreeBudgetInconsistent("AllocationTreeBudgetInconsistent")
+        if message_type not in {MESSAGE_TYPE_EXTERNAL, MESSAGE_TYPE_INTERNAL}:
+            raise AllocationTreeMalformed("AllocationTreeMalformed")
+        if parent_index != NODE_ROOT_SENTINEL:
+            if parent_index >= index:
+                raise AllocationTreeMalformed("AllocationTreeMalformed")
+            parent = _normalize_message_allocation(allocations[parent_index])
+            if int(parent["messageType"]) != MESSAGE_TYPE_INTERNAL:
+                raise AllocationTreeMalformed("AllocationTreeMalformed")
+
+        key = (parent_index, *_allocation_key(node))
+        if key in sibling_keys:
+            raise AllocationDuplicateKey("AllocationDuplicateKey")
+        sibling_keys.add(key)
+
+        depths[index] = (
+            1 if parent_index == NODE_ROOT_SENTINEL else depths[parent_index] + 1
+        )
+        if depths[index] > int(policy.max_allocation_tree_depth or 5):
+            raise AllocationTreeTooDeep("AllocationTreeTooDeep")
+
+        if parent_index == NODE_ROOT_SENTINEL:
+            root_sum = _u256_add(root_sum, budget)
+        else:
+            children_budgets[parent_index] = _u256_add(
+                children_budgets[parent_index], budget
+            )
+
+        raw_fee_params = _fee_params_bytes(node["feeParams"])
+        if len(raw_fee_params) > MAX_CONTRACT_DESCENDANT_FEE_PARAMS_BYTES:
+            raise InvalidFeeParams("InvalidFeeParams")
+        if message_type == MESSAGE_TYPE_EXTERNAL:
+            _validate_contract_external_allocation(node, raw_fee_params, policy)
+        else:
+            internal_params[index] = _validate_contract_internal_fee_params(
+                raw_fee_params,
+                policy,
+            )
+
+    if root_sum != grant.budget:
+        raise MessageAllocationsNotEqualBudget("MessageAllocationsNotEqualBudget")
+
+    for index, raw_node in enumerate(allocations):
+        node = _normalize_message_allocation(raw_node)
+        params = internal_params[index]
+        if params is None:
+            continue
+        parent_index = int(node["parentIndex"])
+        parent_params = (
+            child_fee_params
+            if parent_index == NODE_ROOT_SENTINEL
+            else internal_params[parent_index]
+        )
+        if parent_params is None:
+            raise AllocationTreeMalformed("AllocationTreeMalformed")
+        multiplier = (
+            int(parent_params["appealRounds"]) + 1 if node["onAcceptance"] else 1
+        )
+        required = _u256_mul(
+            _u256_add(
+                min_message_primary_fees(params, policy),
+                children_budgets[index],
+            ),
+            multiplier,
+        )
+        if int(node["budget"]) < required:
+            raise AllocationTreeBudgetInconsistent("AllocationTreeBudgetInconsistent")
+
+
+def _validate_balance_funded_internal_fee_params(
+    raw_fee_params: bytes,
+    grant: ContractDescendantGrant,
+    policy: StudioFeePolicy,
+) -> dict[str, Any]:
+    if not grant.legacy:
+        return _validate_contract_internal_fee_params(raw_fee_params, policy)
+
+    params = decode_internal_message_fee_params(raw_fee_params)
+    _validate_internal_message_price_caps(params)
+    _validate_internal_execution_budget_floor(params, policy)
+    return params
+
+
+def _validate_contract_internal_fee_params(
+    raw_fee_params: bytes,
+    policy: StudioFeePolicy,
+) -> dict[str, Any]:
+    params = decode_internal_message_fee_params(raw_fee_params)
+    try:
+        decoded = decode([INTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE], raw_fee_params)[0]
+        canonical = encode([INTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE], [decoded])
+    except Exception as exc:
+        raise InvalidFeeParams("InvalidFeeParams") from exc
+    if canonical != raw_fee_params:
+        raise InvalidFeeParams("InvalidFeeParams")
+
+    rotations = params["rotations"]
+    if not rotations or int(params["appealRounds"]) != len(rotations) - 1:
+        raise InvalidAppealRounds("InvalidAppealRounds")
+    leader = int(params["leaderTimeunitsAllocation"])
+    validator = int(params["validatorTimeunitsAllocation"])
+    if (leader == 0) != (validator == 0):
+        raise PhaseTimeoutOutOfBounds("PhaseTimeoutOutOfBounds")
+    if leader > 0:
+        _validate_phase_timeout_bounds(leader, validator, policy)
+
+    _validate_internal_message_price_caps(params)
+    _validate_internal_execution_budget_floor(params, policy)
+    for field in (
+        "maxPriceGenPerTimeUnit",
+        "storageFeeMaxGasPrice",
+        "receiptFeeMaxGasPrice",
+        "executionBudgetPerRound",
+    ):
+        if int(params[field]).bit_length() > 96:
+            raise InvalidFeeParams("InvalidFeeParams")
+    for value in (leader, validator, *rotations):
+        if int(value).bit_length() > 32:
+            raise InvalidFeeParams("InvalidFeeParams")
+    return params
+
+
+def _validate_contract_external_allocation(
+    node: dict[str, Any],
+    raw_fee_params: bytes,
+    policy: StudioFeePolicy,
+) -> None:
+    if int(node["parentIndex"]) != NODE_ROOT_SENTINEL:
+        raise AllocationTreeMalformed("AllocationTreeMalformed")
+    if bool(node["onAcceptance"]):
+        raise ExternalAllocationInvalid("ExternalOnAcceptanceNotSupported")
+    params = decode_external_message_fee_params(raw_fee_params)
+    if (
+        encode(
+            [EXTERNAL_MESSAGE_FEE_PARAMS_ABI_TYPE],
+            [(int(params["gasLimit"]), int(params["maxGasPrice"]))],
+        )
+        != raw_fee_params
+    ):
+        raise InvalidFeeParams("InvalidFeeParams")
+    gas_limit = int(params["gasLimit"])
+    max_gas_price = int(params["maxGasPrice"])
+    if (
+        gas_limit <= 0
+        or max_gas_price <= 0
+        or gas_limit < int(policy.min_external_gas_limit)
+    ):
+        raise ExternalAllocationInvalid("ExternalAllocationInvalid")
+    per_call = _u256_mul(gas_limit, max_gas_price)
+    budget = int(node["budget"])
+    if budget < per_call or budget % per_call != 0:
+        raise ExternalAllocationInvalid("ExternalAllocationInvalid")
+
+
 def create_child_fee_accounting(
     *,
     message: dict[str, Any],
@@ -1926,43 +2223,43 @@ def create_child_fee_accounting(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     policy = policy or StudioFeePolicy()
     declared_budget = int(message.get("declaredBudget", 0) or 0)
+    use_balance = bool(message.get("useBalance", False))
     # Consensus permits a zero-budget child when its complete calculated
     # primary obligation and allocation subtree are also zero. Negative
     # values are impossible in the ABI and remain invalid locally.
     if declared_budget < 0:
         raise MessageDeclaredBudgetInsufficient("MessageDeclaredBudgetInsufficient")
 
-    fee_params = decode_internal_message_fee_params(message.get("feeParams", b""))
-    _validate_internal_message_price_caps(fee_params)
-    _validate_phase_timeout_bounds(
-        int(fee_params["leaderTimeunitsAllocation"]),
-        int(fee_params["validatorTimeunitsAllocation"]),
-        policy,
-        allow_zero=True,
-    )
-    funding_child_fees = _fees_distribution_from_internal_params(
-        fee_params,
-        total_message_fees=0,
-        parent_fees_distribution=normalize_fees_distribution({}),
-    )
-    # Consensus prices child funding at the child's declared GEN ceiling. The
-    # live GEN price is checked only when the child activates, while storage
-    # and receipt ceilings guard the child's later work and therefore do not
-    # participate in this floor calculation.
-    funding_child_fees["storageFeeMaxGasPrice"] = 0
-    funding_child_fees["receiptFeeMaxGasPrice"] = 0
-    execution_budget_per_round = int(funding_child_fees["executionBudgetPerRound"])
+    raw_fee_params = _fee_params_bytes(message.get("feeParams", b""))
+    grant: ContractDescendantGrant | None = None
+    if use_balance:
+        grant = decode_contract_descendant_grant(message.get("allocationSubtree"))
+        fee_params = _validate_balance_funded_internal_fee_params(
+            raw_fee_params,
+            grant,
+            policy,
+        )
+    else:
+        fee_params = decode_internal_message_fee_params(raw_fee_params)
+        _validate_internal_message_price_caps(fee_params)
+        _validate_phase_timeout_bounds(
+            int(fee_params["leaderTimeunitsAllocation"]),
+            int(fee_params["validatorTimeunitsAllocation"]),
+            policy,
+            allow_zero=True,
+        )
+    execution_budget_per_round = int(fee_params["executionBudgetPerRound"])
     if (
         execution_budget_per_round > 0
         and execution_budget_per_round < policy.message_fee_params_budget_floor()
     ):
         raise BudgetTooLow("BudgetTooLow")
-    child_primary = calculate_round_fees(
-        funding_child_fees,
-        VALIDATORS_PER_ROUND[0],
-        0,
+    # Child funding uses its declared GEN ceiling; storage and receipt caps
+    # guard later work and do not participate in this quote.
+    child_primary = min_message_primary_fees(
+        fee_params,
         policy,
-        enforce_gen_price_cap=False,
+        legacy=bool(grant and grant.legacy),
     )
     if declared_budget < child_primary:
         raise MessageDeclaredBudgetInsufficient("MessageDeclaredBudgetInsufficient")
@@ -1975,26 +2272,52 @@ def create_child_fee_accounting(
     # Old GenVM receipts may expose the allocation subtree as its encoded hex
     # form. Preserve that raw value in the receipt/hash path, but never iterate
     # its characters as FlatArrays allocation nodes here.
-    allocation_nodes = (
-        message_allocations if isinstance(message_allocations, list) else []
-    )
-    child_message_allocations = _child_allocations_from_message_subtree(
-        message,
-        allocation_nodes,
-    )
-    # Mode 1 children have no allocation subtree but still receive the remainder
-    # of their declared budget as a message-fee bucket for their own children.
-    child_message_budget = declared_budget - child_primary
+    if use_balance:
+        assert grant is not None
+        _validate_contract_descendant_grant(
+            grant,
+            child_fee_params=fee_params,
+            policy=policy,
+        )
+        minimum = _u256_add(child_primary, grant.budget)
+        if declared_budget < minimum:
+            raise MessageDeclaredBudgetInsufficient("MessageDeclaredBudgetInsufficient")
+        child_message_allocations = grant.allocations
+        child_message_budget = (
+            declared_budget - child_primary if grant.legacy else grant.budget
+        )
+        allocation_policy = grant.policy
+    else:
+        if _is_contract_descendant_grant(message.get("allocationSubtree")):
+            raise InvalidContractDescendantGrant("InvalidContractDescendantGrant")
+        allocation_nodes = (
+            message_allocations if isinstance(message_allocations, list) else []
+        )
+        child_message_allocations = _child_allocations_from_message_subtree(
+            message,
+            allocation_nodes,
+        )
+        child_message_budget = declared_budget - child_primary
+        allocation_policy = (
+            MessageAllocationPolicy.PINNED
+            if child_message_allocations
+            else (
+                MessageAllocationPolicy.CLOSED
+                if allocation_nodes
+                else MessageAllocationPolicy.OPEN
+            )
+        )
     child_fees = _fees_distribution_from_internal_params(
         fee_params,
         total_message_fees=child_message_budget,
         parent_fees_distribution=parent_fees,
     )
-    validate_message_allocations(
-        child_message_allocations,
-        total_message_fees=int(child_fees["totalMessageFees"]),
-        policy=policy,
-    )
+    if not use_balance:
+        validate_message_allocations(
+            child_message_allocations,
+            total_message_fees=int(child_fees["totalMessageFees"]),
+            policy=policy,
+        )
     user_value = int(message.get("value", 0) or 0)
     accounting = _new_fee_accounting(
         fees_distribution=child_fees,
@@ -2006,6 +2329,7 @@ def create_child_fee_accounting(
         sender=sender,
         source="internal_message",
         policy=policy,
+        allocation_policy=allocation_policy,
     )
     return child_fees, accounting
 
@@ -2050,14 +2374,15 @@ def genvm_fee_context(
         "messageBudgetFloor": str(policy.message_fee_params_budget_floor()),
     }
     message_bucket_total = int(accounting.get("message_fee_budget", 0) or 0)
-    has_fee_budgets = bucket_total > 0 or message_bucket_total > 0
     data_bucket_total = (
         bucket_total if bucket_total > 0 else GENVM_UNMETERED_DATA_FEE_BUCKET
     )
     bucket_totals = {
         "execution_data_gas": data_bucket_total,
         "message_fee": (
-            message_bucket_total if has_fee_budgets else GENVM_UNMETERED_DATA_FEE_BUCKET
+            GENVM_UNMETERED_DATA_FEE_BUCKET
+            if uses_unmetered_message_fee_pool(accounting)
+            else message_bucket_total
         ),
         "nondet_outputs": GENVM_UNMETERED_DATA_FEE_BUCKET,
         "submitted_messages": GENVM_UNMETERED_DATA_FEE_BUCKET,
@@ -2070,17 +2395,23 @@ def genvm_message_fee_allocation(
     accounting: dict[str, Any] | None,
     *,
     address_factory: Callable[[str], Any] | None = None,
+    policy: StudioFeePolicy | None = None,
 ) -> list[dict[str, Any]]:
     if not accounting:
-        return _genvm_unmetered_message_fee_allocation()
+        return _genvm_unmetered_message_fee_allocation(None, policy)
 
+    allocation_policy = _accounting_allocation_policy(accounting)
+    if allocation_policy is MessageAllocationPolicy.CLOSED:
+        return [UNMATCHED_EXTERNAL_GUARD_ALLOC]
+
+    message_budget = int(accounting.get("message_fee_budget", 0) or 0)
     if not accounting.get("message_allocations"):
-        if int(accounting.get("message_fee_budget", 0) or 0) > 0:
-            raise Mode1MessageFeesRequireGenVMPerEmissionSupport(
-                "Mode1MessageFeesRequireGenVMPerEmissionSupport: fee-bearing "
-                "GenVM messages require a message allocation tree"
+        if message_budget > 0:
+            return _genvm_open_message_fee_allocation(
+                accounting,
+                message_budget,
             )
-        return _genvm_unmetered_message_fee_allocation()
+        return _genvm_unmetered_message_fee_allocation(accounting, policy)
 
     fees_distribution = normalize_fees_distribution(
         accounting.get("fees_distribution") or {}
@@ -2112,7 +2443,20 @@ def genvm_message_fee_allocation(
             )
         roots.append(allocation)
 
+    roots.append(UNMATCHED_EXTERNAL_GUARD_ALLOC)
     return roots
+
+
+def uses_unmetered_message_fee_pool(accounting: dict[str, Any] | None) -> bool:
+    if not accounting:
+        return True
+    if int(accounting.get("message_fee_budget", 0) or 0) > 0:
+        return False
+    if accounting.get("message_allocations"):
+        return False
+    if accounting.get("message_allocations_restricted"):
+        return False
+    return accounting.get("message_allocation_policy") in {None, "open"}
 
 
 def apply_fee_top_up(
@@ -2802,6 +3146,7 @@ def _consume_external_message_fee(
 ) -> tuple[int, int]:
     if int(message.get("declaredBudget", 0) or 0) != 0:
         raise MessageDeclaredBudgetInsufficient("MessageDeclaredBudgetInsufficient")
+    allocation_policy = _accounting_allocation_policy(accounting)
     event_count = len(accounting.get("external_message_events") or [])
     consumed = _reserve_external_execution(
         accounting,
@@ -2813,6 +3158,8 @@ def _consume_external_message_fee(
     )
     events = accounting.get("external_message_events") or []
     if len(events) == event_count:
+        if allocation_policy is not MessageAllocationPolicy.OPEN:
+            raise MessageNoMatchingAllocation("MessageNoMatchingAllocation")
         return consumed, 0
     event = events[-1]
     return consumed, int(event.get("reservation", 0) or 0)
@@ -2824,21 +3171,81 @@ def _consume_internal_message_fee(
     policy: StudioFeePolicy,
 ) -> int:
     declared_budget = int(message.get("declaredBudget", 0) or 0)
-    fee_params = decode_internal_message_fee_params(message.get("feeParams", b""))
-    _validate_internal_message_price_caps(fee_params)
-    _validate_internal_execution_budget_floor(fee_params, policy)
+    use_balance = bool(message.get("useBalance", False))
+    descendant_budget = 0
+    grant: ContractDescendantGrant | None = None
+    raw_fee_params = _fee_params_bytes(message.get("feeParams", b""))
 
-    min_required = min_message_primary_fees(fee_params, policy)
+    if use_balance:
+        grant = decode_contract_descendant_grant(message.get("allocationSubtree"))
+        fee_params = _validate_balance_funded_internal_fee_params(
+            raw_fee_params,
+            grant,
+            policy,
+        )
+        _validate_contract_descendant_grant(
+            grant,
+            child_fee_params=fee_params,
+            policy=policy,
+        )
+        descendant_budget = grant.budget
+    else:
+        fee_params = decode_internal_message_fee_params(raw_fee_params)
+        if _is_contract_descendant_grant(message.get("allocationSubtree")):
+            raise InvalidContractDescendantGrant("InvalidContractDescendantGrant")
+        if _accounting_allocation_policy(accounting) is MessageAllocationPolicy.CLOSED:
+            raise MessageAllocationsRestricted("MessageAllocationsRestricted")
+        _validate_internal_message_price_caps(fee_params)
+        _validate_internal_execution_budget_floor(fee_params, policy)
+
+    min_required = min_message_primary_fees(
+        fee_params,
+        policy,
+        legacy=bool(grant and grant.legacy),
+    )
+    if use_balance:
+        min_required = _u256_add(min_required, descendant_budget)
     if declared_budget < min_required:
         raise MessageDeclaredBudgetInsufficient("MessageDeclaredBudgetInsufficient")
 
-    if bool(message.get("useBalance", False)):
+    if use_balance:
         # Consensus reserves this budget from the emitting contract (ghost),
         # outside the sender-funded message bucket and allocation tree.
         return 0
 
+    if uses_unmetered_message_fee_pool(accounting):
+        expected = _genvm_unmetered_internal_fee_params(accounting, policy)
+        expected_decoded = {
+            "leaderTimeunitsAllocation": expected["leader_timeunits_allocation"],
+            "validatorTimeunitsAllocation": expected["validator_timeunits_allocation"],
+            "appealRounds": len(expected["rotations"]) - 1,
+            "executionBudgetPerRound": expected["execution_budget_per_round"],
+            "rotations": expected["rotations"],
+            "maxPriceGenPerTimeUnit": expected["max_price_gen_per_time_unit"],
+            "storageFeeMaxGasPrice": expected["storage_fee_max_gas_price"],
+            "receiptFeeMaxGasPrice": expected["receipt_fee_max_gas_price"],
+        }
+        if fee_params != expected_decoded or declared_budget != min_required:
+            raise MessageBudgetExceeded("MessageBudgetExceeded")
+        return 0
+
     _consume_against_allocation(accounting, message, declared_budget)
     return declared_budget
+
+
+def _accounting_allocation_policy(
+    accounting: dict[str, Any],
+) -> MessageAllocationPolicy:
+    value = accounting.get("message_allocation_policy")
+    if value:
+        return MessageAllocationPolicy(value)
+    if accounting.get("message_allocations_restricted"):
+        return MessageAllocationPolicy.CLOSED
+    return (
+        MessageAllocationPolicy.PINNED
+        if accounting.get("message_allocations")
+        else MessageAllocationPolicy.OPEN
+    )
 
 
 def _validate_internal_execution_budget_floor(
@@ -3008,6 +3415,8 @@ def refund_failed_internal_message_fee(
         return updated
     if bool(message.get("useBalance", False)):
         return updated
+    if uses_unmetered_message_fee_pool(accounting):
+        return updated
 
     declared_budget = int(message.get("declaredBudget", 0) or 0)
     if declared_budget <= 0:
@@ -3039,6 +3448,7 @@ def unwind_reveal_message_fees(
     external_unreserved = 0
     external_reimbursement_rolled_back = 0
     external_remainder_rolled_back = 0
+    unmetered_internal = uses_unmetered_message_fee_pool(accounting)
 
     for message in messages:
         if (
@@ -3061,6 +3471,8 @@ def unwind_reveal_message_fees(
         ):
             continue
         if bool(message.get("useBalance", False)):
+            continue
+        if unmetered_internal:
             continue
         if acceptance_dispatched and bool(message.get("onAcceptance", False)):
             continue
@@ -3861,6 +4273,8 @@ def decode_external_message_fee_params(fee_params: bytes | str) -> dict[str, int
 def min_message_primary_fees(
     internal_fee_params: dict[str, Any],
     policy: StudioFeePolicy | None = None,
+    *,
+    legacy: bool = False,
 ) -> int:
     return calculate_round_fees(
         {
@@ -3887,15 +4301,26 @@ def min_message_primary_fees(
         0,
         policy,
         enforce_gen_price_cap=False,
+        allow_incomplete_rotations=legacy,
     )
 
 
 def _calculate_initial_round_total(
     fees: dict[str, int | list[int]],
     num_of_validators: int,
+    *,
+    allow_incomplete_rotations: bool = False,
 ) -> int:
     validator_index = _validator_index(num_of_validators)
-    if int(fees["appealRounds"]) != len(fees["rotations"]) - 1:
+    rotations = fees["rotations"]
+    if not isinstance(rotations, list) or not rotations:
+        raise InvalidAppealRounds("InvalidAppealRounds")
+    appeal_rounds = int(fees["appealRounds"])
+    if (
+        appeal_rounds < len(rotations) - 1
+        if allow_incomplete_rotations
+        else appeal_rounds != len(rotations) - 1
+    ):
         raise InvalidAppealRounds("InvalidAppealRounds")
     return _calculate_fees(fees, validator_index)
 
@@ -4479,6 +4904,7 @@ def _new_fee_accounting(
     sender: str | None,
     source: str,
     policy: StudioFeePolicy,
+    allocation_policy: MessageAllocationPolicy | None = None,
 ) -> dict[str, Any]:
     fees = _serializable_fees_distribution(fees_distribution)
     # FeeManager owns this counter. A caller may include the field in the ABI
@@ -4497,6 +4923,11 @@ def _new_fee_accounting(
         execution_budget=execution_budget_total,
         incoming_primary=primary_budget,
         split_bps=policy.time_unit_overlay_bps,
+    )
+    allocation_policy = allocation_policy or (
+        MessageAllocationPolicy.PINNED
+        if message_allocations
+        else MessageAllocationPolicy.OPEN
     )
     return {
         "version": 2,
@@ -4566,11 +4997,10 @@ def _new_fee_accounting(
             _serializable_message_allocation(allocation)
             for allocation in message_allocations
         ],
-        # Studio resolves the canonical FlatArrays subtree locally, so an
-        # ordinary child with no descendants is open Mode 1, not Consensus'
-        # distinct sealed-child failure state. Keep the explicit bit for
-        # imported/recovered sealed state without conflating the two.
-        "message_allocations_restricted": False,
+        "message_allocation_policy": allocation_policy.value,
+        "message_allocations_restricted": (
+            allocation_policy is MessageAllocationPolicy.CLOSED
+        ),
         "allocation_consumed": {},
         "message_consumption_events": [],
     }
@@ -4684,18 +5114,75 @@ def _genvm_call_key(node: dict[str, Any]) -> bytes | None:
     return bytes.fromhex(call_key.removeprefix("0x"))
 
 
-def _genvm_unmetered_message_fee_allocation() -> list[dict[str, Any]]:
+def _genvm_unmetered_internal_fee_params(
+    accounting: dict[str, Any] | None,
+    policy: StudioFeePolicy | None,
+) -> dict[str, Any]:
+    if policy is None and not accounting:
+        policy = StudioFeePolicy.from_env()
+    policy = execution_policy_for_accounting(accounting, policy)
+    fees = normalize_fees_distribution(
+        (accounting or {}).get("fees_distribution") or {}
+    )
+
+    leader_timeunits = int(fees["leaderTimeunitsAllocation"])
+    if not (
+        int(policy.min_propose_timeunits)
+        <= leader_timeunits
+        <= int(policy.max_propose_timeunits)
+    ):
+        leader_timeunits = min(
+            max(DEFAULT_LEADER_TIMEUNITS_ALLOCATION, policy.min_propose_timeunits),
+            policy.max_propose_timeunits,
+        )
+    validator_timeunits = int(fees["validatorTimeunitsAllocation"])
+    if not (
+        int(policy.min_commit_timeunits)
+        <= validator_timeunits
+        <= int(policy.max_commit_timeunits)
+    ):
+        validator_timeunits = min(
+            max(
+                DEFAULT_VALIDATOR_TIMEUNITS_ALLOCATION,
+                policy.min_commit_timeunits,
+            ),
+            policy.max_commit_timeunits,
+        )
+
+    return {
+        "leader_timeunits_allocation": leader_timeunits,
+        "validator_timeunits_allocation": validator_timeunits,
+        "execution_budget_per_round": max(
+            int(fees["executionBudgetPerRound"]),
+            int(policy.message_fee_params_budget_floor()),
+            DEFAULT_TRANSACTION_EXECUTION_BUDGET_PER_ROUND,
+        ),
+        "rotations": [0],
+        "max_price_gen_per_time_unit": max(
+            int(fees["maxPriceGenPerTimeUnit"]),
+            _with_cap_headroom(policy.gen_per_time_unit),
+            1,
+        ),
+        "storage_fee_max_gas_price": max(
+            int(fees["storageFeeMaxGasPrice"]),
+            _with_cap_headroom(policy.storage_unit_price),
+            1,
+        ),
+        "receipt_fee_max_gas_price": max(
+            int(fees["receiptFeeMaxGasPrice"]),
+            _with_cap_headroom(policy.receipt_gas_price),
+            1,
+        ),
+    }
+
+
+def _genvm_unmetered_message_fee_allocation(
+    accounting: dict[str, Any] | None,
+    policy: StudioFeePolicy | None,
+) -> list[dict[str, Any]]:
     budget = 2**200
     internal_fee_params = {
-        "Internal": {
-            "leader_timeunits_allocation": 0,
-            "validator_timeunits_allocation": 0,
-            "execution_budget_per_round": 0,
-            "rotations": [0],
-            "max_price_gen_per_time_unit": 1,
-            "storage_fee_max_gas_price": 2**200,
-            "receipt_fee_max_gas_price": 2**200,
-        },
+        "Internal": _genvm_unmetered_internal_fee_params(accounting, policy)
     }
     return [
         {
@@ -4717,13 +5204,7 @@ def _genvm_unmetered_message_fee_allocation() -> list[dict[str, Any]]:
             "call_key": None,
             "budget": budget,
             "on": "finalized",
-            "fee_params": {
-                "Internal": {
-                    **internal_fee_params["Internal"],
-                    "storage_fee_max_gas_price": 20,
-                    "receipt_fee_max_gas_price": 20,
-                },
-            },
+            "fee_params": internal_fee_params,
             "children_budget": 0,
             "subtree": b"",
         },
@@ -4754,6 +5235,58 @@ def _genvm_external_legacy_fallback_message_fee_allocation() -> dict[str, Any]:
         "children_budget": 0,
         "subtree": b"",
     }
+
+
+def _genvm_open_message_fee_allocation(
+    accounting: dict[str, Any],
+    budget: int,
+) -> list[dict[str, Any]]:
+    fees = normalize_fees_distribution(accounting.get("fees_distribution") or {})
+    internal_fee_params = {
+        "Internal": {
+            "leader_timeunits_allocation": int(fees["leaderTimeunitsAllocation"]),
+            "validator_timeunits_allocation": int(fees["validatorTimeunitsAllocation"]),
+            "execution_budget_per_round": int(fees["executionBudgetPerRound"]),
+            "rotations": [int(rotation) for rotation in fees["rotations"]],
+            "max_price_gen_per_time_unit": int(fees["maxPriceGenPerTimeUnit"]),
+            "storage_fee_max_gas_price": int(fees["storageFeeMaxGasPrice"]),
+            "receipt_fee_max_gas_price": int(fees["receiptFeeMaxGasPrice"]),
+        }
+    }
+    return [
+        {
+            "recipient": None,
+            "call_key": None,
+            "budget": budget,
+            "on": "finalized",
+            "fee_params": {
+                "External": {
+                    "gas_limit": budget,
+                    "max_gas_price": 0,
+                }
+            },
+            "children_budget": 0,
+            "subtree": b"",
+        },
+        {
+            "recipient": None,
+            "call_key": None,
+            "budget": budget,
+            "on": "finalized",
+            "fee_params": internal_fee_params,
+            "children_budget": 0,
+            "subtree": b"",
+        },
+        {
+            "recipient": None,
+            "call_key": None,
+            "budget": budget,
+            "on": "decided",
+            "fee_params": internal_fee_params,
+            "children_budget": 0,
+            "subtree": b"",
+        },
+    ]
 
 
 def _allocation_subtree(
