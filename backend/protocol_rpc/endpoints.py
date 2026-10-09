@@ -17,6 +17,9 @@ from backend.protocol_rpc.exceptions import (
     NotFoundError,
     QueueDepthExceeded,
 )
+from backend.protocol_rpc.redaction import (
+    sanitize_rpc_private_keys as _sanitize_rpc_private_keys,
+)
 from backend.protocol_rpc.contract_storage_quota import (
     enforce_contract_storage_quota,
     live_state_column_size,
@@ -165,40 +168,6 @@ _GEN_CALL_SINGLEFLIGHT_ENABLED = os.environ.get(
 ).lower() not in {"0", "false", "no", "off"}
 _gen_call_singleflight_tasks: dict[str, asyncio.Task[str]] = {}
 _gen_call_singleflight_lock = asyncio.Lock()
-
-
-def _show_validator_private_keys_in_rpc() -> bool:
-    return os.getenv("SHOW_VALIDATOR_PRIVATE_KEYS_IN_RPC", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
-def _is_private_key_field(key: Any) -> bool:
-    if not isinstance(key, str):
-        return False
-    normalized = key.replace("_", "").replace("-", "").lower()
-    return normalized == "privatekey" or normalized.endswith("privatekey")
-
-
-def _sanitize_rpc_private_keys(value: Any) -> Any:
-    """Return RPC data with private-key fields removed unless explicitly enabled."""
-    if _show_validator_private_keys_in_rpc():
-        return value
-
-    if isinstance(value, dict):
-        return {
-            key: _sanitize_rpc_private_keys(item)
-            for key, item in value.items()
-            if not _is_private_key_field(key)
-        }
-    if isinstance(value, list):
-        return [_sanitize_rpc_private_keys(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_sanitize_rpc_private_keys(item) for item in value)
-    return value
 
 
 def _check_rate_limit(address: str) -> None:
@@ -1616,7 +1585,9 @@ async def sim_call(
             genvm_manager,
             params,
         )
-    return TransactionsProcessor._json_safe_numbers(receipt.to_dict())
+    return TransactionsProcessor._json_safe_numbers(
+        _sanitize_rpc_private_keys(receipt.to_dict())
+    )
 
 
 async def sim_estimate_transaction_fees(
@@ -1920,7 +1891,10 @@ async def _gen_call_with_validator(
         raise JSONRPCError(
             code=-32000,
             message="execution failed",
-            data={"receipt": receipt.to_dict(), "params": params},
+            data={
+                "receipt": _sanitize_rpc_private_keys(receipt.to_dict()),
+                "params": params,
+            },
         )
 
     return receipt
@@ -2474,7 +2448,9 @@ async def eth_call(
 
     if receipt.execution_result != ExecutionResultStatus.SUCCESS:
         raise JSONRPCError(
-            code=-32000, message="execution failed", data={"receipt": receipt.to_dict()}
+            code=-32000,
+            message="execution failed",
+            data={"receipt": _sanitize_rpc_private_keys(receipt.to_dict())},
         )
     return eth_utils.hexadecimal.encode_hex(receipt.result[1:])
 
