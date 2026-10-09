@@ -47,20 +47,12 @@ RPC_URL = os.environ.get("TEST_JSONRPC_URL", "http://localhost:4000/api")
 # GenVM manager's executors path in the image under test.
 LEGACY_EXECUTOR = os.environ.get("TEST_REROUTE_EXECUTOR", "v0.2.17")
 
-# Executor version directory of the *current* line. Pinning a contract to it is
-# a no-op for how that contract runs on its own, but it gives the resolve hook
-# something to answer with when a caller on another line asks where this
-# contract lives.
-#
-# Hardcoded because the test has no way to ask for it, not because pinning it
-# here is desirable. The manager knows the answer --
-# `$GENVMROOT/data/manifest.yaml` lists `executor_versions` -- but it serves no
-# route that reads the manifest back (`/manifest/reload` only reloads it), and
-# `/contract/detect-version` answers with a `specified_major`, which is 0 for
-# every 0.x line and so cannot name a directory. Until something exposes it,
-# this constant has to be updated whenever the image's current line moves;
-# override the env var when it does.
-CURRENT_EXECUTOR = os.environ.get("TEST_CURRENT_EXECUTOR", "v0.3.0-rc9")
+# Selector of the *current* line. Pinning a contract to it is a no-op for how
+# that contract runs on its own, but it gives the resolve hook something to
+# answer with when a caller on another line asks where this contract lives.
+# A `re:` pattern, so release-candidate renames of the line's directory do not
+# break it.
+CURRENT_EXECUTOR = os.environ.get("TEST_CURRENT_EXECUTOR", r"re:^v0\.3\.")
 
 # Shares the validator registry with the other integration suites, which wipe
 # validators while seeding mock responses.
@@ -69,7 +61,7 @@ pytestmark = pytest.mark.xdist_group(name="mock_validators")
 
 # Current SDK, current executor.
 CONTRACT_A = """# v0.3.0
-# { "Depends": "py-genlayer:5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng" }
+# { "Depends": "py-genlayer:babwp9t37jw9g4j2bccgn14g6x7x9s1f7dsmh7emvz735pz4zxa0" }
 
 import genlayer as gl
 from genlayer.types import *
