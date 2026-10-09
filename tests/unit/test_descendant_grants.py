@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from eth_abi import encode
@@ -27,12 +28,19 @@ from backend.protocol_rpc.fees import (
     MessageDeclaredBudgetInsufficient,
     MessageNoMatchingAllocation,
     StudioFeePolicy,
+    FEE_ACCOUNTING_KEY,
     _validate_contract_descendant_grant,
     consume_message_fees,
+    cancel_fee_accounting,
     create_child_fee_accounting,
     decode_contract_descendant_grant,
     genvm_message_fee_allocation,
+    fill_message_fee_payload_from_allocation,
+    settle_fee_accounting,
+    genvm_fee_context,
+    uses_unmetered_message_fee_pool,
 )
+from backend.consensus.base import _attach_child_fee_accounting
 from backend.node.genvm.origin.fees import UNMATCHED_EXTERNAL_GUARD_ALLOC
 
 
@@ -549,3 +557,115 @@ def test_declared_budget_must_cover_primary_and_explicit_grant() -> None:
 
     with pytest.raises(MessageDeclaredBudgetInsufficient):
         consume_message_fees(accounting, [message])
+
+
+def _attach_descendant(parent: dict, message: dict) -> dict:
+    parent["activation_prices_locked"] = True
+    data = {}
+    _attach_child_fee_accounting(
+        SimpleNamespace(
+            transaction=SimpleNamespace(
+                origin_address="0x0000000000000000000000000000000000000099",
+                from_address="0x0000000000000000000000000000000000000088",
+                to_address="0x0000000000000000000000000000000000000077",
+            )
+        ),
+        parent,
+        fill_message_fee_payload_from_allocation(parent, message),
+        SimpleNamespace(use_balance=message["useBalance"], value=0),
+        data,
+    )
+    return data[FEE_ACCOUNTING_KEY]
+
+
+@pytest.mark.parametrize("finish", [cancel_fee_accounting, settle_fee_accounting])
+@pytest.mark.parametrize("policy", [1, 2])
+def test_descendant_refund_returns_to_contract_depositor(finish, policy: int) -> None:
+    depositor = "0x0000000000000000000000000000000000000066"
+    _, parent = create_child_fee_accounting(
+        message=_child_message(
+            _grant(policy, 30, [_node()] if policy == 2 else []), 40
+        ),
+        parent_fees_distribution=None,
+        sender=depositor,
+    )
+    message = _child_message(b"", 30)
+    message["useBalance"] = False
+    child = _attach_descendant(parent, message)
+
+    settled, refund = finish(child)
+
+    assert refund > 0
+    assert {item["recipient"] for item in settled["fee_refund_settlements"]} == {
+        depositor
+    }
+    assert sum(item["amount"] for item in settled["fee_refund_settlements"]) == refund
+    assert finish(settled)[1] == 0
+
+
+def test_pinned_descendants_keep_admitted_parent_appeal_rules() -> None:
+    nodes = [
+        _node(budget=50),
+        _node(parent_index=0, budget=40),
+        _node(
+            parent_index=1,
+            budget=30,
+            on_acceptance=True,
+            fee_params=_internal_fee_params(rotations=[0, 0]),
+        ),
+    ]
+    _, parent = create_child_fee_accounting(
+        message=_child_message(_grant(2, 50, nodes), 60),
+        parent_fees_distribution=None,
+        sender="0x0000000000000000000000000000000000000066",
+    )
+
+    for node, message_budget in zip(nodes, [40, 30, 0]):
+        message = _child_message(b"", node[5])
+        message.update(
+            useBalance=False,
+            feeParams=node[6],
+            onAcceptance=node[1],
+        )
+        child = _attach_descendant(parent, message)
+        assert child["message_allocations_from_grant"] is True
+        assert child["message_fee_budget"] == message_budget
+        parent = child
+
+
+def test_zero_budget_balance_child_retains_closed_grant() -> None:
+    message = _child_message(_grant(0, 0, []), 0)
+    message["feeParams"] = _internal_fee_params(execution_budget=0)
+
+    child = _attach_descendant({}, message)
+
+    assert child["message_allocation_policy"] == "closed"
+    assert child["message_allocations_from_grant"] is True
+    assert child["sender"] == "0x0000000000000000000000000000000000000077"
+    assert genvm_message_fee_allocation(child) == [UNMATCHED_EXTERNAL_GUARD_ALLOC]
+
+
+@pytest.mark.parametrize("declared_budget", [0, 10])
+def test_open_grant_descendant_with_no_remaining_budget_stays_metered(
+    declared_budget: int,
+) -> None:
+    _, parent = create_child_fee_accounting(
+        message=_child_message(_grant(1, 30, []), 40),
+        parent_fees_distribution=None,
+    )
+    message = _child_message(b"", declared_budget)
+    message["feeParams"] = _internal_fee_params(execution_budget=declared_budget)
+    message["useBalance"] = False
+    child = _attach_descendant(parent, message)
+
+    assert child["message_fee_budget"] == 0
+    assert not uses_unmetered_message_fee_pool(child)
+    assert genvm_fee_context(child)[0]["message_fee"] == 0
+    assert all(node["budget"] == 0 for node in genvm_message_fee_allocation(child))
+    unfunded = {
+        **message,
+        "declaredBudget": 10,
+        "feeParams": _internal_fee_params(),
+    }
+    with pytest.raises(MessageBudgetExceeded):
+        consume_message_fees(child, [unfunded])

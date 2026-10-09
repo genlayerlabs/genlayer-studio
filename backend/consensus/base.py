@@ -4146,7 +4146,11 @@ def _attach_child_fee_accounting(
     pending_transaction: PendingTransaction,
     data: dict,
 ) -> None:
-    if int(message_payload.get("declaredBudget", 0) or 0) <= 0:
+    if (
+        int(message_payload.get("declaredBudget", 0) or 0) <= 0
+        and not pending_transaction.use_balance
+        and not parent_fee_accounting.get("message_allocations_from_grant")
+    ):
         return
     if not pending_transaction.use_balance and uses_unmetered_message_fee_pool(
         parent_fee_accounting
@@ -4165,8 +4169,20 @@ def _attach_child_fee_accounting(
             sender=(
                 context.transaction.to_address
                 if pending_transaction.use_balance
-                else context.transaction.origin_address
+                else next(
+                    (
+                        contribution["depositor"]
+                        for contribution in parent_fee_accounting.get("contributions")
+                        or []
+                        if contribution.get("depositor")
+                    ),
+                    parent_fee_accounting.get("sender"),
+                )
+                or context.transaction.origin_address
                 or context.transaction.from_address
+            ),
+            message_allocations_from_grant=bool(
+                parent_fee_accounting.get("message_allocations_from_grant")
             ),
             policy=execution_policy_for_accounting(
                 parent_fee_accounting,

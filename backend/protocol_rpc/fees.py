@@ -2218,6 +2218,7 @@ def create_child_fee_accounting(
     message: dict[str, Any],
     parent_fees_distribution: dict[str, Any] | None,
     message_allocations: list[dict[str, Any]] | str | None = None,
+    message_allocations_from_grant: bool = False,
     sender: str | None = None,
     policy: StudioFeePolicy | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -2312,7 +2313,7 @@ def create_child_fee_accounting(
         total_message_fees=child_message_budget,
         parent_fees_distribution=parent_fees,
     )
-    if not use_balance:
+    if not use_balance and not message_allocations_from_grant:
         validate_message_allocations(
             child_message_allocations,
             total_message_fees=int(child_fees["totalMessageFees"]),
@@ -2330,6 +2331,10 @@ def create_child_fee_accounting(
         source="internal_message",
         policy=policy,
         allocation_policy=allocation_policy,
+    )
+    # Grant trees retain their admission rules when inherited by descendants.
+    accounting["message_allocations_from_grant"] = (
+        not grant.legacy if grant is not None else message_allocations_from_grant
     )
     return child_fees, accounting
 
@@ -2406,7 +2411,7 @@ def genvm_message_fee_allocation(
 
     message_budget = int(accounting.get("message_fee_budget", 0) or 0)
     if not accounting.get("message_allocations"):
-        if message_budget > 0:
+        if message_budget > 0 or accounting.get("message_allocations_from_grant"):
             return _genvm_open_message_fee_allocation(
                 accounting,
                 message_budget,
@@ -2450,6 +2455,8 @@ def genvm_message_fee_allocation(
 def uses_unmetered_message_fee_pool(accounting: dict[str, Any] | None) -> bool:
     if not accounting:
         return True
+    if accounting.get("message_allocations_from_grant"):
+        return False
     if int(accounting.get("message_fee_budget", 0) or 0) > 0:
         return False
     if accounting.get("message_allocations"):
