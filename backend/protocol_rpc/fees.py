@@ -300,7 +300,6 @@ class ContractDescendantGrant:
     policy: MessageAllocationPolicy
     budget: int
     allocations: list[dict[str, Any]]
-    legacy: bool = False
 
 
 @dataclass(frozen=True)
@@ -1569,7 +1568,6 @@ def calculate_round_fees(
     policy: StudioFeePolicy | None = None,
     *,
     enforce_gen_price_cap: bool = False,
-    allow_incomplete_rotations: bool = False,
 ) -> int:
     fees = normalize_fees_distribution(fees_distribution)
     policy = policy or StudioFeePolicy()
@@ -1578,7 +1576,6 @@ def calculate_round_fees(
         time_unit_work = _calculate_initial_round_total(
             fees,
             num_of_validators,
-            allow_incomplete_rotations=allow_incomplete_rotations,
         )
         appeal_profit_reserve = _calculate_appeal_profit_reserve(
             fees,
@@ -1962,7 +1959,6 @@ def decode_contract_descendant_grant(value: Any) -> ContractDescendantGrant:
             policy=MessageAllocationPolicy.CLOSED,
             budget=0,
             allocations=[],
-            legacy=True,
         )
     if len(raw) > MAX_CONTRACT_DESCENDANT_GRANT_BYTES:
         raise InvalidContractDescendantGrant("InvalidContractDescendantGrant")
@@ -2128,20 +2124,6 @@ def _validate_contract_descendant_grant(
             raise AllocationTreeBudgetInconsistent("AllocationTreeBudgetInconsistent")
 
 
-def _validate_balance_funded_internal_fee_params(
-    raw_fee_params: bytes,
-    grant: ContractDescendantGrant,
-    policy: StudioFeePolicy,
-) -> dict[str, Any]:
-    if not grant.legacy:
-        return _validate_contract_internal_fee_params(raw_fee_params, policy)
-
-    params = decode_internal_message_fee_params(raw_fee_params)
-    _validate_internal_message_price_caps(params)
-    _validate_internal_execution_budget_floor(params, policy)
-    return params
-
-
 def _validate_contract_internal_fee_params(
     raw_fee_params: bytes,
     policy: StudioFeePolicy,
@@ -2235,9 +2217,8 @@ def create_child_fee_accounting(
     grant: ContractDescendantGrant | None = None
     if use_balance:
         grant = decode_contract_descendant_grant(message.get("allocationSubtree"))
-        fee_params = _validate_balance_funded_internal_fee_params(
+        fee_params = _validate_contract_internal_fee_params(
             raw_fee_params,
-            grant,
             policy,
         )
     else:
@@ -2260,7 +2241,6 @@ def create_child_fee_accounting(
     child_primary = min_message_primary_fees(
         fee_params,
         policy,
-        legacy=bool(grant and grant.legacy),
     )
     if declared_budget < child_primary:
         raise MessageDeclaredBudgetInsufficient("MessageDeclaredBudgetInsufficient")
@@ -2284,9 +2264,7 @@ def create_child_fee_accounting(
         if declared_budget < minimum:
             raise MessageDeclaredBudgetInsufficient("MessageDeclaredBudgetInsufficient")
         child_message_allocations = grant.allocations
-        child_message_budget = (
-            declared_budget - child_primary if grant.legacy else grant.budget
-        )
+        child_message_budget = grant.budget
         allocation_policy = grant.policy
     else:
         if _is_contract_descendant_grant(message.get("allocationSubtree")):
@@ -2334,7 +2312,7 @@ def create_child_fee_accounting(
     )
     # Grant trees retain their admission rules when inherited by descendants.
     accounting["message_allocations_from_grant"] = (
-        not grant.legacy if grant is not None else message_allocations_from_grant
+        grant is not None or message_allocations_from_grant
     )
     return child_fees, accounting
 
@@ -3185,9 +3163,8 @@ def _consume_internal_message_fee(
 
     if use_balance:
         grant = decode_contract_descendant_grant(message.get("allocationSubtree"))
-        fee_params = _validate_balance_funded_internal_fee_params(
+        fee_params = _validate_contract_internal_fee_params(
             raw_fee_params,
-            grant,
             policy,
         )
         _validate_contract_descendant_grant(
@@ -3208,7 +3185,6 @@ def _consume_internal_message_fee(
     min_required = min_message_primary_fees(
         fee_params,
         policy,
-        legacy=bool(grant and grant.legacy),
     )
     if use_balance:
         min_required = _u256_add(min_required, descendant_budget)
@@ -4280,8 +4256,6 @@ def decode_external_message_fee_params(fee_params: bytes | str) -> dict[str, int
 def min_message_primary_fees(
     internal_fee_params: dict[str, Any],
     policy: StudioFeePolicy | None = None,
-    *,
-    legacy: bool = False,
 ) -> int:
     return calculate_round_fees(
         {
@@ -4308,26 +4282,19 @@ def min_message_primary_fees(
         0,
         policy,
         enforce_gen_price_cap=False,
-        allow_incomplete_rotations=legacy,
     )
 
 
 def _calculate_initial_round_total(
     fees: dict[str, int | list[int]],
     num_of_validators: int,
-    *,
-    allow_incomplete_rotations: bool = False,
 ) -> int:
     validator_index = _validator_index(num_of_validators)
     rotations = fees["rotations"]
     if not isinstance(rotations, list) or not rotations:
         raise InvalidAppealRounds("InvalidAppealRounds")
     appeal_rounds = int(fees["appealRounds"])
-    if (
-        appeal_rounds < len(rotations) - 1
-        if allow_incomplete_rotations
-        else appeal_rounds != len(rotations) - 1
-    ):
+    if appeal_rounds != len(rotations) - 1:
         raise InvalidAppealRounds("InvalidAppealRounds")
     return _calculate_fees(fees, validator_index)
 

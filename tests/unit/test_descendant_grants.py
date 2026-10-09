@@ -21,7 +21,9 @@ from backend.protocol_rpc.fees import (
     ArithmeticOverflow,
     ExternalAllocationInvalid,
     InvalidContractDescendantGrant,
+    InvalidAppealRounds,
     InvalidFeeParams,
+    PhaseTimeoutOutOfBounds,
     MessageAllocationsNotEqualBudget,
     MessageAllocationsRestricted,
     MessageBudgetExceeded,
@@ -212,7 +214,6 @@ def test_portable_descendant_grant_vectors(
     )
     assert grant.budget == int(expected["budget"])
     assert grant.allocations == expected_allocations
-    assert grant.legacy is (name == "closed-legacy-omitted")
 
 
 @pytest.mark.parametrize(
@@ -354,7 +355,7 @@ def _child_message(subtree: bytes, declared_budget: int) -> dict:
 
 
 def test_child_accounting_installs_closed_open_and_pinned_policies() -> None:
-    legacy_fees, legacy = create_child_fee_accounting(
+    omitted_fees, omitted = create_child_fee_accounting(
         message=_child_message(b"", 15),
         parent_fees_distribution=None,
     )
@@ -371,13 +372,13 @@ def test_child_accounting_installs_closed_open_and_pinned_policies() -> None:
         parent_fees_distribution=None,
     )
 
-    assert legacy_fees["totalMessageFees"] == 5
-    assert legacy["message_allocation_policy"] == "closed"
-    assert legacy["message_allocations_restricted"] is True
+    assert omitted_fees == explicit_fees
+    assert omitted == explicit
+    assert omitted["message_allocations_restricted"] is True
     assert explicit_fees["totalMessageFees"] == 0
     assert explicit["primary_fee_budget"] == 15
     assert explicit["message_allocation_policy"] == "closed"
-    assert genvm_message_fee_allocation(legacy) == [UNMATCHED_EXTERNAL_GUARD_ALLOC]
+    assert genvm_message_fee_allocation(omitted) == [UNMATCHED_EXTERNAL_GUARD_ALLOC]
     assert genvm_message_fee_allocation(explicit) == [UNMATCHED_EXTERNAL_GUARD_ALLOC]
     assert open_fees["totalMessageFees"] == 30
     assert opened["primary_fee_budget"] == 15
@@ -516,33 +517,35 @@ def test_closed_external_on_acceptance_keeps_phase_error_precedence() -> None:
         )
 
 
-def test_legacy_balance_message_skips_new_grant_term_validation() -> None:
-    fee_params = _internal_fee_params(
-        leader=1,
-        validator=1,
-        rotations=[0],
-        appeal_rounds=1,
-    ) + bytes(32)
-    message = _child_message(b"", 1_000_000)
+@pytest.mark.parametrize("subtree", [b"", _grant(0, 0, [])])
+@pytest.mark.parametrize(
+    "fee_params,error",
+    [
+        (_internal_fee_params() + bytes(32), InvalidFeeParams),
+        (_internal_fee_params(rotations=[0], appeal_rounds=1), InvalidAppealRounds),
+        (_internal_fee_params(leader=1, validator=1), PhaseTimeoutOutOfBounds),
+    ],
+)
+def test_omitted_and_explicit_closed_grants_validate_fee_terms(
+    subtree: bytes, fee_params: bytes, error: type[Exception]
+) -> None:
+    message = _child_message(subtree, 1_000_000)
     message["feeParams"] = fee_params
     policy = StudioFeePolicy(
         min_propose_timeunits=2,
         min_commit_timeunits=2,
     )
 
-    _, accounting = create_child_fee_accounting(
-        message=message,
-        parent_fees_distribution=None,
-        policy=policy,
-    )
-    updated = consume_message_fees(accounting, [message], policy=policy)
-    assert updated["message_fee_consumed"] == 0
-
-    message["allocationSubtree"] = "0x" + _grant(0, 0, []).hex()
-    with pytest.raises(InvalidFeeParams):
+    with pytest.raises(error):
         create_child_fee_accounting(
             message=message,
             parent_fees_distribution=None,
+            policy=policy,
+        )
+    with pytest.raises(error):
+        consume_message_fees(
+            {"message_fee_budget": 0, "message_allocation_policy": "closed"},
+            [message],
             policy=policy,
         )
 
