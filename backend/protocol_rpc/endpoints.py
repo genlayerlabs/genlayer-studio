@@ -394,6 +394,10 @@ def fund_account(
     if not accounts_manager.is_valid_address(account_address):
         raise InvalidAddressError(account_address)
 
+    from eth_utils import to_checksum_address
+
+    account_address = to_checksum_address(account_address)
+
     import secrets
 
     nonce = transactions_processor.get_transaction_count(None)
