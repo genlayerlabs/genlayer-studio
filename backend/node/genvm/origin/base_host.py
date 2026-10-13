@@ -127,17 +127,19 @@ class UnsafeOverrides:
     Request overrides that reach boundaries production traffic cannot.
 
     Each member states the `debug_mode` the manager requires before it applies:
-    `reroute_to` from `safe`, `initial_recursion` from `unsafe`. With debugging
+    `reroute_to` from `safe`, other overrides from `unsafe`. With debugging
     disabled none of them take effect.
     """
 
     reroute_to: str = ""
     initial_recursion: int | None = None
+    allow_two_workers: bool | None = None
 
     def as_request_field(self) -> dict[str, typing.Any]:
         return {
             "reroute_to": self.reroute_to,
             "initial_recursion": self.initial_recursion,
+            "allow_two_workers": self.allow_two_workers,
         }
 
 
@@ -685,9 +687,9 @@ class TerminalResultUnavailable(Exception):
         super().__init__(message)
 
 
-# Transient manager refusals worth retrying. The manager reports these with the
-# generic `Errors.INTERNAL` code (no dedicated variant yet), so the message is
-# the only discriminator -- kept here so callers never have to string-match.
+# Transient manager refusals worth retrying. They arrive as a `failed_to_start`
+# error string, so the message is the only discriminator -- kept here so callers
+# never have to string-match.
 _RETRYABLE_RUN_REFUSAL_MARKERS: typing.Final = (
     "modules are required but not running",
     "modules are required but not all are running",
