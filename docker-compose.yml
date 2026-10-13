@@ -481,9 +481,10 @@ volumes:
   redis_data:
 
 # Credential for the private nix cache, consumed only by the GenVM source build
-# in Dockerfile.backend. Defaults to /dev/null — an empty netrc — so a checkout
-# without a token still builds, just without cache hits. CI points it at the
-# netrc `nix-setup` wrote.
+# in Dockerfile.backend. Defaults to an empty netrc in the repo, so a checkout
+# without a token still builds, just without cache hits; not /dev/null, as
+# buildx bake refuses to read a file outside the project without --allow=fs.read.
+# CI points it at the netrc `nix-setup` wrote.
 secrets:
   nix_netrc:
-    file: ${NIX_NETRC_FILE:-/dev/null}
+    file: ${NIX_NETRC_FILE:-./docker/empty.netrc}
