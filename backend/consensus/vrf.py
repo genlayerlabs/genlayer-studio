@@ -18,7 +18,13 @@ def get_validators_for_transaction(
     num_validators = min(num_validators, len(nodes))
 
     total_stake = sum(validator["stake"] for validator in nodes)
-    probabilities = [validator["stake"] / total_stake for validator in nodes]
+    if total_stake == 0:
+        # All validators have zero stake (e.g. internally-created validators in
+        # protocol_rpc/endpoints.py). Dividing by zero crashed the consensus
+        # worker, so fall back to a uniform distribution across equal-stake nodes.
+        probabilities = [1 / len(nodes)] * len(nodes)
+    else:
+        probabilities = [validator["stake"] / total_stake for validator in nodes]
 
     selected_validators = rng.choice(
         nodes,
