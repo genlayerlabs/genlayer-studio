@@ -39,7 +39,14 @@ def main():
     # Deploy contract with initial state (have_coin=True)
     print("Deploying with have_coin=True...")
 
-    tx_hash = client.deploy_contract(code=contract_code, args=[True])
+    estimate = client.estimate_transaction_fees()
+    fees = None
+    if estimate.get("policy", {}).get("enabled", True):
+        fees = {
+            "distribution": estimate["distribution"],
+            "feeValue": estimate["feeValue"],
+        }
+    tx_hash = client.deploy_contract(code=contract_code, args=[True], fees=fees)
     print(f"Deploy tx: {tx_hash}")
 
     # Wait for deployment

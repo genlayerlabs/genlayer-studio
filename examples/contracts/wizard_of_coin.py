@@ -1,11 +1,11 @@
-# v0.2.16
-# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
-from genlayer import *
+# v0.3.0
+# { "Depends": "py-genlayer:babwp9t37jw9g4j2bccgn14g6x7x9s1f7dsmh7emvz735pz4zxa0" }
+import genlayer as gl
 
 import json
 
 
-class WizardOfCoin(gl.Contract):
+class WizardOfCoin(gl.contract.Contract):
     have_coin: bool
 
     def __init__(self, have_coin: bool):

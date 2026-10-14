@@ -102,17 +102,21 @@ class ModifiableValidatorsRegistry(ValidatorsRegistry):
         validator.plugin_config = new_validator.llmprovider.plugin_config
 
         self.session.flush()  # Ensure the validator update is persisted
-        return to_dict(validator, False)
+        result = to_dict(validator, False)
+        self.session.commit()
+        return result
 
     async def delete_validator(self, validator_address):
         validator = self._get_validator_or_fail(validator_address)
 
         self.session.delete(validator)
         self.session.flush()  # Ensure the validator deletion is persisted
+        self.session.commit()
 
     async def delete_all_validators(self):
         self.session.query(Validators).delete(synchronize_session=False)
         self.session.flush()  # Ensure all validator deletions are persisted
+        self.session.commit()
 
     async def batch_create_validators(self, validators: list[Validator]) -> list[dict]:
         """Create multiple validators in a single batch without triggering restarts per-validator."""

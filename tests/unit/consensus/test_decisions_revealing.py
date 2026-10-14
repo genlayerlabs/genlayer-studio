@@ -3,7 +3,6 @@
 Tests call pure functions directly — no mocks, no async, no context objects.
 """
 
-import pytest
 from backend.consensus.decisions import decide_revealing, merge_appeal_validators
 from backend.consensus.effects import (
     AddTimestampEffect,
@@ -19,7 +18,6 @@ from backend.consensus.effects import (
     SendMessageEffect,
 )
 from backend.consensus.types import ConsensusResult, ConsensusRound
-
 
 # ── Helpers ────────────────────────────────────────────────────────
 
@@ -78,7 +76,7 @@ class TestMergeAppealValidators:
         assert merged_votes == {"a": "agree", "b": "disagree"}
         assert merged_vals == ["v1", "v2", "v3", "v4"]
 
-    def test_appeal_failed_1_overwrites_half(self):
+    def test_appeal_failed_1_retains_consumed_validators(self):
         existing = list(range(5))  # 5 existing validators
         current = ["new1", "new2", "new3"]
         _, merged_vals = merge_appeal_validators(
@@ -88,10 +86,9 @@ class TestMergeAppealValidators:
             current_validation_results=current,
             appeal_failed=1,
         )
-        # n = (5-1)//2 = 2, keep existing[:1], then current
-        assert merged_vals == [0] + current
+        assert merged_vals == existing + current
 
-    def test_appeal_failed_2(self):
+    def test_appeal_failed_2_retains_consumed_validators(self):
         existing = list(range(7))
         current = ["n1", "n2", "n3", "n4"]
         _, merged_vals = merge_appeal_validators(
@@ -101,10 +98,7 @@ class TestMergeAppealValidators:
             current_validation_results=current,
             appeal_failed=2,
         )
-        # n = len(current) - (len(existing) + 1) = 4 - 8 = -4
-        # existing[:n-1] = existing[:-5] = existing[:2] (negative index)
-        n = len(current) - (len(existing) + 1)
-        assert merged_vals == existing[: n - 1] + current
+        assert merged_vals == existing + current
 
     def test_votes_merged_with_pipe(self):
         merged_votes, _ = merge_appeal_validators(
@@ -147,11 +141,11 @@ class TestRevealingAlwaysEmitted:
 
         # First two: is_last=False, result=IDLE
         assert vote_reveals[0].extra_args[2] is False
-        assert vote_reveals[0].extra_args[3] == int(ConsensusResult.IDLE)
+        assert vote_reveals[0].extra_args[3] == 0
 
         # Last: is_last=True, result=consensus_result
         assert vote_reveals[2].extra_args[2] is True
-        assert vote_reveals[2].extra_args[3] == int(ConsensusResult.MAJORITY_AGREE)
+        assert vote_reveals[2].extra_args[3] == 1
 
     def test_timestamp_last_vote(self):
         _, effects = decide_revealing(**_base_kwargs())
@@ -369,11 +363,24 @@ class TestRevealingAppealSuccessful:
         assert next_state == ConsensusRound.VALIDATOR_APPEAL_SUCCESSFUL
 
 
-class TestRevealingInvalidResult:
-    def test_raises_for_invalid_consensus_result(self):
-        with pytest.raises(ValueError, match="Invalid consensus result"):
-            decide_revealing(
-                **_base_kwargs(
-                    consensus_result=ConsensusResult.DETERMINISTIC_VIOLATION,
-                )
+class TestRevealingDeterministicViolation:
+    def test_dv_max_rotations_is_undetermined(self):
+        next_state, _ = decide_revealing(
+            **_base_kwargs(
+                consensus_result=ConsensusResult.DETERMINISTIC_VIOLATION,
+                rotation_count=3,
+                config_rotation_rounds=3,
             )
+        )
+        assert next_state == "undetermined"
+
+    def test_dv_with_rotations_rotates_accused_leader(self):
+        next_state, effects = decide_revealing(
+            **_base_kwargs(
+                consensus_result=ConsensusResult.DETERMINISTIC_VIOLATION,
+                rotation_count=0,
+                config_rotation_rounds=3,
+            )
+        )
+        assert next_state == "rotate"
+        assert _find_effect(effects, IncreaseRotationCountEffect) is not None
