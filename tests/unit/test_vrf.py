@@ -1,6 +1,8 @@
 from backend.consensus.vrf import get_validators_for_transaction
 from unittest.mock import Mock
 
+import pytest
+
 
 def list_of_dicts_to_set(list_of_dicts: list[dict]) -> set:
     return set(map(lambda x: tuple(x.items()), list_of_dicts))
@@ -66,3 +68,27 @@ def test_get_validators_for_transaction_3():
 
     rng.choice.assert_called_once()
     assert validators == [{"stake": 3}, {"stake": 2}, {"stake": 1}]
+
+
+def test_get_validators_for_transaction_all_zero_stake():
+    """
+    Tests that a uniform probability is used when the total stake is zero.
+
+    Previously this divided by zero and crashed the consensus worker
+    (ZeroDivisionError). Internally-created validators with stake=0 make this a
+    reachable path, so equal-stake nodes must fall back to a uniform distribution.
+    """
+    nodes = [{"stake": 0}, {"stake": 0}, {"stake": 0}]
+
+    def choice_mock(a, p, size, replace):
+        assert p == [1 / 3, 1 / 3, 1 / 3]
+        assert sum(p) == pytest.approx(1.0)
+        return list(a)
+
+    rng = Mock()
+    rng.choice.side_effect = choice_mock
+
+    validators = get_validators_for_transaction(nodes, 3, rng=rng)
+
+    rng.choice.assert_called_once()
+    assert validators == nodes
