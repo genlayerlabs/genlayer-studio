@@ -269,6 +269,53 @@ describe('useTransactionsStore', () => {
     expect(mockDb.transactions.delete).toHaveBeenCalled();
   });
 
+  it.each([
+    TransactionStatus.ACCEPTED,
+    TransactionStatus.UNDETERMINED,
+    TransactionStatus.VALIDATORS_TIMEOUT,
+    TransactionStatus.LEADER_TIMEOUT,
+  ])(
+    'polls a %s decision through appeal and finalization',
+    async (statusName) => {
+      vi.useFakeTimers();
+      useNetworkStore().setCurrentNetwork('testnetBradbury');
+      await nextTick();
+      transactionsStore.addTransaction({ ...testTransaction, statusName });
+      mockGenlayerClient.getTransaction.mockResolvedValueOnce({
+        hash: testTransaction.hash,
+        statusName: TransactionStatus.APPEAL_COMMITTING,
+      });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(transactionsStore.transactions[0].statusName).toBe(
+        TransactionStatus.APPEAL_COMMITTING,
+      );
+
+      mockGenlayerClient.getTransaction.mockResolvedValueOnce({
+        hash: testTransaction.hash,
+        statusName: TransactionStatus.FINALIZED,
+      });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(transactionsStore.transactions[0].statusName).toBe(
+        TransactionStatus.FINALIZED,
+      );
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(mockGenlayerClient.getTransaction).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each([TransactionStatus.FINALIZED, TransactionStatus.CANCELED])(
+    'does not poll stored terminal status %s',
+    async (statusName) => {
+      vi.useFakeTimers();
+      useNetworkStore().setCurrentNetwork('testnetBradbury');
+      await nextTick();
+      transactionsStore.addTransaction({ ...testTransaction, statusName });
+      await transactionsStore.refreshPendingTransactions();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(mockGenlayerClient.getTransaction).not.toHaveBeenCalled();
+    },
+  );
+
   describe('cancelTransaction', () => {
     beforeEach(() => {
       mockGenlayerClient.cancelTransaction.mockResolvedValue({
