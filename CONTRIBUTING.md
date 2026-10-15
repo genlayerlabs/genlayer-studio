@@ -102,7 +102,7 @@ Have ideas for new features or use cases? We're eager to hear them! But first:
 - **3.2. Run the frontend in dev mode**: to run the frontend separately from the backend and with hot reload enabled, first launch the backend without the frontend:
 
    ```sh
-   $ docker compose upjsonrpc webrequest ollama database-migration postgres
+   $ docker compose up jsonrpc webrequest ollama database-migration postgres
    ```
    Then launch the frontend in dev mode:
    ```sh
