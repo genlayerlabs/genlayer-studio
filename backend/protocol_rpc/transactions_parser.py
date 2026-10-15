@@ -13,6 +13,7 @@ import os
 from backend.rollup.consensus_service import ConsensusService
 from backend.rollup.web3_pool import Web3ConnectionPool
 from backend.domain.types import TransactionType
+from backend.errors.errors import InvalidTransactionError
 
 from backend.protocol_rpc.types import (
     DecodedDeploymentData,
@@ -597,6 +598,21 @@ class TransactionParser:
             )
 
         sender = rollup_transaction.data.args.sender
+        # `sender` above is an attacker-controlled argument decoded from the
+        # transaction's calldata, not the party that actually authorized the
+        # transaction. Only `rollup_transaction.from_address` is verified,
+        # by `transaction_has_valid_signature`, to be the recovered signer
+        # of the raw transaction. Without this check, a caller can sign a
+        # valid transaction from their own address while setting `sender`
+        # to any other address, which becomes the Intelligent Contract
+        # caller (see GenVM's `gl.message.sender_address`) while the real
+        # signer merely pays the gas.
+        if to_checksum_address(sender) != to_checksum_address(
+            rollup_transaction.from_address
+        ):
+            raise InvalidTransactionError(
+                "Transaction sender argument does not match the recovered signer"
+            )
         # The v0.6 deploySalted selector is authoritative: Consensus ignores
         # the tuple recipient and always passes address(0) into CreationPhase.
         # Inferring only from the user-controlled recipient let a salted deploy
