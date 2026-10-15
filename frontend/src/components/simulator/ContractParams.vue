@@ -6,7 +6,7 @@ import type {
 } from 'genlayer-js/types';
 import { onMounted, ref, watch } from 'vue';
 import { AnyFieldValue } from '../global/fields/AnyFieldValue';
-import EmptyListPlaceholder from '@/components/Simulator/EmptyListPlaceholder.vue';
+import EmptyListPlaceholder from '@/components/simulator/EmptyListPlaceholder.vue';
 import type { ArgData } from './ContractParams';
 
 const props = defineProps<{

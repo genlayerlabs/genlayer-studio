@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { PlayIcon } from '@heroicons/vue/24/solid';
-import ContractTab from '@/components/Simulator/ContractTab.vue';
+import ContractTab from '@/components/simulator/ContractTab.vue';
 import { useContractsStore } from '@/stores';
 import { computed } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
