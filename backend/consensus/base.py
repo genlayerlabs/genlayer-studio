@@ -21,7 +21,7 @@ from eth_utils import is_address, keccak, to_bytes, to_checksum_address
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from backend.consensus.constants import DEFAULT_VALIDATORS_COUNT
-from backend.consensus.errors import NoValidatorsAvailableError
+from backend.consensus.errors import FinalizationStateError, NoValidatorsAvailableError
 from backend.consensus.vrf import get_validators_for_transaction
 from backend.database_handler.chain_snapshot import ChainSnapshot
 from backend.database_handler.contract_snapshot import ContractSnapshot
@@ -52,6 +52,7 @@ from backend.node.types import (
     Vote,
     ExecutionResultStatus,
     PendingTransaction,
+    _compute_contract_state_hash,
 )
 from backend.protocol_rpc.message_handler.base import MessageHandler
 from backend.protocol_rpc.message_handler.types import (
@@ -3727,10 +3728,8 @@ class AcceptedState(TransactionState):
             ),
             has_contract_snapshot=bool(context.transaction.contract_snapshot),
             contract_snapshot_dict=(
-                context.contract_snapshot.to_dict()
-                if not context.transaction.contract_snapshot
-                else None
-            ),
+                context.transaction.contract_snapshot or context.contract_snapshot
+            ).to_dict(),
             execution_result_success=execution_success,
             tx_type_deploy=is_deploy,
             accepted_contract_state=accepted_contract_state,
@@ -3883,6 +3882,42 @@ class ValidatorsTimeoutState(TransactionState):
         return None
 
 
+def _transaction_finalization_state(
+    context: TransactionContext, leader_receipt: Receipt
+) -> dict[str, str]:
+    saved_snapshot = context.transaction.contract_snapshot
+    state = saved_snapshot.finalization_state if saved_snapshot is not None else None
+    if state is None:
+        state = context.transactions_processor.get_transaction_finalization_state(
+            context.transaction.hash
+        )
+    if state is None and leader_receipt.contract_state:
+        state = leader_receipt.contract_state
+
+    expected_hash = leader_receipt.contract_state_hash
+    if state is not None:
+        if expected_hash and _compute_contract_state_hash(state) != expected_hash:
+            raise FinalizationStateError(
+                f"Finalization state hash mismatch for transaction {context.transaction.hash}"
+            )
+        return state
+
+    # Pre-fix rows did not persist post-state. The moving accepted head is only
+    # safe to reuse when the original receipt proves it is exactly this result.
+    if expected_hash:
+        snapshot = context.contract_snapshot_factory(context.transaction.to_address)
+        accepted_state = (
+            snapshot.states.get("accepted") if snapshot is not None else None
+        )
+        if _compute_contract_state_hash(accepted_state) == expected_hash:
+            return accepted_state
+
+    raise FinalizationStateError(
+        f"Missing transaction-local finalization state for {context.transaction.hash}; "
+        "cannot finalize from an unverified contract head"
+    )
+
+
 class FinalizingState(TransactionState):
     """
     Class representing the finalizing state of a transaction.
@@ -3897,12 +3932,6 @@ class FinalizingState(TransactionState):
         )
         leader_receipt = leader_receipts[0] if leader_receipts else None
 
-        # Acceptance is a separate message lifecycle phase. If the helper EVM
-        # or worker died after the agreed decision was committed, repair that
-        # phase before allowing finalization to overtake it.
-        if leader_receipt is not None:
-            _dispatch_messages_for_phase(context, leader_receipt, "accepted")
-
         pre_effects, post_effects, should_finalize_contract = decide_finalizing(
             tx_hash=context.transaction.hash,
             tx_status_accepted=(
@@ -3916,6 +3945,19 @@ class FinalizingState(TransactionState):
                 leader_receipt.node_config if leader_receipt is not None else None
             ),
         )
+
+        # Verify state before emitting messages, changing status or settling fees.
+        finalization_state = (
+            _transaction_finalization_state(context, leader_receipt)
+            if should_finalize_contract
+            else None
+        )
+
+        # Acceptance is a separate message lifecycle phase. If the helper EVM
+        # or worker died after the agreed decision was committed, repair that
+        # phase before allowing finalization to overtake it.
+        if leader_receipt is not None:
+            _dispatch_messages_for_phase(context, leader_receipt, "accepted")
 
         executor = EffectExecutor(context)
         await executor.execute(pre_effects)
@@ -3938,21 +3980,9 @@ class FinalizingState(TransactionState):
 
         # Impure: contract finalization + triggered transactions (needs DB reads)
         if should_finalize_contract:
-            snapshot = context.contract_snapshot_factory(context.transaction.to_address)
-            if snapshot is None:
-                raise RuntimeError(
-                    "Missing contract snapshot while finalizing a transaction"
-                )
-
-            accepted_state = snapshot.states.get("accepted")
-            if not accepted_state:
-                raise RuntimeError(
-                    "Missing accepted contract state prior to finalization"
-                )
-
             context.contract_processor.update_contract_state(
                 context.transaction.to_address,
-                finalized_state=accepted_state,
+                finalized_state=finalization_state,
             )
 
             _dispatch_messages_for_phase(

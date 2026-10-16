@@ -21,6 +21,7 @@ from backend.consensus.base import (
     NoValidatorsAvailableError,
 )
 from backend.consensus.history import APPEAL_RECOVERY_SNAPSHOT_KEY
+from backend.consensus.errors import FinalizationStateError
 from backend.protocol_rpc.fees import acceptance_dispatch_pending
 
 # Alias for use in context manager (avoids circular import issues)
@@ -96,8 +97,8 @@ _TX_CLAIM_BASE_COLUMNS: tuple[tuple[str, str], ...] = (
 
 # Stored per-transaction state. Heavy: contract_snapshot has been observed at
 # tens of MB, so only claims whose downstream consumes it include this group.
-# Appeals restore the contract's accepted state from it; the pending and
-# finalization paths rebuild snapshots via contract_snapshot_factory and
+# Appeals restore the contract's accepted state from it. Pending rebuilds its
+# snapshot; finalization separately reads only the saved post-state. Both
 # persist consensus_history through DB-side jsonb merges, so they omit it
 # deliberately (see _TX_CLAIM_OMISSIONS in the manifest tests).
 _TX_STATE_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -972,7 +973,9 @@ class ConsensusWorker:
                 e,
                 cancel_on_exhaustion=(
                     not protected_appeal_work
-                    and not isinstance(e, InternalMessageEmissionError)
+                    and not isinstance(
+                        e, (InternalMessageEmissionError, FinalizationStateError)
+                    )
                 ),
             )
         finally:
@@ -1709,7 +1712,7 @@ class ConsensusWorker:
                 + (
                     f"/{self.MAX_GENERIC_ERROR_RETRIES}"
                     if cancel_on_exhaustion
-                    else " (appeal preserved)"
+                    else " (decision preserved)"
                 )
                 + ", "
                 f"next attempt in {backoff}s - error: {error}"

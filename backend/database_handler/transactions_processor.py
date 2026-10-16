@@ -2308,6 +2308,16 @@ class TransactionsProcessor:
         )
         self.session.commit()
 
+    def get_transaction_finalization_state(self, transaction_hash: str) -> dict | None:
+        """Read only the accepted result, without transferring rollback state."""
+        return self.session.execute(
+            text(
+                "SELECT contract_snapshot->'finalization_state' FROM transactions "
+                "WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash},
+        ).scalar_one_or_none()
+
     def transactions_in_process_by_contract(self) -> list[dict]:
         transactions = (
             self.session.query(Transactions)
