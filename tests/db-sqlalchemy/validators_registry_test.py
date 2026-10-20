@@ -3,6 +3,8 @@ from typing import Iterable
 from eth_account import Account
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 
@@ -125,3 +127,18 @@ async def test_validator_update_and_delete_commit_for_other_sessions(
     with SessionLocal() as other_session:
         other_registry = ModifiableValidatorsRegistry(other_session)
         assert other_registry.count_validators() == 0
+
+
+def test_registry_recovers_after_connection_drop(session: Session):
+    registry = ModifiableValidatorsRegistry(session)
+    assert registry.get_all_validators() == []
+
+    pid = session.execute(text("SELECT pg_backend_pid()")).scalar()
+    with session.get_bind().connect() as admin:
+        admin.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+        admin.commit()
+
+    with pytest.raises(DBAPIError):
+        registry.get_all_validators()
+
+    assert registry.get_all_validators() == []
