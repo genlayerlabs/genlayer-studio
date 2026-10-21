@@ -28,9 +28,7 @@ def test_debit_normalizes_address():
     session.execute.return_value = MagicMock(rowcount=1)
     assert AccountsManager(session).debit_account_balance(RAW_ADDRESS, 5) is True
 
-    (params,) = [
-        p for p in _executed_params(session) if p.get("addr")
-    ]
+    (params,) = [p for p in _executed_params(session) if p.get("addr")]
     assert params["addr"] == CHECKSUMMED
 
 
