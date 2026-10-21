@@ -544,6 +544,8 @@ def fund_account(
     if normalized_amount <= 0:
         raise InvalidParams(message="amount must be a positive integer")
 
+    account_address = eth_utils.to_checksum_address(account_address)
+
     import secrets
 
     nonce = transactions_processor.get_transaction_count(None)
