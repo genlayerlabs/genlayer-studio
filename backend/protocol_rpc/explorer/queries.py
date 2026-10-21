@@ -50,7 +50,9 @@ def _serialize_tx(
         "num_of_initial_validators": tx.num_of_initial_validators,
         "last_vote_timestamp": tx.last_vote_timestamp,
         "rotation_count": tx.rotation_count,
-        "leader_timeout_validators": tx.leader_timeout_validators,
+        "leader_timeout_validators": sanitize_rpc_private_keys(
+            tx.leader_timeout_validators
+        ),
         "sim_config": tx.sim_config,
         "triggered_by_hash": tx.triggered_by_hash,
         "triggered_on": tx.triggered_on,

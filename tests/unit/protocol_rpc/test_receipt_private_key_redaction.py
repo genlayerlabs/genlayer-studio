@@ -190,7 +190,7 @@ def _explorer_transaction():
         num_of_initial_validators=None,
         last_vote_timestamp=None,
         rotation_count=0,
-        leader_timeout_validators=None,
+        leader_timeout_validators=[dict(node_config)],
         sim_config=None,
         triggered_by_hash=None,
         triggered_on=None,
@@ -218,6 +218,7 @@ def test_explorer_serialize_tx_redacts_private_keys(monkeypatch):
     assert serialized["consensus_history"]["consensus_results"][0]["leader_result"][0][
         "node_config"
     ] == {"address": SENDER}
+    assert serialized["leader_timeout_validators"] == [{"address": SENDER}]
 
 
 def test_explorer_serialize_tx_can_show_private_keys_for_local_debug(monkeypatch):
