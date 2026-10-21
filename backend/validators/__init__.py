@@ -82,6 +82,7 @@ class ModifiableValidatorsRegistryInterceptor(vr.ModifiableValidatorsRegistry):
         self._parent = parent
         super().__init__(*args, **kwargs)
 
+    @vr.rollback_on_error
     async def create_validator(self, validator: vr.Validator) -> dict:
         async with self._parent.do_write():
             res = await super().create_validator(validator)
@@ -89,6 +90,7 @@ class ModifiableValidatorsRegistryInterceptor(vr.ModifiableValidatorsRegistry):
             await self._parent._notify_validator_change("validator_created", res)
             return res
 
+    @vr.rollback_on_error
     async def update_validator(
         self,
         new_validator: vr.Validator,
@@ -99,6 +101,7 @@ class ModifiableValidatorsRegistryInterceptor(vr.ModifiableValidatorsRegistry):
             await self._parent._notify_validator_change("validator_updated", res)
             return res
 
+    @vr.rollback_on_error
     async def delete_validator(self, validator_address):
         async with self._parent.do_write():
             res = await super().delete_validator(validator_address)
@@ -108,6 +111,7 @@ class ModifiableValidatorsRegistryInterceptor(vr.ModifiableValidatorsRegistry):
             )
             return res
 
+    @vr.rollback_on_error
     async def delete_all_validators(self):
         async with self._parent.do_write():
             res = await super().delete_all_validators()
@@ -115,6 +119,7 @@ class ModifiableValidatorsRegistryInterceptor(vr.ModifiableValidatorsRegistry):
             await self._parent._notify_validator_change("all_validators_deleted", {})
             return res
 
+    @vr.rollback_on_error
     async def batch_create_validators(
         self, validators: list[vr.Validator]
     ) -> list[dict]:
@@ -127,6 +132,7 @@ class ModifiableValidatorsRegistryInterceptor(vr.ModifiableValidatorsRegistry):
             )
             return res
 
+    @vr.rollback_on_error
     async def replace_all_validators(
         self, validators: list[vr.Validator]
     ) -> list[dict]:

@@ -277,14 +277,24 @@ class _VmErrorFeeNoMatchingAllocation:
         return VmError("fee no_matching_allocation # external")
 
 
+class _VmErrorFeeDescendantGrant:
+    @staticmethod
+    def budget() -> "VmError":
+        return VmError("fee descendant_grant budget")
+
+    @staticmethod
+    def tree() -> "VmError":
+        return VmError("fee descendant_grant tree")
+
+    @staticmethod
+    def external() -> "VmError":
+        return VmError("fee descendant_grant external")
+
+
 class _VmErrorFee:
     @staticmethod
     def below_minimum() -> "VmError":
         return VmError("fee below_minimum")
-
-    @staticmethod
-    def phase_timeout_out_of_bounds() -> "VmError":
-        return VmError("fee phase_timeout_out_of_bounds")
 
     @staticmethod
     def too_many_rounds() -> "VmError":
@@ -293,6 +303,10 @@ class _VmErrorFee:
     @staticmethod
     def no_matching_allocation() -> "_VmErrorFeeNoMatchingAllocation":
         return _VmErrorFeeNoMatchingAllocation()
+
+    @staticmethod
+    def descendant_grant() -> "_VmErrorFeeDescendantGrant":
+        return _VmErrorFeeDescendantGrant()
 
 
 class _VmErrorEvm:
