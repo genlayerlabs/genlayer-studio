@@ -4,6 +4,8 @@ import asyncio
 import typing
 import contextlib
 import dataclasses
+import hashlib
+import json
 import os
 import random
 
@@ -80,6 +82,7 @@ class ModifiableValidatorsRegistryInterceptor(vr.ModifiableValidatorsRegistry):
         self._parent = parent
         super().__init__(*args, **kwargs)
 
+    @vr.rollback_on_error
     async def create_validator(self, validator: vr.Validator) -> dict:
         async with self._parent.do_write():
             res = await super().create_validator(validator)
@@ -87,6 +90,7 @@ class ModifiableValidatorsRegistryInterceptor(vr.ModifiableValidatorsRegistry):
             await self._parent._notify_validator_change("validator_created", res)
             return res
 
+    @vr.rollback_on_error
     async def update_validator(
         self,
         new_validator: vr.Validator,
@@ -97,6 +101,7 @@ class ModifiableValidatorsRegistryInterceptor(vr.ModifiableValidatorsRegistry):
             await self._parent._notify_validator_change("validator_updated", res)
             return res
 
+    @vr.rollback_on_error
     async def delete_validator(self, validator_address):
         async with self._parent.do_write():
             res = await super().delete_validator(validator_address)
@@ -106,6 +111,7 @@ class ModifiableValidatorsRegistryInterceptor(vr.ModifiableValidatorsRegistry):
             )
             return res
 
+    @vr.rollback_on_error
     async def delete_all_validators(self):
         async with self._parent.do_write():
             res = await super().delete_all_validators()
@@ -113,6 +119,7 @@ class ModifiableValidatorsRegistryInterceptor(vr.ModifiableValidatorsRegistry):
             await self._parent._notify_validator_change("all_validators_deleted", {})
             return res
 
+    @vr.rollback_on_error
     async def batch_create_validators(
         self, validators: list[vr.Validator]
     ) -> list[dict]:
@@ -125,6 +132,7 @@ class ModifiableValidatorsRegistryInterceptor(vr.ModifiableValidatorsRegistry):
             )
             return res
 
+    @vr.rollback_on_error
     async def replace_all_validators(
         self, validators: list[vr.Validator]
     ) -> list[dict]:
@@ -152,6 +160,34 @@ class Snapshot:
 from backend.node.base import LLMConfig, Manager as GenVMManager
 
 
+def _registry_fingerprint(validators: list[dict]) -> str:
+    """Return a stable identity for the validator configuration GenVM consumes."""
+
+    relevant_fields = (
+        "address",
+        "stake",
+        "provider",
+        "model",
+        "config",
+        "plugin",
+        "plugin_config",
+    )
+    canonical = [
+        {field: validator.get(field) for field in relevant_fields}
+        for validator in sorted(
+            validators,
+            key=lambda validator: str(validator.get("address") or "").lower(),
+        )
+    ]
+    encoded = json.dumps(
+        canonical,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 class Manager:
     registry: vr.ModifiableValidatorsRegistry
 
@@ -161,6 +197,7 @@ class Manager:
         self.genvm_manager = genvm_manager
 
         self._cached_snapshot = None
+        self._cached_registry_fingerprint: str | None = None
 
         self.registry = ModifiableValidatorsRegistryInterceptor(
             self, validators_registry_session
@@ -172,12 +209,30 @@ class Manager:
         # creates the general Snapshot with:
         # - SingleValidatorSnapshot (validator, genvm_host_data)
         # - the genvm_config_path
-        new_validators = await self._get_snap_from_registry()
-        # Registers all the validators providers and models to the LLM module
-        await self._change_providers_from_snapshot(new_validators)
+        async with self._restart_llm_lock:
+            # Read inside the lock. A delayed event must not overwrite a newer
+            # snapshot that another restart loaded while this coroutine waited.
+            registry_validators = self.registry.get_all_validators()
+            registry_fingerprint = _registry_fingerprint(registry_validators)
+            # Registers all the validators providers and models to the LLM
+            # module. Redis delivers one notification per mutation and those
+            # notifications can lag behind the database. Avoid stopping a
+            # healthy module for a state that is already loaded.
+            if (
+                self._cached_snapshot is not None
+                and self._cached_registry_fingerprint == registry_fingerprint
+            ):
+                logger.info("Validator registry is already loaded; skipping restart")
+                return
+            new_validators = await self._get_snap_from_registry(registry_validators)
+            await self._change_providers_from_snapshot_locked(new_validators)
+            self._cached_registry_fingerprint = registry_fingerprint
 
-    async def _get_snap_from_registry(self) -> Snapshot:
-        cur_validators_as_dict = self.registry.get_all_validators()
+    async def _get_snap_from_registry(
+        self, cur_validators_as_dict: list[dict] | None = None
+    ) -> Snapshot:
+        if cur_validators_as_dict is None:
+            cur_validators_as_dict = self.registry.get_all_validators()
         logger.info(
             f"ValidatorManager retrieved {len(cur_validators_as_dict)} validators from registry",
         )
@@ -252,6 +307,17 @@ class Manager:
                     "Validators manager snapshot not initialized. "
                     "Ensure restart() was called successfully."
                 )
+            # Validator events are asynchronous across RPC and consensus
+            # processes. The database commit is authoritative, so verify the
+            # entire cached configuration before freezing a transaction's
+            # selection pool. Checking only an empty cache misses partial
+            # wipe/recreate states (for example a cached 4-of-5 pool).
+            registry_validators = self.registry.get_all_validators()
+            registry_fingerprint = _registry_fingerprint(registry_validators)
+            if self._cached_registry_fingerprint != registry_fingerprint:
+                fresh = await self._get_snap_from_registry(registry_validators)
+                await self._change_providers_from_snapshot_locked(fresh)
+                self._cached_registry_fingerprint = registry_fingerprint
             snap = deepcopy(self._cached_snapshot)
         yield snap
 
@@ -329,9 +395,7 @@ class Manager:
     @contextlib.asynccontextmanager
     async def do_write(self):
         yield
-
-        new_validators = await self._get_snap_from_registry()
-        await self._change_providers_from_snapshot(new_validators)
+        await self.restart()
 
     async def _notify_validator_change(self, event_type: str, data: dict):
         """

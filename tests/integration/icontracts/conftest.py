@@ -45,14 +45,15 @@ def get_mock_provider_config() -> dict[str, str]:
 @pytest.fixture
 def setup_validators():
     created_validator_addresses = []
+    replaced_validator_pool = False
 
     def _setup(
         mock_response: Any = None,
         mock_web_response: Any = None,
     ) -> None:
-        nonlocal created_validator_addresses
+        nonlocal created_validator_addresses, replaced_validator_pool
         if mock_llms():
-            # Wipe ALL existing validators before seeding this test's mocks.
+            # Atomically replace ALL existing validators with this test's mocks.
             # Without this, a prior test's validator (which has different
             # mock_response, possibly even none) can be picked into this
             # test's consensus round via VRF, disagree with the leader's
@@ -62,38 +63,34 @@ def setup_validators():
             # assertion fails. The xdist_group marker serializes these
             # tests onto a single worker, so this wipe is safe for the
             # parallel CI run.
-            delete_all = post_request_localhost(
-                payload("sim_deleteAllValidators")
-            ).json()
-            assert has_success_status(delete_all)
-
             mock_cfg = get_mock_provider_config()
-            # Mock mode: create validators with specific mock_response for this test
-            for _ in range(5):
-                result = post_request_localhost(
-                    payload(
-                        "sim_createValidator",
-                        8,
-                        mock_cfg["provider"],
-                        mock_cfg["model"],
-                        {"temperature": 0.75, "max_tokens": 500},
-                        "openai-compatible",
-                        {
-                            "api_key_env_var": mock_cfg["api_key_env_var"],
-                            "api_url": mock_cfg["api_url"],
-                            "mock_response": (
-                                mock_response if mock_response is not None else {}
-                            ),
-                            "mock_web_response": (
-                                mock_web_response
-                                if mock_web_response is not None
-                                else {}
-                            ),
-                        },
-                    )
-                ).json()
-                assert has_success_status(result)
-                created_validator_addresses.append(result["result"]["address"])
+            validator_config = {
+                "stake": 8,
+                "provider": mock_cfg["provider"],
+                "model": mock_cfg["model"],
+                "config": {"temperature": 0.75, "max_tokens": 500},
+                "plugin": "openai-compatible",
+                "plugin_config": {
+                    "api_key_env_var": mock_cfg["api_key_env_var"],
+                    "api_url": mock_cfg["api_url"],
+                    "mock_response": (
+                        mock_response if mock_response is not None else {}
+                    ),
+                    "mock_web_response": (
+                        mock_web_response if mock_web_response is not None else {}
+                    ),
+                },
+            }
+            result = post_request_localhost(
+                payload("sim_replaceValidators", [validator_config] * 5)
+            ).json()
+            assert has_success_status(result)
+            assert len(result["result"]) == 5
+            created_validator_addresses.extend(
+                validator["address"] for validator in result["result"]
+            )
+            assert len(set(created_validator_addresses)) == 5
+            replaced_validator_pool = True
         else:
             cfg = get_provider_config()
             # Non-mock mode: only create the validators that are still missing
@@ -121,7 +118,13 @@ def setup_validators():
 
     yield _setup
 
-    # Only delete validators that THIS test created (not all validators)
+    # The next mock-backed test atomically replaces this pool. Deleting each
+    # validator here would emit five more asynchronous GenVM reloads and can
+    # interrupt transactions that are still completing acceptance effects.
+    if replaced_validator_pool:
+        return
+
+    # Only delete validators that THIS non-mock test created.
     for address in created_validator_addresses:
         delete_result = post_request_localhost(
             payload("sim_deleteValidator", address)

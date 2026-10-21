@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -52,21 +53,162 @@ def test_eth_get_transaction_by_hash_requests_no_contract_snapshot():
     )
 
 
+def test_eth_get_transaction_by_hash_redacts_private_keys_by_default(monkeypatch):
+    monkeypatch.delenv("SHOW_VALIDATOR_PRIVATE_KEYS_IN_RPC", raising=False)
+    transactions_processor = MagicMock()
+    stored_transaction = {
+        "hash": "0xabc",
+        "consensus_data": {
+            "leader_receipt": [
+                {
+                    "node_config": {
+                        "address": "0xvalidator",
+                        "private_key": "0xsecret",
+                    }
+                }
+            ],
+            "validators": [
+                {
+                    "node_config": {
+                        "address": "0xvalidator2",
+                        "privateKey": "0xsecret2",
+                    }
+                }
+            ],
+        },
+    }
+    transactions_processor.get_transaction_by_hash.return_value = stored_transaction
+
+    result = endpoints.get_transaction_by_hash(
+        transactions_processor=transactions_processor,
+        transaction_hash="0xabc",
+    )
+
+    leader_config = result["consensus_data"]["leader_receipt"][0]["node_config"]
+    validator_config = result["consensus_data"]["validators"][0]["node_config"]
+    assert leader_config == {"address": "0xvalidator"}
+    assert validator_config == {"address": "0xvalidator2"}
+    assert (
+        stored_transaction["consensus_data"]["leader_receipt"][0]["node_config"][
+            "private_key"
+        ]
+        == "0xsecret"
+    )
+
+
+def test_eth_get_transaction_by_hash_can_show_private_keys_for_local_debug(
+    monkeypatch,
+):
+    monkeypatch.setenv("SHOW_VALIDATOR_PRIVATE_KEYS_IN_RPC", "true")
+    transactions_processor = MagicMock()
+    stored_transaction = {
+        "hash": "0xabc",
+        "consensus_data": {
+            "leader_receipt": [
+                {"node_config": {"address": "0xvalidator", "private_key": "0xsecret"}}
+            ]
+        },
+    }
+    transactions_processor.get_transaction_by_hash.return_value = stored_transaction
+
+    result = endpoints.get_transaction_by_hash(
+        transactions_processor=transactions_processor,
+        transaction_hash="0xabc",
+    )
+
+    assert result == stored_transaction
+
+
 def test_eth_transaction_receipt_requests_no_contract_snapshot():
+    transactions_processor = MagicMock()
+    consensus_main = "0xb7278a61aa25c888815afc32ad3cc52ff24fe575"
+    transactions_processor.get_transaction_by_hash.return_value = {
+        "hash": "0xabc",
+        "from_address": "0x1111111111111111111111111111111111111111",
+        "to_address": "0x2222222222222222222222222222222222222222",
+        "type": 2,
+        "tx_slot": "7",
+        "contract_address": "0x3333333333333333333333333333333333333333",
+        "status": "FINALIZED",
+    }
+    transactions_processor.get_evm_envelope.return_value = SimpleNamespace(
+        to_address=consensus_main,
+    )
+
+    receipt = endpoints.get_transaction_receipt(transactions_processor, "0xabc")
+
+    assert receipt["transactionHash"] == "0xabc"
+    assert receipt["to"] == consensus_main
+    assert receipt["contractAddress"] is None
+    assert receipt["logs"][0]["address"] == consensus_main
+    assert (
+        receipt["logs"][0]["topics"][0]
+        == "0x"
+        + endpoints.eth_utils.keccak(text="CreatedTransaction(bytes32,uint256)").hex()
+    )
+    assert receipt["logs"][0]["topics"][1] == "0xabc"
+    assert receipt["logs"][0]["data"] == "0x" + (7).to_bytes(32, "big").hex()
+    transactions_processor.get_transaction_by_hash.assert_called_once_with(
+        "0xabc", include_contract_snapshot=False
+    )
+
+
+def test_eth_transaction_receipt_does_not_fabricate_creation_event_for_send():
     transactions_processor = MagicMock()
     transactions_processor.get_transaction_by_hash.return_value = {
         "hash": "0xabc",
         "from_address": "0x1111111111111111111111111111111111111111",
         "to_address": "0x2222222222222222222222222222222222222222",
+        "type": 0,
+        "tx_slot": "0",
         "status": "FINALIZED",
     }
+    transactions_processor.get_evm_envelope.return_value = SimpleNamespace(
+        to_address="0x2222222222222222222222222222222222222222",
+    )
+
+    receipt = endpoints.get_transaction_receipt(transactions_processor, "0xabc")
+
+    assert receipt["logs"] == []
+
+
+def test_eth_transaction_receipt_reports_reverted_lifecycle_envelope():
+    transactions_processor = MagicMock()
+    transactions_processor.get_transaction_by_hash.return_value = None
+    transactions_processor.get_evm_envelope.return_value = SimpleNamespace(
+        from_address="0x1111111111111111111111111111111111111111",
+        to_address="0x2222222222222222222222222222222222222222",
+        success=False,
+        error="InsufficientFees",
+    )
 
     receipt = endpoints.get_transaction_receipt(transactions_processor, "0xabc")
 
     assert receipt["transactionHash"] == "0xabc"
-    transactions_processor.get_transaction_by_hash.assert_called_once_with(
-        "0xabc", include_contract_snapshot=False
+    assert receipt["status"] == "0x0"
+    assert receipt["revertReason"] == "InsufficientFees"
+    assert receipt["logs"] == []
+
+
+def test_eth_get_transaction_by_hash_reports_envelope_without_protocol_row():
+    transactions_processor = MagicMock()
+    transactions_processor.get_transaction_by_hash.return_value = None
+    transactions_processor.get_evm_envelope.return_value = SimpleNamespace(
+        from_address="0x1111111111111111111111111111111111111111",
+        to_address="0x2222222222222222222222222222222222222222",
+        nonce=7,
     )
+
+    transaction = endpoints.get_transaction_by_hash(
+        transactions_processor,
+        "0x" + "ab" * 32,
+    )
+
+    assert transaction["hash"] == "0x" + "ab" * 32
+    assert transaction["from"] == "0x1111111111111111111111111111111111111111"
+    assert transaction["to"] == "0x2222222222222222222222222222222222222222"
+    assert transaction["nonce"] == "0x7"
+    assert transaction["blockNumber"] == "0x0"
 
 
 def test_eth_get_block_by_number_requests_no_contract_snapshot_for_full_tx():

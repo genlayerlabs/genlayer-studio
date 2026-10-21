@@ -29,15 +29,22 @@ class EndpointResult:
 
 @dataclass
 class DecodedsubmitAppealDataArgs:
-    tx_id: str
+    tx_id: str | bytes
+    expected_decision_id: int | None = None
     fees_distribution: dict | None = None
     top_up_and_submit: bool = False
 
 
 @dataclass
 class DecodedTopUpFeesDataArgs:
-    tx_id: str
+    tx_id: str | bytes
     fees_distribution: dict
+
+
+@dataclass
+class DecodedFinalizeTransactionDataArgs:
+    tx_id: str | bytes
+    expected_decision_id: int | None = None
 
 
 @dataclass
@@ -69,6 +76,7 @@ class DecodedRollupTransaction:
         DecodedRollupTransactionData
         | DecodedsubmitAppealDataArgs
         | DecodedTopUpFeesDataArgs
+        | DecodedFinalizeTransactionDataArgs
         | None
     )
     type: str
@@ -76,6 +84,8 @@ class DecodedRollupTransaction:
     value: int
     fee_value: int = 0
     submitted_value: int | None = None
+    raw_data: str | None = None
+    chain_id: int | None = None
 
     @property
     def total_spend(self) -> int:

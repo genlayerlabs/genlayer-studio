@@ -4,7 +4,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from backend.node.genvm import base as genvm_base
-from backend.node.genvm.origin import public_abi
+from backend.node.genvm.origin import host_fns
+from backend.node.genvm.origin.leader_public_data import LeaderPublicData
 from backend.services.usage_metrics_service import UsageMetricsService
 
 
@@ -165,11 +166,11 @@ def test_provide_result_preserves_llm_token_metrics():
     host._nondet_disagreement = None
 
     res = SimpleNamespace(
-        result_kind=public_abi.ResultCode.RETURN,
+        result_kind=host_fns.ResultCode.RETURN,
         result_data={"ok": True},
-        result_storage_changes=[],
+        result_storage_deltas=[],
         result_emissions=[],
-        result_nondet_results=[],
+        result_leader_public_data=LeaderPublicData([]).encode(),
         stdout="",
         stderr="",
         genvm_log=[],
@@ -185,7 +186,7 @@ def test_provide_result_preserves_llm_token_metrics():
             }
         },
         vm_error_description=None,
-        data_fees_remaining=0,
+        data_fees_remaining={},
     )
 
     result = host.provide_result(res, SimpleNamespace(), genvm_base.Context())

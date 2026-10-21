@@ -83,6 +83,10 @@ if [[ -f ".github/workflows/release-from-tag.yml" ]]; then
      ! grep -Fq 'branch_head' .github/workflows/release-from-tag.yml; then
     error "release-from-tag.yml must verify the tag commit is the current matching version branch head."
   fi
+  if ! grep -Fq 'release-backend-preview' .github/scripts/resolve-release-policy.sh || \
+     ! grep -Fq 'push_latest' .github/workflows/release-from-tag.yml; then
+    error "Prereleases must use the preview deployment event and must control latest image publication."
+  fi
 fi
 
 if [[ -f ".github/workflows/manual-docker-release.yml" ]]; then
@@ -91,6 +95,9 @@ if [[ -f ".github/workflows/manual-docker-release.yml" ]]; then
   fi
   if ! grep -Fq './.github/workflows/release-from-tag.yml' .github/workflows/manual-docker-release.yml; then
     error "manual-docker-release.yml must delegate image promotion to release-from-tag.yml."
+  fi
+  if ! grep -Fq 'resolve-release-policy.sh' .github/workflows/manual-docker-release.yml; then
+    error "manual-docker-release.yml must use the shared stable/prerelease branch policy."
   fi
 fi
 
