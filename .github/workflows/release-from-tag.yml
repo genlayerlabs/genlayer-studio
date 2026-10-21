@@ -39,6 +39,9 @@ jobs:
       tag: ${{ steps.validate.outputs.tag }}
       commit: ${{ steps.validate.outputs.commit }}
       version_branch: ${{ steps.validate.outputs.version_branch }}
+      release_channel: ${{ steps.validate.outputs.release_channel }}
+      push_latest: ${{ steps.validate.outputs.push_latest }}
+      deployment_event: ${{ steps.validate.outputs.deployment_event }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -53,12 +56,10 @@ jobs:
           set -euo pipefail
 
           tag="${INPUT_TAG:-${GITHUB_REF_NAME}}"
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9-]+)?$ ]]; then
-            echo "Invalid release tag: $tag" >&2
-            exit 1
-          fi
-
-          version_branch="$(sed -E 's/^((v[0-9]+)\.([0-9]+))\..*$/\1/' <<< "$tag")"
+          version_branch="$(./.github/scripts/resolve-release-policy.sh "$tag" version-branch)"
+          release_channel="$(./.github/scripts/resolve-release-policy.sh "$tag" channel)"
+          push_latest="$(./.github/scripts/resolve-release-policy.sh "$tag" push-latest)"
+          deployment_event="$(./.github/scripts/resolve-release-policy.sh "$tag" deployment-event)"
 
           git fetch --force origin \
             "refs/heads/${version_branch}:refs/remotes/origin/${version_branch}" \
@@ -73,14 +74,20 @@ jobs:
           fi
 
           echo "Release tag: $tag"
+          echo "Release channel: $release_channel"
           echo "Version branch: origin/${version_branch}"
           echo "Tag commit: $tag_commit"
           echo "Version branch head: $branch_head"
+          echo "Publish latest: $push_latest"
+          echo "Deployment event: $deployment_event"
 
           {
             echo "tag=$tag"
             echo "commit=$tag_commit"
             echo "version_branch=$version_branch"
+            echo "release_channel=$release_channel"
+            echo "push_latest=$push_latest"
+            echo "deployment_event=$deployment_event"
           } >> "$GITHUB_OUTPUT"
 
   push-docker-images:
@@ -92,11 +99,12 @@ jobs:
     with:
       ref: ${{ needs.validate-tag.outputs.tag }}
       image_tag: ${{ needs.validate-tag.outputs.tag }}
+      push_latest: ${{ needs.validate-tag.outputs.push_latest == 'true' }}
     secrets:
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
   trigger-workload-release-lane:
-    name: Trigger AWS Release Lane
+    name: Trigger AWS deployment
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -161,11 +169,12 @@ jobs:
           FRONTEND: ${{ steps.digests.outputs.frontend }}
           EXPLORER: ${{ steps.digests.outputs.explorer }}
           MIGRATION: ${{ steps.digests.outputs.migration }}
+          DEPLOYMENT_EVENT: ${{ needs.validate-tag.outputs.deployment_event }}
         run: |
           set -euo pipefail
           gh api repos/genlayerlabs/devexp-argocd-apps/dispatches \
             --method POST \
-            -f event_type=release-backend \
+            -f "event_type=${DEPLOYMENT_EVENT}" \
             -F "client_payload[image]=$JSONRPC" \
             -F "client_payload[consensus_worker_image]=$WORKER" \
             -F "client_payload[frontend_image]=$FRONTEND" \

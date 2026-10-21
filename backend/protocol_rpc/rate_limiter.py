@@ -24,6 +24,15 @@ DEFAULT_ANON_PER_MINUTE = 30
 DEFAULT_ANON_PER_HOUR = 500
 DEFAULT_ANON_PER_DAY = 5000
 
+# Cheap reads (see rate_limit_methods) are metered in their own bucket at this
+# multiple of the tier's limits. Reads never reach the GenVM, so the tier
+# numbers — which have to be sized for consensus rounds — are far stricter than
+# a database read warrants.
+DEFAULT_READ_MULTIPLIER = 10
+
+STANDARD_BUCKET = "standard"
+READ_BUCKET = "read"
+
 # Lua script that atomically prunes, checks, and records in one round-trip.
 # This eliminates the TOCTOU race where concurrent requests could all read the
 # same stale count before any of them recorded, bypassing the limit.
@@ -32,7 +41,14 @@ DEFAULT_ANON_PER_DAY = 5000
 # ARGV: [now, member, minute_window, minute_limit, hour_window, hour_limit,
 #         day_window, day_limit]
 #
-# Returns: [0] on success, or [1, window_name, limit, count, retry_after] on denial.
+# Returns [allowed, window_name, limit, count, reset_seconds] in both the
+# allowed (allowed=0) and denied (allowed=1) case. The reported window is the
+# one closest to exhaustion, which is what a client needs in order to pace
+# itself — reporting all three would just make the caller compute this anyway.
+#
+# `reset_seconds` is the time until the oldest entry in that window ages out,
+# i.e. when capacity actually frees up. For a sliding window that is the honest
+# answer; the window length alone would overstate the wait.
 _CHECK_AND_RECORD_LUA = """
 local now = tonumber(ARGV[1])
 local member = ARGV[2]
@@ -43,12 +59,24 @@ local windows = {
     {key = KEYS[3], seconds = tonumber(ARGV[7]), limit = tonumber(ARGV[8]), name = "day"},
 }
 
+local function reset_seconds(w)
+    local oldest = redis.call('ZRANGE', w.key, 0, 0, 'WITHSCORES')
+    if not oldest[2] then
+        return w.seconds
+    end
+    local reset = math.ceil(tonumber(oldest[2]) + w.seconds - now)
+    if reset < 1 then
+        return 1
+    end
+    return reset
+end
+
 -- Phase 1: Prune expired entries and check counts
 for _, w in ipairs(windows) do
     redis.call('ZREMRANGEBYSCORE', w.key, 0, now - w.seconds)
-    local count = redis.call('ZCARD', w.key)
-    if count >= w.limit then
-        return {1, w.name, w.limit, count, w.seconds}
+    w.count = redis.call('ZCARD', w.key)
+    if w.count >= w.limit then
+        return {1, w.name, w.limit, w.count, reset_seconds(w)}
     end
 end
 
@@ -56,9 +84,18 @@ end
 for _, w in ipairs(windows) do
     redis.call('ZADD', w.key, now, member)
     redis.call('EXPIRE', w.key, w.seconds + 60)
+    w.count = w.count + 1
 end
 
-return {0}
+-- Phase 3: Report whichever window has the least headroom left
+local tightest = windows[1]
+for _, w in ipairs(windows) do
+    if (w.limit - w.count) < (tightest.limit - tightest.count) then
+        tightest = w
+    end
+end
+
+return {0, tightest.name, tightest.limit, tightest.count, reset_seconds(tightest)}
 """
 
 
@@ -68,6 +105,34 @@ class TierLimits:
     rate_limit_minute: int
     rate_limit_hour: int
     rate_limit_day: int
+
+    def scaled(self, factor: int) -> "TierLimits":
+        return TierLimits(
+            name=self.name,
+            rate_limit_minute=self.rate_limit_minute * factor,
+            rate_limit_hour=self.rate_limit_hour * factor,
+            rate_limit_day=self.rate_limit_day * factor,
+        )
+
+
+@dataclass(frozen=True)
+class RateLimitUsage:
+    """Headroom in the window closest to exhaustion, for X-RateLimit-* headers."""
+
+    bucket: str
+    window: str
+    limit: int
+    remaining: int
+    reset_seconds: int
+
+    def as_headers(self) -> dict[str, str]:
+        return {
+            "X-RateLimit-Bucket": self.bucket,
+            "X-RateLimit-Window": self.window,
+            "X-RateLimit-Limit": str(self.limit),
+            "X-RateLimit-Remaining": str(self.remaining),
+            "X-RateLimit-Reset": str(self.reset_seconds),
+        }
 
 
 class RateLimiterService:
@@ -81,6 +146,7 @@ class RateLimiterService:
         anon_per_minute: int = DEFAULT_ANON_PER_MINUTE,
         anon_per_hour: int = DEFAULT_ANON_PER_HOUR,
         anon_per_day: int = DEFAULT_ANON_PER_DAY,
+        read_multiplier: int = DEFAULT_READ_MULTIPLIER,
     ):
         self._redis = redis_client
         self._get_session = get_session
@@ -91,6 +157,9 @@ class RateLimiterService:
             rate_limit_hour=anon_per_hour,
             rate_limit_day=anon_per_day,
         )
+        # A multiplier below 1 would make reads *stricter* than writes, which is
+        # never intended; clamp rather than trust the environment.
+        self._read_multiplier = max(1, read_multiplier)
         self._lua_sha: Optional[str] = None
 
     @classmethod
@@ -112,26 +181,42 @@ class RateLimiterService:
             anon_per_day=int(
                 os.environ.get("RATE_LIMIT_ANON_PER_DAY", DEFAULT_ANON_PER_DAY)
             ),
+            read_multiplier=int(
+                os.environ.get("RATE_LIMIT_READ_MULTIPLIER", DEFAULT_READ_MULTIPLIER)
+            ),
         )
 
     @property
     def enabled(self) -> bool:
         return self._enabled
 
-    async def check_rate_limit(self, api_key: Optional[str], client_ip: str) -> None:
-        """Check rate limits. Raises RateLimitExceeded if over limit."""
+    async def check_rate_limit(
+        self,
+        api_key: Optional[str],
+        client_ip: str,
+        is_cheap_read: bool = False,
+    ) -> Optional[RateLimitUsage]:
+        """Check rate limits. Raises RateLimitExceeded if over limit.
+
+        Returns the usage of whichever window is closest to exhaustion, or None
+        when limiting is disabled.
+        """
         if not self._enabled:
-            return
+            return None
 
         if api_key:
             identity, limits = await self._resolve_api_key(api_key)
-            if identity is None:
+            if identity is None or limits is None:
                 raise RateLimitExceeded(message="Invalid API key")
         else:
             identity = f"ip:{client_ip}"
             limits = self._anon_limits
 
-        await self._check_windows(identity, limits)
+        if is_cheap_read:
+            return await self._check_windows(
+                identity, limits.scaled(self._read_multiplier), READ_BUCKET
+            )
+        return await self._check_windows(identity, limits, STANDARD_BUCKET)
 
     async def _resolve_api_key(
         self, raw_key: str
@@ -192,15 +277,27 @@ class RateLimiterService:
             self._lua_sha = await self._redis.script_load(_CHECK_AND_RECORD_LUA)
         return self._lua_sha
 
-    async def _check_windows(self, identity: str, limits: TierLimits) -> None:
+    async def _check_windows(
+        self,
+        identity: str,
+        limits: TierLimits,
+        bucket: str,
+    ) -> RateLimitUsage:
         """Atomically prune, check, and record using a Lua script."""
         now = time.time()
         member = f"{now}:{uuid.uuid4().hex[:8]}"
 
+        # The standard bucket keeps its original key shape so that limits in
+        # flight at deploy time carry over instead of silently resetting.
+        prefix = (
+            f"ratelimit:{identity}"
+            if bucket == STANDARD_BUCKET
+            else f"ratelimit:{identity}:{bucket}"
+        )
         keys = [
-            f"ratelimit:{identity}:minute",
-            f"ratelimit:{identity}:hour",
-            f"ratelimit:{identity}:day",
+            f"{prefix}:minute",
+            f"{prefix}:hour",
+            f"{prefix}:day",
         ]
         args = [
             str(now),
@@ -222,22 +319,30 @@ class RateLimiterService:
             sha = await self._ensure_lua_loaded()
             result = await self._redis.evalsha(sha, len(keys), *keys, *args)
 
+        window_name = result[1].decode() if isinstance(result[1], bytes) else result[1]
+        max_requests = int(result[2])
+        count = int(result[3])
+        reset_after = int(result[4])
+
         if result[0] == 1:
-            window_name = (
-                result[1].decode() if isinstance(result[1], bytes) else result[1]
-            )
-            max_requests = int(result[2])
-            count = int(result[3])
-            retry_after = int(result[4])
             raise RateLimitExceeded(
                 message=f"Rate limit exceeded: {max_requests} requests per {window_name}",
                 data={
+                    "bucket": bucket,
                     "window": window_name,
                     "limit": max_requests,
                     "current": count,
-                    "retry_after_seconds": retry_after,
+                    "retry_after_seconds": reset_after,
                 },
             )
+
+        return RateLimitUsage(
+            bucket=bucket,
+            window=window_name,
+            limit=max_requests,
+            remaining=max(0, max_requests - count),
+            reset_seconds=reset_after,
+        )
 
     async def invalidate_key_cache(self, key_hash: str) -> None:
         """Invalidate cached tier for an API key (call after deactivation)."""

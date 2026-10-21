@@ -14,6 +14,8 @@ RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 
 FROM base AS builder
+ARG VITE_APP_VERSION=""
+ENV VITE_APP_VERSION=${VITE_APP_VERSION}
 ENV NODE_OPTIONS=--max-old-space-size=4096
 RUN npm run build
 

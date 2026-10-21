@@ -83,6 +83,15 @@ describe('JsonRpcService — RPC method mapping', () => {
       );
     });
 
+    it('fundAccount preserves the exact decimal wei amount on the wire', async () => {
+      const amount = '10000000000000000000';
+      await service.fundAccount('0xaccount', amount);
+      expect(mockCall).toHaveBeenCalledWith({
+        method: 'sim_fundAccount',
+        params: ['0xaccount', amount],
+      });
+    });
+
     it('estimateTransactionFees calls sim_estimateTransactionFees', async () => {
       const params = { scenarioName: 'tip', type: 'write' };
       await service.estimateTransactionFees(params);

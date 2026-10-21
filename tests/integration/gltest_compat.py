@@ -6,9 +6,12 @@ from typing import Optional, Union
 
 import gltest.artifacts
 import gltest.artifacts.contract as contract_artifacts
+import gltest.contracts.contract as contract_module
 import gltest.contracts.contract_factory as contract_factory
 from gltest.artifacts.contract import ContractDefinition
 from gltest_cli.config.general import get_general_config
+
+from tests.common.fee_defaults import install_gltest_fee_bridges
 
 
 def _is_genlayer_contract_base(base: ast.expr) -> bool:
@@ -29,7 +32,20 @@ def _is_genlayer_contract_base(base: ast.expr) -> bool:
 def search_path_by_class_name(contracts_dir: Path, contract_name: str) -> Path:
     """Search for a file by class name in the contracts directory."""
     matching_files = []
-    exclude_dirs = {".venv", "venv", "env", "build", "dist", "__pycache__", ".git"}
+    # `node_modules` holds third-party files this parser has no business
+    # reading: the documented `--contracts-dir .` walks the whole repo, and a
+    # single stray Python 2 script in there fails the run. CI never hits it
+    # because it does not install frontend deps.
+    exclude_dirs = {
+        ".venv",
+        "venv",
+        "env",
+        "build",
+        "dist",
+        "__pycache__",
+        ".git",
+        "node_modules",
+    }
 
     for file_path in contracts_dir.rglob("*"):
         if any(exclude_dir in file_path.parts for exclude_dir in exclude_dirs):
@@ -154,6 +170,7 @@ def find_contract_definition_from_path(
 
 
 def apply() -> None:
+    install_gltest_fee_bridges(contract_factory, contract_module)
     contract_artifacts.search_path_by_class_name = search_path_by_class_name
     contract_artifacts.find_contract_definition_from_name = (
         find_contract_definition_from_name

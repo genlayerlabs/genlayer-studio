@@ -23,10 +23,15 @@ from backend.protocol_rpc.fees import (
 )
 import backend.node.genvm.base as genvmbase
 import backend.node.genvm.origin.calldata as calldata
+from backend.node.genvm.executor_selection import (
+    legacy_executor_selector_for_code,
+    uses_legacy_storage,
+)
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.node.types import Receipt, ExecutionMode, Vote, ExecutionResultStatus
 from backend.protocol_rpc.message_handler.base import IMessageHandler
 from .genvm.origin import logger as genvm_logger
+from .genvm.origin import host_fns
 from .genvm.origin import public_abi
 
 from .types import Address
@@ -370,6 +375,12 @@ class _SnapshotView(genvmbase.StateProxy):
         # Balance is not part of the snapshot by design; it persists in DB independently.
         bal = getattr(snap, "balance", 0)
         return int(bal) if bal is not None else 0
+
+    def genvm_executor_selector_for(self, addr: Address) -> str | None:
+        # A nested call target picks up its own executor pin; loading its
+        # snapshot here is the same lookup its storage reads already trigger.
+        selector = getattr(self._get_snapshot(addr), "genvm_executor_selector", None)
+        return selector or None
 
 
 import aiohttp
@@ -728,7 +739,7 @@ class Node:
         result_code = receipt.result[0]
 
         # 1. Timeout: VM-level timeout or GenVM internal error
-        if result_code == public_abi.ResultCode.VM_ERROR:
+        if result_code == host_fns.ResultCode.VM_ERROR:
             error_message = receipt.result[1:]
             if error_message == b"timeout" or error_message.startswith(
                 b"GenVM internal error"
@@ -780,11 +791,13 @@ class Node:
             res = res.replace(tzinfo=datetime.UTC)
         return res
 
-    def _put_code_to(self, to: genvmbase.StateProxyWritable, code: bytes) -> None:
+    def _put_code_to(
+        self, to: genvmbase.StateProxyWritable, code: bytes, *, legacy: bool = False
+    ) -> None:
         """Write contract code directly to storage using the code slot."""
         from backend.node.genvm import get_code_slot
 
-        code_slot = get_code_slot()
+        code_slot = get_code_slot(legacy=legacy)
         # Prefix with 4-byte little-endian length
         code_len_prefix = len(code).to_bytes(4, byteorder="little", signed=False)
         code_data = code_len_prefix + code
@@ -803,9 +816,16 @@ class Node:
     ) -> Receipt:
         assert self.contract_snapshot is not None
 
+        # Simulated deployments (including fee estimates) do not pass through
+        # consensus's snapshot factory. Select the same legacy line here too.
+        if not self.contract_snapshot.genvm_executor_selector:
+            self.contract_snapshot.genvm_executor_selector = (
+                legacy_executor_selector_for_code(code_to_deploy)
+            )
+
         transaction_datetime = self._date_from_str(transaction_created_at)
         if transaction_datetime is None:
-            transaction_datetime = datetime.datetime.now()
+            transaction_datetime = datetime.datetime.now(datetime.UTC)
 
         return await self._run_genvm(
             from_address,
@@ -904,7 +924,11 @@ class Node:
             )
         )
 
-    async def get_contract_schema(self, code: bytes) -> str:
+    async def get_contract_schema(
+        self, code: bytes, *, genvm_executor_selector: str | None = None
+    ) -> str:
+        inferred_selector = legacy_executor_selector_for_code(code)
+        executor_selector = genvm_executor_selector or inferred_selector
         NO_ADDR = Address(b"\x00" * 20)
         message = {
             "is_init": False,
@@ -916,7 +940,9 @@ class Node:
             "chain_id": 0,
         }
         state_proxy = _StateProxyNone(NO_ADDR)
-        self._put_code_to(state_proxy, code)
+        self._put_code_to(
+            state_proxy, code, legacy=uses_legacy_storage(executor_selector)
+        )
 
         start_time = time.time()
         result = await genvmbase.run_genvm_host(
@@ -937,6 +963,7 @@ class Node:
             logger=self.logger,
             timeout=30,
             manager_uri=self.manager.url,
+            genvm_executor_selector=executor_selector,
         )
         result.processing_time = int((time.time() - start_time) * 1000)
 
@@ -983,7 +1010,7 @@ class Node:
         self.timing_callback("GENVM_PREPARATION_START")
 
         leader_res: None | dict[int, bytes]
-        if self.leader_receipt is None or not self.leader_receipt.eq_outputs:
+        if self.leader_receipt is None or self.leader_receipt.eq_outputs is None:
             leader_res = None
         else:
             leader_res = {
@@ -1039,7 +1066,7 @@ class Node:
         }
         if transaction_datetime is not None:
             assert transaction_datetime.tzinfo is not None
-            message["datetime"] = transaction_datetime.isoformat()
+            message["transaction_timestamp"] = transaction_datetime.isoformat()
         perms = "rcn"  # read/call/spawn nondet
         if not readonly:
             perms += "ws"  # write/send
@@ -1075,12 +1102,13 @@ class Node:
                     message_fee_allocation=message_fee_allocation,
                 ),
                 logger=logger,
+                genvm_executor_selector=self.contract_snapshot.genvm_executor_selector,
             )
         except FeeValidationError as e:
             result = genvmbase.ExecutionResult(
                 result=genvmbase.ExecutionError(
                     message=str(e),
-                    kind=public_abi.ResultCode.USER_ERROR,
+                    kind=host_fns.ResultCode.USER_ERROR,
                     error_code=e.__class__.__name__,
                     raw_error={
                         "fatal": False,
@@ -1129,13 +1157,13 @@ class Node:
         if (
             result.data_fee_bucket_totals is not None
             and result.data_fees_remaining is not None
+            and result.data_fee_bucket_totals.keys()
+            == result.data_fees_remaining.keys()
         ):
-            data_fees_consumed = [
-                max(0, int(total) - int(remaining))
-                for total, remaining in zip(
-                    result.data_fee_bucket_totals, result.data_fees_remaining
-                )
-            ]
+            data_fees_consumed = {
+                name: max(0, int(total) - int(result.data_fees_remaining[name]))
+                for name, total in result.data_fee_bucket_totals.items()
+            }
 
         result = Receipt(
             result=genvmbase.encode_result_to_bytes(result.result),
