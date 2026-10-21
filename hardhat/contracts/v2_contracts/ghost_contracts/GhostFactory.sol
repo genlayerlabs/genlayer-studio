@@ -32,14 +32,31 @@ contract GhostFactory is
 		__AccessControl_init();
 	}
 
-	function createGhost() external onlyGenConsensus returns (address) {
-		BeaconProxy beacon = new BeaconProxy(
-			ghostBeaconProxy,
-			abi.encodeWithSelector(
-				GhostBlueprint.initialize.selector,
-				address(this)
-			)
-		);
+	function createGhost(
+		address _namespace,
+		uint256 _saltNonce
+	) external onlyGenConsensus returns (address) {
+		BeaconProxy beacon;
+		if (_saltNonce == 0) {
+			beacon = new BeaconProxy(
+				ghostBeaconProxy,
+				abi.encodeWithSelector(
+					GhostBlueprint.initialize.selector,
+					address(this)
+				)
+			);
+		} else {
+			bytes32 salt = keccak256(
+				abi.encodePacked(_namespace, _saltNonce)
+			);
+			beacon = new BeaconProxy{ salt: salt }(
+				ghostBeaconProxy,
+				abi.encodeWithSelector(
+					GhostBlueprint.initialize.selector,
+					address(this)
+				)
+			);
+		}
 		emit GhostCreated(address(beacon));
 		GhostBlueprint(payable(address(beacon))).transferOwnership(msg.sender);
 		latestGhost = address(beacon);

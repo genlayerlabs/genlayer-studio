@@ -4,7 +4,7 @@ import time
 import pytest
 
 from backend.node.genvm.base import Host
-from backend.node.genvm.origin.public_abi import StorageType
+from backend.node.genvm.origin.public_abi import StorageView
 
 
 class _SlowStateProxy:
@@ -28,7 +28,7 @@ async def test_storage_read_runs_off_event_loop():
 
     storage_task = asyncio.create_task(
         host.storage_read(
-            StorageType.DEFAULT,
+            StorageView.DEFAULT,
             b"\x01" * 20,
             b"\x02" * 32,
             0,

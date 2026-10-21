@@ -147,6 +147,7 @@ consensus/nodes/nodes.json
 # npm
 node_modules/
 package-lock.json
+!hardhat/package-lock.json
 /package.json
 
 # Nginx TLS certificates and keys
@@ -181,3 +182,7 @@ frontend/test-results/
 # E2E injects a shared GenVM runtime here for Docker builds.
 .e2e-genvm-prebuilt/*
 !.e2e-genvm-prebuilt/.gitkeep
+
+# CI exports the sandboxed GenVM runners store closure here for source builds.
+.genvm-nix-closure/*
+!.genvm-nix-closure/.gitkeep

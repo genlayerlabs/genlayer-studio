@@ -1,4 +1,5 @@
-"""Assertions over the executor's structured log records.
+"""
+Assertions over the executor's structured log records.
 
 The manager captures every executor-emitted log line and surfaces them as
 ``RunHostAndProgramRes.genvm_log`` — a list of JSON objects shaped like
@@ -6,15 +7,13 @@ The manager captures every executor-emitted log line and surfaces them as
 under ``debug_mode >= safe-unbounded`` (integration tests run ``unsafe``), so no
 record is evicted regardless of how chatty the run is.
 
-The ADR-012 load action emits one stable ``"runner load"`` record per load,
-carrying:
+The load action emits one stable ``"runner load"`` record per load, carrying:
 
 - ``runner``      — the canonical runner id (``chain:``/``custom:``/``name:hash``);
-- ``runner_load_cost``  — the flat per-load constant
-    (``public_abi::memory_limiter_consts::RUNNER_LOAD_COST``);
+- ``runner_load_cost``  — the flat per-load memory limiter constant;
 - ``size``        — the charged content size (archive ``total_size``);
 - ``status``      — ``"charged"`` (first load in this VM) or ``"cached"``
-                    (already in the VM's loaded set — free).
+        (already in the VM's loaded set — free).
 
 This module is deliberately message-agnostic: a matcher's ``message`` defaults
 to ``"runner load"`` but may name any message, so the same machinery serves
@@ -62,7 +61,8 @@ def extract(
     match: dict | None = None,
     runner_prefix: str | None = None,
 ) -> list[dict]:
-    """Return the ``genvm_log`` records matching ``match`` (defaulting to the
+    """
+    Return the ``genvm_log`` records matching ``match`` (defaulting to the
     ``runner load`` message) and an optional ``runner`` prefix."""
     return _select(genvm_log, match or {}, runner_prefix)
 

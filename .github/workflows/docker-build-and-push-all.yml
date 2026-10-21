@@ -41,6 +41,7 @@ jobs:
     with:
       docker_build_context: .
       dockerfile: docker/Dockerfile.backend
+      target: prod
       dockerhub_repo: yeagerai/simulator-jsonrpc
       dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
       ref: ${{ inputs.ref }}
@@ -59,6 +60,8 @@ jobs:
       ref: ${{ inputs.ref }}
       image_tag: ${{ inputs.image_tag }}
       push_latest: ${{ inputs.push_latest }}
+      build_args: |
+        VITE_APP_VERSION=${{ inputs.image_tag }}
     secrets:
       dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
 
@@ -79,7 +82,8 @@ jobs:
     uses: ./.github/workflows/docker-build-and-push-image.yml
     with:
       docker_build_context: .
-      dockerfile: docker/Dockerfile.consensus-worker
+      dockerfile: docker/Dockerfile.backend
+      target: consensus-worker
       dockerhub_repo: yeagerai/simulator-consensus-worker
       dockerhub_username: ${{ vars.DOCKERHUB_USERNAME }}
       ref: ${{ inputs.ref }}

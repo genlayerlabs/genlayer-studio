@@ -26,9 +26,11 @@ import type {
   Address,
   TransactionHash,
   CalldataEncodable,
+  MessageFeeAllocationInput,
   TransactionHashVariant,
 } from 'genlayer-js/types';
 import { TransactionStatus } from 'genlayer-js/types';
+import { JsonRpcServiceError } from '@/services/JsonRpcService';
 
 const schema = ref<any>();
 
@@ -38,6 +40,7 @@ type TrustedFeeEstimate = {
   };
   distribution: StudioFeeConfig['defaultFees']['distribution'];
   feeValue: bigint | number | string;
+  messageAllocations?: MessageFeeAllocationInput[];
 };
 
 function feeNumberToRpc(value: bigint | number | string) {
@@ -47,6 +50,7 @@ function feeNumberToRpc(value: bigint | number | string) {
 function feesToRpcParams(fees: {
   distribution: StudioFeeConfig['defaultFees']['distribution'];
   feeValue: bigint | number | string;
+  messageAllocations?: MessageFeeAllocationInput[];
 }) {
   return {
     distribution: Object.fromEntries(
@@ -58,20 +62,58 @@ function feesToRpcParams(fees: {
       ]),
     ),
     feeValue: feeNumberToRpc(fees.feeValue),
+    ...(fees.messageAllocations !== undefined
+      ? { messageAllocations: fees.messageAllocations }
+      : {}),
   };
+}
+
+function feesFromStudioEstimate(
+  estimate: StudioFeeEstimateResult,
+): TrustedFeeEstimate {
+  const preset = estimate.recommendedPreset;
+  if (!preset?.distribution || preset.feeValue === undefined) {
+    throw new Error('Studio fee estimator returned no recommended preset');
+  }
+  return {
+    distribution: preset.distribution,
+    feeValue: preset.feeValue,
+    ...(preset.messageAllocations !== undefined
+      ? { messageAllocations: preset.messageAllocations }
+      : {}),
+  };
+}
+
+function isExpectedSimulationExecutionFailure(error: unknown) {
+  return (
+    error instanceof JsonRpcServiceError &&
+    error.code === -32000 &&
+    error.message === 'execution failed'
+  );
 }
 
 async function encodeWriteMethodCalldata(
   method: string,
   args: CalldataEncodable[],
+  kwargs: { [key: string]: CalldataEncodable },
+  leaderOnly = false,
 ) {
   const { abi } = await import('genlayer-js');
-  const { toRlp, toHex } = await import('viem');
-  const calldataObj = abi.calldata.makeCalldataObject(method, args, undefined);
+  const calldataObj = abi.calldata.makeCalldataObject(method, args, kwargs);
   const encoded = abi.calldata.encode(calldataObj);
-  return toRlp(
-    [toHex(encoded), toHex(false)].map((item) => item as `0x${string}`),
-  );
+  return abi.transactions.serialize([encoded, leaderOnly]);
+}
+
+async function encodeDeployCalldata(
+  code: Uint8Array,
+  args: CalldataEncodable[],
+  kwargs: { [key: string]: CalldataEncodable },
+  leaderOnly: boolean,
+) {
+  const { abi } = await import('genlayer-js');
+  const calldataObj = abi.calldata.makeCalldataObject(undefined, args, kwargs);
+  const encoded = abi.calldata.encode(calldataObj);
+  return abi.transactions.serialize([code, encoded, leaderOnly]);
 }
 
 /**
@@ -165,6 +207,9 @@ export function useContractQueries() {
       return {
         distribution: estimate.distribution,
         feeValue: BigInt(estimate.feeValue),
+        ...(estimate.messageAllocations !== undefined
+          ? { messageAllocations: estimate.messageAllocations }
+          : {}),
       };
     }
 
@@ -180,6 +225,77 @@ export function useContractQueries() {
       distribution: studioFeeConfig.value.defaultFees.distribution,
       feeValue: BigInt(studioFeeConfig.value.defaultFees.feeValue),
     };
+  }
+
+  async function getStudioWriteFees({
+    method,
+    args,
+    kwargs,
+    value,
+    leaderOnly,
+  }: {
+    method: string;
+    args: CalldataEncodable[];
+    kwargs: { [key: string]: CalldataEncodable };
+    value: bigint;
+    leaderOnly: boolean;
+  }): Promise<TrustedFeeEstimate | undefined> {
+    try {
+      const serialized = await encodeWriteMethodCalldata(
+        method,
+        args,
+        kwargs,
+        leaderOnly,
+      );
+      const estimate = await rpcClient.estimateTransactionFees({
+        scenarioName: method,
+        type: 'write',
+        to: address.value,
+        from: accountsStore.selectedAccount?.address,
+        data: serialized,
+        value: '0x' + value.toString(16),
+        transaction_hash_variant: 'latest-nonfinal',
+      });
+      return feesFromStudioEstimate(estimate);
+    } catch (error) {
+      // Preserve the ability to submit transactions whose execution is
+      // intentionally expected to fail; they still need a valid base fee
+      // envelope so Consensus can materialize the error receipt.
+      if (!isExpectedSimulationExecutionFailure(error)) throw error;
+      return getDefaultStudioFees();
+    }
+  }
+
+  async function getStudioDeployFees({
+    code,
+    args,
+    kwargs,
+    leaderOnly,
+  }: {
+    code: Uint8Array;
+    args: CalldataEncodable[];
+    kwargs: { [key: string]: CalldataEncodable };
+    leaderOnly: boolean;
+  }): Promise<TrustedFeeEstimate | undefined> {
+    try {
+      const serialized = await encodeDeployCalldata(
+        code,
+        args,
+        kwargs,
+        leaderOnly,
+      );
+      const estimate = await rpcClient.estimateTransactionFees({
+        scenarioName: 'deploy',
+        type: 'deploy',
+        to: '0x0000000000000000000000000000000000000000',
+        from: accountsStore.selectedAccount?.address,
+        data: serialized,
+      });
+      return feesFromStudioEstimate(estimate);
+    } catch (error) {
+      if (!isExpectedSimulationExecutionFailure(error)) throw error;
+      return getDefaultStudioFees();
+    }
   }
 
   const contractSchemaQuery = useQuery({
@@ -237,11 +353,19 @@ export function useContractQueries() {
 
       const code = contract.value?.content ?? '';
       const code_bytes = new TextEncoder().encode(code);
-      const fees = await getDefaultStudioFees();
+      const fees = networkStore.isStudio
+        ? await getStudioDeployFees({
+            code: code_bytes,
+            args: args.args,
+            kwargs: args.kwargs,
+            leaderOnly,
+          })
+        : await getDefaultStudioFees();
 
       const result = await genlayerClient.value?.deployContract({
         code: code_bytes as any as string, // FIXME: code should accept both bytes and string in genlayer-js
         args: args.args,
+        kwargs: args.kwargs,
         leaderOnly,
         consensusMaxRotations,
         ...(fees ? { fees } : {}),
@@ -278,6 +402,9 @@ export function useContractQueries() {
         title: 'Error deploying contract',
       });
       console.error('Error Deploying the contract', error);
+      if (error instanceof Error) {
+        throw error;
+      }
       throw new Error('Error Deploying the contract');
     }
   }
@@ -328,6 +455,7 @@ export function useContractQueries() {
         address: address.value as Address,
         functionName: method,
         args: args.args,
+        kwargs: args.kwargs,
         transactionHashVariant,
       });
 
@@ -363,12 +491,21 @@ export function useContractQueries() {
       }
 
       await ensureCorrectChain();
-      const fees = await getDefaultStudioFees();
+      const fees = networkStore.isStudio
+        ? await getStudioWriteFees({
+            method,
+            args: args.args,
+            kwargs: args.kwargs,
+            value,
+            leaderOnly,
+          })
+        : await getDefaultStudioFees();
 
       const result = await genlayerClient.value?.writeContract({
         address: address.value as Address,
         functionName: method,
         args: args.args,
+        kwargs: args.kwargs,
         value,
         leaderOnly,
         consensusMaxRotations,
@@ -390,6 +527,9 @@ export function useContractQueries() {
       return true;
     } catch (error) {
       console.error(error);
+      if (error instanceof Error) {
+        throw error;
+      }
       throw new Error('Error writing to contract');
     }
   }
@@ -407,13 +547,25 @@ export function useContractQueries() {
     value?: bigint;
   }) {
     try {
-      const fees = await getDefaultStudioFees();
+      const fees = networkStore.isStudio
+        ? await getStudioWriteFees({
+            method,
+            args: args.args,
+            kwargs: args.kwargs,
+            value: value ?? 0n,
+            leaderOnly: false,
+          })
+        : await getDefaultStudioFees();
       const from =
         accountsStore.selectedAccount?.address ||
         '0x0000000000000000000000000000000000000000';
 
       if (networkStore.isStudio) {
-        const serialized = await encodeWriteMethodCalldata(method, args.args);
+        const serialized = await encodeWriteMethodCalldata(
+          method,
+          args.args,
+          args.kwargs,
+        );
         return await rpcClient.simulateCall({
           type: 'write',
           to: address.value,
@@ -428,7 +580,11 @@ export function useContractQueries() {
       // Use simulateWriteContract for non-payable, but for payable we need
       // to call gen_call directly since the SDK doesn't support value param.
       if (value && value > 0n) {
-        const serialized = await encodeWriteMethodCalldata(method, args.args);
+        const serialized = await encodeWriteMethodCalldata(
+          method,
+          args.args,
+          args.kwargs,
+        );
         const result = await (genlayerClient.value as any).request({
           method: 'gen_call',
           params: [
@@ -458,6 +614,7 @@ export function useContractQueries() {
         address: address.value as Address,
         functionName: method,
         args: args.args,
+        kwargs: args.kwargs,
         value,
         ...(fees ? { fees } : {}),
       });
@@ -473,6 +630,7 @@ export function useContractQueries() {
     method,
     args,
     value,
+    leaderOnly = false,
   }: {
     method: string;
     args: {
@@ -480,6 +638,7 @@ export function useContractQueries() {
       kwargs: { [key: string]: CalldataEncodable };
     };
     value?: bigint;
+    leaderOnly?: boolean;
   }): Promise<StudioFeeEstimateResult> {
     if (!networkStore.isStudio) {
       throw new Error('Fee estimation is only available in Studio');
@@ -489,7 +648,12 @@ export function useContractQueries() {
       const from =
         accountsStore.selectedAccount?.address ||
         '0x0000000000000000000000000000000000000000';
-      const serialized = await encodeWriteMethodCalldata(method, args.args);
+      const serialized = await encodeWriteMethodCalldata(
+        method,
+        args.args,
+        args.kwargs,
+        leaderOnly,
+      );
       return await rpcClient.estimateTransactionFees({
         scenarioName: method,
         type: 'write',

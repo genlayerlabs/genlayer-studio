@@ -635,11 +635,20 @@ async def _check_consensus_health() -> Dict[str, Any]:
     # top-level "issues" tag agree on what counts as degraded.
     DEGRADED_AT_STUCK_HEADS = int(os.environ.get("HEALTH_DEGRADED_AT_STUCK_HEADS", "3"))
     # Finalization-stall threshold: ACCEPTED/UNDETERMINED/*_TIMEOUT txs
-    # that haven't reached FINALIZED within this many seconds count as
-    # stuck. Default 600s (10 min) — finalization is supposed to be
-    # quick after the finality window opens.
+    # that remain unfinalized for this long *after their appeal deadline*
+    # count as stuck. Default 600s (10 min).
     STUCK_FINALIZATION_AFTER_SECONDS = int(
         os.environ.get("HEALTH_STUCK_FINALIZATION_AFTER_SECONDS", "600")
+    )
+    FINALITY_WINDOW_SECONDS = max(
+        0, int(os.environ.get("VITE_FINALITY_WINDOW", "1800"))
+    )
+    APPEAL_FAILED_REDUCTION = min(
+        1.0,
+        max(
+            0.0,
+            float(os.environ.get("VITE_FINALITY_WINDOW_APPEAL_FAILED_REDUCTION", "0")),
+        ),
     )
     DEGRADED_AT_STUCK_FINALIZATIONS = int(
         os.environ.get("HEALTH_DEGRADED_AT_STUCK_FINALIZATIONS", "3")
@@ -772,8 +781,8 @@ async def _check_consensus_health() -> Dict[str, Any]:
 
                 # Stuck finalizations: ACCEPTED-class txs waiting too
                 # long to reach FINALIZED. Two paths:
-                #   1. timestamp_awaiting_finalization set and stale
-                #      (normal "finalizer not running" case)
+                #   1. the exact DecisionRecord appeal deadline (or the
+                #      legacy reconstructed deadline) is stale
                 #   2. timestamp_awaiting_finalization NULL and the row
                 #      is old (catches future bugs like the May 2026
                 #      insufficient-balance SEND path, where a tx
@@ -783,7 +792,7 @@ async def _check_consensus_health() -> Dict[str, Any]:
                 stuck_fin_rows = conn.execute(
                     text(
                         f"""
-                        WITH stuck_finalizations AS (
+                        WITH finalization_windows AS (
                             SELECT
                                 hash AS tx_hash,
                                 to_address,
@@ -797,16 +806,45 @@ async def _check_consensus_health() -> Dict[str, Any]:
                                     THEN EXTRACT(EPOCH FROM NOW())::bigint
                                         - timestamp_awaiting_finalization
                                     ELSE EXTRACT(EPOCH FROM NOW() - created_at)::bigint
-                                END AS waiting_seconds
+                                END AS waiting_seconds,
+                                CASE
+                                    WHEN timestamp_awaiting_finalization IS NOT NULL
+                                         AND execution_mode IN (
+                                            'LEADER_ONLY',
+                                            'LEADER_SELF_VALIDATOR'
+                                         )
+                                    THEN timestamp_awaiting_finalization::double precision
+                                    ELSE COALESCE(
+                                        NULLIF(
+                                            consensus_history->'latestDecision'->>'appealDeadline',
+                                            ''
+                                        )::double precision,
+                                        CASE
+                                            WHEN timestamp_awaiting_finalization IS NOT NULL
+                                            THEN timestamp_awaiting_finalization
+                                                + COALESCE(appeal_processing_time, 0)
+                                                + :finality_window_seconds * POWER(
+                                                    1 - :appeal_failed_reduction,
+                                                    COALESCE(appeal_failed, 0)
+                                                )
+                                            ELSE NULL
+                                        END
+                                    )
+                                END AS appeal_deadline
                             FROM transactions
                             WHERE status IN ({FINALIZATION_ELIGIBLE_STATUSES_SQL})
-                              AND (
-                                  (timestamp_awaiting_finalization IS NOT NULL
-                                   AND EXTRACT(EPOCH FROM NOW())::bigint
-                                       - timestamp_awaiting_finalization
-                                       > :stuck_seconds)
+                              AND appealed = false
+                        ),
+                        stuck_finalizations AS (
+                            SELECT *
+                            FROM finalization_windows
+                            WHERE (
+                                  (appeal_deadline IS NOT NULL
+                                   AND EXTRACT(EPOCH FROM NOW())
+                                       > appeal_deadline + :stuck_seconds)
                                   OR
-                                  (timestamp_awaiting_finalization IS NULL
+                                  (appeal_deadline IS NULL
+                                   AND timestamp_awaiting_finalization IS NULL
                                    AND created_at
                                        < NOW() - make_interval(secs => :stuck_seconds))
                               )
@@ -835,6 +873,8 @@ async def _check_consensus_health() -> Dict[str, Any]:
                     ),
                     {
                         "stuck_seconds": STUCK_FINALIZATION_AFTER_SECONDS,
+                        "finality_window_seconds": FINALITY_WINDOW_SECONDS,
+                        "appeal_failed_reduction": APPEAL_FAILED_REDUCTION,
                         "event_limit": STUCK_FINALIZATION_EVENT_LIMIT,
                     },
                 ).fetchall()

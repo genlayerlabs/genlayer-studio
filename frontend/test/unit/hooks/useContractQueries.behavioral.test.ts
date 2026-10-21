@@ -6,6 +6,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ref } from 'vue';
+import { JsonRpcServiceError } from '@/services/JsonRpcService';
 
 const mockDeployContract = vi.fn(() => Promise.resolve('0xDeployHash'));
 const mockWriteContract = vi.fn(() => Promise.resolve('0xWriteHash'));
@@ -47,12 +48,26 @@ const mockGenlayerClient = {
 };
 
 const mockEnsureCorrectChain = vi.fn();
+const mockMessageAllocations = [
+  {
+    messageType: 1,
+    onAcceptance: true,
+    parentIndex:
+      '0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
+    recipient: '0x0000000000000000000000000000000000000001',
+    callKey:
+      '0x7469700000000000000000000000000000000000000000000000000000000000',
+    budget: '22000000000000000',
+    feeParams: '0x1234',
+  },
+];
 const mockRpcEstimateTransactionFees = vi.fn(() =>
   Promise.resolve({
     scenario: 'tip',
     feeReport: { totalEstimatedFee: '120000000000000000' },
     recommendedPreset: {
       feeValue: '132000000000000000',
+      messageAllocations: mockMessageAllocations,
       distribution: {
         leaderTimeunitsAllocation: '110',
         validatorTimeunitsAllocation: '55',
@@ -292,49 +307,104 @@ describe('useContractQueries — behavioral contract', () => {
   });
 
   describe('Studio fee defaults', () => {
-    it('should attach trusted Studio default fees to deployments', async () => {
+    it('should estimate and attach transaction-specific Studio fees to deployments', async () => {
       mockNetworkStore.isStudio = true;
+      const { abi } = await import('genlayer-js');
+      const constructorArgs = {
+        args: ['arg1'],
+        kwargs: { owner: 'alice' },
+      };
+      const expectedData = abi.transactions.serialize([
+        new TextEncoder().encode(mockContractsStore.currentContract.content),
+        abi.calldata.encode(
+          abi.calldata.makeCalldataObject(
+            undefined,
+            constructorArgs.args,
+            constructorArgs.kwargs,
+          ),
+        ),
+        false,
+      ]);
       const { useContractQueries } = await import('@/hooks/useContractQueries');
       const { deployContract } = useContractQueries();
 
-      await deployContract({ args: [], kwargs: {} }, 'NORMAL' as any, 3);
+      await deployContract(constructorArgs, 'NORMAL' as any, 3);
 
-      expect(mockEstimateTransactionFees).toHaveBeenCalled();
+      expect(mockRpcEstimateTransactionFees).toHaveBeenCalledWith(
+        expect.objectContaining({
+          scenarioName: 'deploy',
+          type: 'deploy',
+          to: '0x0000000000000000000000000000000000000000',
+          from: '0xUser',
+          data: expectedData,
+        }),
+      );
+      expect(mockEstimateTransactionFees).not.toHaveBeenCalled();
       expect(mockDeployContract).toHaveBeenCalledWith(
         expect.objectContaining({
           fees: expect.objectContaining({
-            feeValue: 120000000000000000n,
+            feeValue: '132000000000000000',
+            messageAllocations: mockMessageAllocations,
             distribution: expect.objectContaining({
-              leaderTimeunitsAllocation: '100',
-              totalMessageFees: '20000000000000000',
+              leaderTimeunitsAllocation: '110',
+              totalMessageFees: '22000000000000000',
               maxPriceGenPerTimeUnit: '1000000000000000',
             }),
           }),
+          kwargs: constructorArgs.kwargs,
         }),
       );
     });
 
-    it('should attach trusted Studio default fees to writes', async () => {
+    it('should estimate and attach transaction-specific Studio fees to writes', async () => {
       mockNetworkStore.isStudio = true;
+      const { abi } = await import('genlayer-js');
+      const writeArgs = {
+        args: ['hello'],
+        kwargs: { recipient: 'alice' },
+      };
+      const expectedData = abi.transactions.serialize([
+        abi.calldata.encode(
+          abi.calldata.makeCalldataObject(
+            'tip',
+            writeArgs.args,
+            writeArgs.kwargs,
+          ),
+        ),
+        false,
+      ]);
       const { useContractQueries } = await import('@/hooks/useContractQueries');
       const { callWriteMethod } = useContractQueries();
 
       await callWriteMethod({
         method: 'tip',
-        args: { args: ['hello'], kwargs: {} },
+        args: writeArgs,
         executionMode: 'NORMAL' as any,
         value: 5n,
       });
 
-      expect(mockEstimateTransactionFees).toHaveBeenCalled();
+      expect(mockRpcEstimateTransactionFees).toHaveBeenCalledWith(
+        expect.objectContaining({
+          scenarioName: 'tip',
+          type: 'write',
+          to: '0xContract',
+          from: '0xUser',
+          value: '0x5',
+          transaction_hash_variant: 'latest-nonfinal',
+          data: expectedData,
+        }),
+      );
+      expect(mockEstimateTransactionFees).not.toHaveBeenCalled();
       expect(mockWriteContract).toHaveBeenCalledWith(
         expect.objectContaining({
           functionName: 'tip',
+          kwargs: writeArgs.kwargs,
           value: 5n,
           fees: expect.objectContaining({
-            feeValue: 120000000000000000n,
+            feeValue: '132000000000000000',
+            messageAllocations: mockMessageAllocations,
             distribution: expect.objectContaining({
-              validatorTimeunitsAllocation: '50',
+              validatorTimeunitsAllocation: '55',
               receiptFeeMaxGasPrice: '1',
             }),
           }),
@@ -362,10 +432,11 @@ describe('useContractQueries — behavioral contract', () => {
           transaction_hash_variant: 'latest-nonfinal',
           data: expect.stringMatching(/^0x/),
           fees: expect.objectContaining({
-            feeValue: '120000000000000000',
+            feeValue: '132000000000000000',
+            messageAllocations: mockMessageAllocations,
             distribution: expect.objectContaining({
-              leaderTimeunitsAllocation: '100',
-              totalMessageFees: '20000000000000000',
+              leaderTimeunitsAllocation: '110',
+              totalMessageFees: '22000000000000000',
             }),
           }),
         }),
@@ -375,6 +446,9 @@ describe('useContractQueries — behavioral contract', () => {
 
     it('should fall back to sim_getFeeConfig when SDK fee defaults are unavailable', async () => {
       mockNetworkStore.isStudio = true;
+      mockRpcEstimateTransactionFees.mockRejectedValueOnce(
+        new JsonRpcServiceError('execution failed', -32000),
+      );
       mockGenlayerClient.estimateTransactionFees = undefined;
       const { useContractQueries } = await import('@/hooks/useContractQueries');
       const { callWriteMethod } = useContractQueries();
@@ -402,6 +476,9 @@ describe('useContractQueries — behavioral contract', () => {
 
     it('should omit Studio fees when fee config explicitly reports gasless mode', async () => {
       mockNetworkStore.isStudio = true;
+      mockRpcEstimateTransactionFees.mockRejectedValueOnce(
+        new JsonRpcServiceError('execution failed', -32000),
+      );
       mockGenlayerClient.estimateTransactionFees = undefined;
       mockRpcGetFeeConfig.mockResolvedValue({
         enabled: false,
@@ -425,6 +502,63 @@ describe('useContractQueries — behavioral contract', () => {
           fees: expect.anything(),
         }),
       );
+    });
+
+    it('should not submit with generic fees when transaction-specific estimation is unavailable', async () => {
+      mockNetworkStore.isStudio = true;
+      mockRpcEstimateTransactionFees.mockRejectedValueOnce(
+        new JsonRpcServiceError('manager unavailable', -32002),
+      );
+      const { useContractQueries } = await import('@/hooks/useContractQueries');
+      const { callWriteMethod } = useContractQueries();
+
+      await expect(
+        callWriteMethod({
+          method: 'tip',
+          args: { args: ['hello'], kwargs: {} },
+          executionMode: 'NORMAL' as any,
+        }),
+      ).rejects.toThrow('manager unavailable');
+
+      expect(mockWriteContract).not.toHaveBeenCalled();
+      expect(mockEstimateTransactionFees).not.toHaveBeenCalled();
+    });
+
+    it('should not deploy with generic fees when transaction-specific estimation is unavailable', async () => {
+      mockNetworkStore.isStudio = true;
+      mockRpcEstimateTransactionFees.mockRejectedValueOnce(
+        new JsonRpcServiceError('manager unavailable', -32002),
+      );
+      const { useContractQueries } = await import('@/hooks/useContractQueries');
+      const { deployContract } = useContractQueries();
+
+      await expect(
+        deployContract({ args: [], kwargs: {} }, 'NORMAL' as any, 3),
+      ).rejects.toThrow('manager unavailable');
+
+      expect(mockDeployContract).not.toHaveBeenCalled();
+      expect(mockEstimateTransactionFees).not.toHaveBeenCalled();
+    });
+
+    it('should not submit when the estimator omits its recommended preset', async () => {
+      mockNetworkStore.isStudio = true;
+      mockRpcEstimateTransactionFees.mockResolvedValueOnce({
+        scenario: 'tip',
+        feeReport: {},
+      } as any);
+      const { useContractQueries } = await import('@/hooks/useContractQueries');
+      const { callWriteMethod } = useContractQueries();
+
+      await expect(
+        callWriteMethod({
+          method: 'tip',
+          args: { args: ['hello'], kwargs: {} },
+          executionMode: 'NORMAL' as any,
+        }),
+      ).rejects.toThrow('Studio fee estimator returned no recommended preset');
+
+      expect(mockWriteContract).not.toHaveBeenCalled();
+      expect(mockEstimateTransactionFees).not.toHaveBeenCalled();
     });
   });
 

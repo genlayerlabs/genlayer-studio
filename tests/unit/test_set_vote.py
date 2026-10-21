@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 from backend.node.base import Node
 from backend.node.types import Receipt, ExecutionMode, ExecutionResultStatus, Vote
-from backend.node.genvm.origin.public_abi import ResultCode
+from backend.node.genvm.origin.host_fns import ResultCode
 from backend.node.genvm.error_codes import GenVMErrorCode
 from backend.domain.types import Validator, LLMProvider
 
