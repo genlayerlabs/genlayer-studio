@@ -15,6 +15,7 @@ import random
 from copy import deepcopy
 import json
 import base64
+import binascii
 
 from eth_utils import is_address, keccak, to_bytes, to_checksum_address
 from sqlalchemy import text
@@ -41,6 +42,10 @@ from backend.domain.types import (
     Validator,
 )
 from backend.node.base import Node, get_simulator_chain_id
+from backend.node.genvm.executor_selection import (
+    legacy_executor_selector_for_code,
+    uses_legacy_storage,
+)
 from backend.node.types import (
     ExecutionMode,
     Receipt,
@@ -80,6 +85,7 @@ from backend.protocol_rpc.fees import (
     runtime_rotations_for_round,
     stamp_receipt_execution_policy,
     unwind_reveal_message_fees,
+    uses_unmetered_message_fee_pool,
     validate_receipt_admission_caps,
 )
 from backend.rollup.consensus_service import ConsensusService
@@ -375,12 +381,25 @@ def node_factory(
 
 
 def transaction_genvm_executor_selector(transaction: Transaction) -> str | None:
-    """Studio-only GenVM executor override carried by the transaction."""
-    return (
+    """Select and persist the deployment's executor, honoring explicit pins."""
+    explicit_selector = (
         transaction.sim_config.genvm_executor_selector
         if transaction.sim_config
         else None
     )
+    if explicit_selector:
+        return explicit_selector
+    if transaction.type != TransactionType.DEPLOY_CONTRACT or not transaction.data:
+        return None
+    code_b64 = transaction.data.get("contract_code")
+    if not isinstance(code_b64, (str, bytes)):
+        return None
+    try:
+        code = base64.b64decode(code_b64, validate=True)
+    except (binascii.Error, ValueError):
+        # Keep malformed payload handling on the existing execution path.
+        return None
+    return legacy_executor_selector_for_code(code)
 
 
 def contract_snapshot_factory(
@@ -416,8 +435,8 @@ def contract_snapshot_factory(
         ret.contract_code = transaction.data["contract_code"]
         ret.balance = transaction.value or 0
         ret.states = {"accepted": {}, "finalized": {}}
-        # The contract row is still empty at deploy time, so the executor
-        # override can only come from the deploy transaction itself.
+        # The contract row is still empty at deploy time. Honor its explicit
+        # pin or select the legacy line from the deployment's source header.
         ret.genvm_executor_selector = transaction_genvm_executor_selector(transaction)
         return ret
 
@@ -3719,7 +3738,15 @@ class AcceptedState(TransactionState):
                 context.transaction.data.get("contract_address") if is_deploy else None
             ),
             code_slot_b64=(
-                base64.b64encode(get_code_slot()).decode("ascii") if is_deploy else None
+                base64.b64encode(
+                    get_code_slot(
+                        legacy=uses_legacy_storage(
+                            transaction_genvm_executor_selector(context.transaction)
+                        )
+                    )
+                ).decode("ascii")
+                if is_deploy
+                else None
             ),
             to_address=context.transaction.to_address,
             leader_node_config=leader_receipt.node_config,
@@ -4119,7 +4146,15 @@ def _attach_child_fee_accounting(
     pending_transaction: PendingTransaction,
     data: dict,
 ) -> None:
-    if int(message_payload.get("declaredBudget", 0) or 0) <= 0:
+    if (
+        int(message_payload.get("declaredBudget", 0) or 0) <= 0
+        and not pending_transaction.use_balance
+        and not parent_fee_accounting.get("message_allocations_from_grant")
+    ):
+        return
+    if not pending_transaction.use_balance and uses_unmetered_message_fee_pool(
+        parent_fee_accounting
+    ):
         return
 
     try:
@@ -4134,8 +4169,20 @@ def _attach_child_fee_accounting(
             sender=(
                 context.transaction.to_address
                 if pending_transaction.use_balance
-                else context.transaction.origin_address
+                else next(
+                    (
+                        contribution["depositor"]
+                        for contribution in parent_fee_accounting.get("contributions")
+                        or []
+                        if contribution.get("depositor")
+                    ),
+                    parent_fee_accounting.get("sender"),
+                )
+                or context.transaction.origin_address
                 or context.transaction.from_address
+            ),
+            message_allocations_from_grant=bool(
+                parent_fee_accounting.get("message_allocations_from_grant")
             ),
             policy=execution_policy_for_accounting(
                 parent_fee_accounting,

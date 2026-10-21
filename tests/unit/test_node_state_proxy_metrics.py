@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from eth_abi import encode
+from eth_abi import decode, encode
 
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.domain.types import LLMProvider, Validator
@@ -17,11 +17,15 @@ from backend.node.genvm.base import (
 from backend.node.genvm.base import Host as GenVMHost
 import backend.node.genvm.origin.calldata as gvm_calldata
 from backend.node.genvm.origin.base_host import RunHostAndProgramRes
+from backend.node.genvm.origin.fees import UNMATCHED_EXTERNAL_GUARD_ALLOC
 from backend.node.genvm.origin.host_fns import ResultCode
 from backend.node.genvm.origin.leader_public_data import LeaderPublicData
 from backend.node.types import Address, ExecutionMode, ExecutionResultStatus
 from backend.protocol_rpc.fees import (
+    CONTRACT_DESCENDANT_GRANT_ABI_TYPE,
+    CONTRACT_DESCENDANT_GRANT_DOMAIN,
     GENVM_UNMETERED_DATA_FEE_BUCKET,
+    MESSAGE_ALLOCATION_NODE_ABI_TYPE,
     StudioFeePolicy,
     create_fee_accounting,
     required_fee_deposit,
@@ -166,10 +170,10 @@ def test_host_provide_result_preserves_fee_metadata_from_genvm_emissions():
                     "storage_fee_max_gas_price": 12,
                     "receipt_fee_max_gas_price": 13,
                 },
-                "declaredBudget": 60,
-                "callKey": bytes.fromhex("12" * 32),
+                "message_fee": 60,
+                "call_key": bytes.fromhex("12" * 32),
                 "subtree": genvm_subtree,
-                "useBalance": True,
+                "use_balance": True,
             },
             {
                 "type": "InternalDeployMessage",
@@ -179,7 +183,7 @@ def test_host_provide_result_preserves_fee_metadata_from_genvm_emissions():
                 "value": 0,
                 "on": "finalized",
                 "fee_params": "0x" + deploy_fee_params.hex(),
-                "declared_budget": 70,
+                "message_fee": 70,
                 "call_key": "0x" + "34" * 32,
                 "allocation_subtree": allocation_subtree,
             },
@@ -192,10 +196,8 @@ def test_host_provide_result_preserves_fee_metadata_from_genvm_emissions():
                     "gas_limit": 21_000,
                     "max_gas_price": 10,
                 },
-                "declaredBudget": 0,
-                "callKey": bytes.fromhex("56" * 32),
-                "allocationSubtree": [],
-                "gasUsed": 123,
+                "message_fee": 0,
+                "call_key": bytes.fromhex("56" * 32),
             },
         ],
         result_leader_public_data=LeaderPublicData([]).encode(),
@@ -238,7 +240,7 @@ def test_host_provide_result_preserves_fee_metadata_from_genvm_emissions():
     assert eth_send.fee_params == eth_send_fee_params
     assert eth_send.declared_budget == 0
     assert eth_send.call_key == "0x" + "56" * 32
-    assert eth_send.gas_used == 123
+    assert eth_send.gas_used == 0
     assert execution.data_fees_remaining == {
         "execution_data_gas": 100,
         "message_fee": 90,
@@ -248,6 +250,15 @@ def test_host_provide_result_preserves_fee_metadata_from_genvm_emissions():
 
 def test_malformed_allocation_subtree_preserves_exact_receipt_bytes():
     assert _emission_allocation_subtree({"subtree": b"\x01\x02\xff"}) == "0x0102ff"
+
+
+def test_descendant_grant_subtree_preserves_exact_receipt_bytes():
+    grant = encode(
+        ["bytes32", CONTRACT_DESCENDANT_GRANT_ABI_TYPE],
+        [CONTRACT_DESCENDANT_GRANT_DOMAIN, (1, 0, 0, [])],
+    )
+
+    assert _emission_allocation_subtree({"subtree": grant}) == "0x" + grant.hex()
 
 
 @pytest.mark.asyncio
@@ -345,7 +356,7 @@ async def test_run_genvm_receives_fee_context_from_transaction_accounting():
     fee_context = run_genvm_host.await_args.kwargs["fee_context"]
     assert fee_context.bucket_totals == {
         "execution_data_gas": fees_distribution["executionBudgetPerRound"],
-        "message_fee": 0,
+        "message_fee": GENVM_UNMETERED_DATA_FEE_BUCKET,
         "nondet_outputs": GENVM_UNMETERED_DATA_FEE_BUCKET,
         "submitted_messages": GENVM_UNMETERED_DATA_FEE_BUCKET,
         "submitted_messages_count": 20,
@@ -428,7 +439,8 @@ async def test_run_genvm_passes_mode2_message_fee_allocations_to_genvm():
         )
 
     allocations = run_genvm_host.await_args.kwargs["fee_context"].message_fee_allocation
-    assert len(allocations) == 1
+    assert allocations[1] == UNMATCHED_EXTERNAL_GUARD_ALLOC
+    assert len(allocations) == 2
     allocation = allocations[0]
     assert allocation["recipient"].as_hex.lower() == recipient
     assert allocation["call_key"] == bytes.fromhex("34" * 32)
@@ -445,13 +457,19 @@ async def test_run_genvm_passes_mode2_message_fee_allocations_to_genvm():
             "receipt_fee_max_gas_price": 2**200,
         },
     }
-    assert allocation["children"][0]["recipient"].as_hex.lower() == child_recipient
-    assert allocation["children"][0]["call_key"] == bytes.fromhex("56" * 32)
-    assert allocation["children"][0]["budget"] == 60
+    assert allocation["children_budget"] == 60
+    subtree = decode([MESSAGE_ALLOCATION_NODE_ABI_TYPE], allocation["subtree"])[0]
+    assert subtree[0][2] == (1 << 256) - 1
+    assert subtree[0][3] == recipient
+    assert subtree[1][2] == 0
+    assert subtree[1][3] == child_recipient
+    assert subtree[1][4] == bytes.fromhex("56" * 32)
+    assert subtree[1][5] == 60
+    assert subtree[1][6] == child_fee_params
 
 
 @pytest.mark.asyncio
-async def test_run_genvm_rejects_fee_bearing_mode1_before_genvm():
+async def test_run_genvm_materializes_fee_bearing_open_mode():
     node = _make_node()
     execution_result = ExecutionResult(
         result=ExecutionReturn(ret=b"\x00\x00"),
@@ -498,20 +516,14 @@ async def test_run_genvm_rejects_fee_bearing_mode1_before_genvm():
             fee_accounting=fee_accounting,
         )
 
-    run_genvm_host.assert_not_awaited()
-    assert receipt.execution_result == ExecutionResultStatus.ERROR
-    assert (
-        receipt.genvm_result["error_code"]
-        == "Mode1MessageFeesRequireGenVMPerEmissionSupport"
-    )
-    assert receipt.genvm_result["raw_error"] == {
-        "fatal": False,
-        "causes": [
-            "Mode1MessageFeesRequireGenVMPerEmissionSupport: fee-bearing "
-            "GenVM messages require a message allocation tree"
-        ],
-        "ctx": {"source": "studio_fee_accounting"},
-    }
+    run_genvm_host.assert_awaited_once()
+    assert receipt.execution_result == ExecutionResultStatus.SUCCESS
+    allocations = run_genvm_host.await_args.kwargs["fee_context"].message_fee_allocation
+    assert len(allocations) == 3
+    assert all(allocation["budget"] == 55 for allocation in allocations)
+    assert all(allocation["children_budget"] == 0 for allocation in allocations)
+    assert all(allocation["subtree"] == b"" for allocation in allocations)
+    assert all("children" not in allocation for allocation in allocations)
 
 
 @pytest.mark.asyncio

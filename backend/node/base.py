@@ -23,6 +23,10 @@ from backend.protocol_rpc.fees import (
 )
 import backend.node.genvm.base as genvmbase
 import backend.node.genvm.origin.calldata as calldata
+from backend.node.genvm.executor_selection import (
+    legacy_executor_selector_for_code,
+    uses_legacy_storage,
+)
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.node.types import Receipt, ExecutionMode, Vote, ExecutionResultStatus
 from backend.protocol_rpc.message_handler.base import IMessageHandler
@@ -787,11 +791,13 @@ class Node:
             res = res.replace(tzinfo=datetime.UTC)
         return res
 
-    def _put_code_to(self, to: genvmbase.StateProxyWritable, code: bytes) -> None:
+    def _put_code_to(
+        self, to: genvmbase.StateProxyWritable, code: bytes, *, legacy: bool = False
+    ) -> None:
         """Write contract code directly to storage using the code slot."""
         from backend.node.genvm import get_code_slot
 
-        code_slot = get_code_slot()
+        code_slot = get_code_slot(legacy=legacy)
         # Prefix with 4-byte little-endian length
         code_len_prefix = len(code).to_bytes(4, byteorder="little", signed=False)
         code_data = code_len_prefix + code
@@ -809,6 +815,13 @@ class Node:
         fee_accounting: dict | None = None,
     ) -> Receipt:
         assert self.contract_snapshot is not None
+
+        # Simulated deployments (including fee estimates) do not pass through
+        # consensus's snapshot factory. Select the same legacy line here too.
+        if not self.contract_snapshot.genvm_executor_selector:
+            self.contract_snapshot.genvm_executor_selector = (
+                legacy_executor_selector_for_code(code_to_deploy)
+            )
 
         transaction_datetime = self._date_from_str(transaction_created_at)
         if transaction_datetime is None:
@@ -911,7 +924,11 @@ class Node:
             )
         )
 
-    async def get_contract_schema(self, code: bytes) -> str:
+    async def get_contract_schema(
+        self, code: bytes, *, genvm_executor_selector: str | None = None
+    ) -> str:
+        inferred_selector = legacy_executor_selector_for_code(code)
+        executor_selector = genvm_executor_selector or inferred_selector
         NO_ADDR = Address(b"\x00" * 20)
         message = {
             "is_init": False,
@@ -923,7 +940,9 @@ class Node:
             "chain_id": 0,
         }
         state_proxy = _StateProxyNone(NO_ADDR)
-        self._put_code_to(state_proxy, code)
+        self._put_code_to(
+            state_proxy, code, legacy=uses_legacy_storage(executor_selector)
+        )
 
         start_time = time.time()
         result = await genvmbase.run_genvm_host(
@@ -944,6 +963,7 @@ class Node:
             logger=self.logger,
             timeout=30,
             manager_uri=self.manager.url,
+            genvm_executor_selector=executor_selector,
         )
         result.processing_time = int((time.time() - start_time) * 1000)
 

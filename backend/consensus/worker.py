@@ -1820,6 +1820,7 @@ class ConsensusWorker:
         """
         import base64
         from backend.node.genvm import get_code_slot
+        from backend.node.genvm.executor_selection import uses_legacy_storage
         from backend.database_handler.models import CurrentState
 
         tx_hash = transaction_data["hash"]
@@ -1866,7 +1867,11 @@ class ConsensusWorker:
             code_slot_value = base64.b64encode(code_len_prefix + code_bytes).decode(
                 "ascii"
             )
-            code_slot_key = base64.b64encode(get_code_slot()).decode("ascii")
+            code_slot_key = base64.b64encode(
+                get_code_slot(
+                    legacy=uses_legacy_storage(contract.genvm_executor_selector)
+                )
+            ).decode("ascii")
 
             # Update contract data - update BOTH accepted and finalized state
             # Since upgrade transactions bypass consensus and go directly to FINALIZED,

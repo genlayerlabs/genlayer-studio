@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import rlp
-from eth_abi import encode
+from eth_abi import decode, encode
 from web3 import Web3
 
 from backend.consensus.base import (
@@ -88,7 +88,6 @@ from backend.protocol_rpc.fees import (
     MessageAllocationsRestricted,
     MessageFeesReportMismatch,
     MessageNoMatchingAllocation,
-    Mode1MessageFeesRequireGenVMPerEmissionSupport,
     message_effect_identities,
     min_message_primary_fees,
     PhaseTimeoutOutOfBounds,
@@ -97,6 +96,7 @@ from backend.protocol_rpc.fees import (
     EMPTY_CALL_KEY,
     MESSAGE_ALLOCATION_NODE_ABI_TYPE,
     MIN_RECEIPT_BYTES,
+    MIN_TERMINAL_OUTPUT_BYTES,
     MESSAGE_REVEAL_LENGTH_SLOTS,
     MAX_CONTRIBUTION_SEGMENTS,
     NODE_ROOT_SENTINEL,
@@ -146,6 +146,7 @@ from backend.protocol_rpc.fees import (
     record_execution_fee_consumption,
     record_reveal_message_fees,
     refund_failed_external_message_fee,
+    refund_failed_internal_message_fee,
     required_fee_deposit,
     _genvm_receipt_metered_fee,
     _receipt_fee_report,
@@ -165,6 +166,7 @@ from backend.node.types import (
     PendingTransaction,
     Receipt,
 )
+from backend.node.genvm.origin.fees import UNMATCHED_EXTERNAL_GUARD_ALLOC
 from backend.protocol_rpc.types import (
     DecodedsubmitAppealDataArgs,
     DecodedRollupTransaction,
@@ -793,14 +795,22 @@ def test_studio_fee_policy_matches_consensus_deterministic_receipt_estimators():
         + (receipt_bytes * policy.calldata_gas_per_byte)
         + (PROPOSE_RECEIPT_SLOTS * policy.gas_per_changed_slot)
     )
-    expected_receipt_floor_gas = (
+    expected_min_receipt_gas = (
         policy.fixed_propose_receipt_gas
         + policy.intrinsic_gas
         + policy.bootloader_overhead
         + (MIN_RECEIPT_BYTES * policy.calldata_gas_per_byte)
         + (PROPOSE_RECEIPT_SLOTS * policy.gas_per_changed_slot)
     )
-    expected_legacy_receipt_gas = expected_receipt_floor_gas - (
+    expected_budget_floor_gas = (
+        policy.fixed_propose_receipt_gas
+        + policy.intrinsic_gas
+        + policy.bootloader_overhead
+        + (policy.receipt_wrapper_bytes + MIN_TERMINAL_OUTPUT_BYTES)
+        * policy.calldata_gas_per_byte
+        + (PROPOSE_RECEIPT_SLOTS * policy.gas_per_changed_slot)
+    )
+    expected_legacy_receipt_gas = expected_min_receipt_gas - (
         policy.fixed_propose_receipt_gas
     )
     expected_genvm_start_gas = (
@@ -863,10 +873,29 @@ def test_studio_fee_policy_matches_consensus_deterministic_receipt_estimators():
     assert policy.estimate_nondet_output_start_gas() == expected_nondet_output_start_gas
     assert (
         policy.estimate_propose_receipt_gas(MIN_RECEIPT_BYTES)
-        == expected_receipt_floor_gas
+        == expected_min_receipt_gas
     )
-    assert policy.message_fee_params_budget_floor() == expected_receipt_floor_gas * 3
+    assert policy.message_fee_params_budget_floor() == expected_budget_floor_gas * 3
     assert policy.genvm_start_budget_floor() == expected_genvm_start_gas * 3
+
+
+@pytest.mark.parametrize(
+    ("receipt_wrapper_bytes", "expected_floor_gas"),
+    [(1_024, 315_408), (1_536, 323_600)],
+)
+def test_studio_fee_config_matches_consensus_execution_budget_floor(
+    receipt_wrapper_bytes, expected_floor_gas
+):
+    policy = StudioFeePolicy(
+        receipt_gas_price=250_000_000,
+        receipt_wrapper_bytes=receipt_wrapper_bytes,
+    )
+    expected_floor = expected_floor_gas * policy.receipt_gas_price
+
+    assert policy.message_fee_params_budget_floor() == expected_floor
+    assert studio_fee_config(policy)["policy"]["messageFeeParamsBudgetFloor"] == str(
+        expected_floor
+    )
 
 
 def test_studio_fee_config_exposes_default_nonzero_fee_policy():
@@ -969,6 +998,40 @@ def test_validate_transaction_fee_deposit_rejects_execution_budget_below_floor()
             user_value=0,
             policy=policy,
         )
+
+
+@pytest.mark.parametrize("receipt_wrapper_bytes", [1_024, 1_536])
+def test_validate_transaction_fee_deposit_accepts_exact_execution_budget_floor(
+    receipt_wrapper_bytes,
+):
+    policy = StudioFeePolicy(
+        receipt_gas_price=1,
+        receipt_wrapper_bytes=receipt_wrapper_bytes,
+    )
+    floor = policy.message_fee_params_budget_floor()
+    at_floor = _fees_distribution(execution_budget_per_round=floor)
+    below_floor = _fees_distribution(execution_budget_per_round=floor - 1)
+
+    with pytest.raises(BudgetTooLow):
+        validate_transaction_fee_deposit(
+            fees_distribution=below_floor,
+            num_of_validators=5,
+            submitted_value=required_fee_deposit(below_floor, 5, policy),
+            user_value=0,
+            policy=policy,
+        )
+
+    required = required_fee_deposit(at_floor, 5, policy)
+    assert (
+        validate_transaction_fee_deposit(
+            fees_distribution=at_floor,
+            num_of_validators=5,
+            submitted_value=required,
+            user_value=0,
+            policy=policy,
+        )
+        == required
+    )
 
 
 @pytest.mark.parametrize(
@@ -3114,7 +3177,7 @@ def test_genvm_fee_context_uses_transaction_execution_budget_and_policy():
 
     assert bucket_totals == {
         "execution_data_gas": 123,
-        "message_fee": 0,
+        "message_fee": GENVM_UNMETERED_DATA_FEE_BUCKET,
         "nondet_outputs": GENVM_UNMETERED_DATA_FEE_BUCKET,
         "submitted_messages": GENVM_UNMETERED_DATA_FEE_BUCKET,
         "submitted_messages_count": 12,
@@ -3135,7 +3198,7 @@ def test_genvm_fee_context_uses_transaction_execution_budget_and_policy():
         "minCommitTimeout": "3",
         "maxCommitTimeout": "202",
         "genPerTimeUnit": "2",
-        "messageBudgetFloor": "18704",
+        "messageBudgetFloor": "39440",
     }
 
 
@@ -3282,12 +3345,29 @@ def test_genvm_message_fee_allocation_maps_studio_nodes():
                 "receipt_fee_max_gas_price": 2**200,
             },
         },
-        "children": [],
+        "children_budget": 0,
+        "subtree": encode(
+            [MESSAGE_ALLOCATION_NODE_ABI_TYPE],
+            [
+                [
+                    (
+                        1,
+                        True,
+                        NODE_ROOT_SENTINEL,
+                        "0x" + "22" * 20,
+                        bytes.fromhex("12" * 32),
+                        60,
+                        fee_params,
+                    )
+                ]
+            ],
+        ),
     }
-    assert len(allocations) == 1
+    assert allocations[1] == UNMATCHED_EXTERNAL_GUARD_ALLOC
+    assert len(allocations) == 2
 
 
-def test_genvm_message_fee_allocation_nests_descendants_under_roots():
+def test_genvm_message_fee_allocation_encodes_descendants_under_roots():
     root_fee_params = _encode_internal_fee_params(leader_timeunits=6)
     child_fee_params = _encode_internal_fee_params(leader_timeunits=7)
     root = _allocation(
@@ -3313,33 +3393,85 @@ def test_genvm_message_fee_allocation_nests_descendants_under_roots():
 
     allocations = genvm_message_fee_allocation(accounting)
 
-    assert len(allocations) == 1
+    assert allocations[1] == UNMATCHED_EXTERNAL_GUARD_ALLOC
+    assert len(allocations) == 2
     assert allocations[0]["recipient"] == root["recipient"]
     assert allocations[0]["call_key"] == bytes.fromhex("12" * 32)
     assert allocations[0]["budget"] == 120
-    assert allocations[0]["children"] == [
-        {
-            "recipient": descendant["recipient"],
-            "call_key": bytes.fromhex("34" * 32),
-            "budget": 60,
-            "on": "decided",
-            "fee_params": {
-                "Internal": {
-                    "leader_timeunits_allocation": 7,
-                    "validator_timeunits_allocation": 10,
-                    "execution_budget_per_round": 0,
-                    "rotations": [0],
-                    "max_price_gen_per_time_unit": 1,
-                    "storage_fee_max_gas_price": 2**200,
-                    "receipt_fee_max_gas_price": 2**200,
-                },
-            },
-            "children": [],
-        }
+    assert allocations[0]["children_budget"] == 60
+    assert "children" not in allocations[0]
+    assert decode([MESSAGE_ALLOCATION_NODE_ABI_TYPE], allocations[0]["subtree"])[0] == (
+        (
+            1,
+            True,
+            NODE_ROOT_SENTINEL,
+            root["recipient"],
+            bytes.fromhex("12" * 32),
+            120,
+            root_fee_params,
+        ),
+        (
+            1,
+            True,
+            0,
+            descendant["recipient"],
+            bytes.fromhex("34" * 32),
+            60,
+            child_fee_params,
+        ),
+    )
+
+
+def test_genvm_message_fee_allocation_preserves_subtree_order_and_direct_budget():
+    fee_params = _encode_internal_fee_params()
+    nodes = [
+        _allocation(budget=250, fee_params=fee_params),
+        _allocation(budget=150, fee_params=fee_params, recipient="0x" + "33" * 20),
+        _allocation(parent_index=0, budget=120, fee_params=fee_params),
+        _allocation(parent_index=1, budget=70, fee_params=fee_params),
+        _allocation(parent_index=2, budget=55, fee_params=fee_params),
+        _allocation(
+            parent_index=0, budget=60, fee_params=fee_params, recipient="0x" + "44" * 20
+        ),
+    ]
+    accounting = {"message_allocations": nodes, "allocation_consumed": {"0": 250}}
+
+    allocations = genvm_message_fee_allocation(accounting)
+
+    assert [node["budget"] for node in allocations] == [250, 150, 0]
+    assert [node["children_budget"] for node in allocations] == [180, 70, 0]
+    first = decode([MESSAGE_ALLOCATION_NODE_ABI_TYPE], allocations[0]["subtree"])[0]
+    second = decode([MESSAGE_ALLOCATION_NODE_ABI_TYPE], allocations[1]["subtree"])[0]
+    assert [node[2] for node in first] == [NODE_ROOT_SENTINEL, 0, 1, 0]
+    assert [node[5] for node in first] == [250, 120, 55, 60]
+    assert [node[2] for node in second] == [NODE_ROOT_SENTINEL, 0]
+    assert [node[5] for node in second] == [150, 70]
+    assert all(node[6] == fee_params for node in (*first, *second))
+    assert allocations[2] == UNMATCHED_EXTERNAL_GUARD_ALLOC
+    assert nodes[3]["parentIndex"] == 1
+    assert nodes[4]["parentIndex"] == 2
+
+
+def test_genvm_message_fee_allocation_rejects_children_budget_overflow():
+    nodes = [
+        _allocation(budget=NODE_ROOT_SENTINEL),
+        _allocation(parent_index=0, budget=NODE_ROOT_SENTINEL),
+        _allocation(parent_index=0, budget=1),
     ]
 
+    with pytest.raises(ArithmeticOverflow):
+        genvm_message_fee_allocation({"message_allocations": nodes})
 
-def test_genvm_message_fee_allocation_does_not_add_uncommitted_fallback():
+
+@pytest.mark.parametrize("parent_index", [-1, 0, 1])
+def test_genvm_message_fee_allocation_rejects_invalid_parent(parent_index):
+    with pytest.raises(AllocationTreeMalformed):
+        genvm_message_fee_allocation(
+            {"message_allocations": [_allocation(parent_index=parent_index)]}
+        )
+
+
+def test_genvm_message_fee_allocation_preserves_only_pinned_external_keys():
     external = _allocation(
         message_type=0,
         on_acceptance=False,
@@ -3364,23 +3496,32 @@ def test_genvm_message_fee_allocation_does_not_add_uncommitted_fallback():
     )
     assert allocations[0]["budget"] == 210_000
     assert allocations[0]["on"] == "finalized"
+    assert allocations[0]["children_budget"] == 0
+    assert allocations[0]["subtree"] == b""
     assert allocations[0]["fee_params"] == {
         "External": {
             "gas_limit": 21_000,
             "max_gas_price": 10,
         },
     }
-    assert len(allocations) == 1
+    assert allocations[1] == UNMATCHED_EXTERNAL_GUARD_ALLOC
+    assert len(allocations) == 2
 
 
-def test_genvm_message_fee_allocation_keeps_legacy_gasless_messages_unmetered():
-    allocations = genvm_message_fee_allocation(None)
+def test_genvm_message_fee_allocation_keeps_legacy_messages_unmetered_with_funding():
+    policy = StudioFeePolicy(
+        gen_per_time_unit=2,
+        storage_unit_price=3,
+        receipt_gas_price=4,
+    )
+    allocations = genvm_message_fee_allocation(None, policy=policy)
 
     assert [next(iter(node["fee_params"])) for node in allocations] == [
         "External",
         "Internal",
         "Internal",
     ]
+    assert UNMATCHED_EXTERNAL_GUARD_ALLOC not in allocations
     assert [node["on"] for node in allocations] == [
         "finalized",
         "finalized",
@@ -3388,30 +3529,39 @@ def test_genvm_message_fee_allocation_keeps_legacy_gasless_messages_unmetered():
     ]
     assert all(node["recipient"] is None for node in allocations)
     assert all(node["call_key"] is None for node in allocations)
-    base_internal_params = {
-        "leader_timeunits_allocation": 0,
-        "validator_timeunits_allocation": 0,
-        "execution_budget_per_round": 0,
-        "rotations": [0],
-        "max_price_gen_per_time_unit": 1,
-    }
-    # the finalized node keeps the vendored GenVM default gas-price cap
-    assert [
+    assert all(node["children_budget"] == 0 for node in allocations)
+    assert all(node["subtree"] == b"" for node in allocations)
+    internal_params = [
         node["fee_params"]["Internal"]
         for node in allocations
         if "Internal" in node["fee_params"]
-    ] == [
-        {
-            **base_internal_params,
-            "storage_fee_max_gas_price": 20,
-            "receipt_fee_max_gas_price": 20,
-        },
-        {
-            **base_internal_params,
-            "storage_fee_max_gas_price": 2**200,
-            "receipt_fee_max_gas_price": 2**200,
-        },
     ]
+    assert internal_params[0] == internal_params[1]
+    params = internal_params[0]
+    assert params["leader_timeunits_allocation"] == 100
+    assert params["validator_timeunits_allocation"] == 200
+    assert params["execution_budget_per_round"] >= max(
+        DEFAULT_TRANSACTION_EXECUTION_BUDGET_PER_ROUND,
+        policy.message_fee_params_budget_floor(),
+    )
+    assert params["rotations"] == [0]
+    assert params["max_price_gen_per_time_unit"] >= policy.gen_per_time_unit
+    assert params["storage_fee_max_gas_price"] >= policy.storage_unit_price
+    assert params["receipt_fee_max_gas_price"] >= policy.receipt_gas_price
+
+    decoded = decode_internal_message_fee_params(
+        _encode_internal_fee_params(
+            leader_timeunits=params["leader_timeunits_allocation"],
+            validator_timeunits=params["validator_timeunits_allocation"],
+            execution_budget_per_round=params["execution_budget_per_round"],
+            rotations=params["rotations"],
+            max_price_gen_per_time_unit=params["max_price_gen_per_time_unit"],
+            storage_fee_max_gas_price=params["storage_fee_max_gas_price"],
+            receipt_fee_max_gas_price=params["receipt_fee_max_gas_price"],
+        )
+    )
+    declared_budget = min_message_primary_fees(decoded, policy)
+    assert 0 < declared_budget <= allocations[1]["budget"]
 
 
 def test_genvm_message_fee_allocation_keeps_zero_budget_legacy_messages_unmetered():
@@ -3429,9 +3579,57 @@ def test_genvm_message_fee_allocation_keeps_zero_budget_legacy_messages_unmetere
         "Internal",
         "Internal",
     ]
+    assert UNMATCHED_EXTERNAL_GUARD_ALLOC not in allocations
 
 
-def test_genvm_message_fee_allocation_rejects_fee_bearing_mode1_until_genvm_supports_it():
+def test_zero_message_bucket_unmetered_params_report_zero_message_fee():
+    accounting = create_fee_accounting(
+        fees_distribution=_fees_distribution(
+            execution_budget_per_round=123,
+            total_message_fees=0,
+        ),
+        num_of_validators=5,
+        submitted_value=1223,
+        user_value=0,
+    )
+    params = genvm_message_fee_allocation(accounting)[1]["fee_params"]["Internal"]
+    fee_params = _encode_internal_fee_params(
+        leader_timeunits=params["leader_timeunits_allocation"],
+        validator_timeunits=params["validator_timeunits_allocation"],
+        execution_budget_per_round=params["execution_budget_per_round"],
+        rotations=params["rotations"],
+        max_price_gen_per_time_unit=params["max_price_gen_per_time_unit"],
+        storage_fee_max_gas_price=params["storage_fee_max_gas_price"],
+        receipt_fee_max_gas_price=params["receipt_fee_max_gas_price"],
+    )
+    declared_budget = min_message_primary_fees(
+        decode_internal_message_fee_params(fee_params)
+    )
+    assert declared_budget > 0
+
+    bucket_totals, _ = genvm_fee_context(accounting)
+    assert bucket_totals["message_fee"] == GENVM_UNMETERED_DATA_FEE_BUCKET
+
+    message = {
+        "messageType": 1,
+        "recipient": "0x2222222222222222222222222222222222222222",
+        "onAcceptance": False,
+        "feeParams": fee_params,
+        "declaredBudget": declared_budget,
+        "callKey": CALL_KEY_WILDCARD,
+    }
+    updated = consume_message_fees(accounting, [message])
+
+    assert updated["message_fee_consumed"] == 0
+    assert "failed_internal_message_refunds" not in refund_failed_internal_message_fee(
+        updated, message
+    )
+    assert "message_fee_unwind_events" not in unwind_reveal_message_fees(
+        updated, [message]
+    )
+
+
+def test_genvm_message_fee_allocation_materializes_fee_bearing_open_mode():
     accounting = create_fee_accounting(
         fees_distribution=_fees_distribution(total_message_fees=55),
         num_of_validators=5,
@@ -3439,8 +3637,18 @@ def test_genvm_message_fee_allocation_rejects_fee_bearing_mode1_until_genvm_supp
         user_value=0,
     )
 
-    with pytest.raises(Mode1MessageFeesRequireGenVMPerEmissionSupport):
-        genvm_message_fee_allocation(accounting)
+    allocations = genvm_message_fee_allocation(accounting)
+
+    assert [next(iter(node["fee_params"])) for node in allocations] == [
+        "External",
+        "Internal",
+        "Internal",
+    ]
+    assert all(node["budget"] == 55 for node in allocations)
+    assert all(node["children_budget"] == 0 for node in allocations)
+    assert all(node["subtree"] == b"" for node in allocations)
+    assert all("children" not in node for node in allocations)
+    assert UNMATCHED_EXTERNAL_GUARD_ALLOC not in allocations
 
 
 def test_create_fee_accounting_records_user_side_budgets():
@@ -3519,7 +3727,7 @@ def test_genvm_fee_context_uses_locked_fee_policy_by_default():
 
     assert bucket_totals == {
         "execution_data_gas": execution_budget,
-        "message_fee": 0,
+        "message_fee": GENVM_UNMETERED_DATA_FEE_BUCKET,
         "nondet_outputs": GENVM_UNMETERED_DATA_FEE_BUCKET,
         "submitted_messages": GENVM_UNMETERED_DATA_FEE_BUCKET,
         "submitted_messages_count": 20,
@@ -7223,7 +7431,10 @@ def test_use_balance_message_validates_floor_without_consuming_sender_bucket():
                 "messageType": 1,
                 "recipient": "0x2222222222222222222222222222222222222222",
                 "onAcceptance": True,
-                "feeParams": _encode_internal_fee_params(),
+                "feeParams": _encode_internal_fee_params(
+                    storage_fee_max_gas_price=2**96 - 1,
+                    receipt_fee_max_gas_price=2**96 - 1,
+                ),
                 "declaredBudget": 55,
                 "callKey": EMPTY_CALL_KEY,
                 "useBalance": True,
@@ -7480,7 +7691,7 @@ def test_mode2_message_fees_reject_missing_allocation_and_phase_mismatch():
         )
 
 
-def test_mode2_external_message_fees_require_matching_committed_allocation():
+def test_mode2_unmatched_external_message_rejects_at_consensus_freeze():
     accounting = create_fee_accounting(
         fees_distribution=_fees_distribution(total_message_fees=55),
         message_allocations=[
@@ -9685,6 +9896,11 @@ def test_create_child_fee_accounting_strips_leaf_matched_root_subtree():
     assert child_fees["totalMessageFees"] == 0
     assert child_accounting["message_fee_budget"] == 0
     assert child_accounting["message_allocations"] == []
+    assert child_accounting["message_allocation_policy"] == "closed"
+    assert child_accounting["message_allocations_restricted"] is True
+    assert genvm_message_fee_allocation(child_accounting) == [
+        UNMATCHED_EXTERNAL_GUARD_ALLOC
+    ]
 
 
 def test_create_child_fee_accounting_rejects_phase_mismatched_root_subtree():
@@ -10237,6 +10453,60 @@ def test_message_dispatch_creates_mode1_child_fee_accounting_from_pending_metada
         "externalReimbursed": 0,
         "remaining": 0,
     }
+
+
+def test_message_dispatch_keeps_synthetic_unmetered_child_outside_fee_accounting(
+    monkeypatch,
+):
+    monkeypatch.setenv("GENLAYER_STUDIO_GEN_PER_TIME_UNIT", "1")
+    monkeypatch.setenv("GENLAYER_STUDIO_STORAGE_UNIT_PRICE", "1")
+    monkeypatch.setenv("GENLAYER_STUDIO_RECEIPT_GAS_PRICE", "1")
+    monkeypatch.setenv("GENLAYER_STUDIO_MIN_PROPOSE_TIMEUNITS", "1")
+    monkeypatch.setenv("GENLAYER_STUDIO_MIN_COMMIT_TIMEUNITS", "1")
+    policy = StudioFeePolicy.from_env()
+    fees_distribution, submitted_value = default_transaction_fees_for_policy(policy)
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=submitted_value,
+        user_value=0,
+        sender="0x1111111111111111111111111111111111111111",
+        policy=policy,
+    )
+    params = genvm_message_fee_allocation(accounting)[2]["fee_params"]["Internal"]
+    fee_params = _encode_internal_fee_params(
+        leader_timeunits=params["leader_timeunits_allocation"],
+        validator_timeunits=params["validator_timeunits_allocation"],
+        execution_budget_per_round=params["execution_budget_per_round"],
+        rotations=params["rotations"],
+        max_price_gen_per_time_unit=params["max_price_gen_per_time_unit"],
+        storage_fee_max_gas_price=params["storage_fee_max_gas_price"],
+        receipt_fee_max_gas_price=params["receipt_fee_max_gas_price"],
+    )
+    declared_budget = min_message_primary_fees(
+        decode_internal_message_fee_params(fee_params), policy
+    )
+    assert declared_budget > 0
+
+    context, processor = _message_dispatch_context(accounting)
+    pending = PendingTransaction(
+        address="0x2222222222222222222222222222222222222222",
+        calldata=b"\x12\x34",
+        code=None,
+        salt_nonce=0,
+        on="accepted",
+        value=0,
+        fee_params=fee_params,
+        declared_budget=declared_budget,
+        call_key="0x" + "12" * 32,
+    )
+
+    _, inserts = _get_messages_data(context, [pending], "accepted")
+
+    child_data = inserts[0][1]
+    assert FEE_ACCOUNTING_KEY not in child_data
+    assert "fee_value" not in child_data
+    assert processor.updated_fee_accounting["message_fee_consumed"] == 0
 
 
 def test_internal_deployment_descriptor_stays_zero_address_and_carries_salt():
@@ -10910,11 +11180,13 @@ def test_post_activation_top_up_uses_locked_formula_and_floor():
         intrinsic_gas=0,
         bootloader_overhead=0,
         gas_per_changed_slot=0,
-        calldata_gas_per_byte=0,
+        calldata_gas_per_byte=1,
         fixed_propose_receipt_gas=10,
     )
+    floor = activation_policy.message_fee_params_budget_floor()
+    assert floor == 10 + 1_024 + MIN_TERMINAL_OUTPUT_BYTES
     fees_distribution = _fees_distribution(
-        execution_budget_per_round=10,
+        execution_budget_per_round=floor,
         receipt_fee_max_gas_price=2,
     )
     accounting = create_fee_accounting(
@@ -10942,10 +11214,11 @@ def test_post_activation_top_up_uses_locked_formula_and_floor():
             activation_policy,
             receipt_gas_price=2,
             fixed_propose_receipt_gas=100,
+            receipt_wrapper_bytes=2_048,
         ),
     )
 
-    assert topped_up["fees_distribution"]["executionBudgetPerRound"] == 11
+    assert topped_up["fees_distribution"]["executionBudgetPerRound"] == floor + 1
 
 
 def test_apply_fee_top_up_only_raises_existing_price_caps():

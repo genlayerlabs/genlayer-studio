@@ -1,11 +1,15 @@
 # database_handler/contract_snapshot.py
 from .models import CurrentState
 from .errors import ContractNotFoundError
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 from typing import Optional, Dict
 import base64
 import json
+from backend.node.genvm.executor_selection import (
+    LEGACY_EXECUTOR_SELECTOR,
+    uses_legacy_storage,
+)
 
 
 class ContractSnapshot:
@@ -99,7 +103,9 @@ class ContractSnapshot:
         accepted = self.states.get("accepted") or {}
 
         try:
-            stored = accepted.get(_code_slot_b64())
+            stored = accepted.get(
+                _code_slot_b64(legacy=uses_legacy_storage(self.genvm_executor_selector))
+            )
             if not stored:
                 return None
             return _decode_code_payload(stored)
@@ -107,12 +113,12 @@ class ContractSnapshot:
             return None
 
 
-def _code_slot_b64() -> str:
+def _code_slot_b64(*, legacy: bool = False) -> str:
     """Base64 of the deterministic storage slot the deployed code lives in."""
     # Import here to avoid circular dependencies at module import time
     from backend.node.genvm import get_code_slot
 
-    return base64.b64encode(get_code_slot()).decode("ascii")
+    return base64.b64encode(get_code_slot(legacy=legacy)).decode("ascii")
 
 
 def _decode_code_payload(stored: str) -> Optional[str]:
@@ -142,7 +148,16 @@ def fetch_deployed_code_b64(session: Session, contract_address: str) -> Optional
     Raises ContractNotFoundError when the contract is absent or undeployed, and
     returns None when the contract exists but holds no code.
     """
-    slot = _code_slot_b64()
+    # Select only the correct code blob, retaining the narrow SQL read rather
+    # than fetching a large contract state to inspect its executor metadata.
+    slot = case(
+        (
+            (CurrentState.genvm_executor_selector == LEGACY_EXECUTOR_SELECTOR)
+            | CurrentState.genvm_executor_selector.startswith("v0.2."),
+            _code_slot_b64(legacy=True),
+        ),
+        else_=_code_slot_b64(),
+    )
 
     row = session.execute(
         select(
