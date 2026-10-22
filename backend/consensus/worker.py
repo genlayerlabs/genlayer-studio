@@ -5,7 +5,7 @@ import asyncio
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Callable, Optional, Any
+from typing import Callable, Optional, Any, Sequence
 from sqlalchemy.orm import Session
 from sqlalchemy import text, bindparam
 
@@ -293,9 +293,16 @@ class ConsensusWorker:
 
         return parsed
 
-    async def claim_next_finalization(self, session: Session) -> Optional[dict]:
+    async def claim_next_finalization(
+        self, session: Session, exclude_hashes: Sequence[str] = ()
+    ) -> Optional[dict]:
         """
         Claim the next transaction that needs finalization (appeal window expired).
+
+        Args:
+            session: Database session
+            exclude_hashes: Hashes in retry backoff; their contracts are skipped
+                so another contract's head can be claimed instead.
 
         Returns:
             Transaction data dict if claimed, None otherwise
@@ -372,6 +379,15 @@ class ConsensusWorker:
                             AND earlier.hash != t.hash
                     )
                     AND NOT EXISTS (
+                        -- A backed-off tx holds back itself and every younger tx on its contract
+                        SELECT 1 FROM transactions backed_off
+                        WHERE backed_off.hash = ANY(CAST(:backoff_hashes AS text[]))
+                            AND backed_off.to_address IS NOT DISTINCT FROM t.to_address
+                            AND backed_off.queue_order <= t.queue_order
+                            -- Stale entries for already-terminal txs must not block
+                            AND backed_off.status NOT IN ('FINALIZED', 'CANCELED')
+                    )
+                    AND NOT EXISTS (
                         -- Ensure no other transaction for same contract is being processed
                         SELECT 1 FROM transactions t2
                         WHERE t2.to_address IS NOT DISTINCT FROM t.to_address
@@ -418,6 +434,7 @@ class ConsensusWorker:
                 "finality_window_seconds": self.consensus_algorithm.finality_window_time,
                 "appeal_failed_reduction": self.consensus_algorithm.finality_window_appeal_failed_reduction,
                 "stranded_threshold_seconds": STRANDED_TX_AFTER_SECONDS,
+                "backoff_hashes": list(exclude_hashes),
             },
         ).first()
         duration = time.perf_counter() - start_time
@@ -2029,6 +2046,8 @@ class ConsensusWorker:
                     logger.info(
                         f"[Worker {self.worker_id}] Successfully finalized transaction {transaction.hash}"
                     )
+                    self._no_validators_retries.pop(transaction.hash, None)
+                    self._generic_error_retries.pop(transaction.hash, None)
 
                     # Send usage metrics to external API (non-blocking)
                     await self.usage_metrics_service.send_finalized_transaction_metrics(
@@ -2226,6 +2245,42 @@ class ConsensusWorker:
         state["last_log"] = now_monotonic
         state["polls"] = 0
 
+    def _backoff_window(self, tx_hash: str) -> Optional[tuple[str, float, float]]:
+        """
+        Return (kind, elapsed, backoff) if the transaction is inside a retry
+        backoff window, None otherwise.
+        """
+        now = time.time()
+
+        retry_info = self._no_validators_retries.get(tx_hash)
+        if retry_info:
+            backoff = self._no_validators_base_backoff * (
+                2 ** (retry_info["count"] - 1)
+            )
+            elapsed = now - retry_info["last_attempt"]
+            if elapsed < backoff:
+                return "no-validators", elapsed, backoff
+
+        generic_info = self._generic_error_retries.get(tx_hash)
+        if generic_info:
+            backoff = self._generic_error_base_backoff * (
+                2
+                ** min(
+                    generic_info["count"] - 1,
+                    self.MAX_GENERIC_ERROR_RETRIES - 1,
+                )
+            )
+            elapsed = now - generic_info["last_attempt"]
+            if elapsed < backoff:
+                return "generic-error", elapsed, backoff
+
+        return None
+
+    def _backoff_hashes(self) -> list[str]:
+        """Hashes of transactions currently inside a retry backoff window."""
+        candidates = set(self._no_validators_retries) | set(self._generic_error_retries)
+        return sorted(h for h in candidates if self._backoff_window(h) is not None)
+
     def _is_in_backoff(self, transaction_data: dict) -> bool:
         """
         Check if a transaction is in backoff due to no validators or generic errors.
@@ -2237,40 +2292,16 @@ class ConsensusWorker:
             True if transaction is in backoff period, False otherwise
         """
         tx_hash = transaction_data["hash"]
+        window = self._backoff_window(tx_hash)
+        if window is None:
+            return False
 
-        # Check no-validators backoff
-        retry_info = self._no_validators_retries.get(tx_hash)
-        if retry_info:
-            backoff = self._no_validators_base_backoff * (
-                2 ** (retry_info["count"] - 1)
-            )
-            time_since_last = time.time() - retry_info["last_attempt"]
-            if time_since_last < backoff:
-                logger.debug(
-                    f"[Worker {self.worker_id}] Transaction {tx_hash} in no-validators backoff "
-                    f"({time_since_last:.1f}s < {backoff}s)"
-                )
-                return True
-
-        # Check generic error backoff
-        generic_info = self._generic_error_retries.get(tx_hash)
-        if generic_info:
-            backoff = self._generic_error_base_backoff * (
-                2
-                ** min(
-                    generic_info["count"] - 1,
-                    self.MAX_GENERIC_ERROR_RETRIES - 1,
-                )
-            )
-            time_since_last = time.time() - generic_info["last_attempt"]
-            if time_since_last < backoff:
-                logger.debug(
-                    f"[Worker {self.worker_id}] Transaction {tx_hash} in generic-error backoff "
-                    f"({time_since_last:.1f}s < {backoff}s)"
-                )
-                return True
-
-        return False
+        kind, elapsed, backoff = window
+        logger.debug(
+            f"[Worker {self.worker_id}] Transaction {tx_hash} in {kind} backoff "
+            f"({elapsed:.1f}s < {backoff}s)"
+        )
+        return True
 
     async def _process_transaction_task(self, transaction_data: dict):
         """Task wrapper for processing a transaction with its own session."""
@@ -2311,9 +2342,12 @@ class ConsensusWorker:
                 return True
             self.release_transaction(session, tx_hash)
 
-        finalization_data = await self.claim_next_finalization(session)
+        finalization_data = await self.claim_next_finalization(
+            session, exclude_hashes=self._backoff_hashes()
+        )
         if finalization_data:
             tx_hash = finalization_data["hash"]
+            # Backoff can start after the exclusion list was built.
             if not self._is_in_backoff(finalization_data):
                 logger.debug(
                     f"[Worker {self.worker_id}] Claimed finalization for transaction {tx_hash}"

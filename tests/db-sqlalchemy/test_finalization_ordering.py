@@ -375,3 +375,87 @@ async def test_ordering_is_per_contract(worker: ConsensusWorker, session: Sessio
         "Ordering must be per-contract; other contracts' state shouldn't matter. "
         f"Got: {result}"
     )
+
+
+def _insert_ready(session: Session, tx_hash: str, nonce: int, to_address: str):
+    _insert_tx(
+        session,
+        tx_hash=tx_hash,
+        status="ACCEPTED",
+        nonce=nonce,
+        to_address=to_address,
+        timestamp_awaiting_finalization=int(time.time()) - 600,
+    )
+
+
+@pytest.mark.asyncio
+async def test_backed_off_head_does_not_starve_other_contracts(
+    worker: ConsensusWorker, session: Session
+):
+    stuck = "0x" + "80" * 32
+    other = "0x" + "81" * 32
+    _insert_ready(session, stuck, 0, CONTRACT)
+    _insert_ready(session, other, 0, OTHER_CONTRACT)
+
+    with worker.get_session() as s:
+        result = await worker.claim_next_finalization(s, exclude_hashes=[stuck])
+
+    assert result is not None and result["hash"] == other
+
+
+@pytest.mark.asyncio
+async def test_backed_off_head_still_blocks_younger_same_contract_tx(
+    worker: ConsensusWorker, session: Session
+):
+    stuck = "0x" + "82" * 32
+    _insert_ready(session, stuck, 0, CONTRACT)
+    _insert_ready(session, "0x" + "83" * 32, 1, CONTRACT)
+
+    with worker.get_session() as s:
+        result = await worker.claim_next_finalization(s, exclude_hashes=[stuck])
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_empty_exclusion_list_claims_normally(
+    worker: ConsensusWorker, session: Session
+):
+    head = "0x" + "84" * 32
+    _insert_ready(session, head, 0, CONTRACT)
+
+    with worker.get_session() as s:
+        result = await worker.claim_next_finalization(s, exclude_hashes=[])
+
+    assert result is not None and result["hash"] == head
+
+
+@pytest.mark.asyncio
+async def test_head_is_claimed_once_backoff_exclusion_is_lifted(
+    worker: ConsensusWorker, session: Session
+):
+    stuck = "0x" + "85" * 32
+    _insert_ready(session, stuck, 0, CONTRACT)
+    _insert_ready(session, "0x" + "86" * 32, 1, CONTRACT)
+
+    with worker.get_session() as s:
+        assert await worker.claim_next_finalization(s, exclude_hashes=[stuck]) is None
+    with worker.get_session() as s:
+        result = await worker.claim_next_finalization(s)
+
+    assert result is not None and result["hash"] == stuck
+
+
+@pytest.mark.asyncio
+async def test_terminal_backed_off_tx_does_not_block_its_successor(
+    worker: ConsensusWorker, session: Session
+):
+    done = "0x" + "87" * 32
+    successor = "0x" + "88" * 32
+    _insert_tx(session, tx_hash=done, status="FINALIZED", nonce=0)
+    _insert_ready(session, successor, 1, CONTRACT)
+
+    with worker.get_session() as s:
+        result = await worker.claim_next_finalization(s, exclude_hashes=[done])
+
+    assert result is not None and result["hash"] == successor
