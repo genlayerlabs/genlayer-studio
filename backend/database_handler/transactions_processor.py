@@ -2123,7 +2123,10 @@ class TransactionsProcessor:
                 Transactions.status.notin_(
                     [TransactionStatus.FINALIZED, TransactionStatus.CANCELED]
                 ),
-                Transactions.type != TransactionType.UPGRADE_CONTRACT.value,
+                or_(
+                    Transactions.type.is_(None),
+                    Transactions.type != TransactionType.UPGRADE_CONTRACT.value,
+                ),
             )
             .order_by(Transactions.queue_order)
             .all()
