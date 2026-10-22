@@ -257,7 +257,7 @@ services:
     profiles: ["ollama"]
     image: ollama/ollama:0.17.6
     ports:
-      - 11434:11434
+      - "127.0.0.1:11434:11434"
     volumes:
       - ./.ollama:/root/.ollama
     container_name: ollama
@@ -275,7 +275,7 @@ services:
     image: postgres:16-alpine
     command: sh -c "if [ \"$REMOTE_DATABASE\" = \"true\" ]; then echo 'Postgres disabled in hosted environment' && exec tail -f /dev/null; else exec docker-entrypoint.sh postgres; fi"
     ports:
-      - "${DBHOSTPORT:-5432}:5432"
+      - "127.0.0.1:${DBHOSTPORT:-5432}:5432"
     environment:
       - POSTGRES_USER=${DBUSER}
       - POSTGRES_PASSWORD=${DBPASSWORD}
@@ -429,7 +429,7 @@ services:
   redis:
     image: redis:8-alpine
     ports:
-      - "${REDISPORT:-6379}:6379"
+      - "127.0.0.1:${REDISPORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:

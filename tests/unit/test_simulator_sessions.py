@@ -1114,3 +1114,42 @@ def test_update_transaction_status_uses_request_session(monkeypatch):
         new_status=TransactionStatus.FINALIZED,
         update_current_status_changes=True,
     )
+
+
+def test_fund_account_normalizes_lowercase_address(monkeypatch):
+    session = MagicMock()
+    accounts_manager_instance = MagicMock()
+    accounts_manager_instance.is_valid_address.return_value = True
+
+    transactions_processor_instance = MagicMock()
+    transactions_processor_instance.get_transaction_count.return_value = 5
+    transactions_processor_instance.insert_transaction.return_value = None
+
+    def mock_token_hex(n):
+        return "def" if n == 32 else "xxx"
+
+    monkeypatch.setattr("secrets.token_hex", mock_token_hex)
+
+    monkeypatch.setattr(
+        endpoints,
+        "AccountsManager",
+        lambda s: accounts_manager_instance if s is session else None,
+    )
+    monkeypatch.setattr(
+        endpoints,
+        "TransactionsProcessor",
+        lambda s: transactions_processor_instance if s is session else None,
+    )
+
+    lowercase = "0x" + "ab" * 20
+    result = endpoints.fund_account(session, lowercase, 100)
+
+    assert result == "0xdef"
+    checksummed = "0xABaBaBaBABabABabAbAbABAbABabababaBaBABaB"
+    transactions_processor_instance.insert_transaction.assert_called_once_with(
+        None, checksummed, None, 100, 0, 5, False, 0, None, "0xdef"
+    )
+    accounts_manager_instance.credit_tx_value_once.assert_called_once_with(
+        "0xdef", checksummed, 100
+    )
+    session.commit.assert_called_once()
