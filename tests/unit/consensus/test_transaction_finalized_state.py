@@ -5,7 +5,10 @@ from unittest.mock import Mock
 
 import pytest
 
-from backend.consensus.base import _transaction_finalization_state
+from backend.consensus.base import (
+    _transaction_finalization_state,
+    resolve_finalization_state,
+)
 from backend.consensus.errors import FinalizationStateError
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.node.types import _compute_contract_state_hash
@@ -16,9 +19,12 @@ AFTER = {"slot": "after"}
 YOUNGER = {"slot": "younger"}
 
 
-def context(*, saved=None, stored=None, live=YOUNGER):
+def context(*, saved=None, stored=None, live=YOUNGER, pre_states=None, successors=()):
+    pre_states = pre_states or {}
     tp = Mock()
     tp.get_transaction_finalization_state.return_value = stored
+    tp.get_successor_snapshot_hashes.return_value = list(successors)
+    tp.get_transaction_pre_state.side_effect = pre_states.get
     factory = Mock(return_value=SimpleNamespace(states={"accepted": live}))
     return SimpleNamespace(
         transaction=SimpleNamespace(
@@ -111,3 +117,74 @@ def test_legacy_stripped_receipt_without_hash_cannot_authorize_live_state():
     with pytest.raises(FinalizationStateError, match="Missing transaction-local"):
         _transaction_finalization_state(ctx, receipt(state={}, expected=None))
     ctx.contract_snapshot_factory.assert_not_called()
+
+
+def test_legacy_row_recovers_from_first_matching_successor():
+    ctx = context(
+        pre_states={"0xtx": BEFORE, "0xs1": AFTER, "0xs2": YOUNGER},
+        successors=["0xs1", "0xs2"],
+    )
+    assert _transaction_finalization_state(ctx, receipt()) == AFTER
+    tp = ctx.transactions_processor
+    tp.get_successor_snapshot_hashes.assert_called_once_with("0xtx", 3)
+    assert [c.args for c in tp.get_transaction_pre_state.call_args_list] == [
+        ("0xtx",),
+        ("0xs1",),
+    ]
+
+
+def test_mismatching_successors_are_skipped():
+    ctx = context(
+        pre_states={"0xtx": BEFORE, "0xs1": YOUNGER, "0xs2": AFTER},
+        successors=["0xs1", "0xs2"],
+    )
+    assert resolve_finalization_state(ctx, receipt()) == (
+        AFTER,
+        "successor 2 (0xs2)",
+    )
+
+
+def test_no_matching_pre_state_preserves_the_decision():
+    ctx = context(
+        pre_states={"0xtx": BEFORE, "0xs1": YOUNGER, "0xs2": None},
+        successors=["0xs1", "0xs2", "0xs3"],
+    )
+    with pytest.raises(FinalizationStateError, match="unverified contract head"):
+        _transaction_finalization_state(ctx, receipt())
+    assert ctx.transactions_processor.get_transaction_pre_state.call_count == 4
+
+
+def test_unchanged_state_write_recovers_from_own_pre_state():
+    ctx = context(pre_states={"0xtx": AFTER}, successors=["0xs1"])
+    assert resolve_finalization_state(ctx, receipt()) == (AFTER, "own pre-state")
+    ctx.transactions_processor.get_successor_snapshot_hashes.assert_not_called()
+
+
+def test_without_expected_hash_no_pre_state_is_consulted():
+    ctx = context(pre_states={"0xtx": AFTER}, successors=["0xs1"])
+    with pytest.raises(FinalizationStateError, match="Missing transaction-local"):
+        _transaction_finalization_state(ctx, receipt(expected=None))
+    ctx.transactions_processor.get_transaction_pre_state.assert_not_called()
+    ctx.transactions_processor.get_successor_snapshot_hashes.assert_not_called()
+
+
+@pytest.mark.parametrize("source", ["database", "receipt"])
+def test_primary_source_skips_pre_state_lookup(source):
+    ctx = context(
+        stored=AFTER if source == "database" else None,
+        pre_states={"0xs1": AFTER},
+        successors=["0xs1"],
+    )
+    state = _transaction_finalization_state(
+        ctx, receipt(state=AFTER if source == "receipt" else None)
+    )
+    assert state == AFTER
+    ctx.transactions_processor.get_transaction_pre_state.assert_not_called()
+    ctx.transactions_processor.get_successor_snapshot_hashes.assert_not_called()
+
+
+def test_primary_source_mismatch_is_not_rescued_by_successors():
+    ctx = context(stored=YOUNGER, pre_states={"0xs1": AFTER}, successors=["0xs1"])
+    with pytest.raises(FinalizationStateError, match="hash mismatch"):
+        _transaction_finalization_state(ctx, receipt())
+    ctx.transactions_processor.get_transaction_pre_state.assert_not_called()

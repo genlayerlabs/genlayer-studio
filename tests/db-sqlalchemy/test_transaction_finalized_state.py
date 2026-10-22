@@ -328,30 +328,91 @@ async def test_accepted_execution_error_does_not_promote_contract_state(lifecycl
         }
 
 
+def strip_finalization_state(session, tx_hash):
+    session.execute(
+        text(
+            "UPDATE transactions SET contract_snapshot = contract_snapshot - 'finalization_state' WHERE hash=:hash"
+        ),
+        {"hash": tx_hash},
+    )
+    session.commit()
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("overlap", [False, True])
-async def test_legacy_row_requires_matching_receipt_hash(lifecycle, overlap):
+async def test_legacy_row_without_successor_uses_matching_head(lifecycle):
     first = await accept(lifecycle, 0, state(1))
-    if overlap:
-        await accept(lifecycle, 1, state(2))
     with lifecycle.sessions() as session:
+        strip_finalization_state(session, first)
+    await finalize(lifecycle, first)
+    with lifecycle.sessions() as session:
+        assert ContractSnapshot(CONTRACT, session).states["finalized"] == state(1)
+
+
+@pytest.mark.asyncio
+async def test_legacy_row_recovers_post_state_from_successor_pre_state(lifecycle):
+    first = await accept(lifecycle, 0, state(1))
+    second = await accept(lifecycle, 1, state(2))
+    with lifecycle.sessions() as session:
+        strip_finalization_state(session, first)
+    await finalize(lifecycle, first)
+    with lifecycle.sessions() as session:
+        assert ContractSnapshot(CONTRACT, session).states == {
+            "accepted": state(2),
+            "finalized": state(1),
+        }
+    await finalize(lifecycle, second)
+    with lifecycle.sessions() as session:
+        assert ContractSnapshot(CONTRACT, session).states["finalized"] == state(2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("successor_snapshot", ["tampered", "missing"])
+async def test_legacy_row_without_verifiable_state_stays_accepted(
+    lifecycle, successor_snapshot
+):
+    first = await accept(lifecycle, 0, state(1))
+    second = await accept(lifecycle, 1, state(2))
+    with lifecycle.sessions() as session:
+        strip_finalization_state(session, first)
         session.execute(
             text(
-                "UPDATE transactions SET contract_snapshot = contract_snapshot - 'finalization_state' WHERE hash=:hash"
+                "UPDATE transactions SET contract_snapshot = "
+                + (
+                    "jsonb_set(contract_snapshot, '{states,accepted}', "
+                    "CAST(:tampered AS jsonb))"
+                    if successor_snapshot == "tampered"
+                    else "NULL"
+                )
+                + " WHERE hash=:hash"
             ),
-            {"hash": first},
+            {"hash": second, "tampered": json.dumps(state(7))},
         )
         session.commit()
-    if not overlap:
-        await finalize(lifecycle, first)
-    else:
-        lifecycle.rollup.reset_mock()
-        # Exhaust the generic retry budget: an unverifiable agreed decision
-        # must neither be finalized nor canceled to let younger state escape.
-        for _ in range(lifecycle.worker.MAX_GENERIC_ERROR_RETRIES + 1):
-            await finalize(lifecycle, first, expected_status="ACCEPTED")
-        lifecycle.rollup.emit_transaction_event.assert_not_called()
+    lifecycle.rollup.reset_mock()
+    # Exhaust the generic retry budget: an unverifiable agreed decision
+    # must neither be finalized nor canceled to let younger state escape.
+    for _ in range(lifecycle.worker.MAX_GENERIC_ERROR_RETRIES + 1):
+        await finalize(lifecycle, first, expected_status="ACCEPTED")
+    lifecycle.rollup.emit_transaction_event.assert_not_called()
     with lifecycle.sessions() as session:
-        assert ContractSnapshot(CONTRACT, session).states["finalized"] == state(
-            0 if overlap else 1
-        )
+        assert ContractSnapshot(CONTRACT, session).states["finalized"] == state(0)
+
+
+@pytest.mark.asyncio
+async def test_legacy_report_classifies_without_writing(lifecycle, capsys):
+    from backend.database_handler.finalization_legacy_report import report
+
+    first = await accept(lifecycle, 0, state(1))
+    second = await accept(lifecycle, 1, state(2))
+    with lifecycle.sessions() as session:
+        strip_finalization_state(session, first)
+    capsys.readouterr()
+    with lifecycle.sessions() as session:
+        totals = report(session, limit=10)
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert lines == [f"{first}\t{CONTRACT}\tsuccessor 1 ({second})"]
+    assert dict(totals) == {"successor 1": 1}
+    with lifecycle.sessions() as session:
+        tp = TransactionsProcessor(session)
+        assert tp.get_transaction_by_hash(first)["status"] == "ACCEPTED"
+        assert ContractSnapshot(CONTRACT, session).states["finalized"] == state(0)

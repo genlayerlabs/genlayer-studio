@@ -2318,6 +2318,38 @@ class TransactionsProcessor:
             {"hash": transaction_hash},
         ).scalar_one_or_none()
 
+    def get_successor_snapshot_hashes(
+        self, transaction_hash: str, limit: int
+    ) -> list[str]:
+        """Oldest same-contract successors that saved a pre-state snapshot."""
+        rows = self.session.execute(
+            text(
+                """
+                SELECT successor.hash
+                FROM transactions tx
+                JOIN transactions successor
+                    ON successor.to_address = tx.to_address
+                    AND successor.queue_order > tx.queue_order
+                WHERE tx.hash = :hash
+                    AND successor.contract_snapshot IS NOT NULL
+                ORDER BY successor.queue_order ASC
+                LIMIT :limit
+                """
+            ),
+            {"hash": transaction_hash, "limit": limit},
+        ).scalars()
+        return list(rows)
+
+    def get_transaction_pre_state(self, transaction_hash: str) -> dict | None:
+        """Read only the saved pre-execution accepted state."""
+        return self.session.execute(
+            text(
+                "SELECT contract_snapshot->'states'->'accepted' FROM transactions "
+                "WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash},
+        ).scalar_one_or_none()
+
     def transactions_in_process_by_contract(self) -> list[dict]:
         transactions = (
             self.session.query(Transactions)

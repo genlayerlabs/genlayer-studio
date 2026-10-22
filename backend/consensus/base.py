@@ -3882,17 +3882,37 @@ class ValidatorsTimeoutState(TransactionState):
         return None
 
 
-def _transaction_finalization_state(
+FINALIZATION_SUCCESSOR_LOOKUP_LIMIT = 3
+
+
+def _recovery_pre_states(
+    transactions_processor, tx_hash: str
+) -> Iterable[tuple[str, dict | None]]:
+    yield "own pre-state", transactions_processor.get_transaction_pre_state(tx_hash)
+    successors = transactions_processor.get_successor_snapshot_hashes(
+        tx_hash, FINALIZATION_SUCCESSOR_LOOKUP_LIMIT
+    )
+    for position, successor_hash in enumerate(successors, start=1):
+        yield (
+            f"successor {position} ({successor_hash})",
+            transactions_processor.get_transaction_pre_state(successor_hash),
+        )
+
+
+def resolve_finalization_state(
     context: TransactionContext, leader_receipt: Receipt
-) -> dict[str, str]:
+) -> tuple[dict[str, str], str]:
+    """Return the transaction's hash-verified post-state and where it came from."""
     saved_snapshot = context.transaction.contract_snapshot
     state = saved_snapshot.finalization_state if saved_snapshot is not None else None
+    source = "saved state"
     if state is None:
         state = context.transactions_processor.get_transaction_finalization_state(
             context.transaction.hash
         )
     if state is None and leader_receipt.contract_state:
         state = leader_receipt.contract_state
+        source = "receipt"
 
     expected_hash = leader_receipt.contract_state_hash
     if state is not None:
@@ -3900,7 +3920,7 @@ def _transaction_finalization_state(
             raise FinalizationStateError(
                 f"Finalization state hash mismatch for transaction {context.transaction.hash}"
             )
-        return state
+        return state, source
 
     # Pre-fix rows did not persist post-state. The moving accepted head is only
     # safe to reuse when the original receipt proves it is exactly this result.
@@ -3910,12 +3930,33 @@ def _transaction_finalization_state(
             snapshot.states.get("accepted") if snapshot is not None else None
         )
         if _compute_contract_state_hash(accepted_state) == expected_hash:
-            return accepted_state
+            return accepted_state, "head"
+
+        # A later tx's saved pre-state is this tx's post-state unless something intervened.
+        for source, pre_state in _recovery_pre_states(
+            context.transactions_processor, context.transaction.hash
+        ):
+            if _compute_contract_state_hash(pre_state) == expected_hash:
+                return pre_state, source
 
     raise FinalizationStateError(
         f"Missing transaction-local finalization state for {context.transaction.hash}; "
         "cannot finalize from an unverified contract head"
     )
+
+
+def _transaction_finalization_state(
+    context: TransactionContext, leader_receipt: Receipt
+) -> dict[str, str]:
+    state, source = resolve_finalization_state(context, leader_receipt)
+    if source not in ("saved state", "receipt"):
+        from loguru import logger
+
+        logger.info(
+            f"Recovered legacy finalization state for {context.transaction.hash} "
+            f"from {source}"
+        )
+    return state
 
 
 class FinalizingState(TransactionState):
