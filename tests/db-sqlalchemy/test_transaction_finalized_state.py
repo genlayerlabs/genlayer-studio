@@ -459,11 +459,28 @@ def upgrades(lifecycle, monkeypatch):
     return lifecycle
 
 
-def queue_upgrade(lifecycle):
+def queue_upgrade(lifecycle, *, legacy_finalized=False):
     with lifecycle.sessions() as session:
-        return admin_upgrade_contract_code(session, CONTRACT, UPGRADE_CODE)[
+        upgrade_hash = admin_upgrade_contract_code(session, CONTRACT, UPGRADE_CODE)[
             "transaction_hash"
         ]
+        if legacy_finalized:
+            # What the pre-change worker left: code applied, no predecessor close.
+            session.query(Transactions).filter_by(hash=upgrade_hash).one().status = (
+                "FINALIZED"
+            )
+            session.query(Transactions).filter_by(
+                hash=upgrade_hash
+            ).one().consensus_data = {"upgrade_result": "success"}
+            contract = session.query(CurrentState).filter_by(id=CONTRACT).one()
+            contract.data = {
+                "state": {
+                    name: {**tree, **code()}
+                    for name, tree in contract.data["state"].items()
+                }
+            }
+            session.commit()
+    return upgrade_hash
 
 
 async def run_upgrade(lifecycle, upgrade_hash):
@@ -542,6 +559,36 @@ def insert_pending(lifecycle, nonce):
     return tx_hash
 
 
+async def succeed_validator_appeal(lifecycle, monkeypatch, tx_hash):
+    monkeypatch.setattr(
+        consensus_base.ConsensusAlgorithm,
+        "get_extra_validators",
+        staticmethod(lambda *args, **kwargs: (None, [{"address": SENDER}])),
+    )
+    monkeypatch.setattr(
+        consensus_base,
+        "CommittingState",
+        lambda: SimpleNamespace(
+            handle=AsyncMock(return_value=ConsensusRound.VALIDATOR_APPEAL_SUCCESSFUL)
+        ),
+    )
+    with lifecycle.sessions() as session:
+        tp = TransactionsProcessor(session)
+        tp.set_transaction_appeal(tx_hash, True)
+        tx = Transaction.from_dict(tp.get_transaction_by_hash(tx_hash))
+        context = context_for(lifecycle, session, tx)
+        await lifecycle.worker.consensus_algorithm.process_validator_appeal(
+            transaction=tx,
+            transactions_processor=tp,
+            chain_snapshot=None,
+            accounts_manager=context.accounts_manager,
+            contract_snapshot_factory=context.contract_snapshot_factory,
+            contract_processor=context.contract_processor,
+            node_factory=node_factory,
+            validators_snapshot=SimpleNamespace(nodes=[]),
+        )
+
+
 @pytest.mark.asyncio
 async def test_upgrade_finalizes_decided_predecessor_before_applying_code(upgrades):
     first = await accept(upgrades, 0, state(1))
@@ -600,6 +647,71 @@ async def test_upgrade_refunds_pending_paid_appeal_before_finalizing(upgrades):
     assert finalized["data"][FEE_ACCOUNTING_KEY]["appeal_bonds"] == []
     assert APPEAL_RECOVERY_SNAPSHOT_KEY not in finalized["data"]
     assert contract_states(upgrades)["finalized"] == {**state(1), **code()}
+
+
+@pytest.mark.asyncio
+async def test_queued_or_applied_upgrade_closes_appeal_admission(upgrades):
+    first = await accept(upgrades, 0, state(1))
+    with upgrades.sessions() as session:
+        assert not TransactionsProcessor(session).upgrade_closes_appeals(first)
+    upgrade_hash = queue_upgrade(upgrades)
+    with upgrades.sessions() as session:
+        tp = TransactionsProcessor(session)
+        assert tp.upgrade_closes_appeals(first)
+        with pytest.raises(ValueError, match="CanNotAppeal"):
+            tp.admit_transaction_appeal(
+                first,
+                expected_decision_id=1,
+                submitted_at=int(time.time()),
+                appeal_deadline=int(time.time()) + 600,
+                retention_bps=0,
+                prepare_fee_accounting=lambda accounting: (accounting, 0),
+            )
+        session.rollback()
+        for status, closes in (("FINALIZED", True), ("CANCELED", False)):
+            session.execute(
+                text(
+                    "UPDATE transactions SET status = CAST(:status AS"
+                    " transaction_status) WHERE hash = :hash"
+                ),
+                {"status": status, "hash": upgrade_hash},
+            )
+            assert tp.upgrade_closes_appeals(first) is closes
+        session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_successful_appeal_after_upgrade_keeps_new_code(upgrades, monkeypatch):
+    upgrade_hash = queue_upgrade(upgrades)
+    assert (await run_upgrade(upgrades, upgrade_hash))["status"] == "FINALIZED"
+    later = await accept(upgrades, 0, {**state(1), **code()})
+
+    await succeed_validator_appeal(upgrades, monkeypatch, later)
+
+    assert row_of(upgrades, upgrade_hash)["status"] == "FINALIZED"
+    assert row_of(upgrades, later)["status"] == "PENDING"
+    assert contract_states(upgrades) == {
+        "accepted": {**state(0), **code()},
+        "finalized": {**state(0), **code()},
+    }
+
+
+@pytest.mark.asyncio
+async def test_rewind_never_resurrects_canceled_rows_or_upgrades(upgrades, monkeypatch):
+    first = await accept(upgrades, 0, state(1))
+    canceled = insert_pending(upgrades, 1)
+    with upgrades.sessions() as session:
+        session.query(Transactions).filter_by(hash=canceled).one().status = "CANCELED"
+        session.commit()
+    upgrade_hash = queue_upgrade(upgrades, legacy_finalized=True)
+
+    await succeed_validator_appeal(upgrades, monkeypatch, first)
+
+    assert row_of(upgrades, first)["status"] == "PENDING"
+    assert row_of(upgrades, canceled)["status"] == "CANCELED"
+    assert row_of(upgrades, upgrade_hash)["status"] == "FINALIZED"
+    # The restored pre-state must not drop the code of the upgrade that overtook it.
+    assert contract_states(upgrades)["accepted"] == {**state(0), **code()}
 
 
 @pytest.mark.asyncio
@@ -763,3 +875,29 @@ async def test_upgrade_finalizes_undecided_predecessor_without_promotion(
     assert row_of(upgrades, first)["status"] == "FINALIZED"
     assert balance(upgrades, SENDER) == sender_balance + 50
     assert contract_states(upgrades)["finalized"] == {**state(0), **code()}
+
+
+@pytest.mark.asyncio
+async def test_legacy_interleaved_upgrade_keeps_code_when_older_row_finalizes(
+    upgrades, capsys
+):
+    from backend.database_handler.finalization_legacy_report import report
+
+    first = await accept(upgrades, 0, state(1))
+    upgrade_hash = queue_upgrade(upgrades, legacy_finalized=True)
+
+    capsys.readouterr()
+    with upgrades.sessions() as session:
+        totals = report(session, limit=10)
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert lines == [
+        f"{first}\t{CONTRACT}\tinterleaved upgrade ({upgrade_hash})\tACCEPTED"
+    ]
+    assert dict(totals) == {"interleaved upgrade": 1}
+
+    await finalize(upgrades, first)
+
+    assert contract_states(upgrades)["finalized"] == {**state(1), **code()}
+    with upgrades.sessions() as session:
+        totals = report(session, limit=10)
+    assert dict(totals) == {}

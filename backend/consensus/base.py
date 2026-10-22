@@ -393,6 +393,31 @@ def upgrade_code_slot(
     return key, base64.b64encode(code_len_prefix + code_bytes).decode("ascii")
 
 
+def with_later_upgrade_code(
+    transactions_processor: TransactionsProcessor,
+    transaction_hash: str,
+    state: dict[str, str],
+) -> dict[str, str]:
+    """Keep the code of a FINALIZED upgrade that overtook this older decision."""
+    upgrade = transactions_processor.get_latest_finalized_upgrade_after(
+        transaction_hash
+    )
+    if not upgrade or not upgrade.get("new_code"):
+        return state
+    key, value = upgrade_code_slot(
+        upgrade["new_code"], upgrade.get("genvm_executor_selector")
+    )
+    return {**state, key: value}
+
+
+def _closed_lifecycle(transaction: dict) -> bool:
+    return (
+        transaction.get("status")
+        in (TransactionStatus.FINALIZED.value, TransactionStatus.CANCELED.value)
+        or transaction.get("type") == TransactionType.UPGRADE_CONTRACT.value
+    )
+
+
 def transaction_genvm_executor_selector(transaction: Transaction) -> str | None:
     """Select and persist the deployment's executor, honoring explicit pins."""
     explicit_selector = (
@@ -1423,6 +1448,17 @@ class ConsensusAlgorithm:
                                     )
                                 )
 
+                        if (
+                            previous_contract_state is not None
+                            and context.transaction.type
+                            != TransactionType.DEPLOY_CONTRACT
+                        ):
+                            previous_contract_state = with_later_upgrade_code(
+                                context.transactions_processor,
+                                context.transaction.hash,
+                                previous_contract_state,
+                            )
+
                         # Restore the contract state
                         if previous_contract_state is not None:
                             context.contract_processor.update_contract_state(
@@ -1462,11 +1498,14 @@ class ConsensusAlgorithm:
         Rollback newer transactions.
         In the simplified system, we just need to reset future transactions to PENDING.
         """
-        # Set all transactions with higher created_at to PENDING
-        future_transactions = context.transactions_processor.get_newer_transactions(
-            context.transaction.hash
+        future_transactions = (
+            context.transactions_processor.get_rewindable_newer_transactions(
+                context.transaction.hash
+            )
         )
         for future_transaction in future_transactions:
+            if _closed_lifecycle(future_transaction):
+                continue
             future_hash = future_transaction["hash"]
             future_data = deepcopy(future_transaction.get("data") or {})
             if bool(future_transaction.get("appealed")) or (
@@ -4035,7 +4074,11 @@ class FinalizingState(TransactionState):
         if should_finalize_contract:
             context.contract_processor.update_contract_state(
                 context.transaction.to_address,
-                finalized_state=finalization_state,
+                finalized_state=with_later_upgrade_code(
+                    context.transactions_processor,
+                    context.transaction.hash,
+                    finalization_state,
+                ),
             )
 
             _dispatch_messages_for_phase(

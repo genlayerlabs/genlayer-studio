@@ -2129,6 +2129,10 @@ def _appeal_admission_context(
         or has_terminal_validator_appeal(transaction.get("consensus_history"))
     ):
         raise InvalidTransactionError("CanNotAppeal")
+    if session is not None and TransactionsProcessor(session).upgrade_closes_appeals(
+        str(transaction.get("hash"))
+    ):
+        raise InvalidTransactionError("CanNotAppeal")
 
     deadline = _transaction_appeal_deadline(transaction)
     if deadline is not None and time.time() >= deadline:

@@ -2,6 +2,8 @@
 
 Run before deploying transaction-local finalization to see which legacy rows
 will finalize, and from which verified source, and which will stay ACCEPTED.
+It also lists decided rows that a pre-change code upgrade overtook; they now
+finalize on top of that upgrade's code instead of reverting it.
 """
 
 from __future__ import annotations
@@ -60,6 +62,38 @@ _UPGRADED_AFTER = text(
     """
 )
 
+_INTERLEAVED_ROWS = text(
+    """
+    SELECT tx.hash, tx.to_address, tx.status, upgrade.hash AS upgrade_hash
+    FROM transactions tx
+    JOIN LATERAL (
+        SELECT hash FROM transactions
+        WHERE type = 3
+            AND status = 'FINALIZED'
+            AND to_address = tx.to_address
+            AND queue_order > tx.queue_order
+            AND NOT COALESCE(consensus_data ? 'applied_at', false)
+        ORDER BY queue_order DESC
+        LIMIT 1
+    ) upgrade ON true
+    WHERE tx.status IN (
+        'ACCEPTED', 'UNDETERMINED', 'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT'
+    )
+    ORDER BY tx.queue_order ASC
+    LIMIT :limit
+    """
+)
+
+INTERLEAVED = "interleaved upgrade"
+
+
+def interleaved_rows(session: Session, limit: int) -> list[dict]:
+    """Decided rows older than a FINALIZED upgrade that did not close them first."""
+    return [
+        dict(row)
+        for row in session.execute(_INTERLEAVED_ROWS, {"limit": limit}).mappings()
+    ]
+
 
 def classify(
     row: dict,
@@ -114,6 +148,12 @@ def report(session: Session, limit: int) -> Counter:
         )
         totals[source.split(" (")[0]] += 1
         print(f"{row['hash']}\t{row['to_address']}\t{source}\t{reason}".rstrip())
+    for row in interleaved_rows(session, limit):
+        totals[INTERLEAVED] += 1
+        print(
+            f"{row['hash']}\t{row['to_address']}\t"
+            f"{INTERLEAVED} ({row['upgrade_hash']})\t{row['status']}"
+        )
     session.rollback()
     return totals
 
@@ -122,7 +162,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "List ACCEPTED transactions without a saved finalization state and "
-            "classify how each would finalize. Read-only."
+            "classify how each would finalize, plus decided transactions that an "
+            "earlier code upgrade overtook. Read-only."
         )
     )
     parser.add_argument(
