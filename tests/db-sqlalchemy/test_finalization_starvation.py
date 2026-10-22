@@ -757,3 +757,45 @@ async def test_safety_net_warns_on_long_stuck_finalization(
         tx_hash in record.getMessage() and "starvation" in record.getMessage().lower()
         for record in caplog.records
     ), f"Expected starvation warning for {tx_hash}; got {[r.getMessage() for r in caplog.records]}"
+
+
+@pytest.mark.asyncio
+async def test_upgrade_is_claimed_ahead_of_older_pending_and_open_window(
+    engine: Engine, worker: ConsensusWorker, session: Session
+):
+    """The upgrade keeps type 3 priority; it finalizes decided rows itself."""
+    _setup_contract(engine)
+    upgrade_hash = "0x" + "c3" * 32
+    _insert_tx(
+        session,
+        tx_hash="0x" + "c1" * 32,
+        status="ACCEPTED",
+        nonce=0,
+        timestamp_awaiting_finalization=int(time.time()) - 1,
+        consensus_data={"leader_receipt": [{}], "votes": {}, "validators": []},
+        created_at_offset_seconds=-30,
+    )
+    _insert_tx(
+        session,
+        tx_hash="0x" + "c2" * 32,
+        status="PENDING",
+        nonce=1,
+        created_at_offset_seconds=-20,
+    )
+    _insert_tx(
+        session,
+        tx_hash=upgrade_hash,
+        status="PENDING",
+        nonce=2,
+        data={"new_code": "class C: pass"},
+    )
+    session.execute(
+        text("UPDATE transactions SET type = 3 WHERE hash = :hash"),
+        {"hash": upgrade_hash},
+    )
+    session.commit()
+
+    claimed = await worker.claim_next_transaction(session)
+
+    assert claimed is not None
+    assert claimed["hash"] == upgrade_hash

@@ -381,6 +381,18 @@ def node_factory(
     )
 
 
+def upgrade_code_slot(
+    new_code: str, genvm_executor_selector: str | None
+) -> tuple[str, str]:
+    """Storage key and value a code upgrade writes for this contract."""
+    code_bytes = new_code.encode("utf-8")
+    code_len_prefix = len(code_bytes).to_bytes(4, byteorder="little", signed=False)
+    key = base64.b64encode(
+        get_code_slot(legacy=uses_legacy_storage(genvm_executor_selector))
+    ).decode("ascii")
+    return key, base64.b64encode(code_len_prefix + code_bytes).decode("ascii")
+
+
 def transaction_genvm_executor_selector(transaction: Transaction) -> str | None:
     """Select and persist the deployment's executor, honoring explicit pins."""
     explicit_selector = (

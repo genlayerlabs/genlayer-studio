@@ -285,10 +285,15 @@ async def test_code_upgrade_preserves_executor_and_other_storage(monkeypatch, se
         },
     )
     session = MagicMock()
-    session.query.return_value.filter_by.return_value.one_or_none.return_value = (
-        contract
+    query = (
+        session.query.return_value.filter_by.return_value.with_for_update.return_value.populate_existing.return_value
     )
-    tx = session.query.return_value.filter_by.return_value.one.return_value
+    query.one_or_none.return_value = contract
+    tx = query.one.return_value
+    tx.status = TransactionStatus.PENDING
+    tx.worker_id = "test"
+    tx.data = {}
+    session.execute.return_value.first.return_value = None
     dispatch = AsyncMock()
     monkeypatch.setattr(
         consensus_worker.ConsensusAlgorithm,
@@ -299,14 +304,10 @@ async def test_code_upgrade_preserves_executor_and_other_storage(monkeypatch, se
     worker = consensus_worker.ConsensusWorker.__new__(consensus_worker.ConsensusWorker)
     worker.worker_id = "test"
     worker.msg_handler = Mock()
-    worker.current_transactions = {}
-    worker.get_session = MagicMock()
-    worker.release_transaction = Mock()
+    worker._generic_error_retries = {}
     code = LEGACY_CODE.decode()
 
-    await worker._process_upgrade_transaction(
-        {"hash": "0xabc", "to_address": ADDRESS, "data": {"new_code": code}}, session
-    )
+    await worker._apply_upgrade_code(session, "0xabc", ADDRESS, code)
 
     assert tx.consensus_data["upgrade_result"] == "success"
     assert contract.genvm_executor_selector == selector

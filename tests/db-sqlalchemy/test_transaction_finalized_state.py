@@ -16,20 +16,30 @@ from backend.consensus.base import (
     TransactionContext,
     contract_snapshot_factory,
     node_factory,
+    upgrade_code_slot,
 )
 import backend.consensus.base as consensus_base
+from backend.consensus.history import APPEAL_RECOVERY_SNAPSHOT_KEY
 from backend.consensus.types import ConsensusRound
 from backend.consensus.worker import ConsensusWorker
 from backend.database_handler.accounts_manager import AccountsManager
 from backend.database_handler.contract_processor import ContractProcessor
 from backend.database_handler.contract_snapshot import ContractSnapshot
-from backend.database_handler.models import CurrentState
+from backend.database_handler.models import CurrentState, Transactions
 from backend.database_handler.transactions_processor import TransactionsProcessor
 from backend.database_handler.types import ConsensusData
 from backend.domain.types import Transaction, TransactionType
 from backend.node.base import _SnapshotView
 from backend.node.genvm import get_code_slot
 from backend.node.types import Address, ExecutionMode, ExecutionResultStatus, Receipt
+from backend.protocol_rpc.endpoints import admin_upgrade_contract_code
+from backend.protocol_rpc.fees import (
+    FEE_ACCOUNTING_KEY,
+    calculate_appeal_charge,
+    create_fee_accounting,
+    record_appeal_bond,
+    required_fee_deposit,
+)
 
 
 SENDER = "0x" + "11" * 20
@@ -416,3 +426,340 @@ async def test_legacy_report_classifies_without_writing(lifecycle, capsys):
         tp = TransactionsProcessor(session)
         assert tp.get_transaction_by_hash(first)["status"] == "ACCEPTED"
         assert ContractSnapshot(CONTRACT, session).states["finalized"] == state(0)
+
+
+UPGRADE_CODE = "class Contract: pass  # v2"
+APPEALER = "0x" + "33" * 20
+FEES = {
+    "leaderTimeunitsAllocation": 100,
+    "validatorTimeunitsAllocation": 200,
+    "appealRounds": 0,
+    "executionBudgetPerRound": 0,
+    "executionConsumed": 0,
+    "totalMessageFees": 0,
+    "rotations": [0],
+    "maxPriceGenPerTimeUnit": 0,
+    "storageFeeMaxGasPrice": 0,
+    "receiptFeeMaxGasPrice": 0,
+}
+
+
+def code(new_code=UPGRADE_CODE):
+    return dict([upgrade_code_slot(new_code, None)])
+
+
+CODE_KEY = next(iter(code()))
+
+
+@pytest.fixture
+def upgrades(lifecycle, monkeypatch):
+    monkeypatch.setenv("UPGRADE_DEFER_SECONDS", "0")
+    monkeypatch.delenv("VITE_IS_HOSTED", raising=False)
+    monkeypatch.delenv("ADMIN_API_KEY", raising=False)
+    return lifecycle
+
+
+def queue_upgrade(lifecycle):
+    with lifecycle.sessions() as session:
+        return admin_upgrade_contract_code(session, CONTRACT, UPGRADE_CODE)[
+            "transaction_hash"
+        ]
+
+
+async def run_upgrade(lifecycle, upgrade_hash):
+    with lifecycle.sessions() as session:
+        claimed = await lifecycle.worker.claim_next_transaction(session)
+        assert claimed is not None and claimed["hash"] == upgrade_hash
+        await lifecycle.worker.process_transaction(claimed, session)
+    return row_of(lifecycle, upgrade_hash)
+
+
+def row_of(lifecycle, tx_hash):
+    with lifecycle.sessions() as session:
+        return TransactionsProcessor(session).get_transaction_by_hash(tx_hash)
+
+
+def contract_states(lifecycle):
+    with lifecycle.sessions() as session:
+        return ContractSnapshot(CONTRACT, session).states
+
+
+def balance(lifecycle, address):
+    with lifecycle.sessions() as session:
+        return AccountsManager(session).get_account_balance(address)
+
+
+def add_fee_accounting(lifecycle, tx_hash, *, appeal=False):
+    """Give a decided row fee custody, optionally with an admitted paid appeal."""
+    accounting = create_fee_accounting(
+        fees_distribution=dict(FEES),
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(FEES, 5),
+        user_value=0,
+        sender=SENDER,
+    )
+    charge = 0
+    if appeal:
+        quote = calculate_appeal_charge(
+            accounting["fees_distribution"], current_round=0, status="ACCEPTED"
+        )
+        charge = quote["bond"] + quote["funding"]
+        accounting = record_appeal_bond(
+            accounting,
+            amount=charge,
+            appealer=APPEALER,
+            current_round=0,
+            status="ACCEPTED",
+        )
+    with lifecycle.sessions() as session:
+        row = session.query(Transactions).filter_by(hash=tx_hash).one()
+        row.num_of_initial_validators = 5
+        data = {**(row.data or {}), FEE_ACCOUNTING_KEY: accounting}
+        if appeal:
+            row.appealed = True
+            row.timestamp_appeal = int(time.time())
+            data[APPEAL_RECOVERY_SNAPSHOT_KEY] = {"status": "ACCEPTED"}
+        row.data = data
+        session.commit()
+    return charge
+
+
+def insert_pending(lifecycle, nonce):
+    tx_hash = "0x" + f"{nonce + 1:064x}"
+    with lifecycle.sessions() as session:
+        TransactionsProcessor(session).insert_transaction(
+            from_address=SENDER,
+            to_address=CONTRACT,
+            data={"calldata": "Bg=="},
+            value=0,
+            type=TransactionType.RUN_CONTRACT.value,
+            nonce=nonce,
+            leader_only=False,
+            config_rotation_rounds=3,
+            transaction_hash=tx_hash,
+        )
+        session.commit()
+    return tx_hash
+
+
+@pytest.mark.asyncio
+async def test_upgrade_finalizes_decided_predecessor_before_applying_code(upgrades):
+    first = await accept(upgrades, 0, state(1))
+    add_fee_accounting(upgrades, first)
+    upgrade_hash = queue_upgrade(upgrades)
+
+    upgrade = await run_upgrade(upgrades, upgrade_hash)
+
+    assert upgrade["status"] == "FINALIZED"
+    assert upgrade["consensus_data"]["upgrade_result"] == "success"
+    assert upgrade["consensus_data"]["closed_transactions"] == [first]
+    assert upgrade["consensus_data"]["refunded_appeals"] == []
+    assert "applied_at" in upgrade["consensus_data"]
+    finalized = row_of(upgrades, first)
+    assert finalized["status"] == "FINALIZED"
+    assert finalized["data"][FEE_ACCOUNTING_KEY]["status"] == "settled"
+    assert contract_states(upgrades) == {
+        "accepted": {**state(1), **code()},
+        "finalized": {**state(1), **code()},
+    }
+
+
+@pytest.mark.asyncio
+async def test_never_started_transaction_stays_queued_and_runs_on_new_code(
+    upgrades,
+):
+    first = await accept(upgrades, 0, state(1))
+    pending = insert_pending(upgrades, 1)
+    upgrade_hash = queue_upgrade(upgrades)
+
+    assert (await run_upgrade(upgrades, upgrade_hash))["status"] == "FINALIZED"
+    assert row_of(upgrades, first)["status"] == "FINALIZED"
+    assert row_of(upgrades, pending)["status"] == "PENDING"
+
+    await accept(upgrades, 1, {**state(2), **code()}, recompute=True)
+    pre_state = row_of(upgrades, pending)["contract_snapshot"]["states"]["accepted"]
+    assert pre_state == {**state(1), **code()}
+
+
+@pytest.mark.asyncio
+async def test_upgrade_refunds_pending_paid_appeal_before_finalizing(upgrades):
+    first = await accept(upgrades, 0, state(1))
+    charge = add_fee_accounting(upgrades, first, appeal=True)
+    upgrade_hash = queue_upgrade(upgrades)
+
+    upgrade = await run_upgrade(upgrades, upgrade_hash)
+
+    assert upgrade["status"] == "FINALIZED"
+    assert upgrade["consensus_data"]["refunded_appeals"] == [
+        {"transaction": first, "refund": charge}
+    ]
+    assert balance(upgrades, APPEALER) == charge
+    finalized = row_of(upgrades, first)
+    assert finalized["status"] == "FINALIZED"
+    assert finalized["appealed"] is False
+    assert finalized["data"][FEE_ACCOUNTING_KEY]["appeal_bonds"] == []
+    assert APPEAL_RECOVERY_SNAPSHOT_KEY not in finalized["data"]
+    assert contract_states(upgrades)["finalized"] == {**state(1), **code()}
+
+
+@pytest.mark.asyncio
+async def test_unverifiable_predecessor_cancels_upgrade_without_side_effects(
+    upgrades,
+):
+    first = await accept(upgrades, 0, state(1))
+    second = await accept(upgrades, 1, state(2))
+    with upgrades.sessions() as session:
+        strip_finalization_state(session, first)
+        session.execute(
+            text(
+                "UPDATE transactions SET contract_snapshot = jsonb_set("
+                "contract_snapshot, '{states,accepted}', CAST(:tampered AS jsonb))"
+                " WHERE hash=:hash"
+            ),
+            {"hash": second, "tampered": json.dumps(state(7))},
+        )
+        session.commit()
+    before = contract_states(upgrades)
+    upgrades.rollup.reset_mock()
+    upgrade_hash = queue_upgrade(upgrades)
+
+    upgrade = await run_upgrade(upgrades, upgrade_hash)
+
+    assert upgrade["status"] == "CANCELED"
+    assert upgrade["consensus_data"] == {
+        "upgrade_result": "failed",
+        "error": "predecessor_finalization_state",
+        "transaction": first,
+    }
+    assert row_of(upgrades, first)["status"] == "ACCEPTED"
+    assert row_of(upgrades, second)["status"] == "ACCEPTED"
+    assert contract_states(upgrades) == before
+    upgrades.rollup.emit_transaction_event.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_upgrade_retry_after_crash_never_refunds_or_settles_twice(
+    upgrades, monkeypatch
+):
+    first = await accept(upgrades, 0, state(1))
+    second = await accept(upgrades, 1, state(2))
+    add_fee_accounting(upgrades, first)
+    charge = add_fee_accounting(upgrades, second, appeal=True)
+    upgrade_hash = queue_upgrade(upgrades)
+    worker = upgrades.worker
+    finalize_transaction = worker._finalize_transaction
+    crashed = []
+
+    async def crash_once(transaction, session):
+        if transaction.hash == second and not crashed:
+            crashed.append(transaction.hash)
+            raise RuntimeError("worker died mid-close")
+        await finalize_transaction(transaction, session)
+
+    monkeypatch.setattr(worker, "_finalize_transaction", crash_once)
+
+    interrupted = await run_upgrade(upgrades, upgrade_hash)
+
+    assert crashed == [second]
+    assert interrupted["status"] == "PENDING"
+    assert interrupted["data"]["upgrade_close"] == {
+        "closed_transactions": [first, second],
+        "refunded_appeals": [{"transaction": second, "refund": charge}],
+    }
+    assert row_of(upgrades, first)["status"] == "FINALIZED"
+    assert row_of(upgrades, second)["status"] == "ACCEPTED"
+    assert row_of(upgrades, second)["appealed"] is False
+    assert balance(upgrades, APPEALER) == charge
+    settled_first = row_of(upgrades, first)["data"][FEE_ACCOUNTING_KEY]
+    sender_balance = balance(upgrades, SENDER)
+    assert CODE_KEY not in contract_states(upgrades)["accepted"]
+
+    upgrade = await run_upgrade(upgrades, upgrade_hash)
+
+    assert upgrade["status"] == "FINALIZED"
+    assert upgrade["consensus_data"]["closed_transactions"] == [first, second]
+    assert upgrade["consensus_data"]["refunded_appeals"] == [
+        {"transaction": second, "refund": charge}
+    ]
+    assert balance(upgrades, APPEALER) == charge
+    assert row_of(upgrades, first)["data"][FEE_ACCOUNTING_KEY] == settled_first
+    second_row = row_of(upgrades, second)
+    assert second_row["status"] == "FINALIZED"
+    second_accounting = second_row["data"][FEE_ACCOUNTING_KEY]
+    assert [a["refund"] for a in second_accounting["aborted_appeals"]] == [charge]
+    # total_refunded also counts the appeal refund paid to the appealer.
+    assert (
+        balance(upgrades, SENDER)
+        == sender_balance + second_accounting["total_refunded"] - charge
+    )
+    assert contract_states(upgrades)["finalized"] == {**state(2), **code()}
+    with upgrades.sessions() as session:
+        assert await worker.claim_next_transaction(session) is None
+
+
+@pytest.mark.asyncio
+async def test_upgrade_defers_while_stale_leased_appeal_may_still_run(upgrades):
+    first = await accept(upgrades, 0, state(1))
+    with upgrades.sessions() as session:
+        session.execute(
+            text(
+                "UPDATE transactions SET status = 'COMMITTING',"
+                " blocked_at = NOW() - INTERVAL '1 hour', worker_id = 'dead',"
+                " data = data || CAST(:snapshot AS jsonb) WHERE hash = :hash"
+            ),
+            {
+                "hash": first,
+                "snapshot": json.dumps(
+                    {APPEAL_RECOVERY_SNAPSHOT_KEY: {"status": "ACCEPTED"}}
+                ),
+            },
+        )
+        session.commit()
+    before_row = row_of(upgrades, first)
+    before_states = contract_states(upgrades)
+    upgrade_hash = queue_upgrade(upgrades)
+
+    upgrade = await run_upgrade(upgrades, upgrade_hash)
+
+    assert upgrade["status"] == "PENDING"
+    assert "upgrade_close" not in upgrade["data"]
+    with upgrades.sessions() as session:
+        assert (
+            session.execute(
+                text("SELECT blocked_at FROM transactions WHERE hash = :hash"),
+                {"hash": upgrade_hash},
+            ).scalar_one()
+            is None
+        )
+    after_row = row_of(upgrades, first)
+    assert after_row["status"] == "COMMITTING"
+    assert after_row["data"] == before_row["data"]
+    assert contract_states(upgrades) == before_states
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["UNDETERMINED", "LEADER_TIMEOUT"])
+async def test_upgrade_finalizes_undecided_predecessor_without_promotion(
+    upgrades, status
+):
+    first = await accept(upgrades, 0, state(1))
+    with upgrades.sessions() as session:
+        session.execute(
+            text(
+                "UPDATE transactions SET status = CAST(:status AS"
+                " transaction_status), value = 50, value_credited = false"
+                " WHERE hash = :hash"
+            ),
+            {"status": status, "hash": first},
+        )
+        session.commit()
+    sender_balance = balance(upgrades, SENDER)
+    upgrade_hash = queue_upgrade(upgrades)
+
+    upgrade = await run_upgrade(upgrades, upgrade_hash)
+
+    assert upgrade["status"] == "FINALIZED"
+    assert upgrade["consensus_data"]["closed_transactions"] == [first]
+    assert row_of(upgrades, first)["status"] == "FINALIZED"
+    assert balance(upgrades, SENDER) == sender_balance + 50
+    assert contract_states(upgrades)["finalized"] == {**state(0), **code()}

@@ -2,6 +2,7 @@
 
 import os
 import asyncio
+import json
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -15,10 +16,14 @@ from backend.database_handler.accounts_manager import AccountsManager
 from backend.database_handler.errors import ContractNotFoundError
 from backend.domain.types import Transaction
 from backend.node.genvm.error_codes import GenVMInternalError
+from backend.node.types import ExecutionResultStatus
 from backend.consensus.base import (
     ConsensusAlgorithm,
     InternalMessageEmissionError,
     NoValidatorsAvailableError,
+    TransactionContext,
+    resolve_finalization_state,
+    upgrade_code_slot,
 )
 from backend.consensus.history import APPEAL_RECOVERY_SNAPSHOT_KEY
 from backend.consensus.errors import FinalizationStateError
@@ -27,6 +32,11 @@ from backend.protocol_rpc.fees import acceptance_dispatch_pending
 # Alias for use in context manager (avoids circular import issues)
 _NoValidatorsError = NoValidatorsAvailableError
 from backend.protocol_rpc.message_handler.base import MessageHandler
+from backend.protocol_rpc.message_handler.types import (
+    EventScope,
+    EventType,
+    LogEvent,
+)
 from backend.rollup.consensus_service import ConsensusService
 import backend.validators as validators
 from loguru import logger
@@ -39,6 +49,25 @@ from backend.services.usage_metrics_service import UsageMetricsService
 # NO_PROVIDER_FOR_PROMPT for its own node address. These must not trip the
 # stop-the-worker circuit breaker (see _transaction_context).
 _TRANSIENT_LEADER_FATAL_CAUSES = frozenset({"NO_PROVIDER_FOR_PROMPT"})
+
+
+UPGRADE_CLOSE_KEY = "upgrade_close"
+
+
+class _UpgradeDeferred(Exception):
+    """Same-contract work may still be running; try the upgrade again later."""
+
+
+class _UpgradeRejected(Exception):
+    """The upgrade can never apply; cancel it with this receipt data."""
+
+    def __init__(self, consensus_data: dict):
+        super().__init__(consensus_data.get("error"))
+        self.consensus_data = consensus_data
+
+
+def _upgrade_failed(error: str, **details: Any) -> dict:
+    return {"upgrade_result": "failed", "error": error, **details}
 
 
 def _acceptance_dispatch_pending(transaction_data: dict[str, Any]) -> bool:
@@ -1649,6 +1678,7 @@ class ConsensusWorker:
         error: Exception,
         *,
         cancel_on_exhaustion: bool = True,
+        cancel_details: Optional[dict] = None,
     ):
         """
         Handle retry logic for generic errors during transaction processing.
@@ -1685,6 +1715,7 @@ class ConsensusWorker:
                     "error": "max_generic_retries_exceeded",
                     "last_error": str(error),
                     "retries": retry_info["count"],
+                    **(cancel_details or {}),
                 }
                 # Refund sender for payable tx that was never activated
                 if tx.value and tx.value > 0 and tx.from_address:
@@ -1832,141 +1863,478 @@ class ConsensusWorker:
     ):
         """
         Process a contract upgrade transaction (type=3). No consensus needed.
-        Directly updates contract code in database.
+
+        The upgrade closes the contract's earlier lifecycle: decided
+        transactions are finalized through the normal finalization path
+        (pending paid appeals are refunded first), never-started ones stay
+        queued and run on the new code, and the code is applied last.
 
         Args:
             transaction_data: Transaction data dictionary containing new_code
             session: Database session
         """
-        import base64
-        from backend.node.genvm import get_code_slot
-        from backend.node.genvm.executor_selection import uses_legacy_storage
-        from backend.database_handler.models import CurrentState
-
         tx_hash = transaction_data["hash"]
+        contract_address = transaction_data["to_address"]
+        logger.info(
+            f"[Worker {self.worker_id}] Processing upgrade transaction {tx_hash} for contract {contract_address}"
+        )
 
         try:
-            contract_address = transaction_data["to_address"]
+            new_code = self._validate_upgrade(session, transaction_data)
+            decided = self._plan_upgrade_close(session, tx_hash, contract_address)
             data = transaction_data.get("data") or {}
-            new_code = data.get("new_code")
-            if not new_code:
-                raise ValueError("Missing new_code in transaction data")
-            logger.info(
-                f"[Worker {self.worker_id}] Processing upgrade transaction {tx_hash} for contract {contract_address}"
-            )
-
-            # Load contract
-            contract = (
-                session.query(CurrentState).filter_by(id=contract_address).one_or_none()
-            )
-            if not contract:
-                raise ValueError(f"Contract {contract_address} not found")
-
-            # Validate contract has expected state structure
-            if (
-                not contract.data
-                or "state" not in contract.data
-                or "accepted" not in contract.data["state"]
-                or "finalized" not in contract.data["state"]
-            ):
-                raise ValueError(
-                    f"Contract {contract_address} has invalid state structure"
-                )
-
-            # Validate Python syntax before proceeding
-            try:
-                compile(new_code, "<upgrade>", "exec")
-            except SyntaxError as e:
-                raise ValueError(f"Invalid Python syntax: {e}") from e
-
-            # Encode code for slot storage: base64(4-byte-len-prefix + code-bytes)
-            code_bytes = new_code.encode("utf-8")
-            code_len_prefix = len(code_bytes).to_bytes(
-                4, byteorder="little", signed=False
-            )
-            code_slot_value = base64.b64encode(code_len_prefix + code_bytes).decode(
-                "ascii"
-            )
-            code_slot_key = base64.b64encode(
-                get_code_slot(
-                    legacy=uses_legacy_storage(contract.genvm_executor_selector)
-                )
-            ).decode("ascii")
-
-            # Update contract data - update BOTH accepted and finalized state
-            # Since upgrade transactions bypass consensus and go directly to FINALIZED,
-            # both state trees must be updated for reads to see the new code
-            contract.data = {
-                "state": {
-                    "accepted": {
-                        **contract.data["state"]["accepted"],
-                        code_slot_key: code_slot_value,
-                    },
-                    "finalized": {
-                        **contract.data["state"]["finalized"],
-                        code_slot_key: code_slot_value,
-                    },
-                },
+            progress = {
+                "closed_transactions": [],
+                "refunded_appeals": [],
+                **(data.get(UPGRADE_CLOSE_KEY) or {}),
             }
-
-            # Store success in consensus_data for receipt
-            tx = session.query(Transactions).filter_by(hash=tx_hash).one()
-            tx.consensus_data = {
-                "upgrade_result": "success",
-                "contract_address": contract_address,
-            }
-            session.commit()
-
-            # Mark transaction as finalized and send WebSocket notification
-            transactions_processor = TransactionsProcessor(session)
-            await ConsensusAlgorithm.dispatch_transaction_status_update(
-                transactions_processor,
-                tx_hash,
-                TransactionStatus.FINALIZED,
-                self.msg_handler,
-            )
-
+            for predecessor in decided:
+                await self._force_finalize_for_upgrade(tx_hash, predecessor, progress)
+            await self._apply_upgrade_code(session, tx_hash, contract_address, new_code)
+        except _UpgradeDeferred as e:
+            session.rollback()
             logger.info(
-                f"[Worker {self.worker_id}] Contract {contract_address} upgraded successfully via tx {tx_hash}"
+                f"[Worker {self.worker_id}] Deferring upgrade {tx_hash}: "
+                f"transaction {e} on {contract_address} may still be running"
             )
-
+            # Keep the lease briefly so the upgrade is not re-claimed in a hot loop.
+            await asyncio.sleep(float(os.environ.get("UPGRADE_DEFER_SECONDS", "5")))
+        except _UpgradeRejected as e:
+            logger.error(
+                f"[Worker {self.worker_id}] Contract upgrade rejected for {tx_hash}: {e}"
+            )
+            session.rollback()
+            await self._cancel_upgrade(session, tx_hash, e.consensus_data)
         except Exception as e:
             logger.error(
                 f"[Worker {self.worker_id}] Contract upgrade failed for {tx_hash}: {e}",
                 exc_info=True,
             )
             session.rollback()
+            # Finalized predecessors stay final; the code is applied on retry.
+            await self._handle_generic_error_retry(
+                tx_hash, e, cancel_details={"upgrade_result": "failed"}
+            )
 
-            # Mark transaction as canceled on failure and send WebSocket notification
+    def _validate_upgrade(self, session: Session, transaction_data: dict) -> str:
+        from backend.database_handler.models import CurrentState
+
+        contract_address = transaction_data["to_address"]
+        new_code = (transaction_data.get("data") or {}).get("new_code")
+        if not new_code:
+            raise _UpgradeRejected(
+                _upgrade_failed("Missing new_code in transaction data")
+            )
+        contract = (
+            session.query(CurrentState).filter_by(id=contract_address).one_or_none()
+        )
+        if not contract:
+            raise _UpgradeRejected(
+                _upgrade_failed(f"Contract {contract_address} not found")
+            )
+        if (
+            not contract.data
+            or "state" not in contract.data
+            or "accepted" not in contract.data["state"]
+            or "finalized" not in contract.data["state"]
+        ):
+            raise _UpgradeRejected(
+                _upgrade_failed(
+                    f"Contract {contract_address} has invalid state structure"
+                )
+            )
+        try:
+            compile(new_code, "<upgrade>", "exec")
+        except SyntaxError as e:
+            raise _UpgradeRejected(
+                _upgrade_failed(f"Invalid Python syntax: {e}")
+            ) from e
+        session.rollback()
+        return new_code
+
+    def _plan_upgrade_close(
+        self, session: Session, upgrade_hash: str, contract_address: str
+    ) -> list[str]:
+        """Return the decided transactions to finalize before the upgrade applies."""
+        rows = session.execute(
+            text(
+                """
+                SELECT hash, status, blocked_at
+                FROM transactions
+                WHERE to_address = :contract
+                    AND hash != :hash
+                    AND status NOT IN ('FINALIZED', 'CANCELED')
+                ORDER BY queue_order ASC
+                FOR UPDATE
+                """
+            ),
+            {"contract": contract_address, "hash": upgrade_hash},
+        ).all()
+        for row in rows:
+            # A stale lease or mid-consensus row may belong to a slow live worker.
+            if row.blocked_at is not None or str(row.status) in (
+                "PROPOSING",
+                "COMMITTING",
+                "REVEALING",
+            ):
+                raise _UpgradeDeferred(row.hash)
+        decided = [
+            row.hash
+            for row in rows
+            if str(row.status) in self._FINALIZATION_ELIGIBLE_STATUSES
+        ]
+
+        # Never touch a predecessor unless every one of them can finalize.
+        transactions_processor = TransactionsProcessor(session)
+        for predecessor in decided:
+            transaction = Transaction.from_dict(
+                transactions_processor.get_transaction_by_hash(predecessor)
+            )
+            receipts = (
+                transaction.consensus_data.leader_receipt
+                if transaction.consensus_data is not None
+                else None
+            )
+            receipt = receipts[0] if receipts else None
+            if (
+                transaction.status != TransactionStatus.ACCEPTED
+                or receipt is None
+                or receipt.execution_result != ExecutionResultStatus.SUCCESS
+            ):
+                continue
             try:
-                tx = session.query(Transactions).filter_by(hash=tx_hash).one()
-                tx.consensus_data = {"upgrade_result": "failed", "error": str(e)}
-                session.commit()
+                resolve_finalization_state(
+                    self._finalization_context(transaction, session), receipt
+                )
+            except FinalizationStateError as e:
+                raise _UpgradeRejected(
+                    _upgrade_failed(
+                        "predecessor_finalization_state", transaction=predecessor
+                    )
+                ) from e
+        session.rollback()
+        return decided
 
-                transactions_processor = TransactionsProcessor(session)
-                await ConsensusAlgorithm.dispatch_transaction_status_update(
-                    transactions_processor,
-                    tx_hash,
-                    TransactionStatus.CANCELED,
-                    self.msg_handler,
+    def _finalization_context(
+        self, transaction: Transaction, session: Session
+    ) -> TransactionContext:
+        from backend.consensus.base import (
+            contract_snapshot_factory,
+            contract_processor_factory,
+            node_factory,
+        )
+
+        return TransactionContext(
+            transaction=transaction,
+            transactions_processor=TransactionsProcessor(session),
+            chain_snapshot=None,
+            accounts_manager=AccountsManager(session),
+            contract_snapshot_factory=lambda contract_address: contract_snapshot_factory(
+                contract_address, session, transaction
+            ),
+            contract_processor=contract_processor_factory(session),
+            node_factory=node_factory,
+            msg_handler=self.msg_handler,
+            consensus_service=self.consensus_service,
+            validators_snapshot=None,
+            genvm_manager=self.consensus_algorithm.genvm_manager,
+        )
+
+    def _record_upgrade_progress(
+        self, session: Session, upgrade_hash: str, progress: dict
+    ) -> None:
+        """Persist close progress and renew the lease; fail if the lease was lost."""
+        owned = session.execute(
+            text(
+                """
+                UPDATE transactions
+                SET blocked_at = NOW(),
+                    data = jsonb_set(
+                        COALESCE(data, '{}'::jsonb),
+                        CAST(:path AS text[]),
+                        CAST(:progress AS jsonb),
+                        true
+                    )
+                WHERE hash = :hash
+                    AND worker_id = :worker_id
+                    AND status = 'PENDING'
+                RETURNING hash
+                """
+            ),
+            {
+                "hash": upgrade_hash,
+                "worker_id": self.worker_id,
+                "path": [UPGRADE_CLOSE_KEY],
+                "progress": json.dumps(progress),
+            },
+        ).first()
+        if owned is None:
+            raise RuntimeError(
+                f"Upgrade {upgrade_hash} is no longer leased by worker {self.worker_id}"
+            )
+
+    async def _force_finalize_for_upgrade(
+        self, upgrade_hash: str, predecessor: str, progress: dict
+    ) -> None:
+        with self.get_session() as fin_session:
+            row = fin_session.execute(
+                text(
+                    "SELECT status, appealed, data ? :snapshot_key AS has_snapshot"
+                    " FROM transactions WHERE hash = :hash FOR UPDATE"
+                ),
+                {"hash": predecessor, "snapshot_key": APPEAL_RECOVERY_SNAPSHOT_KEY},
+            ).first()
+            if row is None or str(row.status) not in (
+                self._FINALIZATION_ELIGIBLE_STATUSES
+            ):
+                # Finalized by an earlier attempt.
+                fin_session.rollback()
+                return
+
+            refund = None
+            if row.appealed or row.has_snapshot:
+                refund = AccountsManager(fin_session).abort_pending_appeal_admission(
+                    predecessor, "upgrade_closed_lifecycle"
                 )
-            except Exception as update_error:
-                logger.error(
-                    f"[Worker {self.worker_id}] Failed to update failed upgrade tx status: {update_error}"
+            if refund is not None:
+                progress["refunded_appeals"].append(
+                    {"transaction": predecessor, "refund": refund}
+                )
+            if predecessor not in progress["closed_transactions"]:
+                progress["closed_transactions"].append(predecessor)
+            # Same commit as the refund, so a retry never records or refunds twice.
+            self._record_upgrade_progress(fin_session, upgrade_hash, progress)
+            fin_session.commit()
+            if refund is not None:
+                self.msg_handler.send_message(
+                    log_event=LogEvent(
+                        "transaction_appeal_updated",
+                        EventType.INFO,
+                        EventScope.CONSENSUS,
+                        "Appeal refunded: contract upgraded",
+                        {"hash": predecessor},
+                    ),
+                    log_to_terminal=False,
                 )
 
-        finally:
-            # Clear current transaction tracking
-            self.current_transactions.pop(tx_hash, None)
-            # Release the transaction
-            try:
-                with self.get_session() as release_session:
-                    self.release_transaction(release_session, tx_hash)
-            except Exception as release_error:
-                logger.error(
-                    f"[Worker {self.worker_id}] Failed to release upgrade transaction {tx_hash}: {release_error}",
-                    exc_info=True,
-                )
+            transaction_data = TransactionsProcessor(
+                fin_session
+            ).get_transaction_by_hash(predecessor)
+            transaction = Transaction.from_dict(transaction_data)
+            logger.info(
+                f"[Worker {self.worker_id}] Finalizing {predecessor} before upgrade {upgrade_hash}"
+            )
+            transaction = await self._repair_accepted_delivery(
+                transaction, transaction_data, fin_session
+            )
+            await self._finalize_transaction(transaction, fin_session)
+            fin_session.commit()
+
+        await self.usage_metrics_service.send_finalized_transaction_metrics(
+            transaction, transaction_data
+        )
+
+    async def _apply_upgrade_code(
+        self,
+        session: Session,
+        tx_hash: str,
+        contract_address: str,
+        new_code: str,
+    ) -> None:
+        from backend.database_handler.models import CurrentState
+
+        contract = (
+            session.query(CurrentState)
+            .filter_by(id=contract_address)
+            .with_for_update()
+            .populate_existing()
+            .one_or_none()
+        )
+        upgrade = (
+            session.query(Transactions)
+            .filter_by(hash=tx_hash)
+            .with_for_update()
+            .populate_existing()
+            .one()
+        )
+        if (
+            upgrade.status != TransactionStatus.PENDING
+            or upgrade.worker_id != self.worker_id
+        ):
+            session.rollback()
+            logger.warning(
+                f"[Worker {self.worker_id}] Upgrade {tx_hash} is no longer owned and pending; not applying"
+            )
+            return
+        if contract is None or "state" not in (contract.data or {}):
+            raise _UpgradeRejected(
+                _upgrade_failed(f"Contract {contract_address} not found")
+            )
+
+        still_open = session.execute(
+            text(
+                """
+                SELECT hash FROM transactions
+                WHERE to_address = :contract
+                    AND hash != :hash
+                    AND status NOT IN ('FINALIZED', 'CANCELED')
+                    AND (
+                        blocked_at IS NOT NULL
+                        OR status IN :open_statuses
+                    )
+                LIMIT 1
+                """
+            ).bindparams(bindparam("open_statuses", expanding=True)),
+            {
+                "contract": contract_address,
+                "hash": tx_hash,
+                "open_statuses": [
+                    *self._FINALIZATION_ELIGIBLE_STATUSES,
+                    "PROPOSING",
+                    "COMMITTING",
+                    "REVEALING",
+                ],
+            },
+        ).first()
+        if still_open is not None:
+            raise RuntimeError(
+                f"Transaction {still_open.hash} reopened before upgrade {tx_hash} applied"
+            )
+
+        # A recompute must not restore its pre-upgrade appeal decision after a crash.
+        session.execute(
+            text(
+                """
+                UPDATE transactions
+                SET data = data - :snapshot_key
+                WHERE to_address = :contract
+                    AND hash != :hash
+                    AND status IN ('PENDING', 'ACTIVATED')
+                    AND data ? :snapshot_key
+                """
+            ),
+            {
+                "contract": contract_address,
+                "hash": tx_hash,
+                "snapshot_key": APPEAL_RECOVERY_SNAPSHOT_KEY,
+            },
+        )
+
+        code_slot_key, code_slot_value = upgrade_code_slot(
+            new_code, contract.genvm_executor_selector
+        )
+        contract.data = {
+            "state": {
+                "accepted": {
+                    **contract.data["state"]["accepted"],
+                    code_slot_key: code_slot_value,
+                },
+                "finalized": {
+                    **contract.data["state"]["finalized"],
+                    code_slot_key: code_slot_value,
+                },
+            },
+        }
+        progress = (upgrade.data or {}).get(UPGRADE_CLOSE_KEY) or {}
+        upgrade.consensus_data = {
+            "upgrade_result": "success",
+            "contract_address": contract_address,
+            "closed_transactions": progress.get("closed_transactions", []),
+            "refunded_appeals": progress.get("refunded_appeals", []),
+            "applied_at": int(time.time()),
+        }
+        # The status update commits the code, receipt and FINALIZED together.
+        await ConsensusAlgorithm.dispatch_transaction_status_update(
+            TransactionsProcessor(session),
+            tx_hash,
+            TransactionStatus.FINALIZED,
+            self.msg_handler,
+        )
+        self._generic_error_retries.pop(tx_hash, None)
+        logger.info(
+            f"[Worker {self.worker_id}] Contract {contract_address} upgraded successfully via tx {tx_hash}"
+        )
+
+    async def _cancel_upgrade(
+        self, session: Session, tx_hash: str, consensus_data: dict
+    ) -> None:
+        try:
+            tx = session.query(Transactions).filter_by(hash=tx_hash).one()
+            if tx.status != TransactionStatus.PENDING:
+                session.rollback()
+                return
+            tx.consensus_data = consensus_data
+            await ConsensusAlgorithm.dispatch_transaction_status_update(
+                TransactionsProcessor(session),
+                tx_hash,
+                TransactionStatus.CANCELED,
+                self.msg_handler,
+            )
+            self._generic_error_retries.pop(tx_hash, None)
+        except Exception as update_error:
+            session.rollback()
+            logger.error(
+                f"[Worker {self.worker_id}] Failed to update failed upgrade tx status: {update_error}"
+            )
+
+    async def _repair_accepted_delivery(
+        self, transaction: Transaction, transaction_data: dict, session: Session
+    ) -> Transaction:
+        """Replay a missed acceptance-phase delivery; returns the reloaded tx."""
+        if not _acceptance_dispatch_pending(transaction_data):
+            return transaction
+        from backend.consensus.base import (
+            accounts_manager_factory,
+            contract_snapshot_factory,
+            contract_processor_factory,
+            node_factory,
+            transactions_processor_factory,
+        )
+
+        logger.info(
+            f"[Worker {self.worker_id}] Repairing accepted message delivery "
+            f"for transaction {transaction.hash}"
+        )
+        transactions_processor = transactions_processor_factory(session)
+        await self.consensus_algorithm.repair_accepted_message_delivery(
+            transaction,
+            transactions_processor,
+            accounts_manager_factory(session),
+            lambda contract_address: contract_snapshot_factory(
+                contract_address, session, transaction
+            ),
+            contract_processor_factory(session),
+            node_factory,
+        )
+        latest_transaction = transactions_processor.get_transaction_by_hash(
+            transaction.hash
+        )
+        if latest_transaction is None:
+            return transaction
+        return Transaction.from_dict(latest_transaction)
+
+    async def _finalize_transaction(
+        self, transaction: Transaction, session: Session
+    ) -> None:
+        from backend.consensus.base import (
+            accounts_manager_factory,
+            contract_snapshot_factory,
+            contract_processor_factory,
+            node_factory,
+            transactions_processor_factory,
+        )
+
+        await self.consensus_algorithm.process_finalization(
+            transaction,
+            transactions_processor_factory(session),
+            None,  # chain_snapshot not needed for finalization
+            accounts_manager_factory(session),
+            lambda contract_address: contract_snapshot_factory(
+                contract_address, session, transaction
+            ),
+            contract_processor_factory(session),
+            node_factory,
+        )
 
     async def process_finalization(self, finalization_data: dict, session: Session):
         """
@@ -1985,41 +2353,15 @@ class ConsensusWorker:
                 # Convert to Transaction domain object
                 transaction = Transaction.from_dict(finalization_data)
 
-                # Check if the appeal window has passed
-                from backend.consensus.base import (
-                    contract_snapshot_factory,
-                    contract_processor_factory,
-                    transactions_processor_factory,
-                    accounts_manager_factory,
-                    node_factory,
+                from backend.consensus.base import transactions_processor_factory
+
+                transaction = await self._repair_accepted_delivery(
+                    transaction, finalization_data, session
                 )
-
-                transactions_processor = transactions_processor_factory(session)
-
-                if _acceptance_dispatch_pending(finalization_data):
-                    logger.info(
-                        f"[Worker {self.worker_id}] Repairing accepted message delivery "
-                        f"for transaction {transaction.hash}"
-                    )
-                    await self.consensus_algorithm.repair_accepted_message_delivery(
-                        transaction,
-                        transactions_processor,
-                        accounts_manager_factory(session),
-                        lambda contract_address: contract_snapshot_factory(
-                            contract_address, session, transaction
-                        ),
-                        contract_processor_factory(session),
-                        node_factory,
-                    )
-                    latest_transaction = transactions_processor.get_transaction_by_hash(
-                        transaction.hash
-                    )
-                    if latest_transaction is not None:
-                        transaction = Transaction.from_dict(latest_transaction)
 
                 # Check if can finalize (appeal window expired)
                 can_finalize = self.consensus_algorithm.can_finalize_transaction(
-                    transactions_processor,
+                    transactions_processor_factory(session),
                     transaction,
                     0,  # index in queue (not used in our case)
                     [finalization_data],  # mock queue with just this transaction
@@ -2030,17 +2372,7 @@ class ConsensusWorker:
                         f"[Worker {self.worker_id}] Finalizing transaction {transaction.hash}"
                     )
 
-                    await self.consensus_algorithm.process_finalization(
-                        transaction,
-                        transactions_processor,
-                        None,  # chain_snapshot not needed for finalization
-                        accounts_manager_factory(session),
-                        lambda contract_address: contract_snapshot_factory(
-                            contract_address, session, transaction
-                        ),
-                        contract_processor_factory(session),
-                        node_factory,
-                    )
+                    await self._finalize_transaction(transaction, session)
 
                     session.commit()
                     logger.info(

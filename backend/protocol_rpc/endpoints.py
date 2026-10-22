@@ -988,7 +988,8 @@ def admin_upgrade_contract_code(
 ) -> dict:
     """
     Queue a contract code upgrade. Returns immediately with tx hash.
-    Upgrade executes when worker processes it (after any pending txs for this contract).
+    The worker runs it ahead of this contract's queued txs once in-flight work ends:
+    earlier decided txs are finalized first, never-started txs run on the new code.
 
     Access control:
     - Local (no env vars): open access
