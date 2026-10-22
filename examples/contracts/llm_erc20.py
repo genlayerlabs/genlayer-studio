@@ -36,11 +36,11 @@ enough balance. If any transaction is invalid, it shouldn't be processed.
 Update the balances based on the valid transactions only.
 Given the current balance in JSON format and the transaction provided,
 please provide the result of your calculation with the following format:
-{{
+{
 "transaction_success": bool,          // Whether the transaction was successful
 "transaction_error": str,             // Empty if transaction is successful
 "updated_balances": object<str, int>  // Updated balances after the transaction
-}}
+}
 
 It is mandatory that you respond only using the JSON format above,
 nothing else. Don't include any other words or characters,
