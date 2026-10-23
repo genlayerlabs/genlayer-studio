@@ -78,6 +78,7 @@ contract Transactions is
 		bytes32 _randomSeed
 	)
 		external
+		onlyGenConsensus
 		returns (
 			address recipient,
 			uint256 leaderIndex,
@@ -330,7 +331,11 @@ contract Transactions is
 	/// @return lastVoteTimestamp The timestamp of the last vote
 	function finalizeTransaction(
 		bytes32 _txId
-	) external returns (address recipient, uint256 lastVoteTimestamp) {
+	)
+		external
+		onlyGenConsensus
+		returns (address recipient, uint256 lastVoteTimestamp)
+	{
 		Transaction storage transaction = transactions[_txId];
 		ITransactions.TransactionStatus status = transaction.status;
 
@@ -387,7 +392,11 @@ contract Transactions is
 	function submitAppeal(
 		bytes32 _txId,
 		uint256 _appealBond
-	) external returns (address[] memory appealValidators, uint256 round) {
+	)
+		external
+		onlyGenConsensus
+		returns (address[] memory appealValidators, uint256 round)
+	{
 		Transaction storage transaction = transactions[_txId];
 
 		// Check if the status is correct
