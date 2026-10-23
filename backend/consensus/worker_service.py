@@ -102,6 +102,97 @@ def get_genvm_failure_count() -> int:
     return _genvm_consecutive_failures
 
 
+def _get_blocked_tx_unhealthy_after_minutes(transaction_timeout_minutes=None) -> int:
+    """Return the liveness threshold for a claimed transaction.
+
+    The worker recovery timeout owns deciding when a transaction is stuck.
+    Liveness must stay above that timeout so Kubernetes does not kill a
+    legitimately long consensus attempt and force a recovery cycle.
+    """
+    if isinstance(transaction_timeout_minutes, (int, str)) and not isinstance(
+        transaction_timeout_minutes, bool
+    ):
+        raw_transaction_timeout = transaction_timeout_minutes
+    else:
+        raw_transaction_timeout = os.getenv("TRANSACTION_TIMEOUT_MINUTES", "30")
+
+    try:
+        transaction_timeout = int(raw_transaction_timeout)
+    except (TypeError, ValueError):
+        transaction_timeout = 30
+    if transaction_timeout <= 0:
+        transaction_timeout = 30
+
+    try:
+        buffer_minutes = int(
+            os.getenv("WORKER_BLOCKED_TX_UNHEALTHY_BUFFER_MINUTES", "5")
+        )
+    except ValueError:
+        buffer_minutes = 5
+    if buffer_minutes <= 0:
+        buffer_minutes = 5
+
+    minimum_threshold = max(14, transaction_timeout + buffer_minutes)
+
+    configured_threshold = os.getenv("WORKER_BLOCKED_TX_UNHEALTHY_AFTER_MINUTES")
+    if configured_threshold is None:
+        return minimum_threshold
+
+    try:
+        configured_threshold_minutes = int(configured_threshold)
+    except ValueError:
+        return minimum_threshold
+    if configured_threshold_minutes <= 0:
+        return minimum_threshold
+
+    return max(configured_threshold_minutes, minimum_threshold)
+
+
+def _get_worker_graceful_shutdown_timeout_seconds() -> int:
+    """Return how long shutdown should wait before releasing claimed txs.
+
+    Kubernetes sends SIGKILL when terminationGracePeriodSeconds expires. The
+    worker must release claims before that hard deadline, otherwise scale-down
+    strands in-flight transactions until the 30m stale-claim recovery path bumps
+    recovery_count.
+    """
+    default_termination_grace = 180
+    try:
+        termination_grace = int(
+            os.getenv(
+                "WORKER_TERMINATION_GRACE_SECONDS", str(default_termination_grace)
+            )
+        )
+    except ValueError:
+        termination_grace = default_termination_grace
+    if termination_grace <= 0:
+        termination_grace = default_termination_grace
+
+    try:
+        release_buffer = int(os.getenv("WORKER_SHUTDOWN_RELEASE_BUFFER_SECONDS", "30"))
+    except ValueError:
+        release_buffer = 30
+    if release_buffer <= 0:
+        release_buffer = 30
+
+    default_timeout = max(1, termination_grace - release_buffer)
+
+    configured_timeout = os.getenv("WORKER_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS")
+    if configured_timeout is None:
+        return default_timeout
+
+    try:
+        timeout = int(configured_timeout)
+    except ValueError:
+        return default_timeout
+    if timeout <= 0:
+        return default_timeout
+
+    # Preserve a release buffer even when the configured value is too close to
+    # Kubernetes' hard kill deadline.
+    return min(timeout, default_timeout)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage the worker lifecycle."""
@@ -123,7 +214,9 @@ async def lifespan(app: FastAPI):
     # CRITICAL: Kill any orphaned GenVM processes from previous crashes
     # These zombie processes can consume gigabytes of memory outside Docker limits
     logger.info("Cleaning up orphaned GenVM processes from previous crashes...")
-    _pkill_rc = os.system("pkill -9 -f 'genvm (llm|web)' 2>/dev/null || true")
+    _pkill_rc = os.system(  # noqa: ASYNC221 - one-shot startup orphan cleanup
+        "pkill -9 -f 'genvm (llm|web)' 2>/dev/null || true"
+    )
     logger.info("GenVM cleanup complete")
 
     # Database setup
@@ -323,11 +416,10 @@ async def lifespan(app: FastAPI):
                 f"Waiting for {tx_count} transactions / {task_count} tasks to complete before shutdown..."
             )
 
-            # Get graceful shutdown timeout from env (default: 180 seconds)
-            # This gives the transactions time to finish before we force-stop
-            graceful_timeout = int(
-                os.environ.get("WORKER_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS", "180")
-            )
+            # Release claims before Kubernetes' SIGKILL deadline. This gives
+            # in-flight work time to complete, but still leaves a buffer for
+            # cleanup/requeue if the pod is being scaled down.
+            graceful_timeout = _get_worker_graceful_shutdown_timeout_seconds()
             start_time = time.time()
 
             while (worker.current_transactions or worker._active_tasks) and (
@@ -389,7 +481,9 @@ async def lifespan(app: FastAPI):
 
         # Final safety check: Kill any remaining genvm processes
         logger.info("Final cleanup: killing any remaining GenVM processes...")
-        os.system("pkill -9 -f 'genvm (llm|web)' 2>/dev/null || true")
+        os.system(  # noqa: ASYNC221 - one-shot shutdown orphan cleanup
+            "pkill -9 -f 'genvm (llm|web)' 2>/dev/null || true"
+        )
         logger.info("GenVM cleanup complete")
 
         print("Consensus Worker Service stopped")
@@ -432,7 +526,7 @@ def health_check():
     long-running synchronous DB operations in the consensus worker.
     """
     import psutil
-    from datetime import datetime
+    from datetime import datetime, timezone
     from fastapi.responses import JSONResponse
     from urllib.request import urlopen, Request
     from urllib.error import URLError
@@ -556,16 +650,9 @@ def health_check():
     # Check if ANY transaction is blocked for too long
     current_txs = []
     if worker.current_transactions:
-        # Get unhealthy threshold from env
-        try:
-            blocked_tx_unhealthy_after_minutes = int(
-                os.getenv("WORKER_BLOCKED_TX_UNHEALTHY_AFTER_MINUTES", "14")
-            )
-        except ValueError:
-            blocked_tx_unhealthy_after_minutes = 14
-        if blocked_tx_unhealthy_after_minutes <= 0:
-            blocked_tx_unhealthy_after_minutes = 14
-
+        blocked_tx_unhealthy_after_minutes = _get_blocked_tx_unhealthy_after_minutes(
+            getattr(worker, "transaction_timeout_minutes", None)
+        )
         blocked_tx_unhealthy_after_seconds = blocked_tx_unhealthy_after_minutes * 60
 
         for tx_hash, tx_info in worker.current_transactions.items():
@@ -584,7 +671,8 @@ def health_check():
                     if blocked_at.tzinfo is not None:
                         blocked_at = blocked_at.replace(tzinfo=None)
 
-                    elapsed = datetime.utcnow() - blocked_at
+                    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+                    elapsed = now_utc - blocked_at
 
                     # Check if blocked for too long - pod is unhealthy
                     if elapsed.total_seconds() > blocked_tx_unhealthy_after_seconds:

@@ -11,7 +11,7 @@ import redis.asyncio as aioredis
 from loguru import logger
 
 from backend.protocol_rpc.message_handler.base import MessageHandler
-from backend.protocol_rpc.message_handler.types import LogEvent
+from backend.protocol_rpc.message_handler.types import EventScope, LogEvent
 from backend.protocol_rpc.configuration import GlobalConfiguration
 
 
@@ -127,9 +127,9 @@ class RedisWorkerMessageHandler(MessageHandler):
         Returns:
             The Redis channel name
         """
-        if log_event.scope.value == "Transaction":
+        if log_event.scope == EventScope.TRANSACTION:
             return self.TRANSACTION_CHANNEL
-        elif log_event.scope.value == "Consensus":
+        elif log_event.scope == EventScope.CONSENSUS:
             return self.CONSENSUS_CHANNEL
         else:
             return self.GENERAL_CHANNEL
@@ -182,7 +182,8 @@ class RedisWorkerMessageHandler(MessageHandler):
             loop = asyncio.get_event_loop()
             if loop.is_running():
                 # Schedule the async send operation
-                asyncio.create_task(self._publish_to_redis(log_event))
+                task = asyncio.create_task(self._publish_to_redis(log_event))
+                self._track_background_task(task)
             else:
                 # If no loop is running, run it synchronously
                 asyncio.run(self._publish_to_redis(log_event))
@@ -205,10 +206,10 @@ class RedisWorkerMessageHandler(MessageHandler):
             self._log_message(log_event)
 
         # Publish to Redis if it's an important event
-        if log_event.transaction_hash or log_event.scope.value in [
-            "TRANSACTION",
-            "CONSENSUS",
-        ]:
+        if log_event.transaction_hash or log_event.scope in (
+            EventScope.TRANSACTION,
+            EventScope.CONSENSUS,
+        ):
             self._socket_emit(log_event)
 
     async def send_message_async(
@@ -226,10 +227,10 @@ class RedisWorkerMessageHandler(MessageHandler):
             self._log_message(log_event)
 
         # Publish to Redis if it's an important event and await completion
-        if log_event.transaction_hash or log_event.scope.value in [
-            "TRANSACTION",
-            "CONSENSUS",
-        ]:
+        if log_event.transaction_hash or log_event.scope in (
+            EventScope.TRANSACTION,
+            EventScope.CONSENSUS,
+        ):
             await self._publish_to_redis(log_event)
 
     async def close(self):

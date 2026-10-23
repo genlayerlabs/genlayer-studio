@@ -11,7 +11,7 @@ TEST_CONTRACT_WITH_ISSUES = """# Missing magic comment
 
 from genlayer import *
 
-class TestContract(gl.Contract):
+class TestContract(gl.contract.Contract):
     balance: int  # Should be u256
 
     # Missing __init__ method
@@ -22,11 +22,12 @@ class TestContract(gl.Contract):
 """
 
 # Valid contract
-VALID_CONTRACT = """# { "Depends": "py-genlayer:test" }
+VALID_CONTRACT = """# { "Depends": "py-genlayer:babwp9t37jw9g4j2bccgn14g6x7x9s1f7dsmh7emvz735pz4zxa0" }
 
-from genlayer import *
+import genlayer as gl
+from genlayer.types import *
 
-class TestContract(gl.Contract):
+class TestContract(gl.contract.Contract):
     balance: u256
 
     def __init__(self):

@@ -79,8 +79,28 @@ def test_intelligent_oracle_factory_pattern(setup_validators):
             reasoning_all_sources_election: True,
         },
     }
+    mock_web_response = {
+        "nondet_web_render": {
+            markets_data[0]["evidence_urls"]: {
+                "mode": "text",
+                "status": 200,
+                "body": (
+                    "Madrid Marathon 2024 results and rankings. "
+                    "Mitku Tafa won the men's race on April 28, 2024."
+                ),
+            },
+            markets_data[1]["evidence_urls"]: {
+                "mode": "text",
+                "status": 200,
+                "body": (
+                    "Official 2024 US election results. "
+                    "Donald Trump won with 312 electoral votes."
+                ),
+            },
+        },
+    }
 
-    setup_validators(mock_response)
+    setup_validators(mock_response, mock_web_response)
 
     # Get the intelligent oracle factory
     intelligent_oracle_factory = get_contract_factory("IntelligentOracle")
