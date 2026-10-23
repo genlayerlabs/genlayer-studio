@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import CodeEditor from '@/components/Simulator/CodeEditor.vue';
+import CodeEditor from '@/components/simulator/CodeEditor.vue';
 import { useContractsStore } from '@/stores';
 import { computed } from 'vue';
 import HomeTab from './HomeTab.vue';
 import { useContractQueries } from '@/hooks';
-import ContractTabs from '@/components/Simulator/ContractTabs.vue';
+import ContractTabs from '@/components/simulator/ContractTabs.vue';
 
 const store = useContractsStore();
 const { contractSchemaQuery } = useContractQueries();
