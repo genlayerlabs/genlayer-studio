@@ -17,6 +17,29 @@ class ValidatorConfig:
     amount: int = 1
 
 
+def _validator_identity_key(
+    provider: str,
+    model: str,
+    stake: int,
+    config: dict | None,
+    plugin: str | None,
+    plugin_config: dict | None,
+) -> tuple:
+    """Hashable identity of a validator for config-change detection.
+
+    Includes config/plugin/plugin_config so that changes to provider settings
+    (e.g. API URLs, plugin options) are detected, not just provider/model/stake.
+    """
+    return (
+        provider,
+        model,
+        stake,
+        json.dumps(config or {}, sort_keys=True, separators=(",", ":")),
+        plugin or "",
+        json.dumps(plugin_config or {}, sort_keys=True, separators=(",", ":")),
+    )
+
+
 def _current_config_hash(registry) -> str | None:
     """Derive a hash from the validators currently in the DB.
 
@@ -25,18 +48,32 @@ def _current_config_hash(registry) -> str | None:
     all_validators = registry.get_all_validators(include_private_key=False)
     if not all_validators:
         return None
-    # Build a comparable structure: list of (provider, model, stake, count) sorted
+    # Build a comparable structure: list of (provider, model, stake, config,
+    # plugin, plugin_config, count) sorted
     from collections import Counter
 
     key_counts = Counter()
     for v in all_validators:
-        provider = v.get("provider", "")
-        model = v.get("model", "")
-        stake = v.get("stake", 0)
-        key_counts[(provider, model, stake)] += 1
+        key = _validator_identity_key(
+            v.get("provider", ""),
+            v.get("model", ""),
+            v.get("stake", 0),
+            v.get("config"),
+            v.get("plugin"),
+            v.get("plugin_config"),
+        )
+        key_counts[key] += 1
 
     items = [
-        {"provider": k[0], "model": k[1], "stake": k[2], "amount": c}
+        {
+            "provider": k[0],
+            "model": k[1],
+            "stake": k[2],
+            "config": k[3],
+            "plugin": k[4],
+            "plugin_config": k[5],
+            "amount": c,
+        }
         for k, c in sorted(key_counts.items())
     ]
     normalized = json.dumps(items, sort_keys=True, separators=(",", ":"))
@@ -51,10 +88,21 @@ def _desired_config_hash(validators_json: str) -> str:
     key_counts = Counter()
     for v in data:
         cfg = ValidatorConfig(**v)
-        key_counts[(cfg.provider, cfg.model, cfg.stake)] += cfg.amount
+        key = _validator_identity_key(
+            cfg.provider, cfg.model, cfg.stake, cfg.config, cfg.plugin, cfg.plugin_config
+        )
+        key_counts[key] += cfg.amount
 
     items = [
-        {"provider": k[0], "model": k[1], "stake": k[2], "amount": c}
+        {
+            "provider": k[0],
+            "model": k[1],
+            "stake": k[2],
+            "config": k[3],
+            "plugin": k[4],
+            "plugin_config": k[5],
+            "amount": c,
+        }
         for k, c in sorted(key_counts.items())
     ]
     normalized = json.dumps(items, sort_keys=True, separators=(",", ":"))

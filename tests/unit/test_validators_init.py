@@ -41,6 +41,105 @@ async def test_initialize_validators_skips_when_config_unchanged():
 
 
 @pytest.mark.asyncio
+async def test_initialize_validators_reinitializes_when_plugin_config_changed():
+    """Changing only plugin_config/config/plugin must trigger reinitialization.
+
+    Regression test: the config hash previously only covered
+    (provider, model, stake, amount), so editing e.g. the API URL or
+    plugin settings in the validators JSON was silently ignored and the
+    validators were never re-created with the new settings.
+    """
+    mock_db_session = Mock()
+    mock_registry = AsyncMock()
+    mock_registry.replace_all_validators = AsyncMock()
+    # DB validators match desired provider/model/stake, but have an old plugin config
+    mock_registry.get_all_validators = Mock(
+        return_value=[
+            {
+                "provider": "openai",
+                "model": "gpt-4",
+                "stake": 100,
+                "config": {},
+                "plugin": "openai",
+                "plugin_config": {
+                    "api_key_env_var": "OPENAIKEY",
+                    "api_url": "https://api.old.example/v1",
+                },
+            },
+        ]
+    )
+    validators_manager = SimpleNamespace(registry=mock_registry)
+
+    validators_json = (
+        '[{"stake": 100, "provider": "openai", "model": "gpt-4", '
+        '"plugin": "openai", "plugin_config": '
+        '{"api_key_env_var": "OPENAIKEY", "api_url": "https://api.new.example/v1"}}]'
+    )
+
+    with patch(
+        "backend.database_handler.accounts_manager.AccountsManager"
+    ) as mock_am_class:
+        with patch(
+            "backend.node.create_nodes.providers.get_default_provider_for"
+        ) as mock_get_provider:
+            mock_am = Mock()
+            mock_am.create_new_account.return_value = SimpleNamespace(
+                address="0xtest", key="privkey"
+            )
+            mock_am_class.return_value = mock_am
+
+            from backend.domain.types import LLMProvider
+
+            mock_get_provider.return_value = LLMProvider(
+                provider="openai",
+                model="gpt-4",
+                config={},
+                plugin="openai",
+                plugin_config={
+                    "api_key_env_var": "OPENAIKEY",
+                    "api_url": "https://api.new.example/v1",
+                },
+            )
+
+            await initialize_validators(
+                validators_json, mock_db_session, validators_manager
+            )
+
+            mock_registry.replace_all_validators.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_config_hash_equal_when_only_config_present_on_both_sides():
+    """Identical config/plugin/plugin_config on both sides must NOT reinit."""
+    mock_db_session = Mock()
+    mock_registry = AsyncMock()
+    plugin_config = {"api_key_env_var": "OPENAIKEY", "api_url": "https://api.example/v1"}
+    mock_registry.get_all_validators = Mock(
+        return_value=[
+            {
+                "provider": "openai",
+                "model": "gpt-4",
+                "stake": 100,
+                "config": {"temperature": 0.5},
+                "plugin": "openai",
+                "plugin_config": plugin_config,
+            },
+        ]
+    )
+    validators_manager = SimpleNamespace(registry=mock_registry)
+
+    validators_json = (
+        '[{"stake": 100, "provider": "openai", "model": "gpt-4", '
+        '"config": {"temperature": 0.5}, "plugin": "openai", "plugin_config": '
+        '{"api_key_env_var": "OPENAIKEY", "api_url": "https://api.example/v1"}}]'
+    )
+
+    await initialize_validators(validators_json, mock_db_session, validators_manager)
+
+    mock_registry.replace_all_validators.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_initialize_validators_reinitializes_when_config_changed():
     """If DB validators differ from desired config, reinitialize."""
     mock_db_session = Mock()
