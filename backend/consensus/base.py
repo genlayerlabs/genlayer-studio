@@ -21,7 +21,7 @@ from eth_utils import is_address, keccak, to_bytes, to_checksum_address
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from backend.consensus.constants import DEFAULT_VALIDATORS_COUNT
-from backend.consensus.errors import NoValidatorsAvailableError
+from backend.consensus.errors import FinalizationStateError, NoValidatorsAvailableError
 from backend.consensus.vrf import get_validators_for_transaction
 from backend.database_handler.chain_snapshot import ChainSnapshot
 from backend.database_handler.contract_snapshot import ContractSnapshot
@@ -52,6 +52,7 @@ from backend.node.types import (
     Vote,
     ExecutionResultStatus,
     PendingTransaction,
+    _compute_contract_state_hash,
 )
 from backend.protocol_rpc.message_handler.base import MessageHandler
 from backend.protocol_rpc.message_handler.types import (
@@ -377,6 +378,43 @@ def node_factory(
         manager=genvm_manager,
         shared_decoded_value_cache=shared_decoded_value_cache,
         shared_contract_snapshot_cache=shared_contract_snapshot_cache,
+    )
+
+
+def upgrade_code_slot(
+    new_code: str, genvm_executor_selector: str | None
+) -> tuple[str, str]:
+    """Storage key and value a code upgrade writes for this contract."""
+    code_bytes = new_code.encode("utf-8")
+    code_len_prefix = len(code_bytes).to_bytes(4, byteorder="little", signed=False)
+    key = base64.b64encode(
+        get_code_slot(legacy=uses_legacy_storage(genvm_executor_selector))
+    ).decode("ascii")
+    return key, base64.b64encode(code_len_prefix + code_bytes).decode("ascii")
+
+
+def with_later_upgrade_code(
+    transactions_processor: TransactionsProcessor,
+    transaction_hash: str,
+    state: dict[str, str],
+) -> dict[str, str]:
+    """Keep the code of a FINALIZED upgrade that overtook this older decision."""
+    upgrade = transactions_processor.get_latest_finalized_upgrade_after(
+        transaction_hash
+    )
+    if not upgrade or not upgrade.get("new_code"):
+        return state
+    key, value = upgrade_code_slot(
+        upgrade["new_code"], upgrade.get("genvm_executor_selector")
+    )
+    return {**state, key: value}
+
+
+def _closed_lifecycle(transaction: dict) -> bool:
+    return (
+        transaction.get("status")
+        in (TransactionStatus.FINALIZED.value, TransactionStatus.CANCELED.value)
+        or transaction.get("type") == TransactionType.UPGRADE_CONTRACT.value
     )
 
 
@@ -1410,6 +1448,17 @@ class ConsensusAlgorithm:
                                     )
                                 )
 
+                        if (
+                            previous_contract_state is not None
+                            and context.transaction.type
+                            != TransactionType.DEPLOY_CONTRACT
+                        ):
+                            previous_contract_state = with_later_upgrade_code(
+                                context.transactions_processor,
+                                context.transaction.hash,
+                                previous_contract_state,
+                            )
+
                         # Restore the contract state
                         if previous_contract_state is not None:
                             context.contract_processor.update_contract_state(
@@ -1449,11 +1498,14 @@ class ConsensusAlgorithm:
         Rollback newer transactions.
         In the simplified system, we just need to reset future transactions to PENDING.
         """
-        # Set all transactions with higher created_at to PENDING
-        future_transactions = context.transactions_processor.get_newer_transactions(
-            context.transaction.hash
+        future_transactions = (
+            context.transactions_processor.get_rewindable_newer_transactions(
+                context.transaction.hash
+            )
         )
         for future_transaction in future_transactions:
+            if _closed_lifecycle(future_transaction):
+                continue
             future_hash = future_transaction["hash"]
             future_data = deepcopy(future_transaction.get("data") or {})
             if bool(future_transaction.get("appealed")) or (
@@ -3727,10 +3779,8 @@ class AcceptedState(TransactionState):
             ),
             has_contract_snapshot=bool(context.transaction.contract_snapshot),
             contract_snapshot_dict=(
-                context.contract_snapshot.to_dict()
-                if not context.transaction.contract_snapshot
-                else None
-            ),
+                context.transaction.contract_snapshot or context.contract_snapshot
+            ).to_dict(),
             execution_result_success=execution_success,
             tx_type_deploy=is_deploy,
             accepted_contract_state=accepted_contract_state,
@@ -3883,6 +3933,83 @@ class ValidatorsTimeoutState(TransactionState):
         return None
 
 
+FINALIZATION_SUCCESSOR_LOOKUP_LIMIT = 3
+
+
+def _recovery_pre_states(
+    transactions_processor, tx_hash: str
+) -> Iterable[tuple[str, dict | None]]:
+    yield "own pre-state", transactions_processor.get_transaction_pre_state(tx_hash)
+    successors = transactions_processor.get_successor_snapshot_hashes(
+        tx_hash, FINALIZATION_SUCCESSOR_LOOKUP_LIMIT
+    )
+    for position, successor_hash in enumerate(successors, start=1):
+        yield (
+            f"successor {position} ({successor_hash})",
+            transactions_processor.get_transaction_pre_state(successor_hash),
+        )
+
+
+def resolve_finalization_state(
+    context: TransactionContext, leader_receipt: Receipt
+) -> tuple[dict[str, str], str]:
+    """Return the transaction's hash-verified post-state and where it came from."""
+    saved_snapshot = context.transaction.contract_snapshot
+    state = saved_snapshot.finalization_state if saved_snapshot is not None else None
+    source = "saved state"
+    if state is None:
+        state = context.transactions_processor.get_transaction_finalization_state(
+            context.transaction.hash
+        )
+    if state is None and leader_receipt.contract_state:
+        state = leader_receipt.contract_state
+        source = "receipt"
+
+    expected_hash = leader_receipt.contract_state_hash
+    if state is not None:
+        if expected_hash and _compute_contract_state_hash(state) != expected_hash:
+            raise FinalizationStateError(
+                f"Finalization state hash mismatch for transaction {context.transaction.hash}"
+            )
+        return state, source
+
+    # Pre-fix rows did not persist post-state. The moving accepted head is only
+    # safe to reuse when the original receipt proves it is exactly this result.
+    if expected_hash:
+        snapshot = context.contract_snapshot_factory(context.transaction.to_address)
+        accepted_state = (
+            snapshot.states.get("accepted") if snapshot is not None else None
+        )
+        if _compute_contract_state_hash(accepted_state) == expected_hash:
+            return accepted_state, "head"
+
+        # A later tx's saved pre-state is this tx's post-state unless something intervened.
+        for source, pre_state in _recovery_pre_states(
+            context.transactions_processor, context.transaction.hash
+        ):
+            if _compute_contract_state_hash(pre_state) == expected_hash:
+                return pre_state, source
+
+    raise FinalizationStateError(
+        f"Missing transaction-local finalization state for {context.transaction.hash}; "
+        "cannot finalize from an unverified contract head"
+    )
+
+
+def _transaction_finalization_state(
+    context: TransactionContext, leader_receipt: Receipt
+) -> dict[str, str]:
+    state, source = resolve_finalization_state(context, leader_receipt)
+    if source not in ("saved state", "receipt"):
+        from loguru import logger
+
+        logger.info(
+            f"Recovered legacy finalization state for {context.transaction.hash} "
+            f"from {source}"
+        )
+    return state
+
+
 class FinalizingState(TransactionState):
     """
     Class representing the finalizing state of a transaction.
@@ -3897,12 +4024,6 @@ class FinalizingState(TransactionState):
         )
         leader_receipt = leader_receipts[0] if leader_receipts else None
 
-        # Acceptance is a separate message lifecycle phase. If the helper EVM
-        # or worker died after the agreed decision was committed, repair that
-        # phase before allowing finalization to overtake it.
-        if leader_receipt is not None:
-            _dispatch_messages_for_phase(context, leader_receipt, "accepted")
-
         pre_effects, post_effects, should_finalize_contract = decide_finalizing(
             tx_hash=context.transaction.hash,
             tx_status_accepted=(
@@ -3916,6 +4037,19 @@ class FinalizingState(TransactionState):
                 leader_receipt.node_config if leader_receipt is not None else None
             ),
         )
+
+        # Verify state before emitting messages, changing status or settling fees.
+        finalization_state = (
+            _transaction_finalization_state(context, leader_receipt)
+            if should_finalize_contract
+            else None
+        )
+
+        # Acceptance is a separate message lifecycle phase. If the helper EVM
+        # or worker died after the agreed decision was committed, repair that
+        # phase before allowing finalization to overtake it.
+        if leader_receipt is not None:
+            _dispatch_messages_for_phase(context, leader_receipt, "accepted")
 
         executor = EffectExecutor(context)
         await executor.execute(pre_effects)
@@ -3938,21 +4072,13 @@ class FinalizingState(TransactionState):
 
         # Impure: contract finalization + triggered transactions (needs DB reads)
         if should_finalize_contract:
-            snapshot = context.contract_snapshot_factory(context.transaction.to_address)
-            if snapshot is None:
-                raise RuntimeError(
-                    "Missing contract snapshot while finalizing a transaction"
-                )
-
-            accepted_state = snapshot.states.get("accepted")
-            if not accepted_state:
-                raise RuntimeError(
-                    "Missing accepted contract state prior to finalization"
-                )
-
             context.contract_processor.update_contract_state(
                 context.transaction.to_address,
-                finalized_state=accepted_state,
+                finalized_state=with_later_upgrade_code(
+                    context.transactions_processor,
+                    context.transaction.hash,
+                    finalization_state,
+                ),
             )
 
             _dispatch_messages_for_phase(

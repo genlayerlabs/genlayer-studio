@@ -9,6 +9,7 @@ from backend.protocol_rpc.fees import (
     FEE_ACCOUNTING_KEY,
     abort_latest_appeal_admission,
     cancel_fee_accounting,
+    latest_appeal_admission_unresolved,
     settle_fee_accounting,
 )
 from backend.consensus.history import (
@@ -325,6 +326,45 @@ class AccountsManager:
             self.credit_account_balance(str(recipient), refund)
         self.session.expire_all()
         return refund
+
+    def abort_pending_appeal_admission(
+        self,
+        tx_hash: str,
+        reason: str,
+    ) -> int | None:
+        """Refund an admitted appeal that has no outcome yet; None if none was pending."""
+        transaction = (
+            self.session.query(Transactions)
+            .filter_by(hash=tx_hash)
+            .populate_existing()
+            .with_for_update()
+            .one_or_none()
+        )
+        if transaction is None or not isinstance(transaction.data, dict):
+            return None
+        has_snapshot = APPEAL_RECOVERY_SNAPSHOT_KEY in transaction.data
+        if not transaction.appealed and not has_snapshot:
+            return None
+        # Resolved bonds keep admissionRollback, so only abort under this guard.
+        if latest_appeal_admission_unresolved(
+            transaction.data.get(FEE_ACCOUNTING_KEY),
+            transaction.consensus_history,
+        ):
+            return self.abort_tx_appeal_admission_once(tx_hash, reason)
+        if not transaction.appealed:
+            # The appeal already has an outcome; finalization settles it.
+            return None
+        # An appeal flag without a revertible paid admission has nothing to refund.
+        data = dict(transaction.data)
+        data.pop(APPEAL_RECOVERY_SNAPSHOT_KEY, None)
+        transaction.data = data
+        history = dict(transaction.consensus_history or {})
+        history.pop(ACTIVE_APPEAL_BASIS_KEY, None)
+        transaction.consensus_history = history
+        transaction.appealed = False
+        transaction.timestamp_appeal = None
+        self.session.flush()
+        return 0
 
     def settle_tx_fee_accounting_once(
         self,

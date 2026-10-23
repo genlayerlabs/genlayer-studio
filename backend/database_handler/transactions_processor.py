@@ -1858,6 +1858,8 @@ class TransactionsProcessor:
             raise ValueError("CanNotAppeal")
         if acceptance_dispatch_pending((row["data"] or {}).get(FEE_ACCOUNTING_KEY)):
             raise ValueError("CanNotAppeal")
+        if self.upgrade_closes_appeals(transaction_hash):
+            raise ValueError("CanNotAppeal")
         # The RPC may have waited for this row lock. Consensus evaluates the
         # deadline at transaction execution, not when the caller began
         # submitting it, so re-sample after lock acquisition and reject an
@@ -2107,7 +2109,8 @@ class TransactionsProcessor:
 
         return block_details
 
-    def get_newer_transactions(self, transaction_hash: str):
+    def get_rewindable_newer_transactions(self, transaction_hash: str):
+        """Newer same-contract rows a rewind may reset; terminal rows and upgrades never replay."""
         transaction = (
             self.session.query(Transactions).filter_by(hash=transaction_hash).one()
         )
@@ -2117,6 +2120,13 @@ class TransactionsProcessor:
             .filter(
                 _transaction_order_tuple() > _transaction_order_value(transaction),
                 Transactions.to_address == transaction.to_address,
+                Transactions.status.notin_(
+                    [TransactionStatus.FINALIZED, TransactionStatus.CANCELED]
+                ),
+                or_(
+                    Transactions.type.is_(None),
+                    Transactions.type != TransactionType.UPGRADE_CONTRACT.value,
+                ),
             )
             .order_by(Transactions.queue_order)
             .all()
@@ -2307,6 +2317,104 @@ class TransactionsProcessor:
             },
         )
         self.session.commit()
+
+    def get_transaction_finalization_state(self, transaction_hash: str) -> dict | None:
+        """Read only the accepted result, without transferring rollback state."""
+        return self.session.execute(
+            text(
+                "SELECT contract_snapshot->'finalization_state' FROM transactions "
+                "WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash},
+        ).scalar_one_or_none()
+
+    def get_successor_snapshot_hashes(
+        self, transaction_hash: str, limit: int
+    ) -> list[str]:
+        """Oldest same-contract successors that saved a pre-state snapshot."""
+        rows = self.session.execute(
+            text(
+                """
+                SELECT successor.hash
+                FROM transactions tx
+                JOIN transactions successor
+                    ON successor.to_address = tx.to_address
+                    AND successor.queue_order > tx.queue_order
+                WHERE tx.hash = :hash
+                    AND successor.contract_snapshot IS NOT NULL
+                ORDER BY successor.queue_order ASC
+                LIMIT :limit
+                """
+            ),
+            {"hash": transaction_hash, "limit": limit},
+        ).scalars()
+        return list(rows)
+
+    def get_latest_finalized_upgrade_after(self, transaction_hash: str) -> dict | None:
+        """The newest FINALIZED code upgrade queued after this transaction."""
+        row = (
+            self.session.execute(
+                text(
+                    """
+                    SELECT upgrade.hash,
+                        upgrade.data->>'new_code' AS new_code,
+                        contract.genvm_executor_selector
+                    FROM transactions tx
+                    JOIN transactions upgrade
+                        ON upgrade.to_address = tx.to_address
+                        AND upgrade.queue_order > tx.queue_order
+                    LEFT JOIN current_state contract ON contract.id = tx.to_address
+                    WHERE tx.hash = :hash
+                        AND upgrade.type = :upgrade_type
+                        AND upgrade.status = 'FINALIZED'
+                    ORDER BY upgrade.queue_order DESC
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "hash": transaction_hash,
+                    "upgrade_type": TransactionType.UPGRADE_CONTRACT.value,
+                },
+            )
+            .mappings()
+            .first()
+        )
+        return dict(row) if row is not None else None
+
+    def upgrade_closes_appeals(self, transaction_hash: str) -> bool:
+        """Whether a queued or applied code upgrade closed this decision's lifecycle."""
+        return bool(
+            self.session.execute(
+                text(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM transactions tx
+                        JOIN transactions upgrade
+                            ON upgrade.to_address = tx.to_address
+                            AND upgrade.queue_order > tx.queue_order
+                        WHERE tx.hash = :hash
+                            AND upgrade.type = :upgrade_type
+                            AND upgrade.status IN ('PENDING', 'FINALIZED')
+                    )
+                    """
+                ),
+                {
+                    "hash": transaction_hash,
+                    "upgrade_type": TransactionType.UPGRADE_CONTRACT.value,
+                },
+            ).scalar_one()
+        )
+
+    def get_transaction_pre_state(self, transaction_hash: str) -> dict | None:
+        """Read only the saved pre-execution accepted state."""
+        return self.session.execute(
+            text(
+                "SELECT contract_snapshot->'states'->'accepted' FROM transactions "
+                "WHERE hash = :hash"
+            ),
+            {"hash": transaction_hash},
+        ).scalar_one_or_none()
 
     def transactions_in_process_by_contract(self) -> list[dict]:
         transactions = (

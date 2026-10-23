@@ -320,6 +320,90 @@ async def test_acceptance_repair_finalization_honors_retry_backoff():
 
 
 @pytest.mark.asyncio
+async def test_finalization_claim_excludes_backed_off_heads():
+    worker = _make_worker()
+    session = MagicMock(spec=Session)
+    worker.claim_next_appeal = AsyncMock(return_value=None)
+    worker.claim_next_finalization = AsyncMock(return_value={"hash": "0xother"})
+    worker.claim_next_transaction = AsyncMock(return_value=None)
+    worker._generic_error_retries["0xstuck"] = {
+        "count": 1,
+        "last_attempt": 100.0,
+        "last_error": "missing finalization state",
+    }
+
+    with (
+        patch("backend.consensus.worker.time.time", return_value=100.0),
+        patch.object(worker, "release_transaction") as release_transaction,
+        patch("backend.consensus.worker.asyncio.create_task") as create_task,
+        patch.object(worker, "_process_finalization_task", new=MagicMock()),
+    ):
+        assert await worker._try_claim_work(session) is True
+
+    worker.claim_next_finalization.assert_awaited_once_with(
+        session, exclude_hashes=["0xstuck"]
+    )
+    release_transaction.assert_not_called()
+    create_task.assert_called_once()
+
+
+def test_backoff_hashes_lists_only_in_window_entries():
+    worker = _make_worker()
+    worker._no_validators_base_backoff = 30.0
+    worker._generic_error_base_backoff = 10.0
+    worker._no_validators_retries = {
+        "0xnv_active": {"count": 1, "last_attempt": 90.0},
+        "0xnv_expired": {"count": 1, "last_attempt": 50.0},
+    }
+    worker._generic_error_retries = {
+        "0xge_active": {"count": 2, "last_attempt": 85.0, "last_error": "x"},
+        "0xge_expired": {"count": 1, "last_attempt": 80.0, "last_error": "x"},
+    }
+
+    with patch("backend.consensus.worker.time.time", return_value=100.0):
+        assert worker._backoff_hashes() == ["0xge_active", "0xnv_active"]
+        assert worker._is_in_backoff({"hash": "0xge_active"}) is True
+        assert worker._is_in_backoff({"hash": "0xge_expired"}) is False
+
+
+@pytest.mark.asyncio
+async def test_successful_finalization_clears_retry_tracking():
+    worker = _make_worker()
+    session = MagicMock(spec=Session)
+    worker._no_validators_retries["0xtx"] = {"count": 1, "last_attempt": 1.0}
+    worker._generic_error_retries["0xtx"] = {
+        "count": 2,
+        "last_attempt": 1.0,
+        "last_error": "boom",
+    }
+    worker._generic_error_retries["0xother"] = {
+        "count": 1,
+        "last_attempt": 1.0,
+        "last_error": "boom",
+    }
+    worker.consensus_algorithm = MagicMock()
+    worker.consensus_algorithm.can_finalize_transaction.return_value = True
+    worker.consensus_algorithm.process_finalization = AsyncMock()
+    worker.usage_metrics_service = MagicMock()
+    worker.usage_metrics_service.send_finalized_transaction_metrics = AsyncMock()
+
+    with (
+        patch(
+            "backend.consensus.worker.Transaction.from_dict",
+            return_value=MagicMock(hash="0xtx"),
+        ),
+        patch("backend.consensus.base.transactions_processor_factory"),
+        patch.object(worker, "release_transaction"),
+    ):
+        await worker.process_finalization({"hash": "0xtx"}, session)
+
+    worker.consensus_algorithm.process_finalization.assert_awaited_once()
+    assert "0xtx" not in worker._no_validators_retries
+    assert "0xtx" not in worker._generic_error_retries
+    assert "0xother" in worker._generic_error_retries
+
+
+@pytest.mark.asyncio
 async def test_generic_appeal_error_is_retryable_without_cancellation():
     worker = _make_worker()
     session = MagicMock(spec=Session)

@@ -13944,3 +13944,42 @@ def test_transaction_payload_exposes_only_consensus_child_transactions():
         "0x" + "02" * 32,
         "0x" + "03" * 32,
     ]
+
+
+@pytest.mark.parametrize(
+    "rounds, unresolved",
+    [
+        (["Accepted"], True),
+        (["Accepted", "Validator Appeal Failed"], False),
+        (["Accepted", "Validator Appeal Successful"], False),
+    ],
+)
+def test_latest_appeal_admission_unresolved_only_before_an_outcome(rounds, unresolved):
+    from backend.protocol_rpc.fees import latest_appeal_admission_unresolved
+
+    fees = {
+        "leaderTimeunitsAllocation": 100,
+        "validatorTimeunitsAllocation": 200,
+        "appealRounds": 0,
+        "executionBudgetPerRound": 0,
+        "rotations": [0],
+    }
+    accounting = create_fee_accounting(
+        fees_distribution=fees,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees, 5),
+        user_value=0,
+        sender="0x" + "11" * 20,
+    )
+    charge = calculate_appeal_charge(fees, current_round=0, status="ACCEPTED")
+    appealed = record_appeal_bond(
+        accounting,
+        amount=charge["bond"] + charge["funding"],
+        appealer="0x" + "22" * 20,
+        current_round=0,
+        status="ACCEPTED",
+    )
+    history = {"consensus_results": [{"consensus_round": r} for r in rounds]}
+
+    assert latest_appeal_admission_unresolved(appealed, history) is unresolved
+    assert latest_appeal_admission_unresolved(accounting, history) is False

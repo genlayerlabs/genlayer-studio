@@ -401,12 +401,14 @@ def decide_accepted(
 
     # ── Contract write decision ──
     if not appealed:
-        # Save contract snapshot for rollback
-        if not has_contract_snapshot:
+        # Keep the rollback pre-state and this decision's post-state together.
+        # A successful recomputation can follow a saved timeout snapshot.
+        if not has_contract_snapshot or execution_result_success:
+            snapshot = dict(contract_snapshot_dict or {})
+            if execution_result_success:
+                snapshot["finalization_state"] = accepted_contract_state
             pre_effects.append(
-                SetContractSnapshotEffect(
-                    tx_hash=tx_hash, snapshot_dict=contract_snapshot_dict
-                )
+                SetContractSnapshotEffect(tx_hash=tx_hash, snapshot_dict=snapshot)
             )
 
         if execution_result_success:
