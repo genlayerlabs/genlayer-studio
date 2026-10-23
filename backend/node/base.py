@@ -173,11 +173,12 @@ class _SnapshotView(genvmbase.StateProxy):
         self._collect_metrics = collect_metrics
         # Primary contract fast path:
         # decode the full primary contract state once and then read by bytes slot key.
-        self._primary_decoded: dict[bytes, bytes] | None = None
+        # {state_status: {slot: decoded_value_bytes}}
+        self._primary_decoded: dict[str, dict[bytes, bytes]] = {}
         # Per-contract decoded slot cache:
-        # {contract_address: {base64_slot_key: decoded_value_bytes}}
+        # {(state_status, contract_address): {base64_slot_key: decoded_value_bytes}}
         # This is only used for non-primary contract lazy reads.
-        self._decoded_slots: dict[str, dict[str, bytes]] = {}
+        self._decoded_slots: dict[tuple[str, str], dict[str, bytes]] = {}
         self._slot_keys: dict[bytes, str] = {}
         # Execution-scoped metrics to quantify cross-contract read cold/warm behavior.
         if collect_metrics:
@@ -239,16 +240,18 @@ class _SnapshotView(genvmbase.StateProxy):
             self._slot_keys[slot] = slot_key
         return slot_key
 
-    def _get_contract_slot_cache(self, snap: ContractSnapshot) -> dict[str, bytes]:
-        return self._decoded_slots.setdefault(snap.contract_address, {})
+    def _get_contract_slot_cache(
+        self, snap: ContractSnapshot, status: str
+    ) -> dict[str, bytes]:
+        return self._decoded_slots.setdefault((status, snap.contract_address), {})
 
-    def _get_primary_decoded(self) -> dict[bytes, bytes]:
-        decoded = self._primary_decoded
+    def _get_primary_decoded(self, status: str) -> dict[bytes, bytes]:
+        decoded = self._primary_decoded.get(status)
         if decoded is not None:
             return decoded
 
         decoded = {}
-        state = self.snapshot.states.get(self.state_status, {})
+        state = self.snapshot.states.get(status, {})
         shared_cache = self._shared_decoded_value_cache
         for slot_key, raw in state.items():
             slot = base64.b64decode(slot_key)
@@ -273,14 +276,13 @@ class _SnapshotView(genvmbase.StateProxy):
                         metrics["shared_decoded_cache_hits"] += 1
             decoded[slot] = value
 
-        self._primary_decoded = decoded
+        self._primary_decoded[status] = decoded
         return decoded
 
-    def _read_primary_slot_value(self, slot: bytes) -> bytes:
-        return self._get_primary_decoded().get(slot, b"")
-
-    def _read_cross_slot_value(self, snap: ContractSnapshot, slot: bytes) -> bytes:
-        slot_cache = self._get_contract_slot_cache(snap)
+    def _read_cross_slot_value(
+        self, snap: ContractSnapshot, slot: bytes, status: str
+    ) -> bytes:
+        slot_cache = self._get_contract_slot_cache(snap, status)
         slot_key = self._slot_key(slot)
         data = slot_cache.get(slot_key)
         if data is not None:
@@ -292,7 +294,7 @@ class _SnapshotView(genvmbase.StateProxy):
         metrics = self._metrics
         if metrics is not None:
             metrics["decoded_cache_misses"] += 1
-        raw = snap.states.get(self.state_status, {}).get(slot_key)
+        raw = snap.states.get(status, {}).get(slot_key)
         shared_cache = self._shared_decoded_value_cache
         if raw is not None and shared_cache is not None:
             data = shared_cache.get(raw)
@@ -329,14 +331,24 @@ class _SnapshotView(genvmbase.StateProxy):
     def storage_read(
         self, account: Address, slot: bytes, index: int, le: int, /
     ) -> bytes:
+        return self._storage_read(self.state_status, account, slot, index, le)
+
+    def storage_read_finalized(
+        self, account: Address, slot: bytes, index: int, le: int, /
+    ) -> bytes:
+        return self._storage_read("finalized", account, slot, index, le)
+
+    def _storage_read(
+        self, status: str, account: Address, slot: bytes, index: int, le: int
+    ) -> bytes:
         if account == self.contract_address:
             metrics = self._metrics
             if metrics is not None:
                 metrics["primary_contract_lookups"] += 1
-            data = self._read_primary_slot_value(slot)
+            data = self._get_primary_decoded(status).get(slot, b"")
         else:
             snap = self._get_snapshot(account)
-            data = self._read_cross_slot_value(snap, slot)
+            data = self._read_cross_slot_value(snap, slot, status)
         end = index + le
         if end <= len(data):
             return data[index:end]
@@ -356,7 +368,7 @@ class _SnapshotView(genvmbase.StateProxy):
         assert not self.readonly
         slot_key = self._slot_key(slot)
         state_bucket = self.snapshot.states.setdefault(self.state_status, {})
-        primary_decoded = self._get_primary_decoded()
+        primary_decoded = self._get_primary_decoded(self.state_status)
         existing = primary_decoded.get(slot, b"")
         data = bytearray(existing)
         mem = memoryview(got)

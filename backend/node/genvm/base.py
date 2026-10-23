@@ -140,6 +140,12 @@ class StateProxy(metaclass=abc.ABCMeta):
         self, account: Address, slot: bytes, index: int, le: int, /
     ) -> bytes: ...
 
+    def storage_read_finalized(
+        self, account: Address, slot: bytes, index: int, le: int, /
+    ) -> bytes:
+        """Read from the latest finalized state; a slot never finalized reads as zeroes."""
+        return bytes(le)
+
     @abc.abstractmethod
     def get_balance(self, addr: Address) -> int: ...
 
@@ -829,10 +835,12 @@ class Host(genvmhost.IHost):
     async def storage_read(
         self, type: StorageView, address: bytes, slot: bytes, offset: int, le: int, /
     ) -> bytes:
-        assert type != StorageView.LATEST_FINALIZED
-        return await asyncio.to_thread(
-            self._state_proxy.storage_read, Address(address), slot, offset, le
+        read = (
+            self._state_proxy.storage_read_finalized
+            if type == StorageView.LATEST_FINALIZED
+            else self._state_proxy.storage_read
         )
+        return await asyncio.to_thread(read, Address(address), slot, offset, le)
 
     async def resolve_call_contract_executor(
         self,
