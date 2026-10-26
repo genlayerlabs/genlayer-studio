@@ -22,6 +22,8 @@ class ContractSnapshot:
     contract_address: str
     balance: int
     states: Dict[str, Dict[str, str]]
+    # Transaction-local post-state, separate from the pre-state used for appeals.
+    finalization_state: Optional[Dict[str, str]] = None
     # Executor version or `re:` selector this contract is pinned to, forwarded
     # to the GenVM manager as `reroute_to`.
     genvm_executor_selector: Optional[str] = None
@@ -53,6 +55,7 @@ class ContractSnapshot:
                 int(b) if (b := getattr(self, "balance", None)) is not None else None
             ),
             "genvm_executor_selector": self.genvm_executor_selector,
+            "finalization_state": self.finalization_state,
         }
 
     @classmethod
@@ -61,6 +64,7 @@ class ContractSnapshot:
             instance = cls.__new__(cls)
             instance.contract_address = input.get("contract_address", None)
             instance.states = input.get("states", {"accepted": {}, "finalized": {}})
+            instance.finalization_state = input.get("finalization_state")
             raw_balance = input.get("balance")
             instance.balance = int(raw_balance) if raw_balance is not None else None
             instance.genvm_executor_selector = input.get(

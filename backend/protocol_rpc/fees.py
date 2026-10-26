@@ -2737,6 +2737,26 @@ def abort_latest_appeal_admission(
     return updated, recipient, refund
 
 
+def latest_appeal_admission_unresolved(
+    accounting: dict[str, Any] | None,
+    consensus_history: dict[str, Any] | None,
+) -> bool:
+    """Whether the latest admitted appeal bond is still revertible and has no outcome."""
+
+    bonds = (accounting or {}).get("appeal_bonds")
+    if not isinstance(bonds, list) or not bonds:
+        return False
+    bond = bonds[-1]
+    if not isinstance(bond, dict) or not isinstance(
+        bond.get("admissionRollback"), dict
+    ):
+        return False
+    _, outcome = _appeal_outcome_after_round(
+        _round_outcomes(consensus_history), int(bond.get("round", 0) or 0)
+    )
+    return outcome is None
+
+
 def calculate_appeal_charge(
     fees_distribution: dict[str, Any],
     *,

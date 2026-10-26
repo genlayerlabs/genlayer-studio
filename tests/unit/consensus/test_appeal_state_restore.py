@@ -118,6 +118,7 @@ class TestValidatorAppealStateRestore:
         not from `{}`."""
         stored_accepted = {"code_slot": "b64code", "storage_slot": "value"}
         transactions_processor = Mock()
+        transactions_processor.get_latest_finalized_upgrade_after.return_value = None
         transactions_processor.get_transaction_by_hash.return_value = {
             "hash": TX_HASH,
             "contract_snapshot": _make_snapshot_dict(stored_accepted),
@@ -213,6 +214,7 @@ class TestValidatorAppealStateRestore:
         saved_accepted = {"code_slot": "b64code", "counter": "0x01"}
         snapshot = ContractSnapshot.from_dict(_make_snapshot_dict(saved_accepted))
         transactions_processor = Mock()
+        transactions_processor.get_latest_finalized_upgrade_after.return_value = None
         contract_processor = Mock()
 
         transaction = _make_transaction(contract_snapshot=snapshot)
@@ -228,6 +230,33 @@ class TestValidatorAppealStateRestore:
             CONTRACT_ADDRESS, accepted_state=saved_accepted
         )
         transactions_processor.get_transaction_by_hash.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_restore_keeps_code_of_later_finalized_upgrade(self, monkeypatch):
+        """A legacy upgrade that finalized after this decision keeps its code."""
+        saved_accepted = {"counter": "0x01"}
+        snapshot = ContractSnapshot.from_dict(_make_snapshot_dict(saved_accepted))
+        transactions_processor = Mock()
+        transactions_processor.get_latest_finalized_upgrade_after.return_value = {
+            "hash": "0xupgrade",
+            "new_code": "class C: pass",
+            "genvm_executor_selector": None,
+        }
+        contract_processor = Mock()
+
+        await _run_validator_appeal(
+            _make_algorithm(),
+            _make_transaction(contract_snapshot=snapshot),
+            transactions_processor,
+            contract_processor,
+            monkeypatch,
+        )
+
+        code_key, code_value = consensus_base.upgrade_code_slot("class C: pass", None)
+        contract_processor.update_contract_state.assert_called_once_with(
+            CONTRACT_ADDRESS,
+            accepted_state={"counter": "0x01", code_key: code_value},
+        )
 
     @pytest.mark.asyncio
     async def test_validator_appeal_filters_live_registry_through_frozen_pool(
@@ -435,7 +464,7 @@ async def test_ancestor_rewind_refunds_active_descendant_appeal_before_reset(
         }
     }
     transactions_processor = Mock()
-    transactions_processor.get_newer_transactions.return_value = [
+    transactions_processor.get_rewindable_newer_transactions.return_value = [
         {"hash": future_hash, "appealed": True, "data": stale_data}
     ]
     transactions_processor.get_transaction_by_hash.return_value = {
@@ -473,6 +502,45 @@ async def test_ancestor_rewind_refunds_active_descendant_appeal_before_reset(
     status_update.assert_awaited_once_with(
         transactions_processor,
         future_hash,
+        TransactionStatus.PENDING,
+        context.msg_handler,
+    )
+
+
+@pytest.mark.asyncio
+async def test_rewind_never_resets_terminal_or_upgrade_rows(monkeypatch):
+    transactions_processor = Mock()
+    transactions_processor.get_rewindable_newer_transactions.return_value = [
+        {"hash": "0xfinal", "status": TransactionStatus.FINALIZED.value, "type": 2},
+        {"hash": "0xcanceled", "status": TransactionStatus.CANCELED.value, "type": 2},
+        {
+            "hash": "0xupgrade",
+            "status": TransactionStatus.PENDING.value,
+            "type": TransactionType.UPGRADE_CONTRACT.value,
+        },
+        {"hash": "0xopen", "status": TransactionStatus.ACCEPTED.value, "type": 2},
+    ]
+    context = SimpleNamespace(
+        transaction=SimpleNamespace(hash=TX_HASH),
+        transactions_processor=transactions_processor,
+        accounts_manager=Mock(),
+        msg_handler=Mock(),
+    )
+    status_update = AsyncMock()
+    monkeypatch.setattr(
+        ConsensusAlgorithm,
+        "dispatch_transaction_status_update",
+        staticmethod(status_update),
+    )
+
+    await ConsensusAlgorithm.__new__(ConsensusAlgorithm).rollback_transactions(context)
+
+    transactions_processor.reset_transaction_for_recomputation.assert_called_once_with(
+        "0xopen", {}
+    )
+    status_update.assert_awaited_once_with(
+        transactions_processor,
+        "0xopen",
         TransactionStatus.PENDING,
         context.msg_handler,
     )
