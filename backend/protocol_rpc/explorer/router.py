@@ -27,7 +27,7 @@ QueryRunner = Annotated[ExplorerQueryRunner, Depends(get_query_runner)]
 
 @explorer_router.get("/stats")
 def get_stats(runner: QueryRunner):
-    return runner.run(queries.get_stats)
+    return runner.stats()
 
 
 @explorer_router.get("/stats/counts")

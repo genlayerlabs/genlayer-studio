@@ -192,15 +192,11 @@ export async function ChartsSection() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Recent Transactions — independent fetch from /transactions
+// 3. Recent Transactions — reuses /stats, which the backend caches
 // ---------------------------------------------------------------------------
 
-interface TransactionsResponse {
-  transactions: Transaction[];
-}
-
 export async function RecentTransactionsSection() {
-  const data = await fetchBackend<TransactionsResponse>('/transactions?limit=10');
+  const stats = await getStats();
 
   return (
     <Card className="overflow-hidden">
@@ -217,7 +213,7 @@ export async function RecentTransactionsSection() {
       </CardHeader>
       <CardContent className="p-0 pt-4">
         <TransactionTable
-          transactions={data.transactions}
+          transactions={stats.recentTransactions}
           showRelations={false}
         />
       </CardContent>
