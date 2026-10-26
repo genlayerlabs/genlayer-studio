@@ -23,6 +23,7 @@ from backend.protocol_rpc.dependencies import (
     websocket_broadcast,
 )
 from backend.protocol_rpc.fastapi_rpc_router import FastAPIRPCRouter
+from backend.protocol_rpc.explorer.query_runner import ExplorerBusyError
 from backend.protocol_rpc.explorer.router import explorer_router
 from backend.protocol_rpc.health import health_router
 from backend.protocol_rpc.rate_limit_middleware import RateLimitMiddleware
@@ -43,6 +44,8 @@ if SENTRY_DSN:
         # transaction. Scrub keys out before anything leaves the process.
         before_send=scrub_sentry_event,
         before_send_transaction=scrub_sentry_event,
+        # Explorer load shedding is expected; traces still record it as unavailable.
+        ignore_errors=[ExplorerBusyError],
         # Add data like request headers and IP for users,
         # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
         send_default_pii=True,

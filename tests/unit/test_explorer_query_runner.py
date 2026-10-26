@@ -1,5 +1,7 @@
 import asyncio
 import json
+import threading
+import time
 from contextlib import contextmanager
 from unittest.mock import Mock
 
@@ -10,7 +12,10 @@ from sqlalchemy.pool import QueuePool
 
 from backend.database_handler.session_factory import DatabaseSessionManager
 from backend.protocol_rpc.explorer import queries, query_runner
-from backend.protocol_rpc.explorer.query_runner import ExplorerQueryRunner
+from backend.protocol_rpc.explorer.query_runner import (
+    ExplorerBusyError,
+    ExplorerQueryRunner,
+)
 from backend.protocol_rpc.explorer.router import explorer_router
 
 
@@ -136,10 +141,10 @@ def test_session_closes_before_return_and_admission_is_reusable(fails):
 
 def test_admission_rejects_before_opening_session():
     db = DatabaseStub()
-    runner = ExplorerQueryRunner(db, max_concurrent=2)
+    runner = ExplorerQueryRunner(db, max_concurrent=2, wait_timeout=0)
 
     def second_query(session):
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(ExplorerBusyError) as exc:
             runner.run(lambda session: pytest.fail("must not run"))
         assert exc.value.status_code == 503
         assert exc.value.headers == {"Retry-After": "1"}
@@ -160,31 +165,38 @@ def test_admission_released_when_open_session_fails():
     assert db.open_session.call_count == 2
 
 
-def test_counts_cache_expires_and_does_not_share_mutable_results(monkeypatch):
+@pytest.mark.parametrize(
+    "method, query_name, ttl_kwarg",
+    [("counts", "get_stats_counts", "counts_ttl"), ("stats", "get_stats", "stats_ttl")],
+)
+def test_cache_expires_and_does_not_share_mutable_results(
+    monkeypatch, method, query_name, ttl_kwarg
+):
     db = DatabaseStub()
-    runner = ExplorerQueryRunner(db, counts_ttl=5)
+    runner = ExplorerQueryRunner(db, **{ttl_kwarg: 5})
+    fetch = getattr(runner, method)
     now = [100.0]
     monkeypatch.setattr(query_runner.time, "monotonic", lambda: now[0])
-    count_query = Mock(side_effect=[{"transactions": 10}, {"transactions": 11}])
-    monkeypatch.setattr(queries, "get_stats_counts", count_query)
+    query = Mock(side_effect=[{"transactions": 10}, {"transactions": 11}])
+    monkeypatch.setattr(queries, query_name, query)
 
-    first = runner.counts()
+    first = fetch()
     first["transactions"] = -1
-    assert runner.counts() == {"transactions": 10}
-    cached = runner.counts()
+    assert fetch() == {"transactions": 10}
+    cached = fetch()
     cached["transactions"] = -2
-    assert runner.counts() == {"transactions": 10}
+    assert fetch() == {"transactions": 10}
     assert db.opened == db.closed == 1
 
     now[0] = 105.0
-    assert runner.counts() == {"transactions": 11}
+    assert fetch() == {"transactions": 11}
     assert db.opened == db.closed == 2
 
 
 @pytest.mark.parametrize("has_cached_counts", [False, True])
 def test_counts_refresh_is_coalesced(monkeypatch, has_cached_counts):
     db = DatabaseStub()
-    runner = ExplorerQueryRunner(db, counts_ttl=0)
+    runner = ExplorerQueryRunner(db, counts_ttl=0, wait_timeout=0)
     if has_cached_counts:
         monkeypatch.setattr(queries, "get_stats_counts", lambda session: {"count": 1})
         assert runner.counts() == {"count": 1}
@@ -219,6 +231,88 @@ def test_failed_counts_refresh_can_retry(monkeypatch):
     assert db.opened == db.closed == 2
 
 
+def _hold_slot(runner):
+    """Occupy one runner slot from another thread until the returned event is set."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    def query(session):
+        entered.set()
+        release.wait(5)
+
+    thread = threading.Thread(target=runner.run, args=(query,))
+    thread.start()
+    assert entered.wait(5)
+    return release, thread
+
+
+def test_waits_for_a_slot_instead_of_rejecting():
+    db = DatabaseStub()
+    runner = ExplorerQueryRunner(db, max_concurrent=1, wait_timeout=5)
+    release, thread = _hold_slot(runner)
+    threading.Timer(0.05, release.set).start()
+
+    assert runner.run(lambda session: "ok") == "ok"
+    thread.join(5)
+    assert db.opened == db.closed == 2
+
+
+def test_wait_times_out_with_busy():
+    db = DatabaseStub()
+    runner = ExplorerQueryRunner(db, max_concurrent=1, wait_timeout=0.05)
+    release, thread = _hold_slot(runner)
+    try:
+        started = time.monotonic()
+        with pytest.raises(ExplorerBusyError) as exc:
+            runner.run(lambda session: pytest.fail("must not run"))
+        assert time.monotonic() - started >= 0.05
+        assert exc.value.status_code == 503
+        assert exc.value.headers == {"Retry-After": "1"}
+    finally:
+        release.set()
+        thread.join(5)
+    assert db.opened == db.closed == 1
+
+
+def test_waiting_is_capped_and_overflow_rejects_immediately():
+    db = DatabaseStub()
+    runner = ExplorerQueryRunner(db, max_concurrent=1, max_waiting=0, wait_timeout=5)
+    release, thread = _hold_slot(runner)
+    try:
+        started = time.monotonic()
+        with pytest.raises(ExplorerBusyError):
+            runner.run(lambda session: pytest.fail("must not run"))
+        assert time.monotonic() - started < 1
+    finally:
+        release.set()
+        thread.join(5)
+    assert runner.run(lambda session: "next") == "next"
+
+
+def test_cold_cache_caller_waits_for_in_flight_refresh(monkeypatch):
+    db = DatabaseStub()
+    runner = ExplorerQueryRunner(db, wait_timeout=5)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_stats(session):
+        entered.set()
+        release.wait(5)
+        return {"total": 1}
+
+    monkeypatch.setattr(queries, "get_stats", slow_stats)
+    results = []
+    thread = threading.Thread(target=lambda: results.append(runner.stats()))
+    thread.start()
+    assert entered.wait(5)
+    threading.Timer(0.05, release.set).start()
+
+    assert runner.stats() == {"total": 1}
+    thread.join(5)
+    assert results == [{"total": 1}]
+    assert db.opened == db.closed == 1
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "path, query_name, args, kwargs",
@@ -251,8 +345,6 @@ def test_failed_counts_refresh_can_retry(monkeypatch):
 async def test_routes_use_bounded_worker_sessions(
     monkeypatch, path, query_name, args, kwargs
 ):
-    import threading
-
     db = DatabaseStub()
     app = FastAPI()
     app.state.explorer_query_runner = ExplorerQueryRunner(db)
@@ -285,7 +377,7 @@ async def test_routes_use_bounded_worker_sessions(
 async def test_routes_preserve_not_found_validation_and_busy_responses(monkeypatch):
     db = DatabaseStub()
     app = FastAPI()
-    runner = ExplorerQueryRunner(db, max_concurrent=1)
+    runner = ExplorerQueryRunner(db, max_concurrent=1, wait_timeout=0)
     app.state.explorer_query_runner = runner
     app.include_router(explorer_router)
     monkeypatch.setattr(queries, "get_transaction_with_relations", lambda *args: None)
