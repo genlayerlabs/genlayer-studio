@@ -291,6 +291,66 @@ def test_abort_tx_appeal_admission_refunds_charge_and_restores_decision(
     assert restored["fees_distribution"] == accounting["fees_distribution"]
 
 
+@pytest.mark.parametrize("appealed, expected", [(False, None), (True, 0)])
+def test_abort_pending_appeal_admission_leaves_resolved_bonds_alone(
+    accounts_manager: AccountsManager,
+    session: Session,
+    appealed: bool,
+    expected: int | None,
+):
+    sender = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
+    appealer = "0x1111111111111111111111111111111111111111"
+    tx_hash = "0x" + "ae" * 32
+    fees = _fees_distribution(appeals=0, rotations=[0])
+    accounting = create_fee_accounting(
+        fees_distribution=fees,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees, 5),
+        user_value=0,
+        sender=sender,
+    )
+    charge = calculate_appeal_charge(
+        accounting["fees_distribution"], current_round=0, status="ACCEPTED"
+    )
+    recorded = record_appeal_bond(
+        accounting,
+        amount=charge["bond"] + charge["funding"],
+        appealer=appealer,
+        current_round=0,
+        status="ACCEPTED",
+    )
+    _insert_fee_accounted_transaction(
+        session,
+        sender=sender,
+        accounting=recorded,
+        tx_hash=tx_hash,
+        consensus_history={
+            "consensus_results": [
+                {"consensus_round": "Accepted"},
+                {"consensus_round": "Validator Appeal Failed"},
+            ]
+        },
+    )
+    tx_model = session.query(Transactions).filter_by(hash=tx_hash).one()
+    tx_model.appealed = appealed
+    tx_model.data = {
+        **tx_model.data,
+        APPEAL_RECOVERY_SNAPSHOT_KEY: {"status": "ACCEPTED"},
+    }
+    session.commit()
+
+    assert (
+        accounts_manager.abort_pending_appeal_admission(tx_hash, "upgrade") == expected
+    )
+    session.commit()
+    session.expire_all()
+
+    assert accounts_manager.get_account_balance(appealer) == 0
+    tx = session.query(Transactions).filter_by(hash=tx_hash).one()
+    assert tx.appealed is False
+    assert tx.data[FEE_ACCOUNTING_KEY]["appeal_bonds"] == recorded["appeal_bonds"]
+
+
 def test_abort_zero_value_appeal_admission_still_persists_rollback(
     accounts_manager: AccountsManager,
     session: Session,

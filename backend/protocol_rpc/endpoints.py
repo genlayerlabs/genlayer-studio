@@ -988,7 +988,8 @@ def admin_upgrade_contract_code(
 ) -> dict:
     """
     Queue a contract code upgrade. Returns immediately with tx hash.
-    Upgrade executes when worker processes it (after any pending txs for this contract).
+    The worker runs it ahead of this contract's queued txs once in-flight work ends:
+    earlier decided txs are finalized first, never-started txs run on the new code.
 
     Access control:
     - Local (no env vars): open access
@@ -2126,6 +2127,10 @@ def _appeal_admission_context(
         status not in _DECISION_STATUSES
         or bool(transaction.get("appealed"))
         or has_terminal_validator_appeal(transaction.get("consensus_history"))
+    ):
+        raise InvalidTransactionError("CanNotAppeal")
+    if session is not None and TransactionsProcessor(session).upgrade_closes_appeals(
+        str(transaction.get("hash"))
     ):
         raise InvalidTransactionError("CanNotAppeal")
 

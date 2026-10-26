@@ -93,9 +93,9 @@ CLAIM_ALLOWED_OMISSIONS = {
         "timestamp_appeal",
         "timestamp_awaiting_finalization",
     },
-    # Finalization: FinalizingState reads current contract state and merges
-    # consensus_history via DB-side jsonb updates; the heavy state columns
-    # are deliberately omitted.
+    # Finalization: FinalizingState separately reads the transaction's saved
+    # post-state and merges history via DB-side jsonb updates; the full
+    # rollback snapshot is deliberately omitted from the claim.
     "claim_next_finalization": _COMMON_OMISSIONS
     | {
         "contract_snapshot",

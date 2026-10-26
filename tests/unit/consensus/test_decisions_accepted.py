@@ -144,13 +144,19 @@ class TestDecideAcceptedNormal:
         )
         e = _find_effect(pre, SetContractSnapshotEffect)
         assert e is not None
-        assert e.snapshot_dict == {"s": 1}
+        assert e.snapshot_dict == {"s": 1, "finalization_state": {"slot1": b"data"}}
 
-    def test_no_contract_snapshot_when_already_saved(self):
+    def test_adds_post_state_to_existing_rollback_snapshot(self):
+        snapshot = {"states": {"accepted": {"before": "value"}}}
         pre, _, _, _ = decide_accepted(
-            **_base_accepted_kwargs(has_contract_snapshot=True)
+            **_base_accepted_kwargs(
+                has_contract_snapshot=True, contract_snapshot_dict=snapshot
+            )
         )
-        assert _find_effect(pre, SetContractSnapshotEffect) is None
+        effect = _find_effect(pre, SetContractSnapshotEffect)
+        assert effect.snapshot_dict["states"] == snapshot["states"]
+        assert effect.snapshot_dict["finalization_state"] == {"slot1": b"data"}
+        assert "finalization_state" not in snapshot
 
     def test_post_effects_contain_status_update(self):
         _, post, _, _ = decide_accepted(**_base_accepted_kwargs())

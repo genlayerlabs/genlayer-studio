@@ -308,7 +308,8 @@ class Receipt:
 
         Args:
             strip_contract_state: If True, replaces contract_state with empty dict to save storage.
-                                 Contract state is always available from CurrentState table.
+                                 Acceptance saves the transaction's post-state in
+                                 its contract snapshot for later finalization.
         """
         result = base64.b64encode(self.result).decode("ascii")
         calldata = str(base64.b64encode(self.calldata), encoding="ascii")
