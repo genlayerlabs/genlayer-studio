@@ -12,9 +12,31 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from backend.protocol_rpc.exceptions import RateLimitExceeded
-from backend.protocol_rpc.rate_limiter import RateLimiterService
+from backend.protocol_rpc.rate_limit_methods import is_cheap_read_payload
+from backend.protocol_rpc.rate_limiter import RateLimiterService, RateLimitUsage
 
 logger = logging.getLogger(__name__)
+
+# Keys may be supplied either as an X-API-Key header or as a single path
+# segment (`/api/glk_...`). The path form exists because the EVM toolchain —
+# MetaMask's "Add network", `foundry.toml`, `--rpc-url`, most viem/ethers
+# setups — accepts one URL string and offers no way to attach a header. Every
+# major RPC provider puts the key in the URL for that reason. Header-only
+# forced at least one integrator to plan a reverse proxy whose entire job was
+# turning a URL into a header.
+API_PATH = "/api"
+API_KEY_PREFIX = "glk_"
+
+
+def _rpc_path_segment(path: str) -> Optional[str]:
+    """Return the single path segment under /api/, or None if not that shape."""
+    if not path.startswith(API_PATH + "/"):
+        return None
+    segment = path[len(API_PATH) + 1 :]
+    if not segment or "/" in segment:
+        return None
+    return segment
+
 
 DEFAULT_TRUSTED_PROXY_CIDRS = (
     "127.0.0.0/8",
@@ -51,8 +73,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self._trusted_proxy_networks = _load_trusted_proxy_networks()
 
     async def dispatch(self, request: Request, call_next) -> Response:
-        # Only rate-limit the JSON-RPC endpoint
-        if request.url.path != "/api" or request.method != "POST":
+        # Only rate-limit the JSON-RPC endpoint. This gate must cover every
+        # path the /api/{api_key} route can match, not just key-shaped ones —
+        # anything the route serves but this misses would be an unlimited,
+        # unauthenticated RPC endpoint.
+        if not self._is_rpc_path(request.url.path) or request.method != "POST":
             return await call_next(request)
 
         rate_limiter: Optional[RateLimiterService] = getattr(
@@ -61,15 +86,16 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if rate_limiter is None or not rate_limiter.enabled:
             return await call_next(request)
 
-        api_key = request.headers.get("X-API-Key")
+        api_key = self._api_key(request)
         client_ip = self._client_ip(request)
+        is_cheap_read = await self._is_cheap_read(request)
 
+        usage: Optional[RateLimitUsage] = None
         try:
-            await rate_limiter.check_rate_limit(api_key, client_ip)
+            usage = await rate_limiter.check_rate_limit(
+                api_key, client_ip, is_cheap_read=is_cheap_read
+            )
         except RateLimitExceeded as exc:
-            retry_after = "60"
-            if exc.data and isinstance(exc.data, dict):
-                retry_after = str(exc.data.get("retry_after_seconds", 60))
             return JSONResponse(
                 status_code=429,
                 content={
@@ -77,7 +103,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     "error": exc.to_dict(),
                     "id": None,
                 },
-                headers={"Retry-After": retry_after},
+                headers=self._denial_headers(exc),
             )
         except Exception:
             logger.warning(
@@ -85,7 +111,70 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 exc_info=True,
             )
 
-        return await call_next(request)
+        response = await call_next(request)
+        if usage is not None:
+            response.headers.update(usage.as_headers())
+        return response
+
+    @staticmethod
+    def _is_rpc_path(path: str) -> bool:
+        return path == API_PATH or _rpc_path_segment(path) is not None
+
+    @staticmethod
+    def _api_key(request: Request) -> Optional[str]:
+        """Resolve the API key from the path, falling back to the header.
+
+        The path wins when both are present: it is what the caller typed into
+        their tool, whereas a header may have been injected by an intermediary
+        they cannot see.
+
+        Only `glk_`-prefixed segments count as keys. A segment of some other
+        shape is treated as no key at all rather than as a bad one, so it falls
+        through to anonymous limits instead of erroring — while a mistyped real
+        key still fails loudly as invalid, which is the confusing case worth
+        being loud about.
+        """
+        segment = _rpc_path_segment(request.url.path)
+        if segment and segment.startswith(API_KEY_PREFIX):
+            return segment
+        return request.headers.get("X-API-Key")
+
+    async def _is_cheap_read(self, request: Request) -> bool:
+        """Classify the request body, charging the stricter bucket on any doubt.
+
+        Reading the body here is safe because Starlette's BaseHTTPMiddleware
+        wraps the request in a _CachedRequest, which replays the buffered body
+        downstream. Calling request.stream() instead would starve the route
+        handler.
+        """
+        try:
+            raw_body = await request.body()
+        except Exception:
+            logger.warning(
+                "Could not read request body to classify rate limit bucket",
+                exc_info=True,
+            )
+            return False
+        return is_cheap_read_payload(raw_body)
+
+    @staticmethod
+    def _denial_headers(exc: RateLimitExceeded) -> dict:
+        data = exc.data if isinstance(exc.data, dict) else {}
+        retry_after = data.get("retry_after_seconds", 60)
+        headers = {"Retry-After": str(retry_after)}
+        # An invalid API key is raised before any window is evaluated, so there
+        # is no usage to report — only the windowed denials carry limits.
+        if "limit" in data:
+            headers.update(
+                {
+                    "X-RateLimit-Bucket": str(data.get("bucket", "standard")),
+                    "X-RateLimit-Window": str(data.get("window", "")),
+                    "X-RateLimit-Limit": str(data["limit"]),
+                    "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Reset": str(retry_after),
+                }
+            )
+        return headers
 
     def _client_ip(self, request: Request) -> str:
         peer_host = request.client.host if request.client else "unknown"

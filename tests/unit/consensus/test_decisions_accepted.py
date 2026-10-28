@@ -26,7 +26,6 @@ from backend.consensus.effects import (
 )
 from backend.consensus.types import ConsensusRound
 
-
 # ── Helpers ────────────────────────────────────────────────────────
 
 
@@ -145,13 +144,19 @@ class TestDecideAcceptedNormal:
         )
         e = _find_effect(pre, SetContractSnapshotEffect)
         assert e is not None
-        assert e.snapshot_dict == {"s": 1}
+        assert e.snapshot_dict == {"s": 1, "finalization_state": {"slot1": b"data"}}
 
-    def test_no_contract_snapshot_when_already_saved(self):
+    def test_adds_post_state_to_existing_rollback_snapshot(self):
+        snapshot = {"states": {"accepted": {"before": "value"}}}
         pre, _, _, _ = decide_accepted(
-            **_base_accepted_kwargs(has_contract_snapshot=True)
+            **_base_accepted_kwargs(
+                has_contract_snapshot=True, contract_snapshot_dict=snapshot
+            )
         )
-        assert _find_effect(pre, SetContractSnapshotEffect) is None
+        effect = _find_effect(pre, SetContractSnapshotEffect)
+        assert effect.snapshot_dict["states"] == snapshot["states"]
+        assert effect.snapshot_dict["finalization_state"] == {"slot1": b"data"}
+        assert "finalization_state" not in snapshot
 
     def test_post_effects_contain_status_update(self):
         _, post, _, _ = decide_accepted(**_base_accepted_kwargs())
@@ -201,6 +206,18 @@ class TestDecideAcceptedDeploy:
     def test_no_update_contract_state_effect(self):
         pre, _, _, _ = decide_accepted(**self._deploy_kwargs())
         assert _find_effect(pre, UpdateContractStateEffect) is None
+
+    def test_registers_contract_without_reroute_by_default(self):
+        pre, _, _, _ = decide_accepted(**self._deploy_kwargs())
+        e = _find_effect(pre, RegisterContractEffect)
+        assert e.contract_data["genvm_executor_selector"] is None
+
+    def test_registers_contract_with_reroute_to(self):
+        pre, _, _, _ = decide_accepted(
+            **self._deploy_kwargs(genvm_executor_selector="v0.2.17")
+        )
+        e = _find_effect(pre, RegisterContractEffect)
+        assert e.contract_data["genvm_executor_selector"] == "v0.2.17"
 
 
 class TestDecideAcceptedRunContract:
@@ -453,6 +470,17 @@ class TestDecideFinalizingNotAccepted:
         e = _find_effect(post, StatusUpdateEffect)
         assert e is not None
         assert e.new_status == "FINALIZED"
+
+    def test_receiptless_decision_skips_unattributable_rollup_event(self):
+        pre, _, should = decide_finalizing(
+            **_base_finalizing_kwargs(
+                tx_status_accepted=False,
+                leader_node_config=None,
+            )
+        )
+
+        assert should is False
+        assert _find_effect(pre, EmitRollupEventEffect) is None
 
 
 class TestDecideFinalizingNotAcceptedWithSuccess:

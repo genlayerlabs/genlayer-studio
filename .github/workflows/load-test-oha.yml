@@ -35,6 +35,9 @@ jobs:
     if: ${{ needs.triggers.outputs.is_pull_request_opened == 'true' || needs.triggers.outputs.is_pull_request_review_approved == 'true' || needs.triggers.outputs.is_pull_request_labeled_with_run_tests == 'true' }}
     runs-on: ubuntu-latest
 
+    env:
+      GENVM_CACHE_DIR: /tmp/genvm-cache
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -63,6 +66,83 @@ jobs:
       - name: Copy .env file
         run: cp .env.example .env
 
+      - name: Resolve GenVM binding
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Binding model: codebase default < env override.
+          # third_party/genvm/version (same convention as genlayer-node) pins
+          # the GenVM this branch's host protocol speaks; it is flipped to the
+          # release tag at release cut. The e2e pipeline / release train can
+          # override by injecting GENVM_TAG or GENVM_REF into the environment.
+          # Exact vX.Y.Z[-suffix] values use release assets. Source pins must be
+          # explicit <branch>:<commit> values so builds cannot drift with a branch.
+          if [[ -n "${GENVM_TAG:-}" && -n "${GENVM_REF:-}" ]]; then
+            echo "::error::GENVM_TAG and GENVM_REF are both set; they are mutually exclusive"
+            exit 1
+          fi
+          GENVM_TAG_VALUE="${GENVM_TAG:-}"
+          GENVM_REF_VALUE="${GENVM_REF:-}"
+          GENVM_SOURCE_MODE_VALUE="${GENVM_SOURCE_MODE:-}"
+          if [[ -z "$GENVM_TAG_VALUE" && -z "$GENVM_REF_VALUE" ]]; then
+            if [[ ! -f third_party/genvm/version ]]; then
+              echo "::error::third_party/genvm/version is missing and no GENVM_TAG/GENVM_REF env override is set"
+              exit 1
+            fi
+            BINDING="$(head -n1 third_party/genvm/version | sed -e 's/\r$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            if [[ "$BINDING" =~ ^\".*\"$ || "$BINDING" =~ ^\'.*\'$ ]]; then
+              BINDING="${BINDING:1:${#BINDING}-2}"
+              BINDING="$(printf '%s' "$BINDING" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            fi
+            if [[ -z "$BINDING" ]]; then
+              echo "::error::third_party/genvm/version is empty"
+              exit 1
+            fi
+            if [[ "$BINDING" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+              GENVM_TAG_VALUE="$BINDING"
+            elif [[ "$BINDING" == *-dev ]]; then
+              echo "::error::Bare GenVM branch pin '$BINDING' is not supported; pin an exact vX.Y.Z release or '<branch>:<commit>'"
+              exit 1
+            elif [[ "$BINDING" =~ ^.+:[0-9a-fA-F]{7,40}$ ]]; then
+              GENVM_REF_VALUE="$BINDING"
+              GENVM_SOURCE_MODE_VALUE="source"
+            else
+              echo "::error::Invalid GenVM pin '$BINDING'; expected vX.Y.Z[-suffix] or '<branch>:<commit>'"
+              exit 1
+            fi
+          fi
+          if [[ -n "$GENVM_TAG_VALUE" && ! "$GENVM_TAG_VALUE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::Invalid GENVM_TAG '$GENVM_TAG_VALUE'; expected vX.Y.Z[-suffix]"
+            exit 1
+          fi
+          if [[ -n "$GENVM_REF_VALUE" ]]; then
+            if [[ "$GENVM_REF_VALUE" == *-dev ]]; then
+              echo "::error::Bare GenVM branch pin '$GENVM_REF_VALUE' is not supported; pin an exact vX.Y.Z release or '<branch>:<commit>'"
+              exit 1
+            elif [[ "$GENVM_REF_VALUE" =~ ^(.+):([0-9a-fA-F]{7,40})$ ]]; then
+              GENVM_REF_BRANCH="${BASH_REMATCH[1]}"
+              GENVM_REF_COMMIT="$(gh api "repos/genlayerlabs/genvm-manager/commits/${BASH_REMATCH[2]}" --jq .sha)"
+              GENVM_REF_VALUE="$GENVM_REF_BRANCH:$GENVM_REF_COMMIT"
+            elif [[ "$GENVM_SOURCE_MODE_VALUE" == "source" ]]; then
+              GENVM_REF_VALUE="$(gh api "repos/genlayerlabs/genvm-manager/commits/$GENVM_REF_VALUE" --jq .sha)"
+            else
+              echo "::error::GENVM_REF must be '<branch>:<commit>' unless GENVM_SOURCE_MODE=source is explicit"
+              exit 1
+            fi
+            GENVM_SOURCE_MODE_VALUE="source"
+          fi
+          sed -i "s|^GENVM_TAG=.*|GENVM_TAG=\"$GENVM_TAG_VALUE\"|" .env
+          sed -i "s|^GENVM_REF=.*|GENVM_REF=\"$GENVM_REF_VALUE\"|" .env
+          sed -i "s|^GENVM_SOURCE_MODE=.*|GENVM_SOURCE_MODE=\"$GENVM_SOURCE_MODE_VALUE\"|" .env
+          {
+            echo "GENVM_TAG=$GENVM_TAG_VALUE"
+            echo "GENVM_REF=$GENVM_REF_VALUE"
+            echo "GENVM_SOURCE_MODE=$GENVM_SOURCE_MODE_VALUE"
+          } >> "$GITHUB_ENV"
+          grep "^GENVM_TAG=" .env
+          grep "^GENVM_REF=" .env
+          grep "^GENVM_SOURCE_MODE=" .env
+
       - name: Changing URL for rpc server to localhost
         run: sed -i "s/'jsonrpc'/'localhost'/g" .env
 
@@ -82,44 +162,87 @@ jobs:
 
       - name: Extract GenVM version for cache key
         id: genvm
-        run: echo "tag=$(grep -m1 'ARG GENVM_TAG=' docker/Dockerfile.backend | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+        run: |
+          GENVM_REF_VALUE="${GENVM_REF:-}"
+          if [[ -z "$GENVM_REF_VALUE" && -f .env ]]; then
+            GENVM_REF_VALUE="$(sed -n 's/^GENVM_REF=["'\'']\{0,1\}\([^"'\'']*\)["'\'']\{0,1\}.*/\1/p' .env | head -n1)"
+          fi
+          if [[ -n "$GENVM_REF_VALUE" ]]; then
+            GENVM_CACHE_REF="${GENVM_REF_VALUE##*:}"
+            echo "binding=ref-$GENVM_CACHE_REF" >> "$GITHUB_OUTPUT"
+            echo "bake_cache=,scope=genvm-$GENVM_CACHE_REF" >> "$GITHUB_OUTPUT"
+          else
+            GENVM_TAG_VALUE="${GENVM_TAG:-}"
+            if [[ -z "$GENVM_TAG_VALUE" && -f .env ]]; then
+              GENVM_TAG_VALUE="$(sed -n 's/^GENVM_TAG=["'\'']\{0,1\}\([^"'\'']*\)["'\'']\{0,1\}.*/\1/p' .env | head -n1)"
+            fi
+            if [[ -z "$GENVM_TAG_VALUE" ]]; then
+              echo "::warning::GENVM_TAG not set (this job runs prebuilt images) — using shared 'untagged' precompile cache key that will not invalidate across GenVM upgrades"
+              GENVM_TAG_VALUE="untagged"
+            fi
+            echo "binding=$GENVM_TAG_VALUE" >> "$GITHUB_OUTPUT"
+            echo "bake_cache=" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Restore GenVM precompile cache
         uses: actions/cache@v5
         with:
-          path: /tmp/genvm-cache
-          key: genvm-precompile-${{ steps.genvm.outputs.tag }}-amd64
+          path: ${{ env.GENVM_CACHE_DIR }}
+          key: genvm-precompile-${{ runner.os }}-${{ runner.arch }}-${{ steps.genvm.outputs.binding }}
 
       - name: Prepare GenVM cache directory
-        run: mkdir -p /tmp/genvm-cache/pc && chmod -R 0777 /tmp/genvm-cache
+        run: |
+          sudo mkdir -p "$GENVM_CACHE_DIR/pc"
+          sudo chown -R 999:999 "$GENVM_CACHE_DIR"
+
+      # Source builds need the GenVM runner fixed-output derivations built under
+      # a real Nix sandbox, which the nixos/nix build stage cannot provide.
+      - name: Prebuild GenVM runners closure
+        id: genvm_closure
+        if: env.GENVM_SOURCE_MODE == 'source'
+        uses: ./.github/actions/genvm-runners-closure
+        with:
+          ref: ${{ env.GENVM_REF }}
+          nix_cache_pull_token: ${{ secrets.NIX_CACHE_PULL_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Build images with cache (buildx bake)
+        # The source build inside Dockerfile.backend substitutes from the same
+        # private cache, so it needs the same credential. docker-compose.yml
+        # reads this path into the `nix_netrc` build secret; unset (a release
+        # build, or a fork PR with no token) falls back to /dev/null.
+        env:
+          NIX_NETRC_FILE: ${{ steps.genvm_closure.outputs.netrc_path }}
         uses: docker/bake-action@v6
         with:
+          # Bake defaults to the Git context, which ignores anything earlier
+          # steps wrote into the workspace. Source builds need the prebuilt
+          # runners closure from there; release builds keep the Git context,
+          # where an empty value is the same as not passing the input.
+          source: ${{ env.GENVM_SOURCE_MODE == 'source' && '.' || '' }}
           files: |
             ./docker-compose.yml
           targets: |
-            frontend
             database-migration
             jsonrpc
             consensus-worker
-            explorer
           set: |
-            *.cache-from=type=gha
-            *.cache-to=type=gha,mode=max
-            frontend.tags=genlayer-studio-frontend:latest
+            *.cache-from=type=gha${{ steps.genvm.outputs.bake_cache }}
+            *.cache-to=type=gha,mode=max${{ steps.genvm.outputs.bake_cache }}
             database-migration.tags=genlayer-studio-database-migration:latest
             jsonrpc.tags=genlayer-studio-jsonrpc:latest
             consensus-worker.tags=genlayer-studio-consensus-worker:latest
-            explorer.tags=genlayer-studio-explorer:latest
           load: true
 
-      - name: Run Docker Compose with multiple workers
+      - name: Precompile GenVM cache
+        timeout-minutes: 30
+        run: docker/scripts/precompile_genvm.sh
+
+      - name: Run backend stack with multiple workers
         timeout-minutes: 5
-        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --no-build --wait
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --no-build --wait database-migration jsonrpc consensus-worker
         env:
           CONSENSUS_WORKERS: 3
 
@@ -229,7 +352,7 @@ jobs:
           sleep 15
 
           # Install required Python packages
-          pip install genlayer-py requests
+          pip install -r ../../requirements.test.txt
 
           # Deploy contracts one by one with delays
           echo "=== Contract Deployment Test ==="
@@ -489,7 +612,7 @@ jobs:
       - name: Run State Integrity Test (lost update detection)
         run: |
           cd tests/load
-          pip install genlayer-py requests
+          pip install -r ../../requirements.test.txt
           python3 test_state_integrity.py http://localhost:4000/api --txs 20
 
       - name: Dump Docker Compose logs

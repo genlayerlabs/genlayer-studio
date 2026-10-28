@@ -1,5 +1,6 @@
 # backend/protocol_rpc/fastapi_server.py
 
+import logging
 import os
 from contextlib import asynccontextmanager
 from typing import Any
@@ -13,6 +14,10 @@ from starlette.requests import ClientDisconnect
 # Load environment variables early so SENTRY_DSN is available for initialization
 load_dotenv()
 
+from backend.protocol_rpc.api_key_redaction import (
+    install_log_redaction,
+    scrub_sentry_event,
+)
 from backend.protocol_rpc.app_lifespan import RPCAppSettings, rpc_app_lifespan
 from backend.protocol_rpc.dependencies import (
     get_rpc_router_optional,
@@ -26,12 +31,20 @@ from backend.protocol_rpc.rpc_endpoint_manager import JSONRPCResponse
 from backend.protocol_rpc.websocket import GLOBAL_CHANNEL, websocket_handler
 
 
+install_log_redaction()
+logger = logging.getLogger(__name__)
+
 SENTRY_DSN = os.getenv("SENTRY_DSN", None)
 if SENTRY_DSN:
     import sentry_sdk
 
     sentry_sdk.init(
         dsn=SENTRY_DSN,
+        # API keys can arrive as a path segment, and with send_default_pii and
+        # full trace sampling below, request URLs reach Sentry on *every*
+        # transaction. Scrub keys out before anything leaves the process.
+        before_send=scrub_sentry_event,
+        before_send_transaction=scrub_sentry_event,
         # Add data like request headers and IP for users,
         # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
         send_default_pii=True,
@@ -61,17 +74,28 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app
 app = FastAPI(title="GenLayer Studio RPC API", version="1.0.0", lifespan=lifespan)
 
-# Add CORS middleware
+# Rate limiting is inner so CORS decorates short-circuit responses such as 429s.
+app.add_middleware(RateLimitMiddleware)
+
+# This public RPC uses header-based API keys and no cookie authentication.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Browsers hide non-simple response headers from JS unless they are listed
+    # here, so without this the rate limit headers are readable by curl but not
+    # by genlayer-js in the browser — the client that most needs to self-pace.
+    expose_headers=[
+        "Retry-After",
+        "X-RateLimit-Bucket",
+        "X-RateLimit-Window",
+        "X-RateLimit-Limit",
+        "X-RateLimit-Remaining",
+        "X-RateLimit-Reset",
+    ],
 )
-
-# Add rate limiting middleware (executes after CORS, before route handler)
-app.add_middleware(RateLimitMiddleware)
 
 # Include health check endpoints
 app.include_router(health_router)
@@ -81,9 +105,22 @@ app.include_router(explorer_router)
 
 
 # JSON-RPC endpoint (supports single and batch requests)
+#
+# `/api/{api_key}` is the same endpoint with the key in the URL, matching how
+# every major RPC provider does it (Alchemy `/v2/<key>`, Infura `/v3/<key>`).
+# The EVM toolchain takes a single URL string and has nowhere to put a custom
+# header — MetaMask's "Add network" being the clearest case — so the header
+# form alone makes Studio unusable from those tools without a proxy in front.
+#
+# The key is consumed by RateLimitMiddleware before the request reaches here;
+# the path parameter exists only so the route matches. Anything that changes
+# which paths this route accepts must change `_is_rpc_path` in that middleware
+# to match, or the new paths become unlimited and unauthenticated.
 @app.post("/api")
+@app.post("/api/{api_key}")
 async def jsonrpc_endpoint(
     request: Request,
+    api_key: str | None = None,
     rpc_router: FastAPIRPCRouter | None = Depends(get_rpc_router_optional),
 ):
     """Main JSON-RPC endpoint with JSON-RPC 2.0 batch support."""
@@ -99,12 +136,14 @@ async def jsonrpc_endpoint(
         return await rpc_router.handle_http_request(request)
     except ClientDisconnect:
         return Response(status_code=204)
-    except Exception as exc:
-        # Ensure JSON-RPC compliant error response instead of framework HTML pages
+    except Exception:
+        # Preserve the unexpected exception server-side without disclosing
+        # database, provider, or infrastructure details to an RPC caller.
+        logger.exception("Unhandled JSON-RPC request failure")
         error = {
             "code": -32603,
             "message": "Internal error",
-            "data": {"detail": str(exc)},
+            "data": {"detail": "An unexpected server error occurred."},
         }
         return JSONResponse(content={"jsonrpc": "2.0", "error": error, "id": None})
 

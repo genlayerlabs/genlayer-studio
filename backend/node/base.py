@@ -15,12 +15,23 @@ import logging
 
 from backend.domain.types import Validator, Transaction, TransactionType
 from backend.protocol_rpc.message_handler.types import LogEvent, EventType, EventScope
+from backend.protocol_rpc.fees import (
+    FEE_ACCOUNTING_KEY,
+    FeeValidationError,
+    genvm_fee_context,
+    genvm_message_fee_allocation,
+)
 import backend.node.genvm.base as genvmbase
 import backend.node.genvm.origin.calldata as calldata
+from backend.node.genvm.executor_selection import (
+    legacy_executor_selector_for_code,
+    uses_legacy_storage,
+)
 from backend.database_handler.contract_snapshot import ContractSnapshot
 from backend.node.types import Receipt, ExecutionMode, Vote, ExecutionResultStatus
 from backend.protocol_rpc.message_handler.base import IMessageHandler
 from .genvm.origin import logger as genvm_logger
+from .genvm.origin import host_fns
 from .genvm.origin import public_abi
 
 from .types import Address
@@ -68,22 +79,16 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _genvm_extra_args() -> list[str]:
-    """Extra CLI args for the genvm executor.
+def _genvm_debug_mode() -> str:
+    """genvm-manager `debug_mode` level for the run request.
 
-    `--debug-mode` enables the `:latest` and `:test` runner version
-    aliases (see genvm/executor/src/exe/run.rs:58-62). Convenient in
-    dev/stg where you want to iterate without pinning a specific runner
-    hash, but a footgun in prd: those aliases float, so two validators
-    on the same tx can resolve different runner binaries — breaks
-    determinism / consensus.
-
-    Gated on GENVM_DEBUG_MODE (default true to preserve dev/stg
-    convenience). Prd manifests should set GENVM_DEBUG_MODE=false so
-    contracts that try to use `py-genlayer:latest` or `py-genlayer:test`
-    fail fast at the executor.
+    `unsafe` (dev/stg default) captures unbounded output and enables the
+    `:latest`/`:test` runner aliases that studio's bundled contracts depend
+    on; only `unsafe`/`unsafe-tracing` resolve those floating aliases. Prd
+    sets GENVM_DEBUG_MODE=false -> `safe` (consensus-safe) so the aliases
+    fail fast.
     """
-    return ["--debug-mode"] if _env_bool("GENVM_DEBUG_MODE", default=True) else []
+    return "unsafe" if _env_bool("GENVM_DEBUG_MODE", default=True) else "safe"
 
 
 def _filter_genvm_log_by_level(genvm_log: list[dict]) -> list[dict]:
@@ -168,11 +173,12 @@ class _SnapshotView(genvmbase.StateProxy):
         self._collect_metrics = collect_metrics
         # Primary contract fast path:
         # decode the full primary contract state once and then read by bytes slot key.
-        self._primary_decoded: dict[bytes, bytes] | None = None
+        # {state_status: {slot: decoded_value_bytes}}
+        self._primary_decoded: dict[str, dict[bytes, bytes]] = {}
         # Per-contract decoded slot cache:
-        # {contract_address: {base64_slot_key: decoded_value_bytes}}
+        # {(state_status, contract_address): {base64_slot_key: decoded_value_bytes}}
         # This is only used for non-primary contract lazy reads.
-        self._decoded_slots: dict[str, dict[str, bytes]] = {}
+        self._decoded_slots: dict[tuple[str, str], dict[str, bytes]] = {}
         self._slot_keys: dict[bytes, str] = {}
         # Execution-scoped metrics to quantify cross-contract read cold/warm behavior.
         if collect_metrics:
@@ -234,16 +240,18 @@ class _SnapshotView(genvmbase.StateProxy):
             self._slot_keys[slot] = slot_key
         return slot_key
 
-    def _get_contract_slot_cache(self, snap: ContractSnapshot) -> dict[str, bytes]:
-        return self._decoded_slots.setdefault(snap.contract_address, {})
+    def _get_contract_slot_cache(
+        self, snap: ContractSnapshot, status: str
+    ) -> dict[str, bytes]:
+        return self._decoded_slots.setdefault((status, snap.contract_address), {})
 
-    def _get_primary_decoded(self) -> dict[bytes, bytes]:
-        decoded = self._primary_decoded
+    def _get_primary_decoded(self, status: str) -> dict[bytes, bytes]:
+        decoded = self._primary_decoded.get(status)
         if decoded is not None:
             return decoded
 
         decoded = {}
-        state = self.snapshot.states.get(self.state_status, {})
+        state = self.snapshot.states.get(status, {})
         shared_cache = self._shared_decoded_value_cache
         for slot_key, raw in state.items():
             slot = base64.b64decode(slot_key)
@@ -268,14 +276,13 @@ class _SnapshotView(genvmbase.StateProxy):
                         metrics["shared_decoded_cache_hits"] += 1
             decoded[slot] = value
 
-        self._primary_decoded = decoded
+        self._primary_decoded[status] = decoded
         return decoded
 
-    def _read_primary_slot_value(self, slot: bytes) -> bytes:
-        return self._get_primary_decoded().get(slot, b"")
-
-    def _read_cross_slot_value(self, snap: ContractSnapshot, slot: bytes) -> bytes:
-        slot_cache = self._get_contract_slot_cache(snap)
+    def _read_cross_slot_value(
+        self, snap: ContractSnapshot, slot: bytes, status: str
+    ) -> bytes:
+        slot_cache = self._get_contract_slot_cache(snap, status)
         slot_key = self._slot_key(slot)
         data = slot_cache.get(slot_key)
         if data is not None:
@@ -287,7 +294,7 @@ class _SnapshotView(genvmbase.StateProxy):
         metrics = self._metrics
         if metrics is not None:
             metrics["decoded_cache_misses"] += 1
-        raw = snap.states.get(self.state_status, {}).get(slot_key)
+        raw = snap.states.get(status, {}).get(slot_key)
         shared_cache = self._shared_decoded_value_cache
         if raw is not None and shared_cache is not None:
             data = shared_cache.get(raw)
@@ -324,14 +331,24 @@ class _SnapshotView(genvmbase.StateProxy):
     def storage_read(
         self, account: Address, slot: bytes, index: int, le: int, /
     ) -> bytes:
+        return self._storage_read(self.state_status, account, slot, index, le)
+
+    def storage_read_finalized(
+        self, account: Address, slot: bytes, index: int, le: int, /
+    ) -> bytes:
+        return self._storage_read("finalized", account, slot, index, le)
+
+    def _storage_read(
+        self, status: str, account: Address, slot: bytes, index: int, le: int
+    ) -> bytes:
         if account == self.contract_address:
             metrics = self._metrics
             if metrics is not None:
                 metrics["primary_contract_lookups"] += 1
-            data = self._read_primary_slot_value(slot)
+            data = self._get_primary_decoded(status).get(slot, b"")
         else:
             snap = self._get_snapshot(account)
-            data = self._read_cross_slot_value(snap, slot)
+            data = self._read_cross_slot_value(snap, slot, status)
         end = index + le
         if end <= len(data):
             return data[index:end]
@@ -351,7 +368,7 @@ class _SnapshotView(genvmbase.StateProxy):
         assert not self.readonly
         slot_key = self._slot_key(slot)
         state_bucket = self.snapshot.states.setdefault(self.state_status, {})
-        primary_decoded = self._get_primary_decoded()
+        primary_decoded = self._get_primary_decoded(self.state_status)
         existing = primary_decoded.get(slot, b"")
         data = bytearray(existing)
         mem = memoryview(got)
@@ -370,6 +387,12 @@ class _SnapshotView(genvmbase.StateProxy):
         # Balance is not part of the snapshot by design; it persists in DB independently.
         bal = getattr(snap, "balance", 0)
         return int(bal) if bal is not None else 0
+
+    def genvm_executor_selector_for(self, addr: Address) -> str | None:
+        # A nested call target picks up its own executor pin; loading its
+        # snapshot here is the same lookup its storage reads already trigger.
+        selector = getattr(self._get_snapshot(addr), "genvm_executor_selector", None)
+        return selector or None
 
 
 import aiohttp
@@ -472,10 +495,10 @@ class Manager:
             body = await resp.json()
             if resp.status != 200:
                 self.logger.error(
-                    f"Failed to stop LLM module", body=body, status=resp.status
+                    "Failed to stop LLM module", body=body, status=resp.status
                 )
             else:
-                self.logger.info(f"Stopped LLM module", body=body, status=resp.status)
+                self.logger.info("Stopped LLM module", body=body, status=resp.status)
 
     async def start_module(
         self,
@@ -490,7 +513,7 @@ class Manager:
             body = await resp.json()
             if resp.status != 200:
                 self.logger.error(
-                    f"Failed to start module",
+                    "Failed to start module",
                     module=module_type,
                     body=body,
                     status=resp.status,
@@ -518,9 +541,7 @@ class Manager:
         async with aiohttp.request("POST", f"{self.url}/llm/check", json=data) as resp:
             body = await resp.json()
             if resp.status != 200:
-                self.logger.error(
-                    f"Failed to check llms", body=body, status=resp.status
-                )
+                self.logger.error("Failed to check llms", body=body, status=resp.status)
                 # Return error response for each config when the check fails
                 return [
                     {
@@ -626,6 +647,7 @@ class Node:
 
         assert transaction.data is not None
         transaction_data = transaction.data
+        fee_accounting = transaction_data.get(FEE_ACCOUNTING_KEY)
         assert transaction.from_address is not None
 
         # Override transaction timestamp
@@ -650,6 +672,7 @@ class Node:
                 transaction_created_at,
                 value=transaction.value or 0,
                 origin_address=transaction.origin_address,
+                fee_accounting=fee_accounting,
             )
 
             self.timing_callback("DEPLOY_END")
@@ -667,6 +690,7 @@ class Node:
                 transaction_created_at,
                 value=transaction.value or 0,
                 origin_address=transaction.origin_address,
+                fee_accounting=fee_accounting,
             )
 
             self.timing_callback("RUN_END")
@@ -713,6 +737,7 @@ class Node:
 
             if fallback_validator:
                 enhanced_node_config["secondary_model"] = {
+                    "address": fallback_validator.address,
                     "provider": fallback_validator.llmprovider.provider,
                     "model": fallback_validator.llmprovider.model,
                     "plugin": fallback_validator.llmprovider.plugin,
@@ -726,7 +751,7 @@ class Node:
         result_code = receipt.result[0]
 
         # 1. Timeout: VM-level timeout or GenVM internal error
-        if result_code == public_abi.ResultCode.VM_ERROR:
+        if result_code == host_fns.ResultCode.VM_ERROR:
             error_message = receipt.result[1:]
             if error_message == b"timeout" or error_message.startswith(
                 b"GenVM internal error"
@@ -778,11 +803,13 @@ class Node:
             res = res.replace(tzinfo=datetime.UTC)
         return res
 
-    def _put_code_to(self, to: genvmbase.StateProxyWritable, code: bytes) -> None:
+    def _put_code_to(
+        self, to: genvmbase.StateProxyWritable, code: bytes, *, legacy: bool = False
+    ) -> None:
         """Write contract code directly to storage using the code slot."""
         from backend.node.genvm import get_code_slot
 
-        code_slot = get_code_slot()
+        code_slot = get_code_slot(legacy=legacy)
         # Prefix with 4-byte little-endian length
         code_len_prefix = len(code).to_bytes(4, byteorder="little", signed=False)
         code_data = code_len_prefix + code
@@ -797,12 +824,20 @@ class Node:
         transaction_created_at: str | None = None,
         value: int = 0,
         origin_address: str | None = None,
+        fee_accounting: dict | None = None,
     ) -> Receipt:
         assert self.contract_snapshot is not None
 
+        # Simulated deployments (including fee estimates) do not pass through
+        # consensus's snapshot factory. Select the same legacy line here too.
+        if not self.contract_snapshot.genvm_executor_selector:
+            self.contract_snapshot.genvm_executor_selector = (
+                legacy_executor_selector_for_code(code_to_deploy)
+            )
+
         transaction_datetime = self._date_from_str(transaction_created_at)
         if transaction_datetime is None:
-            transaction_datetime = datetime.datetime.now()
+            transaction_datetime = datetime.datetime.now(datetime.UTC)
 
         return await self._run_genvm(
             from_address,
@@ -814,6 +849,7 @@ class Node:
             code=code_to_deploy,
             value=value,
             origin_address=origin_address,
+            fee_accounting=fee_accounting,
         )
 
     async def run_contract(
@@ -824,6 +860,7 @@ class Node:
         transaction_created_at: str | None = None,
         value: int = 0,
         origin_address: str | None = None,
+        fee_accounting: dict | None = None,
     ) -> Receipt:
         return await self._run_genvm(
             from_address,
@@ -834,6 +871,7 @@ class Node:
             transaction_datetime=self._date_from_str(transaction_created_at),
             value=value,
             origin_address=origin_address,
+            fee_accounting=fee_accounting,
         )
 
     async def get_contract_data(
@@ -898,38 +936,46 @@ class Node:
             )
         )
 
-    async def get_contract_schema(self, code: bytes) -> str:
+    async def get_contract_schema(
+        self, code: bytes, *, genvm_executor_selector: str | None = None
+    ) -> str:
+        inferred_selector = legacy_executor_selector_for_code(code)
+        executor_selector = genvm_executor_selector or inferred_selector
         NO_ADDR = Address(b"\x00" * 20)
         message = {
             "is_init": False,
             "contract_address": NO_ADDR,
             "sender_address": NO_ADDR,
             "origin_address": NO_ADDR,
+            "signer_address": NO_ADDR,
             "value": 0,
             "chain_id": 0,
         }
         state_proxy = _StateProxyNone(NO_ADDR)
-        self._put_code_to(state_proxy, code)
+        self._put_code_to(
+            state_proxy, code, legacy=uses_legacy_storage(executor_selector)
+        )
 
         start_time = time.time()
         result = await genvmbase.run_genvm_host(
             functools.partial(
                 genvmbase.Host,
                 calldata_bytes=calldata.encode(
-                    {"method": public_abi.SpecialMethod.GET_SCHEMA.value}
+                    {"": public_abi.SpecialMethod.GET_SCHEMA.value}
                 ),
                 state_proxy=state_proxy,
                 leader_results=None,
             ),
             message=message,
             permissions="rw",
-            extra_args=_genvm_extra_args(),
             host_data='{"node_address":"0x", "tx_id":"0x"}',
             capture_output=True,
+            debug_mode=_genvm_debug_mode(),
             is_sync=True,
             logger=self.logger,
             timeout=30,
             manager_uri=self.manager.url,
+            genvm_executor_selector=executor_selector,
         )
         result.processing_time = int((time.time() - start_time) * 1000)
 
@@ -967,15 +1013,16 @@ class Node:
         transaction_hash: str | None = None,
         transaction_datetime: datetime.datetime | None,
         state_status: str | None = None,
-        timeout: float = 10 * 60,
+        timeout: float = 10 * 60,  # noqa: ASYNC109 - forwarded GenVM deadline
         code: bytes | None = None,
         value: int = 0,
         origin_address: str | None = None,
+        fee_accounting: dict | None = None,
     ) -> Receipt:
         self.timing_callback("GENVM_PREPARATION_START")
 
         leader_res: None | dict[int, bytes]
-        if self.leader_receipt is None or not self.leader_receipt.eq_outputs:
+        if self.leader_receipt is None or self.leader_receipt.eq_outputs is None:
             leader_res = None
         else:
             leader_res = {
@@ -1020,24 +1067,31 @@ class Node:
             host_data["node_address"] = self.address
 
         logger = self.logger.with_keys({"tx_id": host_data["tx_id"]})
-
         message = {
             "is_init": is_init,
             "contract_address": contract_address,
             "sender_address": Address(from_address),
             "origin_address": Address(origin_address or from_address),
+            "signer_address": Address(origin_address or from_address),
             "value": int(value),
             "chain_id": get_simulator_chain_id(),
         }
         if transaction_datetime is not None:
             assert transaction_datetime.tzinfo is not None
-            message["datetime"] = transaction_datetime.isoformat()
+            message["transaction_timestamp"] = transaction_datetime.isoformat()
         perms = "rcn"  # read/call/spawn nondet
         if not readonly:
             perms += "ws"  # write/send
 
         start_time = time.time()
         try:
+            bucket_totals, gas_data = genvm_fee_context(
+                fee_accounting,
+            )
+            message_fee_allocation = genvm_message_fee_allocation(
+                fee_accounting,
+                address_factory=Address,
+            )
             result = await genvmbase.run_genvm_host(
                 functools.partial(
                     genvmbase.Host,
@@ -1048,13 +1102,42 @@ class Node:
                 message=message,
                 permissions=perms,
                 capture_output=True,
+                debug_mode=_genvm_debug_mode(),
                 host_data=json.dumps(host_data),
-                extra_args=_genvm_extra_args(),
                 is_sync=is_sync,
                 manager_uri=self.manager.url,
                 timeout=timeout,
                 code=code,
+                fee_context=genvmbase.GenVMFeeContext(
+                    bucket_totals=bucket_totals,
+                    gas_data=gas_data,
+                    message_fee_allocation=message_fee_allocation,
+                ),
                 logger=logger,
+                genvm_executor_selector=self.contract_snapshot.genvm_executor_selector,
+            )
+        except FeeValidationError as e:
+            result = genvmbase.ExecutionResult(
+                result=genvmbase.ExecutionError(
+                    message=str(e),
+                    kind=host_fns.ResultCode.USER_ERROR,
+                    error_code=e.__class__.__name__,
+                    raw_error={
+                        "fatal": False,
+                        "causes": [str(e)],
+                        "ctx": {"source": "studio_fee_accounting"},
+                    },
+                    description=str(e),
+                ),
+                eq_outputs={},
+                pending_transactions=[],
+                stdout="",
+                stderr=str(e),
+                genvm_log=[],
+                state=snapshot_view,
+                processing_time=int((time.time() - start_time) * 1000),
+                nondet_disagree=None,
+                execution_stats=None,
             )
         except genvmbase.GenVMInternalError as e:
             e.is_leader = self.validator_mode == ExecutionMode.LEADER
@@ -1082,6 +1165,17 @@ class Node:
             if isinstance(result.result, genvmbase.ExecutionReturn)
             else ExecutionResultStatus.ERROR
         )
+        data_fees_consumed = None
+        if (
+            result.data_fee_bucket_totals is not None
+            and result.data_fees_remaining is not None
+            and result.data_fee_bucket_totals.keys()
+            == result.data_fees_remaining.keys()
+        ):
+            data_fees_consumed = {
+                name: max(0, int(total) - int(result.data_fees_remaining[name]))
+                for name, total in result.data_fee_bucket_totals.items()
+            }
 
         result = Receipt(
             result=genvmbase.encode_result_to_bytes(result.result),
@@ -1121,6 +1215,9 @@ class Node:
                     if isinstance(result.result, genvmbase.ExecutionError)
                     else None
                 ),
+                "data_fee_bucket_totals": result.data_fee_bucket_totals,
+                "data_fees_remaining": result.data_fees_remaining,
+                "data_fees_consumed": data_fees_consumed,
             },
             processing_time=result.processing_time,
             nondet_disagree=result.nondet_disagree,

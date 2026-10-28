@@ -1,12 +1,12 @@
-# v0.1.0
-# { "Depends": "py-genlayer:test" }
+# v0.3.0
+# { "Depends": "py-genlayer:babwp9t37jw9g4j2bccgn14g6x7x9s1f7dsmh7emvz735pz4zxa0" }
 
-from genlayer import *
+import genlayer as gl
 
 
-class Registry(gl.Contract):
+class Registry(gl.contract.Contract):
     # Declare persistent storage fields
-    contract_addresses: DynArray[str]
+    contract_addresses: gl.storage.DynArray[str]
     intelligent_oracle_code: str
 
     def __init__(self, intelligent_oracle_code: str):
@@ -25,7 +25,7 @@ class Registry(gl.Contract):
         earliest_resolution_date: str,
     ) -> None:
         registered_contracts = len(self.contract_addresses)
-        contract_address = gl.deploy_contract(
+        contract_address = gl.contract.deploy(
             code=self.intelligent_oracle_code.encode("utf-8"),
             args=[
                 prediction_market_id,

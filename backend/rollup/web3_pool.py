@@ -18,6 +18,27 @@ class Web3ConnectionPool:
     _web3: ClassVar[Web3 | None] = None
     _lock: ClassVar[threading.Lock] = threading.Lock()
     _session: ClassVar[requests.Session | None] = None
+    _offline: ClassVar[Web3 | None] = None
+
+    @classmethod
+    def get_for_utilities(cls) -> Web3:
+        """A Web3 usable for pure helpers even with no rollup configured.
+
+        HARDHAT_URL is optional — Studio runs without the legacy Hardhat
+        bridge — so ``get()`` legitimately returns None. Hashing, ABI codec
+        and checksum helpers still need a Web3 object and none of them touch
+        the network, so they fall back to a provider-less instance rather
+        than dereferencing None. Callers that actually reach the chain must
+        keep using ``get()`` and handle None themselves.
+        """
+        web3 = cls.get()
+        if web3 is not None:
+            return web3
+        if cls._offline is None:
+            with cls._lock:
+                if cls._offline is None:
+                    cls._offline = Web3()
+        return cls._offline
 
     @classmethod
     def get(cls) -> Web3 | None:

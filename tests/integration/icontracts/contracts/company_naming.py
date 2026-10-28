@@ -1,13 +1,14 @@
-# { "Depends": "py-genlayer:test" }
+# { "Depends": "py-genlayer:babwp9t37jw9g4j2bccgn14g6x7x9s1f7dsmh7emvz735pz4zxa0" }
 
 import json
-from genlayer import *
+import genlayer as gl
+from genlayer.types import *
 
 MAX_SCORE_DIFFERENCE = 3
 
 
-class CompanyNaming(gl.Contract):
-    scores: TreeMap[str, u256]
+class CompanyNaming(gl.contract.Contract):
+    scores: gl.storage.TreeMap[str, u256]
 
     def __init__(self):
         pass
@@ -64,7 +65,7 @@ This result should be perfectly parseable by a JSON parser without errors.
                 <= MAX_SCORE_DIFFERENCE
             )
 
-        analysis = gl.vm.run_nondet(leader_fn, validator_fn)
+        analysis = gl.vm.run_nondet_default(leader_fn, validator_fn)
 
         score = analysis["score"]
         self.scores[company_name] = score
