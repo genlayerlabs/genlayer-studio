@@ -303,18 +303,29 @@ contract ConsensusMain is
 		uint256 _maxRotations,
 		bytes memory _txData
 	) external {
-		if (_txData.length > 0) {
-			_addTransaction(
-				_sender,
-				_recipient,
-				_numOfInitialValidators,
-				_maxRotations,
-				0,
-				_txData
-			);
-		} else {
+		if (_txData.length == 0) {
 			revert Errors.EmptyTransaction();
 		}
+		// A caller may only submit a transaction on behalf of another
+		// address if it is a registered ghost contract relaying a call for
+		// its own caller (see GhostBlueprint.addTransaction). Otherwise
+		// `_sender` must be the caller itself, or left unset (address(0),
+		// defaulted to msg.sender below).
+		if (
+			_sender != address(0) &&
+			_sender != msg.sender &&
+			!ghostContracts[msg.sender]
+		) {
+			revert Errors.UnauthorizedSender();
+		}
+		_addTransaction(
+			_sender,
+			_recipient,
+			_numOfInitialValidators,
+			_maxRotations,
+			0,
+			_txData
+		);
 		// TODO: Fee verification handling
 	}
 
@@ -396,8 +407,18 @@ contract ConsensusMain is
 		} else {
 			saltNonce = 0;
 		}
+		address feeAwareSender = address(uint160(senderWord));
+		// Same authorization rule as the plain `addTransaction` entrypoint:
+		// see the comment there for why `_sender` cannot be trusted as-is.
+		if (
+			feeAwareSender != address(0) &&
+			feeAwareSender != msg.sender &&
+			!ghostContracts[msg.sender]
+		) {
+			revert Errors.UnauthorizedSender();
+		}
 		_addTransaction(
-			address(uint160(senderWord)),
+			feeAwareSender,
 			address(uint160(recipientWord)),
 			numOfInitialValidators,
 			maxRotations,
