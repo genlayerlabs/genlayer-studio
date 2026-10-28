@@ -716,6 +716,7 @@ def delete_provider(session: Session, id: int) -> None:
     llm_provider_registry.delete(id)
 
 
+@check_forbidden_method_in_hosted_studio
 async def create_validator(
     session: Session,
     validators_manager: validators.Manager,

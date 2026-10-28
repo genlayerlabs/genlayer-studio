@@ -231,6 +231,8 @@ async def lifespan(app: FastAPI):
         pool_pre_ping=True,
         pool_recycle=3600,
         pool_timeout=30,
+        # Errors are persisted into receipts, so keep bound values out of them.
+        hide_parameters=True,
     )
 
     # Create session factory
