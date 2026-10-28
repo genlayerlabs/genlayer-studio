@@ -2,7 +2,7 @@
 import { RouterView, useRouter, useRoute } from 'vue-router';
 import Header from '@/components/Header.vue';
 import Notification from '@/components/Notification.vue';
-import TutorialContainer from '@/components/Tutorial/TutorialContainer.vue';
+import TutorialContainer from '@/components/tutorial/TutorialContainer.vue';
 import ConnectionStatusBanner from '@/components/ConnectionStatusBanner.vue';
 import { useUIStore } from '@/stores/ui';
 import { onBeforeMount, onMounted, nextTick, watch } from 'vue';

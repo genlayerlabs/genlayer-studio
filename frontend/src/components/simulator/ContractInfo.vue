@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import PageSection from '@/components/Simulator/PageSection.vue';
+import PageSection from '@/components/simulator/PageSection.vue';
 import { CheckCircleIcon } from '@heroicons/vue/24/outline';
 import { ArrowPathIcon } from '@heroicons/vue/20/solid';
-import EmptyListPlaceholder from '@/components/Simulator/EmptyListPlaceholder.vue';
+import EmptyListPlaceholder from '@/components/simulator/EmptyListPlaceholder.vue';
 import { useNodeStore, useUIStore } from '@/stores';
 import { useContractQueries, useShortAddress } from '@/hooks';
 import { UploadIcon, Share2, Check, ExternalLink } from 'lucide-vue-next';

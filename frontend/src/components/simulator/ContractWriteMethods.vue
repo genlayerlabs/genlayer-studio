@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { useContractQueries } from '@/hooks';
 import { computed, ref } from 'vue';
-import PageSection from '@/components/Simulator/PageSection.vue';
-import ContractMethodItem from '@/components/Simulator/ContractMethodItem.vue';
-import EmptyListPlaceholder from '@/components/Simulator/EmptyListPlaceholder.vue';
+import PageSection from '@/components/simulator/PageSection.vue';
+import ContractMethodItem from '@/components/simulator/ContractMethodItem.vue';
+import EmptyListPlaceholder from '@/components/simulator/EmptyListPlaceholder.vue';
 import type { ContractSchema } from 'genlayer-js/types';
 import type { ExecutionMode } from '@/types';
 
