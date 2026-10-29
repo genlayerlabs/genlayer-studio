@@ -43,6 +43,7 @@ from backend.domain.types import (
 )
 from backend.node.base import Node, get_simulator_chain_id
 from backend.node.genvm.executor_selection import (
+    legacy_executor_selector_for_child_code,
     legacy_executor_selector_for_code,
     uses_legacy_storage,
 )
@@ -5106,6 +5107,56 @@ def _refund_skipped_internal_message(
     context.transaction.data[FEE_ACCOUNTING_KEY] = updated_accounting
 
 
+def _emitter_genvm_executor_selector(context: TransactionContext) -> str | None:
+    # SEND contexts never set a snapshot.
+    snapshot = getattr(context, "contract_snapshot", None)
+    selector = getattr(snapshot, "genvm_executor_selector", None)
+    if selector:
+        return selector
+    if context.transaction.type == TransactionType.DEPLOY_CONTRACT:
+        return transaction_genvm_executor_selector(context.transaction)
+    return None
+
+
+def _child_sim_config(
+    context: TransactionContext, insert_transaction_data: list
+) -> dict | None:
+    """Cascade the parent's sim_config; pin v0.2-only children of v0.2 contracts.
+
+    Only deployments emitted by a contract already on the retained line may
+    select it from their runners; new user deployments get the newest line.
+    """
+    sim_config = (
+        context.transaction.sim_config.to_dict()
+        if context.transaction.sim_config
+        else None
+    )
+    if sim_config and sim_config.pop("genvm_executor_selector_inferred", False):
+        # An inferred pin described the parent's code only; recompute below.
+        sim_config["genvm_executor_selector"] = None
+        if not sim_config["validators"] and sim_config["genvm_datetime"] is None:
+            sim_config = None
+    if insert_transaction_data[2] != TransactionType.DEPLOY_CONTRACT.value:
+        return sim_config
+    if sim_config and sim_config.get("genvm_executor_selector"):
+        return sim_config
+    code = insert_transaction_data[1].get("contract_code")
+    selector = (
+        legacy_executor_selector_for_child_code(code)
+        if isinstance(code, bytes)
+        else None
+    )
+    if selector is None or not uses_legacy_storage(
+        _emitter_genvm_executor_selector(context)
+    ):
+        return sim_config
+    return {
+        **(sim_config or {"validators": [], "genvm_datetime": None}),
+        "genvm_executor_selector": selector,
+        "genvm_executor_selector_inferred": True,
+    }
+
+
 def _emit_messages(
     context: TransactionContext,
     insert_transactions_data: list,
@@ -5229,11 +5280,7 @@ def _emit_messages(
                 context.transaction.config_rotation_rounds,
                 insert_transaction_data[1],
             ),
-            sim_config=(
-                context.transaction.sim_config.to_dict()
-                if context.transaction.sim_config
-                else None
-            ),
+            sim_config=_child_sim_config(context, insert_transaction_data),
             triggered_on=triggered_on,
             execution_mode=execution_mode_str,  # Cascade execution mode
             origin_address=context.transaction.origin_address,

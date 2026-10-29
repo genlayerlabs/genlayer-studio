@@ -51,6 +51,9 @@ class SimConfig:
     # execution itself and stored on the contract, so every later execution
     # of that contract keeps using it.
     genvm_executor_selector: str | None = None
+    # Set when consensus inferred the selector for a child deployment; such a
+    # pin applies to that deployment only and is not cascaded to descendants.
+    genvm_executor_selector_inferred: bool = False
 
     @property
     def genvm_datetime_as_datetime(self) -> datetime.datetime | None:
@@ -71,16 +74,22 @@ class SimConfig:
             validators=validators,
             genvm_datetime=d.get("genvm_datetime"),
             genvm_executor_selector=d.get("genvm_executor_selector"),
+            genvm_executor_selector_inferred=bool(
+                d.get("genvm_executor_selector_inferred", False)
+            ),
         )
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "validators": [
                 v.to_dict() if hasattr(v, "to_dict") else v for v in self.validators
             ],
             "genvm_datetime": self.genvm_datetime,
             "genvm_executor_selector": self.genvm_executor_selector,
         }
+        if self.genvm_executor_selector_inferred:
+            result["genvm_executor_selector_inferred"] = True
+        return result
 
 
 @dataclass()
