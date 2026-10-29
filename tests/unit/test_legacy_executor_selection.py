@@ -228,6 +228,38 @@ def test_retained_runner_without_installed_registries_keeps_manager_selection():
     assert legacy_executor_selector_for_child_code(code) is None
 
 
+def _encrypted_zip_contract() -> bytes:
+    data = bytearray(_zip_contract(f'{{ "Depends": "{V02_MULTI}" }}'))
+    # Set the encrypted flag in each central directory entry.
+    entry = data.find(b"PK\x01\x02")
+    while entry != -1:
+        data[entry + 8] |= 0x1
+        entry = data.find(b"PK\x01\x02", entry + 4)
+    with pytest.raises(RuntimeError):
+        zipfile.ZipFile(io.BytesIO(bytes(data))).read("runner.json")
+    return bytes(data)
+
+
+@pytest.mark.parametrize(
+    "code, expected",
+    [
+        (_encrypted_zip_contract(), None),
+        (b"# " + b"[" * 100_000 + b"]" * 100_000 + b"\n", None),
+        (
+            b"# "
+            + b"[" * 500
+            + f'{{ "Depends": "{V02_GENLAYER}" }}'.encode()
+            + b"]" * 500,
+            LEGACY_SELECTOR,
+        ),
+    ],
+    ids=["encrypted-zip", "too-deep-json", "deep-json"],
+)
+def test_child_code_sniffing_never_raises(installed_genvm, code, expected):
+    # Invalid input must reach GenVM's invalid-contract path, not crash emission.
+    assert legacy_executor_selector_for_child_code(code) == expected
+
+
 def _child_context(emitter_selector, *, parent=None, snapshot=True):
     parent = parent or Transaction(
         hash="0xparent",
@@ -265,6 +297,7 @@ def test_v02_contract_deploying_retained_only_child_pins_it_to_v02(
         _child_context(emitter_selector), _child_deploy(CAMPAIGN_CODE)
     )
     assert sim_config["genvm_executor_selector"] == LEGACY_SELECTOR
+    assert sim_config["genvm_executor_selector_inferred"] is True
     assert sim_config["validators"] == []
 
     child = _deployment(CAMPAIGN_CODE)
@@ -274,14 +307,34 @@ def test_v02_contract_deploying_retained_only_child_pins_it_to_v02(
     assert snapshot.genvm_executor_selector == LEGACY_SELECTOR
 
 
+def _inferred_child_deployment(code):
+    child = _deployment(code)
+    child.sim_config = SimConfig(
+        validators=[],
+        genvm_executor_selector=LEGACY_SELECTOR,
+        genvm_executor_selector_inferred=True,
+    )
+    return child
+
+
 def test_v02_child_deploying_from_its_constructor_pins_grandchild(installed_genvm):
     # CampaignIC.__init__ deploying its shards: the emitter is itself a deploy.
-    parent = _deployment(CAMPAIGN_CODE, selector=LEGACY_SELECTOR)
+    parent = _inferred_child_deployment(CAMPAIGN_CODE)
     sim_config = consensus_base._child_sim_config(
         _child_context(None, parent=parent, snapshot=False),
         _child_deploy(CAMPAIGN_CODE),
     )
     assert sim_config["genvm_executor_selector"] == LEGACY_SELECTOR
+
+
+def test_inferred_pin_is_not_cascaded_to_descendants(installed_genvm):
+    context = _child_context(
+        None, parent=_inferred_child_deployment(CAMPAIGN_CODE), snapshot=False
+    )
+    call = [ADDRESS, {"calldata": b""}, TransactionType.RUN_CONTRACT.value]
+    assert consensus_base._child_sim_config(context, call) is None
+    deploy = _child_deploy(CURRENT_CODE)
+    assert consensus_base._child_sim_config(context, deploy) is None
 
 
 @pytest.mark.parametrize(

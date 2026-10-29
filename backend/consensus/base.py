@@ -5131,6 +5131,11 @@ def _child_sim_config(
         if context.transaction.sim_config
         else None
     )
+    if sim_config and sim_config.pop("genvm_executor_selector_inferred", False):
+        # An inferred pin described the parent's code only; recompute below.
+        sim_config["genvm_executor_selector"] = None
+        if not sim_config["validators"] and sim_config["genvm_datetime"] is None:
+            sim_config = None
     if insert_transaction_data[2] != TransactionType.DEPLOY_CONTRACT.value:
         return sim_config
     if sim_config and sim_config.get("genvm_executor_selector"):
@@ -5148,6 +5153,7 @@ def _child_sim_config(
     return {
         **(sim_config or {"validators": [], "genvm_datetime": None}),
         "genvm_executor_selector": selector,
+        "genvm_executor_selector_inferred": True,
     }
 
 

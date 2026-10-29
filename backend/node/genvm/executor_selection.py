@@ -69,11 +69,9 @@ def _declared_runners(code: bytes) -> set[str]:
         return set()
     try:
         parsed = json.loads(spec)
-    except ValueError:
+    except (ValueError, RecursionError):
         return set()
-    found: set[str] = set()
-    _collect_depends(parsed, found)
-    return found
+    return _collect_depends(parsed)
 
 
 def _runner_spec(code: bytes) -> bytes | None:
@@ -84,7 +82,8 @@ def _runner_spec(code: bytes) -> bytes | None:
             if info.file_size > _MAX_RUNNER_JSON_BYTES:
                 return None
             return archive.read(info)
-    except (zipfile.BadZipFile, KeyError, ValueError, OSError, EOFError):
+    except Exception:
+        # Encrypted, unsupported or corrupt archives are GenVM's to reject.
         pass
 
     prefix = next((p for p in _COMMENT_PREFIXES if code.startswith(p)), None)
@@ -101,16 +100,20 @@ def _runner_spec(code: bytes) -> bytes | None:
     return b"".join(parts)
 
 
-def _collect_depends(node: object, found: set[str]) -> None:
-    if isinstance(node, dict):
-        for key, value in node.items():
-            if key == "Depends" and isinstance(value, str):
-                found.add(value)
-            else:
-                _collect_depends(value, found)
-    elif isinstance(node, list):
-        for item in node:
-            _collect_depends(item, found)
+def _collect_depends(root: object) -> set[str]:
+    found: set[str] = set()
+    pending = [root]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "Depends" and isinstance(value, str):
+                    found.add(value)
+                else:
+                    pending.append(value)
+        elif isinstance(node, list):
+            pending.extend(node)
+    return found
 
 
 def _legacy_only_runners() -> frozenset[str]:
