@@ -20,16 +20,30 @@ _MAX_RUNNER_JSON_BYTES = 64 * 1024
 
 
 def legacy_executor_selector_for_code(code: bytes) -> str | None:
-    """Select the retained v0.2 line for code that only it can run.
+    """Honor an explicit v0.2 version in a text contract's first comment.
 
-    That is a v0.2 first-line version, or a declared runner shipped only by
-    the retained line: the manager sends every other major-0 contract to the
-    newest line, which rejects such runners as malformed. Other code keeps the
-    normal manager selection, and GenVM remains responsible for validating it.
+    GenVM recognizes #, // and -- comments only at the start of the source,
+    with the version on the first line. Do not infer a version from a runner
+    hash, imports, or later comments. Other formats/versions keep the normal
+    manager selection, and GenVM remains responsible for validating code.
     """
     first_line = code.partition(b"\n")[0]
     if _LEGACY_HEADER.fullmatch(first_line):
         return LEGACY_EXECUTOR_SELECTOR
+    return None
+
+
+def legacy_executor_selector_for_child_code(code: bytes) -> str | None:
+    """Select the retained v0.2 line for code a v0.2 contract deploys.
+
+    New user deployments get the newest line, but contracts already pinned to
+    v0.2 must keep deploying the code they hold (factories, shards). Besides a
+    v0.2 header, that code may declare a runner shipped only by the retained
+    line: the manager sends every other major-0 contract to the newest line,
+    which rejects such runners as malformed.
+    """
+    if selector := legacy_executor_selector_for_code(code):
+        return selector
     legacy_only = _legacy_only_runners()
     if legacy_only and not legacy_only.isdisjoint(_declared_runners(code)):
         return LEGACY_EXECUTOR_SELECTOR

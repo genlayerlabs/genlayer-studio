@@ -27,7 +27,10 @@ from backend.node.base import Node
 from backend.node.types import ExecutionResultStatus
 from backend.node.genvm import base as genvm_base
 from backend.node.genvm import get_code_slot
-from backend.node.genvm.executor_selection import legacy_executor_selector_for_code
+from backend.node.genvm.executor_selection import (
+    legacy_executor_selector_for_child_code,
+    legacy_executor_selector_for_code,
+)
 from backend.node.genvm.origin import calldata
 from backend.node.genvm.origin.logger import NoLogger
 from backend.protocol_rpc import endpoints
@@ -136,32 +139,53 @@ def test_other_code_keeps_canonical_manager_selection(code):
     assert legacy_executor_selector_for_code(code) is None
 
 
-@pytest.mark.parametrize(
-    "code",
-    [
-        # Rally's XID / BridgeSender.
-        f'# v0.1.0\n# {{ "Depends": "{V01_GENLAYER}" }}\nclass C: pass\n'.encode(),
-        # Rally's CampaignIC / CampaignShard: unversioned multi-line Seq.
-        (
-            "# {\n"
-            '#   "Seq": [\n'
-            f'#     {{ "Depends": "{V02_EMBEDDINGS}" }},\n'
-            f'#     {{ "Depends": "{V02_GENLAYER}" }}\n'
-            "#   ]\n"
-            "# }\n"
-            "import numpy\n"
-        ).encode(),
-        f'// {{ "Depends": "{V02_GENLAYER}" }}\ncode'.encode(),
-        f'# v0.3.0\n# {{ "Depends": "{V02_GENLAYER}" }}\n'.encode(),
-        # Rally's CampaignFactory: zip with runner.json.
-        _zip_contract(f'{{\n  "Depends": "{V02_MULTI}"\n}}'),
-    ],
-    ids=["v0.1-header", "unversioned-seq", "slash-comment", "v0.3-header", "zip"],
-)
-def test_code_declaring_a_retained_only_runner_selects_legacy_executor(
+RETAINED_ONLY_CODE = [
+    # Rally's XID / BridgeSender.
+    f'# v0.1.0\n# {{ "Depends": "{V01_GENLAYER}" }}\nclass C: pass\n'.encode(),
+    # Rally's CampaignIC / CampaignShard: unversioned multi-line Seq.
+    (
+        "# {\n"
+        '#   "Seq": [\n'
+        f'#     {{ "Depends": "{V02_EMBEDDINGS}" }},\n'
+        f'#     {{ "Depends": "{V02_GENLAYER}" }}\n'
+        "#   ]\n"
+        "# }\n"
+        "import numpy\n"
+    ).encode(),
+    f'// {{ "Depends": "{V02_GENLAYER}" }}\ncode'.encode(),
+    f'# v0.3.0\n# {{ "Depends": "{V02_GENLAYER}" }}\n'.encode(),
+    # Rally's CampaignFactory: zip with runner.json.
+    _zip_contract(f'{{\n  "Depends": "{V02_MULTI}"\n}}'),
+]
+RETAINED_ONLY_IDS = [
+    "v0.1-header",
+    "unversioned-seq",
+    "slash-comment",
+    "v0.3-header",
+    "zip",
+]
+CAMPAIGN_CODE = RETAINED_ONLY_CODE[1]
+CURRENT_CODE = f'# {{ "Depends": "{V03_GENLAYER}" }}\nclass C: pass\n'.encode()
+
+
+@pytest.mark.parametrize("code", RETAINED_ONLY_CODE, ids=RETAINED_ONLY_IDS)
+def test_child_code_declaring_a_retained_only_runner_selects_legacy_executor(
     installed_genvm, code
 ):
-    assert legacy_executor_selector_for_code(code) == LEGACY_SELECTOR
+    assert legacy_executor_selector_for_child_code(code) == LEGACY_SELECTOR
+
+
+@pytest.mark.parametrize("code", RETAINED_ONLY_CODE, ids=RETAINED_ONLY_IDS)
+def test_new_deployment_of_retained_only_runner_keeps_manager_selection(
+    installed_genvm, code
+):
+    # Only contracts already on v0.2 may deploy onto it by runner.
+    assert legacy_executor_selector_for_code(code) is None
+    assert transaction_genvm_executor_selector(_deployment(code)) is None
+
+
+def test_child_code_with_legacy_header_selects_legacy_executor():
+    assert legacy_executor_selector_for_child_code(LEGACY_CODE) == LEGACY_SELECTOR
 
 
 @pytest.mark.parametrize(
@@ -193,25 +217,97 @@ def test_code_declaring_a_retained_only_runner_selects_legacy_executor(
         "bad-zip",
     ],
 )
-def test_code_runnable_by_newest_line_keeps_manager_selection(installed_genvm, code):
-    assert legacy_executor_selector_for_code(code) is None
+def test_child_code_runnable_by_newest_line_keeps_manager_selection(
+    installed_genvm, code
+):
+    assert legacy_executor_selector_for_child_code(code) is None
 
 
 def test_retained_runner_without_installed_registries_keeps_manager_selection():
     code = f'# {{ "Depends": "{V02_GENLAYER}" }}\n'.encode()
-    assert legacy_executor_selector_for_code(code) is None
+    assert legacy_executor_selector_for_child_code(code) is None
 
 
-def test_child_deployment_of_unversioned_legacy_code_persists_legacy_selector(
-    installed_genvm,
-):
-    # Factory-created children carry only the parent's sim_config, if any.
-    transaction = _deployment(
-        f'# {{ "Seq": [{{ "Depends": "{V02_GENLAYER}" }}] }}\nclass C: pass\n'.encode()
+def _child_context(emitter_selector, *, parent=None, snapshot=True):
+    parent = parent or Transaction(
+        hash="0xparent",
+        status=TransactionStatus.PENDING,
+        type=TransactionType.RUN_CONTRACT,
+        from_address="0x" + "34" * 20,
+        to_address=ADDRESS,
+        data={},
+        value=0,
     )
-    assert transaction_genvm_executor_selector(transaction) == LEGACY_SELECTOR
-    snapshot = contract_snapshot_factory(ADDRESS, None, transaction)
+    return SimpleNamespace(
+        transaction=parent,
+        contract_snapshot=(
+            SimpleNamespace(genvm_executor_selector=emitter_selector)
+            if snapshot
+            else None
+        ),
+    )
+
+
+def _child_deploy(code):
+    return [
+        consensus_base.ZERO_ADDRESS,
+        {"contract_address": consensus_base.ZERO_ADDRESS, "contract_code": code},
+        TransactionType.DEPLOY_CONTRACT.value,
+    ]
+
+
+@pytest.mark.parametrize("emitter_selector", [LEGACY_SELECTOR, "v0.2.17"])
+def test_v02_contract_deploying_retained_only_child_pins_it_to_v02(
+    installed_genvm, emitter_selector
+):
+    # CampaignFactory.create_campaign deploying CampaignIC.
+    sim_config = consensus_base._child_sim_config(
+        _child_context(emitter_selector), _child_deploy(CAMPAIGN_CODE)
+    )
+    assert sim_config["genvm_executor_selector"] == LEGACY_SELECTOR
+    assert sim_config["validators"] == []
+
+    child = _deployment(CAMPAIGN_CODE)
+    child.sim_config = SimConfig.from_dict(sim_config)
+    assert transaction_genvm_executor_selector(child) == LEGACY_SELECTOR
+    snapshot = contract_snapshot_factory(ADDRESS, None, child)
     assert snapshot.genvm_executor_selector == LEGACY_SELECTOR
+
+
+def test_v02_child_deploying_from_its_constructor_pins_grandchild(installed_genvm):
+    # CampaignIC.__init__ deploying its shards: the emitter is itself a deploy.
+    parent = _deployment(CAMPAIGN_CODE, selector=LEGACY_SELECTOR)
+    sim_config = consensus_base._child_sim_config(
+        _child_context(None, parent=parent, snapshot=False),
+        _child_deploy(CAMPAIGN_CODE),
+    )
+    assert sim_config["genvm_executor_selector"] == LEGACY_SELECTOR
+
+
+@pytest.mark.parametrize(
+    "emitter_selector, code",
+    [
+        (None, CAMPAIGN_CODE),
+        ("v0.3.0-rc10", CAMPAIGN_CODE),
+        (LEGACY_SELECTOR, CURRENT_CODE),
+    ],
+    ids=["current-emitter", "pinned-current-emitter", "current-child"],
+)
+def test_child_deployment_otherwise_keeps_manager_selection(
+    installed_genvm, emitter_selector, code
+):
+    context = _child_context(emitter_selector)
+    assert consensus_base._child_sim_config(context, _child_deploy(code)) is None
+
+
+def test_child_call_and_explicit_pin_cascade_unchanged(installed_genvm):
+    parent = _deployment(CAMPAIGN_CODE, selector="v0.2.17")
+    context = _child_context(LEGACY_SELECTOR, parent=parent)
+    call = [ADDRESS, {"calldata": b""}, TransactionType.RUN_CONTRACT.value]
+    expected = parent.sim_config.to_dict()
+    assert consensus_base._child_sim_config(context, call) == expected
+    deploy = _child_deploy(CAMPAIGN_CODE)
+    assert consensus_base._child_sim_config(context, deploy) == expected
 
 
 def _deployment(code=LEGACY_CODE, selector=None):
@@ -351,12 +447,8 @@ def test_explicit_deployment_selector_is_preserved():
     )
 
 
-def test_current_deployment_keeps_default_executor(installed_genvm):
-    transaction = _deployment(
-        LEGACY_CODE.replace(b"v0.2.16", b"v0.3.0").replace(
-            V02_GENLAYER.encode(), V03_GENLAYER.encode()
-        )
-    )
+def test_current_deployment_keeps_default_executor():
+    transaction = _deployment(LEGACY_CODE.replace(b"v0.2.16", b"v0.3.0"))
     assert transaction_genvm_executor_selector(transaction) is None
 
 
