@@ -1,7 +1,9 @@
 """Legacy contracts must work through ordinary RPCs, without sim_config."""
 
 import base64
+import io
 import json
+import zipfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock
 
@@ -48,6 +50,53 @@ class Legacy(gl.Contract):
 ADDRESS = "0x" + "12" * 20
 SCHEMA = {"methods": {"get_value": {"readonly": True}}}
 
+V02_GENLAYER = "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6"
+V01_GENLAYER = "py-genlayer:1j12s63yfjpva9ik2xgnffgrs6v44y1f52jvj9w7xvdn7qckd379"
+V02_MULTI = "py-genlayer-multi:06zyvrlivjga0d5jlpdbprksc0pa6jmllxvp8s20hq1l512vh5yk"
+V02_EMBEDDINGS = (
+    "py-lib-genlayer-embeddings:0bmbm3cyfwxsyh454z53vxqjf47wz2q7smcqp1q4g4a6k2kidnyk"
+)
+V03_GENLAYER = "py-genlayer:babwp9t37jw9g4j2bccgn14g6x7x9s1f7dsmh7emvz735pz4zxa0"
+SHARED_LIB = "py-lib-protobuf:0riri6vk1ma3cnmlwls3d4771y0cf3c44afsl6gwfmnl2cpcbdl1"
+# Split so the backend image's runner-pin grep does not require fake runners.
+UNPINNED_GENLAYER = "py-" + "genlayer"
+
+
+@pytest.fixture(autouse=True)
+def no_installed_genvm(monkeypatch):
+    monkeypatch.delenv("GENVMROOT", raising=False)
+
+
+def _registry(ids):
+    runners = {}
+    for runner_id in ids:
+        name, runner_hash = runner_id.split(":")
+        runners.setdefault(name, []).append(runner_hash)
+    return json.dumps(runners)
+
+
+@pytest.fixture
+def installed_genvm(tmp_path, monkeypatch):
+    """Registries shaped like genvm-manager v0.6.0-rc9's executor lines."""
+    lines = {
+        "v0.2.17": [V02_GENLAYER, V01_GENLAYER, V02_MULTI, V02_EMBEDDINGS, SHARED_LIB],
+        "v0.3.0-rc10": [V03_GENLAYER, SHARED_LIB],
+    }
+    for line, ids in lines.items():
+        data = tmp_path / "executor" / line / "data"
+        data.mkdir(parents=True)
+        (data / "all.json").write_text(_registry(ids))
+    monkeypatch.setenv("GENVMROOT", str(tmp_path))
+    return tmp_path
+
+
+def _zip_contract(runner_json: str) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("contract/__init__.py", "from genlayer import *\n")
+        archive.writestr("runner.json", runner_json)
+    return buffer.getvalue()
+
 
 @pytest.mark.parametrize(
     "header",
@@ -85,6 +134,84 @@ def test_legacy_version_header_matches_genvm_text_comment_rules(header):
 )
 def test_other_code_keeps_canonical_manager_selection(code):
     assert legacy_executor_selector_for_code(code) is None
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        # Rally's XID / BridgeSender.
+        f'# v0.1.0\n# {{ "Depends": "{V01_GENLAYER}" }}\nclass C: pass\n'.encode(),
+        # Rally's CampaignIC / CampaignShard: unversioned multi-line Seq.
+        (
+            "# {\n"
+            '#   "Seq": [\n'
+            f'#     {{ "Depends": "{V02_EMBEDDINGS}" }},\n'
+            f'#     {{ "Depends": "{V02_GENLAYER}" }}\n'
+            "#   ]\n"
+            "# }\n"
+            "import numpy\n"
+        ).encode(),
+        f'// {{ "Depends": "{V02_GENLAYER}" }}\ncode'.encode(),
+        f'# v0.3.0\n# {{ "Depends": "{V02_GENLAYER}" }}\n'.encode(),
+        # Rally's CampaignFactory: zip with runner.json.
+        _zip_contract(f'{{\n  "Depends": "{V02_MULTI}"\n}}'),
+    ],
+    ids=["v0.1-header", "unversioned-seq", "slash-comment", "v0.3-header", "zip"],
+)
+def test_code_declaring_a_retained_only_runner_selects_legacy_executor(
+    installed_genvm, code
+):
+    assert legacy_executor_selector_for_code(code) == LEGACY_SELECTOR
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        f'# v0.3.0\n# {{ "Depends": "{V03_GENLAYER}" }}\n'.encode(),
+        f'# {{ "Depends": "{V03_GENLAYER}" }}\n'.encode(),
+        f'# v0.1.0\n# {{ "Depends": "{V03_GENLAYER}" }}\n'.encode(),
+        # Present in both lines, so the newest line can load it.
+        f'# {{ "Seq": [{{ "Depends": "{SHARED_LIB}" }}] }}\n'.encode(),
+        f'# {{ "Depends": "{UNPINNED_GENLAYER}:latest" }}\n'.encode(),
+        f'# {{ "Depends": "{UNPINNED_GENLAYER}:unknownhash" }}\n'.encode(),
+        # GenVM reads only the leading comment block.
+        f'# v0.3.0\nx = 1\n# {{ "Depends": "{V02_GENLAYER}" }}\n'.encode(),
+        f'# {{ "Depends": "{V02_GENLAYER}"\n'.encode(),
+        _zip_contract(f'{{ "Depends": "{V03_GENLAYER}" }}'),
+        b"PK\x03\x04 not a zip",
+    ],
+    ids=[
+        "v0.3-current",
+        "unversioned-current",
+        "v0.1-current",
+        "shared-lib",
+        "alias",
+        "unknown-hash",
+        "after-code",
+        "malformed-json",
+        "zip-current",
+        "bad-zip",
+    ],
+)
+def test_code_runnable_by_newest_line_keeps_manager_selection(installed_genvm, code):
+    assert legacy_executor_selector_for_code(code) is None
+
+
+def test_retained_runner_without_installed_registries_keeps_manager_selection():
+    code = f'# {{ "Depends": "{V02_GENLAYER}" }}\n'.encode()
+    assert legacy_executor_selector_for_code(code) is None
+
+
+def test_child_deployment_of_unversioned_legacy_code_persists_legacy_selector(
+    installed_genvm,
+):
+    # Factory-created children carry only the parent's sim_config, if any.
+    transaction = _deployment(
+        f'# {{ "Seq": [{{ "Depends": "{V02_GENLAYER}" }}] }}\nclass C: pass\n'.encode()
+    )
+    assert transaction_genvm_executor_selector(transaction) == LEGACY_SELECTOR
+    snapshot = contract_snapshot_factory(ADDRESS, None, transaction)
+    assert snapshot.genvm_executor_selector == LEGACY_SELECTOR
 
 
 def _deployment(code=LEGACY_CODE, selector=None):
@@ -224,8 +351,12 @@ def test_explicit_deployment_selector_is_preserved():
     )
 
 
-def test_current_deployment_keeps_default_executor():
-    transaction = _deployment(LEGACY_CODE.replace(b"v0.2.16", b"v0.3.0"))
+def test_current_deployment_keeps_default_executor(installed_genvm):
+    transaction = _deployment(
+        LEGACY_CODE.replace(b"v0.2.16", b"v0.3.0").replace(
+            V02_GENLAYER.encode(), V03_GENLAYER.encode()
+        )
+    )
     assert transaction_genvm_executor_selector(transaction) is None
 
 
