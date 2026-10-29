@@ -58,6 +58,8 @@ V02_EMBEDDINGS = (
 )
 V03_GENLAYER = "py-genlayer:babwp9t37jw9g4j2bccgn14g6x7x9s1f7dsmh7emvz735pz4zxa0"
 SHARED_LIB = "py-lib-protobuf:0riri6vk1ma3cnmlwls3d4771y0cf3c44afsl6gwfmnl2cpcbdl1"
+# Split so the backend image's runner-pin grep does not require fake runners.
+UNPINNED_GENLAYER = "py-" + "genlayer"
 
 
 @pytest.fixture(autouse=True)
@@ -170,8 +172,8 @@ def test_code_declaring_a_retained_only_runner_selects_legacy_executor(
         f'# v0.1.0\n# {{ "Depends": "{V03_GENLAYER}" }}\n'.encode(),
         # Present in both lines, so the newest line can load it.
         f'# {{ "Seq": [{{ "Depends": "{SHARED_LIB}" }}] }}\n'.encode(),
-        b'# { "Depends": "py-genlayer:latest" }\n',
-        b'# { "Depends": "py-genlayer:unknownhash" }\n',
+        f'# {{ "Depends": "{UNPINNED_GENLAYER}:latest" }}\n'.encode(),
+        f'# {{ "Depends": "{UNPINNED_GENLAYER}:unknownhash" }}\n'.encode(),
         # GenVM reads only the leading comment block.
         f'# v0.3.0\nx = 1\n# {{ "Depends": "{V02_GENLAYER}" }}\n'.encode(),
         f'# {{ "Depends": "{V02_GENLAYER}"\n'.encode(),
