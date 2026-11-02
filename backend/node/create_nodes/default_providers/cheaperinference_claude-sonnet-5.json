@@ -1,0 +1,10 @@
+{
+  "provider": "cheaperinference",
+  "plugin": "openai-compatible",
+  "model": "claude-sonnet-5",
+  "config": {},
+  "plugin_config": {
+    "api_key_env_var": "CHEAPERINFERENCE_API_KEY",
+    "api_url": "https://api.cheaperinference.com"
+  }
+}

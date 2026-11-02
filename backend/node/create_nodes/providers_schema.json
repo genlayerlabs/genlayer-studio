@@ -14,7 +14,8 @@
         "xai",
         "google",
         "openrouter",
-        "libertai"
+        "libertai",
+        "cheaperinference"
       ]
     },
     "model": {
@@ -139,6 +140,22 @@
         "properties": {
           "provider": {
             "const": "libertai"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "plugin": {
+            "const": "openai-compatible"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "provider": {
+            "const": "cheaperinference"
           }
         }
       },
