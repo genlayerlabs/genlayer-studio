@@ -539,8 +539,10 @@ async def test_accepted_deployment_registers_matching_code_slot_and_selector(
 
     await consensus_base.AcceptedState().handle(context)
 
-    pre_effects = executor.execute.await_args_list[0].args[0]
-    registration = next(e for e in pre_effects if isinstance(e, RegisterContractEffect))
+    post_effects = executor.execute.await_args_list[1].args[0]
+    registration = next(
+        e for e in post_effects if isinstance(e, RegisterContractEffect)
+    )
     stored = registration.contract_data
     assert stored["genvm_executor_selector"] == (LEGACY_SELECTOR if legacy else None)
     assert stored["data"]["state"]["accepted"] == receipt.contract_state

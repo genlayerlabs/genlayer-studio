@@ -10,7 +10,9 @@ import rlp
 from eth_abi import decode, encode
 from web3 import Web3
 
+import backend.consensus.base as consensus_base
 from backend.consensus.base import (
+    CHILD_CREATION_ERROR_KEY,
     ConsensusAlgorithm,
     _author_message_phase_locally,
     _apply_external_message_freeze_check,
@@ -10762,6 +10764,65 @@ def test_message_dispatch_creates_mode1_child_fee_accounting_from_pending_metada
         "internalConsumed": child_budget,
         "externalReimbursed": 0,
         "remaining": 0,
+    }
+
+
+def test_message_dispatch_skips_child_whose_fee_accounting_is_rejected(monkeypatch):
+    policy = StudioFeePolicy.from_env()
+    fee_params = _encode_internal_fee_params()
+    child_budget = 64
+    fees_distribution = _env_fees_distribution(total_message_fees=child_budget)
+    accounting = create_fee_accounting(
+        fees_distribution=fees_distribution,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees_distribution, 5, policy),
+        user_value=0,
+        sender="0x1111111111111111111111111111111111111111",
+        policy=policy,
+    )
+    context, _ = _message_dispatch_context(accounting)
+    recipient = "0x2222222222222222222222222222222222222222"
+    pending = PendingTransaction(
+        address=recipient,
+        calldata=b"\x12\x34",
+        code=None,
+        salt_nonce=0,
+        on="accepted",
+        value=7,
+        fee_params=fee_params,
+        declared_budget=child_budget,
+        call_key="0x" + "12" * 32,
+    )
+
+    def reject(**_kwargs):
+        raise MessageAllocationsNotEqualBudget("MessageAllocationsNotEqualBudget")
+
+    monkeypatch.setattr(consensus_base, "create_child_fee_accounting", reject)
+
+    _, inserts = _get_messages_data(context, [pending], "accepted")
+
+    child_data = inserts[0][1]
+    assert child_data[CHILD_CREATION_ERROR_KEY] == "MessageAllocationsNotEqualBudget"
+    assert FEE_ACCOUNTING_KEY not in child_data
+
+    authority = SimpleNamespace(
+        lock_ghost_factory=lambda: None,
+        lock_pending_recipients=lambda _addresses: None,
+        get_successful_ghost_creation_count=lambda: 0,
+        is_genvm_contract_address=lambda address: address.lower() == recipient,
+        get_pending_transaction_count_for_address=lambda _address: 0,
+    )
+    receipt = _author_message_phase_locally(
+        SimpleNamespace(
+            transaction=context.transaction, transactions_processor=authority
+        ),
+        inserts,
+        "accepted",
+    )
+
+    assert receipt == {
+        "tx_ids_hex": ["0x" + ("00" * 32)],
+        "recipients": [Web3.to_checksum_address(recipient)],
     }
 
 

@@ -178,6 +178,10 @@ class InternalMessageEmissionError(RuntimeError):
     """Raised when the helper EVM did not durably accept a message phase."""
 
 
+# Marks a child whose creation Consensus would reject; it is skipped and refunded.
+CHILD_CREATION_ERROR_KEY = "_studio_child_creation_error"
+
+
 def _redact_consensus_data_for_log(consensus_data_dict: dict) -> dict:
     """
     Return a redacted copy of the consensus data suitable for logging.
@@ -3808,7 +3812,7 @@ class AcceptedState(TransactionState):
             ),
         )
 
-        # Execute pre-effects (includes contract registration/update via executor)
+        # Execute pre-effects (decision record, snapshot, timestamps)
         executor = EffectExecutor(context)
         await executor.execute(pre_effects)
 
@@ -3823,7 +3827,7 @@ class AcceptedState(TransactionState):
                 force_phase_event=True,
             )
 
-        # Execute post-effects (status update + appeal cleanup)
+        # Execute post-effects (contract write, status update, appeal cleanup)
         await executor.execute(post_effects)
 
         # Context mutations
@@ -4317,7 +4321,15 @@ def _attach_child_fee_accounting(
             ),
         )
     except FeeValidationError as exc:
-        raise RuntimeError(str(exc)) from exc
+        # Consensus isolates child creation: skip the invalid child, not the phase.
+        from loguru import logger
+
+        logger.warning(
+            f"Skipping internal message from {context.transaction.hash} to "
+            f"{pending_transaction.address}: {exc}"
+        )
+        data[CHILD_CREATION_ERROR_KEY] = str(exc)
+        return
 
     data.update(
         {
@@ -4706,7 +4718,9 @@ def _author_message_phase_locally(
         # CreationPhase. Keep it a per-child contained failure: no ghost,
         # queue slot, child id, or factory nonce is consumed.
         payload_data = message_payload.get("data")
-        creation_failed = payload_data in {b"", "", "0x", None}
+        creation_failed = payload_data in {b"", "", "0x", None} or bool(
+            insert_transaction_data[1].get(CHILD_CREATION_ERROR_KEY)
+        )
         if (
             not creation_failed
             and transaction_type == TransactionType.DEPLOY_CONTRACT.value
@@ -5091,6 +5105,9 @@ def _refund_skipped_internal_message(
         updated_record["skipped"] = True
         updated_record["skippedRefunded"] = True
         updated_record["skippedRefundAmount"] = refund_amount
+        skipped_reason = insert_transaction_data[1].get(CHILD_CREATION_ERROR_KEY)
+        if skipped_reason:
+            updated_record["skippedReason"] = skipped_reason
         if refund_amount > 0:
             context.accounts_manager.credit_account_balance(
                 context.transaction.to_address,

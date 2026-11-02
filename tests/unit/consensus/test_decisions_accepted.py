@@ -180,15 +180,15 @@ class TestDecideAcceptedDeploy:
         return base
 
     def test_registers_new_contract(self):
-        pre, _, _, _ = decide_accepted(**self._deploy_kwargs())
-        e = _find_effect(pre, RegisterContractEffect)
+        _, post, _, _ = decide_accepted(**self._deploy_kwargs())
+        e = _find_effect(post, RegisterContractEffect)
         assert e is not None
         assert e.contract_data["id"] == "0xnewcontract"
         assert "state" in e.contract_data["data"]
 
     def test_contract_data_has_correct_state_structure(self):
-        pre, _, _, _ = decide_accepted(**self._deploy_kwargs())
-        e = _find_effect(pre, RegisterContractEffect)
+        _, post, _, _ = decide_accepted(**self._deploy_kwargs())
+        e = _find_effect(post, RegisterContractEffect)
         state = e.contract_data["data"]["state"]
         assert "accepted" in state
         assert "finalized" in state
@@ -197,26 +197,26 @@ class TestDecideAcceptedDeploy:
         assert "Y29kZQ==" in state["finalized"]
 
     def test_sends_deployed_contract_message(self):
-        pre, _, _, _ = decide_accepted(**self._deploy_kwargs())
-        msgs = _find_effects(pre, SendMessageEffect)
+        _, post, _, _ = decide_accepted(**self._deploy_kwargs())
+        msgs = _find_effects(post, SendMessageEffect)
         deploy_msg = [m for m in msgs if m.event_name == "deployed_contract"]
         assert len(deploy_msg) == 1
         assert deploy_msg[0].event_scope == "GenVM"
 
     def test_no_update_contract_state_effect(self):
-        pre, _, _, _ = decide_accepted(**self._deploy_kwargs())
-        assert _find_effect(pre, UpdateContractStateEffect) is None
+        _, post, _, _ = decide_accepted(**self._deploy_kwargs())
+        assert _find_effect(post, UpdateContractStateEffect) is None
 
     def test_registers_contract_without_reroute_by_default(self):
-        pre, _, _, _ = decide_accepted(**self._deploy_kwargs())
-        e = _find_effect(pre, RegisterContractEffect)
+        _, post, _, _ = decide_accepted(**self._deploy_kwargs())
+        e = _find_effect(post, RegisterContractEffect)
         assert e.contract_data["genvm_executor_selector"] is None
 
     def test_registers_contract_with_reroute_to(self):
-        pre, _, _, _ = decide_accepted(
+        _, post, _, _ = decide_accepted(
             **self._deploy_kwargs(genvm_executor_selector="v0.2.17")
         )
-        e = _find_effect(pre, RegisterContractEffect)
+        e = _find_effect(post, RegisterContractEffect)
         assert e.contract_data["genvm_executor_selector"] == "v0.2.17"
 
 
@@ -224,31 +224,40 @@ class TestDecideAcceptedRunContract:
     """Normal acceptance path for run-contract (non-deploy) transactions."""
 
     def test_updates_contract_state(self):
-        pre, _, _, _ = decide_accepted(
+        _, post, _, _ = decide_accepted(
             **_base_accepted_kwargs(
                 execution_result_success=True,
                 accepted_contract_state={"key": "val"},
             )
         )
-        e = _find_effect(pre, UpdateContractStateEffect)
+        e = _find_effect(post, UpdateContractStateEffect)
         assert e is not None
         assert e.address == "0xcontract"
         assert e.accepted_state == {"key": "val"}
 
     def test_no_register_contract_effect(self):
-        pre, _, _, _ = decide_accepted(**_base_accepted_kwargs())
-        assert _find_effect(pre, RegisterContractEffect) is None
+        _, post, _, _ = decide_accepted(**_base_accepted_kwargs())
+        assert _find_effect(post, RegisterContractEffect) is None
+
+    def test_contract_write_waits_for_message_dispatch(self):
+        pre, post, _, _ = decide_accepted(**_base_accepted_kwargs())
+        assert _find_effect(pre, UpdateContractStateEffect) is None
+        assert _effect_types(post)[:2] == [
+            "UpdateContractStateEffect",
+            "StatusUpdateEffect",
+        ]
 
 
 class TestDecideAcceptedExecutionError:
     """Accepted but execution failed — no contract write effects."""
 
     def test_no_contract_write_on_error(self):
-        pre, _, _, _ = decide_accepted(
+        pre, post, _, _ = decide_accepted(
             **_base_accepted_kwargs(execution_result_success=False)
         )
-        assert _find_effect(pre, RegisterContractEffect) is None
-        assert _find_effect(pre, UpdateContractStateEffect) is None
+        for effects in (pre, post):
+            assert _find_effect(effects, RegisterContractEffect) is None
+            assert _find_effect(effects, UpdateContractStateEffect) is None
 
     def test_still_records_timestamp_and_result(self):
         pre, _, _, _ = decide_accepted(
