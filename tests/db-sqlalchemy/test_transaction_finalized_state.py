@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from eth_abi import encode
 from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 
@@ -31,12 +32,23 @@ from backend.database_handler.types import ConsensusData
 from backend.domain.types import Transaction, TransactionType
 from backend.node.base import _SnapshotView
 from backend.node.genvm import get_code_slot
-from backend.node.types import Address, ExecutionMode, ExecutionResultStatus, Receipt
+from backend.node.types import (
+    Address,
+    ExecutionMode,
+    ExecutionResultStatus,
+    PendingTransaction,
+    Receipt,
+)
 from backend.protocol_rpc.endpoints import admin_upgrade_contract_code
 from backend.protocol_rpc.fees import (
     FEE_ACCOUNTING_KEY,
+    MessageAllocationsNotEqualBudget,
+    StudioFeePolicy,
     calculate_appeal_charge,
     create_fee_accounting,
+    decode_internal_message_fee_params,
+    default_transaction_fees_for_policy,
+    min_message_primary_fees,
     record_appeal_bond,
     required_fee_deposit,
 )
@@ -336,6 +348,162 @@ async def test_accepted_execution_error_does_not_promote_contract_state(lifecycl
             "accepted": state(0),
             "finalized": state(0),
         }
+
+
+CHILD = "0x" + "44" * 20
+
+
+def internal_fee_params():
+    return encode(
+        ["(uint256,uint256,uint256,uint256,uint256[],uint256,uint256,uint256)"],
+        [(5, 10, 0, 0, [0], 1, 2**200, 2**200)],
+    )
+
+
+async def accept_with_message(lifecycle, *, fee_accounting=None):
+    tx_hash = "0x" + f"{1:064x}"
+    pending = PendingTransaction(
+        address=CHILD,
+        calldata=b"\x06",
+        code=None,
+        salt_nonce=0,
+        on="accepted",
+        value=0,
+        fee_params=internal_fee_params(),
+        declared_budget=(
+            min_message_primary_fees(
+                decode_internal_message_fee_params(internal_fee_params()),
+                StudioFeePolicy.from_env(),
+            )
+            if fee_accounting
+            else 0
+        ),
+        call_key="0x" + "12" * 32,
+    )
+    with lifecycle.sessions() as session:
+        tp = TransactionsProcessor(session)
+        # The recipient must be a registered ghost for Consensus to create a child.
+        tp.insert_transaction(
+            from_address=SENDER,
+            to_address=CHILD,
+            data={"contract_address": CHILD, "contract_code": "", "calldata": ""},
+            value=0,
+            type=TransactionType.DEPLOY_CONTRACT.value,
+            nonce=0,
+            leader_only=False,
+            config_rotation_rounds=3,
+            transaction_hash="0x" + "ee" * 32,
+        )
+        session.execute(
+            text("UPDATE transactions SET status='FINALIZED' WHERE hash=:hash"),
+            {"hash": "0x" + "ee" * 32},
+        )
+        tp.insert_transaction(
+            from_address=SENDER,
+            to_address=CONTRACT,
+            data=(
+                {"calldata": "Bg==", FEE_ACCOUNTING_KEY: fee_accounting}
+                if fee_accounting
+                else {"calldata": "Bg=="}
+            ),
+            value=0,
+            type=TransactionType.RUN_CONTRACT.value,
+            nonce=1,
+            leader_only=False,
+            config_rotation_rounds=3,
+            transaction_hash=tx_hash,
+        )
+        session.commit()
+        claimed = await lifecycle.worker.claim_next_transaction(session)
+        assert claimed is not None and claimed["hash"] == tx_hash
+        tx = Transaction.from_dict(tp.get_transaction_by_hash(tx_hash))
+        context = context_for(lifecycle, session, tx)
+        receipt = Receipt(
+            result=b"\x00\x00",
+            calldata=b"\x06",
+            gas_used=0,
+            mode=ExecutionMode.LEADER,
+            contract_state=state(1),
+            node_config={"address": SENDER, "stake": 100},
+            execution_result=ExecutionResultStatus.SUCCESS,
+            pending_transactions=[pending],
+            genvm_result={"stdout": "", "stderr": ""},
+        )
+        context.consensus_data = ConsensusData(
+            votes={}, leader_receipt=[receipt], validators=[]
+        )
+        try:
+            await AcceptedState().handle(context)
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            lifecycle.worker.release_transaction(session, tx_hash)
+    return tx_hash
+
+
+def child_rows(lifecycle, tx_hash):
+    with lifecycle.sessions() as session:
+        return session.execute(
+            text("SELECT hash FROM transactions WHERE triggered_by_hash=:hash"),
+            {"hash": tx_hash},
+        ).fetchall()
+
+
+@pytest.mark.asyncio
+async def test_failed_message_dispatch_does_not_commit_post_state(
+    lifecycle, monkeypatch
+):
+    def helper_down(*_args, **_kwargs):
+        raise RuntimeError("helper unavailable")
+
+    monkeypatch.setattr(consensus_base, "_author_message_phase_locally", helper_down)
+
+    with pytest.raises(RuntimeError, match="helper unavailable"):
+        await accept_with_message(lifecycle)
+
+    # A retry re-executes from the pre-state, so it must still be the head.
+    assert contract_states(lifecycle)["accepted"] == state(0)
+
+
+@pytest.mark.asyncio
+async def test_rejected_child_fee_accounting_skips_child_and_accepts_parent(
+    lifecycle, monkeypatch
+):
+    def reject(**_kwargs):
+        raise MessageAllocationsNotEqualBudget("MessageAllocationsNotEqualBudget")
+
+    monkeypatch.setattr(consensus_base, "create_child_fee_accounting", reject)
+    policy = StudioFeePolicy.from_env()
+    fees, _ = default_transaction_fees_for_policy(policy)
+    fees = {
+        **fees,
+        "totalMessageFees": min_message_primary_fees(
+            decode_internal_message_fee_params(internal_fee_params()), policy
+        ),
+    }
+    accounting = create_fee_accounting(
+        fees_distribution=fees,
+        num_of_validators=5,
+        submitted_value=required_fee_deposit(fees, 5, policy),
+        user_value=0,
+        sender=SENDER,
+        policy=policy,
+    )
+
+    tx_hash = await accept_with_message(lifecycle, fee_accounting=accounting)
+
+    row = row_of(lifecycle, tx_hash)
+    assert row["status"] == "ACCEPTED"
+    assert contract_states(lifecycle)["accepted"] == state(1)
+    assert child_rows(lifecycle, tx_hash) == []
+    parent_accounting = row["data"][FEE_ACCOUNTING_KEY]
+    assert int(parent_accounting["message_fee_consumed"]) == 0
+    assert len(parent_accounting["failed_internal_message_refunds"]) == 1
+    (effect,) = parent_accounting["message_value_effects"].values()
+    assert effect["skipped"] is True
+    assert effect["skippedReason"] == "MessageAllocationsNotEqualBudget"
 
 
 def strip_finalization_state(session, tx_hash):

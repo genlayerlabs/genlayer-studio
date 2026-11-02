@@ -332,7 +332,8 @@ def decide_accepted(
         (pre_effects, post_effects, consensus_round, return_value)
 
         pre_effects: Execute BEFORE triggered-tx processing.
-        post_effects: Execute AFTER triggered-tx processing.
+        post_effects: Execute AFTER triggered-tx processing; the contract write
+            leads them so a failed dispatch never commits this post-state.
         return_value: What handle() should return from the state machine.
 
     Note: Triggered transaction processing (_get_messages_data / _emit_messages)
@@ -427,8 +428,8 @@ def decide_accepted(
                     },
                     "genvm_executor_selector": genvm_executor_selector,
                 }
-                pre_effects.append(RegisterContractEffect(contract_data=new_contract))
-                pre_effects.append(
+                post_effects.append(RegisterContractEffect(contract_data=new_contract))
+                post_effects.append(
                     SendMessageEffect(
                         event_name="deployed_contract",
                         event_type="success",
@@ -439,7 +440,7 @@ def decide_accepted(
                     )
                 )
             else:
-                pre_effects.append(
+                post_effects.append(
                     UpdateContractStateEffect(
                         address=to_address,
                         accepted_state=accepted_contract_state,
