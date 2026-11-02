@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
-import PageSection from '@/components/Simulator/PageSection.vue';
+import PageSection from '@/components/simulator/PageSection.vue';
 import FieldError from '@/components/global/fields/FieldError.vue';
 import NumberInput from '@/components/global/inputs/NumberInput.vue';
 import { useConsensusStore } from '@/stores';

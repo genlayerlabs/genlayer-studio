@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { useContractsStore } from '@/stores';
 import { computed } from 'vue';
-import HomeContractItem from '@/components/Simulator/HomeContractItem.vue';
-import HomeFeatureItem from '@/components/Simulator/HomeFeatureItem.vue';
+import HomeContractItem from '@/components/simulator/HomeContractItem.vue';
+import HomeFeatureItem from '@/components/simulator/HomeFeatureItem.vue';
 import { LINKS } from '@/constants/links';
 import { DocumentTextIcon } from '@heroicons/vue/24/solid';
 import { BrainCircuit, Earth, CodeXml } from 'lucide-vue-next';

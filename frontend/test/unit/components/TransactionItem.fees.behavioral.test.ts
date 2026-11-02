@@ -1,6 +1,6 @@
 import { mount } from '@vue/test-utils';
 import { describe, expect, it, vi } from 'vitest';
-import TransactionItem from '@/components/Simulator/TransactionItem.vue';
+import TransactionItem from '@/components/simulator/TransactionItem.vue';
 import { getRuntimeConfigNumber } from '@/utils/runtimeConfig';
 
 const setTransactionAppealMock = vi.fn();

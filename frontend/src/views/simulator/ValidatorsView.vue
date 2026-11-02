@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { useNodeStore } from '@/stores';
-import ValidatorItem from '@/components/Simulator/ValidatorItem.vue';
-import ValidatorModal from '@/components/Simulator/ValidatorModal.vue';
+import ValidatorItem from '@/components/simulator/ValidatorItem.vue';
+import ValidatorModal from '@/components/simulator/ValidatorModal.vue';
 import { ref } from 'vue';
-import MainTitle from '@/components/Simulator/MainTitle.vue';
-import PageSection from '@/components/Simulator/PageSection.vue';
+import MainTitle from '@/components/simulator/MainTitle.vue';
+import PageSection from '@/components/simulator/PageSection.vue';
 import { PlusIcon } from '@heroicons/vue/16/solid';
-import EmptyListPlaceholder from '@/components/Simulator/EmptyListPlaceholder.vue';
+import EmptyListPlaceholder from '@/components/simulator/EmptyListPlaceholder.vue';
 import GhostBtn from '@/components/global/GhostBtn.vue';
 import { useConfig } from '@/hooks';
 
