@@ -7704,6 +7704,80 @@ def test_fill_message_fee_payload_from_allocation_uses_matching_policy_and_subtr
     assert resolved[1]["budget"] == 56
 
 
+DEPLOY_RECIPIENT = "0x" + "0" * 40
+
+
+def _nested_deploy_accounting(fee_params: str) -> dict:
+    return create_fee_accounting(
+        fees_distribution=_fees_distribution(total_message_fees=111),
+        message_allocations=[
+            _allocation(
+                recipient=DEPLOY_RECIPIENT,
+                call_key=EMPTY_CALL_KEY,
+                budget=111,
+                fee_params=fee_params,
+            ),
+            _allocation(
+                parent_index=0,
+                recipient=DEPLOY_RECIPIENT,
+                call_key=EMPTY_CALL_KEY,
+                budget=56,
+                fee_params=fee_params,
+            ),
+        ],
+        num_of_validators=5,
+        submitted_value=1211,
+        user_value=0,
+    )
+
+
+def test_fill_message_fee_payload_funds_subtree_when_only_primary_declared():
+    fee_params = _encode_internal_fee_params()
+    primary = min_message_primary_fees(decode_internal_message_fee_params(fee_params))
+    accounting = _nested_deploy_accounting(fee_params)
+
+    message = fill_message_fee_payload_from_allocation(
+        accounting,
+        {
+            "messageType": 1,
+            "recipient": DEPLOY_RECIPIENT,
+            "onAcceptance": True,
+            "feeParams": fee_params,
+            "declaredBudget": primary,
+            "callKey": "0x" + "0" * 64,
+        },
+    )
+
+    assert message["declaredBudget"] == primary + 56
+    child_fees, child_accounting = create_child_fee_accounting(
+        message=message,
+        parent_fees_distribution=accounting["fees_distribution"],
+        message_allocations=message["_studioResolvedAllocationSubtree"],
+        sender="0x1111111111111111111111111111111111111111",
+    )
+    assert child_fees["totalMessageFees"] == 56
+    assert len(child_accounting["message_allocations"]) == 1
+
+
+def test_fill_message_fee_payload_keeps_declared_budget_covering_subtree():
+    fee_params = _encode_internal_fee_params()
+    accounting = _nested_deploy_accounting(fee_params)
+
+    message = fill_message_fee_payload_from_allocation(
+        accounting,
+        {
+            "messageType": 1,
+            "recipient": DEPLOY_RECIPIENT,
+            "onAcceptance": True,
+            "feeParams": fee_params,
+            "declaredBudget": 200,
+            "callKey": "0x" + "0" * 64,
+        },
+    )
+
+    assert message["declaredBudget"] == 200
+
+
 def test_fill_message_fee_payload_uses_per_occurrence_budget_for_shared_allocation():
     fee_params = _encode_internal_fee_params()
     recipient = "0x2222222222222222222222222222222222222222"
