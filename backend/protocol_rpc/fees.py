@@ -3012,7 +3012,11 @@ def fill_message_fee_payload_from_allocation(
 
     if not _message_has_fee_params(updated):
         updated["feeParams"] = allocation["feeParams"]
-    if int(updated.get("declaredBudget", 0) or 0) == 0:
+    declared_budget = int(updated.get("declaredBudget", 0) or 0)
+    children_budget = _child_allocation_budget_sum(allocations, index)
+    if declared_budget == 0 or (
+        children_budget > 0 and not accounting.get("message_allocations_from_grant")
+    ):
         # The allocation budget is a cumulative ceiling for every occurrence
         # with this key. It is not the declared budget of each occurrence.
         # GenVM/Consensus assigns an occurrence its minimum primary funding
@@ -3021,10 +3025,10 @@ def fill_message_fee_payload_from_allocation(
         # second same-key occurrence fail with MessageBudgetExceeded.
         fee_params = decode_internal_message_fee_params(updated["feeParams"])
         policy = execution_policy_for_accounting(accounting)
-        updated["declaredBudget"] = _u256_add(
-            min_message_primary_fees(fee_params, policy),
-            _child_allocation_budget_sum(allocations, index),
-        )
+        primary = min_message_primary_fees(fee_params, policy)
+        # v0.2 executors declare just the primary fee and leave the subtree unfunded.
+        if declared_budget in (0, primary):
+            updated["declaredBudget"] = _u256_add(primary, children_budget)
     updated["callKey"] = _normalize_call_key(
         updated.get("callKey", allocation["callKey"])
     )
