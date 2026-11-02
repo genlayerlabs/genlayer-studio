@@ -3,8 +3,20 @@
 from eth_account import Account
 from eth_utils import is_address, to_checksum_address
 
-from .models import CurrentState
+from .models import CurrentState, Transactions
 from backend.database_handler.errors import AccountNotFoundError
+from backend.protocol_rpc.fees import (
+    FEE_ACCOUNTING_KEY,
+    abort_latest_appeal_admission,
+    cancel_fee_accounting,
+    latest_appeal_admission_unresolved,
+    settle_fee_accounting,
+)
+from backend.consensus.history import (
+    ACTIVE_APPEAL_BASIS_KEY,
+    APPEAL_RECOVERY_SNAPSHOT_KEY,
+    completed_consensus_round_index,
+)
 
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -22,16 +34,21 @@ class AccountsManager:
             "updated_at": account_data.updated_at.isoformat(),
         }
 
-    def create_new_account(self) -> Account:
+    def create_new_account(self, *, commit: bool = True) -> Account:
         """
         Used when generating intelligent contract's accounts or sending funds to a new account.
         Users should create their accounts client-side
         """
         account = Account.create()
-        self.create_new_account_with_address(account.address)
+        self.create_new_account_with_address(account.address, commit=commit)
         return account
 
-    def create_new_account_with_address(self, address: str) -> Account:
+    def create_new_account_with_address(
+        self,
+        address: str,
+        *,
+        commit: bool = True,
+    ) -> Account:
         # Check if account already exists
         if not is_address(address):
             raise ValueError(f"Invalid address: {address}")
@@ -50,18 +67,28 @@ class AccountsManager:
         # If account doesn't exist, create it
         account = CurrentState(id=address, data={}, balance=0)
         self.session.add(account)
-        self.session.commit()
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
         return account
 
     def is_valid_address(self, address: str) -> bool:
         return is_address(address)
 
+    @staticmethod
+    def _normalize_address(account_address: str) -> str:
+        """Normalize to the checksum form used as the primary key, matching
+        get_account()/create_new_account_with_address(). Falls back to the
+        original value if checksumming fails."""
+        try:
+            return to_checksum_address(account_address)
+        except Exception:
+            return account_address
+
     def get_account(self, account_address: str) -> CurrentState | None:
         """Private method to retrieve an account from the data base"""
-        try:
-            normalized = to_checksum_address(account_address)
-        except Exception:
-            normalized = account_address
+        normalized = self._normalize_address(account_address)
         account = (
             self.session.query(CurrentState)
             .filter(CurrentState.id == normalized)
@@ -100,7 +127,7 @@ class AccountsManager:
                 "UPDATE current_state SET balance = balance - :amount "
                 "WHERE id = :addr AND balance >= :amount"
             ),
-            {"amount": amount, "addr": account_address},
+            {"amount": amount, "addr": self._normalize_address(account_address)},
         )
         return result.rowcount > 0
 
@@ -108,6 +135,7 @@ class AccountsManager:
         """Atomic credit. Creates account if it doesn't exist."""
         if amount <= 0:
             return
+        account_address = self._normalize_address(account_address)
         self.session.execute(
             text(
                 "INSERT INTO current_state (id, data, balance) "
@@ -131,6 +159,7 @@ class AccountsManager:
         Sets value_credited=true atomically. Returns True if credit was applied."""
         if amount <= 0:
             return False
+        target_address = self._normalize_address(target_address)
         # Ensure target account exists
         self.session.execute(
             text(
@@ -166,14 +195,265 @@ class AccountsManager:
         Returns True if refund was applied."""
         result = self.session.execute(
             text(
-                "SELECT value, value_credited FROM transactions " "WHERE hash = :hash"
+                "UPDATE transactions "
+                "SET data = jsonb_set(COALESCE(data, '{}'::jsonb), "
+                "'{uncreditedValueRefunded}', 'true'::jsonb, true) "
+                "WHERE hash = :hash AND value_credited = false AND value > 0 "
+                "AND COALESCE(data ->> 'uncreditedValueRefunded', 'false') <> 'true' "
+                "RETURNING value"
             ),
             {"hash": tx_hash},
         )
         row = result.first()
-        if row is None or row.value is None or row.value <= 0:
+        if row is None:
             return False
-        if row.value_credited:
-            return False  # target already received funds, can't refund
         self.credit_account_balance(sender_address, row.value)
+        self.session.expire_all()
         return True
+
+    def refund_activated_tx_value_once(
+        self,
+        tx_hash: str,
+        target_address: str,
+        beneficiary_address: str,
+    ) -> bool:
+        """Return an activated transaction's value to its principal owner once.
+
+        Activation credits the destination before consensus has a terminal
+        result.  A no-result/error finalization must reverse that provisional
+        credit.  For an internal child the owner is ``from_address`` (the
+        emitting contract), never the outer transaction origin.
+        """
+
+        result = self.session.execute(
+            text(
+                "UPDATE transactions "
+                "SET data = jsonb_set(COALESCE(data, '{}'::jsonb), "
+                "'{activatedValueRefunded}', 'true'::jsonb, true) "
+                "WHERE hash = :hash AND value_credited = true AND value > 0 "
+                "AND COALESCE(data ->> 'activatedValueRefunded', 'false') <> 'true' "
+                "RETURNING value"
+            ),
+            {"hash": tx_hash},
+        )
+        row = result.first()
+        if row is None:
+            return False
+
+        amount = int(row.value)
+        if not self.debit_account_balance(target_address, amount):
+            # Raising keeps the status update, marker, debit, and refund in one
+            # database rollback domain.  A retry can therefore repair the
+            # lifecycle instead of silently minting or misdirecting value.
+            raise RuntimeError(
+                f"ActivatedValueRefundInsufficientBalance({tx_hash},{target_address},{amount})"
+            )
+        self.credit_account_balance(beneficiary_address, amount)
+        self.session.expire_all()
+        return True
+
+    def cancel_tx_fee_accounting_once(
+        self, tx_hash: str, sender_address: str, reason: str = "canceled"
+    ) -> int:
+        transaction = (
+            self.session.query(Transactions)
+            .filter_by(hash=tx_hash)
+            .populate_existing()
+            .with_for_update()
+            .one_or_none()
+        )
+        if transaction is None:
+            return 0
+        if not isinstance(transaction.data, dict):
+            return 0
+        data = dict(transaction.data)
+        accounting = data.get(FEE_ACCOUNTING_KEY)
+        if not accounting:
+            return 0
+        sender_address = accounting.get("sender") or sender_address
+        was_terminal = accounting.get("status") in {"settled", "canceled"}
+        updated, refund = cancel_fee_accounting(accounting, reason=reason)
+        data[FEE_ACCOUNTING_KEY] = updated
+        data.pop(APPEAL_RECOVERY_SNAPSHOT_KEY, None)
+        transaction.data = data
+        if refund > 0:
+            self._credit_fee_refund_settlements(updated, sender_address, refund)
+        if not was_terminal:
+            self._credit_external_message_fee_payouts(updated)
+            self._credit_appeal_bond_payouts(updated)
+        return refund
+
+    def abort_tx_appeal_admission_once(
+        self,
+        tx_hash: str,
+        reason: str = "appeal_committee_unavailable",
+    ) -> int:
+        """Atomically undo a paid appeal that never formed its committee."""
+
+        transaction = (
+            self.session.query(Transactions)
+            .filter_by(hash=tx_hash)
+            .populate_existing()
+            .with_for_update()
+            .one_or_none()
+        )
+        if transaction is None or not isinstance(transaction.data, dict):
+            return 0
+        data = dict(transaction.data)
+        accounting = data.get(FEE_ACCOUNTING_KEY)
+        if not isinstance(accounting, dict):
+            return 0
+        updated, recipient, refund = abort_latest_appeal_admission(
+            accounting,
+            reason=reason,
+        )
+        if not recipient:
+            return 0
+
+        data[FEE_ACCOUNTING_KEY] = updated
+        data.pop(APPEAL_RECOVERY_SNAPSHOT_KEY, None)
+        transaction.data = data
+        history = dict(transaction.consensus_history or {})
+        history.pop(ACTIVE_APPEAL_BASIS_KEY, None)
+        transaction.consensus_history = history
+        transaction.appealed = False
+        transaction.timestamp_appeal = None
+        # Persist the ORM rollback before the raw-SQL credit and cache expiry;
+        # expiring an unflushed row would resurrect the paid appeal and make a
+        # retry refund it a second time.
+        self.session.flush()
+        if refund > 0:
+            self.credit_account_balance(str(recipient), refund)
+        self.session.expire_all()
+        return refund
+
+    def abort_pending_appeal_admission(
+        self,
+        tx_hash: str,
+        reason: str,
+    ) -> int | None:
+        """Refund an admitted appeal that has no outcome yet; None if none was pending."""
+        transaction = (
+            self.session.query(Transactions)
+            .filter_by(hash=tx_hash)
+            .populate_existing()
+            .with_for_update()
+            .one_or_none()
+        )
+        if transaction is None or not isinstance(transaction.data, dict):
+            return None
+        has_snapshot = APPEAL_RECOVERY_SNAPSHOT_KEY in transaction.data
+        if not transaction.appealed and not has_snapshot:
+            return None
+        # Resolved bonds keep admissionRollback, so only abort under this guard.
+        if latest_appeal_admission_unresolved(
+            transaction.data.get(FEE_ACCOUNTING_KEY),
+            transaction.consensus_history,
+        ):
+            return self.abort_tx_appeal_admission_once(tx_hash, reason)
+        if not transaction.appealed:
+            # The appeal already has an outcome; finalization settles it.
+            return None
+        # An appeal flag without a revertible paid admission has nothing to refund.
+        data = dict(transaction.data)
+        data.pop(APPEAL_RECOVERY_SNAPSHOT_KEY, None)
+        transaction.data = data
+        history = dict(transaction.consensus_history or {})
+        history.pop(ACTIVE_APPEAL_BASIS_KEY, None)
+        transaction.consensus_history = history
+        transaction.appealed = False
+        transaction.timestamp_appeal = None
+        self.session.flush()
+        return 0
+
+    def settle_tx_fee_accounting_once(
+        self,
+        tx_hash: str,
+        sender_address: str,
+        receipt=None,
+        reason: str = "finalized",
+    ) -> int:
+        transaction = (
+            self.session.query(Transactions)
+            .filter_by(hash=tx_hash)
+            .populate_existing()
+            .with_for_update()
+            .one_or_none()
+        )
+        if transaction is None:
+            return 0
+        if not isinstance(transaction.data, dict):
+            return 0
+        data = dict(transaction.data)
+        accounting = data.get(FEE_ACCOUNTING_KEY)
+        if not accounting:
+            return 0
+        sender_address = accounting.get("sender") or sender_address
+        was_terminal = accounting.get("status") in {"settled", "canceled"}
+        updated, refund = settle_fee_accounting(
+            accounting,
+            receipt=receipt,
+            reason=reason,
+            actual_final_round=_infer_final_round(transaction.consensus_history),
+            num_of_validators=transaction.num_of_initial_validators,
+            consensus_history=transaction.consensus_history,
+            execution_mode=(
+                transaction.execution_mode.value
+                if hasattr(transaction.execution_mode, "value")
+                else str(transaction.execution_mode or "NORMAL")
+            ),
+        )
+        data[FEE_ACCOUNTING_KEY] = updated
+        data.pop(APPEAL_RECOVERY_SNAPSHOT_KEY, None)
+        transaction.data = data
+        if refund > 0:
+            self._credit_fee_refund_settlements(updated, sender_address, refund)
+        if not was_terminal:
+            self._credit_external_message_fee_payouts(updated)
+            self._credit_appeal_bond_payouts(updated)
+        return refund
+
+    def _credit_fee_refund_settlements(
+        self,
+        accounting: dict,
+        fallback_recipient: str,
+        total_refund: int,
+    ) -> None:
+        settlements = accounting.get("fee_refund_settlements") or []
+        credited = 0
+        for settlement in settlements:
+            if not isinstance(settlement, dict):
+                continue
+            recipient = settlement.get("recipient")
+            amount = int(settlement.get("amount", 0) or 0)
+            if recipient and amount > 0:
+                self.credit_account_balance(recipient, amount)
+                credited += amount
+        remainder = max(0, int(total_refund) - credited)
+        if remainder > 0:
+            self.credit_account_balance(
+                accounting.get("sender") or fallback_recipient,
+                remainder,
+            )
+
+    def _credit_appeal_bond_payouts(self, accounting: dict) -> None:
+        for payout in accounting.get("appeal_bond_settlements") or []:
+            if not isinstance(payout, dict):
+                continue
+            amount = int(payout.get("payout", 0) or 0)
+            appealer = payout.get("appealer")
+            if amount > 0 and appealer:
+                self.credit_account_balance(appealer, amount)
+
+    def _credit_external_message_fee_payouts(self, accounting: dict) -> None:
+        for payout in accounting.get("external_message_fee_payouts") or []:
+            if not isinstance(payout, dict):
+                continue
+            recipient = payout.get("recipient")
+            amount = int(payout.get("amount", 0) or 0)
+            if amount > 0 and recipient:
+                self.credit_account_balance(recipient, amount)
+
+
+def _infer_final_round(consensus_history: dict | None) -> int:
+    return completed_consensus_round_index(consensus_history)

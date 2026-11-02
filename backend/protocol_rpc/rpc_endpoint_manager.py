@@ -12,6 +12,7 @@ from fastapi import params
 from fastapi.dependencies.utils import get_dependant, solve_dependencies
 from fastapi.requests import Request
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy.exc import SQLAlchemyError
 
 from backend.protocol_rpc.exceptions import (
     InternalError,
@@ -263,7 +264,14 @@ class RPCEndpointManager:
                             transaction_hash=transaction_hash,
                         )
                     )
-                internal = InternalError(message=str(exc))
+                # Database error text exposes SQL and schema; keep it in server logs only.
+                internal = InternalError(
+                    message=(
+                        "Internal database error"
+                        if isinstance(exc, SQLAlchemyError)
+                        else str(exc)
+                    )
+                )
                 return JSONRPCResponse(
                     jsonrpc="2.0", error=internal.to_dict(), id=request.id
                 )

@@ -42,7 +42,7 @@ llm.exec_prompt_template_transform = function(args)
 	}
 end
 
--- check https://github.com/genlayerlabs/genvm/blob/v0.1.2/executor/modules/implementation/scripting/llm-default.lua
+-- check https://github.com/genlayerlabs/genvm-manager/blob/main/install/config/genvm-llm-default.lua
 
 -- Used to look up mock responses for testing
 -- It returns the response that is linked to a substring of the message

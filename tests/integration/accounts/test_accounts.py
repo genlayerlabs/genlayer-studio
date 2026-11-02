@@ -1,6 +1,7 @@
 # tests/e2e/test_storage.py
 
 from tests.common.request import (
+    ZERO_ADDRESS,
     payload,
     post_request_localhost,
     wait_for_transaction,
@@ -109,7 +110,7 @@ def test_accounts_burn():
 
     # Test burn
     burn_amount = 200
-    transaction_response_call_1 = send_transaction(account_1, None, burn_amount)
+    transaction_response_call_1 = send_transaction(account_1, ZERO_ADDRESS, burn_amount)
     assert has_success_status(transaction_response_call_1)
 
     # Verify balance after transfer

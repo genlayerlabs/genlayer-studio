@@ -1,16 +1,17 @@
-# v0.2.16
-# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+# v0.3.0
+# { "Depends": "py-genlayer:babwp9t37jw9g4j2bccgn14g6x7x9s1f7dsmh7emvz735pz4zxa0" }
 
 import json
 
-from genlayer import *
+import genlayer as gl
+from genlayer.types import *
 
 
-class LlmErc20(gl.Contract):
-    balances: TreeMap[Address, u256]
+class LlmErc20(gl.contract.Contract):
+    balances: gl.storage.TreeMap[Address, u256]
 
     def __init__(self, total_supply: int) -> None:
-        self.balances[gl.message.sender_address] = u256(total_supply)
+        self.balances[gl.message.sender_address] = total_supply
 
     @gl.public.write
     def transfer(self, amount: int, to_address: str) -> None:
@@ -35,11 +36,11 @@ enough balance. If any transaction is invalid, it shouldn't be processed.
 Update the balances based on the valid transactions only.
 Given the current balance in JSON format and the transaction provided,
 please provide the result of your calculation with the following format:
-{{
+{
 "transaction_success": bool,          // Whether the transaction was successful
 "transaction_error": str,             // Empty if transaction is successful
 "updated_balances": object<str, int>  // Updated balances after the transaction
-}}
+}
 
 It is mandatory that you respond only using the JSON format above,
 nothing else. Don't include any other words or characters,

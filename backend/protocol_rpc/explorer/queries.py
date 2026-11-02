@@ -16,6 +16,7 @@ from backend.database_handler.models import (
     TransactionStatus,
     Validators,
 )
+from backend.protocol_rpc.redaction import sanitize_rpc_private_keys
 
 
 def _serialize_tx(
@@ -30,7 +31,7 @@ def _serialize_tx(
         "to_address": tx.to_address,
         "input_data": tx.input_data,
         "data": tx.data,
-        "consensus_data": tx.consensus_data,
+        "consensus_data": sanitize_rpc_private_keys(tx.consensus_data),
         "nonce": tx.nonce,
         "value": tx.value,
         "type": tx.type,
@@ -42,14 +43,16 @@ def _serialize_tx(
         "s": tx.s,
         "v": tx.v,
         "appeal_failed": tx.appeal_failed,
-        "consensus_history": tx.consensus_history,
+        "consensus_history": sanitize_rpc_private_keys(tx.consensus_history),
         "timestamp_appeal": tx.timestamp_appeal,
         "appeal_processing_time": tx.appeal_processing_time,
         "config_rotation_rounds": tx.config_rotation_rounds,
         "num_of_initial_validators": tx.num_of_initial_validators,
         "last_vote_timestamp": tx.last_vote_timestamp,
         "rotation_count": tx.rotation_count,
-        "leader_timeout_validators": tx.leader_timeout_validators,
+        "leader_timeout_validators": sanitize_rpc_private_keys(
+            tx.leader_timeout_validators
+        ),
         "sim_config": tx.sim_config,
         "triggered_by_hash": tx.triggered_by_hash,
         "triggered_on": tx.triggered_on,

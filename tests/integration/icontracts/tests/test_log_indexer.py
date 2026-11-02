@@ -34,8 +34,9 @@ def test_log_indexer(setup_validators):
     # ########################################
     closest_vector_log_0 = contract.get_closest_vector(args=["I like mango"]).call()
     closest_vector_log_0 = closest_vector_log_0
-    assert float(closest_vector_log_0["similarity"]) > 0.94
-    assert float(closest_vector_log_0["similarity"]) < 0.95
+    assert closest_vector_log_0["id"] == 0
+    assert closest_vector_log_0["text"] == "I like to eat mango"
+    assert 0 < float(closest_vector_log_0["similarity"]) < 1
 
     # ########################################
     # ############## Add log 1 ###############
@@ -67,8 +68,9 @@ def test_log_indexer(setup_validators):
         args=["I like mango a lot"]
     ).call()
     closest_vector_log_0_2 = closest_vector_log_0_2
-    assert float(closest_vector_log_0_2["similarity"]) > 0.94
-    assert float(closest_vector_log_0_2["similarity"]) < 0.95
+    assert closest_vector_log_0_2["id"] == 0
+    assert closest_vector_log_0_2["text"] == "I like to eat a lot of mangoes"
+    assert 0 < float(closest_vector_log_0_2["similarity"]) < 1
 
     # ########################################
     # ########### Remove log 0 ##############
@@ -83,8 +85,11 @@ def test_log_indexer(setup_validators):
         args=["I like to eat mango"]
     ).call()
     closest_vector_log_0_3 = closest_vector_log_0_3
-    assert float(closest_vector_log_0_3["similarity"]) > 0.67
-    assert float(closest_vector_log_0_3["similarity"]) < 0.68
+    assert closest_vector_log_0_3["id"] == 1
+    assert closest_vector_log_0_3["text"] == "I like carrots"
+    assert float(closest_vector_log_0_3["similarity"]) < float(
+        closest_vector_log_0["similarity"]
+    )
 
     # ########################################
     # ##### Test id uniqueness after deletion #

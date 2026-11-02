@@ -7,8 +7,10 @@ import Logo from '@/assets/images/logo.svg';
 import GhostBtn from './global/GhostBtn.vue';
 import NetworkSelector from './global/NetworkSelector.vue';
 import AccountSelect from '@/components/Simulator/AccountSelect.vue';
+import { getRuntimeConfig } from '@/utils/runtimeConfig';
 
 const uiStore = useUIStore();
+const appVersion = getRuntimeConfig('VITE_APP_VERSION');
 
 const toggleMode = () => {
   uiStore.toggleMode();
@@ -23,16 +25,26 @@ const showTutorial = () => {
   <header
     class="flex items-center justify-between border-b border-b-slate-500 p-2 dark:border-b-zinc-500 dark:bg-zinc-800"
   >
-    <RouterLink to="/">
-      <Logo
-        alt="GenLayer Logo"
-        height="36"
-        :class="[
-          'block',
-          uiStore.mode === 'light' ? 'text-primary' : 'text-white',
-        ]"
-      />
-    </RouterLink>
+    <div class="flex items-center gap-2">
+      <RouterLink to="/">
+        <Logo
+          alt="GenLayer Logo"
+          height="36"
+          :class="[
+            'block',
+            uiStore.mode === 'light' ? 'text-primary' : 'text-white',
+          ]"
+        />
+      </RouterLink>
+      <span
+        v-if="appVersion"
+        data-testid="app-version"
+        class="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] leading-none text-slate-500 dark:bg-zinc-700 dark:text-zinc-300"
+        :title="`GenLayer Studio ${appVersion}`"
+      >
+        {{ appVersion }}
+      </span>
+    </div>
 
     <div class="flex items-center gap-2 pr-2">
       <NetworkSelector />

@@ -14,7 +14,7 @@ const RPC_URL = process.env.GENLAYER_RPC_URL ?? 'http://localhost:4000/api';
 // Anvil account 0
 const ADDRESS_CHECKSUMMED = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
 const ADDRESS_LOWERCASE = ADDRESS_CHECKSUMMED.toLowerCase();
-const TEN_GEN_WEI = 10_000_000_000_000_000_000; // 10 * 1e18
+const TEN_GEN_WEI = 10_000_000_000_000_000_000n; // 10 * 1e18
 
 async function rpcCall(method: string, params: unknown = []) {
   const res = await fetch(RPC_URL, {
@@ -32,7 +32,7 @@ test.describe('eth_getBalance MetaMask compatibility', () => {
     // Fund account once
     await rpcCall('sim_fundAccount', {
       account_address: ADDRESS_CHECKSUMMED,
-      amount: TEN_GEN_WEI,
+      amount: TEN_GEN_WEI.toString(),
     });
   });
 
