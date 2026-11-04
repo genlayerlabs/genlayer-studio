@@ -153,6 +153,77 @@ def test_eth_transaction_receipt_requests_no_contract_snapshot():
     )
 
 
+def _consensus_receipt(to_address="0x2222222222222222222222222222222222222222"):
+    transactions_processor = MagicMock()
+    transactions_processor.get_transaction_by_hash.return_value = {
+        "hash": "0xabc",
+        "from_address": "0x1111111111111111111111111111111111111111",
+        "to_address": to_address,
+        "type": 2,
+        "tx_slot": "7",
+        "status": "FINALIZED",
+    }
+    transactions_processor.get_evm_envelope.return_value = SimpleNamespace(
+        to_address="0xb7278a61aa25c888815afc32ad3cc52ff24fe575",
+    )
+    return endpoints.get_transaction_receipt(transactions_processor, "0xabc")
+
+
+def test_eth_transaction_receipt_omits_legacy_log_by_default():
+    assert endpoints._LEGACY_NEW_TRANSACTION_RECEIPT_LOG is False
+    assert len(_consensus_receipt()["logs"]) == 1
+
+
+def test_eth_transaction_receipt_adds_legacy_log_after_created_event(monkeypatch):
+    monkeypatch.setattr(endpoints, "_LEGACY_NEW_TRANSACTION_RECEIPT_LOG", True)
+
+    created, legacy = _consensus_receipt()["logs"]
+
+    assert (
+        created["topics"][0]
+        == "0x"
+        + endpoints.eth_utils.keccak(text="CreatedTransaction(bytes32,uint256)").hex()
+    )
+    assert created["logIndex"] == 0
+    assert legacy["logIndex"] == 1
+    assert legacy["address"] == "0xb7278a61aa25c888815afc32ad3cc52ff24fe575"
+    assert legacy["data"] == "0x"
+    assert legacy["topics"] == [
+        "0x"
+        + endpoints.eth_utils.keccak(
+            text="NewTransaction(bytes32,address,address)"
+        ).hex(),
+        "0xabc",
+        "0x" + "0" * 24 + "2" * 40,
+        "0x" + "0" * 24 + "1" * 40,
+    ]
+
+
+def test_eth_transaction_receipt_legacy_log_tolerates_missing_recipient(monkeypatch):
+    monkeypatch.setattr(endpoints, "_LEGACY_NEW_TRANSACTION_RECEIPT_LOG", True)
+
+    legacy = _consensus_receipt(to_address=None)["logs"][1]
+
+    assert legacy["topics"][2] == "0x" + "0" * 64
+
+
+def test_eth_transaction_receipt_legacy_log_skips_send(monkeypatch):
+    monkeypatch.setattr(endpoints, "_LEGACY_NEW_TRANSACTION_RECEIPT_LOG", True)
+    transactions_processor = MagicMock()
+    transactions_processor.get_transaction_by_hash.return_value = {
+        "hash": "0xabc",
+        "from_address": "0x1111111111111111111111111111111111111111",
+        "to_address": "0x2222222222222222222222222222222222222222",
+        "type": 0,
+        "status": "FINALIZED",
+    }
+    transactions_processor.get_evm_envelope.return_value = None
+
+    receipt = endpoints.get_transaction_receipt(transactions_processor, "0xabc")
+
+    assert receipt["logs"] == []
+
+
 def test_eth_transaction_receipt_does_not_fabricate_creation_event_for_send():
     transactions_processor = MagicMock()
     transactions_processor.get_transaction_by_hash.return_value = {
