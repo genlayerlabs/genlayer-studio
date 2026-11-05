@@ -4,7 +4,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from backend.consensus.base import CommittingState
+from backend.consensus.base import (
+    CommittingState,
+    LeaderTimeoutState,
+    ProposingState,
+)
 from backend.database_handler.types import ConsensusData
 from backend.node.genvm.error_codes import GenVMInternalError, GenVMErrorCode
 from backend.node.genvm.origin.host_fns import ResultCode
@@ -337,3 +341,99 @@ async def test_no_quorum_replaces_timeout_slots_only(monkeypatch):
         "validator-3",
         "validator-4",
     ]
+
+
+@pytest.mark.asyncio
+async def test_validator_timeout_receipt_keeps_partial_stats(monkeypatch):
+    monkeypatch.setenv("CONSENSUS_VALIDATOR_EXEC_TIMEOUT_SECONDS", "0.02")
+    cancelled_at_snapshot: list[bool] = []
+    cancelled = False
+
+    async def exec_hung(_transaction):
+        nonlocal cancelled
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    def partial_execution_stats():
+        cancelled_at_snapshot.append(cancelled)
+        return {"timeout_progress": {"phase": "awaiting_vm"}}
+
+    context = _make_context(
+        validators=["validator-1"],
+        node_factory=lambda *_args: SimpleNamespace(
+            exec_transaction=exec_hung,
+            partial_execution_stats=partial_execution_stats,
+        ),
+    )
+
+    await CommittingState().handle(context)
+
+    receipt = context.validation_results[0]
+    assert receipt.vote == Vote.TIMEOUT
+    assert receipt.execution_stats == {"timeout_progress": {"phase": "awaiting_vm"}}
+    assert cancelled_at_snapshot == [False]
+    assert cancelled
+
+
+@pytest.mark.asyncio
+async def test_validator_timeout_survives_failing_stats_snapshot(monkeypatch):
+    monkeypatch.setenv("CONSENSUS_VALIDATOR_EXEC_TIMEOUT_SECONDS", "0.02")
+
+    async def exec_hung(_transaction):
+        await asyncio.sleep(10)
+
+    def partial_execution_stats():
+        raise RuntimeError("boom")
+
+    context = _make_context(
+        validators=["validator-1"],
+        node_factory=lambda *_args: SimpleNamespace(
+            exec_transaction=exec_hung,
+            partial_execution_stats=partial_execution_stats,
+        ),
+    )
+
+    await CommittingState().handle(context)
+
+    receipt = context.validation_results[0]
+    assert receipt.vote == Vote.TIMEOUT
+    assert receipt.execution_stats is None
+
+
+@pytest.mark.asyncio
+async def test_leader_timeout_receipt_keeps_partial_stats(monkeypatch):
+    monkeypatch.setenv("CONSENSUS_LEADER_EXEC_TIMEOUT_SECONDS", "0.02")
+
+    async def exec_hung(_transaction):
+        await asyncio.sleep(10)
+
+    context = _make_context(
+        validators=["validator-1"],
+        node_factory=lambda *_args: SimpleNamespace(
+            exec_transaction=exec_hung,
+            partial_execution_stats=lambda: {
+                "timeout_progress": {"phase": "host_call:storage_read"}
+            },
+        ),
+    )
+    context.involved_validators = [{"address": "leader"}, {"address": "validator-1"}]
+    context.transaction = MagicMock(
+        hash="tx-hash",
+        execution_mode="NORMAL",
+        appeal_leader_timeout=False,
+        data={},
+    )
+    context.num_validators = 2
+    context.votes = {}
+
+    next_state = await ProposingState().handle(context)
+
+    assert isinstance(next_state, LeaderTimeoutState)
+    receipt = context.consensus_data.leader_receipt[0]
+    assert receipt.genvm_result["error_code"] == "CONSENSUS_LEADER_EXEC_TIMEOUT"
+    assert receipt.execution_stats == {
+        "timeout_progress": {"phase": "host_call:storage_read"}
+    }
