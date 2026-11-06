@@ -636,18 +636,17 @@ class Node:
                 pass
 
             timing_callback = _timing_callback
+        self._timing_callback = timing_callback
         self._last_timing_step: str | None = None
         self._genvm_ctx: genvmbase.Context | None = None
-
-        def _recording_timing_callback(step: str) -> None:
-            self._last_timing_step = step
-            timing_callback(step)
-
-        self.timing_callback = _recording_timing_callback
 
         if logger is None:
             logger = genvm_logger.StderrLogger()
         self.logger = logger.with_keys({"node_address": self.address})
+
+    def timing_callback(self, step: str) -> None:
+        self._last_timing_step = step
+        self._timing_callback(step)
 
     def partial_execution_stats(self) -> dict:
         """Where the run stands, for a caller about to cancel it."""
@@ -1138,7 +1137,6 @@ class Node:
                 genvm_executor_selector=self.contract_snapshot.genvm_executor_selector,
                 ctx=self._genvm_ctx,
             )
-            self._genvm_ctx.mark_run_finished()
         except FeeValidationError as e:
             result = genvmbase.ExecutionResult(
                 result=genvmbase.ExecutionError(
@@ -1165,6 +1163,8 @@ class Node:
         except genvmbase.GenVMInternalError as e:
             e.is_leader = self.validator_mode == ExecutionMode.LEADER
             raise
+        finally:
+            self._genvm_ctx.mark_run_finished()
         result.processing_time = int((time.time() - start_time) * 1000)
 
         # State-proxy metrics are opt-in via GENVM_STATE_PROXY_METRICS.
