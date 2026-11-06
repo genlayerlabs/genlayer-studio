@@ -615,11 +615,31 @@ class Node:
                 pass
 
             timing_callback = _timing_callback
-        self.timing_callback = timing_callback
+        self._last_timing_step: str | None = None
+        self._genvm_ctx: genvmbase.Context | None = None
+
+        def _recording_timing_callback(step: str) -> None:
+            self._last_timing_step = step
+            timing_callback(step)
+
+        self.timing_callback = _recording_timing_callback
 
         if logger is None:
             logger = genvm_logger.StderrLogger()
         self.logger = logger.with_keys({"node_address": self.address})
+
+    def partial_execution_stats(self) -> dict:
+        """Where the run stands, for a caller about to cancel it."""
+        if self._genvm_ctx is None:
+            stats: dict = {}
+            progress = {"phase": "before_genvm"}
+        else:
+            stats = dict(self._genvm_ctx.stats)
+            progress = self._genvm_ctx.progress()
+        return {
+            **stats,
+            "timeout_progress": {**progress, "node_step": self._last_timing_step},
+        }
 
     async def exec_transaction(self, transaction: Transaction) -> Receipt:
         self.timing_callback("EXEC_START")
@@ -1038,6 +1058,7 @@ class Node:
             perms += "ws"  # write/send
 
         start_time = time.time()
+        self._genvm_ctx = genvmbase.Context(logger=logger)
         try:
             result = await genvmbase.run_genvm_host(
                 functools.partial(
@@ -1056,7 +1077,9 @@ class Node:
                 timeout=timeout,
                 code=code,
                 logger=logger,
+                ctx=self._genvm_ctx,
             )
+            self._genvm_ctx.mark_run_finished()
         except genvmbase.GenVMInternalError as e:
             e.is_leader = self.validator_mode == ExecutionMode.LEADER
             raise
