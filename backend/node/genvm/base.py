@@ -161,6 +161,25 @@ def _get_int(env_key: str, default: int) -> int:
         return default
 
 
+# Progress of one attempt; the errors that explain a retry are kept.
+_PER_ATTEMPT_STATS = (
+    "manager_run_attempt_success",
+    "host_loop_entered_s",
+    "host_loop_enter_wait_ms",
+    "host_first_method",
+    "host_first_method_received_s",
+    "host_accept_to_first_method_ms",
+    "host_total_handling_time_ms",
+    "host_time_per_method_ms",
+    "call_counts",
+    "delete_genvm_status",
+    "delete_genvm_failed",
+    "delete_genvm_body",
+    "delete_genvm_request_failed",
+    "delete_genvm_request_error",
+)
+
+
 class Context(base_host.Context):
     def __init__(self, logger: genvm_logger.Logger | None = None):
         self.logger: genvm_logger.Logger = logger or genvm_logger.NoLogger()
@@ -172,6 +191,7 @@ class Context(base_host.Context):
         self._retries = 0
         self._in_retry_backoff = False
         self._run_finished = False
+        self._vm_connections_closed = 0
 
     def on_genvm_success(self):
         if _on_genvm_success is not None:
@@ -183,6 +203,9 @@ class Context(base_host.Context):
 
     def add_stat(self, key: str, value: typing.Any, /):
         self.stats[key] = value
+        # The host loop reports a finished connection only through this stat.
+        if key == "call_counts":
+            self._vm_connections_closed += 1
 
     @contextlib.contextmanager
     def host_call(self, name: str):
@@ -199,9 +222,12 @@ class Context(base_host.Context):
     def begin_retry_backoff(self, retries: int) -> None:
         self._retries = retries
         self._in_retry_backoff = True
-        # These describe the failed attempt, not the next one.
-        self.stats.pop("manager_run_attempt_success", None)
-        self.stats.pop("host_loop_entered_s", None)
+        for key in _PER_ATTEMPT_STATS:
+            self.stats.pop(key, None)
+        self._vm_connections_closed = 0
+        self._host_call_counts = {}
+        self._last_host_call = None
+        self._last_host_activity_s = None
 
     def end_retry_backoff(self) -> None:
         self._in_retry_backoff = False
@@ -216,14 +242,17 @@ class Context(base_host.Context):
             return f"host_call:{self._host_calls_in_flight[-1]}"
         if self._in_retry_backoff:
             return "retry_backoff"
-        # Nondet work (LLM, web) happens inside the VM, so it lands here.
         if "host_loop_entered_s" in self.stats:
+            if self._vm_connections_closed:
+                return "awaiting_manager_result"
+            # Nondet work (LLM, web) happens inside the VM, so it lands here.
             return "awaiting_vm"
         if "manager_run_attempt_success" in self.stats:
             return "awaiting_executor_connect"
         return "awaiting_manager"
 
     def progress(self) -> dict[str, typing.Any]:
+        # Time since a tracked host call started or ended.
         idle_ms = None
         if self._last_host_activity_s is not None:
             idle_ms = round((time.perf_counter() - self._last_host_activity_s) * 1000)

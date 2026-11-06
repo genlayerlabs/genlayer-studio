@@ -406,17 +406,26 @@ async def test_validator_timeout_survives_failing_stats_snapshot(monkeypatch):
 @pytest.mark.asyncio
 async def test_leader_timeout_receipt_keeps_partial_stats(monkeypatch):
     monkeypatch.setenv("CONSENSUS_LEADER_EXEC_TIMEOUT_SECONDS", "0.02")
+    cancelled_at_snapshot: list[bool] = []
+    cancelled = False
 
     async def exec_hung(_transaction):
-        await asyncio.sleep(10)
+        nonlocal cancelled
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    def partial_execution_stats():
+        cancelled_at_snapshot.append(cancelled)
+        return {"timeout_progress": {"phase": "host_call:storage_read"}}
 
     context = _make_context(
         validators=["validator-1"],
         node_factory=lambda *_args: SimpleNamespace(
             exec_transaction=exec_hung,
-            partial_execution_stats=lambda: {
-                "timeout_progress": {"phase": "host_call:storage_read"}
-            },
+            partial_execution_stats=partial_execution_stats,
         ),
     )
     context.involved_validators = [{"address": "leader"}, {"address": "validator-1"}]
@@ -437,3 +446,5 @@ async def test_leader_timeout_receipt_keeps_partial_stats(monkeypatch):
     assert receipt.execution_stats == {
         "timeout_progress": {"phase": "host_call:storage_read"}
     }
+    assert cancelled_at_snapshot == [False]
+    assert cancelled
