@@ -636,11 +636,30 @@ class Node:
                 pass
 
             timing_callback = _timing_callback
-        self.timing_callback = timing_callback
+        self._timing_callback = timing_callback
+        self._last_timing_step: str | None = None
+        self._genvm_ctx: genvmbase.Context | None = None
 
         if logger is None:
             logger = genvm_logger.StderrLogger()
         self.logger = logger.with_keys({"node_address": self.address})
+
+    def timing_callback(self, step: str) -> None:
+        self._last_timing_step = step
+        self._timing_callback(step)
+
+    def partial_execution_stats(self) -> dict:
+        """Where the run stands, for a caller about to cancel it."""
+        if self._genvm_ctx is None:
+            stats: dict = {}
+            progress = {"phase": "before_genvm"}
+        else:
+            stats = dict(self._genvm_ctx.stats)
+            progress = self._genvm_ctx.progress()
+        return {
+            **stats,
+            "timeout_progress": {**progress, "node_step": self._last_timing_step},
+        }
 
     async def exec_transaction(self, transaction: Transaction) -> Receipt:
         self.timing_callback("EXEC_START")
@@ -1084,6 +1103,7 @@ class Node:
             perms += "ws"  # write/send
 
         start_time = time.time()
+        self._genvm_ctx = genvmbase.Context(logger=logger)
         try:
             bucket_totals, gas_data = genvm_fee_context(
                 fee_accounting,
@@ -1115,6 +1135,7 @@ class Node:
                 ),
                 logger=logger,
                 genvm_executor_selector=self.contract_snapshot.genvm_executor_selector,
+                ctx=self._genvm_ctx,
             )
         except FeeValidationError as e:
             result = genvmbase.ExecutionResult(
@@ -1142,6 +1163,8 @@ class Node:
         except genvmbase.GenVMInternalError as e:
             e.is_leader = self.validator_mode == ExecutionMode.LEADER
             raise
+        finally:
+            self._genvm_ctx.mark_run_finished()
         result.processing_time = int((time.time() - start_time) * 1000)
 
         # State-proxy metrics are opt-in via GENVM_STATE_PROXY_METRICS.
