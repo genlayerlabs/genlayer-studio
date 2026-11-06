@@ -60,6 +60,8 @@ from .error_codes import (
     GenVMInternalError,
 )
 
+GENVM_NETWORK = "studio"
+
 GENVM_GASLESS_GAS_DATA: dict[str, str] = {
     **genvmhost.DEFAULT_GAS_DATA,
     "storageUnitPrice": "0",
@@ -1106,6 +1108,7 @@ async def run_genvm_host(
                                 "calldata_bytes", host_args.get("calldata_bytes", b"")
                             ),
                             leader_public_data=leader_public_data,
+                            network=GENVM_NETWORK,
                             unsafe_overrides=base_host.UnsafeOverrides(
                                 reroute_to=genvm_executor_selector or ""
                             ),

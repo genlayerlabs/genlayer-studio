@@ -413,6 +413,7 @@ class TestRetryBehavior:
             )
 
         assert run_mock.await_count == 2
+        assert all(c.kwargs["network"] == "studio" for c in run_mock.await_args_list)
         assert isinstance(result.result, base_host.ExecutionReturn)
 
     @pytest.mark.asyncio
