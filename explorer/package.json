@@ -29,7 +29,8 @@
     "react-day-picker": "^9.14.0",
     "react-dom": "19.2.4",
     "shiki": "^4.0.2",
-    "tailwind-merge": "^3.5.0"
+    "tailwind-merge": "^3.5.0",
+    "viem": "^2.29.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
