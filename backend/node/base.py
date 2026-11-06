@@ -577,6 +577,9 @@ class _StateProxyNone(genvmbase.StateProxyWritable):
 
 import backend.validators as validators
 
+# Raw manager errors can name internal hosts, and receipts reach public RPC.
+_PRIVATE_EXECUTION_STATS = ("delete_genvm_body", "delete_genvm_request_error")
+
 
 class Node:
     def __init__(
@@ -615,11 +618,34 @@ class Node:
                 pass
 
             timing_callback = _timing_callback
-        self.timing_callback = timing_callback
+        self._timing_callback = timing_callback
+        self._last_timing_step: str | None = None
+        self._genvm_ctx: genvmbase.Context | None = None
 
         if logger is None:
             logger = genvm_logger.StderrLogger()
         self.logger = logger.with_keys({"node_address": self.address})
+
+    def timing_callback(self, step: str) -> None:
+        self._last_timing_step = step
+        self._timing_callback(step)
+
+    def partial_execution_stats(self) -> dict:
+        """Where the run stands, for a caller about to cancel it."""
+        if self._genvm_ctx is None:
+            stats: dict = {}
+            progress = {"phase": "before_genvm"}
+        else:
+            stats = {
+                key: value
+                for key, value in self._genvm_ctx.stats.items()
+                if key not in _PRIVATE_EXECUTION_STATS
+            }
+            progress = self._genvm_ctx.progress()
+        return {
+            **stats,
+            "timeout_progress": {**progress, "node_step": self._last_timing_step},
+        }
 
     async def exec_transaction(self, transaction: Transaction) -> Receipt:
         self.timing_callback("EXEC_START")
@@ -1038,6 +1064,7 @@ class Node:
             perms += "ws"  # write/send
 
         start_time = time.time()
+        self._genvm_ctx = genvmbase.Context(logger=logger)
         try:
             result = await genvmbase.run_genvm_host(
                 functools.partial(
@@ -1056,10 +1083,13 @@ class Node:
                 timeout=timeout,
                 code=code,
                 logger=logger,
+                ctx=self._genvm_ctx,
             )
         except genvmbase.GenVMInternalError as e:
             e.is_leader = self.validator_mode == ExecutionMode.LEADER
             raise
+        finally:
+            self._genvm_ctx.mark_run_finished()
         result.processing_time = int((time.time() - start_time) * 1000)
 
         # State-proxy metrics are opt-in via GENVM_STATE_PROXY_METRICS.
