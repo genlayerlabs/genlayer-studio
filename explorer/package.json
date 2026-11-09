@@ -22,7 +22,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
-    "genlayer-js": "^0.20.3",
+    "genlayer-js": "github:genlayerlabs/genlayer-js#2bc5e60052d4a5ef2fef4d9f6931014ca15f20b1",
     "lucide-react": "^0.575.0",
     "next": "16.1.6",
     "next-themes": "^0.4.6",
