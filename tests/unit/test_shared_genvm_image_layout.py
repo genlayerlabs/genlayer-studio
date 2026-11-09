@@ -1,4 +1,5 @@
 import re
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -170,3 +171,47 @@ def test_release_builds_select_the_shared_service_targets():
     assert "target: prod" in workflow
     assert "target: consensus-worker" in workflow
     assert "Dockerfile.consensus-worker" not in workflow
+
+
+def _cache_dir_loop(dockerfile: str) -> str:
+    runtime = _stage_body(dockerfile, "genvm-runtime")
+    match = re.search(
+        r"^\s*find /genvm -name genvm\.yaml \| while.*?^\s*done ; \\$",
+        runtime,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None
+    return re.sub(r" \\$", "", match.group(0), flags=re.MULTILINE)
+
+
+def test_genvm_cache_dir_is_isolated_per_executor_version(tmp_path: Path):
+    loop = _cache_dir_loop(DOCKERFILE.read_text())
+    root = tmp_path / "genvm"
+    versions = ["v0.2.17", "v0.3.0-rc10"]
+    for version in versions:
+        config = root / "executor" / version / "config"
+        config.mkdir(parents=True)
+        (config / "genvm.yaml").write_text("threads: 2\ncache_dir: /tmp\n")
+
+    subprocess.run(
+        [
+            "bash",
+            "-euo",
+            "pipefail",
+            "-c",
+            loop.replace("find /genvm ", f"find {root} "),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    for version in versions:
+        config = (root / "executor" / version / "config" / "genvm.yaml").read_text()
+        assert f"cache_dir: /genvm-cache/{version}/\n" in config
+
+
+def test_entrypoints_keep_precompile_markers_out_of_the_legacy_shared_cache():
+    for name in ("entrypoint-backend.sh", "entrypoint-consensus-worker.sh"):
+        entrypoint = (REPO_ROOT / "docker" / name).read_text()
+        assert "/genvm-cache/pc" not in entrypoint
+        assert 'touch "$cache_dir/$CACHE_MARKER_NAME"' in entrypoint
