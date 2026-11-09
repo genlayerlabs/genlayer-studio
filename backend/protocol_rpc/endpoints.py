@@ -118,6 +118,7 @@ from backend.protocol_rpc.types import (
 from backend.database_handler.snapshot_manager import SnapshotManager
 from backend.node.base import Manager as GenVMManager
 import asyncio
+from starlette.concurrency import run_in_threadpool
 
 # Limit concurrent GenVM executions on the jsonrpc path to prevent uvloop fd
 # conflicts and DB pool exhaustion while calls hold request-scoped sessions.
@@ -168,6 +169,11 @@ _GEN_CALL_SINGLEFLIGHT_ENABLED = os.environ.get(
 ).lower() not in {"0", "false", "no", "off"}
 _gen_call_singleflight_tasks: dict[str, asyncio.Task[str]] = {}
 _gen_call_singleflight_lock = asyncio.Lock()
+
+# Compat for SDKs that only parse NewTransaction (genlayer-js before v2).
+_LEGACY_NEW_TRANSACTION_RECEIPT_LOG = os.environ.get(
+    "GENLAYER_STUDIO_LEGACY_NEW_TRANSACTION_RECEIPT_LOG", "false"
+).lower() in {"1", "true", "yes", "on"}
 
 
 def _check_rate_limit(address: str) -> None:
@@ -1279,7 +1285,9 @@ async def get_contract_schema(
     contract_address: str,
 ) -> dict:
     try:
-        contract_snapshot = ContractSnapshot(contract_address, session)
+        contract_snapshot = await run_in_threadpool(
+            ContractSnapshot, contract_address, session
+        )
     except ContractNotFoundError:
         raise NotFoundError(
             message=f"Contract {contract_address} not found",
@@ -1749,12 +1757,12 @@ async def _gen_call_with_validator(
         sim_config is not None and sim_config.genvm_datetime is not None
     )
 
-    def create_node() -> Node:
+    async def create_node() -> Node:
         # A fee estimate can execute twice: first to discover exact message
         # keys and then to meter them. Each pass must start from the same DB
         # snapshot; _SnapshotView writes through to its ContractSnapshot.
         if type == "deploy":
-            contract_snapshot = ContractSnapshot(None, session)
+            contract_snapshot = await run_in_threadpool(ContractSnapshot, None, session)
             contract_snapshot.contract_address = to_address
             contract_snapshot.balance = 0
             contract_snapshot.states = {"accepted": {}, "finalized": {}}
@@ -1762,7 +1770,9 @@ async def _gen_call_with_validator(
                 sim_config.genvm_executor_selector if sim_config else None
             )
         else:
-            contract_snapshot = ContractSnapshot(to_address, session)
+            contract_snapshot = await run_in_threadpool(
+                ContractSnapshot, to_address, session
+            )
         if type in {"write", "deploy"}:
             _stage_simulated_call_value(contract_snapshot, call_value)
         return Node(
@@ -1777,7 +1787,7 @@ async def _gen_call_with_validator(
         )
 
     async def execute(active_fee_accounting):
-        node = create_node()
+        node = await create_node()
         if type == "read":
             # Pre-parse timestamp override and map errors
             txn_dt = None
@@ -2399,8 +2409,8 @@ async def eth_call(
 
     # Check if this is a ConsensusData contract call that we should handle locally
     # This should happen before early return to allow interception even without 'from'
-    consensus_data_result = handle_consensus_data_call(
-        transactions_processor, to_address, data
+    consensus_data_result = await run_in_threadpool(
+        handle_consensus_data_call, transactions_processor, to_address, data
     )
     if consensus_data_result is not None:
         return consensus_data_result
@@ -2426,7 +2436,9 @@ async def eth_call(
                 )
             as_validator = snapshot.nodes[0].validator
             try:
-                target_contract_snapshot = ContractSnapshot(to_address, session)
+                target_contract_snapshot = await run_in_threadpool(
+                    ContractSnapshot, to_address, session
+                )
             except ContractNotFoundError:
                 raise NotFoundError(
                     message=f"Contract {to_address} not found",
@@ -3590,6 +3602,11 @@ def get_gas_estimate(data: Any) -> str:
     return hex(0x7A120)  # 500,000 — fits within block limit, enough for any Studio tx
 
 
+def _address_log_topic(address: str | None) -> str:
+    bare_address = (address or "").removeprefix("0x").lower()
+    return "0x" + bare_address.rjust(64, "0")
+
+
 def get_transaction_receipt(
     transactions_processor: TransactionsProcessor,
     transaction_hash: str,
@@ -3662,6 +3679,28 @@ def get_transaction_receipt(
                 "removed": False,
             }
         )
+        if _LEGACY_NEW_TRANSACTION_RECEIPT_LOG:
+            logs.append(
+                {
+                    "address": to_addr,
+                    "topics": [
+                        "0x"
+                        + eth_utils.keccak(
+                            text="NewTransaction(bytes32,address,address)"
+                        ).hex(),
+                        transaction_hash,
+                        _address_log_topic(transaction.get("to_address")),
+                        _address_log_topic(from_addr),
+                    ],
+                    "data": "0x",
+                    "blockNumber": 0,
+                    "transactionHash": transaction_hash,
+                    "transactionIndex": 0,
+                    "blockHash": transaction_hash,
+                    "logIndex": 1,
+                    "removed": False,
+                }
+            )
 
     receipt = {
         "transactionHash": transaction_hash,

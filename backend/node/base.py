@@ -24,6 +24,7 @@ from backend.protocol_rpc.fees import (
 import backend.node.genvm.base as genvmbase
 import backend.node.genvm.origin.calldata as calldata
 from backend.node.genvm.executor_selection import (
+    clamp_to_legacy_line_activation,
     legacy_executor_selector_for_code,
     uses_legacy_storage,
 )
@@ -1081,7 +1082,16 @@ class Node:
         if transaction_datetime is None:
             transaction_datetime = datetime.datetime.now(datetime.UTC)
         assert transaction_datetime.tzinfo is not None
-        message["transaction_timestamp"] = transaction_datetime.isoformat()
+        run_datetime = clamp_to_legacy_line_activation(
+            transaction_datetime, self.contract_snapshot.genvm_executor_selector
+        )
+        if run_datetime != transaction_datetime:
+            logger.warning(
+                "transaction time predates the v0.2 executor line, running at its activation",
+                requested=transaction_datetime.isoformat(),
+                used=run_datetime.isoformat(),
+            )
+        message["transaction_timestamp"] = run_datetime.isoformat()
         perms = "rcn"  # read/call/spawn nondet
         if not readonly:
             perms += "ws"  # write/send
