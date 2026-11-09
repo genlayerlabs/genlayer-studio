@@ -169,6 +169,11 @@ _GEN_CALL_SINGLEFLIGHT_ENABLED = os.environ.get(
 _gen_call_singleflight_tasks: dict[str, asyncio.Task[str]] = {}
 _gen_call_singleflight_lock = asyncio.Lock()
 
+# Compat for SDKs that only parse NewTransaction (genlayer-js before v2).
+_LEGACY_NEW_TRANSACTION_RECEIPT_LOG = os.environ.get(
+    "GENLAYER_STUDIO_LEGACY_NEW_TRANSACTION_RECEIPT_LOG", "false"
+).lower() in {"1", "true", "yes", "on"}
+
 
 def _check_rate_limit(address: str) -> None:
     """Reject if address exceeds rate limit. Prunes old entries."""
@@ -3590,6 +3595,11 @@ def get_gas_estimate(data: Any) -> str:
     return hex(0x7A120)  # 500,000 — fits within block limit, enough for any Studio tx
 
 
+def _address_log_topic(address: str | None) -> str:
+    bare_address = (address or "").removeprefix("0x").lower()
+    return "0x" + bare_address.rjust(64, "0")
+
+
 def get_transaction_receipt(
     transactions_processor: TransactionsProcessor,
     transaction_hash: str,
@@ -3662,6 +3672,28 @@ def get_transaction_receipt(
                 "removed": False,
             }
         )
+        if _LEGACY_NEW_TRANSACTION_RECEIPT_LOG:
+            logs.append(
+                {
+                    "address": to_addr,
+                    "topics": [
+                        "0x"
+                        + eth_utils.keccak(
+                            text="NewTransaction(bytes32,address,address)"
+                        ).hex(),
+                        transaction_hash,
+                        _address_log_topic(transaction.get("to_address")),
+                        _address_log_topic(from_addr),
+                    ],
+                    "data": "0x",
+                    "blockNumber": 0,
+                    "transactionHash": transaction_hash,
+                    "transactionIndex": 0,
+                    "blockHash": transaction_hash,
+                    "logIndex": 1,
+                    "removed": False,
+                }
+            )
 
     receipt = {
         "transactionHash": transaction_hash,
