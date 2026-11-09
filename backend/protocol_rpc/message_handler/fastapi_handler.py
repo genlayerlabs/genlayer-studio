@@ -31,6 +31,10 @@ class MessageHandler(IMessageHandler):
         self.config = config
         self.client_session_id = None
         self._pending_tasks: set[asyncio.Task] = set()
+        try:
+            self._loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
 
     def _track_background_task(self, task: asyncio.Task) -> None:
         """Retain a background task and report failures until it completes."""
@@ -49,6 +53,7 @@ class MessageHandler(IMessageHandler):
     def with_client_session(self, client_session_id: str):
         new_msg_handler = MessageHandler(self.broadcast, self.config)
         new_msg_handler._pending_tasks = self._pending_tasks
+        new_msg_handler._loop = self._loop
         new_msg_handler.client_session_id = client_session_id
         return new_msg_handler
 
@@ -92,17 +97,33 @@ class MessageHandler(IMessageHandler):
 
         message = json.dumps(payload)
         try:
-            loop = asyncio.get_running_loop()
+            running_loop = asyncio.get_running_loop()
         except RuntimeError:
+            running_loop = None
+
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            loop = running_loop
+        if loop is None or not loop.is_running():
+            return
+        self._loop = loop
+
+        def publish() -> None:
+            task = loop.create_task(
+                self.broadcast.publish(channel=channel, message=message)
+            )
+            self._track_background_task(task)
+
+        if running_loop is loop:
+            publish()
             return
 
-        if not loop.is_running():
-            return
-
-        task = loop.create_task(
-            self.broadcast.publish(channel=channel, message=message)
-        )
-        self._track_background_task(task)
+        # Sync RPC handlers run in worker threads; Broadcast belongs to the app loop.
+        try:
+            loop.call_soon_threadsafe(publish)
+        except RuntimeError:
+            # The loop closed while a worker was still finishing.
+            pass
 
     def _socket_emit(self, log_event: LogEvent) -> None:
         """Emit a log event via broadcast channels.
