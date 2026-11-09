@@ -1,6 +1,7 @@
 """Legacy contracts must work through ordinary RPCs, without sim_config."""
 
 import base64
+import datetime
 import io
 import json
 import zipfile
@@ -417,6 +418,14 @@ async def test_schema_for_legacy_code_selects_legacy_executor(
     # v0.2 interprets the v0.3 code slot as its locked-slot list. Writing code
     # there causes an OOM before Python starts, even with correct routing.
     assert get_code_slot() not in proxy.data
+
+
+@pytest.mark.asyncio
+async def test_schema_runs_at_the_current_time(schema_run):
+    before = datetime.datetime.now(datetime.UTC)
+    await _node().get_contract_schema(LEGACY_CODE)
+    timestamp = schema_run.await_args.kwargs["message"]["transaction_timestamp"]
+    assert before <= datetime.datetime.fromisoformat(timestamp)
 
 
 @pytest.mark.asyncio

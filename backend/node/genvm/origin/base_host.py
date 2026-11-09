@@ -1208,6 +1208,7 @@ async def run_genvm(
     shutdown_early: asyncio.Event | None = None,
     host_hello_data: collections.abc.Sequence[bytes] = (),
     major: int | None = None,
+    network: str | None = None,
 ) -> RunHostAndProgramRes:
     logger = ctx.logger
 
@@ -1264,6 +1265,8 @@ async def run_genvm(
         }
         if deadline is not None:
             request_payload["deadline"] = deadline
+        if network is not None:
+            request_payload["network"] = network
 
         attempt_start = time.perf_counter()
         try:
