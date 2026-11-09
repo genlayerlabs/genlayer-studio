@@ -27,6 +27,12 @@ contract Voting {
 		if (maxVotes == validatorCount) {
 			if (majorityVote == ITransactions.VoteType.Agree) {
 				result = ITransactions.ResultType.MajorityAgree;
+			} else if (majorityVote == ITransactions.VoteType.Timeout) {
+				result = ITransactions.ResultType.Timeout;
+			} else if (
+				majorityVote == ITransactions.VoteType.DeterministicViolation
+			) {
+				result = ITransactions.ResultType.DeterministicViolation;
 			} else {
 				result = ITransactions.ResultType.MajorityDisagree;
 			}
