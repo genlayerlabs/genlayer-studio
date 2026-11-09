@@ -2,7 +2,7 @@
 import { notify } from '@kyvg/vue3-notification';
 import { useTransactionsStore, useContractsStore } from '@/stores';
 import { ref } from 'vue';
-import PageSection from '@/components/Simulator/PageSection.vue';
+import PageSection from '@/components/simulator/PageSection.vue';
 import { ArchiveXIcon, XIcon } from 'lucide-vue-next';
 import { useSetupStores } from '@/hooks';
 

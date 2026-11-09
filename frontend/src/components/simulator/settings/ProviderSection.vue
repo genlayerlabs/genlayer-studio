@@ -1,15 +1,15 @@
 <script setup lang="ts">
 import { useNodeStore } from '@/stores';
 import { ref, computed } from 'vue';
-import PageSection from '@/components/Simulator/PageSection.vue';
+import PageSection from '@/components/simulator/PageSection.vue';
 import { PlusIcon } from '@heroicons/vue/16/solid';
 import { uniqBy } from 'lodash-es';
 import GhostBtn from '@/components/global/GhostBtn.vue';
-import ProviderItem from '@/components/Simulator/ProviderItem.vue';
-import ProviderModal from '@/components/Simulator/ProviderModal.vue';
+import ProviderItem from '@/components/simulator/ProviderItem.vue';
+import ProviderModal from '@/components/simulator/ProviderModal.vue';
 import { DatabaseBackup } from 'lucide-vue-next';
 import { notify } from '@kyvg/vue3-notification';
-import EmptyListPlaceholder from '@/components/Simulator/EmptyListPlaceholder.vue';
+import EmptyListPlaceholder from '@/components/simulator/EmptyListPlaceholder.vue';
 
 const nodeStore = useNodeStore();
 const isNewProviderModalOpen = ref(false);

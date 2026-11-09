@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import ConstructorParameters from '@/components/Simulator/ConstructorParameters.vue';
-import ContractReadMethods from '@/components/Simulator/ContractReadMethods.vue';
-import ContractWriteMethods from '@/components/Simulator/ContractWriteMethods.vue';
-import TransactionsList from '@/components/Simulator/TransactionsList.vue';
+import ConstructorParameters from '@/components/simulator/ConstructorParameters.vue';
+import ContractReadMethods from '@/components/simulator/ContractReadMethods.vue';
+import ContractWriteMethods from '@/components/simulator/ContractWriteMethods.vue';
+import TransactionsList from '@/components/simulator/TransactionsList.vue';
 import { useContractQueries } from '@/hooks';
-import MainTitle from '@/components/Simulator/MainTitle.vue';
+import MainTitle from '@/components/simulator/MainTitle.vue';
 import { ref, watch, computed } from 'vue';
 import {
   useContractsStore,
@@ -13,7 +13,7 @@ import {
   useUIStore,
 } from '@/stores';
 
-import ContractInfo from '@/components/Simulator/ContractInfo.vue';
+import ContractInfo from '@/components/simulator/ContractInfo.vue';
 import SelectInput from '@/components/global/inputs/SelectInput.vue';
 import type { ExecutionMode } from '@/types';
 import { useConfig } from '@/hooks';
