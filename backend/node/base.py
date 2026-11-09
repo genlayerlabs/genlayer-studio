@@ -950,6 +950,7 @@ class Node:
             "signer_address": NO_ADDR,
             "value": 0,
             "chain_id": 0,
+            "transaction_timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
         }
         state_proxy = _StateProxyNone(NO_ADDR)
         self._put_code_to(
@@ -1076,9 +1077,11 @@ class Node:
             "value": int(value),
             "chain_id": get_simulator_chain_id(),
         }
-        if transaction_datetime is not None:
-            assert transaction_datetime.tzinfo is not None
-            message["transaction_timestamp"] = transaction_datetime.isoformat()
+        # The manager picks the executor line by the forks active at this time
+        if transaction_datetime is None:
+            transaction_datetime = datetime.datetime.now(datetime.UTC)
+        assert transaction_datetime.tzinfo is not None
+        message["transaction_timestamp"] = transaction_datetime.isoformat()
         perms = "rcn"  # read/call/spawn nondet
         if not readonly:
             perms += "ws"  # write/send

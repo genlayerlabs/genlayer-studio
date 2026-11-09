@@ -83,3 +83,38 @@ async def test_run_genvm_scales_initial_time_units_allocation(
     assert client.payloads[0]["initial_time_units_allocation"] == (
         math.ceil(timeout or 10 * 60)
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("network", [None, "studio"])
+async def test_run_genvm_sends_network_only_when_given(monkeypatch, network):
+    async def fake_host_loop(_handler, cancellation, *, ctx):
+        await cancellation.wait()
+
+    monkeypatch.setattr(base_host, "host_loop", fake_host_loop)
+
+    client = _FakeManagerClient()
+    with pytest.raises(base_host.ManagerRunNotStarted):
+        await base_host.run_genvm(
+            _Handler(),
+            manager_client=client,
+            ctx=_Ctx(),
+            is_sync=False,
+            message={"is_init": True},
+            host="unix://test",
+            calldata=b"",
+            bucket_totals=base_host.default_bucket_totals(3),
+            network=network,
+        )
+
+    payload = client.payloads[0]
+    if network is None:
+        assert "network" not in payload
+    else:
+        assert payload["network"] == network
+
+
+def test_studio_always_targets_studio_network():
+    from backend.node.genvm import base
+
+    assert base.GENVM_NETWORK == "studio"
