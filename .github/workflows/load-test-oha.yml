@@ -188,11 +188,11 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ env.GENVM_CACHE_DIR }}
-          key: genvm-precompile-${{ runner.os }}-${{ runner.arch }}-${{ steps.genvm.outputs.binding }}
+          key: genvm-precompile-per-executor-${{ runner.os }}-${{ runner.arch }}-${{ steps.genvm.outputs.binding }}
 
       - name: Prepare GenVM cache directory
         run: |
-          sudo mkdir -p "$GENVM_CACHE_DIR/pc"
+          sudo mkdir -p "$GENVM_CACHE_DIR"
           sudo chown -R 999:999 "$GENVM_CACHE_DIR"
 
       # Source builds need the GenVM runner fixed-output derivations built under
