@@ -13,6 +13,7 @@ from fastapi.dependencies.utils import get_dependant, solve_dependencies
 from fastapi.requests import Request
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.exc import SQLAlchemyError
+from starlette.concurrency import run_in_threadpool
 
 from backend.protocol_rpc.exceptions import (
     InternalError,
@@ -313,7 +314,7 @@ class RPCEndpointManager:
             call_kwargs = bound_arguments
             if "msg_handler" in call_kwargs:
                 call_kwargs["msg_handler"] = session_logger
-            result = registered.dependant.call(**call_kwargs)
+            result = await self._invoke_handler(registered.dependant.call, call_kwargs)
             if inspect.isawaitable(result):
                 result = await result
             return result
@@ -374,10 +375,17 @@ class RPCEndpointManager:
             if "msg_handler" in call_kwargs:
                 call_kwargs["msg_handler"] = session_logger
 
-            result = registered.dependant.call(**call_kwargs)
+            result = await self._invoke_handler(registered.dependant.call, call_kwargs)
             if inspect.isawaitable(result):
                 result = await result
             return result
+
+    @staticmethod
+    async def _invoke_handler(handler: Any, kwargs: Dict[str, Any]) -> Any:
+        # A sync pool checkout on the loop blocks the cleanup that returns connections.
+        if inspect.iscoroutinefunction(handler):
+            return await handler(**kwargs)
+        return await run_in_threadpool(handler, **kwargs)
 
     def _bind_rpc_arguments(
         self,
