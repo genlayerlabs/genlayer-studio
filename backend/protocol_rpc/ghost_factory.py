@@ -16,6 +16,7 @@ import rlp
 from eth_utils import is_address, keccak, to_bytes, to_checksum_address
 
 UINT256_MAX = (1 << 256) - 1
+PREDICT_GHOST_ADDRESS_SELECTOR = keccak(text="predictGhostAddress(uint256,address)")[:4]
 
 # These identify Studio's virtual v0.6 protocol deployment.  Operators that
 # intentionally mirror a concrete EVM deployment can override the factory,
@@ -28,6 +29,10 @@ DEFAULT_GHOST_FACTORY_INITIAL_NONCE = 2
 
 
 class InvalidGhostFactoryConfiguration(ValueError):
+    pass
+
+
+class GhostFactoryCallReverted(Exception):
     pass
 
 
@@ -94,19 +99,45 @@ class GhostFactoryConfig:
             digest = keccak(b"\xff" + factory + salt + self.bytecode_hash)
         return to_checksum_address("0x" + digest[-20:].hex())
 
+    def view_call(self, calldata: bytes) -> bytes:
+        """Return what an ``eth_call`` to GhostFactory returns for ``calldata``.
+
+        Raises ``GhostFactoryCallReverted`` where the contract reverts.
+        """
+
+        if not calldata:
+            # `receive()` takes empty calldata.
+            return b""
+        if calldata[:4] != PREDICT_GHOST_ADDRESS_SELECTOR:
+            raise GhostFactoryCallReverted(
+                f"Studio models only predictGhostAddress of GhostFactory, not selector 0x{calldata[:4].hex()}"
+            )
+        args = calldata[4:]
+        # Solidity's decoder ignores trailing bytes but rejects short or dirty input.
+        if len(args) < 64 or any(args[32:44]):
+            raise GhostFactoryCallReverted(
+                "malformed predictGhostAddress(uint256,address) arguments"
+            )
+        salt_nonce = int.from_bytes(args[:32], "big")
+        if salt_nonce == 0:
+            return bytes(32)
+        predicted = self.address_for(
+            salt_nonce, 0, namespace=to_checksum_address(args[44:64])
+        )
+        return bytes(12) + to_bytes(hexstr=predicted)
+
 
 def genvm_salted_child_address(
     contract_address: str,
     salt_nonce: int,
     chain_id: int,
 ) -> str:
-    """Return the address exposed by GenVM for a salted child deployment.
+    """Return the address the v0.3 executor line exposes for a salted child.
 
     GenVM makes the address synchronously visible to the parent contract, so
     Studio must materialize the child under that exact identity.  This is the
-    runner's public ``create2_address(contract, salt, chain)`` formula; it is
-    intentionally separate from the EVM GhostFactory formula used to allocate
-    top-level deployments.
+    v0.3 runner's ``create2_address(contract, salt, chain)`` formula; v0.4+
+    runners use the GhostFactory CREATE2 formula of ``address_for`` instead.
     """
 
     if not is_address(contract_address):

@@ -6,8 +6,17 @@ import io
 import json
 import os
 import re
+import typing
 import zipfile
 from pathlib import Path
+
+EXECUTOR_SELECTOR_REGEX_PREFIX: typing.Final = "re:"
+"""Prefix marking a selector as a regex pattern, matching the manager's
+`VERSION_REGEX_PREFIX` (genvm-manager crates/modules-interfaces/src/nested.rs)."""
+
+# First line whose SDK places salted children by the GhostFactory CREATE2 formula.
+CREATE2_CHILD_ADDRESS_LINE: typing.Final = (0, 4)
+_EXECUTOR_LINE_RE = re.compile(r"v?(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.]+)?")
 
 # Match the selector used to backfill pre-existing v0.2 contracts. Let the
 # manager choose the newest available patch in this line, not a hardcoded
@@ -72,6 +81,58 @@ def clamp_to_legacy_line_activation(
     if selector == LEGACY_EXECUTOR_SELECTOR and timestamp < LEGACY_LINE_ACTIVATION:
         return LEGACY_LINE_ACTIVATION
     return timestamp
+
+
+def manager_speaks_create2() -> bool:
+    """The manager shipping a v0.4+ line requires `create2`; older ones reject it."""
+    line = _executor_line(None)
+    return line is not None and line >= CREATE2_CHILD_ADDRESS_LINE
+
+
+def uses_create2_child_addresses(selector: str | None) -> bool:
+    """Whether a contract pinned to `selector` derives salted children by CREATE2.
+
+    Resolves the pin like the manager, against the installed executor lines but
+    blind to its fork gating. An unresolvable selector assumes the newest line
+    of the manager Studio talks to.
+    """
+    if uses_legacy_storage(selector):
+        return False
+    line = _executor_line(selector)
+    if line is None:
+        return manager_speaks_create2()
+    return line >= CREATE2_CHILD_ADDRESS_LINE
+
+
+def _executor_line(selector: str | None) -> tuple[int, int] | None:
+    if selector and not selector.startswith(EXECUTOR_SELECTOR_REGEX_PREFIX):
+        return _parse_line(selector)
+    root = os.environ.get("GENVMROOT")
+    installed = _installed_lines_in(root) if root else ()
+    if selector:
+        try:
+            pattern = re.compile(selector[len(EXECUTOR_SELECTOR_REGEX_PREFIX) :])
+        except re.error:
+            return None
+        installed = tuple(
+            (version, name) for version, name in installed if pattern.search(name)
+        )
+    return max(installed)[0][:2] if installed else None
+
+
+def _parse_line(version: str) -> tuple[int, int] | None:
+    match = _EXECUTOR_LINE_RE.fullmatch(version)
+    return (int(match[1]), int(match[2])) if match else None
+
+
+@functools.lru_cache(maxsize=4)
+def _installed_lines_in(root: str) -> tuple[tuple[tuple[int, int, int], str], ...]:
+    lines = []
+    for path in Path(root).glob("executor/*"):
+        match = _EXECUTOR_LINE_RE.fullmatch(path.name)
+        if match and path.is_dir():
+            lines.append(((int(match[1]), int(match[2]), int(match[3])), path.name))
+    return tuple(lines)
 
 
 def _declared_runners(code: bytes) -> set[str]:

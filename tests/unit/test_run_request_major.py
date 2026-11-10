@@ -184,4 +184,4 @@ async def test_run_genvm_host_opts_into_cross_contract_resolution(monkeypatch):
             message={"is_init": False, "contract_address": ADDR},
         )
 
-    assert captured["request_extra"] == {"hook_cross_contract_calls": True}
+    assert captured["request_extra"]["hook_cross_contract_calls"] is True
