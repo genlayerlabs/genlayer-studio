@@ -131,10 +131,8 @@ class AccountsManager:
         )
         return result.rowcount > 0
 
-    def credit_account_balance(self, account_address: str, amount: int):
-        """Atomic credit. Creates account if it doesn't exist."""
-        if amount <= 0:
-            return
+    def ensure_account_exists(self, account_address: str) -> str:
+        """Create a zero-balance account row if missing; returns the normalized address."""
         account_address = self._normalize_address(account_address)
         self.session.execute(
             text(
@@ -144,12 +142,37 @@ class AccountsManager:
             ),
             {"addr": account_address},
         )
+        return account_address
+
+    def credit_account_balance(self, account_address: str, amount: int):
+        """Atomic credit. Creates account if it doesn't exist."""
+        if amount <= 0:
+            return
+        account_address = self.ensure_account_exists(account_address)
         self.session.execute(
             text(
                 "UPDATE current_state SET balance = balance + :amount "
                 "WHERE id = :addr"
             ),
             {"amount": amount, "addr": account_address},
+        )
+
+    def claim_tx_value_credit(self, tx_hash: str) -> bool:
+        """Atomically take ownership of a payable tx's credit; False if already taken."""
+        result = self.session.execute(
+            text(
+                "UPDATE transactions SET value_credited = true "
+                "WHERE hash = :hash AND value_credited = false AND value > 0"
+            ),
+            {"hash": tx_hash},
+        )
+        return result.rowcount > 0
+
+    def release_tx_value_credit(self, tx_hash: str) -> None:
+        """Undo ``claim_tx_value_credit`` when the value never moved."""
+        self.session.execute(
+            text("UPDATE transactions SET value_credited = false WHERE hash = :hash"),
+            {"hash": tx_hash},
         )
 
     def credit_tx_value_once(
@@ -159,25 +182,8 @@ class AccountsManager:
         Sets value_credited=true atomically. Returns True if credit was applied."""
         if amount <= 0:
             return False
-        target_address = self._normalize_address(target_address)
-        # Ensure target account exists
-        self.session.execute(
-            text(
-                "INSERT INTO current_state (id, data, balance) "
-                "VALUES (:addr, '{}'::jsonb, 0) "
-                "ON CONFLICT (id) DO NOTHING"
-            ),
-            {"addr": target_address},
-        )
-        # Atomic: set value_credited and credit balance in one operation
-        result = self.session.execute(
-            text(
-                "UPDATE transactions SET value_credited = true "
-                "WHERE hash = :hash AND value_credited = false AND value > 0"
-            ),
-            {"hash": tx_hash},
-        )
-        if result.rowcount > 0:
+        target_address = self.ensure_account_exists(target_address)
+        if self.claim_tx_value_credit(tx_hash):
             self.session.execute(
                 text(
                     "UPDATE current_state SET balance = balance + :amount "
