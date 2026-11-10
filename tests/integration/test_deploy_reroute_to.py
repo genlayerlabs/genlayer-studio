@@ -279,16 +279,23 @@ def _wait_for_storage(address: str, expected: str, timeout: int = 240) -> None:
     )
 
 
-def test_legacy_contract_without_manual_executor_selection():
+# The v0.2-only runner alone selects the legacy line, whatever the first line says.
+CONTRACT_B_VARIANTS = {
+    "v0.2-header": CONTRACT_B,
+    "no-header": CONTRACT_B.partition("\n")[2],
+    "v0.1-header": CONTRACT_B.replace("# v0.2.16", "# v0.1.0", 1),
+}
+
+
+@pytest.mark.parametrize("code", CONTRACT_B_VARIANTS.values(), ids=CONTRACT_B_VARIANTS)
+def test_legacy_contract_without_manual_executor_selection(code):
     """Unchanged v0.2 code works through schema, deploy, read and write RPCs."""
-    schema = rpc_call(
-        "gen_getContractSchemaForCode", ["0x" + CONTRACT_B.encode().hex()]
-    )
+    schema = rpc_call("gen_getContractSchemaForCode", ["0x" + code.encode().hex()])
     assert "get_storage" in schema["methods"]
 
     # No sim_config and no executor override: ordinary deployment must infer
     # and persist the legacy line, just as preflight selected it from source.
-    address = _deploy(CONTRACT_B, args=["legacy_default"])
+    address = _deploy(code, args=["legacy_default"])
     assert _read(address, "get_storage") == "legacy_default"
     assert rpc_call("gen_getContractSchema", [address]) == schema
 

@@ -23,30 +23,19 @@ _MAX_RUNNER_JSON_BYTES = 64 * 1024
 
 
 def legacy_executor_selector_for_code(code: bytes) -> str | None:
-    """Honor an explicit v0.2 version in a text contract's first comment.
+    """Select the retained v0.2 line for code that only it can run.
 
-    GenVM recognizes #, // and -- comments only at the start of the source,
-    with the version on the first line. Do not infer a version from a runner
-    hash, imports, or later comments. Other formats/versions keep the normal
-    manager selection, and GenVM remains responsible for validating code.
+    An explicit v0.2 version in the first comment (GenVM reads #, // and --
+    comments only at the start of the source) selects it. So does a runner
+    spec (zip runner.json, else the leading comment block) declaring a runner
+    shipped only by the retained line: the manager sends every other major-0
+    contract to the newest line, which rejects such runners as malformed.
+    Anything else keeps the normal manager selection, and GenVM remains
+    responsible for validating code.
     """
     first_line = code.partition(b"\n")[0]
     if _LEGACY_HEADER.fullmatch(first_line):
         return LEGACY_EXECUTOR_SELECTOR
-    return None
-
-
-def legacy_executor_selector_for_child_code(code: bytes) -> str | None:
-    """Select the retained v0.2 line for code a v0.2 contract deploys.
-
-    New user deployments get the newest line, but contracts already pinned to
-    v0.2 must keep deploying the code they hold (factories, shards). Besides a
-    v0.2 header, that code may declare a runner shipped only by the retained
-    line: the manager sends every other major-0 contract to the newest line,
-    which rejects such runners as malformed.
-    """
-    if selector := legacy_executor_selector_for_code(code):
-        return selector
     legacy_only = _legacy_only_runners()
     if legacy_only and not legacy_only.isdisjoint(_declared_runners(code)):
         return LEGACY_EXECUTOR_SELECTOR
@@ -147,11 +136,22 @@ def _legacy_only_runners_in(root: str) -> frozenset[str]:
             continue
         ids = {
             f"{name}:{runner_hash}"
-            for name, hashes in runners.items()
-            if isinstance(hashes, list)
-            for runner_hash in hashes
-            if isinstance(runner_hash, str)
+            for name, entry in runners.items()
+            for runner_hash in _registry_hashes(entry)
         }
         line = registry.parent.parent.name
         (legacy if line.startswith("v0.2.") else newer).update(ids)
     return frozenset(legacy - newer)
+
+
+def _registry_hashes(entry: object) -> list[str]:
+    # v0.2 lists hashes; v0.3+ maps them under "versions" next to "latest".
+    if isinstance(entry, list):
+        hashes = entry
+    elif isinstance(entry, dict):
+        versions = entry.get("versions")
+        hashes = [*versions] if isinstance(versions, dict) else []
+        hashes.append(entry.get("latest"))
+    else:
+        return []
+    return [h for h in hashes if isinstance(h, str)]
