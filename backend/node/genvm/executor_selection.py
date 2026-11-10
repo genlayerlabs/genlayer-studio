@@ -1,5 +1,6 @@
 """Compatibility routing for the retained v0.2 text-contract executor."""
 
+import datetime
 import functools
 import io
 import json
@@ -12,6 +13,8 @@ from pathlib import Path
 # manager choose the newest available patch in this line, not a hardcoded
 # directory or the newest semver-major-0 executor (which is v0.3).
 LEGACY_EXECUTOR_SELECTOR = r"re:^v0\.2\."
+# The "studio" network's genvm/executor/v0.2 date in genvm-manager's data/genvm-chainforks.json
+LEGACY_LINE_ACTIVATION = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
 _LEGACY_HEADER = re.compile(
     rb"(?:#|//|--)\s*v0\.2\.(?:[0-9]+|\*)(?:-[0-9A-Za-z.-]+)?\s*"
 )
@@ -60,6 +63,15 @@ def uses_legacy_storage(selector: str | None) -> bool:
     return bool(selector) and (
         selector == LEGACY_EXECUTOR_SELECTOR or selector.startswith("v0.2.")
     )
+
+
+def clamp_to_legacy_line_activation(
+    timestamp: datetime.datetime, selector: str | None
+) -> datetime.datetime:
+    """Keep a v0.2 line selector resolvable: the manager drops the line before its fork."""
+    if selector == LEGACY_EXECUTOR_SELECTOR and timestamp < LEGACY_LINE_ACTIVATION:
+        return LEGACY_LINE_ACTIVATION
+    return timestamp
 
 
 def _declared_runners(code: bytes) -> set[str]:
