@@ -52,6 +52,12 @@ from .origin import host_fns
 from .origin.host_fns import ResultCode
 from .origin import logger as genvm_logger
 from .origin.leader_public_data import LeaderPublicData
+from . import executor_selection
+from .executor_selection import EXECUTOR_SELECTOR_REGEX_PREFIX
+from backend.protocol_rpc.ghost_factory import (
+    GhostFactoryCallReverted,
+    GhostFactoryConfig,
+)
 from .error_codes import (
     extract_error_code,
     extract_error_code_from_timeout,
@@ -199,10 +205,6 @@ nested connection task stuck outside the event loop (e.g. in blocking I/O)
 would otherwise hang shutdown indefinitely instead of just losing that one
 task's cleanup.
 """
-
-EXECUTOR_SELECTOR_REGEX_PREFIX: typing.Final = "re:"
-"""Prefix marking a selector as a regex pattern, matching the manager's
-`VERSION_REGEX_PREFIX` (genvm-manager crates/modules-interfaces/src/nested.rs)."""
 
 
 def is_valid_executor_selector(value: str) -> bool:
@@ -879,8 +881,17 @@ class Host(genvmhost.IHost):
         pass
 
     async def external_call(self, address: bytes, calldata: bytes, /) -> bytes:
-        # FIXME(core-team): #748
-        assert False
+        factory = GhostFactoryConfig.from_env()
+        target = Address(address)
+        if target != Address(factory.factory_address):
+            raise base_host.HostException(
+                host_fns.Errors.FORBIDDEN,
+                f"Studio cannot eth_call {target.as_hex}: only GhostFactory is modeled",
+            )
+        try:
+            return factory.view_call(calldata)
+        except GhostFactoryCallReverted as e:
+            raise base_host.HostException(host_fns.Errors.EVM_REVERTED, str(e)) from e
 
     async def get_balance_gen_wei(self, address: bytes, /) -> int:
         return await asyncio.to_thread(self._state_proxy.get_balance, Address(address))
@@ -953,6 +964,25 @@ def _create_timeout_result(
     )
 
 
+def create2_request_field(factory: GhostFactoryConfig) -> dict[str, Address | bytes]:
+    """The run request's `create2`: where v0.4+ SDKs place salted children."""
+    return {
+        "deployer": Address(factory.factory_address),
+        "code_hash": factory.bytecode_hash,
+    }
+
+
+def _run_request_extra() -> dict[str, gvm_calldata.Encodable]:
+    # Ask to be consulted on where a CallContract runs. Opting out makes the
+    # manager answer the resolve query itself with "stay in-process", which
+    # silently runs a pinned callee's code on the caller's executor -- the very
+    # thing the pin exists to stop. A nested run inherits this from its parent.
+    extra: dict[str, gvm_calldata.Encodable] = {"hook_cross_contract_calls": True}
+    if executor_selection.MANAGER_SPEAKS_CREATE2:
+        extra["create2"] = create2_request_field(GhostFactoryConfig.from_env())
+    return extra
+
+
 def _encode_leader_public_data(
     leader_results: dict[int, bytes] | None,
 ) -> bytes | None:
@@ -1009,6 +1039,7 @@ async def run_genvm_host(
     effective_gas_data.update(GENVM_GASLESS_GAS_DATA)
     if fee_context.gas_data:
         effective_gas_data.update(fee_context.gas_data)
+    request_extra = _run_request_extra()
     tmpdir = Path(tempfile.mkdtemp())
     try:
         base_delay = 5  # seconds
@@ -1112,13 +1143,7 @@ async def run_genvm_host(
                             unsafe_overrides=base_host.UnsafeOverrides(
                                 reroute_to=genvm_executor_selector or ""
                             ),
-                            # Ask to be consulted on where a CallContract runs.
-                            # Opting out makes the manager answer the resolve
-                            # query itself with "stay in-process", which silently
-                            # runs a pinned callee's code on the caller's
-                            # executor -- the very thing the pin exists to stop.
-                            # A nested run inherits this from its parent.
-                            request_extra={"hook_cross_contract_calls": True},
+                            request_extra=request_extra,
                         )
 
                     execution_result = host.provide_result(

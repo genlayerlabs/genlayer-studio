@@ -1922,6 +1922,7 @@ def test_local_message_authority_applies_ghost_factory_and_per_child_failures(
     context = SimpleNamespace(
         transaction=SimpleNamespace(hash=parent_hash, to_address=registered),
         transactions_processor=processor,
+        contract_snapshot=SimpleNamespace(genvm_executor_selector="v0.3.0"),
     )
 
     def child(recipient, tx_type, occurrence, salt=0):

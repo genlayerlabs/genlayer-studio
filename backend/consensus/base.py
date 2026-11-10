@@ -45,6 +45,7 @@ from backend.node.base import Node, get_simulator_chain_id
 from backend.node.genvm.executor_selection import (
     legacy_executor_selector_for_child_code,
     legacy_executor_selector_for_code,
+    uses_create2_child_addresses,
     uses_legacy_storage,
 )
 from backend.node.types import (
@@ -4726,18 +4727,16 @@ def _author_message_phase_locally(
             and transaction_type == TransactionType.DEPLOY_CONTRACT.value
         ):
             salt_nonce = int(message_payload.get("saltNonce", 0) or 0)
-            if salt_nonce == 0:
+            # A salted child must live where the parent's SDK told the parent it is.
+            if salt_nonce == 0 or uses_create2_child_addresses(
+                _emitter_genvm_executor_selector(context)
+            ):
                 actual_recipient = factory.address_for(
                     salt_nonce,
                     successful_deployments,
                     namespace=context.transaction.to_address,
                 )
             else:
-                # A salted deployment returns its address during the parent's
-                # GenVM execution.  Bind the accepted child to that exact
-                # contract-visible identity; independently allocating an EVM
-                # GhostFactory address leaves the parent pointing at a contract
-                # that Studio never materialized (GAP-016).
                 actual_recipient = genvm_salted_child_address(
                     context.transaction.to_address,
                     salt_nonce,
