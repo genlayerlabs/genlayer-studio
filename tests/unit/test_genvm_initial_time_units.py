@@ -56,7 +56,7 @@ async def test_run_genvm_scales_initial_time_units_allocation(
     monkeypatch,
     timeout,  # noqa: ASYNC109 - pytest parametrize value, not a real timeout arg
 ):
-    async def fake_host_loop(_handler, cancellation, *, ctx):
+    async def fake_host_loop(_handler, cancellation, *, ctx, create2):
         await cancellation.wait()
 
     monkeypatch.setattr(base_host, "host_loop", fake_host_loop)
@@ -88,7 +88,7 @@ async def test_run_genvm_scales_initial_time_units_allocation(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("network", [None, "studio"])
 async def test_run_genvm_sends_network_only_when_given(monkeypatch, network):
-    async def fake_host_loop(_handler, cancellation, *, ctx):
+    async def fake_host_loop(_handler, cancellation, *, ctx, create2):
         await cancellation.wait()
 
     monkeypatch.setattr(base_host, "host_loop", fake_host_loop)
