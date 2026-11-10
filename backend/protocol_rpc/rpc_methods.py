@@ -218,15 +218,16 @@ async def delete_all_validators(
     return await impl.delete_all_validators(validators_manager=validators_manager)
 
 
+# The registry's shared long-lived session belongs to the loop: keep these async.
 @rpc.method("sim_getAllValidators")
-def get_all_validators(
+async def get_all_validators(
     validators_registry=Depends(get_validators_registry),
 ) -> list:
     return impl.get_all_validators(validators_registry=validators_registry)
 
 
 @rpc.method("sim_getValidator")
-def get_validator(
+async def get_validator(
     validator_address: str,
     validators_registry=Depends(get_validators_registry),
 ) -> dict:
@@ -237,7 +238,7 @@ def get_validator(
 
 
 @rpc.method("sim_countValidators")
-def count_validators(
+async def count_validators(
     validators_registry=Depends(get_validators_registry),
 ) -> int:
     return impl.count_validators(validators_registry=validators_registry)
