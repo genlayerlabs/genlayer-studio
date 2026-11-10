@@ -5,6 +5,7 @@ from eth_utils import is_address, to_checksum_address
 
 from .models import CurrentState, Transactions
 from backend.database_handler.errors import AccountNotFoundError
+from backend.domain.types import TransactionType
 from backend.protocol_rpc.fees import (
     FEE_ACCOUNTING_KEY,
     abort_latest_appeal_admission,
@@ -200,9 +201,11 @@ class AccountsManager:
                 "'{uncreditedValueRefunded}', 'true'::jsonb, true) "
                 "WHERE hash = :hash AND value_credited = false AND value > 0 "
                 "AND COALESCE(data ->> 'uncreditedValueRefunded', 'false') <> 'true' "
+                # Top-level SENDs debit only inside execute_transfer, so uncredited means never debited.
+                "AND NOT (type = :send_type AND triggered_by_hash IS NULL) "
                 "RETURNING value"
             ),
-            {"hash": tx_hash},
+            {"hash": tx_hash, "send_type": TransactionType.SEND.value},
         )
         row = result.first()
         if row is None:
