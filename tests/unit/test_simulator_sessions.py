@@ -80,7 +80,7 @@ def test_fund_account_uses_request_scoped_session(monkeypatch):
     accounts_manager_instance.is_valid_address.assert_called_once_with("0x" + "1" * 40)
     transactions_processor_instance.get_transaction_count.assert_called_once_with(None)
     transactions_processor_instance.insert_transaction.assert_called_once_with(
-        None, "0x" + "1" * 40, None, 25, 0, 12, False, 0, None, "0xabc"
+        None, "0x" + "1" * 40, None, 25, 0, 12, False, 0, None, "0xabc", commit=False
     )
     accounts_manager_instance.credit_tx_value_once.assert_called_once_with(
         "0xabc", "0x" + "1" * 40, 25
@@ -115,7 +115,17 @@ def test_fund_account_normalizes_string_amounts(
 
     assert result == "0xabc"
     transactions_processor_instance.insert_transaction.assert_called_once_with(
-        None, address, None, expected_amount, 0, 3, False, 0, None, "0xabc"
+        None,
+        address,
+        None,
+        expected_amount,
+        0,
+        3,
+        False,
+        0,
+        None,
+        "0xabc",
+        commit=False,
     )
     accounts_manager_instance.credit_tx_value_once.assert_called_once_with(
         "0xabc", address, expected_amount
@@ -1147,7 +1157,7 @@ def test_fund_account_normalizes_lowercase_address(monkeypatch):
     assert result == "0xdef"
     checksummed = "0xABaBaBaBABabABabAbAbABAbABabababaBaBABaB"
     transactions_processor_instance.insert_transaction.assert_called_once_with(
-        None, checksummed, None, 100, 0, 5, False, 0, None, "0xdef"
+        None, checksummed, None, 100, 0, 5, False, 0, None, "0xdef", commit=False
     )
     accounts_manager_instance.credit_tx_value_once.assert_called_once_with(
         "0xdef", checksummed, 100

@@ -18,6 +18,8 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Lift c1d2e3f4a5b6's 30s limit; env.py runs the whole chain in one transaction.
+    op.execute("SET LOCAL statement_timeout = 0")
     op.create_table(
         "evm_envelopes",
         sa.Column("hash", sa.String(length=66), nullable=False),

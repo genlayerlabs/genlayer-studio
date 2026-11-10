@@ -237,7 +237,16 @@ RUN set -euo pipefail ; \
         fi ; \
         su - studio-user -c "$post_install $post_install_args" ; \
     fi ; \
-    find /genvm -name genvm.yaml -exec sed -i 's|cache_dir:.*|cache_dir: /genvm-cache/|' {} + ; \
+    # Precompiled modules differ per executor version, and /genvm-cache is shared node-wide across Studios.
+    find /genvm -name genvm.yaml | while IFS= read -r genvm_yaml ; do \
+        if [[ "$genvm_yaml" =~ /executor/([^/]+)/config/genvm\.yaml$ ]]; then \
+            cache_key="${BASH_REMATCH[1]}" ; \
+        else \
+            cache_key=default ; \
+        fi ; \
+        sed -i "s|cache_dir:.*|cache_dir: /genvm-cache/${cache_key}/|" "$genvm_yaml" ; \
+        grep -H 'cache_dir:' "$genvm_yaml" || echo "WARNING: no cache_dir in $genvm_yaml" ; \
+    done ; \
     chown studio-user:studio-group /genvm-cache
 
 ENV GENVMROOT=/genvm
