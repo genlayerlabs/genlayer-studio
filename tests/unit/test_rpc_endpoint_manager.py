@@ -122,6 +122,7 @@ async def test_fund_account_normalizes_frontend_decimal_string_through_rpc(
         0,
         None,
         "0xabc",
+        commit=False,
     )
     accounts_manager.credit_tx_value_once.assert_called_once_with(
         "0xabc", address, 10_000_000_000_000_000_000
