@@ -184,11 +184,16 @@ jobs:
             echo "bake_cache=" >> "$GITHUB_OUTPUT"
           fi
 
+      # Precompiled modules are rejected on CPUs lacking features they were built for (e.g. avx512bitalg).
+      - name: Fingerprint host CPU features
+        id: cpu
+        run: echo "flags=$(grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
       - name: Restore GenVM precompile cache
         uses: actions/cache@v5
         with:
           path: ${{ env.GENVM_CACHE_DIR }}
-          key: genvm-precompile-per-executor-${{ runner.os }}-${{ runner.arch }}-${{ steps.genvm.outputs.binding }}
+          key: genvm-precompile-per-executor-${{ runner.os }}-${{ runner.arch }}-${{ steps.cpu.outputs.flags }}-${{ steps.genvm.outputs.binding }}
 
       - name: Prepare GenVM cache directory
         run: |
