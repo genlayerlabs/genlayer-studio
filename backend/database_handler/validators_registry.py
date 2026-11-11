@@ -1,5 +1,7 @@
 # consensus/domain/state.py
 
+import functools
+import inspect
 from typing import List
 from sqlalchemy.orm import Session
 
@@ -27,6 +29,31 @@ def to_dict(validator: Validators, include_private_key: bool = True) -> dict:
     }
 
 
+def rollback_on_error(method):
+    # The RPC validators session is process-lived; a failure left un-rolled-back poisons it.
+    if inspect.iscoroutinefunction(method):
+
+        @functools.wraps(method)
+        async def async_wrapper(self, *args, **kwargs):
+            try:
+                return await method(self, *args, **kwargs)
+            except BaseException:
+                self.session.rollback()
+                raise
+
+        return async_wrapper
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except BaseException:
+            self.session.rollback()
+            raise
+
+    return wrapper
+
+
 class ValidatorsRegistry:
     def __init__(self, session: Session):
         self.session = session
@@ -49,6 +76,7 @@ class ValidatorsRegistry:
             raise ValidatorNotFound(validator_address)
         return validator_data
 
+    @rollback_on_error
     def count_validators(self) -> int:
         # Expire all objects to ensure we get fresh data from the database
         self.session.expire_all()
@@ -57,6 +85,7 @@ class ValidatorsRegistry:
         self.session.commit()
         return count
 
+    @rollback_on_error
     def get_all_validators(self, include_private_key: bool = True) -> List[dict]:
         # Expire all objects to ensure we get fresh data from the database
         self.session.expire_all()
@@ -68,6 +97,7 @@ class ValidatorsRegistry:
         self.session.commit()
         return result
 
+    @rollback_on_error
     def get_validator(
         self, validator_address: str, include_private_key: bool = True
     ) -> dict:
@@ -82,12 +112,14 @@ class ValidatorsRegistry:
 
 
 class ModifiableValidatorsRegistry(ValidatorsRegistry):
+    @rollback_on_error
     async def create_validator(self, validator: Validator) -> dict:
         db_validator = _to_db_model(validator)
         self.session.add(db_validator)
         self.session.flush()  # Ensure the validator is persisted and queryable
         return self.get_validator(validator.address, False)
 
+    @rollback_on_error
     async def update_validator(
         self,
         new_validator: Validator,
@@ -102,18 +134,25 @@ class ModifiableValidatorsRegistry(ValidatorsRegistry):
         validator.plugin_config = new_validator.llmprovider.plugin_config
 
         self.session.flush()  # Ensure the validator update is persisted
-        return to_dict(validator, False)
+        result = to_dict(validator, False)
+        self.session.commit()
+        return result
 
+    @rollback_on_error
     async def delete_validator(self, validator_address):
         validator = self._get_validator_or_fail(validator_address)
 
         self.session.delete(validator)
         self.session.flush()  # Ensure the validator deletion is persisted
+        self.session.commit()
 
+    @rollback_on_error
     async def delete_all_validators(self):
         self.session.query(Validators).delete(synchronize_session=False)
         self.session.flush()  # Ensure all validator deletions are persisted
+        self.session.commit()
 
+    @rollback_on_error
     async def batch_create_validators(self, validators: list[Validator]) -> list[dict]:
         """Create multiple validators in a single batch without triggering restarts per-validator."""
         results = []
@@ -125,6 +164,7 @@ class ModifiableValidatorsRegistry(ValidatorsRegistry):
             results.append(self.get_validator(validator.address, False))
         return results
 
+    @rollback_on_error
     async def replace_all_validators(self, validators: list[Validator]) -> list[dict]:
         """Atomically delete all validators and create new ones in a single transaction.
 

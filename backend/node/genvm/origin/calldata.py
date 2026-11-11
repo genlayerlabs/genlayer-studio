@@ -1,19 +1,25 @@
-from ...types import Address
-
 """
-This module is responsible for working with genvm calldata
+GenVM calldata encoding and decoding module.
+
+This module provides:
+
+* ``encode``: Encode Python objects to calldata bytes
+* ``decode``: Decode calldata bytes to Python objects
+* ``to_str``: Human-readable string representation
+* ``CalldataEncodable``: ABC for custom encoding
+* Type aliases: ``Encodable``, ``Decoded``, ``EncodableWithDefault``
 
 Calldata natively supports following types:
 
 #. Primitive types:
 
-	#. python built-in: :py:class:`bool`, :py:obj:`None`, :py:class:`int`, :py:class:`str`, :py:class:`bytes`
-	#. :py:meth:`~genlayer.py.types.Address` type
+    #. python built-in: :py:class:`bool`, :py:obj:`None`, :py:class:`int`, :py:class:`str`, :py:class:`bytes`
+    #. :py:meth:`~genlayer.types.Address` type
 
 #. Composite types:
 
-	#. :py:class:`list` (and any other :py:class:`collections.abc.Sequence`)
-	#. :py:class:`dict` with :py:class:`str` keys (and any other :py:class:`collections.abc.Mapping` with :py:class:`str` keys)
+    #. :py:class:`list` (and any other :py:class:`collections.abc.Sequence`)
+    #. :py:class:`dict` with :py:class:`str` keys (and any other :py:class:`collections.abc.Mapping` with :py:class:`str` keys)
 
 For full calldata specification see `genvm repo <https://github.com/yeagerai/genvm/blob/main/doc/calldata.md>`_
 """
@@ -23,18 +29,42 @@ __all__ = (
     "decode",
     "to_str",
     "Encodable",
-    "Encodable",
     "EncodableWithDefault",
     "Decoded",
     "CalldataEncodable",
     "DecodingError",
 )
 
-import typing
-import collections.abc
-import dataclasses
 import abc
+import collections.abc
+import contextlib
+import dataclasses
 import json
+import typing
+
+
+@contextlib.contextmanager
+def context_notes(msg: str):
+    """
+    Helper context manager to add context to exceptions
+
+    .. warning::
+        This is a temporary workaround for lack of exception chaining in Python 3.11
+    """
+    try:
+        yield
+    except BaseException as e:
+        e.add_note(msg)
+        raise
+
+
+# GenLayer Address. This node already defines the canonical `Address` in
+# `backend.node.types`; import it here so the calldata encoder/decoder and the
+# node share a single type (a node `Address` in a message must encode as
+# SPECIAL_ADDR, and `decode` yields the same type the node uses everywhere).
+from backend.node.types import Address as Address
+
+Address.ZERO = Address(b"\x00" * 20)
 
 BITS_IN_TYPE = 3
 
@@ -65,7 +95,7 @@ class CalldataEncodable(metaclass=abc.ABCMeta):
         Override this method to return calldata-compatible type
 
         .. warning::
-                returning ``self`` may lead to an infinite loop or an exception
+            returning ``self`` may lead to an infinite loop or an exception
         """
         raise NotImplementedError()
 
@@ -99,7 +129,8 @@ Type that can be encoded into calldata, provided ``default`` function ``T -> Enc
 def encode_default_parameter(b):
     if not dataclasses.is_dataclass(b):
         return b
-    assert not isinstance(b, type)
+    if isinstance(b, type):
+        raise TypeError(f"expected dataclass instance, got type {b!r}")
 
     return {field.name: getattr(b, field.name) for field in dataclasses.fields(b)}
 
@@ -108,6 +139,7 @@ def encode[
     T
 ](
     x: EncodableWithDefault[T],
+    /,
     *,
     default: typing.Callable[
         [EncodableWithDefault[T]], Encodable
@@ -119,16 +151,17 @@ def encode[
     :param default: function to be applied to each object recursively, it must return object encodable to calldata
 
     .. warning::
-            All composite types in the end are coerced to :py:class:`dict` and :py:class:`list`, so custom type information is *not* be preserved.
-            Such types include:
+        All composite types in the end are coerced to :py:class:`dict` and :py:class:`list`, so custom type information is *not* be preserved.
+        Such types include:
 
-            #. :py:class:`CalldataEncodable`
-            #. :py:mod:`dataclasses`
+        #. :py:class:`CalldataEncodable`
+        #. :py:mod:`dataclasses`
     """
     mem = bytearray()
 
     def append_uleb128(i):
-        assert i >= 0
+        if i < 0:
+            raise ValueError(f"uleb128 requires non-negative integer, got {i}")
         if i == 0:
             mem.append(0)
         while i > 0:
@@ -145,12 +178,13 @@ def encode[
         le = (le << 3) | TYPE_MAP
         append_uleb128(le)
         for k in keys:
-            if not isinstance(k, str):
-                raise TypeError(f"key is not string `{repr(k)}`")
-            bts = k.encode("utf-8")
-            append_uleb128(len(bts))
-            mem.extend(bts)
-            impl(b[k])
+            with context_notes(f"key {k!r}"):
+                if not isinstance(k, str):
+                    raise TypeError(f"key is not string {type(k)}")
+                bts = k.encode("utf-8")
+                append_uleb128(len(bts))
+                mem.extend(bts)
+                impl(b[k])
 
     def impl(b: EncodableWithDefault[T]):
         b = default(b)
@@ -207,6 +241,7 @@ class DecodingError(ValueError):
 
 def decode(
     mem0: collections.abc.Buffer,
+    /,
     *,
     memview2bytes: typing.Callable[[memoryview], typing.Any] = bytes,
 ) -> Decoded:
@@ -280,7 +315,8 @@ def decode(
                             f"unordered calldata keys: `{prev}` >= `{key}`"
                         )
                 prev = key
-                assert key not in ret_dict
+                if key in ret_dict:
+                    raise DecodingError(f"duplicate calldata map key `{key}`")
                 ret_dict[key] = impl()
             return ret_dict
         raise DecodingError(f"invalid type {typ}")
@@ -291,13 +327,13 @@ def decode(
     return res
 
 
-def to_str(d: Encodable) -> str:
+def to_str(d: Encodable, /) -> str:
     """
     Transforms calldata DSL into human readable json-like format, should be used for debug purposes only
     """
     buf: list[str] = []
 
-    def impl(d: Encodable) -> None:
+    def impl(d: Encodable, /) -> None:
         if d is None:
             buf.append("null")
         elif d is True:

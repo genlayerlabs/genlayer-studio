@@ -124,11 +124,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
-  issues: write
-  checks: write
-  actions: write
-  pull-requests: write
 
 # /run-e2e triggers share a per-PR group so a new comment cancels the
 # previous in-progress run. Other issue_comment events (and
@@ -164,6 +159,13 @@ jobs:
   # the dispatch path).
   # ===========================================================================
   acknowledge:
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+      checks: write
+      actions: write
+      pull-requests: write
     # PR-state guard: refuse /run-e2e on closed / merged PRs. After a
     # PR merges, its head branch is typically deleted, which breaks
     # every "content at PR head" fetch (third_party version files,
@@ -197,6 +199,13 @@ jobs:
   # the `github.event_name == 'workflow_dispatch'` clause filters it out.
   # ===========================================================================
   plan:
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+      checks: write
+      actions: write
+      pull-requests: write
     needs: acknowledge
     if: |
       !cancelled() &&
@@ -233,6 +242,13 @@ jobs:
   # ===========================================================================
   build:
     name: build (dev-env)
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+      checks: write
+      actions: write
+      pull-requests: write
     needs: [acknowledge, plan]
     # Without an explicit `if:`, GHA's implicit `success()` would require
     # acknowledge to have succeeded — but acknowledge is intentionally
@@ -287,6 +303,13 @@ jobs:
   # ===========================================================================
   build-studio:
     name: build (studio)
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+      checks: write
+      actions: write
+      pull-requests: write
     needs: [acknowledge, plan]
     if: |
       !cancelled() &&
@@ -311,6 +334,13 @@ jobs:
   # every per-wave plan array).
   # ===========================================================================
   wave-1:
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+      checks: write
+      actions: write
+      pull-requests: write
     # `name:` overrides GHA's default `wave-1 (component, test-task, …)`
     # matrix-tuple display. Reads matrix.job-name (resolved from
     # components.yaml's `job-name` field, falling back to the
@@ -401,6 +431,13 @@ jobs:
       github-retry-max-delay: ${{ needs.plan.outputs.github-retry-max-delay }}
 
   wave-2:
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+      checks: write
+      actions: write
+      pull-requests: write
     # Cascade-skip label rules (walked in order, first match wins):
     #   1. build failed → "(skipped - build fails)"
     #   2. wave-1's failure-label is non-empty (e.g. "core") →
@@ -471,6 +508,13 @@ jobs:
       github-retry-max-delay: ${{ needs.plan.outputs.github-retry-max-delay }}
 
   wave-3:
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+      checks: write
+      actions: write
+      pull-requests: write
     # See wave-2 for the cascade-skip label semantics. Walk order
     # (first match wins): build → wave-1 failure-label → wave-2
     # failure-label → generic-fallback. The `.result == 'failure'`
@@ -534,6 +578,13 @@ jobs:
       github-retry-max-delay: ${{ needs.plan.outputs.github-retry-max-delay }}
 
   wave-4:
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+      checks: write
+      actions: write
+      pull-requests: write
     # See wave-2 for the cascade-skip label semantics. Walk order
     # (first match wins): build → wave-1 → wave-2 → wave-3 failure-
     # label, then generic-fallback via `.result == 'failure'`.
@@ -602,6 +653,13 @@ jobs:
   # `.result` for the rough verdict.
   # ===========================================================================
   result:
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+      checks: write
+      actions: write
+      pull-requests: write
     needs:
       - acknowledge
       - plan
