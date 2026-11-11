@@ -39,7 +39,7 @@ from backend.database_handler.transactions_processor import (
     get_tx_execution_hash,
 )
 from backend.protocol_rpc.exceptions import JSONRPCError, NotFoundError
-from backend.protocol_rpc.ghost_factory import genvm_salted_child_address
+from backend.protocol_rpc.ghost_factory import GhostFactoryConfig
 from backend.protocol_rpc.endpoints import (
     _available_appeal_validator_count,
     _current_fee_round,
@@ -1886,14 +1886,7 @@ def test_non_ghost_internal_message_is_skipped_and_refunded_once(
     assert record["skippedRefundAmount"] == expected_account_refund
 
 
-def test_local_message_authority_applies_ghost_factory_and_per_child_failures(
-    monkeypatch,
-):
-    simulator_chain_id = 61128
-    monkeypatch.setattr(
-        "backend.consensus.base.get_simulator_chain_id",
-        lambda: simulator_chain_id,
-    )
+def test_local_message_authority_applies_ghost_factory_and_per_child_failures():
     registered = "0x2222222222222222222222222222222222222222"
     missing = "0x3333333333333333333333333333333333333333"
     parent_hash = "0x" + ("11" * 32)
@@ -1962,8 +1955,8 @@ def test_local_message_authority_applies_ghost_factory_and_per_child_failures(
 
     zero = "0x" + ("00" * 32)
     assert processor.locked is True
-    expected_salted_child = genvm_salted_child_address(
-        registered, 42, simulator_chain_id
+    expected_salted_child = GhostFactoryConfig.from_env().address_for(
+        42, 0, namespace=registered
     )
     assert {address.lower() for address in processor.locked_recipients} == {
         registered.lower(),
