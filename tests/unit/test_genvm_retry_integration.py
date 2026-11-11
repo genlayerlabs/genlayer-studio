@@ -57,7 +57,7 @@ class NoopHandler:
     pass
 
 
-async def _fake_host_loop(_handler, _cancellation, *, ctx):
+async def _fake_host_loop(_handler, _cancellation, *, ctx, create2):
     return None
 
 
