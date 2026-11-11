@@ -161,8 +161,8 @@ def write_contract_method(
 # Test Contracts
 # =============================================================================
 
-CONTRACT_V1 = """# v0.3.0
-# { "Depends": "py-genlayer:babwp9t37jw9g4j2bccgn14g6x7x9s1f7dsmh7emvz735pz4zxa0" }
+CONTRACT_V1 = """# v0.4.0
+# { "Depends": "py-genlayer:kzybg95x1gn21dw72m7hyg0maaap04n4nx55j9yt6fkdqxtz6bz0" }
 
 import genlayer as gl
 from genlayer.types import *
@@ -196,8 +196,8 @@ class UpgradeTest(gl.contract.Contract):
         self.name = new_name
 """
 
-CONTRACT_V2 = """# v0.3.0
-# { "Depends": "py-genlayer:babwp9t37jw9g4j2bccgn14g6x7x9s1f7dsmh7emvz735pz4zxa0" }
+CONTRACT_V2 = """# v0.4.0
+# { "Depends": "py-genlayer:kzybg95x1gn21dw72m7hyg0maaap04n4nx55j9yt6fkdqxtz6bz0" }
 
 import genlayer as gl
 from genlayer.types import *
@@ -235,8 +235,8 @@ class UpgradeTest(gl.contract.Contract):
         return "new in v2"  # NEW METHOD
 """
 
-CONTRACT_V3_WITH_NEW_STATE = """# v0.3.0
-# { "Depends": "py-genlayer:babwp9t37jw9g4j2bccgn14g6x7x9s1f7dsmh7emvz735pz4zxa0" }
+CONTRACT_V3_WITH_NEW_STATE = """# v0.4.0
+# { "Depends": "py-genlayer:kzybg95x1gn21dw72m7hyg0maaap04n4nx55j9yt6fkdqxtz6bz0" }
 
 import genlayer as gl
 from genlayer.types import *
@@ -276,8 +276,8 @@ class UpgradeTest(gl.contract.Contract):
         self.name = new_name
 """
 
-INVALID_CONTRACT = """# v0.3.0
-# { "Depends": "py-genlayer:babwp9t37jw9g4j2bccgn14g6x7x9s1f7dsmh7emvz735pz4zxa0" }
+INVALID_CONTRACT = """# v0.4.0
+# { "Depends": "py-genlayer:kzybg95x1gn21dw72m7hyg0maaap04n4nx55j9yt6fkdqxtz6bz0" }
 
 import genlayer as gl
 from genlayer.types import *
@@ -287,8 +287,8 @@ class BrokenContract(gl.contract.Contract):
         this is not valid python syntax!!!
 """
 
-SIMPLE_CONTRACT = """# v0.3.0
-# { "Depends": "py-genlayer:babwp9t37jw9g4j2bccgn14g6x7x9s1f7dsmh7emvz735pz4zxa0" }
+SIMPLE_CONTRACT = """# v0.4.0
+# { "Depends": "py-genlayer:kzybg95x1gn21dw72m7hyg0maaap04n4nx55j9yt6fkdqxtz6bz0" }
 
 import genlayer as gl
 from genlayer.types import *

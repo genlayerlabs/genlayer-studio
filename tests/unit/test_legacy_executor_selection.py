@@ -51,9 +51,9 @@ class Legacy(gl.Contract):
         return self.value
 """
 ADDRESS = "0x" + "12" * 20
-CURRENT_LINE_CODE = LEGACY_CODE.replace(b"v0.2.16", b"v0.3.0").replace(
+CURRENT_LINE_CODE = LEGACY_CODE.replace(b"v0.2.16", b"v0.4.0").replace(
     b"1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6",
-    b"babwp9t37jw9g4j2bccgn14g6x7x9s1f7dsmh7emvz735pz4zxa0",
+    b"kzybg95x1gn21dw72m7hyg0maaap04n4nx55j9yt6fkdqxtz6bz0",
 )
 SCHEMA = {"methods": {"get_value": {"readonly": True}}}
 
@@ -63,7 +63,7 @@ V02_MULTI = "py-genlayer-multi:06zyvrlivjga0d5jlpdbprksc0pa6jmllxvp8s20hq1l512vh
 V02_EMBEDDINGS = (
     "py-lib-genlayer-embeddings:0bmbm3cyfwxsyh454z53vxqjf47wz2q7smcqp1q4g4a6k2kidnyk"
 )
-V03_GENLAYER = "py-genlayer:babwp9t37jw9g4j2bccgn14g6x7x9s1f7dsmh7emvz735pz4zxa0"
+V03_GENLAYER = "py-genlayer:kzybg95x1gn21dw72m7hyg0maaap04n4nx55j9yt6fkdqxtz6bz0"
 SHARED_LIB = "py-lib-protobuf:0riri6vk1ma3cnmlwls3d4771y0cf3c44afsl6gwfmnl2cpcbdl1"
 # Split so the backend image's runner-pin grep does not require fake runners.
 UNPINNED_GENLAYER = "py-" + "genlayer"

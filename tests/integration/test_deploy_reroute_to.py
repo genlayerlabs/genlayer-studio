@@ -52,7 +52,7 @@ LEGACY_EXECUTOR = os.environ.get("TEST_REROUTE_EXECUTOR", "v0.2.17")
 # answer with when a caller on another line asks where this contract lives.
 # A `re:` pattern, so release-candidate renames of the line's directory do not
 # break it.
-CURRENT_EXECUTOR = os.environ.get("TEST_CURRENT_EXECUTOR", r"re:^v0\.3\.")
+CURRENT_EXECUTOR = os.environ.get("TEST_CURRENT_EXECUTOR", r"re:^v0\.4\.")
 
 # Shares the validator registry with the other integration suites, which wipe
 # validators while seeding mock responses.
@@ -60,8 +60,8 @@ pytestmark = pytest.mark.xdist_group(name="mock_validators")
 
 
 # Current SDK, current executor.
-CONTRACT_A = """# v0.3.0
-# { "Depends": "py-genlayer:babwp9t37jw9g4j2bccgn14g6x7x9s1f7dsmh7emvz735pz4zxa0" }
+CONTRACT_A = """# v0.4.0
+# { "Depends": "py-genlayer:kzybg95x1gn21dw72m7hyg0maaap04n4nx55j9yt6fkdqxtz6bz0" }
 
 import genlayer as gl
 from genlayer.types import *
@@ -334,7 +334,7 @@ def peers() -> tuple[str, str]:
 
 
 def test_message_from_current_to_legacy_executor(peers):
-    """v0.3 -> v0.2 message: the triggered transaction runs on the legacy
+    """v0.4 -> v0.2 message: the triggered transaction runs on the legacy
     executor, which it can only pick up from the persisted `reroute_to`."""
     address_a, address_b = peers
 
@@ -343,7 +343,7 @@ def test_message_from_current_to_legacy_executor(peers):
 
 
 def test_message_from_legacy_to_current_executor(peers):
-    """v0.2 -> v0.3 message: the triggered transaction runs on the current
+    """v0.2 -> v0.4 message: the triggered transaction runs on the current
     executor, because the target contract has no override."""
     address_a, address_b = peers
 
@@ -352,7 +352,7 @@ def test_message_from_legacy_to_current_executor(peers):
 
 
 def test_call_from_current_to_legacy_executor(peers):
-    """v0.3 -> v0.2 synchronous call (read): the cross-major path.
+    """v0.4 -> v0.2 synchronous call (read): the cross-major path.
 
     The caller's executor asks the host which executor the callee runs on, the
     host answers with the major derived from the callee's persisted
@@ -373,12 +373,12 @@ def test_call_from_current_to_legacy_executor(peers):
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "v0.2 -> v0.3 synchronous call to an *unpinned* callee. The limit is "
+        "v0.2 -> v0.4 synchronous call to an *unpinned* callee. The limit is "
         "ours, not the legacy executor's: v0.2.17 does issue "
         "RESOLVE_CALLCONTRACT_EXECUTOR (confirmed in the host call counts), but "
         "`Host.resolve_call_contract_executor` answers only for a callee that "
         "carries a `reroute_to` and returns None for anything else. So the "
-        "answer here is 'stay in-process', the v0.2.17 executor loads A's v0.3 "
+        "answer here is 'stay in-process', the v0.2.17 executor loads A's v0.4 "
         "code itself, and rejects it with `invalid_contract "
         "absent_runner_comment`. Pinning A makes the same direction work -- see "
         "test_call_from_legacy_to_pinned_current_executor below. Messages cross "
@@ -387,7 +387,7 @@ def test_call_from_current_to_legacy_executor(peers):
     ),
 )
 def test_call_from_legacy_to_current_executor(peers):
-    """v0.2 -> v0.3 synchronous call (read), as opposed to a message."""
+    """v0.2 -> v0.4 synchronous call (read), as opposed to a message."""
     _address_a, address_b = peers
 
     peer_storage = _read(address_b, "read_peer_storage", final=False)
@@ -415,13 +415,13 @@ def pinned_peers() -> tuple[str, str]:
 
 
 def test_call_from_legacy_to_pinned_current_executor(pinned_peers):
-    """v0.2 -> v0.3 synchronous call, with the callee pinned: this one works.
+    """v0.2 -> v0.4 synchronous call, with the callee pinned: this one works.
 
     Same direction as the xfail above, and the same legacy caller. The only
     difference is that A carries a `reroute_to`, so the host has something to
     answer the caller's resolve query with instead of None, and the manager
     runs A in a nested current-line executor rather than letting v0.2.17 try
-    to parse a v0.3 contract.
+    to parse a v0.4 contract.
     """
     _address_a, address_b = pinned_peers
 
