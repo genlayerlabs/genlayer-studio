@@ -29,7 +29,6 @@ from backend.node.types import ExecutionResultStatus
 from backend.node.genvm import base as genvm_base
 from backend.node.genvm import get_code_slot
 from backend.node.genvm.executor_selection import (
-    legacy_executor_selector_for_child_code,
     legacy_executor_selector_for_code,
 )
 from backend.node.genvm.origin import calldata
@@ -52,6 +51,10 @@ class Legacy(gl.Contract):
         return self.value
 """
 ADDRESS = "0x" + "12" * 20
+CURRENT_LINE_CODE = LEGACY_CODE.replace(b"v0.2.16", b"v0.3.0").replace(
+    b"1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6",
+    b"babwp9t37jw9g4j2bccgn14g6x7x9s1f7dsmh7emvz735pz4zxa0",
+)
 SCHEMA = {"methods": {"get_value": {"readonly": True}}}
 
 V02_GENLAYER = "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6"
@@ -79,17 +82,29 @@ def _registry(ids):
     return json.dumps(runners)
 
 
+def _versioned_registry(ids):
+    # genvm-manager v0.6.0-rc11's v0.3 shape.
+    runners = {}
+    for runner_id in ids:
+        name, runner_hash = runner_id.split(":")
+        entry = runners.setdefault(name, {"latest": runner_hash, "versions": {}})
+        entry["versions"][runner_hash] = {"forks": "genvm/executor/v0.3"}
+    return json.dumps(runners)
+
+
 @pytest.fixture
 def installed_genvm(tmp_path, monkeypatch):
-    """Registries shaped like genvm-manager v0.6.0-rc9's executor lines."""
+    """Registries shaped like genvm-manager v0.6.0-rc11's executor lines."""
     lines = {
-        "v0.2.17": [V02_GENLAYER, V01_GENLAYER, V02_MULTI, V02_EMBEDDINGS, SHARED_LIB],
-        "v0.3.0-rc10": [V03_GENLAYER, SHARED_LIB],
+        "v0.2.17": _registry(
+            [V02_GENLAYER, V01_GENLAYER, V02_MULTI, V02_EMBEDDINGS, SHARED_LIB]
+        ),
+        "v0.3.0-rc11": _versioned_registry([V03_GENLAYER, SHARED_LIB]),
     }
-    for line, ids in lines.items():
+    for line, registry in lines.items():
         data = tmp_path / "executor" / line / "data"
         data.mkdir(parents=True)
-        (data / "all.json").write_text(_registry(ids))
+        (data / "all.json").write_text(registry)
     monkeypatch.setenv("GENVMROOT", str(tmp_path))
     return tmp_path
 
@@ -170,23 +185,25 @@ CURRENT_CODE = f'# {{ "Depends": "{V03_GENLAYER}" }}\nclass C: pass\n'.encode()
 
 
 @pytest.mark.parametrize("code", RETAINED_ONLY_CODE, ids=RETAINED_ONLY_IDS)
-def test_child_code_declaring_a_retained_only_runner_selects_legacy_executor(
+def test_code_declaring_a_retained_only_runner_selects_legacy_executor(
     installed_genvm, code
 ):
-    assert legacy_executor_selector_for_child_code(code) == LEGACY_SELECTOR
+    assert legacy_executor_selector_for_code(code) == LEGACY_SELECTOR
 
 
 @pytest.mark.parametrize("code", RETAINED_ONLY_CODE, ids=RETAINED_ONLY_IDS)
-def test_new_deployment_of_retained_only_runner_keeps_manager_selection(
+def test_new_deployment_of_retained_only_runner_selects_legacy_executor(
     installed_genvm, code
 ):
-    # Only contracts already on v0.2 may deploy onto it by runner.
-    assert legacy_executor_selector_for_code(code) is None
-    assert transaction_genvm_executor_selector(_deployment(code)) is None
+    # Unchanged v0.2 code deploys without a `# v0.2.x` header.
+    transaction = _deployment(code)
+    assert transaction_genvm_executor_selector(transaction) == LEGACY_SELECTOR
+    snapshot = contract_snapshot_factory(ADDRESS, None, transaction)
+    assert snapshot.genvm_executor_selector == LEGACY_SELECTOR
 
 
-def test_child_code_with_legacy_header_selects_legacy_executor():
-    assert legacy_executor_selector_for_child_code(LEGACY_CODE) == LEGACY_SELECTOR
+def test_code_with_legacy_header_selects_legacy_executor():
+    assert legacy_executor_selector_for_code(LEGACY_CODE) == LEGACY_SELECTOR
 
 
 @pytest.mark.parametrize(
@@ -218,15 +235,13 @@ def test_child_code_with_legacy_header_selects_legacy_executor():
         "bad-zip",
     ],
 )
-def test_child_code_runnable_by_newest_line_keeps_manager_selection(
-    installed_genvm, code
-):
-    assert legacy_executor_selector_for_child_code(code) is None
+def test_code_runnable_by_newest_line_keeps_manager_selection(installed_genvm, code):
+    assert legacy_executor_selector_for_code(code) is None
 
 
 def test_retained_runner_without_installed_registries_keeps_manager_selection():
     code = f'# {{ "Depends": "{V02_GENLAYER}" }}\n'.encode()
-    assert legacy_executor_selector_for_child_code(code) is None
+    assert legacy_executor_selector_for_code(code) is None
 
 
 def _encrypted_zip_contract() -> bytes:
@@ -256,12 +271,12 @@ def _encrypted_zip_contract() -> bytes:
     ],
     ids=["encrypted-zip", "too-deep-json", "deep-json"],
 )
-def test_child_code_sniffing_never_raises(installed_genvm, code, expected):
+def test_code_sniffing_never_raises(installed_genvm, code, expected):
     # Invalid input must reach GenVM's invalid-contract path, not crash emission.
-    assert legacy_executor_selector_for_child_code(code) == expected
+    assert legacy_executor_selector_for_code(code) == expected
 
 
-def _child_context(emitter_selector, *, parent=None, snapshot=True):
+def _child_context(parent=None):
     parent = parent or Transaction(
         hash="0xparent",
         status=TransactionStatus.PENDING,
@@ -271,14 +286,7 @@ def _child_context(emitter_selector, *, parent=None, snapshot=True):
         data={},
         value=0,
     )
-    return SimpleNamespace(
-        transaction=parent,
-        contract_snapshot=(
-            SimpleNamespace(genvm_executor_selector=emitter_selector)
-            if snapshot
-            else None
-        ),
-    )
+    return SimpleNamespace(transaction=parent)
 
 
 def _child_deploy(code):
@@ -289,13 +297,10 @@ def _child_deploy(code):
     ]
 
 
-@pytest.mark.parametrize("emitter_selector", [LEGACY_SELECTOR, "v0.2.17"])
-def test_v02_contract_deploying_retained_only_child_pins_it_to_v02(
-    installed_genvm, emitter_selector
-):
+def test_retained_only_child_deployment_pins_it_to_v02(installed_genvm):
     # CampaignFactory.create_campaign deploying CampaignIC.
     sim_config = consensus_base._child_sim_config(
-        _child_context(emitter_selector), _child_deploy(CAMPAIGN_CODE)
+        _child_context(), _child_deploy(CAMPAIGN_CODE)
     )
     assert sim_config["genvm_executor_selector"] == LEGACY_SELECTOR
     assert sim_config["genvm_executor_selector_inferred"] is True
@@ -322,41 +327,27 @@ def test_v02_child_deploying_from_its_constructor_pins_grandchild(installed_genv
     # CampaignIC.__init__ deploying its shards: the emitter is itself a deploy.
     parent = _inferred_child_deployment(CAMPAIGN_CODE)
     sim_config = consensus_base._child_sim_config(
-        _child_context(None, parent=parent, snapshot=False),
-        _child_deploy(CAMPAIGN_CODE),
+        _child_context(parent), _child_deploy(CAMPAIGN_CODE)
     )
     assert sim_config["genvm_executor_selector"] == LEGACY_SELECTOR
 
 
 def test_inferred_pin_is_not_cascaded_to_descendants(installed_genvm):
-    context = _child_context(
-        None, parent=_inferred_child_deployment(CAMPAIGN_CODE), snapshot=False
-    )
+    context = _child_context(_inferred_child_deployment(CAMPAIGN_CODE))
     call = [ADDRESS, {"calldata": b""}, TransactionType.RUN_CONTRACT.value]
     assert consensus_base._child_sim_config(context, call) is None
     deploy = _child_deploy(CURRENT_CODE)
     assert consensus_base._child_sim_config(context, deploy) is None
 
 
-@pytest.mark.parametrize(
-    "emitter_selector, code",
-    [
-        (None, CAMPAIGN_CODE),
-        ("v0.3.0-rc10", CAMPAIGN_CODE),
-        (LEGACY_SELECTOR, CURRENT_CODE),
-    ],
-    ids=["current-emitter", "pinned-current-emitter", "current-child"],
-)
-def test_child_deployment_otherwise_keeps_manager_selection(
-    installed_genvm, emitter_selector, code
-):
-    context = _child_context(emitter_selector)
-    assert consensus_base._child_sim_config(context, _child_deploy(code)) is None
+def test_current_child_deployment_keeps_manager_selection(installed_genvm):
+    deploy = _child_deploy(CURRENT_CODE)
+    assert consensus_base._child_sim_config(_child_context(), deploy) is None
 
 
 def test_child_call_and_explicit_pin_cascade_unchanged(installed_genvm):
     parent = _deployment(CAMPAIGN_CODE, selector="v0.2.17")
-    context = _child_context(LEGACY_SELECTOR, parent=parent)
+    context = _child_context(parent)
     call = [ADDRESS, {"calldata": b""}, TransactionType.RUN_CONTRACT.value]
     expected = parent.sim_config.to_dict()
     assert consensus_base._child_sim_config(context, call) == expected
@@ -421,6 +412,17 @@ async def test_schema_for_legacy_code_selects_legacy_executor(
 
 
 @pytest.mark.asyncio
+async def test_schema_for_retained_only_runner_selects_legacy_executor(
+    installed_genvm, schema_run
+):
+    await _node().get_contract_schema(CAMPAIGN_CODE)
+    assert schema_run.await_args.kwargs["genvm_executor_selector"] == LEGACY_SELECTOR
+    proxy = schema_run.await_args.args[0].keywords["state_proxy"]
+    assert get_code_slot(legacy=True) in proxy.data
+    assert get_code_slot() not in proxy.data
+
+
+@pytest.mark.asyncio
 async def test_schema_runs_at_the_current_time(schema_run):
     before = datetime.datetime.now(datetime.UTC)
     await _node().get_contract_schema(LEGACY_CODE)
@@ -436,7 +438,7 @@ async def test_schema_explicit_selector_takes_precedence(schema_run):
 
 @pytest.mark.asyncio
 async def test_current_schema_keeps_default_executor(schema_run):
-    await _node().get_contract_schema(LEGACY_CODE.replace(b"v0.2.16", b"v0.3.0"))
+    await _node().get_contract_schema(CURRENT_LINE_CODE)
     assert schema_run.await_args.kwargs.get("genvm_executor_selector") is None
     proxy = schema_run.await_args.args[0].keywords["state_proxy"]
     assert get_code_slot() in proxy.data
@@ -450,7 +452,7 @@ async def test_current_schema_keeps_default_executor(schema_run):
         (LEGACY_CODE, None, LEGACY_SELECTOR),
         (LEGACY_CODE, "v0.2.17", "v0.2.17"),
         (LEGACY_CODE, "v0.3.0-rc7", "v0.3.0-rc7"),
-        (LEGACY_CODE.replace(b"v0.2.16", b"v0.3.0"), None, None),
+        (CURRENT_LINE_CODE, None, None),
     ],
 )
 async def test_simulated_deployment_selects_executor_before_execution(
@@ -464,6 +466,17 @@ async def test_simulated_deployment_selects_executor_before_execution(
     await node.deploy_contract(ADDRESS, code, calldata.encode({"args": []}))
     node._run_genvm.assert_awaited_once()
     assert node.contract_snapshot.genvm_executor_selector == expected_selector
+
+
+@pytest.mark.asyncio
+async def test_simulated_deployment_of_retained_only_runner_selects_legacy(
+    installed_genvm,
+):
+    node = _node()
+    node.contract_snapshot = SimpleNamespace(genvm_executor_selector=None)
+    node._run_genvm = AsyncMock()
+    await node.deploy_contract(ADDRESS, CAMPAIGN_CODE, calldata.encode({"args": []}))
+    assert node.contract_snapshot.genvm_executor_selector == LEGACY_SELECTOR
 
 
 @pytest.mark.parametrize("selector", [LEGACY_SELECTOR, "v0.2.17"])
@@ -510,7 +523,7 @@ def test_explicit_deployment_selector_is_preserved():
 
 
 def test_current_deployment_keeps_default_executor():
-    transaction = _deployment(LEGACY_CODE.replace(b"v0.2.16", b"v0.3.0"))
+    transaction = _deployment(CURRENT_LINE_CODE)
     assert transaction_genvm_executor_selector(transaction) is None
 
 
@@ -519,7 +532,7 @@ def test_current_deployment_keeps_default_executor():
 async def test_accepted_deployment_registers_matching_code_slot_and_selector(
     monkeypatch, legacy
 ):
-    code = LEGACY_CODE if legacy else LEGACY_CODE.replace(b"v0.2.16", b"v0.3.0")
+    code = LEGACY_CODE if legacy else CURRENT_LINE_CODE
     transaction = _deployment(code)
     transaction.data["contract_address"] = ADDRESS
     code_slot = base64.b64encode(get_code_slot(legacy=legacy)).decode()
