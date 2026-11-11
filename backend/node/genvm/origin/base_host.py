@@ -3,6 +3,7 @@ import asyncio
 import base64
 import collections.abc
 import contextlib
+import contextvars
 import json
 import math
 import socket
@@ -24,6 +25,7 @@ from . import (
     public_abi,
 )
 from .calldata import Address
+from .keccak import Keccak256
 from .logger import Logger
 
 ACCOUNT_ADDR_SIZE = 20
@@ -55,6 +57,20 @@ DebugMode = typing.Literal[
     "unsafe",
     "unsafe-tracing",
 ]
+
+
+class Create2(typing.TypedDict):
+    deployer: Address
+    code_hash: bytes
+
+
+# Node conformance preset at consensus 612d2203: GhostFactory and its bytecodeEVM.
+DEFAULT_CREATE2: Create2 = {
+    "deployer": Address("0x1429859428C0aBc9C2C47C8Ee9FBaf82cFA0F20f"),
+    "code_hash": bytes.fromhex(
+        "aa5d6fdc0053688f0cb3b30dbde241e20d9031bf0f5b714582d4e09f3e103ff8"
+    ),
+}
 
 # Default host-provided `node` fee constants (see fees.expr_prelude in
 # install/config/genvm.yaml). Values are strings (gas_data is Map<str, str>)
@@ -220,7 +236,46 @@ type ResultEmission = typing.Union[
 ]
 
 
+# Nested connection tasks inherit their run's CREATE2 inputs.
+_HOST_CREATE2 = contextvars.ContextVar[Create2]("host_create2", default=DEFAULT_CREATE2)
+
+_PREDICT_GHOST_SELECTOR = Keccak256(b"predictGhostAddress(uint256,address)").digest()[
+    :4
+]
+
+
+async def _predict_ghost_address(
+    create2: Create2, salt_nonce: int, sender: Address
+) -> Address:
+    return predict_ghost_address(create2, salt_nonce, sender)
+
+
+def predict_ghost_address(
+    create2: Create2, salt_nonce: int, sender: Address
+) -> Address:
+    if salt_nonce == 0:
+        return Address.ZERO
+    if create2["code_hash"] == bytes(32):
+        raise HostException(host_fns.Errors.EVM_REVERTED)
+    salt = Keccak256(sender.as_bytes + salt_nonce.to_bytes(32, "big")).digest()
+    return Address(
+        Keccak256(
+            b"\xff" + create2["deployer"].as_bytes + salt + create2["code_hash"]
+        ).digest()[12:]
+    )
+
+
+type PredictGhostAddressHook = collections.abc.Callable[
+    [Create2, int, Address],
+    collections.abc.Awaitable[Address | types.NotImplementedType],
+]
+
+
 class IHost(metaclass=abc.ABCMeta):
+    predict_ghost_address_hook: PredictGhostAddressHook | None = staticmethod(
+        _predict_ghost_address
+    )
+
     @abc.abstractmethod
     async def loop_enter(self, cancellation: asyncio.Event) -> socket.socket: ...
 
@@ -256,6 +311,33 @@ class IHost(metaclass=abc.ABCMeta):
     async def notify_nondet_disagreement(self, call_no: int, /) -> None: ...
 
 
+async def _try_predict_ghost(
+    handler: IHost, create2: Create2, address: bytes, calldata: bytes
+) -> bytes | None:
+    hook = getattr(handler, "predict_ghost_address_hook", None)
+    if (
+        hook is None
+        or address != create2["deployer"].as_bytes
+        or calldata[:4] != _PREDICT_GHOST_SELECTOR
+        or len(calldata) < 68
+        or calldata[36:48] != bytes(12)
+    ):
+        return None
+    predicted = await hook(
+        create2,
+        int.from_bytes(calldata[4:36], "big"),
+        Address(calldata[48:68]),
+    )
+    if predicted is NotImplemented:
+        return None
+    if not isinstance(predicted, Address):
+        raise TypeError(
+            "predict_ghost_address_hook must return Address or NotImplemented, "
+            f"got {type(predicted).__name__}"
+        )
+    return bytes(12) + predicted.as_bytes
+
+
 async def read_contract_major(handler: IHost, message: Message) -> int:
     """
     Reads the public-ABI major the run's contract was deployed against.
@@ -286,24 +368,28 @@ async def host_loop(
     cancellation: asyncio.Event,
     *,
     ctx: Context,
+    create2: Create2 = DEFAULT_CREATE2,
 ) -> None:
     """
     Accepts one connection through the handler, then serves it.
     """
     logger = ctx.logger
+    create2_token = _HOST_CREATE2.set(create2)
+    try:
+        logger.trace("entering loop")
+        loop_enter_wait_start = time.perf_counter()
+        sock = await handler.loop_enter(cancellation)
+        host_loop_entered_s = time.perf_counter()
+        ctx.add_stat("host_loop_entered_s", host_loop_entered_s)
+        ctx.add_stat(
+            "host_loop_enter_wait_ms",
+            round((host_loop_entered_s - loop_enter_wait_start) * 1000),
+        )
+        logger.trace("entered loop")
 
-    logger.trace("entering loop")
-    loop_enter_wait_start = time.perf_counter()
-    sock = await handler.loop_enter(cancellation)
-    host_loop_entered_s = time.perf_counter()
-    ctx.add_stat("host_loop_entered_s", host_loop_entered_s)
-    ctx.add_stat(
-        "host_loop_enter_wait_ms",
-        round((host_loop_entered_s - loop_enter_wait_start) * 1000),
-    )
-    logger.trace("entered loop")
-
-    await host_loop_on(handler, sock, ctx=ctx)
+        await host_loop_on(handler, sock, ctx=ctx, create2=create2)
+    finally:
+        _HOST_CREATE2.reset(create2_token)
 
 
 async def host_loop_on(
@@ -311,6 +397,7 @@ async def host_loop_on(
     sock: socket.socket,
     *,
     ctx: Context,
+    create2: Create2 | None = None,
 ) -> None:
     """
     Serves an already accepted connection.
@@ -319,6 +406,8 @@ async def host_loop_on(
     listener, so the accept step has to be separable from the protocol it feeds.
     """
     async_loop = asyncio.get_event_loop()
+    if create2 is None:
+        create2 = _HOST_CREATE2.get()
 
     logger = ctx.logger
 
@@ -472,7 +561,9 @@ async def host_loop_on(
                 calldata = await read_exact(calldata_len)
 
                 try:
-                    res = await handler.external_call(address, calldata)
+                    res = await _try_predict_ghost(handler, create2, address, calldata)
+                    if res is None:
+                        res = await handler.external_call(address, calldata)
                 except HostException as e:
                     await send_all(bytes([e.error_code]))
                 else:
@@ -1214,8 +1305,15 @@ async def run_genvm(
 
     # `node` fee constants are an ExecutionData field.
     effective_gas_data = DEFAULT_GAS_DATA if gas_data is None else gas_data
+    raw_create2 = typing.cast(Create2, request_extra.get("create2", DEFAULT_CREATE2))
+    create2: Create2 = {
+        "deployer": Address(raw_create2["deployer"]),
+        "code_hash": bytes(raw_create2["code_hash"]),
+    }
     cancellation_event = asyncio.Event()
-    host_task = asyncio.create_task(host_loop(handler, cancellation_event, ctx=ctx))
+    host_task = asyncio.create_task(
+        host_loop(handler, cancellation_event, ctx=ctx, create2=create2)
+    )
 
     client = manager_client
     genvm_id: int | None = None
@@ -1262,6 +1360,7 @@ async def run_genvm(
             "host_genvm_id": host_genvm_id,
             "host_hello_data": list(host_hello_data),
             **request_extra,
+            "create2": create2,
         }
         if deadline is not None:
             request_payload["deadline"] = deadline
