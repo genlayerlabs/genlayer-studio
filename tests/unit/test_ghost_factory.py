@@ -3,7 +3,6 @@ import pytest
 from backend.protocol_rpc.ghost_factory import (
     GhostFactoryConfig,
     InvalidGhostFactoryConfiguration,
-    genvm_salted_child_address,
 )
 
 
@@ -55,24 +54,16 @@ def test_create2_salt_is_scoped_to_authenticated_sender():
     assert first != second
 
 
-def test_genvm_salted_child_address_matches_runner_public_formula():
-    assert (
-        genvm_salted_child_address(
-            "0xb9c60a4375eF3d3D9eF3D6Db31954cADE090A124",
-            1,
-            61999,
-        )
-        == "0x2f4C8a3F29368b8849248E8F84a6993Da2a315E2"
+def test_salted_creation_rejects_zero_bytecode_hash(monkeypatch):
+    monkeypatch.setenv("GENLAYER_STUDIO_GHOST_BYTECODE_HASH", "0x" + "00" * 32)
+    factory = GhostFactoryConfig.from_env()
+    monkeypatch.setattr(
+        "backend.protocol_rpc.ghost_factory.predict_ghost_address",
+        lambda *_args: pytest.fail("zero bytecode hash reached host formula"),
     )
-
-
-@pytest.mark.parametrize("salt_nonce", [0, -1, 1 << 256])
-def test_genvm_salted_child_address_rejects_invalid_salt(salt_nonce):
-    with pytest.raises(InvalidGhostFactoryConfiguration):
-        genvm_salted_child_address(
-            "0x1111111111111111111111111111111111111111",
-            salt_nonce,
-            61999,
+    with pytest.raises(InvalidGhostFactoryConfiguration, match="bytecode hash is zero"):
+        factory.address_for(
+            1, 0, namespace="0x1111111111111111111111111111111111111111"
         )
 
 

@@ -184,7 +184,7 @@ class _RecordingCtx:
 async def _run_with_ack_error(monkeypatch, error: BaseException):
     client = _AckFailingClient(error)
 
-    async def _no_host_loop(_handler, cancellation, *, ctx):
+    async def _no_host_loop(_handler, cancellation, *, ctx, create2):
         # No executor connects in this test, so the loop just waits for the
         # run to end, exactly as the real one does.
         await cancellation.wait()
