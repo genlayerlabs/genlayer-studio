@@ -50,7 +50,7 @@ def test_schedule_defines_studio_network_with_every_executor_fork():
         chainforks.GENVM_NETWORK: {
             "forks": {
                 "genvm/executor/v0.2": "2026-01-01T00:00:00Z",
-                "genvm/executor/v0.3": "always",
+                "genvm/executor/v0.3": "never",
                 "genvm/executor/v0.4": "always",
             }
         }
