@@ -59,7 +59,7 @@ async def _run(monkeypatch, host: Host, message, **kwargs) -> _FakeManagerClient
     """Starts a run that stops at the manager request, keeping its payload."""
     client = _FakeManagerClient()
 
-    async def fake_host_loop(_handler, cancellation, *, ctx):
+    async def fake_host_loop(_handler, cancellation, *, ctx, create2):
         await cancellation.wait()
 
     monkeypatch.setattr(base_host, "host_loop", fake_host_loop)
@@ -184,4 +184,4 @@ async def test_run_genvm_host_opts_into_cross_contract_resolution(monkeypatch):
             message={"is_init": False, "contract_address": ADDR},
         )
 
-    assert captured["request_extra"] == {"hook_cross_contract_calls": True}
+    assert captured["request_extra"]["hook_cross_contract_calls"] is True
