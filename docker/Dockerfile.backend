@@ -263,6 +263,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 COPY backend $path/backend
 RUN chown -R studio-user:studio-group $path
+# GenVM installs above skip check-install (--precompile false); validate Studio's schedule against this GenVM tree
+RUN python3 -m backend.node.genvm.chainforks
 
 FROM service-base AS consensus-worker
 
