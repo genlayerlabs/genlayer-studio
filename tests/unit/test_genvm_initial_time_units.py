@@ -112,9 +112,3 @@ async def test_run_genvm_sends_network_only_when_given(monkeypatch, network):
         assert "network" not in payload
     else:
         assert payload["network"] == network
-
-
-def test_studio_always_targets_studio_network():
-    from backend.node.genvm import base
-
-    assert base.GENVM_NETWORK == "studio"

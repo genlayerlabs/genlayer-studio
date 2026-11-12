@@ -23,6 +23,7 @@ from backend.protocol_rpc.fees import (
 )
 import backend.node.genvm.base as genvmbase
 import backend.node.genvm.origin.calldata as calldata
+from backend.node.genvm import chainforks
 from backend.node.genvm.executor_selection import (
     clamp_to_legacy_line_activation,
     legacy_executor_selector_for_code,
@@ -428,6 +429,34 @@ _MODULE_MAP = {
 }
 
 
+_CHECK_INSTALL_TIMEOUT_SECONDS = 300
+
+
+async def _check_genvm_install(genvm_root: Path) -> None:
+    """Validate Studio's schedule against the installed GenVM before serving it."""
+    proc = await asyncio.subprocess.create_subprocess_exec(
+        *chainforks.check_install_argv(genvm_root),
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        output, _ = await asyncio.wait_for(
+            proc.communicate(), _CHECK_INSTALL_TIMEOUT_SECONDS
+        )
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise RuntimeError(
+            f"genvm-modules check-install timed out after {_CHECK_INSTALL_TIMEOUT_SECONDS}s"
+        ) from None
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"genvm-modules check-install failed with exit code {proc.returncode}:\n"
+            + output.decode(errors="replace")
+        )
+
+
 class Manager:
     url: str
     llm_config_base: dict[str, typing.Any]
@@ -473,6 +502,8 @@ class Manager:
         debug_enabled = os.getenv("GENVM_WEB_DEBUG") == "1"
         stream_target = sys.stdout if debug_enabled else asyncio.subprocess.DEVNULL
 
+        await _check_genvm_install(genvm_root)
+
         exe = genvm_root.joinpath("bin", "genvm-modules")
         man.proc = await asyncio.subprocess.create_subprocess_exec(
             exe,
@@ -480,6 +511,7 @@ class Manager:
             "--port",
             "3999",
             "--die-with-parent",
+            *chainforks.manager_args(),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=stream_target,
             stderr=stream_target,

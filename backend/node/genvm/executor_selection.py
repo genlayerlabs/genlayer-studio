@@ -9,12 +9,13 @@ import re
 import zipfile
 from pathlib import Path
 
+from . import chainforks
+
 # Match the selector used to backfill pre-existing v0.2 contracts. Let the
 # manager choose the newest available patch in this line, not a hardcoded
 # directory or the newest semver-major-0 executor (which is v0.3).
 LEGACY_EXECUTOR_SELECTOR = r"re:^v0\.2\."
-# The "studio" network's genvm/executor/v0.2 date in genvm-manager's data/genvm-chainforks.json
-LEGACY_LINE_ACTIVATION = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+LEGACY_LINE_ACTIVATION = chainforks.fork_activation("genvm/executor/v0.2")
 _LEGACY_HEADER = re.compile(
     rb"(?:#|//|--)\s*v0\.2\.(?:[0-9]+|\*)(?:-[0-9A-Za-z.-]+)?\s*"
 )
