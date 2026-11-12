@@ -61,7 +61,7 @@ from .error_codes import (
     GenVMInternalError,
 )
 
-GENVM_NETWORK = "studio"
+from .chainforks import GENVM_NETWORK
 
 GENVM_GASLESS_GAS_DATA: dict[str, str] = {
     **genvmhost.DEFAULT_GAS_DATA,
