@@ -297,6 +297,25 @@ def _redact_contract_for_log(contract_dict: dict) -> dict:
     return redacted
 
 
+def _partial_execution_stats(
+    node: Any, tx_hash: str, node_config: dict, role: str
+) -> dict | None:
+    from loguru import logger
+
+    # Diagnostics must not turn a timeout into a consensus failure.
+    try:
+        stats = node.partial_execution_stats()
+    except Exception as e:
+        logger.warning(f"No partial stats for timed out {role} of {tx_hash}: {e}")
+        return None
+    logger.warning(
+        f"{role} execution slot expired for {tx_hash}: "
+        f"address={node_config.get('address')}, "
+        f"progress={stats.get('timeout_progress')}"
+    )
+    return stats
+
+
 def _slot_budget_seconds(
     transaction: Transaction,
     role: Literal["leader", "validator"],
@@ -3041,6 +3060,7 @@ class ProposingState(TransactionState):
             leader_dict: dict,
             *,
             detail: str | None = None,
+            execution_stats: dict | None = None,
         ) -> Receipt:
             timeout_ms = int(leader_budget_seconds * 1000)
             return Receipt(
@@ -3063,6 +3083,7 @@ class ProposingState(TransactionState):
                     },
                 },
                 processing_time=timeout_ms,
+                execution_stats=execution_stats,
             )
 
         for attempt in range(MAX_IDLE_REPLACEMENTS + 1):
@@ -3101,13 +3122,18 @@ class ProposingState(TransactionState):
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if exec_task not in done:
+                    execution_stats = _partial_execution_stats(
+                        leader_node, context.transaction.hash, context.leader, "leader"
+                    )
                     exec_task.cancel()
                     try:
                         await asyncio.wait_for(exec_task, timeout=0.1)
                     except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                         pass
                     context.consensus_data.leader_receipt = [
-                        _build_leader_timeout_receipt(context.leader)
+                        _build_leader_timeout_receipt(
+                            context.leader, execution_stats=execution_stats
+                        )
                     ]
                     break
 
@@ -3283,7 +3309,9 @@ class CommittingState(TransactionState):
             raw_error = (receipt.genvm_result or {}).get("raw_error")
             return isinstance(raw_error, dict) and raw_error.get("fatal") is True
 
-        def _build_timeout_receipt(validator_dict: dict) -> Receipt:
+        def _build_timeout_receipt(
+            validator_dict: dict, execution_stats: dict | None = None
+        ) -> Receipt:
             timeout_ms = int(validator_slot_budget_seconds * 1000)
             return Receipt(
                 result=bytes([ResultCode.VM_ERROR]) + b"timeout",
@@ -3309,6 +3337,7 @@ class CommittingState(TransactionState):
                     },
                 },
                 processing_time=timeout_ms,
+                execution_stats=execution_stats,
             )
 
         def _build_synthetic_idle_receipt(validator_dict: dict) -> Receipt:
@@ -3395,6 +3424,9 @@ class CommittingState(TransactionState):
                             )
                             result = _build_internal_error_receipt(current, e)
                     else:
+                        execution_stats = _partial_execution_stats(
+                            node, context.transaction.hash, current, "validator"
+                        )
                         exec_task.cancel()
                         try:
                             await asyncio.wait_for(exec_task, timeout=0.1)
@@ -3409,7 +3441,7 @@ class CommittingState(TransactionState):
                             f"COMMITTING.VALIDATOR_{index}_TIMEOUT"
                             f".attempt_{attempt}",
                         )
-                        result = _build_timeout_receipt(current)
+                        result = _build_timeout_receipt(current, execution_stats)
                     context.transactions_processor.add_state_timestamp(
                         context.transaction.hash,
                         f"COMMITTING.VALIDATOR_{index}_END" f".attempt_{attempt}",

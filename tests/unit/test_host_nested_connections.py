@@ -84,6 +84,7 @@ async def test_later_connections_are_served_with_the_same_handler(monkeypatch):
             assert served_handler is host
             assert served_ctx is ctx
             assert served_sock is not accepted
+            assert ctx.stats["nested_connections"] == 1
 
             cancellation.set()
             await host.close_connections()
