@@ -13,7 +13,7 @@ from . import chainforks
 
 # Match the selector used to backfill pre-existing v0.2 contracts. Let the
 # manager choose the newest available patch in this line, not a hardcoded
-# directory or the newest semver-major-0 executor (which is v0.3).
+# directory or the newest active semver-major-0 executor.
 LEGACY_EXECUTOR_SELECTOR = r"re:^v0\.2\."
 LEGACY_LINE_ACTIVATION = chainforks.fork_activation("genvm/executor/v0.2")
 _LEGACY_HEADER = re.compile(
