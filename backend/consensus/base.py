@@ -18,7 +18,6 @@ import base64
 import binascii
 
 from eth_utils import is_address, keccak, to_bytes, to_checksum_address
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 from backend.consensus.constants import DEFAULT_VALIDATORS_COUNT
 from backend.consensus.errors import FinalizationStateError, NoValidatorsAvailableError
@@ -820,20 +819,21 @@ class ConsensusAlgorithm:
             accounts_manager (AccountsManager): Manager to handle account balance updates.
         """
 
-        # Idempotency guard: if the tx was already credited elsewhere (e.g. the
-        # `sim_fundAccount` endpoint sets value_credited=true after crediting
-        # the recipient directly), skip debit+credit to avoid double-processing.
-        # This fixes a latent 2x-balance bug for faucet txs where both the
-        # endpoint and this function credited the recipient.
-        existing_tx = transactions_processor.get_transaction_by_hash(transaction.hash)
-        if existing_tx and existing_tx.get("value_credited"):
-            await ConsensusAlgorithm.dispatch_transaction_status_update(
-                transactions_processor,
-                transaction.hash,
-                TransactionStatus.FINALIZED,
-                msg_handler,
-            )
-            return
+        # Claim first so a concurrent credit_tx_value_once can't double-credit.
+        claimed = False
+        if transaction.value and transaction.value > 0:
+            if transaction.to_address is not None:
+                # Same lock order as credit_tx_value_once (account, then tx row).
+                accounts_manager.ensure_account_exists(transaction.to_address)
+            claimed = accounts_manager.claim_tx_value_credit(transaction.hash)
+            if not claimed:
+                await ConsensusAlgorithm.dispatch_transaction_status_update(
+                    transactions_processor,
+                    transaction.hash,
+                    TransactionStatus.FINALIZED,
+                    msg_handler,
+                )
+                return
 
         # For triggered (child) transactions, the parent contract was already
         # debited at acceptance time. Skip sender debit to avoid double-debit.
@@ -848,6 +848,9 @@ class ConsensusAlgorithm:
                 transaction.from_address, transaction.value
             )
             if not debited:
+                # Nothing moved, so refund_tx_value must still see it uncredited.
+                if claimed:
+                    accounts_manager.release_tx_value_credit(transaction.hash)
                 # UNDETERMINED is finalization-eligible: claim_next_finalization
                 # filters on timestamp_awaiting_finalization IS NOT NULL.
                 # Without this stamp the row strands forever (16 such rows
@@ -869,17 +872,6 @@ class ConsensusAlgorithm:
             # each other when they target the same recipient.
             accounts_manager.credit_account_balance(
                 transaction.to_address, transaction.value
-            )
-
-        # Mark the tx as credited so a later retry (or duplicate sync path)
-        # hits the idempotency guard above and no-ops.
-        if transaction.value and transaction.value > 0:
-            accounts_manager.session.execute(
-                text(
-                    "UPDATE transactions SET value_credited = true "
-                    "WHERE hash = :hash"
-                ),
-                {"hash": transaction.hash},
             )
 
         # Dispatch a transaction status update to FINALIZED
