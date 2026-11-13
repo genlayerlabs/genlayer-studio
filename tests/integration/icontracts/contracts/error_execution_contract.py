@@ -1,11 +1,12 @@
-# v0.1.0
-# { "Depends": "py-genlayer:test" }
+# v0.4.0
+# { "Depends": "py-genlayer:kzybg95x1gn21dw72m7hyg0maaap04n4nx55j9yt6fkdqxtz6bz0" }
 
-from genlayer import *
+import genlayer as gl
+from genlayer.types import *
 
 
-class ErrorExecutionContract(gl.Contract):
-    state: TreeMap[str, str]
+class ErrorExecutionContract(gl.contract.Contract):
+    state: gl.storage.TreeMap[str, str]
 
     def __init__(self, testcase: int, target_address: str | None = None):
 
@@ -93,4 +94,4 @@ class ErrorExecutionContract(gl.Contract):
     def test_cross_contract_call(self, target_address: str) -> None:
         """Test invalid cross-contract calls"""
         # Try to call a non-existent method on another contract
-        gl.get_contract_at(Address(target_address)).non_existent_method()
+        gl.contract.get_at(Address(target_address)).non_existent_method()

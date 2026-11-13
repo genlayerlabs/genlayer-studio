@@ -1,13 +1,14 @@
-# v0.2.16
-# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+# v0.4.0
+# { "Depends": "py-genlayer:kzybg95x1gn21dw72m7hyg0maaap04n4nx55j9yt6fkdqxtz6bz0" }
 
-from genlayer import *
+import genlayer as gl
+from genlayer.types import *
 
 import json
 import typing
 
 
-class PredictionMarket(gl.Contract):
+class PredictionMarket(gl.contract.Contract):
     has_resolved: bool
     team1: str
     team2: str
@@ -37,7 +38,7 @@ class PredictionMarket(gl.Contract):
         )
         self.team1 = team1
         self.team2 = team2
-        self.winner = u256(0)
+        self.winner = 0
         self.score = ""
 
     @gl.public.write

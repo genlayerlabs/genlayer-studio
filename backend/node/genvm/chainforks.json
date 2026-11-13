@@ -1,0 +1,17 @@
+{
+  "$schema": "https://raw.githubusercontent.com/genlayerlabs/genvm-manager/refs/heads/main/docs/schemas/genvm-chainforks.json",
+  "forks": {
+    "genvm/executor/v0.2": {},
+    "genvm/executor/v0.3": {},
+    "genvm/executor/v0.4": {}
+  },
+  "networks": {
+    "studio": {
+      "forks": {
+        "genvm/executor/v0.2": "2026-01-01T00:00:00Z",
+        "genvm/executor/v0.3": "never",
+        "genvm/executor/v0.4": "always"
+      }
+    }
+  }
+}
