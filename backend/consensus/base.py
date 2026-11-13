@@ -41,7 +41,7 @@ from backend.domain.types import (
     LLMProvider,
     Validator,
 )
-from backend.node.base import Node
+from backend.node.base import Node, get_simulator_chain_id
 from backend.node.genvm.executor_selection import (
     legacy_executor_selector_for_code,
     uses_legacy_storage,
@@ -61,7 +61,10 @@ from backend.protocol_rpc.message_handler.types import (
     EventScope,
 )
 from backend.protocol_rpc.types import ZERO_ADDRESS
-from backend.protocol_rpc.ghost_factory import GhostFactoryConfig
+from backend.protocol_rpc.ghost_factory import (
+    GhostFactoryConfig,
+    legacy_salted_child_address,
+)
 from backend.protocol_rpc.fees import (
     FEE_ACCOUNTING_KEY,
     VALIDATORS_PER_ROUND,
@@ -4678,6 +4681,21 @@ def _dispatch_messages_for_phase(
     return True
 
 
+def _emitter_runs_on_legacy_line(context: TransactionContext) -> bool:
+    """A v0.2 parent stores the address its own SDK computed for a salted child."""
+    selector = getattr(context.contract_snapshot, "genvm_executor_selector", None)
+    if selector:
+        return uses_legacy_storage(selector)
+    # Snapshots saved before the pin existed carry none; the row has it.
+    selector = context.transactions_processor.get_contract_executor_selector(
+        context.transaction.to_address
+    )
+    if not selector and context.transaction.type == TransactionType.DEPLOY_CONTRACT:
+        # A new deployment's row is pinned only once it is accepted.
+        selector = transaction_genvm_executor_selector(context.transaction)
+    return uses_legacy_storage(selector)
+
+
 def _author_message_phase_locally(
     context: TransactionContext,
     insert_transactions_data: list,
@@ -4687,6 +4705,7 @@ def _author_message_phase_locally(
 
     context.transactions_processor.lock_ghost_factory()
     factory = GhostFactoryConfig.from_env()
+    legacy_emitter: bool | None = None
     successful_deployments = (
         context.transactions_processor.get_successful_ghost_creation_count()
     )
@@ -4722,11 +4741,20 @@ def _author_message_phase_locally(
             and transaction_type == TransactionType.DEPLOY_CONTRACT.value
         ):
             salt_nonce = int(message_payload.get("saltNonce", 0) or 0)
-            actual_recipient = factory.address_for(
-                salt_nonce,
-                successful_deployments,
-                namespace=context.transaction.to_address,
-            )
+            if salt_nonce != 0 and legacy_emitter is None:
+                legacy_emitter = _emitter_runs_on_legacy_line(context)
+            if salt_nonce != 0 and legacy_emitter:
+                actual_recipient = legacy_salted_child_address(
+                    context.transaction.to_address,
+                    salt_nonce,
+                    get_simulator_chain_id(),
+                )
+            else:
+                actual_recipient = factory.address_for(
+                    salt_nonce,
+                    successful_deployments,
+                    namespace=context.transaction.to_address,
+                )
             normalized = actual_recipient.lower()
             if (
                 normalized in batch_deployments

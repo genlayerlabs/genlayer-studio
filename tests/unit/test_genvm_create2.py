@@ -27,6 +27,8 @@ FACTORY = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
 CODE_HASH = bytes.fromhex("ab" * 32)
 PARENT = "0x1111111111111111111111111111111111111111"
 SELECTOR = keccak(text="predictGhostAddress(uint256,address)")[:4]
+CHAIN_ID = 61999
+LEGACY_SELECTORS = [r"re:^v0\.2\.", "v0.2.17"]
 
 
 @pytest.fixture(autouse=True)
@@ -34,12 +36,26 @@ def _factory_env(monkeypatch):
     monkeypatch.setenv("GENLAYER_STUDIO_GHOST_FACTORY_ADDRESS", FACTORY)
     monkeypatch.setenv("GENLAYER_STUDIO_GHOST_BYTECODE_HASH", "0x" + CODE_HASH.hex())
     monkeypatch.delenv("GENVMROOT", raising=False)
+    monkeypatch.setattr(
+        "backend.consensus.base.get_simulator_chain_id", lambda: CHAIN_ID
+    )
 
 
 def _create2(sender: str, salt: int) -> str:
     salt_word = keccak(bytes.fromhex(sender[2:]) + salt.to_bytes(32, "big"))
     digest = keccak(b"\xff" + bytes.fromhex(FACTORY[2:]) + salt_word + CODE_HASH)
     return to_checksum_address(digest[12:])
+
+
+def _legacy(parent: str, salt: int) -> str:
+    # v0.2 SDK create2_address: keccak(0x01 ‖ parent ‖ salt ‖ chain id)[:20]
+    digest = keccak(
+        b"\x01"
+        + bytes.fromhex(parent[2:])
+        + salt.to_bytes(32, "big")
+        + CHAIN_ID.to_bytes(32, "big")
+    )
+    return to_checksum_address(digest[:20])
 
 
 def _predict_calldata(salt: int, sender: str) -> bytes:
@@ -360,8 +376,13 @@ def _place_children(
     children: list,
     *,
     tx_type: TransactionType = TransactionType.RUN_CONTRACT,
+    row_selector: str | None = None,
+    sim_config=None,
+    data: dict | None = None,
+    has_snapshot: bool = True,
 ) -> dict:
     processor = SimpleNamespace(
+        get_contract_executor_selector=lambda _address: row_selector,
         lock_ghost_factory=lambda: None,
         lock_pending_recipients=lambda _addresses: None,
         get_successful_ghost_creation_count=lambda: 7,
@@ -373,17 +394,19 @@ def _place_children(
             hash="0x" + "11" * 32,
             to_address=PARENT,
             type=tx_type,
-            sim_config=None,
-            data={},
+            sim_config=sim_config,
+            data=data or {},
         ),
         transactions_processor=processor,
-        contract_snapshot=SimpleNamespace(genvm_executor_selector=selector),
+        contract_snapshot=(
+            SimpleNamespace(genvm_executor_selector=selector) if has_snapshot else None
+        ),
     )
     return _author_message_phase_locally(context, children, "accepted")
 
 
-@pytest.mark.parametrize("selector", [None, "v0.2.17", "v0.3.5", "v0.4.0"])
-def test_salted_children_always_live_at_the_factory_create2_address(selector):
+@pytest.mark.parametrize("selector", [None, "v0.3.5", "v0.4.0", r"re:^v0\."])
+def test_salted_children_live_at_the_factory_create2_address(selector):
     receipt = _place_children(
         selector,
         set(),
@@ -403,7 +426,7 @@ def test_salted_children_always_live_at_the_factory_create2_address(selector):
     assert receipt["tx_ids_hex"][1] == "0x" + "00" * 32
 
 
-@pytest.mark.parametrize("selector", [None, "v0.2.17", "v0.3.5", "v0.4.0"])
+@pytest.mark.parametrize("selector", [None, "v0.3.5", "v0.4.0"])
 def test_salted_child_over_an_existing_contract_fails(selector):
     taken = _create2(PARENT, 42)
 
@@ -430,3 +453,76 @@ def test_salted_placement_is_independent_of_installed_lines(
     )
 
     assert receipt["recipients"] == [_create2(PARENT, 42)]
+
+
+@pytest.mark.parametrize("selector", LEGACY_SELECTORS)
+def test_salted_children_of_a_v02_parent_live_where_its_sdk_predicts(selector):
+    receipt = _place_children(
+        selector,
+        set(),
+        [
+            _salted_child("0x" + "01" * 32, 42),
+            _salted_child("0x" + "02" * 32, 42),
+            _salted_child("0x" + "03" * 32, 43),
+        ],
+    )
+
+    zero = "0x0000000000000000000000000000000000000000"
+    assert receipt["recipients"] == [_legacy(PARENT, 42), zero, _legacy(PARENT, 43)]
+    assert _legacy(PARENT, 42) != _create2(PARENT, 42)
+
+
+@pytest.mark.parametrize("selector", LEGACY_SELECTORS)
+def test_salted_child_of_a_v02_parent_over_an_existing_contract_fails(selector):
+    receipt = _place_children(
+        selector,
+        {_legacy(PARENT, 42).lower()},
+        [_salted_child("0x" + "01" * 32, 42)],
+    )
+
+    assert receipt["recipients"] == ["0x0000000000000000000000000000000000000000"]
+
+
+def test_unsalted_child_of_a_v02_parent_keeps_the_factory_nonce_address():
+    factory = GhostFactoryConfig.from_env()
+
+    receipt = _place_children("v0.2.17", set(), [_salted_child("0x" + "01" * 32, 0)])
+
+    assert receipt["recipients"] == [factory.address_for(0, 7)]
+
+
+def test_v02_pin_is_read_from_the_contract_row_when_the_snapshot_has_none():
+    receipt = _place_children(
+        None,
+        set(),
+        [_salted_child("0x" + "01" * 32, 42)],
+        row_selector=r"re:^v0\.2\.",
+    )
+
+    assert receipt["recipients"] == [_legacy(PARENT, 42)]
+
+
+def test_v02_deployment_without_a_snapshot_places_salted_children_legacy():
+    receipt = _place_children(
+        None,
+        set(),
+        [_salted_child("0x" + "01" * 32, 42)],
+        tx_type=TransactionType.DEPLOY_CONTRACT,
+        sim_config=SimpleNamespace(genvm_executor_selector="v0.2.17"),
+        has_snapshot=False,
+    )
+
+    assert receipt["recipients"] == [_legacy(PARENT, 42)]
+
+
+def test_v02_deployment_accepted_before_pins_existed_uses_the_row_pin():
+    # Alias-runner code gives no hint; the migration pinned the row.
+    receipt = _place_children(
+        None,
+        set(),
+        [_salted_child("0x" + "01" * 32, 42)],
+        tx_type=TransactionType.DEPLOY_CONTRACT,
+        row_selector=r"re:^v0\.2\.",
+    )
+
+    assert receipt["recipients"] == [_legacy(PARENT, 42)]
