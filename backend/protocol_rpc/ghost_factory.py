@@ -105,6 +105,32 @@ class GhostFactoryConfig:
         return to_checksum_address("0x" + digest[-20:].hex())
 
 
+def legacy_salted_child_address(
+    contract_address: str,
+    salt_nonce: int,
+    chain_id: int,
+) -> str:
+    """Salted child address a v0.2 SDK computes in-contract, ignoring the host."""
+
+    if not is_address(contract_address):
+        raise InvalidGhostFactoryConfiguration(
+            "salted child deployment requires a GenVM contract address"
+        )
+    salt_nonce = _coerce_uint256("salt_nonce", salt_nonce)
+    if salt_nonce == 0:
+        raise InvalidGhostFactoryConfiguration(
+            "salted child deployment requires a non-zero salt_nonce"
+        )
+    chain_id = _coerce_uint256("chain_id", chain_id)
+    digest = keccak(
+        b"\x01"
+        + to_bytes(hexstr=to_checksum_address(contract_address))
+        + salt_nonce.to_bytes(32, "big")
+        + chain_id.to_bytes(32, "big")
+    )
+    return to_checksum_address("0x" + digest[:20].hex())
+
+
 def _configured_address(name: str, default: str) -> str:
     value = os.getenv(name, default)
     if not is_address(value):
