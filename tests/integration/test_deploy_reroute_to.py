@@ -148,6 +148,35 @@ class RerouteLegacyPeer(gl.Contract):
 """
 
 
+# Legacy SDK factory: stores the child address its own SDK returns.
+LEGACY_FACTORY = """# v0.2.16
+# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
+
+from genlayer import *
+
+
+class LegacySaltedFactory(gl.Contract):
+    last_child: str
+
+    def __init__(self):
+        self.last_child = ""
+
+    @gl.public.view
+    def get_last_child(self) -> str:
+        return self.last_child
+
+    @gl.public.write
+    def spawn(self, child_code: str, salt: int) -> None:
+        child = gl.deploy_contract(
+            code=child_code.encode("utf-8"),
+            args=["salted_child"],
+            salt_nonce=salt,
+            on="accepted",
+        )
+        self.last_child = child.as_hex
+"""
+
+
 CLIENT = create_client(chain=localnet, endpoint=RPC_URL)
 ACCOUNT = create_account()
 CLIENT.local_account = ACCOUNT
@@ -301,6 +330,27 @@ def test_legacy_contract_without_manual_executor_selection(code):
 
     _write(address, "update_storage", ["legacy_updated"])
     assert _read(address, "get_storage") == "legacy_updated"
+
+
+def test_legacy_factory_reaches_its_salted_child_at_the_address_it_stored():
+    """The v0.2 SDK predicts the child address itself; Studio must deploy there."""
+    factory = _deploy(LEGACY_FACTORY, args=[])
+
+    _write(factory, "spawn", [CONTRACT_B, 1])
+    child = _read(factory, "get_last_child")
+    assert child and child != ADDRESS_ZERO
+
+    start = time.time()
+    last: object = None
+    while time.time() - start < 240:
+        try:
+            last = _read(child, "get_storage", final=False)
+        except Exception as exc:  # child deployment still in flight
+            last = exc
+        if last == "salted_child":
+            return
+        time.sleep(2)
+    raise AssertionError(f"no contract answers at stored child {child}: {last!r}")
 
 
 def test_schema_of_explicitly_pinned_legacy_contract():
