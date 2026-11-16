@@ -183,16 +183,26 @@ class TransactionsProcessorMock:
                 result.append(transaction)
         return sorted(result, key=lambda x: x["created_at"])
 
-    def get_newer_transactions(self, transaction_hash: str):
+    def get_rewindable_newer_transactions(self, transaction_hash: str):
         current_transaction = self.get_transaction_by_hash(transaction_hash)
 
         result = []
         for transaction in self.transactions.values():
-            if (transaction["created_at"] > current_transaction["created_at"]) and (
-                transaction["to_address"] == current_transaction["to_address"]
+            if (
+                transaction["created_at"] > current_transaction["created_at"]
+                and transaction["to_address"] == current_transaction["to_address"]
+                and transaction["status"]
+                not in (
+                    TransactionStatus.FINALIZED.value,
+                    TransactionStatus.CANCELED.value,
+                )
+                and transaction.get("type") != TransactionType.UPGRADE_CONTRACT.value
             ):
                 result.append(transaction)
         return sorted(result, key=lambda x: x["created_at"])
+
+    def get_latest_finalized_upgrade_after(self, transaction_hash: str):
+        return None
 
     def update_consensus_history(
         self,
