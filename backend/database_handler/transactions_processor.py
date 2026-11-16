@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, defer, selectinload
 from sqlalchemy import or_, desc, and_, func, JSON, type_coerce, text
 
 from backend.node.types import Receipt, ExecutionResultStatus
-from .models import EvmEnvelope, Transactions, TransactionStatus
+from .models import CurrentState, EvmEnvelope, Transactions, TransactionStatus
 from eth_utils import to_bytes, keccak, is_address, to_checksum_address
 import json
 import base64
@@ -1752,6 +1752,18 @@ class TransactionsProcessor:
             )
             .first()
             is not None
+        )
+
+    def get_contract_executor_selector(self, address: str) -> str | None:
+        """Executor pin stored on the contract row, if any."""
+        try:
+            address = to_checksum_address(address)
+        except (TypeError, ValueError):
+            return None
+        return (
+            self.session.query(CurrentState.genvm_executor_selector)
+            .filter(CurrentState.id == address)
+            .scalar()
         )
 
     def get_transactions_for_address(
