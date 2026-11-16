@@ -376,13 +376,15 @@ def _place_children(
     children: list,
     *,
     tx_type: TransactionType = TransactionType.RUN_CONTRACT,
-    row_selector: str | None = None,
+    row_selector=None,
     sim_config=None,
     data: dict | None = None,
     has_snapshot: bool = True,
 ) -> dict:
     processor = SimpleNamespace(
-        get_contract_executor_selector=lambda _address: row_selector,
+        get_contract_executor_selector=(
+            row_selector if callable(row_selector) else lambda _address: row_selector
+        ),
         lock_ghost_factory=lambda: None,
         lock_pending_recipients=lambda _addresses: None,
         get_successful_ghost_creation_count=lambda: 7,
@@ -500,6 +502,20 @@ def test_v02_pin_is_read_from_the_contract_row_when_the_snapshot_has_none():
     )
 
     assert receipt["recipients"] == [_legacy(PARENT, 42)]
+
+
+def test_a_pinned_snapshot_decides_without_reading_the_contract_row():
+    def unexpected_lookup(_address):
+        pytest.fail("the snapshot pin must decide the line")
+
+    receipt = _place_children(
+        "v0.4.0",
+        set(),
+        [_salted_child("0x" + "01" * 32, 42)],
+        row_selector=unexpected_lookup,
+    )
+
+    assert receipt["recipients"] == [_create2(PARENT, 42)]
 
 
 def test_v02_deployment_without_a_snapshot_places_salted_children_legacy():
