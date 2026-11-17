@@ -2,28 +2,164 @@
 
 import os
 import asyncio
+import json
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Callable, Optional, Any
+from typing import Callable, Optional, Any, Sequence
 from sqlalchemy.orm import Session
 from sqlalchemy import text, bindparam
 
 from backend.database_handler.models import Transactions, TransactionStatus
 from backend.database_handler.transactions_processor import TransactionsProcessor
+from backend.database_handler.accounts_manager import AccountsManager
 from backend.database_handler.errors import ContractNotFoundError
 from backend.domain.types import Transaction
 from backend.node.genvm.error_codes import GenVMInternalError
-from backend.consensus.base import ConsensusAlgorithm, NoValidatorsAvailableError
+from backend.node.types import ExecutionResultStatus
+from backend.consensus.base import (
+    ConsensusAlgorithm,
+    InternalMessageEmissionError,
+    NoValidatorsAvailableError,
+    TransactionContext,
+    resolve_finalization_state,
+    upgrade_code_slot,
+)
+from backend.consensus.history import APPEAL_RECOVERY_SNAPSHOT_KEY
+from backend.consensus.errors import FinalizationStateError
+from backend.protocol_rpc.fees import acceptance_dispatch_pending
 
 # Alias for use in context manager (avoids circular import issues)
 _NoValidatorsError = NoValidatorsAvailableError
 from backend.protocol_rpc.message_handler.base import MessageHandler
+from backend.protocol_rpc.message_handler.types import (
+    EventScope,
+    EventType,
+    LogEvent,
+)
 from backend.rollup.consensus_service import ConsensusService
 import backend.validators as validators
 from loguru import logger
 from backend.node.base import Manager as GenVMManager
 from backend.services.usage_metrics_service import UsageMetricsService
+
+# GenVM-module error causes that are reported as fatal but are transient in
+# Studio: validator changes stop+restart the llm module, so a leader run
+# claimed inside that window can race the provider-table rebuild and get
+# NO_PROVIDER_FOR_PROMPT for its own node address. These must not trip the
+# stop-the-worker circuit breaker (see _transaction_context).
+_TRANSIENT_LEADER_FATAL_CAUSES = frozenset({"NO_PROVIDER_FOR_PROMPT"})
+
+
+UPGRADE_CLOSE_KEY = "upgrade_close"
+
+
+class _UpgradeDeferred(Exception):
+    """Same-contract work may still be running; try the upgrade again later."""
+
+
+class _UpgradeRejected(Exception):
+    """The upgrade can never apply; cancel it with this receipt data."""
+
+    def __init__(self, consensus_data: dict):
+        super().__init__(consensus_data.get("error"))
+        self.consensus_data = consensus_data
+
+
+def _upgrade_failed(error: str, **details: Any) -> dict:
+    return {"upgrade_result": "failed", "error": error, **details}
+
+
+def _acceptance_dispatch_pending(transaction_data: dict[str, Any]) -> bool:
+    data = transaction_data.get("data")
+    if not isinstance(data, dict):
+        return False
+    accounting = data.get("fee_accounting")
+    if not isinstance(accounting, dict):
+        return False
+    return acceptance_dispatch_pending(accounting)
+
+
+# ---------------------------------------------------------------------------
+# Claim column manifest
+#
+# Single source of truth for what a claim query RETURNs and what the rebuilt
+# transaction dict contains. Both the RETURNING clause and the row->dict
+# conversion are generated from these tuples, so the two can never drift
+# apart. Drift is exactly what caused the contract-state wipe fixed in
+# PR #1724: claim_next_appeal's hand-written RETURNING list omitted
+# contract_snapshot/consensus_history and Transaction.from_dict silently
+# defaulted them, so a successful validator appeal "restored" the contract
+# state to {}.
+#
+# Entries are (sql_column, dict_key). dict_key differs from the column name
+# only for triggered_by_hash, which Transaction.from_dict consumes as
+# "triggered_by".
+# ---------------------------------------------------------------------------
+_TX_CLAIM_BASE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("hash", "hash"),
+    ("from_address", "from_address"),
+    ("to_address", "to_address"),
+    ("data", "data"),
+    ("value", "value"),
+    ("type", "type"),
+    ("nonce", "nonce"),
+    ("gaslimit", "gaslimit"),
+    ("r", "r"),
+    ("s", "s"),
+    ("v", "v"),
+    ("leader_only", "leader_only"),
+    ("execution_mode", "execution_mode"),
+    # Carried because the emission path clamps every triggered child to its
+    # parent's funded rotation schedule. Omitting it made
+    # Transaction.from_dict default the field to None, so each child insert
+    # raised TypeError and the parent retried until it was cancelled.
+    ("config_rotation_rounds", "config_rotation_rounds"),
+    ("sim_config", "sim_config"),
+    ("status", "status"),
+    ("consensus_data", "consensus_data"),
+    ("input_data", "input_data"),
+    ("created_at", "created_at"),
+    ("blocked_at", "blocked_at"),
+    ("triggered_by_hash", "triggered_by"),
+)
+
+# Stored per-transaction state. Heavy: contract_snapshot has been observed at
+# tens of MB, so only claims whose downstream consumes it include this group.
+# Appeals restore the contract's accepted state from it. Pending rebuilds its
+# snapshot; finalization separately reads only the saved post-state. Both
+# persist consensus_history through DB-side jsonb merges, so they omit it
+# deliberately (see _TX_CLAIM_OMISSIONS in the manifest tests).
+_TX_STATE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("contract_snapshot", "contract_snapshot"),
+    ("consensus_history", "consensus_history"),
+)
+
+_TX_APPEAL_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("appealed", "appealed"),
+    ("appeal_failed", "appeal_failed"),
+    ("timestamp_appeal", "timestamp_appeal"),
+    ("appeal_undetermined", "appeal_undetermined"),
+    ("appeal_leader_timeout", "appeal_leader_timeout"),
+    ("appeal_validators_timeout", "appeal_validators_timeout"),
+)
+
+_TX_FINALIZATION_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("timestamp_awaiting_finalization", "timestamp_awaiting_finalization"),
+    ("appeal_failed", "appeal_failed"),
+)
+
+
+def _tx_returning_clause(*column_groups: tuple[tuple[str, str], ...]) -> str:
+    """Render a RETURNING column list from manifest groups."""
+    columns = [col for group in column_groups for col, _ in group]
+    return ", ".join(f"transactions.{col}" for col in columns)
+
+
+def _tx_row_to_dict(row: Any, *column_groups: tuple[tuple[str, str], ...]) -> dict:
+    """Build the claimed-transaction dict from the same manifest groups that
+    generated the query's RETURNING clause."""
+    return {key: getattr(row, col) for group in column_groups for col, key in group}
 
 
 class ConsensusWorker:
@@ -186,9 +322,16 @@ class ConsensusWorker:
 
         return parsed
 
-    async def claim_next_finalization(self, session: Session) -> Optional[dict]:
+    async def claim_next_finalization(
+        self, session: Session, exclude_hashes: Sequence[str] = ()
+    ) -> Optional[dict]:
         """
         Claim the next transaction that needs finalization (appeal window expired).
+
+        Args:
+            session: Database session
+            exclude_hashes: Hashes in retry backoff; their contracts are skipped
+                so another contract's head can be claimed instead.
 
         Returns:
             Transaction data dict if claimed, None otherwise
@@ -215,20 +358,39 @@ class ConsensusWorker:
         # They must be in ACCEPTED/UNDETERMINED/TIMEOUT states and appeal window must have passed
         start_time = time.perf_counter()
         query = text(
-            """
+            f"""
             WITH locked_finalizations AS (
                 SELECT t.*
                 FROM transactions t
                 WHERE t.status IN ('ACCEPTED', 'UNDETERMINED', 'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT')
                     AND t.appealed = false
                     AND (
+                        -- Repair an acceptance-phase helper emission before
+                        -- the appeal deadline; finalization must not be the
+                        -- first later opportunity to deliver accepted children.
+                        (t.data->'fee_accounting'->'active_message_generation'
+                            ->>'acceptanceDispatchRequired' = 'true'
+                         AND COALESCE(
+                            t.data->'fee_accounting'->'active_message_generation'
+                                ->>'acceptanceDispatched',
+                            'false'
+                         ) != 'true')
+                        OR
                         -- Normal: timestamp set and finality window elapsed
                         (t.timestamp_awaiting_finalization IS NOT NULL
                          AND (
                             t.execution_mode IN ('LEADER_ONLY', 'LEADER_SELF_VALIDATOR')
                             OR (
-                                EXTRACT(EPOCH FROM NOW()) - t.timestamp_awaiting_finalization - COALESCE(t.appeal_processing_time, 0)
-                            ) > :finality_window_seconds * POWER(1 - :appeal_failed_reduction, COALESCE(t.appeal_failed, 0))
+                                EXTRACT(EPOCH FROM NOW()) >= COALESCE(
+                                    NULLIF(t.consensus_history->'latestDecision'->>'appealDeadline', '')::double precision,
+                                    t.timestamp_awaiting_finalization
+                                        + COALESCE(t.appeal_processing_time, 0)
+                                        + :finality_window_seconds * POWER(
+                                            1 - :appeal_failed_reduction,
+                                            COALESCE(t.appeal_failed, 0)
+                                        )
+                                )
+                            )
                          ))
                         OR
                         -- Defensive: timestamp NULL + row past stranded threshold
@@ -241,26 +403,38 @@ class ConsensusWorker:
                         -- Ordering invariant: no older non-terminal tx on the same contract
                         SELECT 1 FROM transactions earlier
                         WHERE earlier.to_address IS NOT DISTINCT FROM t.to_address
-                            AND earlier.created_at < t.created_at
+                            AND earlier.queue_order < t.queue_order
                             AND earlier.status NOT IN ('FINALIZED', 'CANCELED')
                             AND earlier.hash != t.hash
+                    )
+                    AND NOT EXISTS (
+                        -- A backed-off tx holds back itself and every younger tx on its contract
+                        SELECT 1 FROM transactions backed_off
+                        WHERE backed_off.hash = ANY(CAST(:backoff_hashes AS text[]))
+                            AND backed_off.to_address IS NOT DISTINCT FROM t.to_address
+                            AND backed_off.queue_order <= t.queue_order
+                            -- Stale entries for already-terminal txs must not block
+                            AND backed_off.status NOT IN ('FINALIZED', 'CANCELED')
                     )
                     AND NOT EXISTS (
                         -- Ensure no other transaction for same contract is being processed
                         SELECT 1 FROM transactions t2
                         WHERE t2.to_address IS NOT DISTINCT FROM t.to_address
                             AND t2.blocked_at IS NOT NULL
-                            AND t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
                             AND t2.hash != t.hash
+                            AND (
+                                t2.status NOT IN ('FINALIZED', 'CANCELED')
+                                OR t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
+                            )
                     )
                     AND pg_try_advisory_xact_lock(hashtext(COALESCE(t.to_address, t.hash)))
-                ORDER BY t.created_at ASC
+                ORDER BY t.queue_order ASC
                 FOR UPDATE SKIP LOCKED
             ),
             ready_for_finalization AS (
                 SELECT *, ROW_NUMBER() OVER (
                     PARTITION BY to_address
-                    ORDER BY created_at ASC
+                    ORDER BY queue_order ASC
                 ) as rn
                 FROM locked_finalizations
             ),
@@ -269,7 +443,7 @@ class ConsensusWorker:
                 SELECT *
                 FROM ready_for_finalization
                 WHERE rn = 1
-                ORDER BY created_at ASC
+                ORDER BY queue_order ASC
                 LIMIT 1
             )
             UPDATE transactions
@@ -277,13 +451,7 @@ class ConsensusWorker:
                 worker_id = :worker_id
             FROM single_finalization
             WHERE transactions.hash = single_finalization.hash
-            RETURNING transactions.hash, transactions.from_address, transactions.to_address,
-                      transactions.data, transactions.value, transactions.type, transactions.nonce,
-                      transactions.gaslimit, transactions.r, transactions.s, transactions.v,
-                      transactions.leader_only, transactions.execution_mode, transactions.sim_config,
-                      transactions.status, transactions.consensus_data,
-                      transactions.input_data, transactions.created_at, transactions.timestamp_awaiting_finalization,
-                      transactions.appeal_failed, transactions.blocked_at, transactions.triggered_by_hash;
+            RETURNING {_tx_returning_clause(_TX_CLAIM_BASE_COLUMNS, _TX_FINALIZATION_COLUMNS)};
         """
         )
 
@@ -295,6 +463,7 @@ class ConsensusWorker:
                 "finality_window_seconds": self.consensus_algorithm.finality_window_time,
                 "appeal_failed_reduction": self.consensus_algorithm.finality_window_appeal_failed_reduction,
                 "stranded_threshold_seconds": STRANDED_TX_AFTER_SECONDS,
+                "backoff_hashes": list(exclude_hashes),
             },
         ).first()
         duration = time.perf_counter() - start_time
@@ -305,31 +474,9 @@ class ConsensusWorker:
                 f"[Worker {self.worker_id}] Claimed next finalization result {result.hash}"
             )
             session.commit()
-            # Convert result to dict
-            return {
-                "hash": result.hash,
-                "from_address": result.from_address,
-                "to_address": result.to_address,
-                "data": result.data,
-                "value": result.value,
-                "type": result.type,
-                "nonce": result.nonce,
-                "gaslimit": result.gaslimit,
-                "r": result.r,
-                "s": result.s,
-                "v": result.v,
-                "leader_only": result.leader_only,
-                "execution_mode": result.execution_mode,
-                "sim_config": result.sim_config,
-                "status": result.status,
-                "consensus_data": result.consensus_data,
-                "input_data": result.input_data,
-                "created_at": result.created_at,
-                "timestamp_awaiting_finalization": result.timestamp_awaiting_finalization,
-                "appeal_failed": result.appeal_failed,
-                "blocked_at": result.blocked_at,
-                "triggered_by": result.triggered_by_hash,
-            }
+            return _tx_row_to_dict(
+                result, _TX_CLAIM_BASE_COLUMNS, _TX_FINALIZATION_COLUMNS
+            )
 
         return None
 
@@ -344,31 +491,36 @@ class ConsensusWorker:
         # Query to atomically claim an appealed transaction
         start_time = time.perf_counter()
         query = text(
-            """
+            f"""
             WITH locked_appeals AS (
-                SELECT t.hash, t.to_address, t.created_at
+                SELECT t.hash, t.to_address, t.queue_order
                 FROM transactions t
                 WHERE t.appealed = true
                     AND t.status IN ('ACCEPTED', 'UNDETERMINED', 'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT')
                     AND (t.blocked_at IS NULL
                          OR t.blocked_at < NOW() - CAST(:timeout AS INTERVAL))
                     AND NOT EXISTS (
-                        -- Ensure no other appeal for same contract is being processed
+                        -- An ancestor appeal can rewind every newer attempt on
+                        -- the recipient. Never overlap it with any descendant
+                        -- worker: otherwise that worker can publish ballots or
+                        -- effects from the state generation being invalidated.
                         SELECT 1 FROM transactions t2
                         WHERE t2.to_address IS NOT DISTINCT FROM t.to_address
-                            AND t2.appealed = true
                             AND t2.blocked_at IS NOT NULL
-                            AND t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
                             AND t2.hash != t.hash
+                            AND (
+                                t2.status NOT IN ('FINALIZED', 'CANCELED')
+                                OR t2.blocked_at > NOW() - CAST(:timeout AS INTERVAL)
+                            )
                     )
                     AND pg_try_advisory_xact_lock(hashtext(COALESCE(t.to_address, t.hash)))
-                ORDER BY t.created_at ASC
+                ORDER BY t.queue_order ASC
                 FOR UPDATE SKIP LOCKED
             ),
             available_appeals AS (
                 SELECT *, ROW_NUMBER() OVER (
                     PARTITION BY to_address
-                    ORDER BY created_at ASC
+                    ORDER BY queue_order ASC
                 ) as rn
                 FROM locked_appeals
             ),
@@ -377,7 +529,7 @@ class ConsensusWorker:
                 SELECT *
                 FROM available_appeals
                 WHERE rn = 1
-                ORDER BY created_at ASC
+                ORDER BY queue_order ASC
                 LIMIT 1
             )
             UPDATE transactions
@@ -385,16 +537,7 @@ class ConsensusWorker:
                 worker_id = :worker_id
             FROM single_appeal
             WHERE transactions.hash = single_appeal.hash
-            RETURNING transactions.hash, transactions.from_address, transactions.to_address,
-                      transactions.data, transactions.value, transactions.type, transactions.nonce,
-                      transactions.gaslimit, transactions.r, transactions.s, transactions.v,
-                      transactions.leader_only, transactions.execution_mode, transactions.sim_config,
-                      transactions.status, transactions.consensus_data,
-                      transactions.input_data, transactions.created_at, transactions.appealed,
-                      transactions.appeal_failed, transactions.timestamp_appeal,
-                      transactions.appeal_undetermined, transactions.appeal_leader_timeout,
-                      transactions.appeal_validators_timeout, transactions.blocked_at,
-                      transactions.triggered_by_hash;
+            RETURNING {_tx_returning_clause(_TX_CLAIM_BASE_COLUMNS, _TX_STATE_COLUMNS, _TX_APPEAL_COLUMNS)};
         """
         )
 
@@ -410,35 +553,9 @@ class ConsensusWorker:
 
         if result:
             session.commit()
-            # Convert result to dict
-            return {
-                "hash": result.hash,
-                "from_address": result.from_address,
-                "to_address": result.to_address,
-                "data": result.data,
-                "value": result.value,
-                "type": result.type,
-                "nonce": result.nonce,
-                "gaslimit": result.gaslimit,
-                "r": result.r,
-                "s": result.s,
-                "v": result.v,
-                "leader_only": result.leader_only,
-                "execution_mode": result.execution_mode,
-                "sim_config": result.sim_config,
-                "status": result.status,
-                "consensus_data": result.consensus_data,
-                "input_data": result.input_data,
-                "created_at": result.created_at,
-                "appealed": result.appealed,
-                "appeal_failed": result.appeal_failed,
-                "timestamp_appeal": result.timestamp_appeal,
-                "appeal_undetermined": result.appeal_undetermined,
-                "appeal_leader_timeout": result.appeal_leader_timeout,
-                "appeal_validators_timeout": result.appeal_validators_timeout,
-                "blocked_at": result.blocked_at,
-                "triggered_by": result.triggered_by_hash,
-            }
+            return _tx_row_to_dict(
+                result, _TX_CLAIM_BASE_COLUMNS, _TX_STATE_COLUMNS, _TX_APPEAL_COLUMNS
+            )
 
         return None
 
@@ -454,9 +571,9 @@ class ConsensusWorker:
         # Ensures only one transaction per contract is processed at a time
         start_time = time.perf_counter()
         query = text(
-            """
+            f"""
             WITH candidate_transactions AS (
-                SELECT t.hash, t.to_address, t.type, t.created_at, t.recovery_count
+                SELECT t.hash, t.to_address, t.type, t.queue_order, t.recovery_count
                 FROM transactions t
                 WHERE t.status IN ('PENDING', 'ACTIVATED')
                     AND (t.blocked_at IS NULL
@@ -477,17 +594,39 @@ class ConsensusWorker:
                     -- This clause makes PENDING/ACTIVATED claims defer when an
                     -- ACCEPTED-class tx for the same contract is past its
                     -- finality window — letting finalization drain the queue.
+                    -- Only older finalizations can preempt this candidate:
+                    -- claim_next_finalization will not claim a younger tx while
+                    -- this candidate is still non-terminal, so deferring here
+                    -- would deadlock the contract head.
                     AND NOT EXISTS (
                         SELECT 1 FROM transactions t3
                         WHERE t3.to_address IS NOT DISTINCT FROM t.to_address
+                            AND t3.queue_order < t.queue_order
                             AND t3.status IN ('ACCEPTED', 'UNDETERMINED', 'LEADER_TIMEOUT', 'VALIDATORS_TIMEOUT')
                             AND t3.appealed = false
-                            AND t3.timestamp_awaiting_finalization IS NOT NULL
                             AND (
-                                t3.execution_mode IN ('LEADER_ONLY', 'LEADER_SELF_VALIDATOR')
+                                (t3.data->'fee_accounting'->'active_message_generation'
+                                    ->>'acceptanceDispatchRequired' = 'true'
+                                 AND COALESCE(
+                                    t3.data->'fee_accounting'->'active_message_generation'
+                                        ->>'acceptanceDispatched',
+                                    'false'
+                                 ) != 'true')
                                 OR (
-                                    EXTRACT(EPOCH FROM NOW()) - t3.timestamp_awaiting_finalization - COALESCE(t3.appeal_processing_time, 0)
-                                ) > :finality_window_seconds * POWER(1 - :appeal_failed_reduction, COALESCE(t3.appeal_failed, 0))
+                                    t3.timestamp_awaiting_finalization IS NOT NULL
+                                    AND (
+                                        t3.execution_mode IN ('LEADER_ONLY', 'LEADER_SELF_VALIDATOR')
+                                        OR EXTRACT(EPOCH FROM NOW()) >= COALESCE(
+                                            NULLIF(t3.consensus_history->'latestDecision'->>'appealDeadline', '')::double precision,
+                                            t3.timestamp_awaiting_finalization
+                                                + COALESCE(t3.appeal_processing_time, 0)
+                                                + :finality_window_seconds * POWER(
+                                                    1 - :appeal_failed_reduction,
+                                                    COALESCE(t3.appeal_failed, 0)
+                                                )
+                                        )
+                                    )
+                                )
                             )
                             AND (t3.blocked_at IS NULL
                                  OR t3.blocked_at < NOW() - CAST(:timeout AS INTERVAL))
@@ -498,14 +637,15 @@ class ConsensusWorker:
                     -- COALESCE handles NULL to_address (e.g. burn transactions) by
                     -- falling back to the tx hash, giving each such tx its own lock.
                     AND pg_try_advisory_xact_lock(hashtext(COALESCE(t.to_address, t.hash)))
-                ORDER BY CASE WHEN t.type = 3 THEN 0 ELSE 1 END, t.created_at ASC
+                ORDER BY CASE WHEN t.type = 3 THEN 0 ELSE 1 END,
+                         t.queue_order ASC
                 FOR UPDATE SKIP LOCKED
             ),
             oldest_per_contract AS (
                 SELECT *, ROW_NUMBER() OVER (
                     PARTITION BY to_address
                     ORDER BY CASE WHEN type = 3 THEN 0 ELSE 1 END,
-                             created_at ASC
+                             queue_order ASC
                 ) as rn
                 FROM candidate_transactions
             ),
@@ -520,8 +660,7 @@ class ConsensusWorker:
                 WHERE rn = 1
                 ORDER BY CASE WHEN recovery_count > 0 THEN 1 ELSE 0 END,
                          CASE WHEN type = 3 THEN 0 ELSE 1 END,
-                         created_at ASC,
-                         hash ASC
+                         queue_order ASC
                 LIMIT 1
             )
             UPDATE transactions
@@ -529,13 +668,7 @@ class ConsensusWorker:
                 worker_id = :worker_id
             FROM single_transaction
             WHERE transactions.hash = single_transaction.hash
-            RETURNING transactions.hash, transactions.from_address, transactions.to_address,
-                      transactions.data, transactions.value, transactions.type, transactions.nonce,
-                      transactions.gaslimit, transactions.r, transactions.s, transactions.v,
-                      transactions.leader_only, transactions.execution_mode, transactions.sim_config,
-                      transactions.status, transactions.consensus_data,
-                      transactions.input_data, transactions.created_at, transactions.blocked_at,
-                      transactions.triggered_by_hash;
+            RETURNING {_tx_returning_clause(_TX_CLAIM_BASE_COLUMNS)};
         """
         )
 
@@ -554,29 +687,7 @@ class ConsensusWorker:
         if result:
             logger.debug(f"[Worker {self.worker_id}] Claimed transaction {result.hash}")
             session.commit()
-            # Convert result to dict
-            return {
-                "hash": result.hash,
-                "from_address": result.from_address,
-                "to_address": result.to_address,
-                "data": result.data,
-                "value": result.value,
-                "type": result.type,
-                "nonce": result.nonce,
-                "gaslimit": result.gaslimit,
-                "r": result.r,
-                "s": result.s,
-                "v": result.v,
-                "leader_only": result.leader_only,
-                "execution_mode": result.execution_mode,
-                "sim_config": result.sim_config,
-                "status": result.status,
-                "consensus_data": result.consensus_data,
-                "input_data": result.input_data,
-                "created_at": result.created_at,
-                "blocked_at": result.blocked_at,
-                "triggered_by": result.triggered_by_hash,
-            }
+            return _tx_row_to_dict(result, _TX_CLAIM_BASE_COLUMNS)
 
         return None
 
@@ -747,6 +858,11 @@ class ConsensusWorker:
             Control to the processing logic
         """
         transaction_reset = False
+        raw_transaction_data = tx_data.get("data")
+        protected_appeal_work = tx_type == "appeal" or (
+            isinstance(raw_transaction_data, dict)
+            and APPEAL_RECOVERY_SNAPSHOT_KEY in raw_transaction_data
+        )
         try:
             # Track current transaction for health monitoring
             self.current_transactions[tx_hash] = {
@@ -762,11 +878,58 @@ class ConsensusWorker:
                 f"is_leader={e.is_leader}, message={e}, detail={e.detail}, ctx={e.ctx}"
             )
             session.rollback()
+            if protected_appeal_work:
+                self._restore_admitted_appeal_for_retry(tx_hash)
 
-            # Only reset transaction and stop worker for leader errors (or unknown origin)
-            # Validator errors can be handled by the consensus algorithm
-            # (continue with remaining validators)
-            if e.is_leader is False:
+            # A paid appeal is already bound to an agreed decision. Reusing the
+            # ordinary transaction-reset path here would erase that decision and
+            # its consensus history while leaving the admitted appeal custody in
+            # ``transaction.data``. Preserve the appeal unchanged and release its
+            # claim so another worker can retry it instead. This is the Studio
+            # equivalent of an on-chain appeal call reverting before it mutates
+            # the transaction.
+            if protected_appeal_work:
+                if e.is_leader is False:
+                    logger.warning(
+                        f"[Worker {self.worker_id}] GenVM internal error in appeal validator "
+                        f"for {tx_hash}; preserving the admitted appeal for retry"
+                    )
+                elif e.is_fatal:
+                    transient_causes = _TRANSIENT_LEADER_FATAL_CAUSES.intersection(
+                        e.causes or []
+                    )
+                    if transient_causes:
+                        await asyncio.sleep(
+                            float(
+                                os.environ.get("GENVM_TRANSIENT_FATAL_BACKOFF_S", "3")
+                            )
+                        )
+                        logger.warning(
+                            f"[Worker {self.worker_id}] Transient fatal GenVM error in appeal "
+                            f"leader ({', '.join(sorted(transient_causes))}); preserving the "
+                            f"admitted appeal and keeping the worker alive"
+                        )
+                    else:
+                        logger.warning(
+                            f"[Worker {self.worker_id}] Fatal GenVM error in appeal leader; "
+                            f"preserving the admitted appeal for another worker and stopping "
+                            f"this worker"
+                        )
+                        self.running = False
+                else:
+                    logger.warning(
+                        f"[Worker {self.worker_id}] Retryable GenVM error in appeal leader for "
+                        f"{tx_hash}; preserving the admitted appeal for retry"
+                    )
+                await self._handle_generic_error_retry(
+                    tx_hash,
+                    e,
+                    cancel_on_exhaustion=False,
+                )
+            # Only reset an ordinary transaction for leader errors (or unknown
+            # origin). Validator errors can be handled by the consensus
+            # algorithm (continue with remaining validators).
+            elif e.is_leader is False:
                 # Validator error - don't reset, consensus will continue with remaining validators
                 logger.warning(
                     f"[Worker {self.worker_id}] GenVM internal error in validator for {tx_hash}, "
@@ -789,6 +952,19 @@ class ConsensusWorker:
                     # helper above. Don't release/reset — it's in ACCEPTED now.
                     transaction_reset = True
                 else:
+                    if e.is_fatal and _TRANSIENT_LEADER_FATAL_CAUSES.intersection(
+                        e.causes or []
+                    ):
+                        # Hold the claim briefly before resetting so the retry
+                        # doesn't burn through its recovery cycles inside the
+                        # same llm-module restart window that caused the error
+                        # (each validator change stops+starts the module; a
+                        # burst of 5 creations churns for several seconds).
+                        await asyncio.sleep(
+                            float(
+                                os.environ.get("GENVM_TRANSIENT_FATAL_BACKOFF_S", "3")
+                            )
+                        )
                     # Retryable leader error — reset for another worker to pick up.
                     try:
                         with self.get_session() as reset_session:
@@ -802,11 +978,32 @@ class ConsensusWorker:
 
                     # For fatal leader errors, stop the worker to trigger K8s restart via health check
                     if e.is_fatal:
-                        logger.warning(
-                            f"[Worker {self.worker_id}] Fatal GenVM error in leader - stopping worker. "
-                            f"{tx_type.capitalize()} {tx_hash} will be reset for another worker."
+                        transient_causes = _TRANSIENT_LEADER_FATAL_CAUSES.intersection(
+                            e.causes or []
                         )
-                        self.running = False
+                        if transient_causes:
+                            # The module reports these as fatal, but in Studio
+                            # they are transient config races: every validator
+                            # change stops+restarts the llm module, and a run
+                            # claimed inside that window can see a provider
+                            # table that lacks the leader's address
+                            # (NO_PROVIDER_FOR_PROMPT). The tx was already
+                            # reset above with a bounded retry budget
+                            # (recovery cycles escalate to CANCELED), so keep
+                            # the worker alive instead of draining claim
+                            # capacity — with all workers stopped the queue
+                            # stalls silently.
+                            logger.warning(
+                                f"[Worker {self.worker_id}] Transient fatal GenVM error in leader "
+                                f"({', '.join(sorted(transient_causes))}) - keeping worker alive. "
+                                f"{tx_type.capitalize()} {tx_hash} was reset for retry."
+                            )
+                        else:
+                            logger.warning(
+                                f"[Worker {self.worker_id}] Fatal GenVM error in leader - stopping worker. "
+                                f"{tx_type.capitalize()} {tx_hash} will be reset for another worker."
+                            )
+                            self.running = False
         except (ContractNotFoundError, _NoValidatorsError):
             # Re-raise for specific handling by caller
             raise
@@ -815,7 +1012,18 @@ class ConsensusWorker:
                 f"[Worker {self.worker_id}] Error processing {tx_type} {tx_hash}: {e}"
             )
             session.rollback()
-            await self._handle_generic_error_retry(tx_hash, e)
+            if protected_appeal_work:
+                self._restore_admitted_appeal_for_retry(tx_hash)
+            await self._handle_generic_error_retry(
+                tx_hash,
+                e,
+                cancel_on_exhaustion=(
+                    not protected_appeal_work
+                    and not isinstance(
+                        e, (InternalMessageEmissionError, FinalizationStateError)
+                    )
+                ),
+            )
         finally:
             # Clear current transaction tracking
             self.current_transactions.pop(tx_hash, None)
@@ -829,6 +1037,27 @@ class ConsensusWorker:
                         f"[Worker {self.worker_id}] Failed to release {tx_type} {tx_hash}: {release_error}",
                         exc_info=True,
                     )
+
+    def _restore_admitted_appeal_for_retry(self, tx_hash: str) -> bool:
+        """Undo partial, independently committed appeal state transitions."""
+
+        try:
+            with self.get_session() as restore_session:
+                restored = TransactionsProcessor(
+                    restore_session
+                ).restore_transaction_appeal_for_retry(tx_hash)
+                if restored:
+                    restore_session.commit()
+                else:
+                    restore_session.rollback()
+                return restored
+        except Exception as restore_error:
+            logger.error(
+                f"[Worker {self.worker_id}] Failed to restore admitted appeal "
+                f"{tx_hash} for retry: {restore_error}",
+                exc_info=True,
+            )
+            return False
 
     # Statuses where the consensus result has been agreed and the tx is
     # awaiting finalization. Recovery must NOT wipe consensus_data /
@@ -868,6 +1097,104 @@ class ConsensusWorker:
             Number of transactions reset (escalations are logged but not
             counted as recoveries).
         """
+        # Step 0: an interrupted paid appeal must resume from the exact agreed
+        # decision captured at admission. Appeal state handlers commit their
+        # progress incrementally, so an ordinary PENDING reset here would erase
+        # the decision while leaving its bond custody behind.
+        restore_appeals_query = text(
+            """
+            UPDATE transactions
+            SET status = CAST(data->'appealRecoverySnapshot'->>'status' AS transaction_status),
+                consensus_history = data->'appealRecoverySnapshot'->'consensusHistory',
+                consensus_data = NULLIF(
+                    data->'appealRecoverySnapshot'->'consensusData',
+                    'null'::jsonb
+                ),
+                contract_snapshot = NULLIF(
+                    data->'appealRecoverySnapshot'->'contractSnapshot',
+                    'null'::jsonb
+                ),
+                appealed = TRUE,
+                appeal_failed = COALESCE(
+                    (data->'appealRecoverySnapshot'->>'appealFailed')::integer,
+                    0
+                ),
+                appeal_undetermined = COALESCE(
+                    (data->'appealRecoverySnapshot'->>'appealUndetermined')::boolean,
+                    FALSE
+                ),
+                appeal_leader_timeout = COALESCE(
+                    (data->'appealRecoverySnapshot'->>'appealLeaderTimeout')::boolean,
+                    FALSE
+                ),
+                appeal_validators_timeout = COALESCE(
+                    (data->'appealRecoverySnapshot'->>'appealValidatorsTimeout')::boolean,
+                    FALSE
+                ),
+                appeal_processing_time = COALESCE(
+                    (data->'appealRecoverySnapshot'->>'appealProcessingTime')::integer,
+                    0
+                ),
+                rotation_count = COALESCE(
+                    (data->'appealRecoverySnapshot'->>'rotationCount')::integer,
+                    0
+                ),
+                leader_timeout_validators = NULLIF(
+                    data->'appealRecoverySnapshot'->'leaderTimeoutValidators',
+                    'null'::jsonb
+                ),
+                timestamp_awaiting_finalization = (
+                    data->'appealRecoverySnapshot'->>'timestampAwaitingFinalization'
+                )::bigint,
+                timestamp_appeal = (
+                    data->'appealRecoverySnapshot'->>'timestampAppeal'
+                )::bigint,
+                worker_id = NULL,
+                blocked_at = NULL
+            WHERE data ? 'appealRecoverySnapshot'
+              AND status IN :consensus_statuses
+              AND (
+                  (
+                   blocked_at IS NOT NULL
+                   AND blocked_at < NOW() - CAST(:timeout AS INTERVAL)
+                   AND COALESCE(
+                       (
+                           SELECT to_timestamp(MAX(progress.value::double precision))
+                           FROM jsonb_each_text(
+                               COALESCE(
+                                   transactions.consensus_history->'current_monitoring',
+                                   '{}'::jsonb
+                               )
+                           ) AS progress(key, value)
+                           WHERE progress.value ~ '^[0-9]+(\\.[0-9]+)?$'
+                       ),
+                       blocked_at
+                   ) < NOW() - CAST(:timeout AS INTERVAL)
+                  )
+                  OR
+                  (blocked_at IS NULL
+                   AND status IN ('PROPOSING', 'COMMITTING', 'REVEALING')
+                   AND created_at < NOW() - CAST(:orphan_timeout AS INTERVAL))
+              )
+            RETURNING hash, status;
+            """
+        ).bindparams(bindparam("consensus_statuses", expanding=True))
+        restored_appeals = session.execute(
+            restore_appeals_query,
+            {
+                "timeout": f"{self.transaction_timeout_minutes} minutes",
+                "orphan_timeout": "5 minutes",
+                "consensus_statuses": list(self._CONSENSUS_RECOVERABLE_STATUSES),
+            },
+        ).fetchall()
+        if restored_appeals:
+            session.commit()
+            for row in restored_appeals:
+                logger.info(
+                    f"[Worker {self.worker_id}] Restored interrupted paid appeal "
+                    f"{row.hash} to admitted status {row.status}"
+                )
+
         # Step 1: escalate txs that have already hit the recovery limit.
         # These have been reset N times and keep getting stuck — cancel
         # them so the per-contract queue can drain.
@@ -889,6 +1216,7 @@ class ConsensusWorker:
                                  )
             WHERE recovery_count >= :max_cycles
               AND status IN :consensus_statuses
+              AND NOT (data ? 'appealRecoverySnapshot')
               AND (
                   (
                    blocked_at IS NOT NULL
@@ -983,6 +1311,7 @@ class ConsensusWorker:
                 recovery_count = recovery_count + 1
             WHERE recovery_count < :max_cycles
               AND status IN :consensus_statuses
+              AND NOT (data ? 'appealRecoverySnapshot')
               AND (
                   -- Case 1: Transactions with expired blocks
                   (
@@ -1077,7 +1406,7 @@ class ConsensusWorker:
                     f"Likely finalization-starvation — investigate."
                 )
 
-        return len(recovered)
+        return len(restored_appeals) + len(recovered)
 
     async def process_transaction(self, transaction_data: dict, session: Session):
         """
@@ -1187,6 +1516,9 @@ class ConsensusWorker:
                             validators_snapshot,
                         )
 
+                TransactionsProcessor(
+                    session
+                ).clear_transaction_appeal_recovery_snapshot(transaction.hash)
                 session.commit()
                 logger.info(
                     f"[Worker {self.worker_id}] Successfully processed transaction {transaction.hash}"
@@ -1205,7 +1537,19 @@ class ConsensusWorker:
             logger.warning(
                 f"[Worker {self.worker_id}] No validators available for transaction {transaction_data['hash']}"
             )
-            await self._handle_no_validators_retry(transaction_data, session)
+            raw_data = transaction_data.get("data")
+            if isinstance(raw_data, dict) and APPEAL_RECOVERY_SNAPSHOT_KEY in raw_data:
+                session.rollback()
+                self._restore_admitted_appeal_for_retry(tx_hash)
+                await self._handle_generic_error_retry(
+                    tx_hash,
+                    NoValidatorsAvailableError(
+                        "No validators available for appeal recomputation"
+                    ),
+                    cancel_on_exhaustion=False,
+                )
+            else:
+                await self._handle_no_validators_retry(transaction_data, session)
 
         except ContractNotFoundError as e:
             # Handle contract not found - mark as ACCEPTED with ERROR execution result
@@ -1297,6 +1641,12 @@ class ConsensusWorker:
                 from backend.database_handler.accounts_manager import AccountsManager
 
                 AccountsManager(session).refund_tx_value(tx_hash, tx.from_address)
+            if tx.from_address:
+                from backend.database_handler.accounts_manager import AccountsManager
+
+                AccountsManager(session).cancel_tx_fee_accounting_once(
+                    tx_hash, tx.from_address, "no_validators_available"
+                )
             session.commit()
 
             # Clean up retry tracking
@@ -1322,10 +1672,20 @@ class ConsensusWorker:
                 f"next attempt in {backoff}s"
             )
 
-    async def _handle_generic_error_retry(self, tx_hash: str, error: Exception):
+    async def _handle_generic_error_retry(
+        self,
+        tx_hash: str,
+        error: Exception,
+        *,
+        cancel_on_exhaustion: bool = True,
+        cancel_details: Optional[dict] = None,
+    ):
         """
         Handle retry logic for generic errors during transaction processing.
-        Implements exponential backoff and cancels after MAX_GENERIC_ERROR_RETRIES.
+        Implements exponential backoff and normally cancels after
+        MAX_GENERIC_ERROR_RETRIES. Paid appeals disable cancellation because
+        an infrastructure failure must not invalidate an already-agreed
+        decision or strand its appeal custody.
 
         Args:
             tx_hash: Transaction hash
@@ -1339,7 +1699,10 @@ class ConsensusWorker:
         retry_info["last_error"] = str(error)
         self._generic_error_retries[tx_hash] = retry_info
 
-        if retry_info["count"] >= self.MAX_GENERIC_ERROR_RETRIES:
+        if (
+            retry_info["count"] >= self.MAX_GENERIC_ERROR_RETRIES
+            and cancel_on_exhaustion
+        ):
             # Cancel the transaction after max retries
             logger.error(
                 f"[Worker {self.worker_id}] Transaction {tx_hash} canceled after "
@@ -1352,6 +1715,7 @@ class ConsensusWorker:
                     "error": "max_generic_retries_exceeded",
                     "last_error": str(error),
                     "retries": retry_info["count"],
+                    **(cancel_details or {}),
                 }
                 # Refund sender for payable tx that was never activated
                 if tx.value and tx.value > 0 and tx.from_address:
@@ -1361,6 +1725,14 @@ class ConsensusWorker:
 
                     AccountsManager(cancel_session).refund_tx_value(
                         tx_hash, tx.from_address
+                    )
+                if tx.from_address:
+                    from backend.database_handler.accounts_manager import (
+                        AccountsManager,
+                    )
+
+                    AccountsManager(cancel_session).cancel_tx_fee_accounting_once(
+                        tx_hash, tx.from_address, "max_generic_retries_exceeded"
                     )
                 cancel_session.commit()
 
@@ -1376,11 +1748,21 @@ class ConsensusWorker:
             del self._generic_error_retries[tx_hash]
         else:
             backoff = self._generic_error_base_backoff * (
-                2 ** (retry_info["count"] - 1)
+                2
+                ** min(
+                    retry_info["count"] - 1,
+                    self.MAX_GENERIC_ERROR_RETRIES - 1,
+                )
             )
             logger.warning(
                 f"[Worker {self.worker_id}] Generic error for {tx_hash}, "
-                f"retry {retry_info['count']}/{self.MAX_GENERIC_ERROR_RETRIES}, "
+                f"retry {retry_info['count']}"
+                + (
+                    f"/{self.MAX_GENERIC_ERROR_RETRIES}"
+                    if cancel_on_exhaustion
+                    else " (decision preserved)"
+                )
+                + ", "
                 f"next attempt in {backoff}s - error: {error}"
             )
 
@@ -1481,136 +1863,478 @@ class ConsensusWorker:
     ):
         """
         Process a contract upgrade transaction (type=3). No consensus needed.
-        Directly updates contract code in database.
+
+        The upgrade closes the contract's earlier lifecycle: decided
+        transactions are finalized through the normal finalization path
+        (pending paid appeals are refunded first), never-started ones stay
+        queued and run on the new code, and the code is applied last.
 
         Args:
             transaction_data: Transaction data dictionary containing new_code
             session: Database session
         """
-        import base64
-        from backend.node.genvm import get_code_slot
-        from backend.database_handler.models import CurrentState
-
         tx_hash = transaction_data["hash"]
+        contract_address = transaction_data["to_address"]
+        logger.info(
+            f"[Worker {self.worker_id}] Processing upgrade transaction {tx_hash} for contract {contract_address}"
+        )
 
         try:
-            contract_address = transaction_data["to_address"]
+            new_code = self._validate_upgrade(session, transaction_data)
+            decided = self._plan_upgrade_close(session, tx_hash, contract_address)
             data = transaction_data.get("data") or {}
-            new_code = data.get("new_code")
-            if not new_code:
-                raise ValueError("Missing new_code in transaction data")
-            logger.info(
-                f"[Worker {self.worker_id}] Processing upgrade transaction {tx_hash} for contract {contract_address}"
-            )
-
-            # Load contract
-            contract = (
-                session.query(CurrentState).filter_by(id=contract_address).one_or_none()
-            )
-            if not contract:
-                raise ValueError(f"Contract {contract_address} not found")
-
-            # Validate contract has expected state structure
-            if (
-                not contract.data
-                or "state" not in contract.data
-                or "accepted" not in contract.data["state"]
-                or "finalized" not in contract.data["state"]
-            ):
-                raise ValueError(
-                    f"Contract {contract_address} has invalid state structure"
-                )
-
-            # Validate Python syntax before proceeding
-            try:
-                compile(new_code, "<upgrade>", "exec")
-            except SyntaxError as e:
-                raise ValueError(f"Invalid Python syntax: {e}") from e
-
-            # Encode code for slot storage: base64(4-byte-len-prefix + code-bytes)
-            code_bytes = new_code.encode("utf-8")
-            code_len_prefix = len(code_bytes).to_bytes(
-                4, byteorder="little", signed=False
-            )
-            code_slot_value = base64.b64encode(code_len_prefix + code_bytes).decode(
-                "ascii"
-            )
-            code_slot_key = base64.b64encode(get_code_slot()).decode("ascii")
-
-            # Update contract data - update BOTH accepted and finalized state
-            # Since upgrade transactions bypass consensus and go directly to FINALIZED,
-            # both state trees must be updated for reads to see the new code
-            contract.data = {
-                "state": {
-                    "accepted": {
-                        **contract.data["state"]["accepted"],
-                        code_slot_key: code_slot_value,
-                    },
-                    "finalized": {
-                        **contract.data["state"]["finalized"],
-                        code_slot_key: code_slot_value,
-                    },
-                },
+            progress = {
+                "closed_transactions": [],
+                "refunded_appeals": [],
+                **(data.get(UPGRADE_CLOSE_KEY) or {}),
             }
-
-            # Store success in consensus_data for receipt
-            tx = session.query(Transactions).filter_by(hash=tx_hash).one()
-            tx.consensus_data = {
-                "upgrade_result": "success",
-                "contract_address": contract_address,
-            }
-            session.commit()
-
-            # Mark transaction as finalized and send WebSocket notification
-            transactions_processor = TransactionsProcessor(session)
-            await ConsensusAlgorithm.dispatch_transaction_status_update(
-                transactions_processor,
-                tx_hash,
-                TransactionStatus.FINALIZED,
-                self.msg_handler,
-            )
-
+            for predecessor in decided:
+                await self._force_finalize_for_upgrade(tx_hash, predecessor, progress)
+            await self._apply_upgrade_code(session, tx_hash, contract_address, new_code)
+        except _UpgradeDeferred as e:
+            session.rollback()
             logger.info(
-                f"[Worker {self.worker_id}] Contract {contract_address} upgraded successfully via tx {tx_hash}"
+                f"[Worker {self.worker_id}] Deferring upgrade {tx_hash}: "
+                f"transaction {e} on {contract_address} may still be running"
             )
-
+            # Keep the lease briefly so the upgrade is not re-claimed in a hot loop.
+            await asyncio.sleep(float(os.environ.get("UPGRADE_DEFER_SECONDS", "5")))
+        except _UpgradeRejected as e:
+            logger.error(
+                f"[Worker {self.worker_id}] Contract upgrade rejected for {tx_hash}: {e}"
+            )
+            session.rollback()
+            await self._cancel_upgrade(session, tx_hash, e.consensus_data)
         except Exception as e:
             logger.error(
                 f"[Worker {self.worker_id}] Contract upgrade failed for {tx_hash}: {e}",
                 exc_info=True,
             )
             session.rollback()
+            # Finalized predecessors stay final; the code is applied on retry.
+            await self._handle_generic_error_retry(
+                tx_hash, e, cancel_details={"upgrade_result": "failed"}
+            )
 
-            # Mark transaction as canceled on failure and send WebSocket notification
+    def _validate_upgrade(self, session: Session, transaction_data: dict) -> str:
+        from backend.database_handler.models import CurrentState
+
+        contract_address = transaction_data["to_address"]
+        new_code = (transaction_data.get("data") or {}).get("new_code")
+        if not new_code:
+            raise _UpgradeRejected(
+                _upgrade_failed("Missing new_code in transaction data")
+            )
+        contract = (
+            session.query(CurrentState).filter_by(id=contract_address).one_or_none()
+        )
+        if not contract:
+            raise _UpgradeRejected(
+                _upgrade_failed(f"Contract {contract_address} not found")
+            )
+        if (
+            not contract.data
+            or "state" not in contract.data
+            or "accepted" not in contract.data["state"]
+            or "finalized" not in contract.data["state"]
+        ):
+            raise _UpgradeRejected(
+                _upgrade_failed(
+                    f"Contract {contract_address} has invalid state structure"
+                )
+            )
+        try:
+            compile(new_code, "<upgrade>", "exec")
+        except SyntaxError as e:
+            raise _UpgradeRejected(
+                _upgrade_failed(f"Invalid Python syntax: {e}")
+            ) from e
+        session.rollback()
+        return new_code
+
+    def _plan_upgrade_close(
+        self, session: Session, upgrade_hash: str, contract_address: str
+    ) -> list[str]:
+        """Return the decided transactions to finalize before the upgrade applies."""
+        rows = session.execute(
+            text(
+                """
+                SELECT hash, status, blocked_at
+                FROM transactions
+                WHERE to_address = :contract
+                    AND hash != :hash
+                    AND status NOT IN ('FINALIZED', 'CANCELED')
+                ORDER BY queue_order ASC
+                FOR UPDATE
+                """
+            ),
+            {"contract": contract_address, "hash": upgrade_hash},
+        ).all()
+        for row in rows:
+            # A stale lease or mid-consensus row may belong to a slow live worker.
+            if row.blocked_at is not None or str(row.status) in (
+                "PROPOSING",
+                "COMMITTING",
+                "REVEALING",
+            ):
+                raise _UpgradeDeferred(row.hash)
+        decided = [
+            row.hash
+            for row in rows
+            if str(row.status) in self._FINALIZATION_ELIGIBLE_STATUSES
+        ]
+
+        # Never touch a predecessor unless every one of them can finalize.
+        transactions_processor = TransactionsProcessor(session)
+        for predecessor in decided:
+            transaction = Transaction.from_dict(
+                transactions_processor.get_transaction_by_hash(predecessor)
+            )
+            receipts = (
+                transaction.consensus_data.leader_receipt
+                if transaction.consensus_data is not None
+                else None
+            )
+            receipt = receipts[0] if receipts else None
+            if (
+                transaction.status != TransactionStatus.ACCEPTED
+                or receipt is None
+                or receipt.execution_result != ExecutionResultStatus.SUCCESS
+            ):
+                continue
             try:
-                tx = session.query(Transactions).filter_by(hash=tx_hash).one()
-                tx.consensus_data = {"upgrade_result": "failed", "error": str(e)}
-                session.commit()
+                resolve_finalization_state(
+                    self._finalization_context(transaction, session), receipt
+                )
+            except FinalizationStateError as e:
+                raise _UpgradeRejected(
+                    _upgrade_failed(
+                        "predecessor_finalization_state", transaction=predecessor
+                    )
+                ) from e
+        session.rollback()
+        return decided
 
-                transactions_processor = TransactionsProcessor(session)
-                await ConsensusAlgorithm.dispatch_transaction_status_update(
-                    transactions_processor,
-                    tx_hash,
-                    TransactionStatus.CANCELED,
-                    self.msg_handler,
+    def _finalization_context(
+        self, transaction: Transaction, session: Session
+    ) -> TransactionContext:
+        from backend.consensus.base import (
+            contract_snapshot_factory,
+            contract_processor_factory,
+            node_factory,
+        )
+
+        return TransactionContext(
+            transaction=transaction,
+            transactions_processor=TransactionsProcessor(session),
+            chain_snapshot=None,
+            accounts_manager=AccountsManager(session),
+            contract_snapshot_factory=lambda contract_address: contract_snapshot_factory(
+                contract_address, session, transaction
+            ),
+            contract_processor=contract_processor_factory(session),
+            node_factory=node_factory,
+            msg_handler=self.msg_handler,
+            consensus_service=self.consensus_service,
+            validators_snapshot=None,
+            genvm_manager=self.consensus_algorithm.genvm_manager,
+        )
+
+    def _record_upgrade_progress(
+        self, session: Session, upgrade_hash: str, progress: dict
+    ) -> None:
+        """Persist close progress and renew the lease; fail if the lease was lost."""
+        owned = session.execute(
+            text(
+                """
+                UPDATE transactions
+                SET blocked_at = NOW(),
+                    data = jsonb_set(
+                        COALESCE(data, '{}'::jsonb),
+                        CAST(:path AS text[]),
+                        CAST(:progress AS jsonb),
+                        true
+                    )
+                WHERE hash = :hash
+                    AND worker_id = :worker_id
+                    AND status = 'PENDING'
+                RETURNING hash
+                """
+            ),
+            {
+                "hash": upgrade_hash,
+                "worker_id": self.worker_id,
+                "path": [UPGRADE_CLOSE_KEY],
+                "progress": json.dumps(progress),
+            },
+        ).first()
+        if owned is None:
+            raise RuntimeError(
+                f"Upgrade {upgrade_hash} is no longer leased by worker {self.worker_id}"
+            )
+
+    async def _force_finalize_for_upgrade(
+        self, upgrade_hash: str, predecessor: str, progress: dict
+    ) -> None:
+        with self.get_session() as fin_session:
+            row = fin_session.execute(
+                text(
+                    "SELECT status, appealed, data ? :snapshot_key AS has_snapshot"
+                    " FROM transactions WHERE hash = :hash FOR UPDATE"
+                ),
+                {"hash": predecessor, "snapshot_key": APPEAL_RECOVERY_SNAPSHOT_KEY},
+            ).first()
+            if row is None or str(row.status) not in (
+                self._FINALIZATION_ELIGIBLE_STATUSES
+            ):
+                # Finalized by an earlier attempt.
+                fin_session.rollback()
+                return
+
+            refund = None
+            if row.appealed or row.has_snapshot:
+                refund = AccountsManager(fin_session).abort_pending_appeal_admission(
+                    predecessor, "upgrade_closed_lifecycle"
                 )
-            except Exception as update_error:
-                logger.error(
-                    f"[Worker {self.worker_id}] Failed to update failed upgrade tx status: {update_error}"
+            if refund is not None:
+                progress["refunded_appeals"].append(
+                    {"transaction": predecessor, "refund": refund}
+                )
+            if predecessor not in progress["closed_transactions"]:
+                progress["closed_transactions"].append(predecessor)
+            # Same commit as the refund, so a retry never records or refunds twice.
+            self._record_upgrade_progress(fin_session, upgrade_hash, progress)
+            fin_session.commit()
+            if refund is not None:
+                self.msg_handler.send_message(
+                    log_event=LogEvent(
+                        "transaction_appeal_updated",
+                        EventType.INFO,
+                        EventScope.CONSENSUS,
+                        "Appeal refunded: contract upgraded",
+                        {"hash": predecessor},
+                    ),
+                    log_to_terminal=False,
                 )
 
-        finally:
-            # Clear current transaction tracking
-            self.current_transactions.pop(tx_hash, None)
-            # Release the transaction
-            try:
-                with self.get_session() as release_session:
-                    self.release_transaction(release_session, tx_hash)
-            except Exception as release_error:
-                logger.error(
-                    f"[Worker {self.worker_id}] Failed to release upgrade transaction {tx_hash}: {release_error}",
-                    exc_info=True,
-                )
+            transaction_data = TransactionsProcessor(
+                fin_session
+            ).get_transaction_by_hash(predecessor)
+            transaction = Transaction.from_dict(transaction_data)
+            logger.info(
+                f"[Worker {self.worker_id}] Finalizing {predecessor} before upgrade {upgrade_hash}"
+            )
+            transaction = await self._repair_accepted_delivery(
+                transaction, transaction_data, fin_session
+            )
+            await self._finalize_transaction(transaction, fin_session)
+            fin_session.commit()
+
+        await self.usage_metrics_service.send_finalized_transaction_metrics(
+            transaction, transaction_data
+        )
+
+    async def _apply_upgrade_code(
+        self,
+        session: Session,
+        tx_hash: str,
+        contract_address: str,
+        new_code: str,
+    ) -> None:
+        from backend.database_handler.models import CurrentState
+
+        contract = (
+            session.query(CurrentState)
+            .filter_by(id=contract_address)
+            .with_for_update()
+            .populate_existing()
+            .one_or_none()
+        )
+        upgrade = (
+            session.query(Transactions)
+            .filter_by(hash=tx_hash)
+            .with_for_update()
+            .populate_existing()
+            .one()
+        )
+        if (
+            upgrade.status != TransactionStatus.PENDING
+            or upgrade.worker_id != self.worker_id
+        ):
+            session.rollback()
+            logger.warning(
+                f"[Worker {self.worker_id}] Upgrade {tx_hash} is no longer owned and pending; not applying"
+            )
+            return
+        if contract is None or "state" not in (contract.data or {}):
+            raise _UpgradeRejected(
+                _upgrade_failed(f"Contract {contract_address} not found")
+            )
+
+        still_open = session.execute(
+            text(
+                """
+                SELECT hash FROM transactions
+                WHERE to_address = :contract
+                    AND hash != :hash
+                    AND status NOT IN ('FINALIZED', 'CANCELED')
+                    AND (
+                        blocked_at IS NOT NULL
+                        OR status IN :open_statuses
+                    )
+                LIMIT 1
+                """
+            ).bindparams(bindparam("open_statuses", expanding=True)),
+            {
+                "contract": contract_address,
+                "hash": tx_hash,
+                "open_statuses": [
+                    *self._FINALIZATION_ELIGIBLE_STATUSES,
+                    "PROPOSING",
+                    "COMMITTING",
+                    "REVEALING",
+                ],
+            },
+        ).first()
+        if still_open is not None:
+            raise RuntimeError(
+                f"Transaction {still_open.hash} reopened before upgrade {tx_hash} applied"
+            )
+
+        # A recompute must not restore its pre-upgrade appeal decision after a crash.
+        session.execute(
+            text(
+                """
+                UPDATE transactions
+                SET data = data - :snapshot_key
+                WHERE to_address = :contract
+                    AND hash != :hash
+                    AND status IN ('PENDING', 'ACTIVATED')
+                    AND data ? :snapshot_key
+                """
+            ),
+            {
+                "contract": contract_address,
+                "hash": tx_hash,
+                "snapshot_key": APPEAL_RECOVERY_SNAPSHOT_KEY,
+            },
+        )
+
+        code_slot_key, code_slot_value = upgrade_code_slot(
+            new_code, contract.genvm_executor_selector
+        )
+        contract.data = {
+            "state": {
+                "accepted": {
+                    **contract.data["state"]["accepted"],
+                    code_slot_key: code_slot_value,
+                },
+                "finalized": {
+                    **contract.data["state"]["finalized"],
+                    code_slot_key: code_slot_value,
+                },
+            },
+        }
+        progress = (upgrade.data or {}).get(UPGRADE_CLOSE_KEY) or {}
+        upgrade.consensus_data = {
+            "upgrade_result": "success",
+            "contract_address": contract_address,
+            "closed_transactions": progress.get("closed_transactions", []),
+            "refunded_appeals": progress.get("refunded_appeals", []),
+            "applied_at": int(time.time()),
+        }
+        # The status update commits the code, receipt and FINALIZED together.
+        await ConsensusAlgorithm.dispatch_transaction_status_update(
+            TransactionsProcessor(session),
+            tx_hash,
+            TransactionStatus.FINALIZED,
+            self.msg_handler,
+        )
+        self._generic_error_retries.pop(tx_hash, None)
+        logger.info(
+            f"[Worker {self.worker_id}] Contract {contract_address} upgraded successfully via tx {tx_hash}"
+        )
+
+    async def _cancel_upgrade(
+        self, session: Session, tx_hash: str, consensus_data: dict
+    ) -> None:
+        try:
+            tx = session.query(Transactions).filter_by(hash=tx_hash).one()
+            if tx.status != TransactionStatus.PENDING:
+                session.rollback()
+                return
+            tx.consensus_data = consensus_data
+            await ConsensusAlgorithm.dispatch_transaction_status_update(
+                TransactionsProcessor(session),
+                tx_hash,
+                TransactionStatus.CANCELED,
+                self.msg_handler,
+            )
+            self._generic_error_retries.pop(tx_hash, None)
+        except Exception as update_error:
+            session.rollback()
+            logger.error(
+                f"[Worker {self.worker_id}] Failed to update failed upgrade tx status: {update_error}"
+            )
+
+    async def _repair_accepted_delivery(
+        self, transaction: Transaction, transaction_data: dict, session: Session
+    ) -> Transaction:
+        """Replay a missed acceptance-phase delivery; returns the reloaded tx."""
+        if not _acceptance_dispatch_pending(transaction_data):
+            return transaction
+        from backend.consensus.base import (
+            accounts_manager_factory,
+            contract_snapshot_factory,
+            contract_processor_factory,
+            node_factory,
+            transactions_processor_factory,
+        )
+
+        logger.info(
+            f"[Worker {self.worker_id}] Repairing accepted message delivery "
+            f"for transaction {transaction.hash}"
+        )
+        transactions_processor = transactions_processor_factory(session)
+        await self.consensus_algorithm.repair_accepted_message_delivery(
+            transaction,
+            transactions_processor,
+            accounts_manager_factory(session),
+            lambda contract_address: contract_snapshot_factory(
+                contract_address, session, transaction
+            ),
+            contract_processor_factory(session),
+            node_factory,
+        )
+        latest_transaction = transactions_processor.get_transaction_by_hash(
+            transaction.hash
+        )
+        if latest_transaction is None:
+            return transaction
+        return Transaction.from_dict(latest_transaction)
+
+    async def _finalize_transaction(
+        self, transaction: Transaction, session: Session
+    ) -> None:
+        from backend.consensus.base import (
+            accounts_manager_factory,
+            contract_snapshot_factory,
+            contract_processor_factory,
+            node_factory,
+            transactions_processor_factory,
+        )
+
+        await self.consensus_algorithm.process_finalization(
+            transaction,
+            transactions_processor_factory(session),
+            None,  # chain_snapshot not needed for finalization
+            accounts_manager_factory(session),
+            lambda contract_address: contract_snapshot_factory(
+                contract_address, session, transaction
+            ),
+            contract_processor_factory(session),
+            node_factory,
+        )
 
     async def process_finalization(self, finalization_data: dict, session: Session):
         """
@@ -1629,20 +2353,15 @@ class ConsensusWorker:
                 # Convert to Transaction domain object
                 transaction = Transaction.from_dict(finalization_data)
 
-                # Check if the appeal window has passed
-                from backend.consensus.base import (
-                    contract_snapshot_factory,
-                    contract_processor_factory,
-                    transactions_processor_factory,
-                    accounts_manager_factory,
-                    node_factory,
-                )
+                from backend.consensus.base import transactions_processor_factory
 
-                transactions_processor = transactions_processor_factory(session)
+                transaction = await self._repair_accepted_delivery(
+                    transaction, finalization_data, session
+                )
 
                 # Check if can finalize (appeal window expired)
                 can_finalize = self.consensus_algorithm.can_finalize_transaction(
-                    transactions_processor,
+                    transactions_processor_factory(session),
                     transaction,
                     0,  # index in queue (not used in our case)
                     [finalization_data],  # mock queue with just this transaction
@@ -1653,22 +2372,14 @@ class ConsensusWorker:
                         f"[Worker {self.worker_id}] Finalizing transaction {transaction.hash}"
                     )
 
-                    await self.consensus_algorithm.process_finalization(
-                        transaction,
-                        transactions_processor,
-                        None,  # chain_snapshot not needed for finalization
-                        accounts_manager_factory(session),
-                        lambda contract_address: contract_snapshot_factory(
-                            contract_address, session, transaction
-                        ),
-                        contract_processor_factory(session),
-                        node_factory,
-                    )
+                    await self._finalize_transaction(transaction, session)
 
                     session.commit()
                     logger.info(
                         f"[Worker {self.worker_id}] Successfully finalized transaction {transaction.hash}"
                     )
+                    self._no_validators_retries.pop(transaction.hash, None)
+                    self._generic_error_retries.pop(transaction.hash, None)
 
                     # Send usage metrics to external API (non-blocking)
                     await self.usage_metrics_service.send_finalized_transaction_metrics(
@@ -1698,6 +2409,14 @@ class ConsensusWorker:
                     TransactionStatus.FINALIZED,
                     self.msg_handler,
                 )
+                tx = error_session.query(Transactions).filter_by(hash=tx_hash).one()
+                refund_recipient = tx.origin_address or tx.from_address
+                if refund_recipient:
+                    AccountsManager(error_session).settle_tx_fee_accounting_once(
+                        tx_hash,
+                        refund_recipient,
+                        reason="finalized_contract_not_found",
+                    )
                 error_session.commit()
 
             logger.info(
@@ -1782,7 +2501,12 @@ class ConsensusWorker:
                             validators_snapshot,
                         )
 
+                transactions_processor.clear_transaction_appeal_recovery_snapshot(
+                    transaction.hash, include_pending=False
+                )
                 session.commit()
+                self._generic_error_retries.pop(transaction.hash, None)
+                self._leader_crash_retries.pop(transaction.hash, None)
                 logger.info(
                     f"[Worker {self.worker_id}] Successfully processed appeal for transaction {transaction.hash}"
                 )
@@ -1795,6 +2519,16 @@ class ConsensusWorker:
 
             with self.get_session() as error_session:
                 transactions_processor = TransactionsProcessor(error_session)
+                accounts_manager = AccountsManager(error_session)
+
+                # The appeal never produced an outcome. Finalizing the original
+                # decision must not make its admitted bond look like a failed
+                # appeal: unwind the exact admission first, refunding both bond
+                # principal and induced-work funding to the appealer.
+                accounts_manager.abort_tx_appeal_admission_once(
+                    tx_hash,
+                    "contract_not_found_during_appeal",
+                )
 
                 await ConsensusAlgorithm.dispatch_transaction_status_update(
                     transactions_processor,
@@ -1802,6 +2536,14 @@ class ConsensusWorker:
                     TransactionStatus.FINALIZED,
                     self.msg_handler,
                 )
+                tx = error_session.query(Transactions).filter_by(hash=tx_hash).one()
+                refund_recipient = tx.origin_address or tx.from_address
+                if refund_recipient:
+                    accounts_manager.settle_tx_fee_accounting_once(
+                        tx_hash,
+                        refund_recipient,
+                        reason="finalized_contract_not_found_during_appeal",
+                    )
                 error_session.commit()
 
             logger.info(
@@ -1835,6 +2577,42 @@ class ConsensusWorker:
         state["last_log"] = now_monotonic
         state["polls"] = 0
 
+    def _backoff_window(self, tx_hash: str) -> Optional[tuple[str, float, float]]:
+        """
+        Return (kind, elapsed, backoff) if the transaction is inside a retry
+        backoff window, None otherwise.
+        """
+        now = time.time()
+
+        retry_info = self._no_validators_retries.get(tx_hash)
+        if retry_info:
+            backoff = self._no_validators_base_backoff * (
+                2 ** (retry_info["count"] - 1)
+            )
+            elapsed = now - retry_info["last_attempt"]
+            if elapsed < backoff:
+                return "no-validators", elapsed, backoff
+
+        generic_info = self._generic_error_retries.get(tx_hash)
+        if generic_info:
+            backoff = self._generic_error_base_backoff * (
+                2
+                ** min(
+                    generic_info["count"] - 1,
+                    self.MAX_GENERIC_ERROR_RETRIES - 1,
+                )
+            )
+            elapsed = now - generic_info["last_attempt"]
+            if elapsed < backoff:
+                return "generic-error", elapsed, backoff
+
+        return None
+
+    def _backoff_hashes(self) -> list[str]:
+        """Hashes of transactions currently inside a retry backoff window."""
+        candidates = set(self._no_validators_retries) | set(self._generic_error_retries)
+        return sorted(h for h in candidates if self._backoff_window(h) is not None)
+
     def _is_in_backoff(self, transaction_data: dict) -> bool:
         """
         Check if a transaction is in backoff due to no validators or generic errors.
@@ -1846,36 +2624,16 @@ class ConsensusWorker:
             True if transaction is in backoff period, False otherwise
         """
         tx_hash = transaction_data["hash"]
+        window = self._backoff_window(tx_hash)
+        if window is None:
+            return False
 
-        # Check no-validators backoff
-        retry_info = self._no_validators_retries.get(tx_hash)
-        if retry_info:
-            backoff = self._no_validators_base_backoff * (
-                2 ** (retry_info["count"] - 1)
-            )
-            time_since_last = time.time() - retry_info["last_attempt"]
-            if time_since_last < backoff:
-                logger.debug(
-                    f"[Worker {self.worker_id}] Transaction {tx_hash} in no-validators backoff "
-                    f"({time_since_last:.1f}s < {backoff}s)"
-                )
-                return True
-
-        # Check generic error backoff
-        generic_info = self._generic_error_retries.get(tx_hash)
-        if generic_info:
-            backoff = self._generic_error_base_backoff * (
-                2 ** (generic_info["count"] - 1)
-            )
-            time_since_last = time.time() - generic_info["last_attempt"]
-            if time_since_last < backoff:
-                logger.debug(
-                    f"[Worker {self.worker_id}] Transaction {tx_hash} in generic-error backoff "
-                    f"({time_since_last:.1f}s < {backoff}s)"
-                )
-                return True
-
-        return False
+        kind, elapsed, backoff = window
+        logger.debug(
+            f"[Worker {self.worker_id}] Transaction {tx_hash} in {kind} backoff "
+            f"({elapsed:.1f}s < {backoff}s)"
+        )
+        return True
 
     async def _process_transaction_task(self, transaction_data: dict):
         """Task wrapper for processing a transaction with its own session."""
@@ -1906,23 +2664,32 @@ class ConsensusWorker:
 
         appeal_data = await self.claim_next_appeal(session)
         if appeal_data:
-            logger.debug(
-                f"[Worker {self.worker_id}] Claimed appeal for transaction {appeal_data['hash']}"
-            )
-            task = asyncio.create_task(self._process_appeal_task(appeal_data))
-            self._active_tasks.add(task)
-            return True
+            tx_hash = appeal_data["hash"]
+            if not self._is_in_backoff(appeal_data):
+                logger.debug(
+                    f"[Worker {self.worker_id}] Claimed appeal for transaction {tx_hash}"
+                )
+                task = asyncio.create_task(self._process_appeal_task(appeal_data))
+                self._active_tasks.add(task)
+                return True
+            self.release_transaction(session, tx_hash)
 
-        finalization_data = await self.claim_next_finalization(session)
+        finalization_data = await self.claim_next_finalization(
+            session, exclude_hashes=self._backoff_hashes()
+        )
         if finalization_data:
-            logger.debug(
-                f"[Worker {self.worker_id}] Claimed finalization for transaction {finalization_data['hash']}"
-            )
-            task = asyncio.create_task(
-                self._process_finalization_task(finalization_data)
-            )
-            self._active_tasks.add(task)
-            return True
+            tx_hash = finalization_data["hash"]
+            # Backoff can start after the exclusion list was built.
+            if not self._is_in_backoff(finalization_data):
+                logger.debug(
+                    f"[Worker {self.worker_id}] Claimed finalization for transaction {tx_hash}"
+                )
+                task = asyncio.create_task(
+                    self._process_finalization_task(finalization_data)
+                )
+                self._active_tasks.add(task)
+                return True
+            self.release_transaction(session, tx_hash)
 
         transaction_data = await self.claim_next_transaction(session)
         if transaction_data:

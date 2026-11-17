@@ -2,6 +2,7 @@ from web3 import Web3
 import json
 from eth_account import Account
 import os
+import pytest
 
 
 def test_eth_account():
@@ -42,6 +43,8 @@ def connect_to_hardhat():
         Exception: If the connection to the Hardhat network fails.
     """
     hardhat_url = os.environ.get("HARDHAT_URL")
+    if not hardhat_url:
+        pytest.skip("HARDHAT_URL is not configured")
     web3 = Web3(Web3.HTTPProvider(hardhat_url))
 
     # Check connection
