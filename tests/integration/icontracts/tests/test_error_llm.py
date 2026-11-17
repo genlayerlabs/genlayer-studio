@@ -54,6 +54,7 @@ def test_llm_invalid_api_key():
 
 def test_llm_invalid_unknown_key():
     """Test LLM call with unknown API key"""
+    # UNKNOWN_KEY must be defined (to any non-empty invalid value) in the env: an undefined var resolves to "" -> zero providers -> CANCELED instead of the expected GenVM internal error.
     # Create a validator with an unknown API key
     for _ in range(5):
         result = post_request_localhost(

@@ -1,0 +1,8 @@
+target-version = "py312"
+include = ["backend/**/*.py"]
+extend-exclude = ["backend/node/genvm/origin/keccak.py"]
+
+[lint]
+select = ["E9", "F", "ASYNC", "RUF006"]
+# Star-import cleanup requires restructuring and is tracked separately.
+ignore = ["F403", "F405"]
