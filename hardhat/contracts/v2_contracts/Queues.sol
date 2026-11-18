@@ -28,6 +28,7 @@ contract Queues is
 		uint issuedTxCount;
 		mapping(bytes32 => uint) txIdToFinalizedSlot;
 		mapping(bytes32 => IQueues.QueueType) txIdToQueueType;
+		mapping(uint => bytes32) issuedIndexToTxId;
 	}
 
 	address public genConsensus;
@@ -100,7 +101,13 @@ contract Queues is
 		address recipient,
 		uint256 slot
 	) external view returns (bytes32) {
-		return recipientQueues[recipient].accepted.slotToTxId[slot];
+		return recipientQueues[recipient].issuedIndexToTxId[slot];
+	}
+
+	function getIssuedTxCount(
+		address recipient
+	) external view returns (uint256) {
+		return recipientQueues[recipient].issuedTxCount;
 	}
 
 	function addTransactionToPendingQueue(
@@ -121,7 +128,9 @@ contract Queues is
 			pendingQueue.txIdToSlot[txId] = slot;
 			pendingQueue.tail++;
 
-			queues.txIdToFinalizedSlot[txId] = queues.issuedTxCount++;
+			uint256 issuedIndex = queues.issuedTxCount++;
+			queues.txIdToFinalizedSlot[txId] = issuedIndex;
+			queues.issuedIndexToTxId[issuedIndex] = txId;
 
 			emit QueueOperationPerformed(
 				recipient,

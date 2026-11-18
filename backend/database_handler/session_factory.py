@@ -29,6 +29,8 @@ class DatabaseSessionManager:
             pool_timeout=30,
             pool_size=pool_size,
             max_overflow=max_overflow,
+            # Bound values (e.g. validator private keys) must not reach error text.
+            hide_parameters=True,
         )
         default_kwargs.update(engine_kwargs)
 

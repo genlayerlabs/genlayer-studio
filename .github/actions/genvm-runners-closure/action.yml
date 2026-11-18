@@ -1,0 +1,61 @@
+name: Prebuild GenVM runners closure
+description: >
+  Builds genvm-manager's `runners-all` on the runner, where the Nix sandbox
+  works, and exports its store closure into the Docker build context so the
+  in-image source build can import it instead of rebuilding it.
+
+  The runner tree is assembled from fixed-output derivations that compile C to
+  wasm (`genvm-cpython-objs`, `genvm-ffi`, bz2/xz/zlib, numpy, PIL). Their
+  identity is their output hash, and the `nixos/nix` image cannot enable the
+  sandbox, so building them there picks up host state and misses the pinned
+  hashes. Everything else in the build is input-addressed and does not care.
+
+inputs:
+  ref:
+    description: GenVM source binding, `<branch>:<commit>` or a bare commit.
+    required: true
+  destination:
+    description: Directory in the build context to write the closure into.
+    required: false
+    default: .genvm-nix-closure
+  nix_cache_pull_token:
+    description: >-
+      pull token for the GenLayer nix cache, which is private. A composite
+      action cannot read `secrets`, so the caller has to thread it through.
+      Empty means the runner closure is built from source.
+    required: false
+    default: ""
+
+outputs:
+  netrc_path:
+    description: >-
+      Netrc holding the cache pull token, written by nix-setup. The Docker
+      source build fetches from the same cache, so it needs the same credential
+      — pass it as a BuildKit secret, never as an ARG or a COPY.
+    value: ${{ steps.nix.outputs.netrc_path }}
+
+runs:
+  using: composite
+  steps:
+    # Substituters, trusted keys and cache auth come from the shared action; the
+    # sandbox settings below are this action's own and must survive it, so they
+    # go through extra_nix_config, whose lines are appended last and win.
+    - name: Install Nix
+      id: nix
+      uses: genlayerlabs/github-actions/nix-setup@39b0a0d5e9bb27a1612d2e98b0f8509d31745157
+      with:
+        cache_pull_token: ${{ inputs.nix_cache_pull_token }}
+        extra_nix_config: |
+          sandbox = true
+          # Without this Nix quietly builds unsandboxed when it cannot set the
+          # sandbox up, which is the exact output this action must never export.
+          sandbox-fallback = false
+
+    - name: Build and export runners-all
+      shell: bash
+      env:
+        GENVM_CLOSURE_REF: ${{ inputs.ref }}
+        GENVM_CLOSURE_DEST: ${{ inputs.destination }}
+      run: |
+        ./scripts/genvm-runners-closure.sh \
+          "$GENVM_CLOSURE_REF" "$GENVM_CLOSURE_DEST"

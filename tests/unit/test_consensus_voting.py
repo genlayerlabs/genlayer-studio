@@ -4,7 +4,6 @@ from backend.consensus.utils import determine_consensus_from_votes
 from backend.consensus.types import ConsensusResult
 from backend.node.types import Vote
 
-
 # --- Majority logic (>50% required) ---
 
 
@@ -52,25 +51,25 @@ def test_single_validator_disagree():
     assert determine_consensus_from_votes(votes) == ConsensusResult.MAJORITY_DISAGREE
 
 
-# --- IDLE counted as DISAGREE ---
+# --- IDLE is classified as TIMEOUT, matching the rollup ballot ---
 
 
-def test_idle_counts_as_disagree():
-    """3 IDLE out of 5 → effective_disagree=3 > 2.5 → MAJORITY_DISAGREE."""
+def test_idle_counts_as_timeout():
+    """3 IDLE out of 5 are revealed as timeout ballots."""
     votes = [Vote.AGREE.value] * 2 + [Vote.IDLE.value] * 3
-    assert determine_consensus_from_votes(votes) == ConsensusResult.MAJORITY_DISAGREE
+    assert determine_consensus_from_votes(votes) == ConsensusResult.TIMEOUT
 
 
-def test_idle_plus_disagree():
-    """1 IDLE + 2 DISAGREE = 3 effective_disagree > 2.5 → MAJORITY_DISAGREE."""
+def test_idle_does_not_join_disagree_bucket():
+    """1 IDLE, 2 DISAGREE, and 2 AGREE has no majority."""
     votes = [Vote.AGREE.value] * 2 + [Vote.DISAGREE.value] * 2 + [Vote.IDLE.value] * 1
-    assert determine_consensus_from_votes(votes) == ConsensusResult.MAJORITY_DISAGREE
+    assert determine_consensus_from_votes(votes) == ConsensusResult.NO_MAJORITY
 
 
 def test_all_idle():
-    """All IDLE → all counted as disagree → MAJORITY_DISAGREE."""
+    """All IDLE → all classified as timeout."""
     votes = [Vote.IDLE.value] * 5
-    assert determine_consensus_from_votes(votes) == ConsensusResult.MAJORITY_DISAGREE
+    assert determine_consensus_from_votes(votes) == ConsensusResult.TIMEOUT
 
 
 def test_idle_not_enough_for_majority():
@@ -79,7 +78,14 @@ def test_idle_not_enough_for_majority():
     assert determine_consensus_from_votes(votes) == ConsensusResult.MAJORITY_AGREE
 
 
-def test_idle_with_timeout_no_majority():
-    """2 IDLE, 2 TIMEOUT, 1 AGREE → no majority."""
+def test_idle_joins_timeout_bucket():
+    """2 IDLE + 2 TIMEOUT are four protocol timeout ballots."""
     votes = [Vote.IDLE.value] * 2 + [Vote.TIMEOUT.value] * 2 + [Vote.AGREE.value] * 1
-    assert determine_consensus_from_votes(votes) == ConsensusResult.NO_MAJORITY
+    assert determine_consensus_from_votes(votes) == ConsensusResult.TIMEOUT
+
+
+def test_deterministic_violation_majority():
+    votes = [Vote.DETERMINISTIC_VIOLATION.value] * 3 + [Vote.AGREE.value] * 2
+    assert (
+        determine_consensus_from_votes(votes) == ConsensusResult.DETERMINISTIC_VIOLATION
+    )
