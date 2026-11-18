@@ -141,6 +141,24 @@ async function sdkCallWithFallback<T>(
   }
 }
 
+const MAX_TOAST_TEXT_LENGTH = 300;
+
+/**
+ * Short, user-facing text for an error toast. Wallet chain mismatches carry
+ * their own explanation; for anything else (e.g. viem RPC errors whose
+ * `message` embeds the whole request body) only the short cause is shown.
+ */
+function errorToastText(error: any): string | undefined {
+  const text =
+    error?.name === 'ChainMismatchError'
+      ? error.message
+      : error?.details || error?.shortMessage || error?.message;
+  if (!text || typeof text !== 'string') return undefined;
+  return text.length > MAX_TOAST_TEXT_LENGTH
+    ? `${text.slice(0, MAX_TOAST_TEXT_LENGTH)}…`
+    : text;
+}
+
 export function useContractQueries() {
   const genlayer = useGenlayer();
   const genlayerClient = computed(() => genlayer.client.value);
@@ -439,7 +457,7 @@ export function useContractQueries() {
       notify({
         type: 'error',
         title: 'Error deploying contract',
-        text: error?.details || error?.message || undefined,
+        text: errorToastText(error),
       });
       console.error('Error Deploying the contract', error);
       if (error instanceof Error) {
