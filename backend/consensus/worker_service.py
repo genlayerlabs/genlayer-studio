@@ -237,6 +237,10 @@ async def lifespan(app: FastAPI):
         hide_parameters=True,
     )
 
+    # Refuse DB writes of tasks claimed before a snapshot restore (stale
+    # in-memory state), see backend/consensus/worker_control.py
+    worker_control.install_write_fence(engine)
+
     # Create session factory
     SessionLocal = sessionmaker(
         autocommit=False, autoflush=False, bind=engine, expire_on_commit=False

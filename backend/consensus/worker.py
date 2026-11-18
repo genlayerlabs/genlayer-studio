@@ -2,6 +2,7 @@
 
 import os
 import asyncio
+import contextvars
 import json
 import time
 import uuid
@@ -2789,6 +2790,19 @@ class ConsensusWorker:
         with self.get_session() as session:
             await self.process_appeal(appeal_data, session)
 
+    def _spawn(self, coro, epoch: int) -> asyncio.Task:
+        """Start a processing task tagged with the restore epoch of its claim.
+
+        Every DB transaction the task (and anything it spawns or runs in a
+        thread) opens is fenced against that epoch: after a snapshot restore
+        it can no longer write (worker_control.install_write_fence).
+        """
+        context = contextvars.copy_context()
+        context.run(worker_control.TASK_RESTORE_EPOCH.set, epoch)
+        task = asyncio.create_task(coro, context=context)
+        self._active_tasks.add(task)
+        return task
+
     async def _try_claim_work(self, session: Session) -> bool:
         """
         Try to claim and spawn task for next work item.
@@ -2808,9 +2822,12 @@ class ConsensusWorker:
         # The shared lock lives until this session's transaction ends, i.e.
         # it covers the claim UPDATE that follows. It is re-checked before
         # every claim because a backoff release below commits (ending the
-        # transaction and with it the lock).
+        # transaction and with it the lock). The restore epoch is read in the
+        # same transaction: it can't change while the gate is held shared, so
+        # it is the epoch the claim belongs to (see _spawn).
         if not worker_control.claim_gate_open(session):
             return False
+        epoch = worker_control.current_restore_epoch(session)
 
         # Priority: appeals > finalizations > transactions
 
@@ -2821,12 +2838,12 @@ class ConsensusWorker:
                 logger.debug(
                     f"[Worker {self.worker_id}] Claimed appeal for transaction {tx_hash}"
                 )
-                task = asyncio.create_task(self._process_appeal_task(appeal_data))
-                self._active_tasks.add(task)
+                self._spawn(self._process_appeal_task(appeal_data), epoch)
                 return True
             self.release_transaction(session, tx_hash)
             if not worker_control.claim_gate_open(session):
                 return False
+            epoch = worker_control.current_restore_epoch(session)
 
         finalization_data = await self.claim_next_finalization(
             session, exclude_hashes=self._backoff_hashes()
@@ -2838,14 +2855,12 @@ class ConsensusWorker:
                 logger.debug(
                     f"[Worker {self.worker_id}] Claimed finalization for transaction {tx_hash}"
                 )
-                task = asyncio.create_task(
-                    self._process_finalization_task(finalization_data)
-                )
-                self._active_tasks.add(task)
+                self._spawn(self._process_finalization_task(finalization_data), epoch)
                 return True
             self.release_transaction(session, tx_hash)
             if not worker_control.claim_gate_open(session):
                 return False
+            epoch = worker_control.current_restore_epoch(session)
 
         transaction_data = await self.claim_next_transaction(session)
         if transaction_data:
@@ -2853,10 +2868,7 @@ class ConsensusWorker:
             # Check backoff for no-validators retry
             if not self._is_in_backoff(transaction_data):
                 logger.debug(f"[Worker {self.worker_id}] Claimed transaction {tx_hash}")
-                task = asyncio.create_task(
-                    self._process_transaction_task(transaction_data)
-                )
-                self._active_tasks.add(task)
+                self._spawn(self._process_transaction_task(transaction_data), epoch)
                 return True
             else:
                 # Release transaction if in backoff
@@ -2886,6 +2898,12 @@ class ConsensusWorker:
                     # task.result() would raise CancelledError (not an
                     # Exception) and kill the loop.
                     if task.cancelled():
+                        continue
+                    if isinstance(task.exception(), worker_control.WorkerFencedError):
+                        logger.warning(
+                            f"[Worker {self.worker_id}] Stopped a task claimed before "
+                            f"a snapshot restore: {task.exception()}"
+                        )
                         continue
                     # Handle any exceptions from completed tasks
                     try:

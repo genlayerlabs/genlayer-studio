@@ -214,12 +214,21 @@ async def test_control_event_dispatch():
 # --------------------------------------------------------------------------- #
 
 
+class _FakeGate:
+    def __init__(self, order):
+        self.order = order
+
+    async def fence_stale_writers(self):
+        self.order.append("fence")
+        return 1
+
+
 def _recording_gate(order):
     @asynccontextmanager
     async def gate(engine, timeout_seconds):
         order.append("gate")
         try:
-            yield
+            yield _FakeGate(order)
         finally:
             order.append("ungate")
 
@@ -272,6 +281,7 @@ async def test_restore_order_gate_release_wait_restore_ungate():
         "check",
         worker_control.RELEASE_IN_FLIGHT_EVENT,
         ("wait", worker_control.DEFAULT_RELEASE_TIMEOUT_SECONDS),
+        "fence",
         "restore",
         "ungate",
     ]
@@ -484,7 +494,7 @@ async def test_restore_gate_runs_db_calls_off_the_loop_on_one_connection():
     engine.connect.assert_called_once()
     assert [c[0] for c in calls] == [
         "SELECT pg_try_advisory_lock(:key)",
-        "SELECT pg_advisory_unlock(:key)",
+        "SELECT pg_advisory_unlock_all()",
     ]
     assert all(t != loop_thread for _, t in calls)
     conn.close.assert_called_once()
@@ -677,3 +687,55 @@ async def test_maintain_liveness_drops_work_when_lock_is_lost_then_reacquires():
         ("tick", True),  # re-acquired
     ]
     assert liveness.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_spawned_task_carries_the_restore_epoch_of_its_claim():
+    worker = _make_worker()
+    seen = []
+
+    async def process(_data):
+        seen.append(worker_control.TASK_RESTORE_EPOCH.get())
+
+        async def child():  # e.g. a validator task spawned by consensus
+            seen.append(worker_control.TASK_RESTORE_EPOCH.get())
+
+        await asyncio.create_task(child())
+
+    with (
+        patch.object(worker_control, "claim_gate_open", return_value=True),
+        patch.object(worker_control, "current_restore_epoch", return_value=7),
+        patch.object(worker, "claim_next_appeal", AsyncMock(return_value=None)),
+        patch.object(worker, "claim_next_finalization", AsyncMock(return_value=None)),
+        patch.object(
+            worker, "claim_next_transaction", AsyncMock(return_value={"hash": "0xA"})
+        ),
+        patch.object(worker, "_is_in_backoff", return_value=False),
+        patch.object(worker, "_process_transaction_task", process),
+    ):
+        assert await worker._try_claim_work(MagicMock(spec=Session)) is True
+        await asyncio.gather(*worker._active_tasks)
+
+    assert seen == [7, 7]
+    assert worker_control.TASK_RESTORE_EPOCH.get() is None  # loop context untouched
+
+
+@pytest.mark.asyncio
+async def test_main_loop_survives_a_fenced_task():
+    worker = _make_worker()
+
+    async def fenced():
+        raise worker_control.WorkerFencedError("stale")
+
+    task = asyncio.create_task(fenced())
+    await asyncio.wait({task})
+    worker._active_tasks.add(task)
+
+    async def stop_after_one(_session):
+        worker.running = False
+        return False
+
+    with patch.object(worker, "_try_claim_work", side_effect=stop_after_one):
+        await asyncio.wait_for(worker.run(), 2)
+
+    assert task not in worker._active_tasks

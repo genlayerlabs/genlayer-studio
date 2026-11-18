@@ -3825,7 +3825,10 @@ async def restore_snapshot(
     2. abort if a live claim has no worker that could release it;
     3. tell workers to cancel in-flight work and release their claims;
     4. wait until nothing is claimed, otherwise abort without restoring;
-    5. restore, then release the gate.
+    5. fence stale writers: wait for in-flight DB transactions of tasks
+       claimed before now and advance the restore epoch, so no such task can
+       write again — even one whose worker was judged terminated but lives on;
+    6. restore, then release the gate (and the fence).
 
     Args:
         snapshot_id: ID of the snapshot to restore
@@ -3854,7 +3857,9 @@ async def restore_snapshot(
     session = snapshot_manager.session
     published: Optional[int] = None
     try:
-        async with worker_control.restore_gate(session.get_bind(), timeout_seconds):
+        async with worker_control.restore_gate(
+            session.get_bind(), timeout_seconds
+        ) as gate:
             await worker_control.ensure_claims_releasable(session)
             published = await worker_control.publish_worker_control(
                 worker_control.RELEASE_IN_FLIGHT_EVENT
@@ -3864,6 +3869,7 @@ async def restore_snapshot(
             await worker_control.wait_for_claims_released(
                 session, timeout_seconds if published is not None else 0
             )
+            await gate.fence_stale_writers()
             return await worker_control.run_blocking(
                 snapshot_manager.restore_snapshot, snapshot_id
             )

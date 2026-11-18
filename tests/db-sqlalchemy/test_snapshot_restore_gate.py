@@ -7,13 +7,14 @@ go of their claims.
 """
 
 import asyncio
+import contextvars
 import os
 from contextlib import contextmanager
 from typing import Iterable
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 os.environ.setdefault("VITE_FINALITY_WINDOW", "30")
@@ -432,3 +433,144 @@ async def test_worker_release_in_flight_clears_its_claims(
 
     assert _claim_of(session, TX_A).worker_id is None
     assert _claim_of(session, TX_B).worker_id == "other-worker"
+
+
+# --------------------------------------------------------------------------- #
+# Write fence: tasks claimed before a restore can't write after it
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def fenced_engine(engine: Engine) -> Iterable[Engine]:
+    """A worker-side engine with the write fence installed."""
+    worker_engine = create_engine(engine.url)
+    worker_control.install_write_fence(worker_engine)
+    yield worker_engine
+    worker_engine.dispose()
+
+
+def _state_value(session: Session):
+    session.rollback()
+    session.expire_all()
+    return session.get(CurrentState, CONTRACT).data.get("value")
+
+
+def _write_value(engine: Engine, value: str) -> None:
+    with sessionmaker(bind=engine)() as ws:
+        ws.execute(
+            text(
+                "UPDATE current_state SET data = jsonb_build_object('value', "
+                "CAST(:v AS text)) WHERE id = :id"
+            ),
+            {"v": value, "id": CONTRACT},
+        )
+        ws.commit()
+
+
+def _in_task_with_epoch(epoch: int, fn, *args):
+    """Run ``fn`` the way a processing task claimed in ``epoch`` would."""
+    context = contextvars.copy_context()
+    context.run(worker_control.TASK_RESTORE_EPOCH.set, epoch)
+    return context.run(fn, *args)
+
+
+def test_fence_lets_current_tasks_and_non_task_code_write(
+    fenced_engine: Engine, session: Session
+):
+    epoch = worker_control.current_restore_epoch(session)
+    session.rollback()
+    _in_task_with_epoch(epoch, _write_value, fenced_engine, "task")
+    assert _state_value(session) == "task"
+    _write_value(fenced_engine, "outside-task")  # claims, recovery: unfenced
+    assert _state_value(session) == "outside-task"
+
+
+def test_fence_refuses_tasks_from_an_older_epoch(
+    fenced_engine: Engine, session: Session
+):
+    old = worker_control.current_restore_epoch(session)
+    session.execute(text("SELECT nextval('restore_epoch_seq')"))
+    session.commit()
+    _write_value(fenced_engine, "before")
+
+    with pytest.raises(worker_control.WorkerFencedError):
+        _in_task_with_epoch(old, _write_value, fenced_engine, "stale")
+
+    assert _state_value(session) == "before"
+    # The pooled connection is still usable afterwards.
+    _write_value(fenced_engine, "after")
+    assert _state_value(session) == "after"
+
+
+@pytest.mark.asyncio
+async def test_liveness_loss_with_surviving_task_cannot_overwrite_restored_state(
+    engine: Engine, fenced_engine: Engine, session: Session
+):
+    """Auditor regression: only the worker's liveness connection dies, so the
+    restore treats its claim as abandoned, but the worker process and its
+    processing task survive on other connections. The task has a DB
+    transaction in flight while the restore starts, and writes again later
+    (delayed cleanup). The in-flight write must land before the rewrite and
+    the later one must be refused: the restored state survives."""
+    worker_id = "worker-with-dying-liveness"
+    liveness = worker_control.WorkerLiveness(fenced_engine, worker_id)
+    assert liveness.acquire()
+
+    state = session.get(CurrentState, CONTRACT)
+    state.data = {"value": "snapshot"}
+    session.commit()
+    manager = SnapshotManager(session)
+    snapshot_id = manager.create_snapshot().snapshot_id
+    _insert_tx(session, TX_A, nonce=0, worker_id=worker_id, status="COMMITTING")
+    epoch = worker_control.current_restore_epoch(session)
+    session.rollback()
+
+    in_tx = asyncio.Event()
+    finish_tx = asyncio.Event()
+    WSession = sessionmaker(bind=fenced_engine)
+
+    async def surviving_task():
+        # Transaction 1: already open when the restore starts.
+        with WSession() as ws:
+            ws.execute(
+                text(
+                    "UPDATE current_state SET data = "
+                    "jsonb_build_object('value', 'in-flight') WHERE id = :id"
+                ),
+                {"id": CONTRACT},
+            )
+            in_tx.set()
+            await finish_tx.wait()
+            ws.commit()
+        await asyncio.sleep(0.3)  # delayed cleanup...
+        # Transaction 2: after the restore.
+        await asyncio.to_thread(_write_value, fenced_engine, "stale")
+
+    context = contextvars.copy_context()
+    context.run(worker_control.TASK_RESTORE_EPOCH.set, epoch)
+    task = asyncio.create_task(surviving_task(), context=context)
+    await in_tx.wait()
+
+    # Only the liveness connection dies; the process and its task live on.
+    pid = liveness.conn.execute(text("SELECT pg_backend_pid()")).scalar()
+    liveness.conn.commit()
+    with sessionmaker(bind=engine)() as admin:
+        admin.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+        admin.commit()
+    assert worker_control.claimed_transactions(session) == []  # claim ignored
+
+    async def release_tx_later():
+        await asyncio.sleep(0.3)
+        finish_tx.set()
+
+    releaser = asyncio.create_task(release_tx_later())
+    with patch.object(
+        endpoints.worker_control, "publish_worker_control", AsyncMock(return_value=0)
+    ):
+        assert await endpoints.restore_snapshot(manager, snapshot_id) is True
+    await releaser
+
+    with pytest.raises(worker_control.WorkerFencedError):
+        await task
+    assert _state_value(session) == "snapshot"
+    liveness.close()

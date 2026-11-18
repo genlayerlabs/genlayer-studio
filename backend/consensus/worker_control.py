@@ -29,8 +29,16 @@ top of the restored state. The protocol is:
    claims remain after the timeout the restore is aborted without touching
    the snapshot; work the workers cancelled in step 3 stays cancelled (its
    transactions were released and get processed again).
-5. RPC rewrites the database, then releases the gate. If the RPC process
-   dies, Postgres drops the lock with its connection.
+5. RPC fences stale writers (``RestoreGate.fence_stale_writers``): it waits
+   for DB transactions of processing tasks that are already in progress, then
+   advances the restore epoch. Every processing task carries the epoch of its
+   claim and each DB transaction it opens checks it (``install_write_fence``),
+   so no task claimed before the restore can write afterwards — whatever its
+   worker's liveness says. This is what makes ignoring a terminated owner's
+   claims safe even if "terminated" turns out to mean "lost its liveness
+   connection but still running".
+6. RPC rewrites the database, then releases the gate and the fence. If the
+   RPC process dies, Postgres drops both locks with its connection.
 
 All DB work runs in worker threads so the RPC event loop is never blocked.
 """
@@ -41,10 +49,12 @@ import os
 import time
 import zlib
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from typing import Any, AsyncIterator, Callable, Optional, TypeVar
 
 from loguru import logger
-from sqlalchemy import Connection, Engine, text
+from sqlalchemy import Connection, Engine, event, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 WORKER_CONTROL_CHANNEL = "worker:control"
@@ -54,6 +64,69 @@ RELEASE_IN_FLIGHT_EVENT = "release_in_flight"
 RESTORE_GATE_LOCK_KEY = 0x474C524553544F52
 
 DEFAULT_RELEASE_TIMEOUT_SECONDS = 30.0
+
+# Advisory lock fencing worker task writes against restores ("GLFENCE1").
+RESTORE_FENCE_LOCK_KEY = 0x474C46454E434531
+
+# Restore epoch a processing task was claimed in (None outside tasks).
+TASK_RESTORE_EPOCH: ContextVar[Optional[int]] = ContextVar(
+    "task_restore_epoch", default=None
+)
+
+_EPOCH_SQL = (
+    "SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM restore_epoch_seq"
+)
+
+
+class WorkerFencedError(BaseException):
+    """A task claimed before a snapshot restore tried to use the DB after it.
+
+    A BaseException (like CancelledError) so the task's ``except Exception``
+    handlers — which write status/retry bookkeeping — can't catch it and write
+    anyway: the task just stops.
+    """
+
+
+def current_restore_epoch(session: Session) -> int:
+    """The current restore epoch (0 before the first restore)."""
+    return int(session.execute(text(_EPOCH_SQL)).scalar())
+
+
+def install_write_fence(engine: Engine) -> None:
+    """Worker side: refuse DB transactions of tasks from an older restore epoch.
+
+    Every transaction begun on ``engine`` inside a processing task (one with
+    ``TASK_RESTORE_EPOCH`` set) first takes the restore fence in shared mode
+    and compares the current epoch with the task's. A mismatch means a
+    restore happened since the task was claimed: the transaction is rolled
+    back before any statement of the task runs, and ``WorkerFencedError`` is
+    raised. Holding the shared fence until commit makes a restore wait for
+    such transactions before rewriting (``RestoreGate.fence_stale_writers``).
+    Transactions outside tasks (claims, recovery, liveness) are not fenced.
+    """
+
+    @event.listens_for(engine, "begin")
+    def _fence(conn) -> None:
+        epoch = TASK_RESTORE_EPOCH.get()
+        if epoch is None:
+            return
+        dbapi_conn = conn.connection.dbapi_connection
+        cursor = dbapi_conn.cursor()
+        try:
+            cursor.execute(
+                f"SELECT pg_advisory_xact_lock_shared(%s), ({_EPOCH_SQL})",
+                (RESTORE_FENCE_LOCK_KEY,),
+            )
+            current = int(cursor.fetchone()[1])
+        finally:
+            cursor.close()
+        if current != epoch:
+            dbapi_conn.rollback()
+            raise WorkerFencedError(
+                f"task claimed in restore epoch {epoch} cannot write after "
+                f"restore epoch {current}"
+            )
+
 
 T = TypeVar("T")
 
@@ -97,7 +170,7 @@ async def restore_gate(
     engine: Engine,
     timeout_seconds: float = DEFAULT_RELEASE_TIMEOUT_SECONDS,
     poll_interval: float = 0.1,
-) -> AsyncIterator[None]:
+) -> AsyncIterator["RestoreGate"]:
     """Hold the exclusive restore gate, blocking all worker claims."""
     conn = await run_blocking(engine.connect)
     acquired = False
@@ -125,18 +198,62 @@ async def restore_gate(
                     "progress, or a claim transaction is stuck)"
                 )
             await asyncio.sleep(poll_interval)
-        yield
+        yield RestoreGate(conn, timeout_seconds)
     finally:
         await run_blocking(_release_gate, conn, acquired)
+
+
+class RestoreGate:
+    """Handle on a held restore gate (its dedicated connection)."""
+
+    def __init__(self, conn: Connection, timeout_seconds: float):
+        self.conn = conn
+        self.timeout_seconds = timeout_seconds
+
+    async def fence_stale_writers(self) -> int:
+        """Stop every task claimed before this restore from writing again.
+
+        Takes the restore fence exclusively — waiting for fenced transactions
+        already in progress to commit, so their writes land *before* the
+        rewrite — then advances the restore epoch. Every later transaction of
+        a task tagged with an older epoch is refused (``install_write_fence``),
+        whatever happened to its worker (e.g. its liveness connection died but
+        the process lives on). The fence stays held until the gate is
+        released, i.e. until the rewrite is done. Returns the new epoch.
+        """
+        return await run_blocking(_fence_and_advance, self.conn, self.timeout_seconds)
+
+
+def _fence_and_advance(conn: Connection, timeout_seconds: float) -> int:
+    conn.execute(
+        text("SELECT set_config('lock_timeout', :t, false)"),
+        {"t": f"{max(1, int(timeout_seconds * 1000))}ms"},
+    )
+    try:
+        conn.execute(
+            text("SELECT pg_advisory_lock(:key)"), {"key": RESTORE_FENCE_LOCK_KEY}
+        )
+        conn.commit()
+    except OperationalError as e:
+        conn.rollback()
+        raise WorkerCoordinationError(
+            "tasks claimed before the restore are still writing after "
+            f"{timeout_seconds}s"
+        ) from e
+    finally:
+        conn.execute(text("SELECT set_config('lock_timeout', '0', false)"))
+        conn.commit()
+    epoch = int(conn.execute(text("SELECT nextval('restore_epoch_seq')")).scalar())
+    conn.commit()
+    logger.info(f"Restore epoch advanced to {epoch}; stale task writes are fenced")
+    return epoch
 
 
 def _release_gate(conn: Connection, acquired: bool) -> None:
     if acquired:
         try:
-            conn.execute(
-                text("SELECT pg_advisory_unlock(:key)"),
-                {"key": RESTORE_GATE_LOCK_KEY},
-            )
+            # Releases the gate and, if taken, the restore fence.
+            conn.execute(text("SELECT pg_advisory_unlock_all()"))
             conn.commit()
         except Exception as e:
             # Never return a pooled connection that still holds the lock:
