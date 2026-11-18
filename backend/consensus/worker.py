@@ -291,6 +291,10 @@ class ConsensusWorker:
         # Initialize usage metrics service for reporting transaction metrics
         self.usage_metrics_service = UsageMetricsService()
 
+        # sim_resetStudioState: while any reset holds a pause, the worker
+        # claims no new work. reset_id -> monotonic expiry.
+        self._admission_pauses: dict[str, float] = {}
+
     def _parse_max_parallel_txs(self) -> int:
         """
         Parse MAX_PARALLEL_TXS_PER_WORKER from environment with validation.
@@ -2650,6 +2654,16 @@ class ConsensusWorker:
         with self.get_session() as session:
             await self.process_appeal(appeal_data, session)
 
+    def _spawn_claimed(self, session: Session, tx_hash: str, coro) -> bool:
+        """Start processing claimed work, unless admission got paused while
+        the claim was in flight; then hand the claim back untouched."""
+        if self.is_admission_paused():
+            coro.close()
+            self.release_transaction(session, tx_hash)
+            return False
+        self._active_tasks.add(asyncio.create_task(coro))
+        return True
+
     async def _try_claim_work(self, session: Session) -> bool:
         """
         Try to claim and spawn task for next work item.
@@ -2669,9 +2683,9 @@ class ConsensusWorker:
                 logger.debug(
                     f"[Worker {self.worker_id}] Claimed appeal for transaction {tx_hash}"
                 )
-                task = asyncio.create_task(self._process_appeal_task(appeal_data))
-                self._active_tasks.add(task)
-                return True
+                return self._spawn_claimed(
+                    session, tx_hash, self._process_appeal_task(appeal_data)
+                )
             self.release_transaction(session, tx_hash)
 
         finalization_data = await self.claim_next_finalization(
@@ -2684,11 +2698,11 @@ class ConsensusWorker:
                 logger.debug(
                     f"[Worker {self.worker_id}] Claimed finalization for transaction {tx_hash}"
                 )
-                task = asyncio.create_task(
-                    self._process_finalization_task(finalization_data)
+                return self._spawn_claimed(
+                    session,
+                    tx_hash,
+                    self._process_finalization_task(finalization_data),
                 )
-                self._active_tasks.add(task)
-                return True
             self.release_transaction(session, tx_hash)
 
         transaction_data = await self.claim_next_transaction(session)
@@ -2697,11 +2711,9 @@ class ConsensusWorker:
             # Check backoff for no-validators retry
             if not self._is_in_backoff(transaction_data):
                 logger.debug(f"[Worker {self.worker_id}] Claimed transaction {tx_hash}")
-                task = asyncio.create_task(
-                    self._process_transaction_task(transaction_data)
+                return self._spawn_claimed(
+                    session, tx_hash, self._process_transaction_task(transaction_data)
                 )
-                self._active_tasks.add(task)
-                return True
             else:
                 # Release transaction if in backoff
                 self.release_transaction(session, tx_hash)
@@ -2729,6 +2741,9 @@ class ConsensusWorker:
                     # Handle any exceptions from completed tasks
                     try:
                         task.result()
+                    except asyncio.CancelledError:
+                        # Cancelled by reset_state(); its claim was released.
+                        pass
                     except Exception as e:
                         logger.exception(f"[Worker {self.worker_id}] Task failed: {e}")
 
@@ -2746,23 +2761,24 @@ class ConsensusWorker:
                     self.running = False
                     break
 
-                with self.get_session() as session:
-                    # Periodically recover stuck transactions (every 12 iterations = ~60 seconds)
-                    recovery_counter += 1
-                    if recovery_counter >= 12:
-                        recovery_counter = 0
-                        recovered = await self.recover_stuck_transactions(session)
-                        if recovered > 0:
-                            logger.info(
-                                f"[Worker {self.worker_id}] Recovered {recovered} stuck transactions"
-                            )
+                if not self.is_admission_paused():
+                    with self.get_session() as session:
+                        # Periodically recover stuck transactions (every 12 iterations = ~60 seconds)
+                        recovery_counter += 1
+                        if recovery_counter >= 12:
+                            recovery_counter = 0
+                            recovered = await self.recover_stuck_transactions(session)
+                            if recovered > 0:
+                                logger.info(
+                                    f"[Worker {self.worker_id}] Recovered {recovered} stuck transactions"
+                                )
 
-                    # Claim and process while we have capacity
-                    if len(self._active_tasks) < self.max_parallel_txs:
-                        claimed = await self._try_claim_work(session)
-                        if claimed:
-                            # Try to claim more immediately if we have capacity
-                            continue
+                        # Claim and process while we have capacity
+                        if len(self._active_tasks) < self.max_parallel_txs:
+                            claimed = await self._try_claim_work(session)
+                            if claimed:
+                                # Try to claim more immediately if we have capacity
+                                continue
 
                 # Wait for a task to complete or poll interval
                 if self._active_tasks:
@@ -2778,6 +2794,108 @@ class ConsensusWorker:
             except Exception as e:
                 logger.exception(f"[Worker {self.worker_id}] Error in main loop: {e}")
                 await asyncio.sleep(self.poll_interval)
+
+    # ------------------------------------------------------------------
+    # sim_resetStudioState support
+    # ------------------------------------------------------------------
+
+    def pause_admission(self, reset_id: str, max_seconds: float) -> None:
+        """Stop claiming new work until resume_admission(reset_id) or until
+        `max_seconds` pass, whichever comes first.
+
+        Every outstanding reset keeps its own pause: finishing one reset must
+        not resume work while another one is still in progress.
+        """
+        self._admission_pauses[reset_id] = time.monotonic() + max_seconds
+
+    def resume_admission(self, reset_id: str) -> None:
+        """Lift the pause held by this reset (other resets keep theirs)."""
+        self._admission_pauses.pop(reset_id, None)
+
+    def is_admission_paused(self) -> bool:
+        now = time.monotonic()
+        for reset_id, until in list(self._admission_pauses.items()):
+            if now >= until:
+                logger.warning(
+                    f"[Worker {self.worker_id}] Studio reset {reset_id} pause "
+                    "expired without completion"
+                )
+                del self._admission_pauses[reset_id]
+        return bool(self._admission_pauses)
+
+    async def reset_state(self, cancel_timeout: float = 10.0) -> dict:
+        """
+        Cancel all in-flight work and drop in-memory bookkeeping.
+
+        Cancelling a processing task cancels its whole execution tree: the
+        consensus states cancel and drain their leader/validator child tasks
+        (see backend.consensus.base._wait_owning_children), and GenVM runs
+        tear down their VM on cancellation. Claims are released by the
+        tasks' own cleanup.
+
+        Returns:
+            {"cancelled": n, "still_running": m}. still_running > 0 means
+            some tasks did not finish within `cancel_timeout`; they stay in
+            _active_tasks so run() keeps tracking them, and the caller must
+            treat the reset as failed.
+        """
+        tasks = [t for t in self._active_tasks if not t.done()]
+        for task in tasks:
+            task.cancel()
+        still_running = 0
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=cancel_timeout)
+            still_running = len(pending)
+
+        self.current_transactions.clear()
+        self._no_validators_retries.clear()
+        self._generic_error_retries.clear()
+        self._leader_crash_retries.clear()
+
+        if still_running:
+            logger.error(
+                f"[Worker {self.worker_id}] State reset: {still_running} of "
+                f"{len(tasks)} tasks still running after {cancel_timeout}s"
+            )
+        else:
+            logger.info(
+                f"[Worker {self.worker_id}] State reset: cancelled {len(tasks)} active tasks"
+            )
+        return {"cancelled": len(tasks), "still_running": still_running}
+
+    async def handle_studio_reset_request(
+        self,
+        reset_id: str,
+        deadline: float,
+        cancel_timeout: float,
+    ) -> Optional[dict]:
+        """
+        Worker side of the sim_resetStudioState handshake.
+
+        Pauses admission, cancels and drains all work, and returns the ack to
+        send back. Returns None (and does nothing) when the request arrives
+        after its deadline: the RPC has already given up on it, so acting on
+        it could cancel work submitted after the reset was reported.
+        """
+        now = time.time()
+        if now >= deadline:
+            logger.warning(
+                f"[Worker {self.worker_id}] Ignoring stale studio reset {reset_id}"
+            )
+            return None
+
+        # Keep the pause a bit longer than the RPC waits for acks, so the
+        # RPC's FINISHED message is what normally lifts it.
+        self.pause_admission(reset_id, max_seconds=(deadline - now) + 30.0)
+        result = await self.reset_state(
+            cancel_timeout=max(0.0, min(cancel_timeout, deadline - time.time()))
+        )
+        return {
+            "worker_id": self.worker_id,
+            "reset_id": reset_id,
+            "ok": result["still_running"] == 0,
+            **result,
+        }
 
     def stop(self):
         """Stop the worker gracefully. Active tasks will complete naturally in run() shutdown logic."""

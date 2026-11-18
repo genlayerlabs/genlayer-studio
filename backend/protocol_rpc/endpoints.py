@@ -5,6 +5,7 @@ import random
 import json
 import re
 import time
+import uuid
 import eth_utils
 import logging
 from contextlib import asynccontextmanager
@@ -522,6 +523,280 @@ def clear_db_tables(session: Session, tables: list) -> None:
             table_name, Base.metadata, autoload=True, autoload_with=session.bind
         )
         session.execute(table.delete())
+
+
+STUDIO_RESET_ACK_TIMEOUT_SECONDS = float(
+    os.environ.get("STUDIO_RESET_ACK_TIMEOUT_SECONDS", "30")
+)
+STUDIO_RESET_LOCK_KEY = "studio:reset:lock"
+# Upper bound on waiting for in-flight DB work before deleting; exceeding it
+# fails the reset (nothing deleted) instead of stalling the request.
+STUDIO_RESET_LOCK_TIMEOUT_SECONDS = float(
+    os.environ.get("STUDIO_RESET_LOCK_TIMEOUT_SECONDS", "10")
+)
+_RELEASE_LOCK_SCRIPT = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+end
+return 0
+"""
+
+
+def _studio_reset_redis():
+    """Redis client used to coordinate sim_resetStudioState with workers."""
+    import redis.asyncio as aioredis
+
+    return aioredis.from_url(
+        os.environ.get("REDIS_URL", "redis://redis:6379/0"),
+        encoding="utf-8",
+        decode_responses=True,
+    )
+
+
+def _studio_reset_error(message: str) -> JSONRPCError:
+    return JSONRPCError(
+        code=-32000,
+        message=f"{message} Nothing was deleted; please try again.",
+        data={},
+    )
+
+
+async def _collect_studio_reset_acks(
+    redis_client, ack_key: str, reset_id: str, expected: int, deadline: float
+) -> list[dict]:
+    """Wait (until `deadline`) for `expected` worker acks of `reset_id`."""
+    acks: list[dict] = []
+    while len(acks) < expected:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        item = await redis_client.blpop([ack_key], timeout=remaining)
+        if item is None:
+            break
+        ack = json.loads(item[1])
+        if ack.get("reset_id") == reset_id:
+            acks.append(ack)
+    return acks
+
+
+def _fence_and_find_live_claims(
+    session: Session, stopped_worker_ids: set[str]
+) -> list[tuple[str, str]]:
+    """Fence off workers that did not take part in the handshake.
+
+    Worker membership is not taken from Redis: a worker whose reset
+    subscription is broken is invisible to PUBLISH but can still be
+    processing. Every worker that processes anything holds a claim on a
+    transactions row (worker_id + blocked_at), so the database is the
+    authoritative list of active workers.
+
+    Locks, held for the rest of the DB transaction, in this order:
+
+    * ``evm_envelopes`` ACCESS EXCLUSIVE: waits for in-flight signed
+      transaction admissions (which read the nonce ledger first, then write
+      ``transactions``) to commit, and makes new ones wait until the reset
+      has committed, so they validate their nonce against the cleared
+      ledger. Taking this lock first avoids a lock-order deadlock with
+      admissions.
+    * ``transactions`` EXCLUSIVE: workers can no longer claim (claims are
+      UPDATEs) until the rows are deleted and committed. Then returns every claim held by a worker
+    that did not confirm it stopped; any such claim means that worker may
+    still be running and the reset must not delete anything.
+
+    Claim age is deliberately ignored. An expired claim (older than
+    TRANSACTION_TIMEOUT_MINUTES) only means the lease may be taken over; the
+    execution holding it can still be running, which is why stuck-transaction
+    recovery also requires stale progress before clearing a claim. Claims of
+    workers that are really gone are cleared by that recovery, after which
+    the reset can proceed.
+    """
+    session.execute(
+        text(f"SET LOCAL lock_timeout = '{STUDIO_RESET_LOCK_TIMEOUT_SECONDS:g}s'")
+    )
+    session.execute(text("LOCK TABLE evm_envelopes IN ACCESS EXCLUSIVE MODE"))
+    session.execute(text("LOCK TABLE transactions IN EXCLUSIVE MODE"))
+    rows = session.execute(
+        text(
+            """
+            SELECT hash, worker_id FROM transactions
+            WHERE worker_id IS NOT NULL
+            """
+        )
+    ).all()
+    return [
+        (row.hash, row.worker_id)
+        for row in rows
+        if row.worker_id not in stopped_worker_ids
+    ]
+
+
+@check_forbidden_method_in_hosted_studio
+async def reset_studio_state(session: Session, admin_key: str | None = None) -> dict:
+    """Delete all transactions and accounts after resetting consensus workers.
+
+    1. Take a cluster-wide Redis lock so resets never overlap (an overlapping
+       reset's FINISHED would otherwise resume workers mid-reset).
+    2. Ask every subscribed consensus worker to pause claiming and to cancel
+       and drain all in-flight execution; wait for each one to acknowledge
+       (see redis_worker_handler for the worker side).
+    3. Fence: lock ``transactions`` against new claims and refuse to delete
+       while any worker that did not acknowledge still holds a live claim.
+       This catches workers the Redis handshake cannot see.
+    4. Delete ``transactions`` (pruned snapshot archives cascade) and
+       ``current_state`` (balances and contract state) and commit.
+    5. Tell the workers the reset is over so they resume claiming work.
+
+    Any failure raises a JSON-RPC error and deletes nothing. Validators, LLM
+    providers, API keys/tiers and user snapshots are kept.
+    """
+    from sqlalchemy.exc import DBAPIError
+
+    from backend.database_handler.models import (
+        CurrentState,
+        EvmEnvelope,
+        Transactions,
+    )
+    from backend.protocol_rpc.message_handler.redis_worker_handler import (
+        STUDIO_RESET_CHANNEL,
+        STUDIO_RESET_FINISHED,
+        STUDIO_RESET_REQUEST,
+    )
+
+    reset_id = uuid.uuid4().hex
+    ack_key = f"studio:reset:{reset_id}:acks"
+    timeout = STUDIO_RESET_ACK_TIMEOUT_SECONDS
+    deadline = time.time() + timeout
+
+    try:
+        redis_client = _studio_reset_redis()
+    except Exception as e:
+        raise _studio_reset_error(f"Could not connect to Redis to reach workers: {e}.")
+
+    try:
+        try:
+            locked = await redis_client.set(
+                STUDIO_RESET_LOCK_KEY,
+                reset_id,
+                nx=True,
+                px=int((timeout + 60) * 1000),
+            )
+        except Exception as e:
+            raise _studio_reset_error(
+                f"Could not reach consensus workers through Redis: {e}."
+            )
+        if not locked:
+            raise _studio_reset_error("Another reset is already in progress.")
+
+        try:
+            try:
+                expected = await redis_client.publish(
+                    STUDIO_RESET_CHANNEL,
+                    json.dumps(
+                        {
+                            "event": STUDIO_RESET_REQUEST,
+                            "data": {
+                                "reset_id": reset_id,
+                                "ack_key": ack_key,
+                                "deadline": deadline,
+                            },
+                        }
+                    ),
+                )
+            except Exception as e:
+                raise _studio_reset_error(
+                    f"Could not reach consensus workers through Redis: {e}."
+                )
+
+            succeeded = False
+            try:
+                acks = await _collect_studio_reset_acks(
+                    redis_client, ack_key, reset_id, expected, deadline
+                )
+                if len(acks) < expected:
+                    raise _studio_reset_error(
+                        f"{expected - len(acks)} of {expected} consensus workers "
+                        f"did not confirm the reset within {timeout:g}s."
+                    )
+                failed = [a.get("worker_id", "?") for a in acks if not a.get("ok")]
+                if failed:
+                    raise _studio_reset_error(
+                        "Consensus workers could not stop their running "
+                        f"transactions: {', '.join(failed)}."
+                    )
+
+                try:
+                    live_claims = _fence_and_find_live_claims(
+                        session,
+                        {a["worker_id"] for a in acks if a.get("worker_id")},
+                    )
+                    if live_claims:
+                        session.rollback()  # drop the table locks right away
+                        workers = sorted({w for _, w in live_claims})
+                        raise _studio_reset_error(
+                            f"{len(live_claims)} transactions are still claimed "
+                            "by consensus workers that did not confirm they "
+                            f"stopped: {', '.join(workers)}. If those workers no "
+                            "longer exist, stuck-transaction recovery releases "
+                            "their claims once TRANSACTION_TIMEOUT_MINUTES pass "
+                            "without progress."
+                        )
+
+                    deleted_transactions = session.query(Transactions).delete(
+                        synchronize_session=False
+                    )
+                    deleted_accounts = session.query(CurrentState).delete(
+                        synchronize_session=False
+                    )
+                    # The signed-envelope ledger drives eth_getTransactionCount,
+                    # replay detection and receipts; it must be cleared with
+                    # the transactions it describes, or nonces and old
+                    # receipts survive the reset.
+                    deleted_envelopes = session.query(EvmEnvelope).delete(
+                        synchronize_session=False
+                    )
+                    session.commit()
+                except DBAPIError as e:
+                    # lock_timeout, or Postgres broke a deadlock against us.
+                    session.rollback()
+                    raise _studio_reset_error(
+                        "The database is busy with other transactions "
+                        f"({type(e.orig).__name__})."
+                    )
+                succeeded = True
+            finally:
+                # Always release the workers; if this publish is lost they
+                # resume on their own when their pause expires.
+                try:
+                    await redis_client.publish(
+                        STUDIO_RESET_CHANNEL,
+                        json.dumps(
+                            {
+                                "event": STUDIO_RESET_FINISHED,
+                                "data": {"reset_id": reset_id, "success": succeeded},
+                            }
+                        ),
+                    )
+                    await redis_client.delete(ack_key)
+                except Exception as e:
+                    logger.error(f"Failed to publish studio reset completion: {e}")
+        finally:
+            try:
+                await redis_client.eval(
+                    _RELEASE_LOCK_SCRIPT, 1, STUDIO_RESET_LOCK_KEY, reset_id
+                )
+            except Exception as e:
+                # The lock expires on its own.
+                logger.error(f"Failed to release studio reset lock: {e}")
+    finally:
+        await redis_client.close()
+
+    return {
+        "deleted_transactions": deleted_transactions,
+        "deleted_accounts": deleted_accounts,
+        "deleted_envelopes": deleted_envelopes,
+        "workers_reset": len(acks),
+        "tasks_cancelled": sum(int(a.get("cancelled", 0)) for a in acks),
+    }
 
 
 def fund_account(

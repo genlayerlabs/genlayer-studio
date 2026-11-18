@@ -4,6 +4,7 @@ local cjson = require "cjson"
 -- Table of specifically restricted methods
 local restricted_methods = {
     "sim_clearDbTables",
+    "sim_resetStudioState",
     "sim_resetDefaultsLlmProviders",
     "sim_addProvider",
     "sim_updateProvider",

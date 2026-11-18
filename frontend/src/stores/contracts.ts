@@ -165,6 +165,18 @@ export const useContractsStore = defineStore('contractsStore', () => {
     currentContractId.value = id || '';
   }
 
+  // Forget the current network's deployments (memory + IndexedDB) after the
+  // Studio backend wiped all accounts (sim_resetStudioState). Contract files
+  // and other chains' deployments are kept.
+  async function clearDeployedContractsForCurrentNetwork(): Promise<void> {
+    const chainId = networkStore.chainId;
+    allDeployedContracts.value = allDeployedContracts.value.filter(
+      (c) => c.chainId !== undefined && c.chainId !== chainId,
+    );
+
+    await db.deployedContracts.where('chainId').equals(chainId).delete();
+  }
+
   async function resetStorage(): Promise<void> {
     contracts.value = [];
     openedFiles.value = [];
@@ -220,6 +232,7 @@ export const useContractsStore = defineStore('contractsStore', () => {
     setCurrentContractId,
     setAllDeployedContracts,
     resetStorage,
+    clearDeployedContractsForCurrentNetwork,
     getInitialOpenedFiles,
     moveOpenedFile,
   };

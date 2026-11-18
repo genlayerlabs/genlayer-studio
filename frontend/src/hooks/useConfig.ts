@@ -19,11 +19,15 @@ export const useConfig = () => {
   const canUpdateFinalityWindow = computed(
     () => !isHostedEnvironment && isStudioNetwork.value,
   );
+  const canResetStudioState = computed(
+    () => !isHostedEnvironment && isStudioNetwork.value,
+  );
 
   return {
     isStudioNetwork,
     canUpdateValidators,
     canUpdateProviders,
     canUpdateFinalityWindow,
+    canResetStudioState,
   };
 };

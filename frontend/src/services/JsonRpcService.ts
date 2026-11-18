@@ -290,6 +290,20 @@ export class JsonRpcService implements IJsonRpcService {
     ) as Promise<number>;
   }
 
+  async resetStudioState(): Promise<{
+    deleted_transactions: number;
+    deleted_accounts: number;
+    deleted_envelopes: number;
+    workers_reset: number;
+    tasks_cancelled: number;
+  }> {
+    return this.callRpcMethod<any>(
+      'sim_resetStudioState',
+      [],
+      'Error resetting transactions and accounts',
+    );
+  }
+
   async cancelTransaction(
     transactionHash: string,
     signature?: string,
