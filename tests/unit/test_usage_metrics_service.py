@@ -379,3 +379,18 @@ def test_extract_llm_calls_falls_back_to_primary_without_token_metrics():
             "costUsd": 0,
         }
     ]
+
+
+def test_format_created_at_returns_utc_isoformat():
+    service = UsageMetricsService()
+    result = service._format_created_at(None)
+    assert "+" in result  # timezone-aware ISO string includes offset like "+00:00"
+    assert "Z" not in result  # should use +00:00, not Z suffix
+
+
+def test_format_created_at_returns_original_datetime_isoformat():
+    from datetime import datetime, timezone
+    service = UsageMetricsService()
+    dt = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    result = service._format_created_at(dt)
+    assert result == "2024-01-01T12:00:00+00:00"
