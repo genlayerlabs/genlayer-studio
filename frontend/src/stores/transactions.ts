@@ -2,17 +2,15 @@ import { defineStore } from 'pinia';
 import { ref, computed, watch } from 'vue';
 import type { TransactionItem } from '@/types';
 import type { TransactionHash } from 'genlayer-js/types';
-import {
-  isDecidedState,
-  transactionsStatusNameToNumber,
-} from 'genlayer-js/types';
+import { TransactionStatus } from 'genlayer-js/types';
 import { useDb, useGenlayer, useWebSocketClient } from '@/hooks';
 import { useNetworkStore } from '@/stores/network';
 
 // Non-Studio chains have no WebSocket push (tx status updates come via
 // `useTransactionListener` which is wired to WS events that only Studio
-// emits). Poll while any tx is still undecided so CANCELED / FINALIZED /
-// TIMEOUT states actually reach the UI.
+// emits). Decisions remain appealable: poll through ACCEPTED / UNDETERMINED /
+// TIMEOUT until the stored transaction is FINALIZED or CANCELED. This tracks
+// parent consensus status only, not completion of child delivery or payouts.
 const NON_STUDIO_POLL_INTERVAL_MS = 5_000;
 const NON_STUDIO_NOT_FOUND_GRACE_MS = 30_000;
 
@@ -62,10 +60,15 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
 
   let undecidedPollTimer: ReturnType<typeof setInterval> | null = null;
 
-  function hasUndecidedTx() {
-    return transactions.value.some(
-      (tx) => !isDecidedState(transactionsStatusNameToNumber[tx.statusName]),
+  function needsStatusRefresh(tx: TransactionItem) {
+    return (
+      tx.statusName !== TransactionStatus.FINALIZED &&
+      tx.statusName !== TransactionStatus.CANCELED
     );
+  }
+
+  function hasUndecidedTx() {
+    return transactions.value.some((tx) => needsStatusRefresh(tx));
   }
 
   function startUndecidedPolling() {
@@ -199,11 +202,10 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
   async function refreshPendingTransactions() {
     // Only refresh txs belonging to the current network — querying cross-network
     // hashes would silently "not find" them and drop them from the store.
-    // Skip fully-decided txs (CANCELED / FINALIZED / *_TIMEOUT / UNDETERMINED /
-    // ACCEPTED) — their status isn't going to change.
-    const pendingTxs = transactions.value.filter(
-      (tx: TransactionItem) =>
-        !isDecidedState(transactionsStatusNameToNumber[tx.statusName]),
+    // Accepted and timeout decisions can still be appealed or finalized.
+    // Only stored FINALIZED / CANCELED statuses stop parent-status refreshes.
+    const pendingTxs = transactions.value.filter((tx: TransactionItem) =>
+      needsStatusRefresh(tx),
     ) as TransactionItem[];
 
     await Promise.all(
