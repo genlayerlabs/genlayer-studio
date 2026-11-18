@@ -161,7 +161,7 @@ def _local_mode(monkeypatch):
 
 def _session(calls: list):
     session = MagicMock()
-    counts = iter([3, 2])
+    counts = iter([3, 2, 1])
 
     def _delete(**_kwargs):
         calls.append("delete")
@@ -198,10 +198,11 @@ async def test_reset_waits_for_worker_to_drain_before_deleting(monkeypatch):
     result = await endpoints.reset_studio_state(session=session)
 
     assert hung.cancelled and task.done()
-    assert calls == ["delete", "delete", "commit"]
+    assert calls == ["delete", "delete", "delete", "commit"]
     assert result == {
         "deleted_transactions": 3,
         "deleted_accounts": 2,
+        "deleted_envelopes": 1,
         "workers_reset": 1,
         "tasks_cancelled": 1,
     }
@@ -292,7 +293,7 @@ async def test_no_running_workers_still_resets(monkeypatch):
 
     result = await endpoints.reset_studio_state(session=session)
 
-    assert calls == ["delete", "delete", "commit"]
+    assert calls == ["delete", "delete", "delete", "commit"]
     assert result["workers_reset"] == 0
 
 
@@ -568,7 +569,7 @@ async def test_overlapping_resets_are_serialized(monkeypatch):
 
     result = await first
     assert result["workers_reset"] == 1
-    assert first_calls == ["delete", "delete", "commit"]
+    assert first_calls == ["delete", "delete", "delete", "commit"]
     assert second_calls == []
 
     # Once the first reset is done, a new one can run.
@@ -624,3 +625,31 @@ async def test_overlapping_requests_on_the_worker_keep_the_pause():
     assert worker.is_admission_paused()
     worker.resume_admission("A")
     assert not worker.is_admission_paused()
+
+
+@pytest.mark.asyncio
+async def test_database_lock_timeout_fails_reset_cleanly(monkeypatch):
+    """lock_timeout / deadlock while fencing: error, nothing deleted, workers
+    released, lock freed."""
+    from sqlalchemy.exc import OperationalError
+
+    class LockNotAvailable(Exception):
+        pass
+
+    def fence(_session, _stopped):
+        raise OperationalError("LOCK TABLE", {}, LockNotAvailable())
+
+    monkeypatch.setattr(endpoints, "_fence_and_find_live_claims", fence)
+    calls: list[str] = []
+    session = _session(calls)
+    redis = FakeRedis()
+    monkeypatch.setattr(endpoints, "_studio_reset_redis", lambda: redis)
+
+    with pytest.raises(JSONRPCError, match="database is busy.*Nothing was deleted"):
+        await endpoints.reset_studio_state(session=session)
+
+    assert calls == []
+    session.rollback.assert_called()
+    finished = _events(redis, STUDIO_RESET_FINISHED)
+    assert finished and finished[0]["data"]["success"] is False
+    assert endpoints.STUDIO_RESET_LOCK_KEY not in redis.kv

@@ -11,13 +11,15 @@ from sqlalchemy.orm import Session
 from backend.database_handler.accounts_manager import AccountsManager
 from backend.database_handler.models import (
     CurrentState,
+    EvmEnvelope,
     Transactions,
     TransactionSnapshotArchive,
     Validators,
 )
 from backend.database_handler.transactions_processor import TransactionsProcessor
+from backend.protocol_rpc import endpoints
 from backend.protocol_rpc.endpoints import reset_studio_state
-from backend.protocol_rpc.exceptions import JSONRPCError
+from backend.protocol_rpc.exceptions import JSONRPCError, NotFoundError
 
 
 def _insert_tx(tp: TransactionsProcessor, triggered_by: str | None = None) -> str:
@@ -139,6 +141,7 @@ async def test_reset_studio_state_deletes_transactions_and_accounts(
     assert result == {
         "deleted_transactions": 2,
         "deleted_accounts": 1,
+        "deleted_envelopes": 0,
         "workers_reset": 1,
         "tasks_cancelled": 0,
     }
@@ -274,3 +277,100 @@ async def test_expired_claim_blocks_until_recovery_clears_it(
         result = await reset_studio_state(session=session)
     assert result["deleted_transactions"] == 1
     assert session.query(Transactions).count() == 0
+
+
+SENDER = "0x9F0e84243496AcFB3Cd99D02eA59673c05901501"
+
+
+def _mine_envelope(tp: TransactionsProcessor, tx_hash: str, nonce: int) -> None:
+    assert tp.begin_evm_envelope(tx_hash, SENDER, nonce) is None
+    tp.record_evm_envelope(tx_hash, SENDER, nonce, tx_hash)
+
+
+@pytest.mark.asyncio
+async def test_reset_clears_evm_envelope_ledger(session: Session, monkeypatch):
+    """Regression (audit #4): the envelope ledger drives nonces, replay
+    responses and receipts, so it must be cleared with the transactions."""
+    monkeypatch.delenv("VITE_IS_HOSTED", raising=False)
+    monkeypatch.delenv("ADMIN_API_KEY", raising=False)
+
+    tp = TransactionsProcessor(session)
+    genlayer_tx = _insert_tx(tp)  # a GenLayer transaction with its envelope
+    _mine_envelope(tp, genlayer_tx, 0)
+    lifecycle_tx = f"0x{uuid.uuid4().hex}{uuid.uuid4().hex}"
+    _mine_envelope(tp, lifecycle_tx, 1)  # envelope-only (no transactions row)
+    session.commit()
+
+    # Before: nonce advanced, receipts exist, resubmission is a replay.
+    assert endpoints.get_transaction_count(tp, SENDER) == hex(2)
+    assert endpoints.get_transaction_receipt(tp, lifecycle_tx) is not None
+    assert tp.begin_evm_envelope(genlayer_tx, SENDER, 0) == genlayer_tx
+    session.rollback()
+
+    with patch(
+        "backend.protocol_rpc.endpoints._studio_reset_redis", return_value=_redis()
+    ):
+        result = await reset_studio_state(session=session)
+
+    assert result["deleted_transactions"] == 1
+    assert result["deleted_envelopes"] == 2
+    assert session.query(EvmEnvelope).count() == 0
+
+    # Nonce is back to zero for the sender.
+    assert endpoints.get_transaction_count(tp, SENDER) == hex(0)
+    # Old receipts and lookups are gone.
+    assert endpoints.get_transaction_receipt(tp, genlayer_tx) is None
+    assert endpoints.get_transaction_receipt(tp, lifecycle_tx) is None
+    with pytest.raises(NotFoundError):
+        endpoints.get_transaction_by_hash(tp, lifecycle_tx)
+
+    # Resubmitting the same envelope is admitted fresh (not answered as a
+    # replay of the deleted transaction), and nonces continue from zero.
+    assert tp.begin_evm_envelope(genlayer_tx, SENDER, 0) is None
+    tp.record_evm_envelope(genlayer_tx, SENDER, 0, genlayer_tx)
+    session.commit()
+    assert endpoints.get_transaction_count(tp, SENDER) == hex(1)
+    with pytest.raises(ValueError, match="NonceTooHigh"):
+        tp.begin_evm_envelope(lifecycle_tx, SENDER, 2)
+    session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_in_flight_admission_blocks_reset_until_it_commits(
+    session: Session, engine, monkeypatch
+):
+    """An admission that already read the nonce ledger holds it; the reset
+    must not delete underneath it (it would record a stale nonce). With a
+    short lock timeout the reset fails cleanly, then succeeds once the
+    admission has committed."""
+    monkeypatch.delenv("VITE_IS_HOSTED", raising=False)
+    monkeypatch.delenv("ADMIN_API_KEY", raising=False)
+    monkeypatch.setattr(endpoints, "STUDIO_RESET_LOCK_TIMEOUT_SECONDS", 0.5)
+
+    tp = TransactionsProcessor(session)
+    _insert_tx(tp)
+    session.commit()
+
+    admission = engine.connect()
+    in_flight = admission.begin()
+    admission.execute(
+        text("SELECT max(nonce) FROM evm_envelopes WHERE from_address = :a"),
+        {"a": SENDER.lower()},
+    )
+    try:
+        with patch(
+            "backend.protocol_rpc.endpoints._studio_reset_redis",
+            return_value=_redis(),
+        ):
+            with pytest.raises(JSONRPCError, match="database is busy"):
+                await reset_studio_state(session=session)
+        assert session.query(Transactions).count() == 1
+    finally:
+        in_flight.commit()
+        admission.close()
+
+    with patch(
+        "backend.protocol_rpc.endpoints._studio_reset_redis", return_value=_redis()
+    ):
+        result = await reset_studio_state(session=session)
+    assert result["deleted_transactions"] == 1

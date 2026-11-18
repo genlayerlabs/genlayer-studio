@@ -529,6 +529,11 @@ STUDIO_RESET_ACK_TIMEOUT_SECONDS = float(
     os.environ.get("STUDIO_RESET_ACK_TIMEOUT_SECONDS", "30")
 )
 STUDIO_RESET_LOCK_KEY = "studio:reset:lock"
+# Upper bound on waiting for in-flight DB work before deleting; exceeding it
+# fails the reset (nothing deleted) instead of stalling the request.
+STUDIO_RESET_LOCK_TIMEOUT_SECONDS = float(
+    os.environ.get("STUDIO_RESET_LOCK_TIMEOUT_SECONDS", "10")
+)
 _RELEASE_LOCK_SCRIPT = """
 if redis.call('get', KEYS[1]) == ARGV[1] then
     return redis.call('del', KEYS[1])
@@ -585,9 +590,16 @@ def _fence_and_find_live_claims(
     transactions row (worker_id + blocked_at), so the database is the
     authoritative list of active workers.
 
-    Takes an EXCLUSIVE lock on ``transactions`` for the rest of the DB
-    transaction: workers can no longer claim (claims are UPDATEs) until the
-    rows are deleted and committed. Then returns every claim held by a worker
+    Locks, held for the rest of the DB transaction, in this order:
+
+    * ``evm_envelopes`` ACCESS EXCLUSIVE: waits for in-flight signed
+      transaction admissions (which read the nonce ledger first, then write
+      ``transactions``) to commit, and makes new ones wait until the reset
+      has committed, so they validate their nonce against the cleared
+      ledger. Taking this lock first avoids a lock-order deadlock with
+      admissions.
+    * ``transactions`` EXCLUSIVE: workers can no longer claim (claims are
+      UPDATEs) until the rows are deleted and committed. Then returns every claim held by a worker
     that did not confirm it stopped; any such claim means that worker may
     still be running and the reset must not delete anything.
 
@@ -598,6 +610,10 @@ def _fence_and_find_live_claims(
     workers that are really gone are cleared by that recovery, after which
     the reset can proceed.
     """
+    session.execute(
+        text(f"SET LOCAL lock_timeout = '{STUDIO_RESET_LOCK_TIMEOUT_SECONDS:g}s'")
+    )
+    session.execute(text("LOCK TABLE evm_envelopes IN ACCESS EXCLUSIVE MODE"))
     session.execute(text("LOCK TABLE transactions IN EXCLUSIVE MODE"))
     rows = session.execute(
         text(
@@ -633,7 +649,13 @@ async def reset_studio_state(session: Session, admin_key: str | None = None) -> 
     Any failure raises a JSON-RPC error and deletes nothing. Validators, LLM
     providers, API keys/tiers and user snapshots are kept.
     """
-    from backend.database_handler.models import CurrentState, Transactions
+    from sqlalchemy.exc import DBAPIError
+
+    from backend.database_handler.models import (
+        CurrentState,
+        EvmEnvelope,
+        Transactions,
+    )
     from backend.protocol_rpc.message_handler.redis_worker_handler import (
         STUDIO_RESET_CHANNEL,
         STUDIO_RESET_FINISHED,
@@ -702,28 +724,44 @@ async def reset_studio_state(session: Session, admin_key: str | None = None) -> 
                         f"transactions: {', '.join(failed)}."
                     )
 
-                live_claims = _fence_and_find_live_claims(
-                    session, {a["worker_id"] for a in acks if a.get("worker_id")}
-                )
-                if live_claims:
-                    session.rollback()  # drop the table lock right away
-                    workers = sorted({w for _, w in live_claims})
-                    raise _studio_reset_error(
-                        f"{len(live_claims)} transactions are still claimed by "
-                        "consensus workers that did not confirm they stopped: "
-                        f"{', '.join(workers)}. If those workers no longer "
-                        "exist, stuck-transaction recovery releases their "
-                        "claims once TRANSACTION_TIMEOUT_MINUTES pass without "
-                        "progress."
+                try:
+                    live_claims = _fence_and_find_live_claims(
+                        session,
+                        {a["worker_id"] for a in acks if a.get("worker_id")},
                     )
+                    if live_claims:
+                        session.rollback()  # drop the table locks right away
+                        workers = sorted({w for _, w in live_claims})
+                        raise _studio_reset_error(
+                            f"{len(live_claims)} transactions are still claimed "
+                            "by consensus workers that did not confirm they "
+                            f"stopped: {', '.join(workers)}. If those workers no "
+                            "longer exist, stuck-transaction recovery releases "
+                            "their claims once TRANSACTION_TIMEOUT_MINUTES pass "
+                            "without progress."
+                        )
 
-                deleted_transactions = session.query(Transactions).delete(
-                    synchronize_session=False
-                )
-                deleted_accounts = session.query(CurrentState).delete(
-                    synchronize_session=False
-                )
-                session.commit()
+                    deleted_transactions = session.query(Transactions).delete(
+                        synchronize_session=False
+                    )
+                    deleted_accounts = session.query(CurrentState).delete(
+                        synchronize_session=False
+                    )
+                    # The signed-envelope ledger drives eth_getTransactionCount,
+                    # replay detection and receipts; it must be cleared with
+                    # the transactions it describes, or nonces and old
+                    # receipts survive the reset.
+                    deleted_envelopes = session.query(EvmEnvelope).delete(
+                        synchronize_session=False
+                    )
+                    session.commit()
+                except DBAPIError as e:
+                    # lock_timeout, or Postgres broke a deadlock against us.
+                    session.rollback()
+                    raise _studio_reset_error(
+                        "The database is busy with other transactions "
+                        f"({type(e.orig).__name__})."
+                    )
                 succeeded = True
             finally:
                 # Always release the workers; if this publish is lost they
@@ -755,6 +793,7 @@ async def reset_studio_state(session: Session, admin_key: str | None = None) -> 
     return {
         "deleted_transactions": deleted_transactions,
         "deleted_accounts": deleted_accounts,
+        "deleted_envelopes": deleted_envelopes,
         "workers_reset": len(acks),
         "tasks_cancelled": sum(int(a.get("cancelled", 0)) for a in acks),
     }
