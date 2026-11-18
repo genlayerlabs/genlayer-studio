@@ -52,7 +52,9 @@ local function get_mock_response_from_table(table, message)
 		if key == "" then
 			-- Save default for later, don't match it now
 			default_value = value
-		elseif string.find(message, key) then
+		-- Mock keys are literal substrings, not Lua patterns. Pattern matching
+		-- can miss punctuation in prompts or spend seconds backtracking.
+		elseif string.find(message, key, 1, true) then
 			return {
 				data = value,
 				consumed_gen = 0
