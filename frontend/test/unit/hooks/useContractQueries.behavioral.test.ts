@@ -672,4 +672,99 @@ describe('useContractQueries — behavioral contract', () => {
       );
     });
   });
+
+  describe('SDK errors (e.g. calldata encoding failures)', () => {
+    const encodingError = new Error('invalid calldata: unsupported type');
+
+    it('callWriteMethod surfaces the SDK error message and adds no transaction', async () => {
+      mockWriteContract.mockRejectedValueOnce(encodingError);
+      const { useContractQueries } = await import('@/hooks/useContractQueries');
+      const { callWriteMethod } = useContractQueries();
+
+      await expect(
+        callWriteMethod({
+          method: 'tip',
+          args: { args: [], kwargs: {} },
+          executionMode: 'NORMAL' as any,
+        }),
+      ).rejects.toThrow('invalid calldata: unsupported type');
+      expect(mockTransactionsStore.addTransaction).not.toHaveBeenCalled();
+    });
+
+    it('callWriteMethod prefers error.details (RPC errors)', async () => {
+      mockWriteContract.mockRejectedValueOnce(
+        Object.assign(new Error('RPC failed'), { details: 'bad args' }),
+      );
+      const { useContractQueries } = await import('@/hooks/useContractQueries');
+      const { callWriteMethod } = useContractQueries();
+
+      await expect(
+        callWriteMethod({
+          method: 'tip',
+          args: { args: [], kwargs: {} },
+          executionMode: 'NORMAL' as any,
+        }),
+      ).rejects.toThrow('bad args');
+    });
+
+    it('callWriteMethod falls back to the generic message', async () => {
+      mockWriteContract.mockRejectedValueOnce({});
+      const { useContractQueries } = await import('@/hooks/useContractQueries');
+      const { callWriteMethod } = useContractQueries();
+
+      await expect(
+        callWriteMethod({
+          method: 'tip',
+          args: { args: [], kwargs: {} },
+          executionMode: 'NORMAL' as any,
+        }),
+      ).rejects.toThrow('Error writing to contract');
+    });
+
+    it('callReadMethod surfaces the SDK error message', async () => {
+      mockReadContract.mockRejectedValueOnce(encodingError);
+      const { useContractQueries } = await import('@/hooks/useContractQueries');
+      const { callReadMethod } = useContractQueries();
+
+      await expect(
+        callReadMethod(
+          'get',
+          { args: [], kwargs: {} },
+          'latest-nonfinal' as any,
+        ),
+      ).rejects.toThrow('invalid calldata: unsupported type');
+    });
+
+    it('callReadMethod falls back to the generic message', async () => {
+      mockReadContract.mockRejectedValueOnce({});
+      const { useContractQueries } = await import('@/hooks/useContractQueries');
+      const { callReadMethod } = useContractQueries();
+
+      await expect(
+        callReadMethod(
+          'get',
+          { args: [], kwargs: {} },
+          'latest-nonfinal' as any,
+        ),
+      ).rejects.toThrow('Error getting the contract state');
+    });
+
+    it('deployContract shows the SDK error in the toast and adds no transaction', async () => {
+      mockDeployContract.mockRejectedValueOnce(encodingError);
+      const { notify } = await import('@kyvg/vue3-notification');
+      const { useContractQueries } = await import('@/hooks/useContractQueries');
+      const { deployContract, isDeploying } = useContractQueries();
+
+      await expect(
+        deployContract({ args: [], kwargs: {} }, 'NORMAL' as any, 3),
+      ).rejects.toThrow('invalid calldata: unsupported type');
+      expect(notify).toHaveBeenCalledWith({
+        type: 'error',
+        title: 'Error deploying contract',
+        text: 'invalid calldata: unsupported type',
+      });
+      expect(isDeploying.value).toBe(false);
+      expect(mockTransactionsStore.addTransaction).not.toHaveBeenCalled();
+    });
+  });
 });
