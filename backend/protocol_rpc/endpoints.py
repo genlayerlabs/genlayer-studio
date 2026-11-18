@@ -5,6 +5,7 @@ import random
 import json
 import re
 import time
+import uuid
 import eth_utils
 import logging
 from contextlib import asynccontextmanager
@@ -524,58 +525,150 @@ def clear_db_tables(session: Session, tables: list) -> None:
         session.execute(table.delete())
 
 
-async def publish_studio_reset_event() -> int:
-    """Tell every consensus worker to drop in-flight work and in-memory state.
+STUDIO_RESET_ACK_TIMEOUT_SECONDS = float(
+    os.environ.get("STUDIO_RESET_ACK_TIMEOUT_SECONDS", "30")
+)
 
-    Returns the number of subscribers that received the event (0 on failure).
-    """
+
+def _studio_reset_redis():
+    """Redis client used to coordinate sim_resetStudioState with workers."""
     import redis.asyncio as aioredis
-    from backend.protocol_rpc.message_handler.redis_worker_handler import (
-        STUDIO_RESET_EVENT,
-        RedisWorkerMessageHandler,
+
+    return aioredis.from_url(
+        os.environ.get("REDIS_URL", "redis://redis:6379/0"),
+        encoding="utf-8",
+        decode_responses=True,
     )
 
-    # Consensus workers already subscribe to the validator events channel, so
-    # the reset signal rides on it instead of introducing a new channel.
-    redis_url = os.environ.get("REDIS_URL", "redis://redis:6379/0")
-    try:
-        redis_client = aioredis.from_url(
-            redis_url, encoding="utf-8", decode_responses=True
-        )
-        try:
-            return await redis_client.publish(
-                RedisWorkerMessageHandler.VALIDATOR_CHANNEL,
-                json.dumps({"event": STUDIO_RESET_EVENT, "data": {}}),
-            )
-        finally:
-            await redis_client.close()
-    except Exception as e:
-        logger.error(f"Failed to publish studio reset event: {e}")
-        return 0
+
+def _studio_reset_error(message: str) -> JSONRPCError:
+    return JSONRPCError(
+        code=-32000,
+        message=f"{message} Nothing was deleted; please try again.",
+        data={},
+    )
+
+
+async def _collect_studio_reset_acks(
+    redis_client, ack_key: str, reset_id: str, expected: int, deadline: float
+) -> list[dict]:
+    """Wait (until `deadline`) for `expected` worker acks of `reset_id`."""
+    acks: list[dict] = []
+    while len(acks) < expected:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        item = await redis_client.blpop([ack_key], timeout=remaining)
+        if item is None:
+            break
+        ack = json.loads(item[1])
+        if ack.get("reset_id") == reset_id:
+            acks.append(ack)
+    return acks
 
 
 @check_forbidden_method_in_hosted_studio
 async def reset_studio_state(session: Session, admin_key: str | None = None) -> dict:
-    """Delete all transactions and accounts, then reset consensus workers.
+    """Delete all transactions and accounts after resetting consensus workers.
 
-    Clears ``transactions`` (their pruned snapshot archives go with them via
-    ON DELETE CASCADE) and ``current_state`` (account balances and deployed
-    contract state). Validators, LLM providers, API keys/tiers and
-    user-created snapshots are kept.
+    Handshake (see redis_worker_handler for the worker side):
+      1. Ask every consensus worker to pause claiming and to cancel and drain
+         all in-flight execution, and wait for each one to acknowledge.
+      2. Only if every worker confirmed, delete ``transactions`` (pruned
+         snapshot archives cascade) and ``current_state`` (balances and
+         contract state) and commit.
+      3. Tell the workers the reset is over so they resume claiming work.
+
+    Any failure (Redis unreachable, a worker not answering in time, a worker
+    unable to stop its tasks) raises a JSON-RPC error and deletes nothing.
+    Validators, LLM providers, API keys/tiers and user snapshots are kept.
     """
     from backend.database_handler.models import CurrentState, Transactions
+    from backend.protocol_rpc.message_handler.redis_worker_handler import (
+        STUDIO_RESET_CHANNEL,
+        STUDIO_RESET_FINISHED,
+        STUDIO_RESET_REQUEST,
+    )
 
-    deleted_transactions = session.query(Transactions).delete(synchronize_session=False)
-    deleted_accounts = session.query(CurrentState).delete(synchronize_session=False)
-    session.commit()
+    reset_id = uuid.uuid4().hex
+    ack_key = f"studio:reset:{reset_id}:acks"
+    timeout = STUDIO_RESET_ACK_TIMEOUT_SECONDS
+    deadline = time.time() + timeout
 
-    # Signal workers only after the rows are gone, so nothing gets re-claimed.
-    workers_notified = await publish_studio_reset_event()
+    try:
+        redis_client = _studio_reset_redis()
+    except Exception as e:
+        raise _studio_reset_error(f"Could not connect to Redis to reach workers: {e}.")
+
+    try:
+        try:
+            expected = await redis_client.publish(
+                STUDIO_RESET_CHANNEL,
+                json.dumps(
+                    {
+                        "event": STUDIO_RESET_REQUEST,
+                        "data": {
+                            "reset_id": reset_id,
+                            "ack_key": ack_key,
+                            "deadline": deadline,
+                        },
+                    }
+                ),
+            )
+        except Exception as e:
+            raise _studio_reset_error(
+                f"Could not reach consensus workers through Redis: {e}."
+            )
+
+        succeeded = False
+        try:
+            acks = await _collect_studio_reset_acks(
+                redis_client, ack_key, reset_id, expected, deadline
+            )
+            if len(acks) < expected:
+                raise _studio_reset_error(
+                    f"{expected - len(acks)} of {expected} consensus workers did "
+                    f"not confirm the reset within {timeout:g}s."
+                )
+            failed = [a.get("worker_id", "?") for a in acks if not a.get("ok")]
+            if failed:
+                raise _studio_reset_error(
+                    "Consensus workers could not stop their running transactions: "
+                    f"{', '.join(failed)}."
+                )
+
+            deleted_transactions = session.query(Transactions).delete(
+                synchronize_session=False
+            )
+            deleted_accounts = session.query(CurrentState).delete(
+                synchronize_session=False
+            )
+            session.commit()
+            succeeded = True
+        finally:
+            # Always release the workers; if this publish is lost they resume
+            # on their own when their pause expires.
+            try:
+                await redis_client.publish(
+                    STUDIO_RESET_CHANNEL,
+                    json.dumps(
+                        {
+                            "event": STUDIO_RESET_FINISHED,
+                            "data": {"reset_id": reset_id, "success": succeeded},
+                        }
+                    ),
+                )
+                await redis_client.delete(ack_key)
+            except Exception as e:
+                logger.error(f"Failed to publish studio reset completion: {e}")
+    finally:
+        await redis_client.close()
 
     return {
         "deleted_transactions": deleted_transactions,
         "deleted_accounts": deleted_accounts,
-        "workers_notified": workers_notified,
+        "workers_reset": len(acks),
+        "tasks_cancelled": sum(int(a.get("cancelled", 0)) for a in acks),
     }
 
 

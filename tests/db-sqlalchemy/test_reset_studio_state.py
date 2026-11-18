@@ -1,7 +1,8 @@
 """sim_resetStudioState wipes transactions and accounts but keeps validators."""
 
+import json
 import uuid
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import text
@@ -72,17 +73,38 @@ async def test_reset_studio_state_deletes_transactions_and_accounts(
     )
     session.commit()
 
+    # One worker that acknowledges the reset as soon as it is requested.
+    redis = MagicMock()
+    acks: list[str] = []
+
+    async def publish(_channel, message):
+        event = json.loads(message)
+        if "ack_key" in event["data"]:
+            acks.append(
+                json.dumps(
+                    {"reset_id": event["data"]["reset_id"], "ok": True, "cancelled": 0}
+                )
+            )
+        return 1
+
+    async def blpop(keys, timeout):
+        return (keys[0], acks.pop(0)) if acks else None
+
+    redis.publish = publish
+    redis.blpop = blpop
+    redis.delete = AsyncMock()
+    redis.close = AsyncMock()
+
     with patch(
-        "backend.protocol_rpc.endpoints.publish_studio_reset_event",
-        new=AsyncMock(return_value=2),
-    ) as publish:
+        "backend.protocol_rpc.endpoints._studio_reset_redis", return_value=redis
+    ):
         result = await reset_studio_state(session=session)
 
-    publish.assert_awaited_once()
     assert result == {
         "deleted_transactions": 2,
         "deleted_accounts": 1,
-        "workers_notified": 2,
+        "workers_reset": 1,
+        "tasks_cancelled": 0,
     }
     assert session.query(Transactions).count() == 0
     assert session.query(CurrentState).count() == 0

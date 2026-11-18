@@ -47,13 +47,15 @@ const handleResetStorage = async () => {
 const handleResetStudioState = async () => {
   isResettingStudioState.value = true;
   try {
+    // Throws (and nothing is deleted) unless every consensus worker
+    // confirmed it stopped its work, so local state is only cleared on success.
     const result = await rpcClient.resetStudioState();
     await transactionsStore.clearTransactionsForCurrentNetwork();
     await contractsStore.clearDeployedContractsForCurrentNetwork();
 
     notify({
       title: 'Transactions and accounts deleted',
-      text: `Removed ${result?.deleted_transactions ?? 0} transactions and ${result?.deleted_accounts ?? 0} accounts`,
+      text: `Removed ${result?.deleted_transactions ?? 0} transactions and ${result?.deleted_accounts ?? 0} accounts; reset ${result?.workers_reset ?? 0} consensus workers`,
       type: 'success',
     });
   } catch (error) {

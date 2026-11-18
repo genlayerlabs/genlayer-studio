@@ -55,6 +55,7 @@ export interface IJsonRpcService {
   resetStudioState(): Promise<{
     deleted_transactions: number;
     deleted_accounts: number;
-    workers_notified: number;
+    workers_reset: number;
+    tasks_cancelled: number;
   }>;
 }

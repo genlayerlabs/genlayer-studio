@@ -300,6 +300,34 @@ def _redact_contract_for_log(contract_dict: dict) -> dict:
     return redacted
 
 
+async def _cancel_and_drain(tasks: Iterable[asyncio.Task]) -> None:
+    """Cancel child tasks and wait until every one of them has finished."""
+    tasks = list(tasks)
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _wait_owning_children(tasks: Iterable[asyncio.Task], **wait_kwargs):
+    """``asyncio.wait`` that does not orphan its children on cancellation.
+
+    ``asyncio.wait`` does not propagate cancellation of the awaiting task to
+    the tasks it waits on. Execution (leader/validator GenVM runs) is spawned
+    as child tasks, so when the worker cancels a transaction (for example on
+    sim_resetStudioState) the children must be cancelled and drained before
+    the cancellation is re-raised; otherwise GenVM executions and their DB
+    callbacks keep running after the parent is gone.
+    """
+    tasks = set(tasks)
+    try:
+        return await asyncio.wait(tasks, **wait_kwargs)
+    except asyncio.CancelledError:
+        await _cancel_and_drain(tasks)
+        raise
+
+
 def _slot_budget_seconds(
     transaction: Transaction,
     role: Literal["leader", "validator"],
@@ -3098,7 +3126,7 @@ class ProposingState(TransactionState):
                 leader_node.exec_transaction(context.transaction)
             )
             try:
-                done, _ = await asyncio.wait(
+                done, _ = await _wait_owning_children(
                     {exec_task},
                     timeout=remaining,
                     return_when=asyncio.FIRST_COMPLETED,
@@ -3381,7 +3409,7 @@ class CommittingState(TransactionState):
                     exec_task = asyncio.create_task(
                         node.exec_transaction(context.transaction)
                     )
-                    done, _ = await asyncio.wait(
+                    done, _ = await _wait_owning_children(
                         {exec_task},
                         timeout=remaining,
                         return_when=asyncio.FIRST_COMPLETED,
@@ -3499,7 +3527,7 @@ class CommittingState(TransactionState):
             }
             pending = set(tasks_by_task)
             while pending:
-                done, pending = await asyncio.wait(
+                done, pending = await _wait_owning_children(
                     pending, return_when=asyncio.FIRST_COMPLETED
                 )
                 for task in done:
