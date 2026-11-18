@@ -1,13 +1,14 @@
 """Snapshot restore must make workers drop in-flight work before the DB is rewritten (DXP-726)."""
 
 import asyncio
-import time
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy.orm import Session
 
 from backend.consensus import worker_control
+from backend.protocol_rpc.exceptions import JSONRPCError
 
 
 def _make_worker():
@@ -26,6 +27,7 @@ def _make_worker():
         validators_manager=MagicMock(),
         genvm_manager=MagicMock(),
         worker_id="test-worker",
+        poll_interval=0,
     )
 
 
@@ -35,7 +37,7 @@ def _make_worker():
 
 
 @pytest.mark.asyncio
-async def test_pause_cancels_in_flight_task_and_releases_its_claim():
+async def test_release_in_flight_cancels_task_and_releases_its_claim():
     worker = _make_worker()
     started = asyncio.Event()
 
@@ -51,87 +53,126 @@ async def test_pause_cancels_in_flight_task_and_releases_its_claim():
         task = asyncio.create_task(in_flight())
         worker._active_tasks.add(task)
         await started.wait()
-        assert "0xtx" in worker.current_transactions
-
         worker._generic_error_retries["0xtx"] = {"count": 1}
-        await worker.pause_and_release(pause_seconds=60)
+
+        await worker.release_in_flight()
 
     assert task.cancelled()
-    assert task not in worker._active_tasks
+    assert worker._active_tasks == set()
     release_transaction.assert_called_once()
     assert release_transaction.call_args.args[1] == "0xtx"
     release_all.assert_called_once()
     assert worker.current_transactions == {}
     assert worker._generic_error_retries == {}
-    assert worker.is_paused()
 
 
 @pytest.mark.asyncio
-async def test_claim_racing_with_pause_is_released_not_processed():
+async def test_main_loop_survives_release_with_multiple_active_tasks():
+    """Cancelling in-flight tasks while run() is looping must not kill run()
+    (CancelledError from task.result() is not an Exception)."""
     worker = _make_worker()
-    worker._paused_until = time.monotonic() + 60
+    worker.max_parallel_txs = 3
+    claims = 0
+    all_started = asyncio.Event()
+    started = 0
+
+    async def long_task():
+        nonlocal started
+        started += 1
+        if started == 2:
+            all_started.set()
+        await asyncio.Event().wait()
+
+    async def fake_claim(_session):
+        nonlocal claims
+        claims += 1
+        if claims <= 2:
+            worker._active_tasks.add(asyncio.create_task(long_task()))
+            return True
+        return False
 
     with (
-        patch.object(worker, "release_transaction") as release_transaction,
-        patch.object(worker, "process_transaction", new_callable=AsyncMock) as process,
+        patch.object(worker, "_try_claim_work", side_effect=fake_claim),
+        patch.object(worker, "recover_stuck_transactions", return_value=0),
+        patch.object(worker, "release_all_claims", return_value=0),
     ):
-        await worker._process_transaction_task({"hash": "0xtx"})
+        run_task = asyncio.create_task(worker.run())
+        await asyncio.wait_for(all_started.wait(), 2)
+        claims_before = claims
 
-    process.assert_not_awaited()
-    release_transaction.assert_called_once()
-    assert release_transaction.call_args.args[1] == "0xtx"
+        await worker.release_in_flight()
+
+        # Let the loop iterate a few times after the cancellation.
+        for _ in range(20):
+            await asyncio.sleep(0)
+        await asyncio.sleep(0.05)
+        assert not run_task.done(), run_task
+        assert claims > claims_before  # still claiming work
+
+        worker.stop()
+        await asyncio.wait_for(run_task, 2)
+
+    assert run_task.exception() is None
 
 
 @pytest.mark.asyncio
-async def test_paused_worker_does_not_claim_work():
+async def test_main_loop_skips_already_cancelled_tasks():
     worker = _make_worker()
-    worker._paused_until = time.monotonic() + 60
-    worker.poll_interval = 0
 
-    calls = 0
+    async def never():
+        await asyncio.Event().wait()
 
-    async def fake_sleep(_):
-        nonlocal calls
-        calls += 1
-        if calls >= 3:
-            worker.running = False
+    cancelled = asyncio.create_task(never())
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    worker._active_tasks.add(cancelled)
 
+    async def stop_after_one(_session):
+        worker.running = False
+        return False
+
+    with patch.object(worker, "_try_claim_work", side_effect=stop_after_one):
+        await asyncio.wait_for(worker.run(), 2)
+
+    assert cancelled not in worker._active_tasks
+
+
+@pytest.mark.asyncio
+async def test_closed_restore_gate_blocks_all_claims():
+    worker = _make_worker()
     with (
-        patch.object(worker, "_try_claim_work", new_callable=AsyncMock) as claim,
-        patch.object(
-            worker, "recover_stuck_transactions", new_callable=AsyncMock
-        ) as recover,
-        patch(
-            "backend.consensus.worker.asyncio.sleep",
-            new_callable=AsyncMock,
-            side_effect=fake_sleep,
-        ),
+        patch.object(worker_control, "claim_gate_open", return_value=False),
+        patch.object(worker, "claim_next_appeal", new_callable=AsyncMock) as a,
+        patch.object(worker, "claim_next_finalization", new_callable=AsyncMock) as f,
+        patch.object(worker, "claim_next_transaction", new_callable=AsyncMock) as t,
     ):
-        await worker.run()
+        assert await worker._try_claim_work(MagicMock(spec=Session)) is False
 
-    claim.assert_not_awaited()
-    recover.assert_not_awaited()
+    a.assert_not_awaited()
+    f.assert_not_awaited()
+    t.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_control_events_pause_and_resume():
+async def test_closed_restore_gate_blocks_recovery_writes():
     worker = _make_worker()
+    session = MagicMock(spec=Session)
+    with patch.object(worker_control, "claim_gate_open", return_value=False):
+        assert await worker.recover_stuck_transactions(session) == 0
+    session.execute.assert_not_called()
+    session.commit.assert_not_called()
 
-    with patch.object(worker, "release_all_claims", return_value=0):
+
+@pytest.mark.asyncio
+async def test_control_event_dispatch():
+    worker = _make_worker()
+    with patch.object(worker, "release_in_flight", new_callable=AsyncMock) as rel:
         await worker.handle_control_event(
-            {"event": worker_control.PAUSE_EVENT, "data": {"pause_seconds": 60}}
+            {"event": worker_control.RELEASE_IN_FLIGHT_EVENT}
         )
-    assert worker.is_paused()
-
-    await worker.handle_control_event({"event": worker_control.RESUME_EVENT})
-    assert not worker.is_paused()
-
-
-def test_pause_expires_without_resume():
-    worker = _make_worker()
-    worker._paused_until = time.monotonic() - 1
-    assert not worker.is_paused()
-    assert worker._paused_until is None
+        await worker.handle_control_event({"event": "unknown"})
+    rel.assert_awaited_once()
 
 
 # --------------------------------------------------------------------------- #
@@ -139,104 +180,159 @@ def test_pause_expires_without_resume():
 # --------------------------------------------------------------------------- #
 
 
+def _recording_gate(order):
+    @asynccontextmanager
+    async def gate(engine, timeout_seconds):
+        order.append("gate")
+        try:
+            yield
+        finally:
+            order.append("ungate")
+
+    return gate
+
+
+def _manager(order=None, exists=True):
+    manager = MagicMock()
+    manager.get_snapshot.return_value = object() if exists else None
+    manager.restore_snapshot.side_effect = (
+        lambda _id: (order.append("restore") if order is not None else None) or True
+    )
+    return manager
+
+
 @pytest.mark.asyncio
-async def test_restore_pauses_workers_waits_for_release_then_resumes():
+async def test_restore_order_gate_release_wait_restore_ungate():
     from backend.protocol_rpc import endpoints
 
     order = []
-    snapshot_manager = MagicMock()
-    snapshot_manager.get_snapshot.return_value = object()
-    snapshot_manager.restore_snapshot.side_effect = lambda _id: (
-        order.append("restore") or True
-    )
 
     async def publish(event, data=None):
         order.append(event)
         return 1
 
     async def wait(session, timeout_seconds):
-        order.append("wait")
-        return True
+        order.append(("wait", timeout_seconds))
 
+    manager = _manager(order)
     with (
+        patch.object(endpoints.worker_control, "restore_gate", _recording_gate(order)),
         patch.object(endpoints.worker_control, "publish_worker_control", publish),
         patch.object(endpoints.worker_control, "wait_for_claims_released", wait),
     ):
-        assert await endpoints.restore_snapshot(snapshot_manager, 7) is True
+        assert await endpoints.restore_snapshot(manager, 7) is True
 
     assert order == [
-        worker_control.PAUSE_EVENT,
-        "wait",
+        "gate",
+        worker_control.RELEASE_IN_FLIGHT_EVENT,
+        ("wait", worker_control.DEFAULT_RELEASE_TIMEOUT_SECONDS),
         "restore",
-        worker_control.RESUME_EVENT,
+        "ungate",
     ]
-    snapshot_manager.restore_snapshot.assert_called_once_with(7)
 
 
 @pytest.mark.asyncio
-async def test_restore_resumes_workers_even_if_restore_fails():
+async def test_restore_aborts_without_touching_db_when_claims_remain():
     from backend.protocol_rpc import endpoints
 
-    snapshot_manager = MagicMock()
-    snapshot_manager.get_snapshot.return_value = object()
-    snapshot_manager.restore_snapshot.side_effect = RuntimeError("boom")
-    publish = AsyncMock(return_value=1)
-
+    order = []
+    manager = _manager(order)
     with (
-        patch.object(endpoints.worker_control, "publish_worker_control", publish),
+        patch.object(endpoints.worker_control, "restore_gate", _recording_gate(order)),
+        patch.object(
+            endpoints.worker_control,
+            "publish_worker_control",
+            AsyncMock(return_value=1),
+        ),
         patch.object(
             endpoints.worker_control,
             "wait_for_claims_released",
-            AsyncMock(return_value=True),
+            AsyncMock(side_effect=worker_control.WorkerCoordinationError("held")),
         ),
     ):
-        with pytest.raises(RuntimeError):
-            await endpoints.restore_snapshot(snapshot_manager, 7)
+        with pytest.raises(JSONRPCError) as exc:
+            await endpoints.restore_snapshot(manager, 7)
 
-    assert publish.await_args_list[-1].args[0] == worker_control.RESUME_EVENT
+    assert "held" in exc.value.message
+    manager.restore_snapshot.assert_not_called()
+    assert order == ["gate", "ungate"]
 
 
 @pytest.mark.asyncio
-async def test_restore_unknown_snapshot_does_not_pause_workers():
+async def test_restore_does_not_wait_when_release_event_was_not_delivered():
     from backend.protocol_rpc import endpoints
 
-    snapshot_manager = MagicMock()
-    snapshot_manager.get_snapshot.return_value = None
-    publish = AsyncMock()
+    wait = AsyncMock()
+    with (
+        patch.object(endpoints.worker_control, "restore_gate", _recording_gate([])),
+        patch.object(
+            endpoints.worker_control,
+            "publish_worker_control",
+            AsyncMock(return_value=None),
+        ),
+        patch.object(endpoints.worker_control, "wait_for_claims_released", wait),
+    ):
+        await endpoints.restore_snapshot(_manager(), 7)
 
-    with patch.object(endpoints.worker_control, "publish_worker_control", publish):
-        assert await endpoints.restore_snapshot(snapshot_manager, 7) is False
+    assert wait.await_args.args[1] == 0
+
+
+@pytest.mark.asyncio
+async def test_restore_aborts_when_gate_cannot_be_acquired():
+    from backend.protocol_rpc import endpoints
+
+    @asynccontextmanager
+    async def busy_gate(engine, timeout_seconds):
+        raise worker_control.WorkerCoordinationError("busy")
+        yield  # pragma: no cover
+
+    manager = _manager()
+    publish = AsyncMock()
+    with (
+        patch.object(endpoints.worker_control, "restore_gate", busy_gate),
+        patch.object(endpoints.worker_control, "publish_worker_control", publish),
+    ):
+        with pytest.raises(JSONRPCError):
+            await endpoints.restore_snapshot(manager, 7)
 
     publish.assert_not_awaited()
-    snapshot_manager.restore_snapshot.assert_not_called()
+    manager.restore_snapshot.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_restore_unknown_snapshot_does_nothing():
+    from backend.protocol_rpc import endpoints
+
+    manager = _manager(exists=False)
+    gate = MagicMock()
+    with patch.object(endpoints.worker_control, "restore_gate", gate):
+        assert await endpoints.restore_snapshot(manager, 7) is False
+
+    gate.assert_not_called()
+    manager.restore_snapshot.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_wait_for_claims_released_polls_until_clear():
-    counts = iter([2, 1, 0])
-    with patch.object(
-        worker_control, "count_claimed_transactions", lambda _s: next(counts)
-    ):
-        assert (
-            await worker_control.wait_for_claims_released(
-                MagicMock(), timeout_seconds=5, poll_interval=0
-            )
-            is True
+    claims = iter([[("0x1", "w")], [("0x1", "w")], []])
+    with patch.object(worker_control, "claimed_transactions", lambda _s: next(claims)):
+        await worker_control.wait_for_claims_released(
+            MagicMock(), timeout_seconds=5, poll_interval=0
         )
 
 
 @pytest.mark.asyncio
-async def test_wait_for_claims_released_times_out():
-    with patch.object(worker_control, "count_claimed_transactions", lambda _s: 1):
-        assert (
+async def test_wait_for_claims_released_raises_on_timeout():
+    with patch.object(
+        worker_control, "claimed_transactions", lambda _s: [("0xabc", "w1")]
+    ):
+        with pytest.raises(worker_control.WorkerCoordinationError, match="0xabc"):
             await worker_control.wait_for_claims_released(
                 MagicMock(), timeout_seconds=0, poll_interval=0
             )
-            is False
-        )
 
 
 @pytest.mark.asyncio
-async def test_publish_without_redis_is_a_noop(monkeypatch):
+async def test_publish_without_redis_returns_none(monkeypatch):
     monkeypatch.delenv("REDIS_URL", raising=False)
     assert await worker_control.publish_worker_control("x") is None

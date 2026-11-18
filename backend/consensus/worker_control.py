@@ -1,38 +1,111 @@
 """
-Control channel between RPC instances and consensus workers.
+Coordination between RPC instances and consensus workers for operations that
+rewrite the ``transactions`` table out from under the workers (snapshot
+restore).
 
-Used to coordinate operations that rewrite the ``transactions`` table out from
-under the workers (e.g. restoring a snapshot). Workers keep claimed
-transactions in memory while they process them; if the table is rewritten
-while that happens, the worker later writes stale results back on top of the
-restored state. The protocol is:
+Workers keep claimed transactions in memory while they process them; if the
+table is rewritten meanwhile, the worker later writes stale results back on
+top of the restored state. The protocol is:
 
-1. RPC publishes ``PAUSE_EVENT``: every worker stops claiming new work,
-   cancels its in-flight tasks and clears its claims in the database.
-2. RPC waits until no transaction is claimed (``worker_id``/``blocked_at`` set).
-3. RPC rewrites the database.
-4. RPC publishes ``RESUME_EVENT``: workers start claiming again.
-
-Workers auto-resume after ``pause_seconds`` so a crashed RPC call cannot leave
-consensus paused forever.
+1. RPC takes the **restore gate**: an exclusive, session-level Postgres
+   advisory lock held on a dedicated connection for the whole restore.
+   Every worker claim (and every stuck-tx recovery write) first takes the
+   *shared* form of the same lock inside its own DB transaction and skips the
+   claim if it can't. While the gate is held no worker — including one that
+   never received step 2 or that started after it — can claim anything.
+   Taking the gate waits for claim transactions already in progress, so their
+   claims are visible afterwards.
+2. RPC publishes ``RELEASE_IN_FLIGHT_EVENT``: each worker cancels its
+   in-flight tasks and clears its claims.
+3. RPC waits until no transaction is claimed. Because of the gate this is a
+   real barrier: zero claims means no worker is processing anything. If claims
+   remain after the timeout the restore is aborted and the DB left untouched.
+4. RPC rewrites the database, then releases the gate. If the RPC process
+   dies, Postgres drops the lock with its connection.
 """
 
 import asyncio
 import json
 import os
 import time
-from typing import Optional
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, Optional
 
 from loguru import logger
-from sqlalchemy import text
+from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 
 WORKER_CONTROL_CHANNEL = "worker:control"
-PAUSE_EVENT = "pause_and_release"
-RESUME_EVENT = "resume"
+RELEASE_IN_FLIGHT_EVENT = "release_in_flight"
 
-DEFAULT_PAUSE_SECONDS = 120.0
+# Arbitrary application-wide advisory lock key ("GLRESTOR" in ASCII).
+RESTORE_GATE_LOCK_KEY = 0x474C524553544F52
+
 DEFAULT_RELEASE_TIMEOUT_SECONDS = 30.0
+
+
+class WorkerCoordinationError(Exception):
+    """Workers could not be brought to a safe state; nothing was changed."""
+
+
+def claim_gate_open(session: Session) -> bool:
+    """Take the shared side of the restore gate for the current DB transaction.
+
+    Returns False while a restore holds the gate; the caller must then not
+    claim or modify transactions. The shared lock is released when the
+    session's transaction commits or rolls back, so the check must run in the
+    same transaction as the write it protects.
+    """
+    return bool(
+        session.execute(
+            text("SELECT pg_try_advisory_xact_lock_shared(:key)"),
+            {"key": RESTORE_GATE_LOCK_KEY},
+        ).scalar()
+    )
+
+
+@asynccontextmanager
+async def restore_gate(
+    engine: Engine,
+    timeout_seconds: float = DEFAULT_RELEASE_TIMEOUT_SECONDS,
+    poll_interval: float = 0.1,
+) -> AsyncIterator[None]:
+    """Hold the exclusive restore gate, blocking all worker claims."""
+    conn = engine.connect()
+    acquired = False
+    try:
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            acquired = bool(
+                conn.execute(
+                    text("SELECT pg_try_advisory_lock(:key)"),
+                    {"key": RESTORE_GATE_LOCK_KEY},
+                ).scalar()
+            )
+            conn.commit()
+            if acquired:
+                break
+            if time.monotonic() >= deadline:
+                raise WorkerCoordinationError(
+                    "could not acquire the restore gate (another restore in "
+                    "progress, or a claim transaction is stuck)"
+                )
+            await asyncio.sleep(poll_interval)
+        yield
+    finally:
+        if acquired:
+            try:
+                conn.execute(
+                    text("SELECT pg_advisory_unlock(:key)"),
+                    {"key": RESTORE_GATE_LOCK_KEY},
+                )
+                conn.commit()
+            except Exception as e:
+                # Never return a pooled connection that still holds the lock:
+                # dropping the physical connection releases it.
+                logger.error(f"Failed to release restore gate: {e}")
+                conn.invalidate()
+        conn.close()
 
 
 async def publish_worker_control(
@@ -41,7 +114,7 @@ async def publish_worker_control(
     """Publish a control event to all consensus workers.
 
     Returns the number of subscribers that received it, or None when Redis is
-    not configured / reachable (no workers to coordinate with).
+    not configured / reachable.
     """
     redis_url = redis_url or os.environ.get("REDIS_URL")
     if not redis_url:
@@ -68,37 +141,39 @@ async def publish_worker_control(
         await client.close()
 
 
-def count_claimed_transactions(session: Session) -> int:
-    """Number of transactions currently claimed by a worker."""
-    result = session.execute(
+def claimed_transactions(session: Session) -> list[tuple[str, Optional[str]]]:
+    """(hash, worker_id) of every transaction currently claimed by a worker."""
+    rows = session.execute(
         text(
-            "SELECT COUNT(*) FROM transactions "
+            "SELECT hash, worker_id FROM transactions "
             "WHERE worker_id IS NOT NULL OR blocked_at IS NOT NULL"
         )
-    ).scalar()
+    ).fetchall()
     # End the read transaction so the next poll sees fresh data.
     session.rollback()
-    return int(result or 0)
+    return [(row[0], row[1]) for row in rows]
 
 
 async def wait_for_claims_released(
     session: Session,
     timeout_seconds: float = DEFAULT_RELEASE_TIMEOUT_SECONDS,
     poll_interval: float = 0.25,
-) -> bool:
+) -> None:
     """Wait until no transaction is claimed by a worker.
 
-    Returns True if all claims were released before ``timeout_seconds``.
+    Raises WorkerCoordinationError if claims remain after ``timeout_seconds``.
+    Only meaningful while the restore gate is held (otherwise new claims can
+    appear right after this returns).
     """
     deadline = time.monotonic() + timeout_seconds
     while True:
-        remaining = count_claimed_transactions(session)
-        if remaining == 0:
-            return True
+        claimed = claimed_transactions(session)
+        if not claimed:
+            return
         if time.monotonic() >= deadline:
-            logger.warning(
-                f"{remaining} transaction(s) still claimed by workers after "
-                f"{timeout_seconds}s; proceeding anyway"
+            sample = ", ".join(f"{h} ({w or 'no worker'})" for h, w in claimed[:5])
+            raise WorkerCoordinationError(
+                f"{len(claimed)} transaction(s) still claimed by workers after "
+                f"{timeout_seconds}s: {sample}"
             )
-            return False
         await asyncio.sleep(poll_interval)

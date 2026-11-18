@@ -28,6 +28,7 @@ from backend.consensus.base import (
 from backend.consensus.history import APPEAL_RECOVERY_SNAPSHOT_KEY
 from backend.consensus.errors import FinalizationStateError
 from backend.protocol_rpc.fees import acceptance_dispatch_pending
+from backend.consensus import worker_control
 
 # Alias for use in context manager (avoids circular import issues)
 _NoValidatorsError = NoValidatorsAvailableError
@@ -216,10 +217,6 @@ class ConsensusWorker:
 
         # Callback for graceful shutdown during K8s scale-down
         self.should_shutdown = should_shutdown
-
-        # Monotonic deadline until which the worker must not claim new work
-        # (set while the RPC rewrites the database, e.g. snapshot restore).
-        self._paused_until: Optional[float] = None
 
         now_monotonic = time.monotonic()
         self._query_log_interval = 60.0  # seconds
@@ -834,19 +831,6 @@ class ConsensusWorker:
                 )
             raise
 
-    def is_paused(self) -> bool:
-        """True while the worker must not claim new work."""
-        if self._paused_until is None:
-            return False
-        if time.monotonic() >= self._paused_until:
-            logger.warning(
-                f"[Worker {self.worker_id}] Pause expired without resume; "
-                f"resuming claims"
-            )
-            self._paused_until = None
-            return False
-        return True
-
     def release_all_claims(self, session: Session) -> int:
         """Clear blocked_at/worker_id on every transaction claimed by this worker."""
         result = session.execute(
@@ -865,30 +849,28 @@ class ConsensusWorker:
         session.commit()
         return released
 
-    async def pause_and_release(self, pause_seconds: float):
+    async def release_in_flight(self):
         """
-        Stop claiming new work, drop in-flight work and release its claims.
+        Drop in-flight work and release its claims.
 
         Called before the database is rewritten under the worker (snapshot
         restore). In-flight processing tasks are cancelled so they don't
         write stale results on top of the new state; their claims are
-        cleared so the RPC can see the worker has let go.
-
-        Args:
-            pause_seconds: Safety timeout after which claiming auto-resumes
+        cleared so the RPC can see the worker has let go. New claims are
+        blocked meanwhile by the restore gate (see worker_control), not by
+        in-memory state, so this is safe even if the event arrives late.
         """
-        self._paused_until = time.monotonic() + pause_seconds
-
         tasks = [t for t in self._active_tasks if not t.done()]
         logger.info(
-            f"[Worker {self.worker_id}] Pausing for up to {pause_seconds}s; "
-            f"cancelling {len(tasks)} in-flight task(s)"
+            f"[Worker {self.worker_id}] Releasing in-flight work; "
+            f"cancelling {len(tasks)} task(s)"
         )
         for task in tasks:
             task.cancel()
+        # Drop them from the active set right away so run() never sees them.
+        self._active_tasks.difference_update(tasks)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        self._active_tasks.difference_update(tasks)
 
         # In-memory per-transaction state refers to the old database contents.
         self.current_transactions.clear()
@@ -896,7 +878,8 @@ class ConsensusWorker:
         self._generic_error_retries.clear()
         self._leader_crash_retries.clear()
 
-        # Cancelled tasks release their own claim; sweep anything left over.
+        # Cancelled tasks release their own claim; sweep anything left over
+        # (e.g. a task cancelled before it started running).
         try:
             with self.get_session() as session:
                 released = self.release_all_claims(session)
@@ -906,28 +889,16 @@ class ConsensusWorker:
                 )
         except Exception as e:
             logger.error(
-                f"[Worker {self.worker_id}] Failed to release claims while pausing: {e}",
+                f"[Worker {self.worker_id}] Failed to release claims: {e}",
                 exc_info=True,
             )
 
-    def resume(self):
-        """Allow the worker to claim new work again."""
-        if self._paused_until is not None:
-            logger.info(f"[Worker {self.worker_id}] Resuming claims")
-        self._paused_until = None
-
     async def handle_control_event(self, event_data: dict):
         """Dispatch an event received on the worker control channel."""
-        from backend.consensus import worker_control
 
         event = event_data.get("event")
-        data = event_data.get("data") or {}
-        if event == worker_control.PAUSE_EVENT:
-            await self.pause_and_release(
-                float(data.get("pause_seconds", worker_control.DEFAULT_PAUSE_SECONDS))
-            )
-        elif event == worker_control.RESUME_EVENT:
-            self.resume()
+        if event == worker_control.RELEASE_IN_FLIGHT_EVENT:
+            await self.release_in_flight()
         else:
             logger.warning(
                 f"[Worker {self.worker_id}] Unknown worker control event: {event}"
@@ -1349,6 +1320,10 @@ class ConsensusWorker:
             RETURNING hash, recovery_count;
             """
         ).bindparams(bindparam("consensus_statuses", expanding=True))
+        # Restore gate (re-checked per step: each commit ends the lock).
+        if not worker_control.claim_gate_open(session):
+            return 0
+
         escalated = session.execute(
             escalate_query,
             {
@@ -1384,6 +1359,10 @@ class ConsensusWorker:
             RETURNING hash, status;
             """
         ).bindparams(bindparam("finalization_statuses", expanding=True))
+        # Restore gate (re-checked per step: each commit ends the lock).
+        if not worker_control.claim_gate_open(session):
+            return 0
+
         released = session.execute(
             release_finalization_query,
             {
@@ -1446,6 +1425,10 @@ class ConsensusWorker:
             RETURNING hash, status, recovery_count;
             """
         ).bindparams(bindparam("consensus_statuses", expanding=True))
+
+        # Restore gate (re-checked per step: each commit ends the lock).
+        if not worker_control.claim_gate_open(session):
+            return 0
 
         result = session.execute(
             recovery_query,
@@ -2738,32 +2721,18 @@ class ConsensusWorker:
         )
         return True
 
-    def _release_if_paused(self, data: dict) -> bool:
-        """Release a claim made concurrently with a pause instead of processing it."""
-        if not self.is_paused():
-            return False
-        with self.get_session() as session:
-            self.release_transaction(session, data["hash"])
-        return True
-
     async def _process_transaction_task(self, transaction_data: dict):
         """Task wrapper for processing a transaction with its own session."""
-        if self._release_if_paused(transaction_data):
-            return
         with self.get_session() as session:
             await self.process_transaction(transaction_data, session)
 
     async def _process_finalization_task(self, finalization_data: dict):
         """Task wrapper for processing a finalization with its own session."""
-        if self._release_if_paused(finalization_data):
-            return
         with self.get_session() as session:
             await self.process_finalization(finalization_data, session)
 
     async def _process_appeal_task(self, appeal_data: dict):
         """Task wrapper for processing an appeal with its own session."""
-        if self._release_if_paused(appeal_data):
-            return
         with self.get_session() as session:
             await self.process_appeal(appeal_data, session)
 
@@ -2777,6 +2746,12 @@ class ConsensusWorker:
         Returns:
             True if work was claimed and task spawned, False otherwise
         """
+        # Restore gate: while a snapshot restore holds it, no claims at all.
+        # The shared lock lives until this session's transaction ends, i.e.
+        # it covers the claim UPDATE that follows.
+        if not worker_control.claim_gate_open(session):
+            return False
+
         # Priority: appeals > finalizations > transactions
 
         appeal_data = await self.claim_next_appeal(session)
@@ -2843,6 +2818,11 @@ class ConsensusWorker:
                 done_tasks = {t for t in self._active_tasks if t.done()}
                 for task in done_tasks:
                     self._active_tasks.discard(task)
+                    # Tasks cancelled by release_in_flight() are expected;
+                    # task.result() would raise CancelledError (not an
+                    # Exception) and kill the loop.
+                    if task.cancelled():
+                        continue
                     # Handle any exceptions from completed tasks
                     try:
                         task.result()
@@ -2862,12 +2842,6 @@ class ConsensusWorker:
                         )
                     self.running = False
                     break
-
-                if self.is_paused():
-                    # Database is being rewritten (snapshot restore); don't
-                    # claim or recover anything until resumed.
-                    await asyncio.sleep(min(self.poll_interval, 1))
-                    continue
 
                 with self.get_session() as session:
                     # Periodically recover stuck transactions (every 12 iterations = ~60 seconds)

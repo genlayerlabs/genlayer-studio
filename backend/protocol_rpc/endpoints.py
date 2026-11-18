@@ -3817,37 +3817,52 @@ async def restore_snapshot(
     """Restore the database state from a snapshot.
 
     Consensus workers hold claimed transactions in memory while processing
-    them. Rewriting the transactions table underneath them would let them
-    write stale results back on top of the restored state, so workers are
-    first told to drop their in-flight work and release their claims, and
-    are only resumed once the database has been restored.
+    them; rewriting the transactions table underneath them would let them
+    write stale results on top of the restored state. So, before touching
+    the DB (see backend/consensus/worker_control.py):
+
+    1. take the restore gate, which blocks every worker claim;
+    2. tell workers to cancel in-flight work and release their claims;
+    3. wait until nothing is claimed — otherwise abort, DB untouched;
+    4. restore, then release the gate.
 
     Args:
         snapshot_id: ID of the snapshot to restore
 
     Returns:
-        bool: True if the snapshot was restored, False otherwise
+        bool: True if the snapshot was restored, False if it doesn't exist
+
+    Raises:
+        JSONRPCError: workers could not be made to release their work; the
+            database was not modified.
     """
     if snapshot_manager.get_snapshot(snapshot_id) is None:
         return False
 
-    await worker_control.publish_worker_control(
-        worker_control.PAUSE_EVENT,
-        {"pause_seconds": worker_control.DEFAULT_PAUSE_SECONDS},
-    )
-    try:
-        await worker_control.wait_for_claims_released(
-            snapshot_manager.session,
-            timeout_seconds=float(
-                os.environ.get(
-                    "SNAPSHOT_RESTORE_RELEASE_TIMEOUT_SECONDS",
-                    worker_control.DEFAULT_RELEASE_TIMEOUT_SECONDS,
-                )
-            ),
+    timeout_seconds = float(
+        os.environ.get(
+            "SNAPSHOT_RESTORE_RELEASE_TIMEOUT_SECONDS",
+            worker_control.DEFAULT_RELEASE_TIMEOUT_SECONDS,
         )
-        return snapshot_manager.restore_snapshot(snapshot_id)
-    finally:
-        await worker_control.publish_worker_control(worker_control.RESUME_EVENT)
+    )
+    session = snapshot_manager.session
+    try:
+        async with worker_control.restore_gate(session.get_bind(), timeout_seconds):
+            published = await worker_control.publish_worker_control(
+                worker_control.RELEASE_IN_FLIGHT_EVENT
+            )
+            # Without a delivered release event nobody will let go of their
+            # claims, so don't wait: proceed only if nothing is claimed.
+            await worker_control.wait_for_claims_released(
+                session, timeout_seconds if published is not None else 0
+            )
+            return snapshot_manager.restore_snapshot(snapshot_id)
+    except worker_control.WorkerCoordinationError as e:
+        raise JSONRPCError(
+            code=-32000,
+            message=f"Snapshot not restored: {e}",
+            data={"snapshot_id": snapshot_id},
+        ) from e
 
 
 @check_forbidden_method_in_hosted_studio
