@@ -9,7 +9,7 @@ delete nothing; and work submitted right after a reset must be processed.
 import asyncio
 import json
 import time
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -76,6 +76,7 @@ class FakeRedis:
         self.published: list[dict] = []
         self.deleted: list[str] = []
         self.closed = False
+        self.kv: dict[str, str] = {}
         self._tasks: list[asyncio.Task] = []
 
     def _queue(self, key):
@@ -116,11 +117,30 @@ class FakeRedis:
 
     async def delete(self, key):
         self.deleted.append(key)
+        self.kv.pop(key, None)
+
+    async def set(self, key, value, nx=False, px=None):
+        if self.publish_error:
+            raise self.publish_error
+        if nx and key in self.kv:
+            return None
+        self.kv[key] = value
+        return True
+
+    async def eval(self, _script, _numkeys, key, value):
+        # Compare-and-delete, like _RELEASE_LOCK_SCRIPT.
+        if self.kv.get(key) == value:
+            del self.kv[key]
+            return 1
+        return 0
 
     async def close(self):
         self.closed = True
         for task in self._tasks:
             await task
+
+
+fence_calls: list[set] = []
 
 
 @pytest.fixture(autouse=True)
@@ -129,6 +149,14 @@ def _local_mode(monkeypatch):
     monkeypatch.delenv("ADMIN_API_KEY", raising=False)
     monkeypatch.setattr(endpoints, "STUDIO_RESET_ACK_TIMEOUT_SECONDS", 0.3)
     monkeypatch.setattr(worker_service, "STUDIO_RESET_CANCEL_TIMEOUT_SECONDS", 0.2)
+    # No stray claims by default; fence behaviour has its own tests.
+    fence_calls.clear()
+
+    def _fence(_session, stopped):
+        fence_calls.append(set(stopped))
+        return []
+
+    monkeypatch.setattr(endpoints, "_fence_and_find_live_claims", _fence)
 
 
 def _session(calls: list):
@@ -180,6 +208,9 @@ async def test_reset_waits_for_worker_to_drain_before_deleting(monkeypatch):
     finished = _events(redis, STUDIO_RESET_FINISHED)
     assert finished and finished[0]["data"]["success"] is True
     assert redis.deleted and redis.closed
+    # The acked worker is exempt from the claim fence, and the lock is gone.
+    assert fence_calls == [{"test-worker"}]
+    assert endpoints.STUDIO_RESET_LOCK_KEY not in redis.kv
     await asyncio.sleep(0)
     # FINISHED lifted the pause.
     assert not worker.is_admission_paused()
@@ -453,3 +484,143 @@ async def test_worker_without_consensus_worker_acks_ok():
     )
     ack = json.loads(await redis._queue("k").get())
     assert ack["ok"] is True and ack["reset_id"] == "r1"
+
+
+# ---------------------------------------------------------------------------
+# Workers outside the Redis handshake, and overlapping resets
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_disconnected_worker_with_live_claim_blocks_deletion(monkeypatch):
+    """A worker whose reset subscription is broken is invisible to PUBLISH
+    (zero subscribers here) but still holds a claim; nothing may be deleted."""
+    calls: list[str] = []
+    session = _session(calls)
+    redis = FakeRedis()  # no subscribers at all
+    monkeypatch.setattr(endpoints, "_studio_reset_redis", lambda: redis)
+    monkeypatch.setattr(
+        endpoints,
+        "_fence_and_find_live_claims",
+        lambda _session, _stopped: [("0xbusy", "worker-disconnected")],
+    )
+
+    with pytest.raises(JSONRPCError, match="worker-disconnected"):
+        await endpoints.reset_studio_state(session=session)
+
+    assert calls == []
+    session.rollback.assert_called()
+    finished = _events(redis, STUDIO_RESET_FINISHED)
+    assert finished and finished[0]["data"]["success"] is False
+    assert endpoints.STUDIO_RESET_LOCK_KEY not in redis.kv
+
+
+@pytest.mark.asyncio
+async def test_disconnected_worker_alongside_a_connected_one(monkeypatch):
+    connected = _make_worker()
+    calls: list[str] = []
+    session = _session(calls)
+    redis = FakeRedis()
+    redis.workers = [(connected, redis.handler_for("w1"))]
+    monkeypatch.setattr(endpoints, "_studio_reset_redis", lambda: redis)
+
+    def fence(_session, stopped):
+        claims = [("0xa", "test-worker"), ("0xb", "worker-disconnected")]
+        return [c for c in claims if c[1] not in stopped]
+
+    monkeypatch.setattr(endpoints, "_fence_and_find_live_claims", fence)
+
+    with pytest.raises(JSONRPCError, match="worker-disconnected"):
+        await endpoints.reset_studio_state(session=session)
+
+    assert calls == []
+    await asyncio.sleep(0)
+    assert not connected.is_admission_paused()
+
+
+@pytest.mark.asyncio
+async def test_overlapping_resets_are_serialized(monkeypatch):
+    worker = _make_worker()
+    hung = _Hung(ignore_cancel_for=0.1)  # slow drain keeps reset 1 open
+    worker._active_tasks.add(asyncio.create_task(hung.run()))
+    await hung.started.wait()
+
+    redis = FakeRedis()
+    redis.workers = [(worker, redis.handler_for("w1"))]
+    # Both calls share the fake client; closing it must not wait for the
+    # worker (the real client's close does not).
+    redis.close = AsyncMock()
+    monkeypatch.setattr(endpoints, "_studio_reset_redis", lambda: redis)
+    first_calls: list[str] = []
+    second_calls: list[str] = []
+
+    first = asyncio.create_task(
+        endpoints.reset_studio_state(session=_session(first_calls))
+    )
+    await asyncio.sleep(0.02)  # first holds the lock; worker is draining
+    with pytest.raises(JSONRPCError, match="Another reset is already in progress"):
+        await endpoints.reset_studio_state(session=_session(second_calls))
+
+    # The rejected reset never reached the workers, so it cannot resume them.
+    assert len(_events(redis, STUDIO_RESET_REQUEST)) == 1
+    assert len(_events(redis, STUDIO_RESET_FINISHED)) == 0
+    assert worker.is_admission_paused()
+
+    result = await first
+    assert result["workers_reset"] == 1
+    assert first_calls == ["delete", "delete", "commit"]
+    assert second_calls == []
+
+    # Once the first reset is done, a new one can run.
+    assert endpoints.STUDIO_RESET_LOCK_KEY not in redis.kv
+    await endpoints.reset_studio_state(session=_session([]))
+
+
+@pytest.mark.asyncio
+async def test_lock_held_by_someone_else_is_not_released(monkeypatch):
+    redis = FakeRedis()
+    redis.kv[endpoints.STUDIO_RESET_LOCK_KEY] = "other-reset"
+    monkeypatch.setattr(endpoints, "_studio_reset_redis", lambda: redis)
+
+    with pytest.raises(JSONRPCError, match="already in progress"):
+        await endpoints.reset_studio_state(session=_session([]))
+
+    assert redis.kv[endpoints.STUDIO_RESET_LOCK_KEY] == "other-reset"
+
+
+def test_finishing_one_reset_keeps_other_resets_paused(monkeypatch):
+    """Regression: A and B both pause the worker; finishing B must not resume
+    admission while A is still collecting acks or deleting rows."""
+    worker = _make_worker()
+    now = [1000.0]
+    monkeypatch.setattr("backend.consensus.worker.time.monotonic", lambda: now[0])
+
+    worker.pause_admission("A", max_seconds=60)
+    worker.pause_admission("B", max_seconds=60)
+
+    worker.resume_admission("B")
+    assert worker.is_admission_paused()
+
+    worker.resume_admission("A")
+    assert not worker.is_admission_paused()
+
+    # Expiry is tracked per reset as well.
+    worker.pause_admission("A", max_seconds=10)
+    worker.pause_admission("B", max_seconds=60)
+    now[0] += 11
+    assert worker.is_admission_paused()
+    now[0] += 60
+    assert not worker.is_admission_paused()
+
+
+@pytest.mark.asyncio
+async def test_overlapping_requests_on_the_worker_keep_the_pause():
+    worker = _make_worker()
+    deadline = time.time() + 5
+    await worker.handle_studio_reset_request("A", deadline, cancel_timeout=1)
+    await worker.handle_studio_reset_request("B", deadline, cancel_timeout=1)
+
+    worker.resume_admission("B")
+    assert worker.is_admission_paused()
+    worker.resume_admission("A")
+    assert not worker.is_admission_paused()

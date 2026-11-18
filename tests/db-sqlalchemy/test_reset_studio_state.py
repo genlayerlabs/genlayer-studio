@@ -17,6 +17,7 @@ from backend.database_handler.models import (
 )
 from backend.database_handler.transactions_processor import TransactionsProcessor
 from backend.protocol_rpc.endpoints import reset_studio_state
+from backend.protocol_rpc.exceptions import JSONRPCError
 
 
 def _insert_tx(tp: TransactionsProcessor, triggered_by: str | None = None) -> str:
@@ -34,6 +35,62 @@ def _insert_tx(tp: TransactionsProcessor, triggered_by: str | None = None) -> st
         transaction_hash=tx_hash,
     )
     return tx_hash
+
+
+def _redis(acking_worker_id: str | None = None) -> MagicMock:
+    """Redis stand-in: optionally one subscribed worker that acks at once."""
+    redis = MagicMock()
+    acks: list[str] = []
+    kv: dict[str, str] = {}
+
+    async def publish(_channel, message):
+        event = json.loads(message)
+        if acking_worker_id is None:
+            return 0
+        if "ack_key" in event["data"]:
+            acks.append(
+                json.dumps(
+                    {
+                        "worker_id": acking_worker_id,
+                        "reset_id": event["data"]["reset_id"],
+                        "ok": True,
+                        "cancelled": 0,
+                    }
+                )
+            )
+        return 1
+
+    async def blpop(keys, timeout):
+        return (keys[0], acks.pop(0)) if acks else None
+
+    async def set_(key, value, nx=False, px=None):
+        if nx and key in kv:
+            return None
+        kv[key] = value
+        return True
+
+    async def eval_(_script, _numkeys, key, value):
+        if kv.get(key) == value:
+            del kv[key]
+
+    redis.publish = publish
+    redis.blpop = blpop
+    redis.set = set_
+    redis.eval = eval_
+    redis.delete = AsyncMock()
+    redis.close = AsyncMock()
+    return redis
+
+
+def _claim(session: Session, tx_hash: str, worker_id: str, age: str) -> None:
+    session.execute(
+        text(
+            "UPDATE transactions SET worker_id = :w, "
+            "blocked_at = NOW() - CAST(:age AS INTERVAL) WHERE hash = :h"
+        ),
+        {"w": worker_id, "age": age, "h": tx_hash},
+    )
+    session.commit()
 
 
 @pytest.mark.asyncio
@@ -73,28 +130,7 @@ async def test_reset_studio_state_deletes_transactions_and_accounts(
     )
     session.commit()
 
-    # One worker that acknowledges the reset as soon as it is requested.
-    redis = MagicMock()
-    acks: list[str] = []
-
-    async def publish(_channel, message):
-        event = json.loads(message)
-        if "ack_key" in event["data"]:
-            acks.append(
-                json.dumps(
-                    {"reset_id": event["data"]["reset_id"], "ok": True, "cancelled": 0}
-                )
-            )
-        return 1
-
-    async def blpop(keys, timeout):
-        return (keys[0], acks.pop(0)) if acks else None
-
-    redis.publish = publish
-    redis.blpop = blpop
-    redis.delete = AsyncMock()
-    redis.close = AsyncMock()
-
+    redis = _redis(acking_worker_id="worker-1")
     with patch(
         "backend.protocol_rpc.endpoints._studio_reset_redis", return_value=redis
     ):
@@ -111,3 +147,55 @@ async def test_reset_studio_state_deletes_transactions_and_accounts(
     assert session.query(TransactionSnapshotArchive).count() == 0
     # Validators survive so users don't have to re-create them.
     assert session.query(Validators).count() == 1
+
+
+@pytest.mark.asyncio
+async def test_live_claim_from_uncounted_worker_blocks_reset(
+    session: Session, monkeypatch
+):
+    """A worker missing from the Redis handshake (zero subscribers here) but
+    still processing a transaction must stop the reset: nothing is deleted."""
+    monkeypatch.delenv("VITE_IS_HOSTED", raising=False)
+    monkeypatch.delenv("ADMIN_API_KEY", raising=False)
+
+    tp = TransactionsProcessor(session)
+    busy = _insert_tx(tp)
+    session.commit()
+    AccountsManager(session).create_new_account()
+    session.commit()
+    _claim(session, busy, "worker-disconnected", "1 minute")
+
+    with patch(
+        "backend.protocol_rpc.endpoints._studio_reset_redis", return_value=_redis()
+    ):
+        with pytest.raises(JSONRPCError, match="worker-disconnected"):
+            await reset_studio_state(session=session)
+
+    assert session.query(Transactions).count() == 1
+    assert session.query(CurrentState).count() == 1
+
+
+@pytest.mark.asyncio
+async def test_claims_of_acked_workers_and_stale_claims_do_not_block(
+    session: Session, monkeypatch
+):
+    monkeypatch.delenv("VITE_IS_HOSTED", raising=False)
+    monkeypatch.delenv("ADMIN_API_KEY", raising=False)
+
+    tp = TransactionsProcessor(session)
+    own = _insert_tx(tp)
+    stale = _insert_tx(tp)
+    session.commit()
+    # A claim the acked worker failed to release, and one left behind by a
+    # crashed worker long ago (already re-claimable by any worker).
+    _claim(session, own, "worker-1", "1 minute")
+    _claim(session, stale, "worker-crashed", "2 hours")
+
+    with patch(
+        "backend.protocol_rpc.endpoints._studio_reset_redis",
+        return_value=_redis(acking_worker_id="worker-1"),
+    ):
+        result = await reset_studio_state(session=session)
+
+    assert result["deleted_transactions"] == 2
+    assert session.query(Transactions).count() == 0

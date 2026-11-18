@@ -291,10 +291,9 @@ class ConsensusWorker:
         # Initialize usage metrics service for reporting transaction metrics
         self.usage_metrics_service = UsageMetricsService()
 
-        # sim_resetStudioState: while paused, the worker claims no new work.
-        # The pause carries the reset id that set it and expires on its own.
-        self._admission_paused_by: Optional[str] = None
-        self._admission_paused_until: float = 0.0
+        # sim_resetStudioState: while any reset holds a pause, the worker
+        # claims no new work. reset_id -> monotonic expiry.
+        self._admission_pauses: dict[str, float] = {}
 
     def _parse_max_parallel_txs(self) -> int:
         """
@@ -2802,27 +2801,27 @@ class ConsensusWorker:
 
     def pause_admission(self, reset_id: str, max_seconds: float) -> None:
         """Stop claiming new work until resume_admission(reset_id) or until
-        `max_seconds` pass, whichever comes first."""
-        self._admission_paused_by = reset_id
-        self._admission_paused_until = time.monotonic() + max_seconds
+        `max_seconds` pass, whichever comes first.
+
+        Every outstanding reset keeps its own pause: finishing one reset must
+        not resume work while another one is still in progress.
+        """
+        self._admission_pauses[reset_id] = time.monotonic() + max_seconds
 
     def resume_admission(self, reset_id: str) -> None:
-        """Lift the pause, but only if it was set by this reset."""
-        if self._admission_paused_by == reset_id:
-            self._admission_paused_by = None
-            self._admission_paused_until = 0.0
+        """Lift the pause held by this reset (other resets keep theirs)."""
+        self._admission_pauses.pop(reset_id, None)
 
     def is_admission_paused(self) -> bool:
-        if self._admission_paused_by is None:
-            return False
-        if time.monotonic() >= self._admission_paused_until:
-            logger.warning(
-                f"[Worker {self.worker_id}] Studio reset {self._admission_paused_by} "
-                "pause expired without completion; resuming work"
-            )
-            self._admission_paused_by = None
-            return False
-        return True
+        now = time.monotonic()
+        for reset_id, until in list(self._admission_pauses.items()):
+            if now >= until:
+                logger.warning(
+                    f"[Worker {self.worker_id}] Studio reset {reset_id} pause "
+                    "expired without completion"
+                )
+                del self._admission_pauses[reset_id]
+        return bool(self._admission_pauses)
 
     async def reset_state(self, cancel_timeout: float = 10.0) -> dict:
         """

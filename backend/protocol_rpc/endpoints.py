@@ -528,6 +528,18 @@ def clear_db_tables(session: Session, tables: list) -> None:
 STUDIO_RESET_ACK_TIMEOUT_SECONDS = float(
     os.environ.get("STUDIO_RESET_ACK_TIMEOUT_SECONDS", "30")
 )
+# Claims older than this are already treated as abandoned by the workers'
+# own claim queries (they may be re-claimed), so they don't block a reset.
+STUDIO_RESET_CLAIM_TIMEOUT_MINUTES = int(
+    os.environ.get("TRANSACTION_TIMEOUT_MINUTES", "30")
+)
+STUDIO_RESET_LOCK_KEY = "studio:reset:lock"
+_RELEASE_LOCK_SCRIPT = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+end
+return 0
+"""
 
 
 def _studio_reset_redis():
@@ -567,21 +579,60 @@ async def _collect_studio_reset_acks(
     return acks
 
 
+def _fence_and_find_live_claims(
+    session: Session, stopped_worker_ids: set[str]
+) -> list[tuple[str, str]]:
+    """Fence off workers that did not take part in the handshake.
+
+    Worker membership is not taken from Redis: a worker whose reset
+    subscription is broken is invisible to PUBLISH but can still be
+    processing. Every worker that processes anything holds a claim on a
+    transactions row (worker_id + blocked_at), so the database is the
+    authoritative list of active workers.
+
+    Takes an EXCLUSIVE lock on ``transactions`` for the rest of the DB
+    transaction: workers can no longer claim (claims are UPDATEs) until the
+    rows are deleted and committed. Then returns live claims held by workers
+    that did not confirm they stopped; any such claim means a worker is still
+    running and the reset must not delete anything.
+    """
+    session.execute(text("LOCK TABLE transactions IN EXCLUSIVE MODE"))
+    rows = session.execute(
+        text(
+            """
+            SELECT hash, worker_id FROM transactions
+            WHERE worker_id IS NOT NULL
+              AND blocked_at IS NOT NULL
+              AND blocked_at > NOW() - CAST(:timeout AS INTERVAL)
+            """
+        ),
+        {"timeout": f"{STUDIO_RESET_CLAIM_TIMEOUT_MINUTES} minutes"},
+    ).all()
+    return [
+        (row.hash, row.worker_id)
+        for row in rows
+        if row.worker_id not in stopped_worker_ids
+    ]
+
+
 @check_forbidden_method_in_hosted_studio
 async def reset_studio_state(session: Session, admin_key: str | None = None) -> dict:
     """Delete all transactions and accounts after resetting consensus workers.
 
-    Handshake (see redis_worker_handler for the worker side):
-      1. Ask every consensus worker to pause claiming and to cancel and drain
-         all in-flight execution, and wait for each one to acknowledge.
-      2. Only if every worker confirmed, delete ``transactions`` (pruned
-         snapshot archives cascade) and ``current_state`` (balances and
-         contract state) and commit.
-      3. Tell the workers the reset is over so they resume claiming work.
+    1. Take a cluster-wide Redis lock so resets never overlap (an overlapping
+       reset's FINISHED would otherwise resume workers mid-reset).
+    2. Ask every subscribed consensus worker to pause claiming and to cancel
+       and drain all in-flight execution; wait for each one to acknowledge
+       (see redis_worker_handler for the worker side).
+    3. Fence: lock ``transactions`` against new claims and refuse to delete
+       while any worker that did not acknowledge still holds a live claim.
+       This catches workers the Redis handshake cannot see.
+    4. Delete ``transactions`` (pruned snapshot archives cascade) and
+       ``current_state`` (balances and contract state) and commit.
+    5. Tell the workers the reset is over so they resume claiming work.
 
-    Any failure (Redis unreachable, a worker not answering in time, a worker
-    unable to stop its tasks) raises a JSON-RPC error and deletes nothing.
-    Validators, LLM providers, API keys/tiers and user snapshots are kept.
+    Any failure raises a JSON-RPC error and deletes nothing. Validators, LLM
+    providers, API keys/tiers and user snapshots are kept.
     """
     from backend.database_handler.models import CurrentState, Transactions
     from backend.protocol_rpc.message_handler.redis_worker_handler import (
@@ -602,65 +653,100 @@ async def reset_studio_state(session: Session, admin_key: str | None = None) -> 
 
     try:
         try:
-            expected = await redis_client.publish(
-                STUDIO_RESET_CHANNEL,
-                json.dumps(
-                    {
-                        "event": STUDIO_RESET_REQUEST,
-                        "data": {
-                            "reset_id": reset_id,
-                            "ack_key": ack_key,
-                            "deadline": deadline,
-                        },
-                    }
-                ),
+            locked = await redis_client.set(
+                STUDIO_RESET_LOCK_KEY,
+                reset_id,
+                nx=True,
+                px=int((timeout + 60) * 1000),
             )
         except Exception as e:
             raise _studio_reset_error(
                 f"Could not reach consensus workers through Redis: {e}."
             )
+        if not locked:
+            raise _studio_reset_error("Another reset is already in progress.")
 
-        succeeded = False
         try:
-            acks = await _collect_studio_reset_acks(
-                redis_client, ack_key, reset_id, expected, deadline
-            )
-            if len(acks) < expected:
-                raise _studio_reset_error(
-                    f"{expected - len(acks)} of {expected} consensus workers did "
-                    f"not confirm the reset within {timeout:g}s."
-                )
-            failed = [a.get("worker_id", "?") for a in acks if not a.get("ok")]
-            if failed:
-                raise _studio_reset_error(
-                    "Consensus workers could not stop their running transactions: "
-                    f"{', '.join(failed)}."
-                )
-
-            deleted_transactions = session.query(Transactions).delete(
-                synchronize_session=False
-            )
-            deleted_accounts = session.query(CurrentState).delete(
-                synchronize_session=False
-            )
-            session.commit()
-            succeeded = True
-        finally:
-            # Always release the workers; if this publish is lost they resume
-            # on their own when their pause expires.
             try:
-                await redis_client.publish(
+                expected = await redis_client.publish(
                     STUDIO_RESET_CHANNEL,
                     json.dumps(
                         {
-                            "event": STUDIO_RESET_FINISHED,
-                            "data": {"reset_id": reset_id, "success": succeeded},
+                            "event": STUDIO_RESET_REQUEST,
+                            "data": {
+                                "reset_id": reset_id,
+                                "ack_key": ack_key,
+                                "deadline": deadline,
+                            },
                         }
                     ),
                 )
-                await redis_client.delete(ack_key)
             except Exception as e:
-                logger.error(f"Failed to publish studio reset completion: {e}")
+                raise _studio_reset_error(
+                    f"Could not reach consensus workers through Redis: {e}."
+                )
+
+            succeeded = False
+            try:
+                acks = await _collect_studio_reset_acks(
+                    redis_client, ack_key, reset_id, expected, deadline
+                )
+                if len(acks) < expected:
+                    raise _studio_reset_error(
+                        f"{expected - len(acks)} of {expected} consensus workers "
+                        f"did not confirm the reset within {timeout:g}s."
+                    )
+                failed = [a.get("worker_id", "?") for a in acks if not a.get("ok")]
+                if failed:
+                    raise _studio_reset_error(
+                        "Consensus workers could not stop their running "
+                        f"transactions: {', '.join(failed)}."
+                    )
+
+                live_claims = _fence_and_find_live_claims(
+                    session, {a["worker_id"] for a in acks if a.get("worker_id")}
+                )
+                if live_claims:
+                    session.rollback()  # drop the table lock right away
+                    workers = sorted({w for _, w in live_claims})
+                    raise _studio_reset_error(
+                        f"{len(live_claims)} transactions are still being "
+                        "processed by consensus workers that did not take part "
+                        f"in the reset: {', '.join(workers)}."
+                    )
+
+                deleted_transactions = session.query(Transactions).delete(
+                    synchronize_session=False
+                )
+                deleted_accounts = session.query(CurrentState).delete(
+                    synchronize_session=False
+                )
+                session.commit()
+                succeeded = True
+            finally:
+                # Always release the workers; if this publish is lost they
+                # resume on their own when their pause expires.
+                try:
+                    await redis_client.publish(
+                        STUDIO_RESET_CHANNEL,
+                        json.dumps(
+                            {
+                                "event": STUDIO_RESET_FINISHED,
+                                "data": {"reset_id": reset_id, "success": succeeded},
+                            }
+                        ),
+                    )
+                    await redis_client.delete(ack_key)
+                except Exception as e:
+                    logger.error(f"Failed to publish studio reset completion: {e}")
+        finally:
+            try:
+                await redis_client.eval(
+                    _RELEASE_LOCK_SCRIPT, 1, STUDIO_RESET_LOCK_KEY, reset_id
+                )
+            except Exception as e:
+                # The lock expires on its own.
+                logger.error(f"Failed to release studio reset lock: {e}")
     finally:
         await redis_client.close()
 
