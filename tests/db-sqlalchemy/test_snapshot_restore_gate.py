@@ -6,6 +6,7 @@ claims during a restore, and for aborting the restore when workers don't let
 go of their claims.
 """
 
+import asyncio
 import os
 from contextlib import contextmanager
 from typing import Iterable
@@ -85,6 +86,23 @@ def session(engine: Engine) -> Iterable[Session]:
     s.commit()
     yield s
     s.close()
+
+
+@pytest.fixture
+def alive(engine: Engine):
+    """Mark worker ids as running: hold their liveness locks for the test."""
+    held: list[worker_control.WorkerLiveness] = []
+
+    def make_alive(*worker_ids: str) -> list[worker_control.WorkerLiveness]:
+        for worker_id in worker_ids:
+            liveness = worker_control.WorkerLiveness(engine, worker_id)
+            assert liveness.acquire()
+            held.append(liveness)
+        return held[-len(worker_ids) :]
+
+    yield make_alive
+    for liveness in held:
+        liveness.close()
 
 
 @pytest.fixture
@@ -170,9 +188,10 @@ async def test_restore_runs_with_gate_held_and_worker_cannot_claim_mid_restore(
 
 @pytest.mark.asyncio
 async def test_restore_aborts_and_leaves_db_untouched_when_claims_remain(
-    engine: Engine, session: Session, monkeypatch
+    engine: Engine, session: Session, monkeypatch, alive
 ):
     monkeypatch.setenv("SNAPSHOT_RESTORE_RELEASE_TIMEOUT_SECONDS", "0.3")
+    alive("unresponsive-worker")
     manager = SnapshotManager(session)
     snapshot_id = manager.create_snapshot().snapshot_id
     _insert_tx(session, TX_A, nonce=0, worker_id="unresponsive-worker")
@@ -202,22 +221,15 @@ async def test_restore_aborts_and_leaves_db_untouched_when_claims_remain(
 
 
 @pytest.mark.asyncio
-async def test_claims_no_live_worker_can_act_on_do_not_block_restore(
-    engine: Engine, session: Session, monkeypatch
+async def test_claims_of_terminated_workers_do_not_block_restore(
+    engine: Engine, session: Session
 ):
-    monkeypatch.setenv("TRANSACTION_TIMEOUT_MINUTES", "30")
+    """A worker died holding claims (fresh or old, any status): its liveness
+    lock is gone, so its claims are ignored and the restore rewrites them."""
     manager = SnapshotManager(session)
     _insert_tx(session, TX_A, nonce=0)
     snapshot_id = manager.create_snapshot().snapshot_id
-    # Lease expired, no progress since: recovery treats it as abandoned.
-    _insert_tx(
-        session,
-        TX_B,
-        nonce=1,
-        worker_id="dead-worker",
-        blocked="NOW() - INTERVAL '2 hours'",
-    )
-    # Terminal: recovery never touches it.
+    _insert_tx(session, TX_B, nonce=1, worker_id="dead-worker")  # fresh claim
     _insert_tx(session, TX_C, nonce=2, worker_id="dead-worker", status="FINALIZED")
 
     assert worker_control.claimed_transactions(session) == []
@@ -230,10 +242,11 @@ async def test_claims_no_live_worker_can_act_on_do_not_block_restore(
 
 
 @pytest.mark.asyncio
-async def test_expired_lease_with_recent_progress_still_counts_as_claimed(
-    engine: Engine, session: Session, monkeypatch
+async def test_claims_of_running_workers_count_whatever_their_age_or_status(
+    engine: Engine, session: Session, alive
 ):
-    monkeypatch.setenv("TRANSACTION_TIMEOUT_MINUTES", "30")
+    """An expired lease or a terminal status does not stop the owning task."""
+    alive("slow-worker")
     _insert_tx(
         session,
         TX_A,
@@ -241,23 +254,139 @@ async def test_expired_lease_with_recent_progress_still_counts_as_claimed(
         worker_id="slow-worker",
         status="PROPOSING",
         blocked="NOW() - INTERVAL '2 hours'",
-        consensus_history=(
-            "jsonb_build_object('current_monitoring', jsonb_build_object("
-            "'PROPOSING', EXTRACT(EPOCH FROM NOW())::double precision))"
-        ),
+    )
+    _insert_tx(session, TX_B, nonce=1, worker_id="slow-worker", status="FINALIZED")
+    _insert_tx(session, TX_C, nonce=2, worker_id="dead-worker")
+
+    assert sorted(worker_control.claimed_transactions(session)) == sorted(
+        [(TX_A, "slow-worker"), (TX_B, "slow-worker")]
     )
 
-    assert worker_control.claimed_transactions(session) == [(TX_A, "slow-worker")]
+
+def test_ownerless_claims_are_ignored(engine: Engine, session: Session):
+    """Every claim query sets worker_id with blocked_at: no task holds these."""
+    _insert_tx(session, TX_A, nonce=0, worker_id="w")
+    session.execute(
+        text("UPDATE transactions SET worker_id = NULL WHERE hash = :h"), {"h": TX_A}
+    )
+    session.commit()
+    assert worker_control.claimed_transactions(session) == []
+
+
+def test_liveness_lock_confirms_termination(engine: Engine, session: Session):
+    liveness = worker_control.WorkerLiveness(engine, "w1")
+    assert worker_control.worker_terminated(session, "w1") is True
+    try:
+        assert liveness.acquire()
+        assert liveness.held()
+        assert worker_control.worker_terminated(session, "w1") is False
+        # The probe never leaves the lock with the RPC.
+        assert worker_control.worker_terminated(session, "w1") is False
+        assert worker_control.WorkerLiveness(engine, "w1").acquire() is False
+
+        # The worker's connection dies (e.g. the process is killed).
+        pid = liveness.conn.execute(text("SELECT pg_backend_pid()")).scalar()
+        liveness.conn.commit()
+        with sessionmaker(bind=engine)() as admin:
+            admin.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+            admin.commit()
+        assert liveness.held() is False
+        assert worker_control.worker_terminated(session, "w1") is True
+    finally:
+        liveness.close()
+    session.rollback()
 
 
 @pytest.mark.asyncio
-async def test_restore_aborts_before_release_event_when_claim_owner_is_gone(
-    engine: Engine, session: Session
+async def test_restore_waits_for_running_task_with_expired_lease_and_delayed_release(
+    engine: Engine, session: Session, worker: ConsensusWorker, alive
 ):
+    """Auditor regression: a still-running task holds a claim whose lease
+    expired long ago and its worker processes the release late. The restore
+    must wait for that task to finish (including a write in its cleanup), so
+    the restored state is what remains afterwards."""
+    alive(worker.worker_id)
+    state = session.get(CurrentState, CONTRACT)
+    state.data = {"value": "snapshot"}
+    session.commit()
+    manager = SnapshotManager(session)
+    snapshot_id = manager.create_snapshot().snapshot_id
+    state.data = {"value": "live"}
+    session.commit()
+    _insert_tx(
+        session,
+        TX_A,
+        nonce=0,
+        worker_id=worker.worker_id,
+        status="COMMITTING",
+        blocked="NOW() - INTERVAL '2 hours'",
+    )
+
+    Session_ = sessionmaker(bind=engine)
+    running = asyncio.Event()
+
+    async def still_running_task():
+        async with worker._transaction_context(TX_A, {}, MagicMock()):
+            running.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.2)  # slow cleanup that still writes
+                with Session_() as ws:
+                    ws.execute(
+                        text(
+                            "UPDATE current_state SET data = "
+                            'CAST(\'{"value": "stale"}\' AS jsonb) WHERE id = :id'
+                        ),
+                        {"id": CONTRACT},
+                    )
+                    ws.commit()
+                raise
+
+    task = asyncio.create_task(still_running_task())
+    worker._active_tasks.add(task)
+    await running.wait()
+
+    async def publish_with_delayed_delivery(*_args, **_kwargs):
+        async def deliver_late():
+            await asyncio.sleep(0.3)
+            await worker.release_in_flight()
+
+        asyncio.ensure_future(deliver_late())
+        return 1
+
+    with (
+        patch.object(
+            endpoints.worker_control,
+            "worker_control_subscribers",
+            AsyncMock(return_value=1),
+        ),
+        patch.object(
+            endpoints.worker_control,
+            "publish_worker_control",
+            publish_with_delayed_delivery,
+        ),
+    ):
+        assert await endpoints.restore_snapshot(manager, snapshot_id) is True
+
+    assert task.done()
+    session.rollback()
+    session.expire_all()
+    assert session.get(CurrentState, CONTRACT).data == {"value": "snapshot"}
+    assert _claim_of(session, TX_A) is None  # not in the snapshot
+
+
+@pytest.mark.asyncio
+async def test_restore_aborts_before_release_event_when_a_running_owner_is_unreachable(
+    engine: Engine, session: Session, alive
+):
+    """Two running claim owners, one control-channel subscriber: one of them
+    can't be asked to release, so abort before disturbing anyone."""
+    alive("live-worker", "unsubscribed-worker")
     manager = SnapshotManager(session)
     snapshot_id = manager.create_snapshot().snapshot_id
     _insert_tx(session, TX_A, nonce=0, worker_id="live-worker")
-    _insert_tx(session, TX_B, nonce=1, worker_id="dead-worker")
+    _insert_tx(session, TX_B, nonce=1, worker_id="unsubscribed-worker")
 
     publish = AsyncMock(return_value=1)
     with (
@@ -273,14 +402,15 @@ async def test_restore_aborts_before_release_event_when_claim_owner_is_gone(
 
     publish.assert_not_awaited()
     assert "told to cancel" not in exc.value.message
-    assert _claim_of(session, TX_B).worker_id == "dead-worker"
+    assert _claim_of(session, TX_B).worker_id == "unsubscribed-worker"
 
 
 @pytest.mark.asyncio
 async def test_restore_aborts_immediately_when_release_event_cannot_be_sent(
-    engine: Engine, session: Session, monkeypatch
+    engine: Engine, session: Session, monkeypatch, alive
 ):
     monkeypatch.delenv("REDIS_URL", raising=False)
+    alive("some-worker")
     manager = SnapshotManager(session)
     snapshot_id = manager.create_snapshot().snapshot_id
     _insert_tx(session, TX_A, nonce=0, worker_id="some-worker")

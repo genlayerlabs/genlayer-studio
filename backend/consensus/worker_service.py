@@ -3,6 +3,7 @@
 import os
 import sys
 import asyncio
+import contextlib
 import signal
 import time
 from contextlib import asynccontextmanager
@@ -14,6 +15,7 @@ from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
 
 from backend.consensus.worker import ConsensusWorker
+from backend.consensus import worker_control
 from backend.protocol_rpc.message_handler.redis_worker_handler import (
     RedisWorkerMessageHandler,
 )
@@ -326,6 +328,15 @@ async def lifespan(app: FastAPI):
     # RPC restores a snapshot, then resume)
     await msg_handler.subscribe_to_worker_control_events(worker.handle_control_event)
 
+    # Liveness lock: lets a snapshot restore confirm this worker is gone (Postgres
+    # drops the lock with our connection) instead of guessing from claim age.
+    # No claims until it is held.
+    liveness = worker_control.WorkerLiveness(engine, worker.worker_id)
+    worker.liveness_ok = False
+    liveness_task = asyncio.create_task(
+        worker_control.maintain_liveness(worker, liveness)
+    )
+
     # Get restart configuration from environment
     max_restarts = int(os.environ.get("WORKER_MAX_RESTARTS", "5"))
     restart_window_seconds = int(os.environ.get("WORKER_RESTART_WINDOW_SECONDS", "300"))
@@ -477,6 +488,12 @@ async def lifespan(app: FastAPI):
                 logger.info("Validators manager terminated successfully")
             except Exception as e:
                 logger.error(f"Error terminating validators manager: {e}")
+
+        # Drop the liveness lock last: in-flight work has been handled above
+        liveness_task.cancel()
+        with contextlib.suppress(BaseException):
+            await liveness_task
+        await asyncio.to_thread(liveness.close)
 
         # Clean up message handler
         if msg_handler:

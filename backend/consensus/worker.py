@@ -219,6 +219,11 @@ class ConsensusWorker:
         # been released (RPC timed out) — so the final sweep can only ever
         # touch claims that existed before the release started.
         self._releases_in_progress = 0
+        # False while this worker does not hold its liveness lock (see
+        # worker_control.WorkerLiveness): a restore would treat claims made
+        # then as abandoned, so none are made. The worker service starts it
+        # False and flips it once the lock is held.
+        self.liveness_ok = True
         # Bound on waiting for cancelled tasks to finish their cleanup.
         self.release_timeout_seconds = worker_control.DEFAULT_RELEASE_TIMEOUT_SECONDS
 
@@ -2796,7 +2801,7 @@ class ConsensusWorker:
         """
         # Our own release cleanup still running: claiming now would hand the
         # sweep in release_in_flight() a claim that isn't stale.
-        if self.is_releasing:
+        if self.is_releasing or not self.liveness_ok:
             return False
 
         # Restore gate: while a snapshot restore holds it, no claims at all.

@@ -446,7 +446,6 @@ async def test_wait_for_claims_released_raises_on_timeout():
         ([], None, True),  # nothing claimed: no Redis needed
         ([("0x1", "w1"), ("0x2", "w2")], 2, True),
         ([("0x1", "w1"), ("0x2", "w2")], 1, False),  # some owner is gone
-        ([("0x1", None)], 3, False),  # no owner to release it
         ([("0x1", "w1")], None, False),  # can't reach any worker
     ],
 )
@@ -610,3 +609,71 @@ async def test_gate_rechecked_after_backoff_release_commits():
     release.assert_called_once()
     f.assert_not_awaited()
     t.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_worker_does_not_claim_without_its_liveness_lock():
+    worker = _make_worker()
+    worker.liveness_ok = False
+    with (
+        patch.object(worker_control, "claim_gate_open", return_value=True),
+        patch.object(worker, "claim_next_appeal", new_callable=AsyncMock) as a,
+        patch.object(worker, "claim_next_transaction", new_callable=AsyncMock) as t,
+    ):
+        assert await worker._try_claim_work(MagicMock(spec=Session)) is False
+    a.assert_not_awaited()
+    t.assert_not_awaited()
+
+
+class _FakeLiveness:
+    def __init__(self, held_results, acquire_results):
+        self.held_results = list(held_results)
+        self.acquire_results = list(acquire_results)
+        self.closed = 0
+
+    def held(self):
+        return self.held_results.pop(0)
+
+    def acquire(self):
+        return self.acquire_results.pop(0)
+
+    def close(self):
+        self.closed += 1
+
+
+@pytest.mark.asyncio
+async def test_maintain_liveness_drops_work_when_lock_is_lost_then_reacquires():
+    worker = _make_worker()
+    worker.liveness_ok = False
+    states = []
+
+    async def release():
+        states.append(("release", worker.liveness_ok))
+        return None
+
+    worker.release_in_flight = release
+    # start: acquire ok; tick 2: lost, re-acquire fails; tick 3: re-acquire ok
+    liveness = _FakeLiveness(
+        held_results=[True, False], acquire_results=[True, False, True]
+    )
+    ticks = 0
+
+    async def fake_sleep(_):
+        nonlocal ticks
+        states.append(("tick", worker.liveness_ok))
+        ticks += 1
+        if ticks >= 4:
+            raise asyncio.CancelledError
+
+    with patch.object(worker_control.asyncio, "sleep", side_effect=fake_sleep):
+        with pytest.raises(asyncio.CancelledError):
+            await worker_control.maintain_liveness(worker, liveness, interval=0)
+
+    assert states == [
+        ("tick", True),  # acquired at start
+        ("tick", True),  # still held
+        ("release", False),  # lost: claiming already stopped when work is dropped
+        ("tick", False),  # re-acquire failed: still not claiming
+        ("tick", True),  # re-acquired
+    ]
+    assert liveness.closed == 1
