@@ -33,6 +33,26 @@ describe('useConfig', () => {
     expect(canUpdateValidators.value).toBe(false);
   });
 
+  it('gates canResetStudioState on non-hosted Studio networks', () => {
+    vi.stubEnv('VITE_IS_HOSTED', 'false');
+    const store = useNetworkStore();
+    const { canResetStudioState } = useConfig();
+
+    store.setCurrentNetwork('localnet');
+    expect(canResetStudioState.value).toBe(true);
+
+    store.setCurrentNetwork('testnetBradbury');
+    expect(canResetStudioState.value).toBe(false);
+  });
+
+  it('returns false for canResetStudioState when hosted', () => {
+    vi.stubEnv('VITE_IS_HOSTED', 'true');
+    useNetworkStore().setCurrentNetwork('localnet');
+
+    const { canResetStudioState } = useConfig();
+    expect(canResetStudioState.value).toBe(false);
+  });
+
   it('exposes isStudioNetwork that reflects the current network', () => {
     const store = useNetworkStore();
     const { isStudioNetwork } = useConfig();

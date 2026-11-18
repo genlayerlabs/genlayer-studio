@@ -45,6 +45,17 @@ def clear_db_tables(
     return impl.clear_db_tables(session=session, tables=tables)
 
 
+@rpc.method(
+    name="sim_resetStudioState",
+    description="Delete all transactions and accounts and reset consensus workers",
+)
+async def reset_studio_state(
+    admin_key: str = None,
+    session: Session = Depends(get_db_session),
+) -> dict:
+    return await impl.reset_studio_state(session=session, admin_key=admin_key)
+
+
 @rpc.method("sim_fundAccount")
 def fund_account(
     account_address: str,

@@ -2779,6 +2779,37 @@ class ConsensusWorker:
                 logger.exception(f"[Worker {self.worker_id}] Error in main loop: {e}")
                 await asyncio.sleep(self.poll_interval)
 
+    async def reset_state(self, cancel_timeout: float = 10.0) -> int:
+        """
+        Drop all in-flight work and in-memory bookkeeping.
+
+        Called when the studio database is reset (sim_resetStudioState): the
+        transactions these tasks were processing no longer exist, so they are
+        cancelled instead of being allowed to write results back.
+
+        Returns:
+            Number of tasks that were cancelled.
+        """
+        # Detach the tasks first so run() never calls .result() on a
+        # cancelled task (CancelledError is not an Exception and would
+        # escape the main loop).
+        tasks = list(self._active_tasks)
+        self._active_tasks.difference_update(tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.wait(tasks, timeout=cancel_timeout)
+
+        self.current_transactions.clear()
+        self._no_validators_retries.clear()
+        self._generic_error_retries.clear()
+        self._leader_crash_retries.clear()
+
+        logger.info(
+            f"[Worker {self.worker_id}] State reset: cancelled {len(tasks)} active tasks"
+        )
+        return len(tasks)
+
     def stop(self):
         """Stop the worker gracefully. Active tasks will complete naturally in run() shutdown logic."""
         logger.info(

@@ -284,6 +284,22 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
     subscribe(transactions.value.map((t) => t.hash));
   }
 
+  // Drop the current network's transactions (memory + IndexedDB) after the
+  // Studio backend wiped them (sim_resetStudioState). Other chains keep theirs.
+  async function clearTransactionsForCurrentNetwork() {
+    const chainId = networkStore.chainId;
+    const isCurrent = (t: TransactionItem) =>
+      t.chainId === undefined || t.chainId === chainId;
+
+    allTransactions.value.filter(isCurrent).forEach((t) => {
+      unsubscribe(t.hash);
+      missingTransactionSince.delete(t.hash);
+    });
+    allTransactions.value = allTransactions.value.filter((t) => !isCurrent(t));
+
+    await db.transactions.where('chainId').equals(chainId).delete();
+  }
+
   async function resetStorage() {
     unsubscribeAll();
     missingTransactionSince.clear();
@@ -305,6 +321,7 @@ export const useTransactionsStore = defineStore('transactionsStore', () => {
     initSubscriptions,
     setAllTransactions,
     resetStorage,
+    clearTransactionsForCurrentNetwork,
     startUndecidedPolling,
     stopUndecidedPolling,
   };

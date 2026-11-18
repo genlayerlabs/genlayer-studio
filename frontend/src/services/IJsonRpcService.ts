@@ -52,4 +52,9 @@ export interface IJsonRpcService {
     transactionHash: string,
     signature?: string,
   ): Promise<{ transaction_hash: string; status: string }>;
+  resetStudioState(): Promise<{
+    deleted_transactions: number;
+    deleted_accounts: number;
+    workers_notified: number;
+  }>;
 }

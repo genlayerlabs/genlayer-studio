@@ -524,6 +524,61 @@ def clear_db_tables(session: Session, tables: list) -> None:
         session.execute(table.delete())
 
 
+async def publish_studio_reset_event() -> int:
+    """Tell every consensus worker to drop in-flight work and in-memory state.
+
+    Returns the number of subscribers that received the event (0 on failure).
+    """
+    import redis.asyncio as aioredis
+    from backend.protocol_rpc.message_handler.redis_worker_handler import (
+        STUDIO_RESET_EVENT,
+        RedisWorkerMessageHandler,
+    )
+
+    # Consensus workers already subscribe to the validator events channel, so
+    # the reset signal rides on it instead of introducing a new channel.
+    redis_url = os.environ.get("REDIS_URL", "redis://redis:6379/0")
+    try:
+        redis_client = aioredis.from_url(
+            redis_url, encoding="utf-8", decode_responses=True
+        )
+        try:
+            return await redis_client.publish(
+                RedisWorkerMessageHandler.VALIDATOR_CHANNEL,
+                json.dumps({"event": STUDIO_RESET_EVENT, "data": {}}),
+            )
+        finally:
+            await redis_client.close()
+    except Exception as e:
+        logger.error(f"Failed to publish studio reset event: {e}")
+        return 0
+
+
+@check_forbidden_method_in_hosted_studio
+async def reset_studio_state(session: Session, admin_key: str | None = None) -> dict:
+    """Delete all transactions and accounts, then reset consensus workers.
+
+    Clears ``transactions`` (their pruned snapshot archives go with them via
+    ON DELETE CASCADE) and ``current_state`` (account balances and deployed
+    contract state). Validators, LLM providers, API keys/tiers and
+    user-created snapshots are kept.
+    """
+    from backend.database_handler.models import CurrentState, Transactions
+
+    deleted_transactions = session.query(Transactions).delete(synchronize_session=False)
+    deleted_accounts = session.query(CurrentState).delete(synchronize_session=False)
+    session.commit()
+
+    # Signal workers only after the rows are gone, so nothing gets re-claimed.
+    workers_notified = await publish_studio_reset_event()
+
+    return {
+        "deleted_transactions": deleted_transactions,
+        "deleted_accounts": deleted_accounts,
+        "workers_notified": workers_notified,
+    }
+
+
 def fund_account(
     session: Session,
     account_address: str,

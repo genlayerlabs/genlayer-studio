@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from backend.consensus.worker import ConsensusWorker
 from backend.protocol_rpc.message_handler.redis_worker_handler import (
     RedisWorkerMessageHandler,
+    STUDIO_RESET_EVENT,
 )
 from backend.protocol_rpc.configuration import GlobalConfiguration
 from backend.rollup.consensus_service import ConsensusService
@@ -298,6 +299,12 @@ async def lifespan(app: FastAPI):
     # Subscribe to validator change events
     async def handle_validator_change(event_data):
         """Reload validators when notified of changes."""
+        if event_data.get("event") == STUDIO_RESET_EVENT:
+            # Studio DB was wiped (sim_resetStudioState): drop in-flight work.
+            logger.info("Received studio reset event, resetting worker state")
+            if worker is not None:
+                await worker.reset_state()
+            return
         logger.info(f"Received validator change event: {event_data}")
         await validators_manager.restart()
 

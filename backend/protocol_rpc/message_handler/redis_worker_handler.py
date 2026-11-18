@@ -14,6 +14,10 @@ from backend.protocol_rpc.message_handler.base import MessageHandler
 from backend.protocol_rpc.message_handler.types import EventScope, LogEvent
 from backend.protocol_rpc.configuration import GlobalConfiguration
 
+# Published on VALIDATOR_CHANNEL by sim_resetStudioState: workers cancel
+# in-flight work and clear in-memory state after the studio DB is wiped.
+STUDIO_RESET_EVENT = "studio_reset"
+
 
 class RedisWorkerMessageHandler(MessageHandler):
     """
