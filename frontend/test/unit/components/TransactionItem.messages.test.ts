@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TransactionItem from '@/components/Simulator/TransactionItem.vue';
 import { notify } from '@kyvg/vue3-notification';
 
@@ -180,5 +180,103 @@ describe('TransactionItem messages (triggered transactions)', () => {
       expect.objectContaining({ type: 'error', text: 'boom' }),
     );
     expect(wrapper.findAllComponents(TransactionItem)).toHaveLength(0);
+  });
+
+  describe('refreshing a followed message', () => {
+    const pendingChild = {
+      hash: childHash,
+      type: 2,
+      statusName: 'PENDING',
+      created_at: '2026-11-18T10:00:01Z',
+      triggered_transactions: [],
+    };
+    const finalizedChild = {
+      ...pendingChild,
+      statusName: 'FINALIZED',
+      consensus_data: {
+        leader_receipt: [{ execution_result: 'SUCCESS' }],
+      },
+      triggered_transactions: [grandchildHash],
+    };
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    async function openChild(wrapper: ReturnType<typeof mountItem>) {
+      await wrapper.trigger('click');
+      await wrapper
+        .find(`[data-testid="triggered-transaction-link-${childHash}"]`)
+        .trigger('click');
+      await vi.advanceTimersByTimeAsync(0);
+    }
+
+    it('updates status, result and newly emitted messages until final', async () => {
+      getTransactionMock
+        .mockResolvedValueOnce(pendingChild)
+        .mockResolvedValueOnce(pendingChild)
+        .mockResolvedValue(finalizedChild);
+
+      const wrapper = mountItem();
+      await openChild(wrapper);
+
+      let child = wrapper.findAllComponents(TransactionItem)[0]!;
+      expect(child.props('transaction').statusName).toBe('PENDING');
+      expect(
+        child
+          .find(`[data-testid="triggered-transaction-link-${grandchildHash}"]`)
+          .exists(),
+      ).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(getTransactionMock).toHaveBeenCalledTimes(2);
+      child = wrapper.findAllComponents(TransactionItem)[0]!;
+      expect(child.props('transaction').statusName).toBe('PENDING');
+
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(getTransactionMock).toHaveBeenCalledTimes(3);
+      child = wrapper.findAllComponents(TransactionItem)[0]!;
+      expect(child.props('transaction').statusName).toBe('FINALIZED');
+      expect(child.text()).toContain('SUCCESS');
+      expect(
+        child
+          .find(`[data-testid="triggered-transaction-link-${grandchildHash}"]`)
+          .exists(),
+      ).toBe(true);
+
+      // A finalized transaction cannot change anymore: polling stops.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(getTransactionMock).toHaveBeenCalledTimes(3);
+    });
+
+    it('stops refreshing when the followed message modal is closed', async () => {
+      getTransactionMock.mockResolvedValue(pendingChild);
+
+      const wrapper = mountItem();
+      await openChild(wrapper);
+      expect(getTransactionMock).toHaveBeenCalledTimes(1);
+
+      const child = wrapper.findAllComponents(TransactionItem)[0]!;
+      await child.findAll('.modal-close')[0]!.trigger('click');
+      expect(wrapper.findAllComponents(TransactionItem)).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(getTransactionMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops refreshing when the parent is unmounted', async () => {
+      getTransactionMock.mockResolvedValue(pendingChild);
+
+      const wrapper = mountItem();
+      await openChild(wrapper);
+      wrapper.unmount();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(getTransactionMock).toHaveBeenCalledTimes(1);
+    });
   });
 });

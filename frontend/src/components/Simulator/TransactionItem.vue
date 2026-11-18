@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, onBeforeUnmount } from 'vue';
 import type {
   StudioExecutionFeeReport,
   StudioExecutionFeeReportMessage,
@@ -117,6 +117,75 @@ function triggeredTransactionType(type: unknown): TransactionItem['type'] {
   return 'method';
 }
 
+function toTriggeredTransactionItem(
+  hash: `0x${string}`,
+  tx: any,
+): TransactionItem {
+  return {
+    hash,
+    type: triggeredTransactionType(tx.type),
+    statusName: tx.statusName ?? tx.status_name ?? tx.status,
+    contractAddress: tx.to_address ?? tx.recipient ?? '',
+    localContractId: '',
+    data: { ...tx, hash },
+  };
+}
+
+// A followed message is fetched on demand, so the store's transaction
+// listener does not update it. Poll it while its modal is open until it can
+// no longer change (status, result or newly emitted messages).
+const TRIGGERED_TRANSACTION_POLL_INTERVAL_MS = 3_000;
+const TRIGGERED_TRANSACTION_FINAL_STATUSES = new Set(['FINALIZED', 'CANCELED']);
+let triggeredPollTimer: ReturnType<typeof setTimeout> | null = null;
+
+function stopTriggeredTransactionPolling() {
+  if (triggeredPollTimer !== null) {
+    clearTimeout(triggeredPollTimer);
+    triggeredPollTimer = null;
+  }
+}
+
+function scheduleTriggeredTransactionPoll() {
+  stopTriggeredTransactionPolling();
+  const current = selectedTriggeredTransaction.value;
+  if (
+    !current ||
+    TRIGGERED_TRANSACTION_FINAL_STATUSES.has(String(current.statusName))
+  ) {
+    return;
+  }
+  const hash = current.hash;
+  triggeredPollTimer = setTimeout(async () => {
+    triggeredPollTimer = null;
+    try {
+      const tx: any = await transactionsStore.getTransaction(
+        hash as TransactionHash,
+      );
+      // Ignore the response if the modal was closed or switched meanwhile.
+      if (selectedTriggeredTransaction.value?.hash !== hash) return;
+      if (tx) {
+        selectedTriggeredTransaction.value = toTriggeredTransactionItem(
+          hash,
+          tx,
+        );
+      }
+    } catch (e) {
+      // Keep the last snapshot and retry on the next tick.
+      console.warn('Error refreshing triggered transaction', e);
+    }
+    if (selectedTriggeredTransaction.value?.hash === hash) {
+      scheduleTriggeredTransactionPoll();
+    }
+  }, TRIGGERED_TRANSACTION_POLL_INTERVAL_MS);
+}
+
+const closeTriggeredTransaction = () => {
+  stopTriggeredTransactionPolling();
+  selectedTriggeredTransaction.value = null;
+};
+
+onBeforeUnmount(stopTriggeredTransactionPolling);
+
 const openTriggeredTransaction = async (hash: `0x${string}`) => {
   if (loadingTriggeredHash.value) return;
   loadingTriggeredHash.value = hash;
@@ -127,14 +196,8 @@ const openTriggeredTransaction = async (hash: `0x${string}`) => {
     if (!tx) {
       throw new Error(`Transaction ${hash} not found`);
     }
-    selectedTriggeredTransaction.value = {
-      hash,
-      type: triggeredTransactionType(tx.type),
-      statusName: tx.statusName ?? tx.status_name ?? tx.status,
-      contractAddress: tx.to_address ?? tx.recipient ?? '',
-      localContractId: '',
-      data: { ...tx, hash },
-    };
+    selectedTriggeredTransaction.value = toTriggeredTransactionItem(hash, tx);
+    scheduleTriggeredTransactionPoll();
   } catch (e: any) {
     notify({
       type: 'error',
@@ -970,7 +1033,7 @@ const badgeColorClass = computed(() => {
             :transaction="selectedTriggeredTransaction"
             :finalityWindow="finalityWindow"
             detailsOnly
-            @close="selectedTriggeredTransaction = null"
+            @close="closeTriggeredTransaction"
           />
         </ModalSection>
 
