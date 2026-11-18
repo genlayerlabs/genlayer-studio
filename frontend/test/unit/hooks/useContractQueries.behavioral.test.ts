@@ -207,6 +207,26 @@ describe('useContractQueries — behavioral contract', () => {
       expect(chainOrder).toBeLessThan(deployOrder);
     });
 
+    it('should show the wallet chain mismatch reason and not deploy', async () => {
+      const reason =
+        'Your wallet is connected to chain ID 1, but Studio uses chain ID 61999.';
+      mockEnsureCorrectChain.mockRejectedValueOnce(new Error(reason));
+      const { notify } = await import('@kyvg/vue3-notification');
+      const { useContractQueries } = await import('@/hooks/useContractQueries');
+      const { deployContract } = useContractQueries();
+
+      await expect(
+        deployContract({ args: [], kwargs: {} }, 'NORMAL' as any, 3),
+      ).rejects.toThrow(reason);
+
+      expect(mockDeployContract).not.toHaveBeenCalled();
+      expect(notify).toHaveBeenCalledWith({
+        type: 'error',
+        title: 'Error deploying contract',
+        text: reason,
+      });
+    });
+
     it('should call genlayerClient.deployContract with contract code', async () => {
       const { useContractQueries } = await import('@/hooks/useContractQueries');
       const { deployContract } = useContractQueries();

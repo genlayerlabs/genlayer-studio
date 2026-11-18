@@ -400,6 +400,11 @@ export function useContractQueries() {
       notify({
         type: 'error',
         title: 'Error deploying contract',
+        // Surface the cause (e.g. wallet on the wrong chain) instead of
+        // leaving it only in the console.
+        ...(error instanceof Error && error.message
+          ? { text: error.message }
+          : {}),
       });
       console.error('Error Deploying the contract', error);
       if (error instanceof Error) {
